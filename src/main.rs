@@ -8,7 +8,7 @@ mod ast;
 mod symbols;
 mod parsing;
 mod parser;
-//mod vm;
+mod vm;
 //mod host;
 //mod image;
 
@@ -18,7 +18,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
-//use crate::vm::{VM, Value};
+use crate::vm::{VM, Value};
 use crate::utils::{thousands_sep};
 //use crate::image::*;
 
