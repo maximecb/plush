@@ -258,7 +258,7 @@ impl From<u8> for Value {
 
 
 
-
+#[derive(Copy, Clone, Debug)]
 struct StackFrame
 {
     // Callee function
@@ -280,8 +280,8 @@ struct StackFrame
 
 
 
-
-
+// Note that actor are cloneable, which is used to fork them
+#[derive(Clone)]
 pub struct Actor
 {
     vm: Arc<Mutex<VM>>,
@@ -291,6 +291,9 @@ pub struct Actor
 
     // List of stack frames (activation records)
     frames: Vec<StackFrame>,
+
+
+
 }
 
 
@@ -918,12 +921,20 @@ pub struct VM
     // Next actor id to assign
     next_actor_id: u64,
 
-    // Map from thread ids to join handles
-    threads: HashMap<u64, thread::JoinHandle<Value>>,
+
+    // TODO: we probably need refs to all the actors in
+    // case we need to pause them for GC?
+
+    // Map from actor ids to thread join handles
+    //actors: HashMap<u64, thread::JoinHandle<Value>>,
+
+
 
     // Reference to self
     // Needed to instantiate actors
     vm: Option<Arc<Mutex<VM>>>,
+
+
 
 
 }

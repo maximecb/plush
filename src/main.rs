@@ -5,9 +5,10 @@
 
 mod utils;
 mod ast;
-mod symbols;
 mod parsing;
 mod parser;
+mod symbols;
+mod codegen;
 mod vm;
 //mod host;
 //mod image;
