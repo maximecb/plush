@@ -1,6 +1,6 @@
 use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 //use crate::host::*;
 
 /// Instruction opcodes
@@ -65,6 +65,7 @@ pub enum Insn
     sub,
     mul,
     div,
+    modulo,
 
     // TODO: bitwise lsft, rsft, bit_and
 
@@ -79,6 +80,10 @@ pub enum Insn
     // Logical negation
     not,
 
+    // Get value type
+    type_of,
+
+    /*
     // Objects manipulation
     obj_new,
     obj_copy,
@@ -86,6 +91,7 @@ pub enum Insn
     obj_set { field_name: *const String },
     obj_get { field_name: *const String },
     obj_seal,
+    */
 
     // Array operations
     arr_new { capacity: u32 },
@@ -97,6 +103,8 @@ pub enum Insn
 
     // Bytearray operations
     ba_new { capacity: u32 },
+    ba_resize,
+    ba_write_u32,
 
     // Jump if true/false
     if_true_stub { target_idx: u32 },
@@ -122,6 +130,10 @@ pub enum Insn
     // Return
     ret,
 }
+
+
+
+
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Value
@@ -253,21 +265,30 @@ struct StackFrame
     ret_addr: usize,
 }
 
+/// Mesage to be sent to an actor
+pub struct Message
+{
+    // Sender actor id
+    // Can be none when the message is a callback
+    sender: u64,
 
+    // Message to be sent
+    msg: Value,
+}
 
-
-
-
-
-
-
-
-
-// Note that actor are cloneable, which is used to fork them
-#[derive(Clone)]
 pub struct Actor
 {
-    vm: Arc<Mutex<VM>>,
+    // Actor id
+    pub actor_id: u64,
+
+    // Parent VM
+    pub vm: Arc<Mutex<VM>>,
+
+    // Message queue receiver endpoint
+    queue_rx: mpsc::Receiver<Message>,
+
+    // Cache of actor ids to message queue endpoints
+    actor_map: HashMap<u64, mpsc::Sender<Message>>,
 
     // Value stack
     stack: Vec<Value>,
@@ -278,17 +299,85 @@ pub struct Actor
 
 impl Actor
 {
-    pub fn new(vm: Arc<Mutex<VM>>) -> Self
+    pub fn new(actor_id: u64, vm: Arc<Mutex<VM>>, queue_rx: mpsc::Receiver<Message>) -> Self
     {
-        todo!();
+        Self {
+            actor_id,
+            vm,
+            queue_rx,
+            actor_map: HashMap::default(),
+            stack: Vec::default(),
+            frames: Vec::default(),
+        }
     }
 
+    // Receive a message from the message queue
+    // This will block until a message is available
+    pub fn recv(&mut self) -> Value
+    {
+        //use crate::window::poll_ui_msg;
+        use std::time::Duration;
+
+        if self.actor_id != 0 {
+            let msg = self.queue_rx.recv().unwrap();
+            return msg.msg;
+        }
+
+        // Actor 0 (the main actor) may need to poll for UI events
+        loop {
+            // Poll for UI messages
+            //let ui_msg = poll_ui_msg(self);
+            //if let Some(msg) = ui_msg {
+            //    return msg;
+            //}
+
+            // Block on the message queue for up to 10ms
+            let msg = self.queue_rx.recv_timeout(Duration::from_millis(10));
+
+            if let Ok(msg) = msg {
+                return msg.msg;
+            }
+        }
+    }
+
+    // Send a message to another actor
+    pub fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
+    {
+        //
+        // TODO: logic to copy objects
+        //
+
+        // Lookup the queue endpoint in our local cache
+        let mut actor_tx = self.actor_map.get(&actor_id);
+
+        if actor_tx.is_none() {
+            let vm = self.vm.lock().unwrap();
+
+            let tx = vm.actor_txs.get(&actor_id);
+
+            if tx.is_none() {
+                return Err(());
+            }
+
+            self.actor_map.insert(actor_id, tx.unwrap().clone());
+
+            actor_tx = self.actor_map.get(&actor_id);
+        }
+
+        let actor_tx = actor_tx.unwrap();
+
+        match actor_tx.send(Message { sender: self.actor_id, msg }) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(()),
+        }
+    }
+
+    /*
     pub fn call(&mut self, fun: Value, args: &[Value]) -> Value
     {
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
 
-        /*
         let mut fun = fun.unwrap_obj();
 
         // Push a new stack frame
@@ -446,6 +535,32 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 * v1),
+                        _ => panic!()
+                    };
+
+                    push!(r);
+                }
+
+                // Division by zero will cause a panic (this is intentional)
+                Insn::div => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let r = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => Int64(v0 / v1),
+                        _ => panic!()
+                    };
+
+                    push!(r);
+                }
+
+                // Division by zero will cause a panic (this is intentional)
+                Insn::modulo => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let r = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => Int64(v0 % v1),
                         _ => panic!()
                     };
 
@@ -612,16 +727,30 @@ impl Actor
 
                 Insn::arr_get => {
                     let idx = pop!().unwrap_u64();
-                    let arr = pop!().unwrap_arr();
-                    let val = Array::get(arr, idx);
+                    let arr = pop!();
+
+                    let val = match arr {
+                        Value::Array(p) => Array::get(p, idx),
+                        Value::ByteArray(p) => Value::from(ByteArray::get(p, idx)),
+                        _ => panic!("expected array type")
+                    };
+
                     push!(val);
                 }
 
                 Insn::arr_set => {
                     let idx = pop!().unwrap_u64();
-                    let arr = pop!().unwrap_arr();
+                    let arr = pop!();
                     let val = pop!();
-                    Array::set(arr, idx, val);
+
+                    match arr {
+                        Value::Array(p) => Array::set(p, idx, val),
+                        Value::ByteArray(p) => {
+                            let b = val.unwrap_u8();
+                            ByteArray::set(p, idx, b);
+                        }
+                        _ => panic!("expected array type")
+                    };
                 }
 
                 Insn::arr_len => {
@@ -647,6 +776,22 @@ impl Actor
                         capacity as usize
                     );
                     push!(Value::ByteArray(new_arr))
+                }
+
+                // Resize byte array
+                Insn::ba_resize => {
+                    let fill_val = pop!().unwrap_u8();
+                    let new_len = pop!().unwrap_u64();
+                    let arr = pop!().unwrap_ba();
+                    ByteArray::resize(arr, new_len, fill_val, &mut self.alloc);
+                }
+
+                // Write u32 value
+                Insn::ba_write_u32 => {
+                    let val = pop!().unwrap_u32();
+                    let idx = pop!().unwrap_u64();
+                    let arr = pop!().unwrap_ba();
+                    ByteArray::write_u32(arr, idx, val);
                 }
 
                 // Jump if true
@@ -718,38 +863,38 @@ impl Actor
                     match host_fn
                     {
                         HostFn::Fn0_0(fun) => {
-                            fun(&mut self.vm, &mut self.alloc);
+                            fun(self);
                             push!(Value::None);
                         }
 
                         HostFn::Fn0_1(fun) => {
-                            let v = fun(&mut self.vm, &mut self.alloc);
+                            let v = fun(self);
                             push!(v);
                         }
 
                         HostFn::Fn1_0(fun) => {
                             let a0 = pop!();
-                            fun(&mut self.vm, &mut self.alloc, a0);
+                            fun(self, a0);
                             push!(Value::None);
                         }
 
                         HostFn::Fn1_1(fun) => {
                             let a0 = pop!();
-                            let v = fun(&mut self.vm, &mut self.alloc, a0);
+                            let v = fun(self, a0);
                             push!(v);
                         }
 
                         HostFn::Fn2_0(fun) => {
                             let a1 = pop!();
                             let a0 = pop!();
-                            fun(&mut self.vm, &mut self.alloc, a0, a1);
+                            fun(self, a0, a1);
                             push!(Value::None);
                         }
 
                         HostFn::Fn2_1(fun) => {
                             let a1 = pop!();
                             let a0 = pop!();
-                            let v = fun(&mut self.vm, &mut self.alloc, a0, a1);
+                            let v = fun(self, a0, a1);
                             push!(v);
                         }
 
@@ -757,7 +902,7 @@ impl Actor
                             let a2 = pop!();
                             let a1 = pop!();
                             let a0 = pop!();
-                            fun(&mut self.vm, &mut self.alloc, a0, a1, a2);
+                            fun(self, a0, a1, a2);
                             push!(Value::None);
                         }
 
@@ -765,7 +910,7 @@ impl Actor
                             let a2 = pop!();
                             let a1 = pop!();
                             let a0 = pop!();
-                            let v = fun(&mut self.vm, &mut self.alloc, a0, a1, a2);
+                            let v = fun(self, a0, a1, a2);
                             push!(v);
                         }
 
@@ -774,7 +919,7 @@ impl Actor
                             let a2 = pop!();
                             let a1 = pop!();
                             let a0 = pop!();
-                            fun(&mut self.vm, &mut self.alloc, a0, a1, a2, a3);
+                            fun(self, a0, a1, a2, a3);
                             push!(Value::None);
                         }
 
@@ -783,7 +928,7 @@ impl Actor
                             let a2 = pop!();
                             let a1 = pop!();
                             let a0 = pop!();
-                            let v = fun(&mut self.vm, &mut self.alloc, a0, a1, a2, a3);
+                            let v = fun(self, a0, a1, a2, a3);
                             push!(v);
                         }
                     }
@@ -880,42 +1025,24 @@ impl Actor
                 _ => panic!("unknown opcode {:?}", insn)
             }
         }
-        */
-
-
-
-        todo!();
     }
+    */
 }
-
-
-
-
-
-
-
 
 pub struct VM
 {
     // Next actor id to assign
     next_actor_id: u64,
 
-
-    // TODO: we probably need refs to all the actors in
-    // case we need to pause them for GC?
-
     // Map from actor ids to thread join handles
-    //actors: HashMap<u64, thread::JoinHandle<Value>>,
+    threads: HashMap<u64, thread::JoinHandle<Value>>,
 
-
+    // Map from actor ids to message queue endpoints
+    actor_txs: HashMap<u64, mpsc::Sender<Message>>,
 
     // Reference to self
     // Needed to instantiate actors
     vm: Option<Arc<Mutex<VM>>>,
-
-
-
-
 }
 
 // Needed to send Arc<Mutex<VM>> to thread
@@ -928,11 +1055,10 @@ impl VM
 {
     pub fn new() -> Arc<Mutex<VM>>
     {
-        /*
         let vm = Self {
-            root_alloc,
-            next_tid: 0,
+            next_actor_id: 0,
             threads: HashMap::default(),
+            actor_txs: HashMap::default(),
             vm: None
         };
 
@@ -943,91 +1069,83 @@ impl VM
         vm.lock().unwrap().vm = Some(vm.clone());
 
         vm
-        */
-
-        todo!();
     }
 
     // Create a new actor
-    pub fn new_thread(vm: &mut Arc<Mutex<VM>>, fun: Value, args: Vec<Value>) -> u64
+    pub fn new_actor(vm: &Arc<Mutex<VM>>, fun: Value, args: Vec<Value>) -> u64
     {
-        /*
         let vm_mutex = vm.clone();
 
-        // Assign a thread id
+        // Assign an actor id
         let mut vm_ref = vm.lock().unwrap();
-        let tid = vm_ref.next_tid;
-        vm_ref.next_tid += 1;
+        let actor_id = vm_ref.next_actor_id;
+        vm_ref.next_actor_id += 1;
         drop(vm_ref);
 
-        // Spawn the new thread
+        // Create a message queue for the actor
+        let (queue_tx, queue_rx) = mpsc::channel::<Message>();
+
+        // Spawn a new thread for the actor
         let handle = thread::spawn(move || {
-            let mut t = Thread::new(vm_mutex);
-            t.call(fun, &args)
+            let mut actor = Actor::new(actor_id, vm_mutex, queue_rx);
+
+            // TODO
+            //actor.call(fun, &args)
+            todo!();
         });
 
-        // Add the thread to the map
+        // Store the join handles and queue endpoints on the VM
         let mut vm_ref = vm.lock().unwrap();
-        vm_ref.threads.insert(tid, handle);
+        vm_ref.threads.insert(actor_id, handle);
+        vm_ref.actor_txs.insert(actor_id, queue_tx);
         drop(vm_ref);
 
-        tid as u64
-        */
+        actor_id
+    }
+
+    // Wait for an actor to produce a result and return it.
+    pub fn join_actor(vm: &Arc<Mutex<VM>>, tid: u64) -> Value
+    {
+        // Get the join handle, then release the VM lock
+        let mut vm = vm.lock().unwrap();
+        let mut handle = vm.threads.remove(&tid).unwrap();
+        drop(vm);
+
+        // Note: there is no need to copy data when joining,
+        // because the actor sending the data is done running
+        handle.join().expect(&format!("could not actor thread with id {}", tid))
+    }
+
+    // Call a function in the main actor
+    pub fn call(vm: &mut Arc<Mutex<VM>>, fun: Value, args: Vec<Value>) -> Value
+    {
+        let vm_mutex = vm.clone();
+
+        // Create a message queue for the actor
+        let (queue_tx, queue_rx) = mpsc::channel::<Message>();
+
+        // Assign an actor id
+        // Store the queue endpoints on the VM
+        let mut vm_ref = vm.lock().unwrap();
+        let actor_id = vm_ref.next_actor_id;
+        assert!(actor_id == 0);
+        vm_ref.next_actor_id += 1;
+        vm_ref.actor_txs.insert(actor_id, queue_tx);
+        drop(vm_ref);
+
+        let mut actor = Actor::new(actor_id, vm_mutex, queue_rx);
+
+        // TODO
+        //actor.call(fun, &args)
 
         todo!();
     }
-
-    /*
-    // Wait for a thread to produce a result and return it.
-    pub fn join_thread(vm: &mut Arc<Mutex<VM>>, tid: u64) -> Value
-    {
-        let mut vm = vm.lock().unwrap();
-
-        let mut handle = vm.threads.remove(&tid).unwrap();
-
-        // Release the VM lock
-        drop(vm);
-
-        handle.join().expect(&format!("could not join thread with id {}", tid))
-    }
-    */
-
-    /*
-    // Call a function in the main thread
-    pub fn call(vm: &mut Arc<Mutex<VM>>, fun: Value, args: Vec<Value>) -> Value
-    {
-        // Note: we use join_thread here because we don't want to lock
-        // on the VM during the call
-        let tid = Self::new_thread(vm, fun, args);
-
-        Self::join_thread(vm, tid)
-    }
-    */
 }
-
-
-
-
-
-
 
 #[cfg(test)]
 mod tests
 {
     use super::*;
-    //use crate::image::*;
-
-    /*
-    fn run_image(file_name: &str) -> Value
-    {
-        let mut root_alloc = RootAlloc::new();
-        let mut alloc = Alloc::new(root_alloc.clone());
-        let fun = parse_file(&mut alloc, file_name).unwrap();
-        let mut vm = VM::new(root_alloc);
-        let ret = VM::call(&mut vm, fun, vec![]);
-        ret
-    }
-    */
 
     /*
     #[test]
@@ -1035,20 +1153,6 @@ mod tests
     {
         let mut root_alloc = RootAlloc::new();
         let vm = VM::new(root_alloc);
-    }
-    */
-
-    /*
-    #[test]
-    fn str_interning()
-    {
-        let mut root_alloc = RootAlloc::new();
-        let mut alloc = Alloc::new(root_alloc);
-        let foo_str = alloc.get_string("foo");
-        let foo_str2 = alloc.get_string("foo");
-        let bar_str = alloc.get_string("bar");
-        assert!(foo_str == foo_str2);
-        assert!(foo_str != bar_str);
     }
 
     #[test]
