@@ -123,12 +123,10 @@ pub enum Insn
     ret,
 }
 
-#[derive(Default, Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Value
 {
-    // The default value for uninitialized memory is none
-    #[default]
-    None,
+    Nil,
 
     False,
     True,
@@ -136,13 +134,9 @@ pub enum Value
     Int64(i64),
     Float64(f64),
 
-    //String(*const String),
-    //Object(*mut Object),
-    //Array(*mut Array),
-    //ByteArray(*mut crate::arrays::ByteArray),
 
-    // Reference to a global definition in an image file
-    //ImgRef(usize)
+
+
 }
 use Value::{False, True, Int64, Float64};
 
@@ -152,21 +146,6 @@ unsafe impl Sync for Value {}
 
 impl Value
 {
-    pub fn is_falsy(&self) -> bool
-    {
-        use Value::*;
-        match self {
-            None => true,
-            False => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_truthy(&self) -> bool
-    {
-        !self.is_falsy()
-    }
-
     /*
     pub fn is_object(&self) -> bool
     {
@@ -280,6 +259,10 @@ struct StackFrame
 
 
 
+
+
+
+
 // Note that actor are cloneable, which is used to fork them
 #[derive(Clone)]
 pub struct Actor
@@ -291,12 +274,7 @@ pub struct Actor
 
     // List of stack frames (activation records)
     frames: Vec<StackFrame>,
-
-
-
 }
-
-
 
 impl Actor
 {
@@ -304,10 +282,6 @@ impl Actor
     {
         todo!();
     }
-
-
-
-
 
     pub fn call(&mut self, fun: Value, args: &[Value]) -> Value
     {
@@ -914,10 +888,15 @@ impl Actor
     }
 }
 
+
+
+
+
+
+
+
 pub struct VM
 {
-
-
     // Next actor id to assign
     next_actor_id: u64,
 
@@ -1025,6 +1004,12 @@ impl VM
     }
     */
 }
+
+
+
+
+
+
 
 #[cfg(test)]
 mod tests

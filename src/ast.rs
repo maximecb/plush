@@ -52,7 +52,7 @@ pub enum Expr
 {
     True,
     False,
-    None,
+    Nil,
     Int(i128),
     Float64(f64),
     String(String),
@@ -63,11 +63,13 @@ pub enum Expr
         exprs: Vec<ExprBox>,
     },
 
+    /*
     // Object literal
     Object {
         extensible: bool,
         fields: Vec<(bool, String, ExprBox)>,
     },
+    */
 
     Ident(String),
 
@@ -123,7 +125,7 @@ impl Default for Expr
 {
     fn default() -> Self
     {
-        Expr::None
+        Expr::Nil
     }
 }
 

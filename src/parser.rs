@@ -66,9 +66,9 @@ fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
         ));
     }
 
-    if input.match_keyword("none")? {
+    if input.match_keyword("nil")? {
         return Ok(ExprBox::new(
-            Expr::None,
+            Expr::Nil,
             pos
         ));
     }
@@ -125,6 +125,7 @@ fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
         ));
     }
 
+    /*
     // Object literal
     if input.match_char('{') {
         return parse_object(input, false, pos);
@@ -132,6 +133,7 @@ fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
     if input.match_token("+{")? {
         return parse_object(input, true, pos);
     }
+    */
 
     // Host function call
     if ch == '$' {
@@ -379,6 +381,7 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     parse_postfix(input)
 }
 
+/*
 // Parse an object literal
 fn parse_object(
     input: &mut Input,
@@ -453,6 +456,7 @@ fn parse_object(
         pos
     )
 }
+*/
 
 /// Parse a list of argument expressions
 fn parse_expr_list(input: &mut Input, end_token: &str) -> Result<Vec<ExprBox>, ParseError>
@@ -710,7 +714,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
     if input.match_keyword("return")? {
         if input.match_token(";")? {
             return StmtBox::new_ok(
-                Stmt::Return(ExprBox::new(Expr::None, pos)),
+                Stmt::Return(ExprBox::new(Expr::Nil, pos)),
                 pos,
             );
         }
@@ -1218,6 +1222,7 @@ mod tests
         parse_fails("let f = fun(x,y,1) {};");
     }
 
+    /*
     #[test]
     fn objects()
     {
@@ -1235,6 +1240,7 @@ mod tests
         parse_ok("let o = { m() {} x:1, y:2 };");
         parse_ok("let o = { x1:1, x2:2, m1() {} m2(x,y,z) {} };");
     }
+    */
 
     #[test]
     fn arrays()
@@ -1246,9 +1252,9 @@ mod tests
         parse_ok("let a = [ 1 , 2, 3 ];");
 
         // Single and double indexing
-        parse_ok("let a = none; a[0];");
-        parse_ok("let a = none; a[0][0];");
-        parse_ok("let a = none; a[0][0]();");
+        parse_ok("let a = nil; a[0];");
+        parse_ok("let a = nil; a[0][0];");
+        parse_ok("let a = nil; a[0][0]();");
 
         // Methods
         parse_ok("let a = []; a.push(1);");

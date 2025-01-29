@@ -239,7 +239,7 @@ impl ExprBox
     ) -> Result<(), ParseError>
     {
         match self.expr.as_mut() {
-            Expr::None { .. } => {}
+            Expr::Nil { .. } => {}
             Expr::True { .. } => {}
             Expr::False { .. } => {}
             Expr::Int { .. } => {}
@@ -252,11 +252,13 @@ impl ExprBox
                 }
             }
 
+            /*
             Expr::Object { fields, .. } => {
                 for (_, _, expr) in fields {
                     expr.resolve_syms(fun, env)?;
                 }
             }
+            */
 
             Expr::Ident(name) => {
                 //dbg!(&name);
