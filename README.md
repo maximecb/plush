@@ -11,7 +11,15 @@ If you think that Plush is cool, you can support my work via [GitHub Sponsors](h
 
 ## Features
 
-**TODO**
+Cool/fun/notable features:
+- Stack-based bytecode interpreter
+- Dynamic typing
+
+Current limitations:
+- Lack of error messages or good error handling
+  - You may have to look at the source code
+  - We could use your help in improving said error messages
+- You may run into incomplete features
 
 ## Build Instructions
 
