@@ -1147,14 +1147,13 @@ mod tests
 {
     use super::*;
 
-    /*
     #[test]
     fn vm_new()
     {
-        let mut root_alloc = RootAlloc::new();
-        let vm = VM::new(root_alloc);
+        let _vm = VM::new();
     }
 
+    /*
     #[test]
     fn ret1()
     {
