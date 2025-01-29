@@ -1,4 +1,5 @@
 use std::fmt;
+use std::collections::HashMap;
 use crate::parsing::SrcPos;
 use crate::symbols::Decl;
 
@@ -118,7 +119,15 @@ pub enum Expr
     HostCall {
         fun_name: String,
         args: Vec<ExprBox>,
-    }
+    },
+
+    // New class instance
+    New {
+        // Class is initially an ident, but
+        // may need to be resolved to a class id?
+        class: ExprBox,
+        args: Vec<ExprBox>,
+    },
 }
 
 impl Default for Expr
@@ -267,6 +276,20 @@ pub struct Function
     pub id: usize,
 }
 
+/// Function
+#[derive(Clone, Debug)]
+pub struct Class
+{
+    /// Name of the class
+    pub name: String,
+
+    // Methods
+    pub methods: HashMap<String, Function>,
+
+    // Source position
+    pub pos: SrcPos,
+}
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -279,6 +302,8 @@ pub fn next_id() -> usize
 pub struct Unit
 {
     // TODO: list of imports?
+
+    // TODO: need list of classes
 
     // Unit-level function
     pub unit_fn: Function,

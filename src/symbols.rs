@@ -306,17 +306,21 @@ impl ExprBox
                 rhs.resolve_syms(fun, env)?;
             }
 
+            Expr::Call { callee, args, .. } => {
+                callee.resolve_syms(fun, env)?;
+                for arg in args {
+                    arg.resolve_syms(fun, env)?;
+                }
+            }
+
             Expr::HostCall { fun_name, args, .. } => {
                 for arg in args {
                     arg.resolve_syms(fun, env)?;
                 }
             }
 
-            Expr::Call { callee, args, .. } => {
-                callee.resolve_syms(fun, env)?;
-                for arg in args {
-                    arg.resolve_syms(fun, env)?;
-                }
+            Expr::New { .. } => {
+                todo!();
             }
 
             Expr::Fun(child_fun) => {
