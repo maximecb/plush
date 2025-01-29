@@ -372,17 +372,17 @@ impl Actor
         }
     }
 
-    /*
     pub fn call(&mut self, fun: Value, args: &[Value]) -> Value
     {
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
 
-        let mut fun = fun.unwrap_obj();
+        // TODO: figure out how fns should be referred to?
+        //let mut fun = fun.unwrap_obj();
 
         // Push a new stack frame
         self.frames.push(StackFrame {
-            fun,
+            //fun,
             argc: args.len().try_into().unwrap(),
             prev_bp: usize::MAX,
             ret_addr: usize::MAX,
@@ -397,8 +397,9 @@ impl Actor
         let mut bp = self.stack.len();
 
         // Get a compiled address for this function
-        let mut pc = self.get_version(fun, 0);
+        //let mut pc = self.get_version(fun, 0);
 
+        /*
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }
         }
@@ -410,7 +411,9 @@ impl Actor
         macro_rules! push_bool {
             ($b: expr) => { push!(if $b { True } else { False }) }
         }
+        */
 
+        /*
         loop
         {
             if pc >= self.insns.len() {
@@ -1025,8 +1028,10 @@ impl Actor
                 _ => panic!("unknown opcode {:?}", insn)
             }
         }
+        */
+
+        todo!();
     }
-    */
 }
 
 pub struct VM
@@ -1134,11 +1139,7 @@ impl VM
         drop(vm_ref);
 
         let mut actor = Actor::new(actor_id, vm_mutex, queue_rx);
-
-        // TODO
-        //actor.call(fun, &args)
-
-        todo!();
+        actor.call(fun, &args)
     }
 }
 
