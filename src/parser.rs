@@ -1004,7 +1004,7 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
     );
 
     let unit_fn = Function {
-        name: input.src_name.clone(),
+        name: input.get_src_name(),
         params: Vec::default(),
         var_arg: false,
         body,

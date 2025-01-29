@@ -1,5 +1,50 @@
 use std::fs;
 use std::fmt;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Default)]
+struct FileIdMap
+{
+    // Map of file names to unique ids
+    name_to_id: HashMap<String, u32>,
+
+    // Map of integer ids to file names
+    id_to_name: Vec<String>,
+}
+
+// Define the global hash map using OnceLock with u32 keys
+static FILE_ID_MAP: OnceLock<Mutex<FileIdMap>> = OnceLock::new();
+
+/// Helper function to get or initialize the global map
+fn get_file_id_map() -> &'static Mutex<FileIdMap>
+{
+    FILE_ID_MAP.get_or_init(|| Mutex::new(FileIdMap::default()))
+}
+
+/// Get a unique id for a given file name
+fn get_file_id(name: &str) -> u32
+{
+    let mut map = get_file_id_map().lock().unwrap();
+
+    if let Some(id) = map.name_to_id.get(name) {
+        return *id;
+    }
+
+    let new_id = map.id_to_name.len() as u32;
+    map.id_to_name.push(name.to_owned());
+    map.name_to_id.insert(name.to_owned(), new_id);
+    new_id
+}
+
+/// Get the file name associated with a unique id
+fn name_from_id(id: u32) -> String
+{
+    let id = id as usize;
+    let map = get_file_id_map().lock().unwrap();
+    assert!(id < map.id_to_name.len());
+    map.id_to_name[id].clone()
+}
 
 #[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash)]
 pub struct SrcPos
@@ -9,11 +54,19 @@ pub struct SrcPos
     file_id: u32,
 }
 
+impl SrcPos
+{
+    pub fn get_src_name(&self) -> String
+    {
+        name_from_id(self.file_id)
+    }
+}
+
 impl fmt::Display for SrcPos
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: map file id to file name
-        write!(f, "{}:{}", self.line_no, self.col_no)
+        let src_name = name_from_id(self.file_id);
+        write!(f, "{}@{}:{}", src_name, self.line_no, self.col_no)
     }
 }
 
@@ -86,8 +139,8 @@ pub struct Input
     // Current index in the input string
     idx: usize,
 
-    // Input source name
-    pub src_name: String,
+    // Source file id
+    pub file_id: u32,
 
     // Current line number
     pub line_no: u32,
@@ -115,13 +168,20 @@ impl Input
 
     pub fn new(input_str: &str, src_name: &str) -> Self
     {
+        let file_id = get_file_id(src_name);
+
         Input {
             input: input_str.chars().collect(),
-            src_name: src_name.to_string(),
+            file_id,
             idx: 0,
             line_no: 1,
             col_no: 1
         }
+    }
+
+    pub fn get_src_name(&self) -> String
+    {
+        name_from_id(self.file_id)
     }
 
     pub fn get_pos(&self) -> SrcPos
@@ -129,7 +189,7 @@ impl Input
         SrcPos {
             line_no: self.line_no,
             col_no: self.col_no,
-            file_id: 0
+            file_id: self.file_id,
         }
     }
 
@@ -156,6 +216,17 @@ impl Input
         }
 
         return self.input[self.idx];
+    }
+
+    /// Peek at a character from the input with a specific offset
+    pub fn peek_ch_at(&self, offset: usize) -> char
+    {
+        if self.idx + offset >= self.input.len()
+        {
+            return '\0';
+        }
+
+        return self.input[self.idx + offset];
     }
 
     /// Consume a character from the input
@@ -190,8 +261,8 @@ impl Input
         return false;
     }
 
-    /// Match characters in the input, no preceding whitespace allowed
-    pub fn match_chars(&mut self, chars: &[char]) -> bool
+    /// Peek for a sequence of characters
+    pub fn peek_chars(&mut self, chars: &[char]) -> bool
     {
         let end_pos = self.idx + chars.len();
 
@@ -206,8 +277,18 @@ impl Input
             }
         }
 
-        // Consumed the matched characters
-        for i in 0..chars.len() {
+        return true;
+    }
+
+    /// Match characters in the input, no preceding whitespace allowed
+    pub fn match_chars(&mut self, chars: &[char]) -> bool
+    {
+        if !self.peek_chars(chars) {
+            return false;
+        }
+
+        // Consume the matched characters
+        for _ in 0..chars.len() {
             self.eat_ch();
         }
 
@@ -554,7 +635,7 @@ impl Input
         let ret = parse_fn(self);
 
         match ret {
-            Ok(v) => {
+            Ok(_) => {
                 let post_pos = self.idx;
                 let chars = &self.input[pre_pos..post_pos];
                 let slice_str: String = chars.iter().collect();
