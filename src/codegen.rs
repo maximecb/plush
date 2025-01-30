@@ -2,7 +2,7 @@ use std::cmp::max;
 use crate::ast::*;
 use crate::parsing::{ParseError};
 use crate::symbols::{Decl};
-use crate::vm::Insn;
+use crate::vm::{Insn, Value};
 
 /// Compiled function object
 pub struct CompiledFun
@@ -13,10 +13,6 @@ pub struct CompiledFun
 
     num_locals: usize,
 }
-
-
-
-
 
 impl Function
 {
@@ -37,36 +33,35 @@ impl Function
 
     fn gen_code(&self, code: &mut Vec<Insn>) -> Result<CompiledFun, ParseError>
     {
+        // Start address of the compiled function
+        let start_pc = code.len();
 
-
-
-
-        /*
         // Allocate stack slots for the local variables
         for i in 0..self.num_locals {
-            code.push("none");
+            code.push(Insn::push { val: Value::Nil });
         }
 
-        self.body.gen_code(self, &None, &None, sym, &mut code, out)?;
+
+
+        //self.body.gen_code(self, &None, &None, sym, &mut code, out)?;
+
 
         // If the body needs a final return
         if self.needs_final_return() {
             if self.is_unit {
-                code.push("0");
+                code.push(Insn::push { val: Value::Int64(0) });
             } else {
-                code.push("none");
+                code.push(Insn::push { val: Value::Nil });
             }
 
-            code.insn("ret");
+            code.push(Insn::ret);
         }
-        */
 
-
-
-
-        todo!();
-
-
+        Ok(CompiledFun {
+            start_pc,
+            num_params: self.params.len(),
+            num_locals: self.num_locals,
+        })
     }
 }
 

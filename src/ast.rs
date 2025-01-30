@@ -328,6 +328,6 @@ pub struct Unit
     // TODO: need list of classes
     pub classes: HashMap<String, Class>,
 
-    // Unit-level function
+    // Unit-level (top level) function
     pub unit_fn: Function,
 }
