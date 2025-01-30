@@ -1388,4 +1388,11 @@ mod tests
         parse_ok("while (1) { foo(); }");
         parse_ok("let i = 0; while (i < n) { foo(); i = i + 1; }");
     }
+
+    #[test]
+    fn example_files()
+    {
+        parse_file("examples/helloworld.pls");
+        parse_file("examples/fib.pls");
+    }
 }
