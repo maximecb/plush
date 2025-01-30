@@ -1047,6 +1047,7 @@ fn parse_class(input: &mut Input, pos: SrcPos) -> Result<Class, ParseError>
         name: class_name.clone(),
         methods,
         pos,
+        id: next_id(),
     };
 
     Ok(class)

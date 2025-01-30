@@ -288,6 +288,9 @@ pub struct Class
 
     // Source position
     pub pos: SrcPos,
+
+    /// Internal unique class id
+    pub id: ClassId,
 }
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]

@@ -1,7 +1,9 @@
 use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 use crate::ast::{FunId, ClassId};
+use crate::codegen::CompiledFun;
 //use crate::host::*;
 
 /// Instruction opcodes
@@ -132,10 +134,6 @@ pub enum Insn
     ret,
 }
 
-
-
-
-
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Value
 {
@@ -246,9 +244,16 @@ impl From<u8> for Value {
     }
 }
 
+/// Mesage to be sent to an actor
+pub struct Message
+{
+    // Sender actor id
+    // Can be none when the message is a callback
+    sender: u64,
 
-
-
+    // Message to be sent
+    msg: Value,
+}
 
 #[derive(Copy, Clone, Debug)]
 struct StackFrame
@@ -264,17 +269,6 @@ struct StackFrame
 
     // Return address
     ret_addr: usize,
-}
-
-/// Mesage to be sent to an actor
-pub struct Message
-{
-    // Sender actor id
-    // Can be none when the message is a callback
-    sender: u64,
-
-    // Message to be sent
-    msg: Value,
 }
 
 pub struct Actor
@@ -296,6 +290,12 @@ pub struct Actor
 
     // List of stack frames (activation records)
     frames: Vec<StackFrame>,
+
+    // Map of compiled functions
+    funs: HashMap<FunId, CompiledFun>,
+
+    // Array of compiled instructions
+    insns: Vec<Insn>,
 }
 
 impl Actor
@@ -309,6 +309,8 @@ impl Actor
             actor_map: HashMap::default(),
             stack: Vec::default(),
             frames: Vec::default(),
+            insns: Vec::default(),
+            funs: HashMap::default(),
         }
     }
 
@@ -317,7 +319,6 @@ impl Actor
     pub fn recv(&mut self) -> Value
     {
         //use crate::window::poll_ui_msg;
-        use std::time::Duration;
 
         if self.actor_id != 0 {
             let msg = self.queue_rx.recv().unwrap();
