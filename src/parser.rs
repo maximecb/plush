@@ -1391,8 +1391,10 @@ mod tests
     }
 
     #[test]
-    fn example_files()
+    fn tests_examples()
     {
+        // Make sure that we can parse our test and example files
+        parse_file("tests/empty.pls");
         parse_file("examples/helloworld.pls");
         parse_file("examples/fib.pls");
     }
