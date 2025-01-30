@@ -109,7 +109,11 @@ impl Unit
         let mut env = Env::default();
         env.push_scope();
 
-        self.unit_fn.resolve_syms(&mut env)?;
+
+        // FIXME:
+        //self.unit_fn.resolve_syms(&mut env)?;
+
+
 
         Ok(())
     }

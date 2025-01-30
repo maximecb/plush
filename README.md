@@ -14,6 +14,7 @@ If you think that Plush is cool, you can support my work via [GitHub Sponsors](h
 Cool/fun/notable features:
 - Stack-based bytecode interpreter
 - Dynamic typing
+- Memory safe, actor-based parallelism
 
 Current limitations:
 - Lack of error messages or good error handling

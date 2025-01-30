@@ -293,7 +293,7 @@ pub struct Class
     pub id: ClassId,
 }
 
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
+#[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct FunId(usize);
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
@@ -311,6 +311,9 @@ impl From<usize> for ClassId {
     }
 }
 
+
+
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -320,26 +323,46 @@ pub fn next_id<IdType: std::convert::From<usize>>() -> IdType
     idx.into()
 }
 
-#[derive(Clone, Debug)]
+
+
+
+
+
+#[derive(Default, Clone, Debug)]
 pub struct Unit
 {
-    // TODO: list of imports?
+    // TODO: list of imports. Don't implement just yet.
+    // These should be unit names
+    // We'll want to import specific symbols from units
 
-    // TODO: need list of classes
-    pub classes: HashMap<String, Class>,
+    // Map of classes by id
+    //pub classes: HashMap<ClassId, Class>,
 
     // Unit-level (top level) function
-    pub unit_fn: Function,
+    pub unit_fn: FunId,
 }
 
-
-
 /// Represents an entire program containing one or more units
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub struct Program
 {
+    // Map of parsed units by name
+    pub units: HashMap<String, Unit>,
 
+    // Having a hash map of ids to functions means that we can
+    // prune unreferenced functions (remove dead code)
+    pub funs: HashMap<FunId, Function>,
 
+    // Map of classes by id
+    //pub classes: HashMap<ClassId, Class>,
 
+    // Main/top-level unit
+    pub main_unit: Unit,
+
+    // Top-level unit function
     pub main_fn: FunId,
+}
+
+impl Program
+{
 }

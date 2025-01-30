@@ -1060,7 +1060,7 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
     let pos = input.get_pos();
 
     let mut stmts = Vec::default();
-    let mut classes = HashMap::default();
+    //let mut classes = HashMap::default();
 
     loop
     {
@@ -1071,11 +1071,13 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
             break;
         }
 
+        /*
         if input.match_keyword("class")? {
             let class = parse_class(input, pos)?;
             classes.insert(class.name.clone(), class);
             continue;
         }
+        */
 
         stmts.push(parse_stmt(input)?);
     }
@@ -1096,8 +1098,12 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
         id: crate::ast::next_id(),
     };
 
+    // FIXME:
+    let unit_fn = unit_fn.id;
+
+
     Ok(Unit {
-        classes,
+        //classes,
         unit_fn
     })
 }
@@ -1301,6 +1307,7 @@ mod tests
         parse_fails("let f = fun(x,y,1) {};");
     }
 
+    /*
     #[test]
     fn classes()
     {
@@ -1315,6 +1322,7 @@ mod tests
         // Constructor without a self param
         parse_fails("class Foo { init() {} }");
     }
+    */
 
     #[test]
     fn new_expr()

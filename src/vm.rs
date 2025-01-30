@@ -2,7 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
-use crate::ast::{FunId, ClassId};
+use crate::ast::{Program, FunId, ClassId};
 use crate::codegen::CompiledFun;
 //use crate::host::*;
 
@@ -998,6 +998,9 @@ impl Actor
 
 pub struct VM
 {
+    // Program to run
+    prog: Program,
+
     // Next actor id to assign
     next_actor_id: u64,
 
@@ -1020,9 +1023,10 @@ unsafe impl Send for VM {}
 // the lock for the entire duration of a call.
 impl VM
 {
-    pub fn new() -> Arc<Mutex<VM>>
+    pub fn new(prog: Program) -> Arc<Mutex<VM>>
     {
         let vm = Self {
+            prog,
             next_actor_id: 0,
             threads: HashMap::default(),
             actor_txs: HashMap::default(),
@@ -1110,7 +1114,8 @@ mod tests
     #[test]
     fn vm_new()
     {
-        let _vm = VM::new();
+        let prog = Program::default();
+        let _vm = VM::new(prog);
     }
 
     /*
