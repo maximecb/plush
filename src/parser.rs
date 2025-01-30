@@ -365,6 +365,22 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     }
     */
 
+    // New object
+    if input.match_token("new")? {
+        let class_expr = parse_atom(input)?;
+        input.expect_token("(")?;
+
+        let arg_exprs = parse_expr_list(input, ")")?;
+
+        return ExprBox::new_ok(
+            Expr::New{
+                class: class_expr,
+                args: arg_exprs
+            },
+            pos
+        );
+    }
+
     if input.match_keyword("typeof")? {
         let child = parse_prefix(input)?;
 
@@ -983,6 +999,59 @@ fn parse_function(input: &mut Input, name: String, pos: SrcPos) -> Result<Functi
     })
 }
 
+/// Parse a class declaration
+fn parse_class(input: &mut Input, pos: SrcPos) -> Result<Class, ParseError>
+{
+    input.eat_ws()?;
+    let class_name = input.parse_ident()?;
+    input.expect_token("{")?;
+
+    let mut methods = HashMap::default();
+
+    loop
+    {
+        input.eat_ws()?;
+
+        if input.eof() {
+            return input.parse_error("unexpected end of input inside class declaration");
+        }
+
+        if input.match_token("}")? {
+            break;
+        }
+
+        let pos = input.get_pos();
+        let method_name = input.parse_ident()?;
+
+        if methods.contains_key(&method_name) {
+            return input.parse_error(
+                &format!("duplicate method name {}", method_name)
+            );
+        }
+
+        let fun = parse_function(input, method_name.clone(), pos)?;
+
+        // If this is a constructor method
+        if method_name == "init" {
+            if fun.params.len() == 0 {
+                return input.parse_error(
+                    "constructor methods must have at least one self parameter"
+                );
+            }
+        }
+
+        methods.insert(method_name, fun);
+    }
+
+    let class = Class {
+        name: class_name.clone(),
+        methods,
+        pos,
+    };
+
+    Ok(class)
+}
+
 /// Parse a single unit of source code (e.g. one source file)
 pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
 {
@@ -990,13 +1059,21 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
     let pos = input.get_pos();
 
     let mut stmts = Vec::default();
+    let mut classes = HashMap::default();
 
     loop
     {
         input.eat_ws()?;
+        let pos = input.get_pos();
 
         if input.eof() {
             break;
+        }
+
+        if input.match_keyword("class")? {
+            let class = parse_class(input, pos)?;
+            classes.insert(class.name.clone(), class);
+            continue;
         }
 
         stmts.push(parse_stmt(input)?);
@@ -1019,6 +1096,7 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
     };
 
     Ok(Unit {
+        classes,
         unit_fn
     })
 }
@@ -1220,6 +1298,33 @@ mod tests
         parse_ok("let f = fun(x,y) {};");
         parse_ok("let f = fun(x,y) { return 1; };");
         parse_fails("let f = fun(x,y,1) {};");
+    }
+
+    #[test]
+    fn classes()
+    {
+        // Class definitions
+        parse_ok("class Foo {}");
+        parse_ok("class Foo { }");
+        parse_ok("class Foo { get() { return 1; } }");
+        parse_ok("class Foo { get(self) { return self.a; } set(self, v) { self.a = v; } }");
+        parse_ok("class Foo {} let o = new Foo();");
+        parse_ok("class Foo { init(s) {} } let o = new Foo();");
+
+        // Constructor without a self param
+        parse_fails("class Foo { init() {} }");
+    }
+
+    #[test]
+    fn new_expr()
+    {
+        parse_ok("let o = new Foo();");
+        parse_ok("let o = new Foo(1, 2);");
+
+        // Field access
+        parse_ok("let o = new Foo(); o.a = 1;");
+        parse_ok("let o = new Foo(); o.a.b = 1;");
+        parse_ok("let o = new Foo(); o.f();");
     }
 
     /*

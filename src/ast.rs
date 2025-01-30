@@ -304,6 +304,7 @@ pub struct Unit
     // TODO: list of imports?
 
     // TODO: need list of classes
+    pub classes: HashMap<String, Class>,
 
     // Unit-level function
     pub unit_fn: Function,
