@@ -331,3 +331,15 @@ pub struct Unit
     // Unit-level (top level) function
     pub unit_fn: Function,
 }
+
+
+
+/// Represents an entire program containing one or more units
+#[derive(Clone, Debug)]
+pub struct Program
+{
+
+
+
+    pub main_fn: FunId,
+}

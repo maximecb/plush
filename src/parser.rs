@@ -1395,6 +1395,7 @@ mod tests
     {
         // Make sure that we can parse our test and example files
         parse_file("tests/empty.pls");
+        parse_file("tests/fact.pls");
         parse_file("examples/helloworld.pls");
         parse_file("examples/fib.pls");
     }

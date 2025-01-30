@@ -83,8 +83,11 @@ pub enum Insn
     // Logical negation
     not,
 
-    // Get value type
-    type_of,
+    // Type check operations
+    is_nil,
+    is_int64,
+    is_object,
+    is_array,
 
     /*
     // Objects manipulation
@@ -379,7 +382,7 @@ impl Actor
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
 
-        // TODO: figure out how fns should be referred to?
+        // TODO: do we need a closure value here?
         //let mut fun = fun.unwrap_obj();
 
         // Push a new stack frame
@@ -398,10 +401,17 @@ impl Actor
         // The base pointer will point at the first local
         let mut bp = self.stack.len();
 
+
+
+
+        // FIXME
         // Get a compiled address for this function
         //let mut pc = self.get_version(fun, 0);
+        let mut pc = 0;
 
-        /*
+
+
+
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }
         }
@@ -413,9 +423,7 @@ impl Actor
         macro_rules! push_bool {
             ($b: expr) => { push!(if $b { True } else { False }) }
         }
-        */
 
-        /*
         loop
         {
             if pc >= self.insns.len() {
@@ -617,7 +625,7 @@ impl Actor
 
                     let b = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => v0 == v1,
-                        (Value::String(p0), Value::String(p1)) => p0 == p1,
+                        //(Value::String(p0), Value::String(p1)) => p0 == p1,
                         _ => panic!()
                     };
 
@@ -630,7 +638,7 @@ impl Actor
 
                     let b = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => v0 != v1,
-                        (Value::String(p0), Value::String(p1)) => p0 != p1,
+                        //(Value::String(p0), Value::String(p1)) => p0 != p1,
                         _ => panic!()
                     };
 
@@ -650,31 +658,7 @@ impl Actor
                     push!(b);
                 }
 
-                // Get value type
-                Insn::type_of => {
-                    let v0 = pop!();
-
-                    let s = match v0 {
-                        Value::None => "none",
-
-                        Value::True => "bool",
-                        Value::False => "bool",
-
-                        Value::Int64(_) => "int64",
-                        Value::String(_) => "string",
-
-                        Value::Object(_) => "object",
-                        Value::Array(_) => "array",
-
-                        _ => panic!()
-                    };
-
-                    // FIXME: locking here is slow/inefficient
-                    // We ideally want to cache the type strings somewhere
-                    let s = self.alloc.get_string(s);
-                    push!(s);
-                }
-
+                /*
                 // Create new empty object
                 Insn::obj_new => {
                     let new_obj = Object::new(&mut self.alloc);
@@ -714,7 +698,9 @@ impl Actor
                     let obj = pop!().unwrap_obj();
                     Object::seal(obj);
                 }
+                */
 
+                /*
                 // Create new empty array
                 Insn::arr_new { capacity } => {
                     let new_arr = Array::new(
@@ -773,7 +759,9 @@ impl Actor
                     let arr = pop!().unwrap_arr();
                     Array::freeze(arr);
                 }
+                */
 
+                /*
                 // Create new empty bytearray
                 Insn::ba_new { capacity } => {
                     let new_arr = ByteArray::new(
@@ -798,22 +786,9 @@ impl Actor
                     let arr = pop!().unwrap_ba();
                     ByteArray::write_u32(arr, idx, val);
                 }
+                */
 
                 // Jump if true
-                Insn::if_true_stub { target_idx } => {
-                    let v = pop!();
-
-                    match v {
-                        Value::True => {
-                            let target_pc = self.get_version(fun, target_idx);
-                            self.insns[pc - 1] = Insn::if_true { target_pc };
-                            pc = target_pc;
-                        }
-                        Value::False => {},
-                        _ => panic!()
-                    }
-                }
-
                 Insn::if_true { target_pc } => {
                     let v = pop!();
 
@@ -825,20 +800,6 @@ impl Actor
                 }
 
                 // Jump if false
-                Insn::if_false_stub { target_idx } => {
-                    let v = pop!();
-
-                    match v {
-                        Value::False => {
-                            let target_pc = self.get_version(fun, target_idx);
-                            self.insns[pc - 1] = Insn::if_false { target_pc };
-                            pc = target_pc;
-                        }
-                        Value::True => {},
-                        _ => panic!()
-                    }
-                }
-
                 Insn::if_false { target_pc } => {
                     let v = pop!();
 
@@ -850,16 +811,11 @@ impl Actor
                 }
 
                 // Unconditional jump
-                Insn::jump_stub{ target_idx } => {
-                    let target_pc = self.get_version(fun, target_idx);
-                    self.insns[pc - 1] = Insn::jump { target_pc };
-                    pc = target_pc;
-                }
-
                 Insn::jump { target_pc } => {
                     pc = target_pc;
                 }
 
+                /*
                 Insn::call_host { host_fn, argc } => {
                     if host_fn.num_params() != (argc as usize) {
                         panic!();
@@ -938,7 +894,9 @@ impl Actor
                         }
                     }
                 }
+                */
 
+                /*
                 // call (arg0, arg1, ..., argN, fun)
                 Insn::call { argc } => {
                     // Function to call
@@ -961,7 +919,9 @@ impl Actor
                     // Get a compiled address for this function
                     pc = self.get_version(fun, 0);
                 }
+                */
 
+                /*
                 // call (arg0, arg1, ..., argN, fun)
                 Insn::call_known { argc, callee } => {
                     // Get a compiled address for this function
@@ -973,7 +933,9 @@ impl Actor
                     // Executed the patched instruction next
                     pc -= 1;
                 }
+                */
 
+                /*
                 // call (arg0, arg1, ..., argN, fun)
                 Insn::call_pc { argc, callee, target_pc } => {
                     // Function being currently executed
@@ -995,6 +957,7 @@ impl Actor
                     // Get a compiled address for this function
                     pc = target_pc;
                 }
+                */
 
                 Insn::ret => {
                     if self.stack.len() <= bp {
@@ -1022,7 +985,7 @@ impl Actor
 
                     pc = top_frame.ret_addr;
                     bp = top_frame.prev_bp;
-                    fun = self.frames[self.frames.len()-1].fun;
+                    //fun = self.frames[self.frames.len()-1].fun;
 
                     push!(ret_val);
                 }
@@ -1030,9 +993,6 @@ impl Actor
                 _ => panic!("unknown opcode {:?}", insn)
             }
         }
-        */
-
-        todo!();
     }
 }
 
