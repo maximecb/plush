@@ -6,9 +6,9 @@ use crate::parsing::{ParseError};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Decl
 {
-    Global { name: String, fun_id: usize },
-    Arg { idx: usize, fun_id: usize },
-    Local { idx: usize, fun_id: usize },
+    Global { name: String, fun_id: FunId },
+    Arg { idx: usize, fun_id: FunId },
+    Local { idx: usize, fun_id: FunId },
 }
 
 #[derive(Default)]

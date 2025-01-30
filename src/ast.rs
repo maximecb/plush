@@ -273,7 +273,7 @@ pub struct Function
     pub pos: SrcPos,
 
     /// Internal unique function id
-    pub id: usize,
+    pub id: FunId,
 }
 
 /// Function
@@ -290,12 +290,31 @@ pub struct Class
     pub pos: SrcPos,
 }
 
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct FunId(usize);
+
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct ClassId(usize);
+
+impl From<usize> for FunId {
+    fn from(id: usize) -> Self {
+        FunId(id)
+    }
+}
+
+impl From<usize> for ClassId {
+    fn from(id: usize) -> Self {
+        ClassId(id)
+    }
+}
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 
-pub fn next_id() -> usize
+pub fn next_id<IdType: std::convert::From<usize>>() -> IdType
 {
-    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    let idx = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    idx.into()
 }
 
 #[derive(Clone, Debug)]

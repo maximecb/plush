@@ -1,6 +1,7 @@
 use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Mutex, mpsc};
+use crate::ast::{FunId, ClassId};
 //use crate::host::*;
 
 /// Instruction opcodes
@@ -253,7 +254,7 @@ impl From<u8> for Value {
 struct StackFrame
 {
     // Callee function
-    //fun: *mut Object,
+    fun: FunId,
 
     // Argument count (number of args supplied)
     argc: u16,
@@ -372,7 +373,7 @@ impl Actor
         }
     }
 
-    pub fn call(&mut self, fun: Value, args: &[Value]) -> Value
+    pub fn call(&mut self, fun: FunId, args: &[Value]) -> Value
     {
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
@@ -382,7 +383,7 @@ impl Actor
 
         // Push a new stack frame
         self.frames.push(StackFrame {
-            //fun,
+            fun,
             argc: args.len().try_into().unwrap(),
             prev_bp: usize::MAX,
             ret_addr: usize::MAX,
@@ -1077,7 +1078,7 @@ impl VM
     }
 
     // Create a new actor
-    pub fn new_actor(vm: &Arc<Mutex<VM>>, fun: Value, args: Vec<Value>) -> u64
+    pub fn new_actor(vm: &Arc<Mutex<VM>>, fun: FunId, args: Vec<Value>) -> u64
     {
         let vm_mutex = vm.clone();
 
@@ -1093,10 +1094,7 @@ impl VM
         // Spawn a new thread for the actor
         let handle = thread::spawn(move || {
             let mut actor = Actor::new(actor_id, vm_mutex, queue_rx);
-
-            // TODO
-            //actor.call(fun, &args)
-            todo!();
+            actor.call(fun, &args)
         });
 
         // Store the join handles and queue endpoints on the VM
@@ -1122,7 +1120,7 @@ impl VM
     }
 
     // Call a function in the main actor
-    pub fn call(vm: &mut Arc<Mutex<VM>>, fun: Value, args: Vec<Value>) -> Value
+    pub fn call(vm: &mut Arc<Mutex<VM>>, fun: FunId, args: Vec<Value>) -> Value
     {
         let vm_mutex = vm.clone();
 
