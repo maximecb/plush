@@ -74,7 +74,7 @@ pub enum Expr
     Ref(Decl),
 
     // Function/closure expression
-    Fun(Box<Function>),
+    Fun(FunId),
 
     // a[b]
     Index {

@@ -322,7 +322,10 @@ impl ExprBox
             }
 
             Expr::Fun(child_fun) => {
-                child_fun.resolve_syms(env)?;
+
+                todo!();
+
+                //child_fun.resolve_syms(env)?;
 
                 /*
                 // For each variable captured by the nested function

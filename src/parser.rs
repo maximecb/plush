@@ -148,10 +148,10 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
             name = input.parse_ident()?;
         }
 
-        let fun = parse_function(input, prog, name, pos)?;
+        let fun_id = parse_function(input, prog, name, pos)?;
 
         return ExprBox::new_ok(
-            Expr::Fun(Box::new(fun)),
+            Expr::Fun(fun_id),
             pos
         );
     }
@@ -401,10 +401,10 @@ fn parse_object(
         // If this is a method definition
         input.eat_ws()?;
         if !mutable && input.peek_ch() == '(' {
-            let fun = parse_function(input, prog, field_name.clone(), pos)?;
+            let fun_id = parse_function(input, prog, field_name.clone(), pos)?;
 
             let fun_expr = ExprBox::new(
-                Expr::Fun(Box::new(fun)),
+                Expr::Fun(fun_id),
                 pos
             );
 
@@ -888,11 +888,11 @@ fn parse_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, ParseErr
     if input.match_keyword("fun")? {
         input.eat_ws()?;
         let name = input.parse_ident()?;
-        let fun = parse_function(input, prog, name, pos)?;
-        let fun_name = fun.name.clone();
+        let fun_id = parse_function(input, prog, name, pos)?;
+        let fun_name = prog.funs[&fun_id].name.clone();
 
         let fun_expr = ExprBox::new(
-            Expr::Fun(Box::new(fun)),
+            Expr::Fun(fun_id),
             pos
         );
 
@@ -918,7 +918,7 @@ fn parse_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, ParseErr
 }
 
 /// Parse a function declaration
-fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcPos) -> Result<Function, ParseError>
+fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcPos) -> Result<FunId, ParseError>
 {
     let mut params = Vec::default();
     let mut var_arg = false;
@@ -953,8 +953,7 @@ fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcP
     // Parse the function body (must be a block statement)
     let body = parse_block_stmt(input, prog)?;
 
-    Ok(Function
-    {
+    let fun = Function {
         name,
         params,
         var_arg,
@@ -963,7 +962,10 @@ fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcP
         is_unit: false,
         pos,
         id: FunId::default(),
-    })
+    };
+
+    let fun_id = prog.reg_fun(fun);
+    Ok(fun_id)
 }
 
 /// Parse a single unit of source code (e.g. one source file)
