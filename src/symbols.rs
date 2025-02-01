@@ -102,9 +102,6 @@ impl Env
     }
 }
 
-
-
-
 impl Program
 {
     pub fn resolve_syms(&mut self) -> Result<(), ParseError>
@@ -113,30 +110,22 @@ impl Program
         env.push_scope();
 
         // Process the unit function
-        let mut unit_fn = std::mem::take(self.funs.get_mut(&self.main_fn).unwrap());
-        //unit_fn.resolve_syms(self, &mut env)?;
-        *self.funs.get_mut(&self.main_fn).unwrap() = unit_fn;
+        let mut main_unit = std::mem::take(&mut self.main_unit);
+        main_unit.resolve_syms(self, &mut env)?;
+        self.main_unit = main_unit;
 
         Ok(())
     }
 }
 
-
-
-
-
 impl Unit
 {
-    pub fn resolve_syms(&mut self) -> Result<(), ParseError>
+    fn resolve_syms(&mut self, prog: &mut Program, env: &mut Env) -> Result<(), ParseError>
     {
-        let mut env = Env::default();
-        env.push_scope();
-
-
-        // FIXME:
-        //self.unit_fn.resolve_syms(&mut env)?;
-
-
+        // Process the unit function
+        let mut unit_fn = std::mem::take(prog.funs.get_mut(&self.unit_fn).unwrap());
+        unit_fn.resolve_syms(prog, env)?;
+        *prog.funs.get_mut(&self.unit_fn).unwrap() = unit_fn;
 
         Ok(())
     }
@@ -144,7 +133,7 @@ impl Unit
 
 impl Function
 {
-    fn resolve_syms(&mut self, env: &mut Env) -> Result<(), ParseError>
+    fn resolve_syms(&mut self, prog: &mut Program, env: &mut Env) -> Result<(), ParseError>
     {
         env.push_scope();
 
@@ -163,6 +152,10 @@ impl Function
         Ok(())
     }
 }
+
+
+
+
 
 impl StmtBox
 {
