@@ -362,3 +362,87 @@ impl ExprBox
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests
+{
+    use super::*;
+    use crate::parsing::Input;
+    use crate::parser::parse_program;
+
+    fn succeeds(src: &str)
+    {
+        dbg!(src);
+        let mut input = Input::new(&src, "src");
+        let mut prog = parse_program(&mut input).unwrap();
+        prog.resolve_syms().unwrap();
+    }
+
+    fn fails(src: &str)
+    {
+        dbg!(src);
+        let mut input = Input::new(&src, "src");
+        let mut prog = parse_program(&mut input).unwrap();
+        assert!(prog.resolve_syms().is_err());
+    }
+
+    /*
+    fn parse_file(file_name: &str)
+    {
+        dbg!(file_name);
+        let mut unit = crate::parser::parse_file(file_name).unwrap();
+        unit.resolve_syms().unwrap();
+    }
+    */
+
+    #[test]
+    fn basics()
+    {
+        succeeds("");
+        /*succeeds("let foo = fun() {};");
+        succeeds("fun foo(a) { return a; }");
+
+        // Local variables
+        succeeds("fun main() { let a = 0; }");
+        succeeds("fun foo(a) { let a = 0; }");
+
+        // Infix expressions
+        succeeds("fun foo(a, b) { return a + b; }");
+
+        // Two functions with the same parameter name
+        succeeds("fun foo(a) {} fun bar(a) {}");*/
+    }
+
+    /*
+    #[test]
+    fn globals()
+    {
+        succeeds("let g = 5; fun main() { return g; }");
+        succeeds("let g = 5; fun main() { return g + 1; }");
+        succeeds("let global_str = \"foo\"; fun main() {}");
+    }
+    */
+
+    #[test]
+    fn immutable()
+    {
+        succeeds("let var g = 5; g = 6;");
+        //succeeds("let var f = fun() {}; f = 6;");
+        //fails("let g = 5; g = 6;");
+        //fails("fun f() {} f = 6;");
+    }
+
+    /*
+    #[test]
+    fn calls()
+    {
+        succeeds("fun foo() {} fun main() { foo(); }");
+    }
+
+    #[test]
+    fn test_files()
+    {
+        //parse_file("tests/call_ident.pls");
+    }
+    */
+}
