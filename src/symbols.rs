@@ -144,7 +144,7 @@ impl Function
         }
 
         let mut body = std::mem::take(&mut self.body);
-        body.resolve_syms(self, env)?;
+        body.resolve_syms(prog, self, env)?;
         self.body = body;
 
         env.pop_scope();
@@ -153,14 +153,11 @@ impl Function
     }
 }
 
-
-
-
-
 impl StmtBox
 {
     fn resolve_syms(
         &mut self,
+        prog: &mut Program,
         fun: &mut Function,
         env: &mut Env
     ) -> Result<(), ParseError>
@@ -169,39 +166,39 @@ impl StmtBox
             Stmt::Break | Stmt::Continue => {}
 
             Stmt::Return(expr) => {
-                expr.resolve_syms(fun, env)?;
+                expr.resolve_syms(prog, fun, env)?;
             }
 
             Stmt::Expr(expr) => {
-                expr.resolve_syms(fun, env)?;
+                expr.resolve_syms(prog, fun, env)?;
             }
 
             Stmt::Block(stmts) => {
                 env.push_scope();
 
                 for stmt in stmts {
-                    stmt.resolve_syms(fun, env)?;
+                    stmt.resolve_syms(prog, fun, env)?;
                 }
 
                 env.pop_scope();
             }
 
             Stmt::If { test_expr, then_stmt, else_stmt } => {
-                test_expr.resolve_syms(fun, env)?;
-                then_stmt.resolve_syms(fun, env)?;
+                test_expr.resolve_syms(prog, fun, env)?;
+                then_stmt.resolve_syms(prog, fun, env)?;
 
                 if else_stmt.is_some() {
-                    else_stmt.as_mut().unwrap().resolve_syms(fun, env)?;
+                    else_stmt.as_mut().unwrap().resolve_syms(prog, fun, env)?;
                 }
             }
 
             Stmt::While { test_expr, body_stmt } => {
-                test_expr.resolve_syms(fun, env)?;
-                body_stmt.resolve_syms(fun, env)?;
+                test_expr.resolve_syms(prog, fun, env)?;
+                body_stmt.resolve_syms(prog, fun, env)?;
             }
 
             Stmt::Assert { test_expr } => {
-                test_expr.resolve_syms(fun, env)?;
+                test_expr.resolve_syms(prog, fun, env)?;
             }
 
             // Variable declaration
@@ -212,7 +209,7 @@ impl StmtBox
                 match init_expr.expr.as_ref() {
                     Expr::Fun { .. } => {}
                     _ => {
-                        init_expr.resolve_syms(fun, env)?;
+                        init_expr.resolve_syms(prog, fun, env)?;
                     }
                 }
 
@@ -234,7 +231,7 @@ impl StmtBox
                 // after the new definition is added to allow recursion
                 match init_expr.expr.as_ref() {
                     Expr::Fun { .. } => {
-                        init_expr.resolve_syms(fun, env)?;
+                        init_expr.resolve_syms(prog, fun, env)?;
                     }
                     _ => {}
                 }
@@ -254,6 +251,7 @@ impl ExprBox
 {
     fn resolve_syms(
         &mut self,
+        prog: &mut Program,
         fun: &mut Function,
         env: &mut Env
     ) -> Result<(), ParseError>
@@ -268,13 +266,13 @@ impl ExprBox
 
             Expr::Array { exprs, .. } => {
                 for expr in exprs {
-                    expr.resolve_syms(fun, env)?;
+                    expr.resolve_syms(prog, fun, env)?;
                 }
             }
 
             Expr::Object { fields, .. } => {
                 for (_, _, expr) in fields {
-                    expr.resolve_syms(fun, env)?;
+                    expr.resolve_syms(prog, fun, env)?;
                 }
             }
 
@@ -307,33 +305,33 @@ impl ExprBox
             Expr::Ref { .. } => panic!("unresolved ref"),
 
             Expr::Index { base, index } => {
-                base.resolve_syms(fun, env)?;
-                index.resolve_syms(fun, env)?;
+                base.resolve_syms(prog, fun, env)?;
+                index.resolve_syms(prog, fun, env)?;
             }
 
             Expr::Member { base, field } => {
-                base.resolve_syms(fun, env)?;
+                base.resolve_syms(prog, fun, env)?;
             }
 
             Expr::Unary { op, child, .. } => {
-                child.resolve_syms(fun, env)?;
+                child.resolve_syms(prog, fun, env)?;
             }
 
             Expr::Binary { op, lhs, rhs, .. } => {
-                lhs.resolve_syms(fun, env)?;
-                rhs.resolve_syms(fun, env)?;
+                lhs.resolve_syms(prog, fun, env)?;
+                rhs.resolve_syms(prog, fun, env)?;
             }
 
             Expr::Call { callee, args, .. } => {
-                callee.resolve_syms(fun, env)?;
+                callee.resolve_syms(prog, fun, env)?;
                 for arg in args {
-                    arg.resolve_syms(fun, env)?;
+                    arg.resolve_syms(prog, fun, env)?;
                 }
             }
 
             Expr::HostCall { fun_name, args, .. } => {
                 for arg in args {
-                    arg.resolve_syms(fun, env)?;
+                    arg.resolve_syms(prog, fun, env)?;
                 }
             }
 
