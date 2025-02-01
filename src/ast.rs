@@ -236,7 +236,7 @@ impl Default for StmtBox
 }
 
 /// Function
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub struct Function
 {
     /// Name of the function

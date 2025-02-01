@@ -102,6 +102,29 @@ impl Env
     }
 }
 
+
+
+
+impl Program
+{
+    pub fn resolve_syms(&mut self) -> Result<(), ParseError>
+    {
+        let mut env = Env::default();
+        env.push_scope();
+
+        // Process the unit function
+        let mut unit_fn = std::mem::take(self.funs.get_mut(&self.main_fn).unwrap());
+        //unit_fn.resolve_syms(self, &mut env)?;
+        *self.funs.get_mut(&self.main_fn).unwrap() = unit_fn;
+
+        Ok(())
+    }
+}
+
+
+
+
+
 impl Unit
 {
     pub fn resolve_syms(&mut self) -> Result<(), ParseError>
