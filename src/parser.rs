@@ -125,15 +125,10 @@ fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
         ));
     }
 
-    /*
     // Object literal
     if input.match_char('{') {
-        return parse_object(input, false, pos);
+        return parse_object(input, pos);
     }
-    if input.match_token("+{")? {
-        return parse_object(input, true, pos);
-    }
-    */
 
     // Host function call
     if ch == '$' {
@@ -365,22 +360,6 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     }
     */
 
-    // New object
-    if input.match_token("new")? {
-        let class_expr = parse_atom(input)?;
-        input.expect_token("(")?;
-
-        let arg_exprs = parse_expr_list(input, ")")?;
-
-        return ExprBox::new_ok(
-            Expr::New{
-                class: class_expr,
-                args: arg_exprs
-            },
-            pos
-        );
-    }
-
     if input.match_keyword("typeof")? {
         let child = parse_prefix(input)?;
 
@@ -397,11 +376,9 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     parse_postfix(input)
 }
 
-/*
 // Parse an object literal
 fn parse_object(
     input: &mut Input,
-    extensible: bool,
     pos: SrcPos,
 ) -> Result<ExprBox, ParseError>
 {
@@ -421,17 +398,17 @@ fn parse_object(
         }
 
         let mut mutable = false;
-        if input.match_char('~') {
+        if input.match_keyword("var")? {
             mutable = true;
         }
 
         // Parse a field name
+        input.eat_ws()?;
         let field_name = input.parse_ident()?;
 
         // If this is a method definition
         input.eat_ws()?;
-        if input.peek_ch() == '(' {
-
+        if !mutable && input.peek_ch() == '(' {
             let fun = parse_function(input, field_name.clone(), pos)?;
 
             let fun_expr = ExprBox::new(
@@ -463,7 +440,6 @@ fn parse_object(
     }
 
     let obj_expr = Expr::Object {
-        extensible,
         fields: mut_key_val,
     };
 
@@ -472,7 +448,6 @@ fn parse_object(
         pos
     )
 }
-*/
 
 /// Parse a list of argument expressions
 fn parse_expr_list(input: &mut Input, end_token: &str) -> Result<Vec<ExprBox>, ParseError>
@@ -995,62 +970,8 @@ fn parse_function(input: &mut Input, name: String, pos: SrcPos) -> Result<Functi
         num_locals: 0,
         is_unit: false,
         pos,
-        id: crate::ast::next_id(),
+        id: FunId::default(),
     })
-}
-
-/// Parse a class declaration
-fn parse_class(input: &mut Input, pos: SrcPos) -> Result<Class, ParseError>
-{
-    input.eat_ws()?;
-    let class_name = input.parse_ident()?;
-    input.expect_token("{")?;
-
-    let mut methods = HashMap::default();
-
-    loop
-    {
-        input.eat_ws()?;
-
-        if input.eof() {
-            return input.parse_error("unexpected end of input inside class declaration");
-        }
-
-        if input.match_token("}")? {
-            break;
-        }
-
-        let pos = input.get_pos();
-        let method_name = input.parse_ident()?;
-
-        if methods.contains_key(&method_name) {
-            return input.parse_error(
-                &format!("duplicate method name {}", method_name)
-            );
-        }
-
-        let fun = parse_function(input, method_name.clone(), pos)?;
-
-        // If this is a constructor method
-        if method_name == "init" {
-            if fun.params.len() == 0 {
-                return input.parse_error(
-                    "constructor methods must have at least one self parameter"
-                );
-            }
-        }
-
-        methods.insert(method_name, fun);
-    }
-
-    let class = Class {
-        name: class_name.clone(),
-        methods,
-        pos,
-        id: next_id(),
-    };
-
-    Ok(class)
 }
 
 /// Parse a single unit of source code (e.g. one source file)
@@ -1095,7 +1016,7 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
         num_locals: 0,
         is_unit: true,
         pos,
-        id: crate::ast::next_id(),
+        id: FunId::default(),
     };
 
     // FIXME:
@@ -1307,43 +1228,12 @@ mod tests
         parse_fails("let f = fun(x,y,1) {};");
     }
 
-    /*
-    #[test]
-    fn classes()
-    {
-        // Class definitions
-        parse_ok("class Foo {}");
-        parse_ok("class Foo { }");
-        parse_ok("class Foo { get() { return 1; } }");
-        parse_ok("class Foo { get(self) { return self.a; } set(self, v) { self.a = v; } }");
-        parse_ok("class Foo {} let o = new Foo();");
-        parse_ok("class Foo { init(s) {} } let o = new Foo();");
-
-        // Constructor without a self param
-        parse_fails("class Foo { init() {} }");
-    }
-    */
-
-    #[test]
-    fn new_expr()
-    {
-        parse_ok("let o = new Foo();");
-        parse_ok("let o = new Foo(1, 2);");
-
-        // Field access
-        parse_ok("let o = new Foo(); o.a = 1;");
-        parse_ok("let o = new Foo(); o.a.b = 1;");
-        parse_ok("let o = new Foo(); o.f();");
-    }
-
-    /*
     #[test]
     fn objects()
     {
         // Literals
         parse_ok("let o = {};");
-        parse_ok("let o = +{};");
-        parse_ok("let o = +{ x: 1, ~y: 2};");
+        parse_ok("let o = { x: 1, var y: 2};");
 
         // Member operator
         parse_ok("let v = a.b;");
@@ -1353,8 +1243,8 @@ mod tests
         parse_ok("let o = { m() {} };");
         parse_ok("let o = { m() {} x:1, y:2 };");
         parse_ok("let o = { x1:1, x2:2, m1() {} m2(x,y,z) {} };");
+        parse_fails("let o = { var m() {} };");
     }
-    */
 
     #[test]
     fn arrays()

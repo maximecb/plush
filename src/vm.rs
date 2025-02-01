@@ -2,7 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
-use crate::ast::{Program, FunId, ClassId};
+use crate::ast::{Program, FunId};
 use crate::codegen::CompiledFun;
 //use crate::host::*;
 

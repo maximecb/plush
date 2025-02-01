@@ -256,13 +256,11 @@ impl ExprBox
                 }
             }
 
-            /*
             Expr::Object { fields, .. } => {
                 for (_, _, expr) in fields {
                     expr.resolve_syms(fun, env)?;
                 }
             }
-            */
 
             Expr::Ident(name) => {
                 //dbg!(&name);
@@ -321,10 +319,6 @@ impl ExprBox
                 for arg in args {
                     arg.resolve_syms(fun, env)?;
                 }
-            }
-
-            Expr::New { .. } => {
-                todo!();
             }
 
             Expr::Fun(child_fun) => {

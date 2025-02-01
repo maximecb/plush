@@ -64,13 +64,10 @@ pub enum Expr
         exprs: Vec<ExprBox>,
     },
 
-    /*
     // Object literal
     Object {
-        extensible: bool,
         fields: Vec<(bool, String, ExprBox)>,
     },
-    */
 
     Ident(String),
 
@@ -118,14 +115,6 @@ pub enum Expr
 
     HostCall {
         fun_name: String,
-        args: Vec<ExprBox>,
-    },
-
-    // New class instance
-    New {
-        // Class is initially an ident, but
-        // may need to be resolved to a class id?
-        class: ExprBox,
         args: Vec<ExprBox>,
     },
 }
@@ -276,28 +265,8 @@ pub struct Function
     pub id: FunId,
 }
 
-/// Function
-#[derive(Clone, Debug)]
-pub struct Class
-{
-    /// Name of the class
-    pub name: String,
-
-    // Methods
-    pub methods: HashMap<String, Function>,
-
-    // Source position
-    pub pos: SrcPos,
-
-    /// Internal unique class id
-    pub id: ClassId,
-}
-
 #[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct FunId(usize);
-
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
-pub struct ClassId(usize);
 
 impl From<usize> for FunId {
     fn from(id: usize) -> Self {
@@ -305,38 +274,12 @@ impl From<usize> for FunId {
     }
 }
 
-impl From<usize> for ClassId {
-    fn from(id: usize) -> Self {
-        ClassId(id)
-    }
-}
-
-
-
-
-use std::sync::atomic::{AtomicUsize, Ordering};
-static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
-
-pub fn next_id<IdType: std::convert::From<usize>>() -> IdType
-{
-    let idx = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    idx.into()
-}
-
-
-
-
-
-
 #[derive(Default, Clone, Debug)]
 pub struct Unit
 {
     // TODO: list of imports. Don't implement just yet.
     // These should be unit names
     // We'll want to import specific symbols from units
-
-    // Map of classes by id
-    //pub classes: HashMap<ClassId, Class>,
 
     // Unit-level (top level) function
     pub unit_fn: FunId,
@@ -346,15 +289,15 @@ pub struct Unit
 #[derive(Default, Clone, Debug)]
 pub struct Program
 {
+    // Last id assigned
+    last_id: usize,
+
     // Map of parsed units by name
     pub units: HashMap<String, Unit>,
 
     // Having a hash map of ids to functions means that we can
     // prune unreferenced functions (remove dead code)
     pub funs: HashMap<FunId, Function>,
-
-    // Map of classes by id
-    //pub classes: HashMap<ClassId, Class>,
 
     // Main/top-level unit
     pub main_unit: Unit,
@@ -365,4 +308,12 @@ pub struct Program
 
 impl Program
 {
+    fn reg_fun(&mut self, mut fun: Function) -> FunId
+    {
+        let id = self.last_id.into();
+        self.last_id += 1;
+        fun.id = id;
+        self.funs.insert(id, fun);
+        id
+    }
 }
