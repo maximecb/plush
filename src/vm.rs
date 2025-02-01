@@ -319,7 +319,7 @@ impl Actor
 
     // Receive a message from the message queue
     // This will block until a message is available
-    pub fn recv(&mut self) -> Value
+    fn recv(&mut self) -> Value
     {
         //use crate::window::poll_ui_msg;
 
@@ -346,7 +346,7 @@ impl Actor
     }
 
     // Send a message to another actor
-    pub fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
+    fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
     {
         //
         // TODO: logic to copy objects
@@ -377,13 +377,21 @@ impl Actor
         }
     }
 
+    // Get an entry PC value for a function id
+    fn get_entry_pc(&mut self, fun: FunId) -> usize
+    {
+
+
+
+
+        todo!();
+    }
+
+    // Call and execute a function in this actor
     pub fn call(&mut self, fun: FunId, args: &[Value]) -> Value
     {
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
-
-        // TODO: do we need a closure value here?
-        //let mut fun = fun.unwrap_obj();
 
         // Push a new stack frame
         self.frames.push(StackFrame {
@@ -401,16 +409,8 @@ impl Actor
         // The base pointer will point at the first local
         let mut bp = self.stack.len();
 
-
-
-
-        // FIXME
         // Get a compiled address for this function
-        //let mut pc = self.get_version(fun, 0);
-        let mut pc = 0;
-
-
-
+        let mut pc = self.get_entry_pc(fun);
 
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }
