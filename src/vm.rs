@@ -377,8 +377,8 @@ impl Actor
         }
     }
 
-    // Get an entry PC value for a function id
-    fn get_entry_pc(&mut self, fun: FunId) -> usize
+    // Get a compiled function entry for a given function id
+    fn get_compiled_fun(&mut self, fun: FunId) -> CompiledFun
     {
 
 
@@ -393,6 +393,19 @@ impl Actor
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
 
+        // Get a compiled address for this function
+        let fun_entry = self.get_compiled_fun(fun);
+        let mut pc = fun_entry.entry_pc;
+
+        if args.len() < fun_entry.num_params {
+            panic!();
+        }
+
+        // Push the arguments on the stack
+        for arg in args {
+            self.stack.push(*arg);
+        }
+
         // Push a new stack frame
         self.frames.push(StackFrame {
             fun,
@@ -401,16 +414,8 @@ impl Actor
             ret_addr: usize::MAX,
         });
 
-        // Push the arguments on the stack
-        for arg in args {
-            self.stack.push(*arg);
-        }
-
         // The base pointer will point at the first local
         let mut bp = self.stack.len();
-
-        // Get a compiled address for this function
-        let mut pc = self.get_entry_pc(fun);
 
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }

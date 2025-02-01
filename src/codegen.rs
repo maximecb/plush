@@ -5,13 +5,14 @@ use crate::symbols::{Decl};
 use crate::vm::{Insn, Value};
 
 /// Compiled function object
+#[derive(Copy, Clone)]
 pub struct CompiledFun
 {
-    start_pc: usize,
+    pub entry_pc: usize,
 
-    num_params: usize,
+    pub num_params: usize,
 
-    num_locals: usize,
+    pub num_locals: usize,
 }
 
 impl Function
@@ -33,13 +34,14 @@ impl Function
 
     fn gen_code(&self, code: &mut Vec<Insn>) -> Result<CompiledFun, ParseError>
     {
-        // Start address of the compiled function
-        let start_pc = code.len();
+        // Entry address of the compiled function
+        let entry_pc = code.len();
 
         // Allocate stack slots for the local variables
         for i in 0..self.num_locals {
             code.push(Insn::push { val: Value::Nil });
         }
+
 
 
 
@@ -58,7 +60,7 @@ impl Function
         }
 
         Ok(CompiledFun {
-            start_pc,
+            entry_pc,
             num_params: self.params.len(),
             num_locals: self.num_locals,
         })
