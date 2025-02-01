@@ -308,7 +308,7 @@ pub struct Program
 
 impl Program
 {
-    fn reg_fun(&mut self, mut fun: Function) -> FunId
+    pub fn reg_fun(&mut self, mut fun: Function) -> FunId
     {
         let id = self.last_id.into();
         self.last_id += 1;

@@ -975,13 +975,12 @@ fn parse_function(input: &mut Input, name: String, pos: SrcPos) -> Result<Functi
 }
 
 /// Parse a single unit of source code (e.g. one source file)
-pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
+pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseError>
 {
     input.eat_ws()?;
     let pos = input.get_pos();
 
     let mut stmts = Vec::default();
-    //let mut classes = HashMap::default();
 
     loop
     {
@@ -991,14 +990,6 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
         if input.eof() {
             break;
         }
-
-        /*
-        if input.match_keyword("class")? {
-            let class = parse_class(input, pos)?;
-            classes.insert(class.name.clone(), class);
-            continue;
-        }
-        */
 
         stmts.push(parse_stmt(input)?);
     }
@@ -1019,26 +1010,30 @@ pub fn parse_unit(input: &mut Input) -> Result<Unit, ParseError>
         id: FunId::default(),
     };
 
-    // FIXME:
-    let unit_fn = unit_fn.id;
-
-
     Ok(Unit {
-        //classes,
-        unit_fn
+        unit_fn: prog.reg_fun(unit_fn)
     })
 }
 
-pub fn parse_str(src: &str) -> Result<Unit, ParseError>
+pub fn parse_program(input: &mut Input) -> Result<Program, ParseError>
 {
-    let mut input = Input::new(&src, "src");
-    parse_unit(&mut input)
+    let mut prog = Program::default();
+    let unit = parse_unit(input, &mut prog)?;
+    prog.main_fn = unit.unit_fn;
+    prog.main_unit = unit;
+    Ok(prog)
 }
 
-pub fn parse_file(file_name: &str) -> Result<Unit, ParseError>
+pub fn parse_str(src: &str) -> Result<Program, ParseError>
+{
+    let mut input = Input::new(&src, "src");
+    parse_program(&mut input)
+}
+
+pub fn parse_file(file_name: &str) -> Result<Program, ParseError>
 {
     let mut input = Input::from_file(file_name)?;
-    parse_unit(&mut input)
+    parse_program(&mut input)
 }
 
 #[cfg(test)]
@@ -1050,14 +1045,14 @@ mod tests
     {
         dbg!(src);
         let mut input = Input::new(&src, "src");
-        parse_unit(&mut input).unwrap();
+        parse_program(&mut input).unwrap();
     }
 
     fn parse_fails(src: &str)
     {
         dbg!(src);
         let mut input = Input::new(&src, "src");
-        assert!(parse_unit(&mut input).is_err());
+        assert!(parse_program(&mut input).is_err());
     }
 
     fn parse_file(file_name: &str)
