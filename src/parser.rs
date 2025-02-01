@@ -6,7 +6,7 @@ use crate::parsing::*;
 use crate::ast::*;
 
 /// Parse an atomic expression
-fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
+fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
     input.eat_ws()?;
     let ch = input.peek_ch();
@@ -104,30 +104,23 @@ fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
     // Parenthesized expression or type casting expression
     if ch == '(' {
         input.eat_ch();
-        let expr = parse_expr(input)?;
+        let expr = parse_expr(input, prog)?;
         input.expect_token(")")?;
         return Ok(expr);
     }
 
     // Array literal
     if input.match_char('[') {
-        let exprs = parse_expr_list(input, "]")?;
+        let exprs = parse_expr_list(input, prog, "]")?;
         return Ok(ExprBox::new(
-            Expr::Array { frozen: true,  exprs },
-            pos,
-        ));
-    }
-    if input.match_token("*[")? {
-        let exprs = parse_expr_list(input, "]")?;
-        return Ok(ExprBox::new(
-            Expr::Array { frozen: false,  exprs },
+            Expr::Array { exprs },
             pos,
         ));
     }
 
     // Object literal
     if input.match_char('{') {
-        return parse_object(input, pos);
+        return parse_object(input, prog, pos);
     }
 
     // Host function call
@@ -135,7 +128,7 @@ fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
         input.eat_ch();
         let fun_name = input.parse_ident()?;
         input.expect_token("(")?;
-        let arg_exprs = parse_expr_list(input, ")")?;
+        let arg_exprs = parse_expr_list(input, prog, ")")?;
 
         return ExprBox::new_ok(
             Expr::HostCall {
@@ -155,7 +148,7 @@ fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
             name = input.parse_ident()?;
         }
 
-        let fun = parse_function(input, name, pos)?;
+        let fun = parse_function(input, prog, name, pos)?;
 
         return ExprBox::new_ok(
             Expr::Fun(Box::new(fun)),
@@ -176,9 +169,9 @@ fn parse_atom(input: &mut Input) -> Result<ExprBox, ParseError>
 }
 
 /// Parse a postfix expression
-fn parse_postfix(input: &mut Input) -> Result<ExprBox, ParseError>
+fn parse_postfix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
-    let mut base_expr = parse_atom(input)?;
+    let mut base_expr = parse_atom(input, prog)?;
 
     loop
     {
@@ -187,7 +180,7 @@ fn parse_postfix(input: &mut Input) -> Result<ExprBox, ParseError>
 
         // If this is a function call
         if input.match_token("(")? {
-            let arg_exprs = parse_expr_list(input, ")")?;
+            let arg_exprs = parse_expr_list(input, prog, ")")?;
 
             base_expr = ExprBox::new(
                 Expr::Call {
@@ -202,7 +195,7 @@ fn parse_postfix(input: &mut Input) -> Result<ExprBox, ParseError>
 
         // Array indexing
         if input.match_token("[")? {
-            let index_expr = parse_expr(input)?;
+            let index_expr = parse_expr(input, prog)?;
             input.expect_token("]")?;
 
             base_expr = ExprBox::new(
@@ -262,7 +255,7 @@ fn parse_postfix(input: &mut Input) -> Result<ExprBox, ParseError>
 /// Parse an prefix expression
 /// Note: this function should only call parse_postfix directly
 /// to respect the priority of operations in C
-fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
+fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
     input.eat_ws()?;
     let ch = input.peek_ch();
@@ -271,7 +264,7 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     // Unary not expression (bitwise or logical not)
     if ch == '!' {
         input.eat_ch();
-        let child = parse_prefix(input)?;
+        let child = parse_prefix(input, prog)?;
 
         return ExprBox::new_ok(
             Expr::Unary {
@@ -285,7 +278,7 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     /*
     // Pre-increment expression
     if input.match_token("++")? {
-        let sub_expr = parse_prefix(input)?;
+        let sub_expr = parse_prefix(input, prog)?;
 
         // Transform into i = i + 1
         return Ok(
@@ -305,7 +298,7 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     /*
     // Pre-decrement expression
     if input.match_token("--")? {
-        let sub_expr = parse_prefix(input)?;
+        let sub_expr = parse_prefix(input, prog)?;
 
         // Transform into i = i - 1
         return Ok(
@@ -325,7 +318,7 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     // Unary minus expression
     if ch == '-' {
         input.eat_ch();
-        let sub_expr = parse_prefix(input)?;
+        let sub_expr = parse_prefix(input, prog)?;
 
         // If this is an integer or floating-point value, negate it
         let expr = match *sub_expr.expr {
@@ -343,25 +336,23 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
         );
     }
 
-    /*
     // Unary plus expression
     if ch == '+' {
         input.eat_ch();
-        let sub_expr = parse_prefix(input)?;
+        let sub_expr = parse_prefix(input, prog)?;
 
-        // If this is an integer or floating-point value, negate it
-        let expr = match sub_expr {
+        // If this is an integer or floating-point value, do nothing
+        let expr = match sub_expr.expr.as_ref() {
             Expr::Int(int_val) => sub_expr,
-            Expr::Float32(f_val) => sub_expr,
+            Expr::Float64(f_val) => sub_expr,
             _ => return input.parse_error("plus operator applied to non-constant value")
         };
 
         return Ok(expr)
     }
-    */
 
     if input.match_keyword("typeof")? {
-        let child = parse_prefix(input)?;
+        let child = parse_prefix(input, prog)?;
 
         return ExprBox::new_ok(
             Expr::Unary {
@@ -373,12 +364,13 @@ fn parse_prefix(input: &mut Input) -> Result<ExprBox, ParseError>
     }
 
     // Try to parse this as a postfix expression
-    parse_postfix(input)
+    parse_postfix(input, prog)
 }
 
 // Parse an object literal
 fn parse_object(
     input: &mut Input,
+    prog: &mut Program,
     pos: SrcPos,
 ) -> Result<ExprBox, ParseError>
 {
@@ -409,7 +401,7 @@ fn parse_object(
         // If this is a method definition
         input.eat_ws()?;
         if !mutable && input.peek_ch() == '(' {
-            let fun = parse_function(input, field_name.clone(), pos)?;
+            let fun = parse_function(input, prog, field_name.clone(), pos)?;
 
             let fun_expr = ExprBox::new(
                 Expr::Fun(Box::new(fun)),
@@ -427,7 +419,7 @@ fn parse_object(
 
         // Parse the field value
         input.expect_token(":")?;
-        let field_expr = parse_expr(input)?;
+        let field_expr = parse_expr(input, prog)?;
         mut_key_val.push((mutable, field_name, field_expr));
 
         if input.match_token("}")? {
@@ -450,7 +442,7 @@ fn parse_object(
 }
 
 /// Parse a list of argument expressions
-fn parse_expr_list(input: &mut Input, end_token: &str) -> Result<Vec<ExprBox>, ParseError>
+fn parse_expr_list(input: &mut Input, prog: &mut Program, end_token: &str) -> Result<Vec<ExprBox>, ParseError>
 {
     let mut arg_exprs = Vec::default();
 
@@ -466,7 +458,7 @@ fn parse_expr_list(input: &mut Input, end_token: &str) -> Result<Vec<ExprBox>, P
         }
 
         // Parse one argument
-        arg_exprs.push(parse_expr(input)?);
+        arg_exprs.push(parse_expr(input, prog)?);
 
         if input.match_token(end_token)? {
             break;
@@ -539,7 +531,7 @@ fn match_bin_op(input: &mut Input) -> Result<Option<OpInfo>, ParseError>
 /// Parse a complex infix expression
 /// This uses the shunting yard algorithm to parse infix expressions:
 /// https://en.wikipedia.org/wiki/Shunting_yard_algorithm
-fn parse_expr(input: &mut Input) -> Result<ExprBox, ParseError>
+fn parse_expr(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
     // Operator stack
     let mut op_stack: Vec<OpInfo> = Vec::default();
@@ -548,7 +540,7 @@ fn parse_expr(input: &mut Input) -> Result<ExprBox, ParseError>
     let mut expr_stack: Vec<ExprBox> = Vec::default();
 
     // Parse the prefix sub-expression
-    expr_stack.push(parse_prefix(input)?);
+    expr_stack.push(parse_prefix(input, prog)?);
 
     // Evaluate the operators on the stack with lower
     // precedence than a new operator we just read
@@ -592,9 +584,9 @@ fn parse_expr(input: &mut Input) -> Result<ExprBox, ParseError>
             eval_lower_prec(&mut op_stack, &mut expr_stack, TERNARY_PREC);
 
             let test_expr = expr_stack.pop().unwrap();
-            let then_expr = parse_expr(input)?;
+            let then_expr = parse_expr(input, prog)?;
             input.expect_token(":")?;
-            let else_expr = parse_expr(input)?;
+            let else_expr = parse_expr(input, prog)?;
 
             expr_stack.push(Expr::Ternary {
                 test_expr: Box::new(test_expr),
@@ -619,7 +611,7 @@ fn parse_expr(input: &mut Input) -> Result<ExprBox, ParseError>
         if new_op.rtl == true {
             // Recursively parse the rhs expression,
             // forcing it to be evaluated before the lhs
-            let rhs = parse_expr(input)?;
+            let rhs = parse_expr(input, prog)?;
             let lhs = expr_stack.pop().unwrap();
 
             let pos = lhs.pos.clone();
@@ -640,7 +632,7 @@ fn parse_expr(input: &mut Input) -> Result<ExprBox, ParseError>
         op_stack.push(new_op);
 
         // There must be another prefix sub-expression following
-        expr_stack.push(parse_prefix(input)?);
+        expr_stack.push(parse_prefix(input, prog)?);
     }
 
     // Emit all operators remaining on the operator stack
@@ -664,7 +656,7 @@ fn parse_expr(input: &mut Input) -> Result<ExprBox, ParseError>
 }
 
 /// Parse a block statement
-fn parse_block_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
+fn parse_block_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, ParseError>
 {
     input.eat_ws()?;
     let pos = input.get_pos();
@@ -687,7 +679,7 @@ fn parse_block_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
             continue;
         }
 
-        stmts.push(parse_stmt(input)?);
+        stmts.push(parse_stmt(input, prog)?);
     }
 
     return StmtBox::new_ok(
@@ -697,7 +689,7 @@ fn parse_block_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
 }
 
 /// Parse a statement
-fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
+fn parse_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, ParseError>
 {
     input.eat_ws()?;
     let pos = input.get_pos();
@@ -711,7 +703,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
         }
         else
         {
-            let expr = parse_expr(input)?;
+            let expr = parse_expr(input, prog)?;
             input.expect_token(";")?;
             return StmtBox::new_ok(
                 Stmt::Return(expr),
@@ -734,16 +726,16 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
     if input.match_keyword("if")? {
         // Parse the test expression
         input.expect_token("(")?;
-        let test_expr = parse_expr(input)?;
+        let test_expr = parse_expr(input, prog)?;
         input.expect_token(")")?;
 
         // Parse the then statement
-        let then_stmt = parse_stmt(input)?;
+        let then_stmt = parse_stmt(input, prog)?;
 
         // If there is an else statement
         if input.match_keyword("else")? {
             // Parse the else statement
-            let else_stmt = parse_stmt(input)?;
+            let else_stmt = parse_stmt(input, prog)?;
 
             return StmtBox::new_ok(
                 Stmt::If {
@@ -771,11 +763,11 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
     if input.match_keyword("while")? {
         // Parse the test expression
         input.expect_token("(")?;
-        let test_expr = parse_expr(input)?;
+        let test_expr = parse_expr(input, prog)?;
         input.expect_token(")")?;
 
         // Parse the loop body
-        let body_stmt = parse_stmt(input)?;
+        let body_stmt = parse_stmt(input, prog)?;
 
         return StmtBox::new_ok(
             Stmt::While {
@@ -794,7 +786,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
         let init_stmt = if input.match_token(";")? {
             StmtBox::default()
         } else {
-            parse_stmt(input)?
+            parse_stmt(input, prog)?
         };
 
         // Test expression
@@ -804,7 +796,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
                 pos
             )
         } else {
-            let expr = parse_expr(input)?;
+            let expr = parse_expr(input, prog)?;
             input.expect_token(";")?;
             expr
         };
@@ -813,13 +805,13 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
         let incr_expr = if input.match_token(")")? {
             ExprBox::default()
         } else {
-            let expr = parse_expr(input)?;
+            let expr = parse_expr(input, prog)?;
             input.expect_token(")")?;
             expr
         };
 
         // Parse the loop body
-        let body_stmt = parse_stmt(input)?;
+        let body_stmt = parse_stmt(input, prog)?;
 
         // The loop gets generated as:
         // { init_stmt, while (test_expr) { loop_body; incr_expr; }  }
@@ -855,7 +847,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
     if input.match_keyword("assert")? {
         // Parse the test expression
         input.expect_token("(")?;
-        let test_expr = parse_expr(input)?;
+        let test_expr = parse_expr(input, prog)?;
         input.expect_token(")")?;
         input.expect_token(";")?;
 
@@ -869,7 +861,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
 
     // Block statement
     if input.peek_ch() == '{' {
-        return parse_block_stmt(input);
+        return parse_block_stmt(input, prog);
     }
 
     // Variable declaration
@@ -878,7 +870,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
         input.eat_ws()?;
         let var_name = input.parse_ident()?;
         input.expect_token("=")?;
-        let init_expr = parse_expr(input)?;
+        let init_expr = parse_expr(input, prog)?;
         input.expect_token(";")?;
 
         return StmtBox::new_ok(
@@ -896,7 +888,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
     if input.match_keyword("fun")? {
         input.eat_ws()?;
         let name = input.parse_ident()?;
-        let fun = parse_function(input, name, pos)?;
+        let fun = parse_function(input, prog, name, pos)?;
         let fun_name = fun.name.clone();
 
         let fun_expr = ExprBox::new(
@@ -916,7 +908,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
     }
 
     // Try to parse this as an expression statement
-    let expr = parse_expr(input)?;
+    let expr = parse_expr(input, prog)?;
     input.expect_token(";")?;
 
     StmtBox::new_ok(
@@ -926,7 +918,7 @@ fn parse_stmt(input: &mut Input) -> Result<StmtBox, ParseError>
 }
 
 /// Parse a function declaration
-fn parse_function(input: &mut Input, name: String, pos: SrcPos) -> Result<Function, ParseError>
+fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcPos) -> Result<Function, ParseError>
 {
     let mut params = Vec::default();
     let mut var_arg = false;
@@ -959,7 +951,7 @@ fn parse_function(input: &mut Input, name: String, pos: SrcPos) -> Result<Functi
     }
 
     // Parse the function body (must be a block statement)
-    let body = parse_block_stmt(input)?;
+    let body = parse_block_stmt(input, prog)?;
 
     Ok(Function
     {
@@ -991,7 +983,7 @@ pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseEr
             break;
         }
 
-        stmts.push(parse_stmt(input)?);
+        stmts.push(parse_stmt(input, prog)?);
     }
 
     let body = StmtBox::new(
@@ -1076,7 +1068,10 @@ mod tests
         parse_ok(" \"foobar\";");
         parse_ok("'foo\tbar\nbif';");
         parse_ok("1_000_000;");
+        parse_ok("+3;");
+        parse_ok("+3.5;");
 
+        // No semicolon
         parse_fails("x");
     }
 
@@ -1089,6 +1084,7 @@ mod tests
         parse_ok("1 + 2 + 3;");
         parse_ok("1 + 2 + 3 + 4;");
         parse_ok("(1) + 2 + 3 * 4;");
+        parse_ok("1 * -3;");
 
         // Should not parse
         parse_fails("1 + 2 +;");

@@ -60,7 +60,6 @@ pub enum Expr
 
     // Array literal
     Array {
-        frozen: bool,
         exprs: Vec<ExprBox>,
     },
 
