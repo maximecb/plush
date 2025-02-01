@@ -335,11 +335,15 @@ impl ExprBox
                 }
             }
 
-            Expr::Fun(child_fun) => {
+            Expr::Fun(fun_id) => {
+                // Resolve symbols in the nested function
+                let mut child_fun = std::mem::take(prog.funs.get_mut(fun_id).unwrap());
+                child_fun.resolve_syms(prog, env)?;
+                *prog.funs.get_mut(fun_id).unwrap() = child_fun;
 
-                todo!();
 
-                //child_fun.resolve_syms(env)?;
+
+
 
                 /*
                 // For each variable captured by the nested function
@@ -386,20 +390,18 @@ mod tests
         assert!(prog.resolve_syms().is_err());
     }
 
-    /*
     fn parse_file(file_name: &str)
     {
         dbg!(file_name);
-        let mut unit = crate::parser::parse_file(file_name).unwrap();
-        unit.resolve_syms().unwrap();
+        let mut prog = crate::parser::parse_file(file_name).unwrap();
+        prog.resolve_syms().unwrap();
     }
-    */
 
     #[test]
     fn basics()
     {
         succeeds("");
-        /*succeeds("let foo = fun() {};");
+        succeeds("let foo = fun() {};");
         succeeds("fun foo(a) { return a; }");
 
         // Local variables
@@ -410,10 +412,9 @@ mod tests
         succeeds("fun foo(a, b) { return a + b; }");
 
         // Two functions with the same parameter name
-        succeeds("fun foo(a) {} fun bar(a) {}");*/
+        succeeds("fun foo(a) {} fun bar(a) {}");
     }
 
-    /*
     #[test]
     fn globals()
     {
@@ -421,24 +422,24 @@ mod tests
         succeeds("let g = 5; fun main() { return g + 1; }");
         succeeds("let global_str = \"foo\"; fun main() {}");
     }
-    */
 
     #[test]
     fn immutable()
     {
         succeeds("let var g = 5; g = 6;");
-        //succeeds("let var f = fun() {}; f = 6;");
+        succeeds("let var f = fun() {}; f = 6;");
+
         //fails("let g = 5; g = 6;");
         //fails("fun f() {} f = 6;");
     }
 
-    /*
     #[test]
     fn calls()
     {
         succeeds("fun foo() {} fun main() { foo(); }");
     }
 
+    /*
     #[test]
     fn test_files()
     {
