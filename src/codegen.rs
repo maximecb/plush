@@ -42,11 +42,8 @@ impl Function
             code.push(Insn::push { val: Value::Nil });
         }
 
-
-
-
-        //self.body.gen_code(self, &None, &None, sym, &mut code, out)?;
-
+        // Compile the function body
+        self.body.gen_code(self, &mut vec![], &mut vec![], code)?;
 
         // If the body needs a final return
         if self.needs_final_return() {
@@ -62,25 +59,18 @@ impl Function
     }
 }
 
-
-
-
-
-
-/*
 impl StmtBox
 {
     fn gen_code(
         &self,
         fun: &Function,
-        break_label: &Option<String>,
-        cont_label: &Option<String>,
-        sym: &mut SymGen,
-        code: &mut ByteCode,
-        out: &mut String,
+        break_idxs: &Vec<usize>,
+        cont_idxs: &Vec<usize>,
+        code: &mut Vec<Insn>,
     ) -> Result<(), ParseError>
     {
         match self.stmt.as_ref() {
+            /*
             Stmt::Expr(expr) => {
                 match expr.expr.as_ref() {
                     // For assignment expressions as statements,
@@ -117,18 +107,22 @@ impl StmtBox
                     None => return ParseError::msg_only("continue outside of loop context")
                 }
             }
+            */
 
             Stmt::Return(expr) => {
-                expr.gen_code(fun, sym, code, out)?;
-                code.insn("ret");
+                println!("emit return");
+
+                expr.gen_code(fun, code)?;
+                code.push(Insn::ret);
             }
 
             Stmt::Block(stmts) => {
                 for stmt in stmts {
-                    stmt.gen_code(fun, break_label, cont_label, sym, code, out)?;
+                    stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
                 }
             }
 
+            /*
             Stmt::If { test_expr, then_stmt, else_stmt } => {
                 test_expr.gen_code(fun, sym, code, out)?;
 
@@ -153,7 +147,9 @@ impl StmtBox
                     code.label(&false_label);
                 }
             }
+            */
 
+            /*
             Stmt::While { test_expr, body_stmt } => {
                 let loop_label = sym.gen_sym("while_loop");
                 let break_label = sym.gen_sym("while_break");
@@ -215,37 +211,34 @@ impl StmtBox
                     }
                 }
             }
+            */
 
-            //_ => todo!()
+            _ => todo!()
         }
 
         Ok(())
     }
 }
-*/
 
 
 
-/*
+
+
 impl ExprBox
 {
     fn gen_code(
         &self,
         fun: &Function,
-        sym: &mut SymGen,
-        code: &mut ByteCode,
-        out: &mut String,
+        code: &mut Vec<Insn>,
     ) -> Result<(), ParseError>
     {
         match self.expr.as_ref() {
-            Expr::True => { code.push("true"); }
-            Expr::False => { code.push("false"); }
-            Expr::None => { code.push("none"); }
+            Expr::Nil => code.push(Insn::push { val: Value::Nil }),
+            Expr::True => code.push(Insn::push { val: Value::True }),
+            Expr::False => code.push(Insn::push { val: Value::False }),
+            Expr::Int64(v) => code.push(Insn::push { val: Value::Int64(*v) }),
 
-            Expr::Int(v) => {
-                code.push(&format!("{}", v));
-            }
-
+            /*
             Expr::Float64(v) => {
                 code.push(&format!("{}", v));
             }
@@ -264,7 +257,9 @@ impl ExprBox
                     out,
                 );
             }
+            */
 
+            /*
             Expr::Object { extensible, fields } => {
                 return gen_obj_expr(
                     *extensible,
@@ -275,7 +270,9 @@ impl ExprBox
                     out,
                 );
             }
+            */
 
+            /*
             Expr::Ref(decl) => {
                 match decl {
                     Decl::Arg { idx, .. } => {
@@ -293,13 +290,17 @@ impl ExprBox
                     }
                 }
             }
+            */
 
+            /*
             Expr::Index { base, index } => {
                 base.gen_code(fun, sym, code, out)?;
                 index.gen_code(fun, sym, code, out)?;
                 code.insn("arr_get");
             }
+            */
 
+            /*
             Expr::Member { base, field } if field == "len" => {
                 // Evaluate the base
                 base.gen_code(fun, sym, code, out)?;
@@ -327,12 +328,16 @@ impl ExprBox
 
                 code.label(&len_done);
             }
+            */
 
+            /*
             Expr::Member { base, field } => {
                 base.gen_code(fun, sym, code, out)?;
                 code.insn_s("obj_get", &field);
             }
+            */
 
+            /*
             Expr::Unary { op, child } => {
                 child.gen_code(fun, sym, code, out)?;
 
@@ -352,10 +357,13 @@ impl ExprBox
                     }
                 }
             },
+            */
 
+            /*
             Expr::Binary { op, lhs, rhs } => {
                 gen_bin_op(op, lhs, rhs, fun, sym, code, out)?;
             }
+            */
 
             /*
             Expr::Ternary { test_expr, then_expr, else_expr } => {
@@ -377,6 +385,7 @@ impl ExprBox
             }
             */
 
+            /*
             Expr::HostCall { fun_name, args } => {
                 for arg in args {
                     arg.gen_code(fun, sym, code, out)?;
@@ -422,6 +431,7 @@ impl ExprBox
                 let fun_sym = child_fun.fun_sym();
                 code.push(&fun_sym);
             }
+            */
 
             _ => todo!("{:?}", self)
         }
@@ -429,7 +439,11 @@ impl ExprBox
         Ok(())
     }
 }
-*/
+
+
+
+
+
 
 
 /*

@@ -54,7 +54,7 @@ pub enum Expr
     True,
     False,
     Nil,
-    Int(i128),
+    Int64(i64),
     Float64(f64),
     String(String),
 

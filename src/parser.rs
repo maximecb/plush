@@ -15,8 +15,13 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
     // Hexadecimal integer literal
     if input.match_token("0x")? {
         let int_val = input.parse_int(16)?;
+
+        if int_val < i64::MIN.into() || int_val > i64::MAX.into() {
+            return input.parse_error("integer literal outside of int64 range")
+        }
+
         return Ok(ExprBox::new(
-            Expr::Int(int_val),
+            Expr::Int64(int_val as i64),
             pos
         ));
     }
@@ -24,8 +29,13 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
     // Binary integer literal
     if input.match_token("0b")? {
         let int_val = input.parse_int(2)?;
+
+        if int_val < i64::MIN.into() || int_val > i64::MAX.into() {
+            return input.parse_error("integer literal outside of int64 range")
+        }
+
         return Ok(ExprBox::new(
-            Expr::Int(int_val),
+            Expr::Int64(int_val as i64),
             pos
         ));
     }
@@ -36,9 +46,9 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
         //println!("{}", num_str);
 
         // If we can parse this value as an integer
-        if let Ok(int_val) = num_str.parse::<i128>() {
+        if let Ok(int_val) = num_str.parse::<i64>() {
             return Ok(ExprBox::new(
-                Expr::Int(int_val),
+                Expr::Int64(int_val),
                 pos
             ));
         }
@@ -322,7 +332,7 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
 
         // If this is an integer or floating-point value, negate it
         let expr = match *sub_expr.expr {
-            Expr::Int(int_val) => Expr::Int(-int_val),
+            Expr::Int64(int_val) => Expr::Int64(-int_val),
             Expr::Float64(f_val) => Expr::Float64(-f_val),
             _ => Expr::Unary{
                 op: UnOp::Minus,
@@ -343,7 +353,7 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
 
         // If this is an integer or floating-point value, do nothing
         let expr = match sub_expr.expr.as_ref() {
-            Expr::Int(int_val) => sub_expr,
+            Expr::Int64(int_val) => sub_expr,
             Expr::Float64(f_val) => sub_expr,
             _ => return input.parse_error("plus operator applied to non-constant value")
         };

@@ -260,7 +260,7 @@ impl ExprBox
             Expr::Nil { .. } => {}
             Expr::True { .. } => {}
             Expr::False { .. } => {}
-            Expr::Int { .. } => {}
+            Expr::Int64 { .. } => {}
             Expr::Float64 { .. } => {}
             Expr::String { .. } => {}
 

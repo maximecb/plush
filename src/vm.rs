@@ -1145,6 +1145,13 @@ mod tests
         assert!(eval("") == Value::Nil);
     }
 
+    #[test]
+    fn simple_exprs()
+    {
+        assert!(eval("return 77;") == Value::Int64(77));
+        assert!(eval("return -77;") == Value::Int64(-77));
+    }
+
     /*
     #[test]
     fn ret1()
