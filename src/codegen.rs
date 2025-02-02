@@ -110,8 +110,6 @@ impl StmtBox
             */
 
             Stmt::Return(expr) => {
-                println!("emit return");
-
                 expr.gen_code(fun, code)?;
                 code.push(Insn::ret);
             }
@@ -170,7 +168,9 @@ impl StmtBox
                 code.jump(&loop_label);
                 code.label(&break_label);
             }
+            */
 
+            /*
             Stmt::Assert { test_expr } => {
                 let pass_label = sym.gen_sym("assert_pass");
                 test_expr.gen_code(fun, sym, code, out)?;
@@ -219,10 +219,6 @@ impl StmtBox
         Ok(())
     }
 }
-
-
-
-
 
 impl ExprBox
 {
@@ -359,11 +355,9 @@ impl ExprBox
             },
             */
 
-            /*
             Expr::Binary { op, lhs, rhs } => {
-                gen_bin_op(op, lhs, rhs, fun, sym, code, out)?;
+                gen_bin_op(op, lhs, rhs, fun, code)?;
             }
-            */
 
             /*
             Expr::Ternary { test_expr, then_expr, else_expr } => {
@@ -440,12 +434,6 @@ impl ExprBox
     }
 }
 
-
-
-
-
-
-
 /*
 // Generate code for an array literal expression
 fn gen_arr_expr(
@@ -473,7 +461,6 @@ fn gen_arr_expr(
     Ok(())
 }
 */
-
 
 /*
 // Generate code for an object literal expression
@@ -510,27 +497,26 @@ fn gen_obj_expr(
 }
 */
 
-
-/*
 fn gen_bin_op(
     op: &BinOp,
     lhs: &ExprBox,
     rhs: &ExprBox,
     fun: &Function,
-    sym: &mut SymGen,
-    code: &mut ByteCode,
-    out: &mut String,
+    code: &mut Vec<Insn>,
 ) -> Result<(), ParseError>
 {
     use BinOp::*;
 
+    /*
     // Assignments are different from other kinds of expressions
     // because we don't evaluate the lhs the same way
     if *op == Assign {
         gen_assign(lhs, rhs, fun, sym, code, out, true)?;
         return Ok(());
     }
+    */
 
+    /*
     // Logical AND (a && b)
     if *op == And {
         let false_label = sym.gen_sym("and_false");
@@ -555,7 +541,9 @@ fn gen_bin_op(
 
         return Ok(());
     }
+    */
 
+    /*
     // Logical OR (a || b)
     if *op == Or {
         let true_label = sym.gen_sym("or_true");
@@ -580,46 +568,38 @@ fn gen_bin_op(
 
         return Ok(());
     }
+    */
 
-    lhs.gen_code(fun, sym, code, out)?;
-    rhs.gen_code(fun, sym, code, out)?;
+    lhs.gen_code(fun, code)?;
+    rhs.gen_code(fun, code)?;
 
     match op {
+        /*
         BitAnd => code.insn("bit_and"),
         BitOr => code.insn("bit_or"),
         BitXor => code.insn("bit_xor"),
         LShift => code.insn("lshift"),
         RShift => code.insn("rshift"),
-
-        Add => code.insn("add"),
-        Sub => code.insn("sub"),
-        Mul => code.insn("mul"),
-
-        /*
-        Div => {
-            emit_arith_op(out_type, "div_i", "div_u", "div_f", out);
-        }
-
-        Mod => {
-            // Modulo with floating-point values should not pass type checking
-            emit_arith_op(out_type, "mod_i", "mod_u", "", out);
-        }
         */
 
+        Add => code.push(Insn::add),
+        Sub => code.push(Insn::sub),
+        Mul => code.push(Insn::mul),
+
+        /*
         Eq => code.insn("eq"),
         Ne => code.insn("ne"),
         Lt => code.insn("lt"),
         Le => code.insn("le"),
         Gt => code.insn("gt"),
         Ge => code.insn("ge"),
+        */
 
         _ => todo!("{:?}", op),
     }
 
     Ok(())
 }
-*/
-
 
 /*
 fn gen_assign(
@@ -678,7 +658,6 @@ fn gen_assign(
     Ok(())
 }
 */
-
 
 /*
 #[cfg(test)]

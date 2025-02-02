@@ -1132,6 +1132,12 @@ mod tests
         VM::call(&mut vm, main_fn, vec![])
     }
 
+    fn eval_eq(s: &str, v: Value)
+    {
+        let val = eval(s);
+        assert_eq!(val, v);
+    }
+
     #[test]
     fn vm_new()
     {
@@ -1142,24 +1148,24 @@ mod tests
     #[test]
     fn empty_unit()
     {
-        assert!(eval("") == Value::Nil);
+        eval_eq("", Value::Nil);
     }
 
     #[test]
     fn simple_exprs()
     {
-        assert!(eval("return 77;") == Value::Int64(77));
-        assert!(eval("return -77;") == Value::Int64(-77));
+        eval_eq("return 77;", Value::Int64(77));
+        eval_eq("return -77;", Value::Int64(-77));
+        eval_eq("return 1 + 5;", Value::Int64(6));
+        eval_eq("return 2 * 3 + 4;", Value::Int64(10));
+        eval_eq("return 5 + 2 * -2;", Value::Int64(1));
     }
+
+
+
+
 
     /*
-    #[test]
-    fn ret1()
-    {
-        let ret = run_image("tests/ret_1.zim");
-        assert!(ret == Value::Int64(1));
-    }
-
     #[test]
     fn sub_ab()
     {
