@@ -1122,12 +1122,27 @@ impl VM
 mod tests
 {
     use super::*;
+    use crate::parser::parse_str;
+
+    fn eval(s: &str) -> Value
+    {
+        let prog = parse_str(s).unwrap();
+        let main_fn = prog.main_fn;
+        let mut vm = VM::new(prog);
+        VM::call(&mut vm, main_fn, vec![])
+    }
 
     #[test]
     fn vm_new()
     {
         let prog = Program::default();
         let _vm = VM::new(prog);
+    }
+
+    #[test]
+    fn empty_unit()
+    {
+        assert!(eval("") == Value::Nil);
     }
 
     /*

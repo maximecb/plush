@@ -50,12 +50,7 @@ impl Function
 
         // If the body needs a final return
         if self.needs_final_return() {
-            if self.is_unit {
-                code.push(Insn::push { val: Value::Int64(0) });
-            } else {
-                code.push(Insn::push { val: Value::Nil });
-            }
-
+            code.push(Insn::push { val: Value::Nil });
             code.push(Insn::ret);
         }
 
