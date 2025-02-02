@@ -378,23 +378,30 @@ impl Actor
     }
 
     // Get a compiled function entry for a given function id
-    fn get_compiled_fun(&mut self, fun: FunId) -> CompiledFun
+    fn get_compiled_fun(&mut self, fun_id: FunId) -> CompiledFun
     {
+        if let Some(entry) = self.funs.get(&fun_id) {
+            return *entry;
+        }
 
+        // Borrow the function from the VM and compile it
+        let vm = self.vm.lock().unwrap();
+        let fun = &vm.prog.funs[&fun_id];
+        let entry = fun.gen_code(&mut self.insns).unwrap();
+        self.funs.insert(fun_id, entry);
 
-
-
-        todo!();
+        // Return the compiled function entry
+        entry
     }
 
     // Call and execute a function in this actor
-    pub fn call(&mut self, fun: FunId, args: &[Value]) -> Value
+    pub fn call(&mut self, fun_id: FunId, args: &[Value]) -> Value
     {
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
 
         // Get a compiled address for this function
-        let fun_entry = self.get_compiled_fun(fun);
+        let fun_entry = self.get_compiled_fun(fun_id);
         let mut pc = fun_entry.entry_pc;
 
         if args.len() < fun_entry.num_params {
@@ -408,7 +415,7 @@ impl Actor
 
         // Push a new stack frame
         self.frames.push(StackFrame {
-            fun,
+            fun: fun_id,
             argc: args.len().try_into().unwrap(),
             prev_bp: usize::MAX,
             ret_addr: usize::MAX,

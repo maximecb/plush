@@ -32,7 +32,7 @@ impl Function
         return true;
     }
 
-    fn gen_code(&self, code: &mut Vec<Insn>) -> Result<CompiledFun, ParseError>
+    pub fn gen_code(&self, code: &mut Vec<Insn>) -> Result<CompiledFun, ParseError>
     {
         // Entry address of the compiled function
         let entry_pc = code.len();
