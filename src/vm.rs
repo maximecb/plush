@@ -113,14 +113,11 @@ pub enum Insn
     ba_write_u32,
 
     // Jump if true/false
-    if_true_stub { target_idx: u32 },
-    if_true { target_pc: usize },
-    if_false_stub { target_idx: u32 },
-    if_false { target_pc: usize },
+    if_true { target_ofs: i32 },
+    if_false { target_ofs: i32 },
 
     // Unconditional jump
-    jump_stub { target_idx: u32 },
-    jump { target_pc: usize },
+    jump { target_ofs: i32 },
 
     // Call a host function
     //call_host { host_fn: HostFn, argc: u16 },
@@ -801,30 +798,30 @@ impl Actor
                 */
 
                 // Jump if true
-                Insn::if_true { target_pc } => {
+                Insn::if_true { target_ofs } => {
                     let v = pop!();
 
                     match v {
-                        Value::True => { pc = target_pc; }
+                        Value::True => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
                         Value::False => {}
                         _ => panic!()
                     }
                 }
 
                 // Jump if false
-                Insn::if_false { target_pc } => {
+                Insn::if_false { target_ofs } => {
                     let v = pop!();
 
                     match v {
-                        Value::False => { pc = target_pc; }
+                        Value::False => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
                         Value::True => {}
                         _ => panic!()
                     }
                 }
 
                 // Unconditional jump
-                Insn::jump { target_pc } => {
-                    pc = target_pc;
+                Insn::jump { target_ofs } => {
+                    pc = ((pc as i64) + (target_ofs as i64)) as usize
                 }
 
                 /*

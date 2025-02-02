@@ -120,32 +120,48 @@ impl StmtBox
                 }
             }
 
-            /*
-            Stmt::If { test_expr, then_stmt, else_stmt } => {
-                test_expr.gen_code(fun, sym, code, out)?;
 
-                let false_label = sym.gen_sym("if_false");
+
+
+            Stmt::If { test_expr, then_stmt, else_stmt } => {
+                // Compile the test expression
+                test_expr.gen_code(fun, code)?;
+
+
+
 
                 // If false, jump to else stmt
-                code.insn_s("if_false", &false_label);
+                //code.push(Insn::if_false { target: 0 });
+
+
 
                 if else_stmt.is_some() {
-                    let join_label = sym.gen_sym("if_join");
+                    then_stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
+                    //code.jump(&join_label);
 
-                    then_stmt.gen_code(fun, break_label, cont_label, sym, code, out)?;
-                    code.jump(&join_label);
+                    //code.label(&false_label);
 
-                    code.label(&false_label);
-                    else_stmt.as_ref().unwrap().gen_code(fun, break_label, cont_label, sym, code, out)?;
-                    code.label(&join_label);
+                    else_stmt.as_ref().unwrap().gen_code(fun, break_idxs, cont_idxs, code)?;
+
+                    //code.label(&join_label);
                 }
                 else
                 {
-                    then_stmt.gen_code(fun, break_label, cont_label, sym, code, out)?;
-                    code.label(&false_label);
+                    then_stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
+
+
+                    // TODO: we need to patch the if_false
+                    //code.label(&false_label);
                 }
+
+
+
             }
-            */
+
+
+
+
+
 
             /*
             Stmt::While { test_expr, body_stmt } => {
