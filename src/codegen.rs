@@ -120,48 +120,44 @@ impl StmtBox
                 }
             }
 
-
-
-
             Stmt::If { test_expr, then_stmt, else_stmt } => {
                 // Compile the test expression
                 test_expr.gen_code(fun, code)?;
 
-
-
-
                 // If false, jump to else stmt
-                //code.push(Insn::if_false { target: 0 });
-
-
+                let if_idx = code.len();
+                code.push(Insn::if_false { target_ofs: 0 });
 
                 if else_stmt.is_some() {
                     then_stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
-                    //code.jump(&join_label);
+                    let jump_idx = code.len();
+                    code.push(Insn::jump { target_ofs: 0 });
 
-                    //code.label(&false_label);
+                    // Patch the if_false to jump to the else clause
+                    let jump_ofs = (code.len() as i32) - (if_idx as i32) - 1;
+                    if let Insn::if_false { target_ofs } = &mut code[if_idx] {
+                        *target_ofs = jump_ofs;
+                    }
 
                     else_stmt.as_ref().unwrap().gen_code(fun, break_idxs, cont_idxs, code)?;
 
-                    //code.label(&join_label);
+                    // Patch the jump instruction to jump after the else clause
+                    let jump_ofs = (code.len() as i32) - (jump_idx as i32) - 1;
+                    if let Insn::jump { target_ofs } = &mut code[jump_idx] {
+                        *target_ofs = jump_ofs;
+                    }
                 }
                 else
                 {
                     then_stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
 
-
-                    // TODO: we need to patch the if_false
-                    //code.label(&false_label);
+                    // Patch the if_false to jump to the else clause
+                    let jump_ofs = (code.len() as i32) - (if_idx as i32) - 1;
+                    if let Insn::if_false { target_ofs } = &mut code[if_idx] {
+                        *target_ofs = jump_ofs;
+                    }
                 }
-
-
-
             }
-
-
-
-
-
 
             /*
             Stmt::While { test_expr, body_stmt } => {
@@ -602,14 +598,12 @@ fn gen_bin_op(
         Sub => code.push(Insn::sub),
         Mul => code.push(Insn::mul),
 
-        /*
-        Eq => code.insn("eq"),
-        Ne => code.insn("ne"),
-        Lt => code.insn("lt"),
-        Le => code.insn("le"),
-        Gt => code.insn("gt"),
-        Ge => code.insn("ge"),
-        */
+        Eq => code.push(Insn::eq),
+        Ne => code.push(Insn::ne),
+        Lt => code.push(Insn::lt),
+        //Le => code.insn("le"),
+        //Gt => code.insn("gt"),
+        //Ge => code.insn("ge"),
 
         _ => todo!("{:?}", op),
     }

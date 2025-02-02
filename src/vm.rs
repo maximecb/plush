@@ -44,9 +44,6 @@ pub enum Insn
     // Get the function argument at a given index
     get_arg { idx: u16 },
 
-    // Set the function argument at a given index
-    set_arg { idx: u16 },
-
     /*
     // Get a variadic argument with a dynamic index variable
     // get_arg (idx)
@@ -490,20 +487,6 @@ impl Actor
                     let arg_val = self.stack[stack_idx];
                     push!(arg_val);
                     //println!("arg_val={:?}", arg_val);
-                }
-
-                Insn::set_arg { idx } => {
-                    let argc = self.frames[self.frames.len() - 1].argc as usize;
-                    let idx = idx as usize;
-
-                    if idx >= argc {
-                        panic!("invalid index in set_arg, idx={}, argc={}", idx, argc);
-                    }
-
-                    // Last argument is at bp - 1 (if there are arguments)
-                    let stack_idx = (bp - argc) + idx;
-                    let val = pop!();
-                    self.stack[stack_idx] = val;
                 }
 
                 Insn::get_local { idx } => {
@@ -1154,8 +1137,19 @@ mod tests
         eval_eq("return 77;", Value::Int64(77));
         eval_eq("return -77;", Value::Int64(-77));
         eval_eq("return 1 + 5;", Value::Int64(6));
+        eval_eq("return 5 - 3;", Value::Int64(2));
         eval_eq("return 2 * 3 + 4;", Value::Int64(10));
         eval_eq("return 5 + 2 * -2;", Value::Int64(1));
+    }
+
+    #[test]
+    fn if_else()
+    {
+        eval_eq("if (true) return 1; return 2;", Value::Int64(1));
+        eval_eq("if (false) return 1; return 2;", Value::Int64(2));
+        eval_eq("if (true) return 77; else return 88;", Value::Int64(77));
+        eval_eq("if (false) return 77; else return 88;", Value::Int64(88));
+        eval_eq("if (3 < 5) return 1; return 2;", Value::Int64(1));
     }
 
 
