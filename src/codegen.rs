@@ -198,30 +198,22 @@ impl StmtBox
 
                 code.label(&pass_label);
             }
+            */
 
             // Variable declaration
             Stmt::Let { mutable, var_name, init_expr, decl } => {
-                init_expr.gen_code(fun, sym, code, out)?;
+                init_expr.gen_code(fun, code)?;
 
                 match decl.as_ref().unwrap() {
-                    Decl::Global { name, fun_id } => {
-                        let global_obj_name = format!("@global_{}", fun.id);
-                        code.push(&global_obj_name);
-
-                        // FIXME: need to distinguish def_const
-                        code.insn_s("obj_set", &var_name);
-                    }
-
-                    Decl::Arg { .. } => panic!(),
-
-                    Decl::Local { idx, fun_id } => {
+                    Decl::Local { idx, mutable, fun_id } => {
                         // TODO: handle captured closure vars
 
-                        code.insn_i("set_local", *idx as i64);
+                        code.push(Insn::set_local { idx: (*idx).try_into().unwrap() });
                     }
+
+                    _ => panic!(),
                 }
             }
-            */
 
             _ => todo!()
         }

@@ -1152,6 +1152,13 @@ mod tests
         eval_eq("if (3 < 5) return 1; return 2;", Value::Int64(1));
     }
 
+    fn let_expr()
+    {
+        eval_eq("let x = 1; return x;", Value::Int64(1));
+        eval_eq("let var x = 1; return x;", Value::Int64(1));
+        eval_eq("let x = 1; let y = 2; return x + y;", Value::Int64(3));
+    }
+
 
 
 
