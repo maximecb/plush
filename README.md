@@ -12,8 +12,9 @@ If you think that Plush is cool, you can support my work via [GitHub Sponsors](h
 ## Features
 
 Cool/fun/notable features:
-- Stack-based bytecode interpreter
+- Simple JavaScript-like syntax and straightforward semantics
 - Dynamic typing
+- Stack-based bytecode interpreter
 - Memory safe, actor-based parallelism
 
 Current limitations:
@@ -81,18 +82,9 @@ cargo run examples/fizzbuzz.asm
 
 Run `cargo test` from the `vm`, and `plush` directories.
 
-## Codebase Organization
-
-The repository is organized into a 3 different subprojects, each of which is a Rust codebase which can be compiled with `cargo`:
-
-- `/vm` : The implementation of the virtual machine
-  - [`/vm/examples/*`](vm/examples): Example assembly programs that can be run by the VM
-
 ## Open Source License
 
-The code for Plush, its VM and associated tools is shared under the [Apache-2.0 license](https://github.com/maximecb/plush/blob/main/LICENSE).
-
-The examples under the `vm/examples` and `plusg/examples` directories are shared under the [Creative Commons CC0](https://creativecommons.org/publicdomain/zero/1.0/) license.
+The code for Plush, its VM and associated tools is shared under the [Apache-2.0 license](https://github.com/maximecb/plush/blob/main/LICENSE). The example code under the `examples` are shared under the [Creative Commons CC0](https://creativecommons.org/publicdomain/zero/1.0/) license.
 
 ## Contributing
 
@@ -114,5 +106,5 @@ an issue or starting a discussion about your proposed change first.
 
 Also please keep in mind that one of the core principles of Plush is to minimize dependencies to keep the VM easy
 to install and easy to port. Opening a PR that adds dependencies to multiple new packages and libraries is
-unlikely to get merged. Again, if you have a valid argument in favor of doing so, please open a discussion to
+unlikely to get merged. If you believe you have a valid argument in favor of doing so, please open an issue to
 share your point of view.
