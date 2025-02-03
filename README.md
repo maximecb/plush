@@ -84,7 +84,7 @@ Run `cargo test` from the `vm`, and `plush` directories.
 
 ## Open Source License
 
-The code for Plush, its VM and associated tools is shared under the [Apache-2.0 license](https://github.com/maximecb/plush/blob/main/LICENSE). The example code under the `examples` are shared under the [Creative Commons CC0](https://creativecommons.org/publicdomain/zero/1.0/) license.
+The code for Plush, its VM and associated tools is shared under the [Apache-2.0 license](https://github.com/maximecb/plush/blob/main/LICENSE). The example code in the `/examples` directory are shared under the [Creative Commons CC0](https://creativecommons.org/publicdomain/zero/1.0/) license.
 
 ## Contributing
 

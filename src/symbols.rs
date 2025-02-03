@@ -6,8 +6,8 @@ use crate::parsing::{ParseError};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Decl
 {
-    Arg { idx: usize, fun_id: FunId },
-    Local { idx: usize, fun_id: FunId, mutable: bool },
+    Arg { idx: u32, fun_id: FunId },
+    Local { idx: u32, fun_id: FunId, mutable: bool },
 
     // TODO:
     // Used to mark variables as captured by the current closure
@@ -59,7 +59,7 @@ impl Env
         assert!(top_scope.decls.get(name).is_none());
 
         let decl = Decl::Local {
-            idx: top_scope.next_idx,
+            idx: top_scope.next_idx as u32,
             fun_id: fun.id,
             mutable,
         };
@@ -144,7 +144,7 @@ impl Function
 
         // Declare the function arguments
         for (idx, param_name) in self.params.iter().enumerate() {
-            let decl = Decl::Arg { idx, fun_id: self.id };
+            let decl = Decl::Arg { idx: idx as u32, fun_id: self.id };
             env.define(param_name, decl);
         }
 

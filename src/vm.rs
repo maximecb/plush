@@ -42,7 +42,7 @@ pub enum Insn
     */
 
     // Get the function argument at a given index
-    get_arg { idx: u16 },
+    get_arg { idx: u32 },
 
     /*
     // Get a variadic argument with a dynamic index variable
@@ -52,13 +52,11 @@ pub enum Insn
 
     // Get the local variable at a given stack slot index
     // The index is relative to the base of the stack frame
-    // get_local <idx:u16>
-    get_local { idx: u16 },
+    get_local { idx: u32 },
 
     // Set the local variable at a given stack slot index
     // The index is relative to the base of the stack frame
-    // set_local <idx:u16> (value)
-    set_local { idx: u16 },
+    set_local { idx: u32 },
 
     // Arithmetic
     add,
@@ -1106,7 +1104,8 @@ mod tests
 
     fn eval(s: &str) -> Value
     {
-        let prog = parse_str(s).unwrap();
+        let mut prog = parse_str(s).unwrap();
+        prog.resolve_syms().unwrap();
         let main_fn = prog.main_fn;
         let mut vm = VM::new(prog);
         VM::call(&mut vm, main_fn, vec![])
@@ -1152,6 +1151,7 @@ mod tests
         eval_eq("if (3 < 5) return 1; return 2;", Value::Int64(1));
     }
 
+    #[test]
     fn let_expr()
     {
         eval_eq("let x = 1; return x;", Value::Int64(1));
@@ -1159,6 +1159,14 @@ mod tests
         eval_eq("let x = 1; let y = 2; return x + y;", Value::Int64(3));
     }
 
+    #[test]
+    fn assign()
+    {
+        eval_eq("let var x = 1; x = 2; return x;", Value::Int64(2));
+
+        // FIXME: this should fail
+        //eval_eq("let x = 1; x = 2; return x;", Value::Int64(2));
+    }
 
 
 

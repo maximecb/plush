@@ -68,13 +68,12 @@ impl StmtBox
     ) -> Result<(), ParseError>
     {
         match self.stmt.as_ref() {
-            /*
             Stmt::Expr(expr) => {
                 match expr.expr.as_ref() {
                     // For assignment expressions as statements,
                     // avoid generating output that we would then need to pop
                     Expr::Binary { op: BinOp::Assign, lhs, rhs } => {
-                        gen_assign(lhs, rhs, fun, sym, code, out, false)?;
+                        gen_assign(lhs, rhs, fun, code, false)?;
                     }
 
                     /*
@@ -86,19 +85,22 @@ impl StmtBox
                     */
 
                     _ => {
-                        expr.gen_code(fun, sym, code, out)?;
-                        code.insn("pop");
+                        expr.gen_code(fun, code)?;
+                        code.push(Insn::pop);
                     }
                 }
             }
 
+            /*
             Stmt::Break => {
                 match break_label {
                     Some(label) => code.insn_s("jump", label),
                     None => return ParseError::msg_only("break outside of loop context")
                 }
             }
+            */
 
+            /*
             Stmt::Continue => {
                 match cont_label {
                     Some(label) => code.insn_s("jump", label),
@@ -215,7 +217,7 @@ impl StmtBox
                 }
             }
 
-            _ => todo!()
+            _ => todo!("{:?}", self.stmt)
         }
 
         Ok(())
@@ -267,25 +269,17 @@ impl ExprBox
             }
             */
 
-            /*
             Expr::Ref(decl) => {
                 match decl {
                     Decl::Arg { idx, .. } => {
-                        code.insn_i("get_arg", *idx as i64);
+                        code.push(Insn::get_arg { idx: *idx });
                     }
 
                     Decl::Local { idx, .. } => {
-                        code.insn_i("get_local", *idx as i64);
-                    }
-
-                    Decl::Global { name, fun_id } => {
-                        let global_obj_name = format!("@global_{}", fun_id);
-                        code.push(&global_obj_name);
-                        code.insn_s("obj_get", &name);
+                        code.push(Insn::get_local { idx: *idx });
                     }
                 }
             }
-            */
 
             /*
             Expr::Index { base, index } => {
@@ -508,14 +502,12 @@ fn gen_bin_op(
 {
     use BinOp::*;
 
-    /*
     // Assignments are different from other kinds of expressions
     // because we don't evaluate the lhs the same way
     if *op == Assign {
-        gen_assign(lhs, rhs, fun, sym, code, out, true)?;
+        gen_assign(lhs, rhs, fun, code, true)?;
         return Ok(());
     }
-    */
 
     /*
     // Logical AND (a && b)
@@ -600,46 +592,36 @@ fn gen_bin_op(
     Ok(())
 }
 
-/*
 fn gen_assign(
     lhs: &ExprBox,
     rhs: &ExprBox,
     fun: &Function,
-    sym: &mut SymGen,
-    code: &mut ByteCode,
-    out: &mut String,
+    code: &mut Vec<Insn>,
     need_value: bool,
 ) -> Result<(), ParseError>
 {
     //dbg!(lhs);
     //dbg!(rhs);
 
-    rhs.gen_code(fun, sym, code, out)?;
+    rhs.gen_code(fun, code)?;
 
     // If the output value is needed
     if need_value {
-        code.insn("dup");
+        code.push(Insn::dup);
     }
 
     match lhs.expr.as_ref() {
         Expr::Ref(decl) => {
             match decl {
-                Decl::Arg { idx, .. } => {
-                    code.insn_i("set_arg", *idx as i64);
-                }
-
                 Decl::Local { idx, .. } => {
-                    code.insn_i("set_local", *idx as i64);
+                    code.push(Insn::set_local { idx: *idx });
                 }
 
-                Decl::Global { name, .. } => {
-                    let global_obj_name = format!("@global_{}", fun.id);
-                    code.push(&global_obj_name);
-                    code.insn_s("obj_set", &name);
-                }
+                _ => todo!()
             }
         }
 
+        /*
         Expr::Member { base, field } => {
             base.gen_code(fun, sym, code, out)?;
             code.insn_s("obj_set", &field);
@@ -650,13 +632,13 @@ fn gen_assign(
             index.gen_code(fun, sym, code, out)?;
             code.insn("arr_set");
         }
+        */
 
         _ => todo!()
     }
 
     Ok(())
 }
-*/
 
 /*
 #[cfg(test)]
