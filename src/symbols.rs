@@ -6,9 +6,13 @@ use crate::parsing::{ParseError};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Decl
 {
-    Global { name: String, fun_id: FunId },
     Arg { idx: usize, fun_id: FunId },
-    Local { idx: usize, fun_id: FunId },
+    Local { idx: usize, fun_id: FunId, mutable: bool },
+
+    // TODO:
+    // Used to mark variables as captured by the current closure
+    // TODO: we want a flag to indicate which values are global
+    //Captured
 }
 
 #[derive(Default)]
@@ -48,7 +52,7 @@ impl Env
     }
 
     /// Define a new local variable in the current scope
-    fn define_local(&mut self, name: &str, fun: &mut Function) -> Decl
+    fn define_local(&mut self, name: &str, mutable: bool, fun: &mut Function) -> Decl
     {
         let num_scopes = self.scopes.len();
         let top_scope = &mut self.scopes[num_scopes - 1];
@@ -57,6 +61,7 @@ impl Env
         let decl = Decl::Local {
             idx: top_scope.next_idx,
             fun_id: fun.id,
+            mutable,
         };
 
         top_scope.next_idx += 1;
@@ -214,17 +219,7 @@ impl StmtBox
                 }
 
                 // If we're in a unit-level function
-                let new_decl = if fun.is_unit {
-                    env.define(
-                        var_name,
-                        Decl::Global{
-                            name: var_name.to_string(),
-                            fun_id: fun.id
-                        }
-                    )
-                } else {
-                    env.define_local(var_name, fun)
-                };
+                let new_decl = env.define_local(var_name, *mutable, fun);
 
                 // If this is a function declaration
                 // Resolve symbols in the initialization expression

@@ -10,8 +10,7 @@ mod parser;
 mod symbols;
 mod codegen;
 mod vm;
-//mod host;
-//mod image;
+mod host;
 
 extern crate sdl2;
 use std::env;
@@ -21,7 +20,6 @@ use std::process::exit;
 use std::sync::{Arc, Mutex};
 use crate::vm::{VM, Value};
 use crate::utils::{thousands_sep};
-//use crate::image::*;
 
 /// Command-line options
 #[derive(Debug, Clone)]

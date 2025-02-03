@@ -9,9 +9,7 @@ use crate::vm::{Insn, Value};
 pub struct CompiledFun
 {
     pub entry_pc: usize,
-
     pub num_params: usize,
-
     pub num_locals: usize,
 }
 
@@ -245,12 +243,9 @@ impl ExprBox
             Expr::True => code.push(Insn::push { val: Value::True }),
             Expr::False => code.push(Insn::push { val: Value::False }),
             Expr::Int64(v) => code.push(Insn::push { val: Value::Int64(*v) }),
+            Expr::Float64(v) => code.push(Insn::push { val: Value::Float64(*v) }),
 
             /*
-            Expr::Float64(v) => {
-                code.push(&format!("{}", v));
-            }
-
             Expr::String(s) => {
                 code.insn_s("push", s);
             }
@@ -345,27 +340,29 @@ impl ExprBox
             }
             */
 
-            /*
             Expr::Unary { op, child } => {
-                child.gen_code(fun, sym, code, out)?;
+                child.gen_code(fun, code)?;
 
                 match op {
                     UnOp::Minus => {
-                        code.push("-1");
-                        code.insn("mul");
+                        code.push(Insn::push { val: Value::Int64(-1) });
+                        code.push(Insn::mul);
                     }
 
                     // Logical negation
                     UnOp::Not => {
-                        code.insn("not");
+                        code.push(Insn::not);
                     }
 
+                    /*
                     UnOp::TypeOf => {
                         code.insn("typeof");
                     }
+                    */
+
+                    _ => todo!()
                 }
             },
-            */
 
             Expr::Binary { op, lhs, rhs } => {
                 gen_bin_op(op, lhs, rhs, fun, code)?;
@@ -601,9 +598,9 @@ fn gen_bin_op(
         Eq => code.push(Insn::eq),
         Ne => code.push(Insn::ne),
         Lt => code.push(Insn::lt),
-        //Le => code.insn("le"),
-        //Gt => code.insn("gt"),
-        //Ge => code.insn("ge"),
+        Le => code.push(Insn::le),
+        Gt => code.push(Insn::gt),
+        Ge => code.push(Insn::ge),
 
         _ => todo!("{:?}", op),
     }
