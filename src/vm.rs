@@ -1168,6 +1168,12 @@ mod tests
         //eval_eq("let x = 1; x = 2; return x;", Value::Int64(2));
     }
 
+    #[test]
+    fn assert()
+    {
+        eval("let var x = 1; assert(x == 1);");
+    }
+
 
 
 

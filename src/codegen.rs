@@ -13,6 +13,22 @@ pub struct CompiledFun
     pub num_locals: usize,
 }
 
+// Patch a jump instruction
+fn patch_jump(code: &mut Vec<Insn>, jmp_idx: usize, dst_idx: usize)
+{
+    let jump_ofs = (dst_idx as i32) - (jmp_idx as i32) - 1;
+
+    match &mut code[jmp_idx] {
+        Insn::if_true { target_ofs } |
+        Insn::if_false { target_ofs } |
+        Insn::jump { target_ofs } => {
+            *target_ofs = jump_ofs;
+        }
+
+        _ => todo!()
+    }
+}
+
 impl Function
 {
     fn needs_final_return(&self) -> bool
@@ -134,18 +150,12 @@ impl StmtBox
                     code.push(Insn::jump { target_ofs: 0 });
 
                     // Patch the if_false to jump to the else clause
-                    let jump_ofs = (code.len() as i32) - (if_idx as i32) - 1;
-                    if let Insn::if_false { target_ofs } = &mut code[if_idx] {
-                        *target_ofs = jump_ofs;
-                    }
+                    patch_jump(code, if_idx, code.len());
 
                     else_stmt.as_ref().unwrap().gen_code(fun, break_idxs, cont_idxs, code)?;
 
                     // Patch the jump instruction to jump after the else clause
-                    let jump_ofs = (code.len() as i32) - (jump_idx as i32) - 1;
-                    if let Insn::jump { target_ofs } = &mut code[jump_idx] {
-                        *target_ofs = jump_ofs;
-                    }
+                    patch_jump(code, jump_idx, code.len());
                 }
                 else
                 {
@@ -182,25 +192,24 @@ impl StmtBox
             }
             */
 
-            /*
             Stmt::Assert { test_expr } => {
-                let pass_label = sym.gen_sym("assert_pass");
-                test_expr.gen_code(fun, sym, code, out)?;
-                code.insn_s("if_true", &pass_label);
+                test_expr.gen_code(fun, code)?;
 
+                let if_idx = code.len();
+                code.push(Insn::if_true { target_ofs: 0 });
+
+                /*
                 code.insn_s("push", &format!("assertion failed at {}\n", self.pos));
-
                 code.add_insn(vec![
                     "'call_host'".to_string(),
                     "'print_str'".to_string(),
                     "1".to_string(),
                 ]);
+                */
 
-                code.insn("panic");
-
-                code.label(&pass_label);
+                code.push(Insn::panic);
+                patch_jump(code, if_idx, code.len());
             }
-            */
 
             // Variable declaration
             Stmt::Let { mutable, var_name, init_expr, decl } => {
