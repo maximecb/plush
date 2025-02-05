@@ -169,28 +169,43 @@ impl StmtBox
                 }
             }
 
-            /*
             Stmt::While { test_expr, body_stmt } => {
-                let loop_label = sym.gen_sym("while_loop");
-                let break_label = sym.gen_sym("while_break");
+                let mut break_idxs = Vec::new();
+                let mut cont_idxs = Vec::new();
 
-                code.label(&loop_label);
-                test_expr.gen_code(fun, sym, code, out)?;
-                code.insn_s("if_false", &break_label);
+                // Continue will jump here
+                let cont_idx = code.len();
+
+                // Evaluate the test expression
+                test_expr.gen_code(fun, code)?;
+
+                break_idxs.push(code.len());
+                code.push(Insn::if_false { target_ofs: 0 });
 
                 body_stmt.gen_code(
                     fun,
-                    &Some(break_label.clone()),
-                    &Some(loop_label.clone()),
-                    sym,
+                    &mut break_idxs,
+                    &mut cont_idxs,
                     code,
-                    out,
                 )?;
 
-                code.jump(&loop_label);
-                code.label(&break_label);
+                // Jump back to the loop test
+                cont_idxs.push(code.len());
+                code.push(Insn::jump { target_ofs: 0 });
+
+                // Break will jump here
+                let break_idx = code.len();
+
+                // Patch continue jumps
+                for branch_idx in cont_idxs.iter() {
+                    patch_jump(code, *branch_idx, cont_idx);
+                }
+
+                // Patch break jumps
+                for branch_idx in break_idxs.iter() {
+                    patch_jump(code, *branch_idx, break_idx);
+                }
             }
-            */
 
             Stmt::Assert { test_expr } => {
                 test_expr.gen_code(fun, code)?;
@@ -397,7 +412,6 @@ impl ExprBox
             }
 
             Expr::Call { callee, args } => {
-
                 // If the callee has the form a.b
                 if let Expr::Member { base, field } = callee.expr.as_ref() {
                     // Evaluate the self argument
@@ -422,7 +436,10 @@ impl ExprBox
                     code.insn_i("call", args.len() as i64);
                 }
             }
+            */
 
+            /*
+            // Closure expression
             Expr::Fun(child_fun) => {
                 child_fun.gen_code(sym, out)?;
 

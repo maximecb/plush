@@ -796,7 +796,7 @@ impl Actor
                     match v {
                         Value::False => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
                         Value::True => {}
-                        _ => panic!()
+                        _ => panic!("{:?}", v)
                     }
                 }
 
@@ -1171,7 +1171,15 @@ mod tests
     #[test]
     fn assert()
     {
-        eval("let var x = 1; assert(x == 1);");
+        eval("let x = 1; assert(x == 1);");
+        eval("let x = 1; assert(x < 2);");
+        eval("let x = 1; x = x + 1; assert(x < 10);");
+    }
+
+    #[test]
+    fn while_loop()
+    {
+        eval_eq("let var x = 1; while (x < 10) { x = x + 1; } return x;", Value::Int64(10));
     }
 
 
