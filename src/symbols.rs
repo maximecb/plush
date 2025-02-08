@@ -315,6 +315,16 @@ impl ExprBox
             Expr::Binary { op, lhs, rhs, .. } => {
                 lhs.resolve_syms(prog, fun, env)?;
                 rhs.resolve_syms(prog, fun, env)?;
+
+                // If this is an assignment to a constant
+                if *op == BinOp::Assign {
+                    if let Expr::Ref(Decl::Local { mutable: false, .. } | Decl::Arg { .. }) = lhs.expr.as_ref() {
+                        return ParseError::with_pos(
+                            &format!("assignment to immutable variable"),
+                            &self.pos
+                        );
+                    }
+                }
             }
 
             Expr::Call { callee, args, .. } => {

@@ -1132,6 +1132,7 @@ mod tests
 
     fn eval(s: &str) -> Value
     {
+        dbg!(s);
         let mut prog = parse_str(s).unwrap();
         prog.resolve_syms().unwrap();
         let main_fn = prog.main_fn;
@@ -1191,9 +1192,13 @@ mod tests
     fn assign()
     {
         eval_eq("let var x = 1; x = 2; return x;", Value::Int64(2));
+    }
 
-        // FIXME: this should fail
-        //eval_eq("let x = 1; x = 2; return x;", Value::Int64(2));
+    #[test]
+    #[should_panic]
+    fn assign_const()
+    {
+        eval("let x = 1; x = 2;");
     }
 
     #[test]
@@ -1201,7 +1206,7 @@ mod tests
     {
         eval("let x = 1; assert(x == 1);");
         eval("let x = 1; assert(x < 2);");
-        eval("let x = 1; x = x + 1; assert(x < 10);");
+        eval("let var x = 1; x = x + 1; assert(x < 10);");
     }
 
     #[test]
@@ -1217,7 +1222,8 @@ mod tests
         eval_eq("fun f(x) { return x + 1; } return f(7);", Value::Int64(8));
         eval_eq("fun f(a, b) { return a - b; } return f(7, 2);", Value::Int64(5));
 
-        // TODO: function that calls another function
+        // FIXME: requires closure resolution
+        //eval_eq("fun a() { return 8; } fun b() { return a(); } return b();", Value::Int64(8));
     }
 
 
