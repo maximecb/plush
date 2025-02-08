@@ -11,8 +11,7 @@ pub enum Decl
 
     // TODO:
     // Used to mark variables as captured by the current closure
-    // TODO: we want a flag to indicate which values are global
-    //Captured
+    //Captured { idx: u32, fun_id: FunId, mutable: bool, global: bool }
 }
 
 #[derive(Default)]

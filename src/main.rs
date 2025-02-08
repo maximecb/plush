@@ -10,6 +10,7 @@ mod parser;
 mod symbols;
 mod codegen;
 mod vm;
+mod alloc;
 mod host;
 
 extern crate sdl2;
