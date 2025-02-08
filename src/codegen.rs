@@ -410,8 +410,12 @@ impl ExprBox
                     format!("{}", args.len())
                 ]);
             }
+            */
 
             Expr::Call { callee, args } => {
+                let argc = args.len().try_into().unwrap();
+
+                /*
                 // If the callee has the form a.b
                 if let Expr::Member { base, field } = callee.expr.as_ref() {
                     // Evaluate the self argument
@@ -427,16 +431,15 @@ impl ExprBox
 
                     // Pass one extra argument (self)
                     code.insn_i("call", 1 + args.len() as i64);
-                } else {
+                } else*/ {
                     for arg in args {
-                        arg.gen_code(fun, sym, code, out)?;
+                        arg.gen_code(fun, code)?;
                     }
 
-                    callee.gen_code(fun, sym, code, out)?;
-                    code.insn_i("call", args.len() as i64);
+                    callee.gen_code(fun, code)?;
+                    code.push(Insn::call { argc });
                 }
             }
-            */
 
             // Closure expression
             Expr::Fun(fun_id) => {

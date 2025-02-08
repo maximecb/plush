@@ -489,7 +489,12 @@ impl Actor
                     let idx = idx as usize;
 
                     if idx >= argc {
-                        panic!("invalid index in get_arg, idx={}, argc={}", idx, argc);
+                        panic!(
+                            "invalid index in get_arg, idx={}, argc={}, stack depth: {}",
+                            idx,
+                            argc,
+                            self.frames.len()
+                        );
                     }
 
                     // Last argument is at bp - 1 (if there are arguments)
@@ -663,10 +668,8 @@ impl Actor
                 // Create a new closure
                 Insn::new_clos { fun_id, num_cells } => {
                     let clos = Closure { fun_id };
-                    //lew new_clos = self.alloc.alloc();
-                    //push!(Value::Object(new_obj))
-
-                    todo!();
+                    let new_clos = self.alloc.alloc(clos);
+                    push!(Value::Closure(new_clos));
                 }
 
                 /*
@@ -923,10 +926,9 @@ impl Actor
 
                     // Get a compiled address for this function
                     let fun_entry = self.get_compiled_fun(fun_id);
-                    pc = fun_entry.entry_pc;
 
-                    if args.len() != fun_entry.num_params {
-                        panic!();
+                    if argc as usize != fun_entry.num_params {
+                        panic!("incorrect argument count");
                     }
 
                     self.frames.push(StackFrame {
@@ -938,6 +940,7 @@ impl Actor
 
                     // The base pointer will point at the first local
                     bp = self.stack.len();
+                    pc = fun_entry.entry_pc;
                 }
 
                 /*
@@ -1205,6 +1208,16 @@ mod tests
     fn while_loop()
     {
         eval_eq("let var x = 1; while (x < 10) { x = x + 1; } return x;", Value::Int64(10));
+    }
+
+    #[test]
+    fn fun_call()
+    {
+        eval_eq("fun f() { return 7; } return f();", Value::Int64(7));
+        eval_eq("fun f(x) { return x + 1; } return f(7);", Value::Int64(8));
+        eval_eq("fun f(a, b) { return a - b; } return f(7, 2);", Value::Int64(5));
+
+        // TODO: function that calls another function
     }
 
 
