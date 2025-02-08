@@ -435,8 +435,14 @@ mod tests
         succeeds("let var g = 5; g = 6;");
         succeeds("let var f = fun() {}; f = 6;");
 
-        //fails("let g = 5; g = 6;");
-        //fails("fun f() {} f = 6;");
+        fails("let g = 5; g = 6;");
+        fails("fun f() {} f = 6;");
+    }
+
+    #[test]
+    fn keywords()
+    {
+        fails("letx = 1;");
     }
 
     #[test]

@@ -1195,6 +1195,7 @@ mod tests
         parse_fails("fun foo();");
         parse_fails("fun foo() return 0;");
         parse_fails("fun f foo();");
+        parse_fails("funx() {}");
     }
 
     #[test]
