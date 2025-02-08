@@ -7,7 +7,7 @@ use crate::parsing::{ParseError};
 pub enum Decl
 {
     Arg { idx: u32, fun_id: FunId },
-    Local { idx: u32, fun_id: FunId, mutable: bool },
+    Local { idx: u32, fun_id: FunId, mutable: bool, global: bool },
 
     // TODO:
     // Used to mark variables as captured by the current closure
@@ -62,6 +62,7 @@ impl Env
             idx: top_scope.next_idx as u32,
             fun_id: fun.id,
             mutable,
+            global: fun.is_unit,
         };
 
         top_scope.next_idx += 1;

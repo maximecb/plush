@@ -84,15 +84,16 @@ pub enum Insn
     is_object,
     is_array,
 
-    /*
+    // Create a closure instance
+    new_clos { fun_id: u32 },
+
     // Objects manipulation
-    obj_new,
-    obj_copy,
-    obj_def { field_name: *const String },
-    obj_set { field_name: *const String },
-    obj_get { field_name: *const String },
-    obj_seal,
-    */
+    obj_new { capacity: u16 },
+    //obj_copy,
+    //obj_def { field: String },
+    //obj_set { field: String },
+    //obj_get { field: String },
+    //obj_seal,
 
     // Array operations
     arr_new { capacity: u32 },

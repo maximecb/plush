@@ -231,7 +231,7 @@ impl StmtBox
                 init_expr.gen_code(fun, code)?;
 
                 match decl.as_ref().unwrap() {
-                    Decl::Local { idx, mutable, fun_id } => {
+                    Decl::Local { idx, fun_id, mutable, global } => {
                         // TODO: handle captured closure vars
 
                         code.push(Insn::set_local { idx: (*idx).try_into().unwrap() });
