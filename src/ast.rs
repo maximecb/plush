@@ -265,11 +265,18 @@ pub struct Function
 }
 
 #[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug)]
-pub struct FunId(usize);
+pub struct FunId(u32);
 
 impl From<usize> for FunId {
     fn from(id: usize) -> Self {
-        FunId(id)
+        FunId(id.try_into().unwrap())
+    }
+}
+
+impl From<FunId> for usize {
+    fn from(id: FunId) -> Self {
+        let FunId(id) = id;
+        id as usize
     }
 }
 

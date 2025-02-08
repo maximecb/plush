@@ -3,8 +3,9 @@ use std::{thread, thread::sleep};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use crate::ast::{Program, FunId};
+use crate::alloc::Alloc;
 use crate::codegen::CompiledFun;
-//use crate::host::*;
+use crate::host::*;
 
 /// Instruction opcodes
 /// Note: commonly used upcodes should be in the [0, 127] range (one byte)
@@ -85,10 +86,10 @@ pub enum Insn
     is_array,
 
     // Create a closure instance
-    new_clos { fun_id: u32 },
+    new_clos { fun_id: FunId, num_cells: u32 },
 
     // Objects manipulation
-    obj_new { capacity: u16 },
+    new_obj { capacity: u16 },
     //obj_copy,
     //obj_def { field: String },
     //obj_set { field: String },
@@ -96,7 +97,7 @@ pub enum Insn
     //obj_seal,
 
     // Array operations
-    arr_new { capacity: u32 },
+    new_arr { capacity: u32 },
     arr_push,
     arr_len,
     arr_set,
@@ -130,20 +131,20 @@ pub enum Insn
     ret,
 }
 
+pub struct Closure
+{
+    fun_id: FunId,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Value
 {
     Nil,
-
     False,
     True,
-
     Int64(i64),
     Float64(f64),
-
-
-
-
+    Closure(*mut Closure),
 }
 use Value::{False, True, Int64, Float64};
 
@@ -275,6 +276,9 @@ pub struct Actor
     // Parent VM
     pub vm: Arc<Mutex<VM>>,
 
+    // Private allocator
+    pub alloc: Alloc,
+
     // Message queue receiver endpoint
     queue_rx: mpsc::Receiver<Message>,
 
@@ -301,6 +305,7 @@ impl Actor
         Self {
             actor_id,
             vm,
+            alloc: Alloc::new(),
             queue_rx,
             actor_map: HashMap::default(),
             stack: Vec::default(),
@@ -647,6 +652,15 @@ impl Actor
                     };
 
                     push!(b);
+                }
+
+                // Create a new closure
+                Insn::new_clos { fun_id, num_cells } => {
+                    let clos = Closure { fun_id };
+                    //lew new_clos = self.alloc.alloc();
+                    //push!(Value::Object(new_obj))
+
+                    todo!();
                 }
 
                 /*

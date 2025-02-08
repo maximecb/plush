@@ -438,15 +438,13 @@ impl ExprBox
             }
             */
 
-            /*
             // Closure expression
-            Expr::Fun(child_fun) => {
-                child_fun.gen_code(sym, out)?;
+            Expr::Fun(fun_id) => {
+                // TODO: need to pay attention to captured variables
+                let num_cells = 0;
 
-                let fun_sym = child_fun.fun_sym();
-                code.push(&fun_sym);
+                code.push(Insn::new_clos { fun_id: *fun_id, num_cells });
             }
-            */
 
             _ => todo!("{:?}", self)
         }

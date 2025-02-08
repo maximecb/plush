@@ -1,6 +1,6 @@
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 
-struct Alloc
+pub struct Alloc
 {
     mem_block: *mut u8,
     mem_size: usize,
@@ -9,7 +9,7 @@ struct Alloc
 
 impl Alloc
 {
-    fn new() -> Self
+    pub fn new() -> Self
     {
         let mem_size = 16 * 1024 * 1024;
         let layout = Layout::from_size_align(mem_size, 8).unwrap();
