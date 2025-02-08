@@ -144,7 +144,13 @@ pub enum Value
     True,
     Int64(i64),
     Float64(f64),
+    Fun(FunId),
     Closure(*mut Closure),
+
+    // TODO: HostFun?
+    // need some kind of id for this to work,
+    // can't just use a string here?
+    HostFun(&'static u32)
 }
 use Value::{False, True, Int64, Float64};
 
@@ -255,8 +261,8 @@ pub struct Message
 #[derive(Copy, Clone, Debug)]
 struct StackFrame
 {
-    // Callee function
-    fun: FunId,
+    // Function currently executing
+    fun: Value,
 
     // Argument count (number of args supplied)
     argc: u16,
@@ -413,7 +419,7 @@ impl Actor
 
         // Push a new stack frame
         self.frames.push(StackFrame {
-            fun: fun_id,
+            fun: Value::Fun(fun_id),
             argc: args.len().try_into().unwrap(),
             prev_bp: usize::MAX,
             ret_addr: usize::MAX,
@@ -901,16 +907,17 @@ impl Actor
                 }
                 */
 
-                /*
                 // call (arg0, arg1, ..., argN, fun)
                 Insn::call { argc } => {
                     // Function to call
                     let fun_val = pop!();
-                    fun = fun_val.unwrap_obj();
 
                     // Argument count
                     assert!(argc as usize <= self.stack.len() - bp);
 
+                    // TODO: get fun id
+
+                    /*
                     self.frames.push(StackFrame {
                         argc,
                         fun,
@@ -923,8 +930,10 @@ impl Actor
 
                     // Get a compiled address for this function
                     pc = self.get_version(fun, 0);
+                    */
+
+                    todo!();
                 }
-                */
 
                 /*
                 // call (arg0, arg1, ..., argN, fun)
@@ -943,9 +952,6 @@ impl Actor
                 /*
                 // call (arg0, arg1, ..., argN, fun)
                 Insn::call_pc { argc, callee, target_pc } => {
-                    // Function being currently executed
-                    fun = callee;
-
                     // Argument count
                     assert!(argc as usize <= self.stack.len() - bp);
 
@@ -990,7 +996,6 @@ impl Actor
 
                     pc = top_frame.ret_addr;
                     bp = top_frame.prev_bp;
-                    //fun = self.frames[self.frames.len()-1].fun;
 
                     push!(ret_val);
                 }
