@@ -2,6 +2,7 @@ use std::fmt;
 use std::collections::HashMap;
 use crate::parsing::SrcPos;
 use crate::symbols::Decl;
+use crate::host::HostFn;
 
 /// Unary operator
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -57,6 +58,9 @@ pub enum Expr
     Int64(i64),
     Float64(f64),
     String(String),
+
+    // Host function
+    HostFn(HostFn),
 
     // Array literal
     Array {

@@ -258,6 +258,7 @@ impl ExprBox
             Expr::Int64 { .. } => {}
             Expr::Float64 { .. } => {}
             Expr::String { .. } => {}
+            Expr::HostFn { .. } => {}
 
             Expr::Array { exprs, .. } => {
                 for expr in exprs {
