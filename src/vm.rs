@@ -408,7 +408,7 @@ impl Actor
         let fun_entry = self.get_compiled_fun(fun_id);
         let mut pc = fun_entry.entry_pc;
 
-        if args.len() < fun_entry.num_params {
+        if args.len() != fun_entry.num_params {
             panic!();
         }
 
@@ -910,14 +910,25 @@ impl Actor
                 // call (arg0, arg1, ..., argN, fun)
                 Insn::call { argc } => {
                     // Function to call
-                    let fun_val = pop!();
+                    let fun = pop!();
 
                     // Argument count
                     assert!(argc as usize <= self.stack.len() - bp);
 
-                    // TODO: get fun id
+                    let fun_id = match fun {
+                        Value::Fun(id) => id,
+                        Value::Closure(clos) => unsafe { (*clos).fun_id },
+                        _ => panic!()
+                    };
 
-                    /*
+                    // Get a compiled address for this function
+                    let fun_entry = self.get_compiled_fun(fun_id);
+                    pc = fun_entry.entry_pc;
+
+                    if args.len() != fun_entry.num_params {
+                        panic!();
+                    }
+
                     self.frames.push(StackFrame {
                         argc,
                         fun,
@@ -927,12 +938,6 @@ impl Actor
 
                     // The base pointer will point at the first local
                     bp = self.stack.len();
-
-                    // Get a compiled address for this function
-                    pc = self.get_version(fun, 0);
-                    */
-
-                    todo!();
                 }
 
                 /*
