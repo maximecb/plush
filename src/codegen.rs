@@ -399,20 +399,6 @@ impl ExprBox
             }
             */
 
-            /*
-            Expr::HostCall { fun_name, args } => {
-                for arg in args {
-                    arg.gen_code(fun, sym, code, out)?;
-                }
-
-                code.add_insn(vec![
-                    "'call_host'".to_string(),
-                    format!("'{}'", fun_name),
-                    format!("{}", args.len())
-                ]);
-            }
-            */
-
             Expr::Call { callee, args } => {
                 let argc = args.len().try_into().unwrap();
 

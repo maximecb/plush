@@ -317,8 +317,8 @@ impl Actor
         }
     }
 
-    // Receive a message from the message queue
-    // This will block until a message is available
+    /// Receive a message from the message queue
+    /// This will block until a message is available
     fn recv(&mut self) -> Value
     {
         //use crate::window::poll_ui_msg;
@@ -345,7 +345,7 @@ impl Actor
         }
     }
 
-    // Send a message to another actor
+    /// Send a message to another actor
     fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
     {
         //
@@ -377,7 +377,7 @@ impl Actor
         }
     }
 
-    // Get a compiled function entry for a given function id
+    /// Get a compiled function entry for a given function id
     fn get_compiled_fun(&mut self, fun_id: FunId) -> CompiledFun
     {
         if let Some(entry) = self.funs.get(&fun_id) {
@@ -394,7 +394,96 @@ impl Actor
         entry
     }
 
-    // Call and execute a function in this actor
+    /// Call a host function
+    pub fn call_host(&mut self, host_fn: HostFn, argc: usize)
+    {
+        macro_rules! pop {
+            () => { self.stack.pop().unwrap() }
+        }
+
+        macro_rules! push {
+            ($val: expr) => { self.stack.push($val) }
+        }
+
+        if host_fn.num_params() != argc {
+            panic!();
+        }
+
+        match host_fn
+        {
+            HostFn::Fn0_0(fun) => {
+                fun(self);
+                push!(Value::Nil);
+            }
+
+            HostFn::Fn0_1(fun) => {
+                let v = fun(self);
+                push!(v);
+            }
+
+            HostFn::Fn1_0(fun) => {
+                let a0 = pop!();
+                fun(self, a0);
+                push!(Value::Nil);
+            }
+
+            HostFn::Fn1_1(fun) => {
+                let a0 = pop!();
+                let v = fun(self, a0);
+                push!(v);
+            }
+
+            HostFn::Fn2_0(fun) => {
+                let a1 = pop!();
+                let a0 = pop!();
+                fun(self, a0, a1);
+                push!(Value::Nil);
+            }
+
+            HostFn::Fn2_1(fun) => {
+                let a1 = pop!();
+                let a0 = pop!();
+                let v = fun(self, a0, a1);
+                push!(v);
+            }
+
+            HostFn::Fn3_0(fun) => {
+                let a2 = pop!();
+                let a1 = pop!();
+                let a0 = pop!();
+                fun(self, a0, a1, a2);
+                push!(Value::Nil);
+            }
+
+            HostFn::Fn3_1(fun) => {
+                let a2 = pop!();
+                let a1 = pop!();
+                let a0 = pop!();
+                let v = fun(self, a0, a1, a2);
+                push!(v);
+            }
+
+            HostFn::Fn4_0(fun) => {
+                let a3 = pop!();
+                let a2 = pop!();
+                let a1 = pop!();
+                let a0 = pop!();
+                fun(self, a0, a1, a2, a3);
+                push!(Value::Nil);
+            }
+
+            HostFn::Fn4_1(fun) => {
+                let a3 = pop!();
+                let a2 = pop!();
+                let a1 = pop!();
+                let a0 = pop!();
+                let v = fun(self, a0, a1, a2, a3);
+                push!(v);
+            }
+        }
+    }
+
+    /// Call and execute a function in this actor
     pub fn call(&mut self, fun_id: FunId, args: &[Value]) -> Value
     {
         assert!(self.stack.len() == 0);
@@ -824,87 +913,6 @@ impl Actor
                 Insn::jump { target_ofs } => {
                     pc = ((pc as i64) + (target_ofs as i64)) as usize
                 }
-
-                /*
-                Insn::call_host { host_fn, argc } => {
-                    if host_fn.num_params() != (argc as usize) {
-                        panic!();
-                    }
-
-                    match host_fn
-                    {
-                        HostFn::Fn0_0(fun) => {
-                            fun(self);
-                            push!(Value::None);
-                        }
-
-                        HostFn::Fn0_1(fun) => {
-                            let v = fun(self);
-                            push!(v);
-                        }
-
-                        HostFn::Fn1_0(fun) => {
-                            let a0 = pop!();
-                            fun(self, a0);
-                            push!(Value::None);
-                        }
-
-                        HostFn::Fn1_1(fun) => {
-                            let a0 = pop!();
-                            let v = fun(self, a0);
-                            push!(v);
-                        }
-
-                        HostFn::Fn2_0(fun) => {
-                            let a1 = pop!();
-                            let a0 = pop!();
-                            fun(self, a0, a1);
-                            push!(Value::None);
-                        }
-
-                        HostFn::Fn2_1(fun) => {
-                            let a1 = pop!();
-                            let a0 = pop!();
-                            let v = fun(self, a0, a1);
-                            push!(v);
-                        }
-
-                        HostFn::Fn3_0(fun) => {
-                            let a2 = pop!();
-                            let a1 = pop!();
-                            let a0 = pop!();
-                            fun(self, a0, a1, a2);
-                            push!(Value::None);
-                        }
-
-                        HostFn::Fn3_1(fun) => {
-                            let a2 = pop!();
-                            let a1 = pop!();
-                            let a0 = pop!();
-                            let v = fun(self, a0, a1, a2);
-                            push!(v);
-                        }
-
-                        HostFn::Fn4_0(fun) => {
-                            let a3 = pop!();
-                            let a2 = pop!();
-                            let a1 = pop!();
-                            let a0 = pop!();
-                            fun(self, a0, a1, a2, a3);
-                            push!(Value::None);
-                        }
-
-                        HostFn::Fn4_1(fun) => {
-                            let a3 = pop!();
-                            let a2 = pop!();
-                            let a1 = pop!();
-                            let a0 = pop!();
-                            let v = fun(self, a0, a1, a2, a3);
-                            push!(v);
-                        }
-                    }
-                }
-                */
 
                 // call (arg0, arg1, ..., argN, fun)
                 Insn::call { argc } => {
