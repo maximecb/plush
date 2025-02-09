@@ -74,7 +74,11 @@ pub fn get_host_const(name: &str) -> Expr
     {
         "time_current_ms" => Expr::HostFn(Fn0_1(time_current_ms)),
 
-        _ => panic!()
+        "print_i64" => Expr::HostFn(Fn1_0(print_i64)),
+        "print_str" => Expr::HostFn(Fn1_0(print_str)),
+        "print_endl" => Expr::HostFn(Fn0_0(print_endl)),
+
+        _ => panic!("unknown host constant \"{name}\"")
     }
 }
 
@@ -90,4 +94,25 @@ pub fn get_time_ms() -> u64
 pub fn time_current_ms(actor: &mut Actor) -> Value
 {
     Value::from(get_time_ms())
+}
+
+fn print_i64(actor: &mut Actor, v: Value)
+{
+    let v = v.unwrap_i64();
+    print!("{}", v);
+}
+
+/// Print a null-terminated UTF-8 string to stdout
+fn print_str(actor: &mut Actor, s: Value)
+{
+    //let rust_str = s.unwrap_rust_str();
+    //print!("{}", rust_str);
+
+    todo!("string support");
+}
+
+/// Print a newline characted to stdout
+fn print_endl(actor: &mut Actor)
+{
+    println!();
 }

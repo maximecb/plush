@@ -133,18 +133,14 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
         return parse_object(input, prog, pos);
     }
 
-    // Host function call
+    // Host constant
     if ch == '$' {
         input.eat_ch();
-        let fun_name = input.parse_ident()?;
-        input.expect_token("(")?;
-        let arg_exprs = parse_expr_list(input, prog, ")")?;
+        let name = input.parse_ident()?;
+        let expr = crate::host::get_host_const(&name);
 
         return ExprBox::new_ok(
-            Expr::HostCall {
-                fun_name,
-                args: arg_exprs
-            },
+            expr,
             pos
         );
     }
@@ -1166,7 +1162,6 @@ mod tests
     {
         parse_ok("$print_endl();");
         parse_ok("$print_i64(123);");
-        parse_ok("1 + $get_int() + 2;");
     }
 
     #[test]

@@ -262,6 +262,7 @@ impl ExprBox
             Expr::False => code.push(Insn::push { val: Value::False }),
             Expr::Int64(v) => code.push(Insn::push { val: Value::Int64(*v) }),
             Expr::Float64(v) => code.push(Insn::push { val: Value::Float64(*v) }),
+            Expr::HostFn(f) => code.push(Insn::push { val: Value::HostFn(*f) }),
 
             /*
             Expr::String(s) => {

@@ -21,6 +21,7 @@ use std::process::exit;
 use std::sync::{Arc, Mutex};
 use crate::vm::{VM, Value};
 use crate::utils::{thousands_sep};
+use crate::parser::{parse_file};
 
 /// Command-line options
 #[derive(Debug, Clone)]
@@ -84,16 +85,8 @@ fn main()
 
     let file_name = &opts.rest[0];
 
-    /*
-    let mut root_alloc = RootAlloc::new();
-    let mut alloc = Alloc::new(root_alloc.clone());
-    let fun = parse_file(&mut alloc, file_name).unwrap();
-    let mut vm = VM::new(root_alloc);
-    let ret = VM::call(&mut vm, fun, vec![]);
-    */
-
-
-
-
-
+    let prog = parse_file(file_name).unwrap();
+    let main_fn = prog.main_fn;
+    let mut vm = VM::new(prog);
+    let ret = VM::call(&mut vm, main_fn, vec![]);
 }

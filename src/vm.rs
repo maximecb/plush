@@ -146,13 +146,9 @@ pub enum Value
     Float64(f64),
     Fun(FunId),
     Closure(*mut Closure),
-
-    // TODO: HostFun?
-    // need some kind of id for this to work,
-    // can't just use a string here?
-    HostFun(&'static u32)
+    HostFn(HostFn)
 }
-use Value::{False, True, Int64, Float64};
+use Value::{Nil, False, True, Int64, Float64};
 
 // Allow sending Value between threads
 unsafe impl Send for Value {}
