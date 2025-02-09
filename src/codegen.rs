@@ -433,9 +433,12 @@ impl ExprBox
             // Closure expression
             Expr::Fun(fun_id) => {
                 // TODO: need to pay attention to captured variables
-                let num_cells = 0;
+                let num_slots = 0;
 
-                code.push(Insn::new_clos { fun_id: *fun_id, num_cells });
+
+
+
+                code.push(Insn::new_clos { fun_id: *fun_id, num_slots });
             }
 
             _ => todo!("{:?}", self)

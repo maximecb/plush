@@ -86,7 +86,7 @@ pub enum Insn
     is_array,
 
     // Closure operations
-    new_clos { fun_id: FunId, num_cells: u32 },
+    new_clos { fun_id: FunId, num_slots: u32 },
     clos_set { idx: u32 },
     clos_get { idx: u32 },
 
@@ -136,7 +136,9 @@ pub enum Insn
 pub struct Closure
 {
     fun_id: FunId,
-    cells: Vec<Value>,
+
+    // Captured variable slots
+    slots: Vec<Value>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -754,10 +756,39 @@ impl Actor
                 }
 
                 // Create a new closure
-                Insn::new_clos { fun_id, num_cells } => {
-                    let clos = Closure { fun_id, cells: vec![Nil; num_cells as usize] };
+                Insn::new_clos { fun_id, num_slots } => {
+                    let clos = Closure { fun_id, slots: vec![Nil; num_slots as usize] };
                     let new_clos = self.alloc.alloc(clos);
                     push!(Value::Closure(new_clos));
+                }
+
+                // Set a closure slot
+                Insn::clos_set { idx } => {
+                    let val = pop!();
+                    let clos = pop!();
+
+                    match clos {
+                        Value::Closure(clos) => {
+                            let clos = unsafe { &mut *clos };
+                            clos.slots[idx as usize] = val;
+                        }
+                        _ => panic!()
+                    }
+                }
+
+                // Get a closure slot for the function currently executing
+                Insn::clos_get { idx } => {
+                    let fun = &self.frames[self.frames.len() - 1].fun;
+
+                    let val = match fun {
+                        Value::Closure(clos) => {
+                            let clos = unsafe { &**clos };
+                            clos.slots[idx as usize]
+                        }
+                        _ => panic!()
+                    };
+
+                    push!(val);
                 }
 
                 /*
@@ -1234,6 +1265,13 @@ mod tests
         eval_eq("fun f() { return 7; } return f();", Value::Int64(7));
         eval_eq("fun f(x) { return x + 1; } return f(7);", Value::Int64(8));
         eval_eq("fun f(a, b) { return a - b; } return f(7, 2);", Value::Int64(5));
+
+
+        // FIXME
+        //eval_eq("let g = 3; fun f() { return g+1; } return f();", Value::Int64(4));
+
+
+
 
         // FIXME: requires closure resolution
         //eval_eq("fun a() { return 8; } fun b() { return a(); } return b();", Value::Int64(8));
