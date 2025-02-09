@@ -319,7 +319,7 @@ impl Actor
 
     /// Receive a message from the message queue
     /// This will block until a message is available
-    fn recv(&mut self) -> Value
+    pub fn recv(&mut self) -> Value
     {
         //use crate::window::poll_ui_msg;
 
@@ -346,7 +346,7 @@ impl Actor
     }
 
     /// Send a message to another actor
-    fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
+    pub fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
     {
         //
         // TODO: logic to copy objects

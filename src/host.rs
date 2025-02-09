@@ -78,6 +78,13 @@ pub fn get_host_const(name: &str) -> Expr
         "print_str" => Expr::HostFn(Fn1_0(print_str)),
         "print_endl" => Expr::HostFn(Fn0_0(print_endl)),
 
+        "actor_id" => Expr::HostFn(Fn0_1(actor_id)),
+        "actor_sleep" => Expr::HostFn(Fn1_0(actor_sleep)),
+        "actor_spawn" => Expr::HostFn(Fn1_1(actor_spawn)),
+        "actor_join" => Expr::HostFn(Fn1_1(actor_join)),
+        "actor_send" => Expr::HostFn(Fn2_1(actor_send)),
+        "actor_recv" => Expr::HostFn(Fn0_1(actor_recv)),
+
         _ => panic!("unknown host constant \"{name}\"")
     }
 }
@@ -115,4 +122,57 @@ fn print_str(actor: &mut Actor, s: Value)
 fn print_endl(actor: &mut Actor)
 {
     println!();
+}
+
+// Get the id of the current actor
+fn actor_id(actor: &mut Actor) -> Value
+{
+    Value::from(actor.actor_id)
+}
+
+// Make the current actor sleep
+fn actor_sleep(actor: &mut Actor, msecs: Value)
+{
+    let msecs = msecs.unwrap_u64();
+    thread::sleep(Duration::from_millis(msecs));
+}
+
+// Spawn a new actor
+// Takes a function to call as argument
+// Returns an actor id
+fn actor_spawn(actor: &mut Actor, fun: Value) -> Value
+{
+    //let tid = VM::new_actor(&actor.vm, fun, vec![]);
+    //Value::from(tid)
+
+    todo!();
+}
+
+// Wait for a thread to terminate, produce the return value
+fn actor_join(actor: &mut Actor, actor_id: Value) -> Value
+{
+    let id = actor_id.unwrap_u64();
+    VM::join_actor(&actor.vm, id)
+}
+
+// Send a message to an actor
+// This will return false in case of failure
+fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Value
+{
+    let actor_id = actor_id.unwrap_u64();
+
+    let res = actor.send(actor_id, msg);
+
+    if res.is_ok() {
+        Value::True
+    } else {
+        Value::False
+    }
+}
+
+// Receive a message from the current actor's queue
+// This will block until a message is available
+fn actor_recv(actor: &mut Actor) -> Value
+{
+    actor.recv()
 }
