@@ -157,7 +157,10 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
         let fun_id = parse_function(input, prog, name, pos)?;
 
         return ExprBox::new_ok(
-            Expr::Fun(fun_id),
+            Expr::Fun {
+                fun_id,
+                captured: Vec::default()
+            },
             pos
         );
     }
@@ -410,7 +413,10 @@ fn parse_object(
             let fun_id = parse_function(input, prog, field_name.clone(), pos)?;
 
             let fun_expr = ExprBox::new(
-                Expr::Fun(fun_id),
+                Expr::Fun {
+                    fun_id,
+                    captured: Vec::default(),
+                },
                 pos
             );
 
@@ -898,7 +904,10 @@ fn parse_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, ParseErr
         let fun_name = prog.funs[&fun_id].name.clone();
 
         let fun_expr = ExprBox::new(
-            Expr::Fun(fun_id),
+            Expr::Fun {
+                fun_id,
+                captured: Vec::default(),
+            },
             pos
         );
 

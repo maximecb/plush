@@ -78,7 +78,10 @@ pub enum Expr
     Ref(Decl),
 
     // Function/closure expression
-    Fun(FunId),
+    Fun {
+        fun_id: FunId,
+        captured: Vec<Decl>,
+    },
 
     // a[b]
     Index {

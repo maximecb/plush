@@ -1266,16 +1266,22 @@ mod tests
         eval_eq("fun f(x) { return x + 1; } return f(7);", Value::Int64(8));
         eval_eq("fun f(a, b) { return a - b; } return f(7, 2);", Value::Int64(5));
 
+        // Captured global variable
+        eval_eq("let g = 3; fun f() { return g+1; } return f();", Value::Int64(4));
 
-        // FIXME
-        //eval_eq("let g = 3; fun f() { return g+1; } return f();", Value::Int64(4));
-
-
-
-
-        // FIXME: requires closure resolution
-        //eval_eq("fun a() { return 8; } fun b() { return a(); } return b();", Value::Int64(8));
+        // Function calling another function
+        eval_eq("fun a() { return 8; } fun b() { return a(); } return b();", Value::Int64(8));
     }
+
+    #[test]
+    fn fact()
+    {
+        // Recursive factorial function
+        eval_eq("fun f(n) { if (n < 3) return n; return n*f(n-1); } return f(0);", Value::Int64(0));
+    }
+
+
+
 
     #[test]
     fn host_call()

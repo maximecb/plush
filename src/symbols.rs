@@ -369,7 +369,7 @@ impl ExprBox
                 }
             }
 
-            Expr::Fun(fun_id) => {
+            Expr::Fun { fun_id, captured } => {
                 // Resolve symbols in the nested function
                 let mut child_fun = std::mem::take(prog.funs.get_mut(fun_id).unwrap());
                 child_fun.resolve_syms(prog, env)?;
@@ -381,6 +381,8 @@ impl ExprBox
                     if decl.fun_id != fun.id {
                         fun.reg_captured(&decl);
                     }
+
+                    captured.push(decl.clone());
                 }
 
                 // Put the child function back in place

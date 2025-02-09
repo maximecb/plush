@@ -227,8 +227,9 @@ impl StmtBox
             }
 
             // Variable declaration
-            Stmt::Let { mutable, var_name, init_expr, decl: Some(decl) } => {
+            Stmt::Let { mutable, var_name, init_expr, decl } => {
                 init_expr.gen_code(fun, code)?;
+                let decl = decl.as_ref().unwrap();
 
                 match decl.kind {
                     DeclKind::Local => {
@@ -304,7 +305,13 @@ impl ExprBox
                         code.push(Insn::get_local { idx: decl.idx });
                     }
 
-                    _ => todo!()
+                    DeclKind::Captured => {
+                        if decl.mutable {
+                            todo!()
+                        }
+
+                        code.push(Insn::clos_get { idx: decl.idx });
+                    }
                 }
             }
 
@@ -431,14 +438,25 @@ impl ExprBox
             }
 
             // Closure expression
-            Expr::Fun(fun_id) => {
-                // TODO: need to pay attention to captured variables
-                let num_slots = 0;
+            Expr::Fun { fun_id, captured } => {
+                code.push(Insn::new_clos {
+                    fun_id: *fun_id,
+                    num_slots: captured.len() as u32,
+                });
 
+                // For each variable captured by the closure
+                for (idx, decl) in captured.iter().enumerate() {
+                    code.push(Insn::dup);
 
+                    // TODO: here we need to be able to eval the ref
+                    // we need a gen_ref()
+                    if decl.fun_id != fun.id {
+                        panic!();
+                    }
+                    code.push(Insn::get_local { idx: decl.idx });
 
-
-                code.push(Insn::new_clos { fun_id: *fun_id, num_slots });
+                    code.push(Insn::clos_set { idx: idx as u32 });
+                }
             }
 
             _ => todo!("{:?}", self)
