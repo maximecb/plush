@@ -419,6 +419,9 @@ mod tests
 
         // Two functions with the same parameter name
         succeeds("fun foo(a) {} fun bar(a) {}");
+
+        // Undefined local
+        fails("fun foo() { return g; }")
     }
 
     #[test]
@@ -427,6 +430,9 @@ mod tests
         succeeds("let g = 5; fun main() { return g; }");
         succeeds("let g = 5; fun main() { return g + 1; }");
         succeeds("let global_str = \"foo\"; fun main() {}");
+
+        // Undefined global
+        fails("g;");
     }
 
     #[test]
