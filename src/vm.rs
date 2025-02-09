@@ -1236,38 +1236,9 @@ mod tests
         //eval_eq("fun a() { return 8; } fun b() { return a(); } return b();", Value::Int64(8));
     }
 
-
-
-
-    /*
     #[test]
-    fn sub_ab()
+    fn host_call()
     {
-        // This checks that argument ordering is handled correctly
-        let ret = run_image("tests/sub_ab.zim");
-        assert!(ret == Value::Int64(2));
+        eval_eq("return $actor_id();", Value::Int64(0));
     }
-
-    #[test]
-    fn fact()
-    {
-        let ret = run_image("tests/fact.zim");
-        assert!(ret == Value::Int64(720));
-    }
-
-    #[test]
-    fn fib()
-    {
-        let ret = run_image("tests/fib.zim");
-        dbg!(ret);
-        assert!(ret == Value::Int64(6765));
-    }
-
-    #[test]
-    fn examples()
-    {
-        let ret = run_image("examples/hello_world.zim");
-        assert!(ret == Value::Int64(0));
-    }
-    */
 }
