@@ -920,11 +920,17 @@ impl Actor
                     let fun = pop!();
 
                     // Argument count
-                    assert!(argc as usize <= self.stack.len() - bp);
+                    if argc as usize > self.stack.len() - bp {
+                        panic!();
+                    }
 
                     let fun_id = match fun {
                         Value::Fun(id) => id,
                         Value::Closure(clos) => unsafe { (*clos).fun_id },
+                        Value::HostFn(f) => {
+                            self.call_host(f, argc.into());
+                            continue;
+                        }
                         _ => panic!()
                     };
 
