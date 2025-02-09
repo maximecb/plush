@@ -4,14 +4,35 @@ use crate::parsing::{ParseError};
 
 /// Global/variable/function declaration
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Decl
+pub enum DeclKind
 {
-    Arg { idx: u32, fun_id: FunId },
-    Local { idx: u32, fun_id: FunId, mutable: bool, global: bool },
+    // Function argument
+    Arg,
 
-    // TODO:
+    // Local variable in a function
+    Local,
+
     // Used to mark variables as captured by the current closure
-    //Captured { idx: u32, fun_id: FunId, mutable: bool, global: bool }
+    Captured,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Decl
+{
+    // Kind of declaration
+    pub kind: DeclKind,
+
+    // Index
+    pub idx: u32,
+
+    // Function this originates from
+    pub fun_id: FunId,
+
+    // Global variable flag
+    pub global: bool,
+
+    // Mutable variable flag
+    pub mutable: bool,
 }
 
 #[derive(Default)]
@@ -57,7 +78,8 @@ impl Env
         let top_scope = &mut self.scopes[num_scopes - 1];
         assert!(top_scope.decls.get(name).is_none());
 
-        let decl = Decl::Local {
+        let decl = Decl {
+            kind: DeclKind::Local,
             idx: top_scope.next_idx as u32,
             fun_id: fun.id,
             mutable,
@@ -144,7 +166,13 @@ impl Function
 
         // Declare the function arguments
         for (idx, param_name) in self.params.iter().enumerate() {
-            let decl = Decl::Arg { idx: idx as u32, fun_id: self.id };
+            let decl = Decl {
+                kind: DeclKind::Arg,
+                idx: idx as u32,
+                fun_id: self.id,
+                global: false,
+                mutable: false
+            };
             env.define(param_name, decl);
         }
 
@@ -275,17 +303,17 @@ impl ExprBox
             Expr::Ident(name) => {
                 //dbg!(&name);
 
-                if let Some(decl) = env.lookup(name) {
-                    /*
+                if let Some(mut decl) = env.lookup(name) {
                     // If this variable comes from another function,
                     // then it must be captured as a closure variable
-                    match decl {
-                        Decl::Local { fun_id, .. } | Decl::Arg { fun_id, .. } if fun_id != fun.id => {
-                            fun.reg_captured(&decl);
-                        }
-                        _ => {}
-                    };
-                    */
+                    if decl.fun_id != fun.id {
+                        // Register and get an index for the captured variable
+                        let cell_idx = fun.reg_captured(&decl);
+
+                        // Identify this as a captured closure variable
+                        decl.kind = DeclKind::Captured;
+                        decl.idx = cell_idx;
+                    }
 
                     *(self.expr) = Expr::Ref(decl);
                 }
@@ -319,7 +347,7 @@ impl ExprBox
 
                 // If this is an assignment to a constant
                 if *op == BinOp::Assign {
-                    if let Expr::Ref(Decl::Local { mutable: false, .. } | Decl::Arg { .. }) = lhs.expr.as_ref() {
+                    if let Expr::Ref(Decl { mutable: false, .. }) = lhs.expr.as_ref() {
                         return ParseError::with_pos(
                             &format!("assignment to immutable variable"),
                             &self.pos
@@ -345,25 +373,18 @@ impl ExprBox
                 // Resolve symbols in the nested function
                 let mut child_fun = std::mem::take(prog.funs.get_mut(fun_id).unwrap());
                 child_fun.resolve_syms(prog, env)?;
-                *prog.funs.get_mut(fun_id).unwrap() = child_fun;
 
-
-
-
-
-                /*
                 // For each variable captured by the nested function
                 for (decl, idx) in &child_fun.captured {
-                    // If this variable comes from another function,
+                    // If this variable doesn't comes from this function,
                     // then it must be captured as a closure variable
-                    match decl {
-                        Decl::Local { fun_id, .. } | Decl::Arg { fun_id, .. } if *fun_id != fun.id => {
-                            fun.reg_captured(&decl);
-                        }
-                        _ => {}
-                    };
+                    if decl.fun_id != fun.id {
+                        fun.reg_captured(&decl);
+                    }
                 }
-                */
+
+                // Put the child function back in place
+                *prog.funs.get_mut(fun_id).unwrap() = child_fun;
             }
 
             //_ => todo!("{:?}", self)
@@ -419,6 +440,9 @@ mod tests
 
         // Two functions with the same parameter name
         succeeds("fun foo(a) {} fun bar(a) {}");
+
+        // Reference to global
+        succeeds("let g = 1; fun foo() { return g; }");
 
         // Undefined local
         fails("fun foo() { return g; }")

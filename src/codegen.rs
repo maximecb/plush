@@ -1,7 +1,7 @@
 use std::cmp::max;
 use crate::ast::*;
 use crate::parsing::{ParseError};
-use crate::symbols::{Decl};
+use crate::symbols::{Decl, DeclKind};
 use crate::vm::{Insn, Value};
 
 /// Compiled function object
@@ -227,14 +227,14 @@ impl StmtBox
             }
 
             // Variable declaration
-            Stmt::Let { mutable, var_name, init_expr, decl } => {
+            Stmt::Let { mutable, var_name, init_expr, decl: Some(decl) } => {
                 init_expr.gen_code(fun, code)?;
 
-                match decl.as_ref().unwrap() {
-                    Decl::Local { idx, fun_id, mutable, global } => {
+                match decl.kind {
+                    DeclKind::Local => {
                         // TODO: handle captured closure vars
 
-                        code.push(Insn::set_local { idx: (*idx).try_into().unwrap() });
+                        code.push(Insn::set_local { idx: decl.idx.try_into().unwrap() });
                     }
 
                     _ => panic!(),
@@ -295,14 +295,16 @@ impl ExprBox
             */
 
             Expr::Ref(decl) => {
-                match decl {
-                    Decl::Arg { idx, .. } => {
-                        code.push(Insn::get_arg { idx: *idx });
+                match decl.kind {
+                    DeclKind::Arg => {
+                        code.push(Insn::get_arg { idx: decl.idx });
                     }
 
-                    Decl::Local { idx, .. } => {
-                        code.push(Insn::get_local { idx: *idx });
+                    DeclKind::Local => {
+                        code.push(Insn::get_local { idx: decl.idx });
                     }
+
+                    _ => todo!()
                 }
             }
 
@@ -626,9 +628,9 @@ fn gen_assign(
 
     match lhs.expr.as_ref() {
         Expr::Ref(decl) => {
-            match decl {
-                Decl::Local { idx, .. } => {
-                    code.push(Insn::set_local { idx: *idx });
+            match decl.kind {
+                DeclKind::Local => {
+                    code.push(Insn::set_local { idx: decl.idx });
                 }
 
                 _ => todo!()

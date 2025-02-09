@@ -258,6 +258,9 @@ pub struct Function
     /// Number of local variables
     pub num_locals: usize,
 
+    /// Map of captured closure variables to closure slots indices
+    pub captured: HashMap<Decl, u32>,
+
     /// Unit-level (global) function
     pub is_unit: bool,
 
@@ -266,6 +269,22 @@ pub struct Function
 
     /// Internal unique function id
     pub id: FunId,
+}
+
+impl Function
+{
+    // Register a captured closure variable and return its slot index
+    pub fn reg_captured(&mut self, decl: &Decl) -> u32
+    {
+        match self.captured.get(decl) {
+            Some(idx) => *idx,
+            None => {
+                let idx = self.captured.len() as u32;
+                self.captured.insert(decl.clone(), idx);
+                idx
+            }
+        }
+    }
 }
 
 #[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug)]
