@@ -85,8 +85,10 @@ pub enum Insn
     is_object,
     is_array,
 
-    // Create a closure instance
+    // Closure operations
     new_clos { fun_id: FunId, num_cells: u32 },
+    clos_set { idx: u32 },
+    clos_get { idx: u32 },
 
     // Objects manipulation
     new_obj { capacity: u16 },
@@ -134,6 +136,7 @@ pub enum Insn
 pub struct Closure
 {
     fun_id: FunId,
+    cells: Vec<Value>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -752,7 +755,7 @@ impl Actor
 
                 // Create a new closure
                 Insn::new_clos { fun_id, num_cells } => {
-                    let clos = Closure { fun_id };
+                    let clos = Closure { fun_id, cells: vec![Nil; num_cells as usize] };
                     let new_clos = self.alloc.alloc(clos);
                     push!(Value::Closure(new_clos));
                 }
