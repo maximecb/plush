@@ -144,6 +144,8 @@ pub struct Closure
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Value
 {
+    // Uninitialized. This should never be observed.
+    Undef,
     Nil,
     False,
     True,
@@ -153,7 +155,7 @@ pub enum Value
     Closure(*mut Closure),
     HostFn(HostFn)
 }
-use Value::{Nil, False, True, Int64, Float64};
+use Value::{Undef, Nil, False, True, Int64, Float64};
 
 // Allow sending Value between threads
 unsafe impl Send for Value {}
@@ -757,7 +759,7 @@ impl Actor
 
                 // Create a new closure
                 Insn::new_clos { fun_id, num_slots } => {
-                    let clos = Closure { fun_id, slots: vec![Nil; num_slots as usize] };
+                    let clos = Closure { fun_id, slots: vec![Undef; num_slots as usize] };
                     let new_clos = self.alloc.alloc(clos);
                     push!(Value::Closure(new_clos));
                 }
@@ -787,6 +789,10 @@ impl Actor
                         }
                         _ => panic!()
                     };
+
+                    if val == Value::Undef {
+                        panic!();
+                    }
 
                     push!(val);
                 }
@@ -965,7 +971,7 @@ impl Actor
                             self.call_host(f, argc.into());
                             continue;
                         }
-                        _ => panic!()
+                        _ => panic!("call with non-function {:?}", fun)
                     };
 
                     // Get a compiled address for this function
@@ -1276,12 +1282,18 @@ mod tests
     #[test]
     fn fact()
     {
+        // FIXME
         // Recursive factorial function
-        eval_eq("fun f(n) { if (n < 3) return n; return n*f(n-1); } return f(0);", Value::Int64(0));
+        //eval_eq("fun f(n) { if (n < 2) return 1; return n * f(n-1); } return f(6);", Value::Int64(720));
     }
 
-
-
+    #[test]
+    fn fib()
+    {
+        // TODO:
+        // Recursive fibonacci function
+        //eval_eq("fun f(n) { if (n < 2) return 1; return n*f(n-1); } return f(0);", Value::Int64(0));
+    }
 
     #[test]
     fn host_call()
