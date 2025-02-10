@@ -131,6 +131,25 @@ impl StmtBox
             }
 
             Stmt::Block(stmts) => {
+                // For each function declaration
+                for stmt in stmts {
+                    if let Stmt::Let { init_expr, decl, .. } = stmt.stmt.as_ref() {
+                        if let Expr::Fun { fun_id, captured } = init_expr.expr.as_ref() {
+                            // Create the closure
+                            code.push(Insn::new_clos {
+                                fun_id: *fun_id,
+                                num_slots: captured.len() as u32,
+                            });
+
+                            // TODO: we need a function to generate assignment code
+                            // based on a decl
+                            let decl = decl.as_ref().unwrap();
+                            assert!(decl.kind == DeclKind::Local);
+                            code.push(Insn::set_local { idx: decl.idx.try_into().unwrap() });
+                        }
+                    }
+                }
+
                 for stmt in stmts {
                     stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
                 }
@@ -228,9 +247,34 @@ impl StmtBox
 
             // Variable declaration
             Stmt::Let { mutable, var_name, init_expr, decl } => {
-                init_expr.gen_code(fun, code)?;
-                let decl = decl.as_ref().unwrap();
+                match init_expr.expr.as_ref() {
+                    Expr::Fun { fun_id, captured } => {
 
+                        // TODO: we need a way to eval the closure decl
+                        let decl = decl.as_ref().unwrap();
+                        assert!(decl.kind == DeclKind::Local);
+                        code.push(Insn::get_local { idx: decl.idx.try_into().unwrap() });
+
+                        // For each variable captured by the closure
+                        for (idx, decl) in captured.iter().enumerate() {
+
+                            code.push(Insn::dup);
+
+                            // TODO: here we need to be able to eval the ref
+                            // we need a gen_ref()
+                            if decl.fun_id != fun.id {
+                                panic!();
+                            }
+                            code.push(Insn::get_local { idx: decl.idx });
+
+                            code.push(Insn::clos_set { idx: idx as u32 });
+                        }
+                    }
+
+                    _ => init_expr.gen_code(fun, code)?
+                }
+
+                let decl = decl.as_ref().unwrap();
                 match decl.kind {
                     DeclKind::Local => {
                         // TODO: handle captured closure vars

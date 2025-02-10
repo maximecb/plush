@@ -791,7 +791,7 @@ impl Actor
                     };
 
                     if val == Value::Undef {
-                        panic!();
+                        panic!("executing uninitialized closure");
                     }
 
                     push!(val);
@@ -1282,17 +1282,28 @@ mod tests
     #[test]
     fn fact()
     {
-        // FIXME
         // Recursive factorial function
-        //eval_eq("fun f(n) { if (n < 2) return 1; return n * f(n-1); } return f(6);", Value::Int64(720));
+        eval_eq("fun f(n) { if (n < 2) return 1; return n * f(n-1); } return f(6);", Value::Int64(720));
     }
 
     #[test]
     fn fib()
     {
-        // TODO:
         // Recursive fibonacci function
-        //eval_eq("fun f(n) { if (n < 2) return 1; return n*f(n-1); } return f(0);", Value::Int64(0));
+        eval_eq("fun f(n) { if (n < 2) return n; return f(n-1) + f(n-2); } return f(10);", Value::Int64(55));
+    }
+
+    #[test]
+    fn ret_clos()
+    {
+        eval_eq("fun a() { fun b() { return 33; } return b; } let f = a(); return f();", Value::Int64(33));
+    }
+
+    #[test]
+    fn call_ahead()
+    {
+        // FIXME:
+        //eval_eq("fun a() { return b(); } fun b() { return 7; } return a();", Value::Int64(7));
     }
 
     #[test]

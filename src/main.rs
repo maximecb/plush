@@ -85,7 +85,8 @@ fn main()
 
     let file_name = &opts.rest[0];
 
-    let prog = parse_file(file_name).unwrap();
+    let mut prog = parse_file(file_name).unwrap();
+    prog.resolve_syms().unwrap();
     let main_fn = prog.main_fn;
     let mut vm = VM::new(prog);
     let ret = VM::call(&mut vm, main_fn, vec![]);
