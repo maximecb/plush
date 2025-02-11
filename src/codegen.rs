@@ -136,7 +136,7 @@ impl StmtBox
                     if let Stmt::Let { init_expr, decl, .. } = stmt.stmt.as_ref() {
                         if let Expr::Fun { fun_id, captured } = init_expr.expr.as_ref() {
                             // Create the closure
-                            code.push(Insn::new_clos {
+                            code.push(Insn::clos_new {
                                 fun_id: *fun_id,
                                 num_slots: captured.len() as u32,
                             });
@@ -315,18 +315,14 @@ impl ExprBox
             }
             */
 
-            /*
-            Expr::Object { extensible, fields } => {
+            Expr::Object { fields } => {
                 return gen_obj_expr(
-                    *extensible,
                     fields,
                     fun,
-                    sym,
                     code,
-                    out,
                 );
             }
-            */
+
 
             Expr::Ref(decl) => {
                 gen_var_read(decl, code);
@@ -456,7 +452,7 @@ impl ExprBox
 
             // Closure expression
             Expr::Fun { fun_id, captured } => {
-                code.push(Insn::new_clos {
+                code.push(Insn::clos_new {
                     fun_id: *fun_id,
                     num_slots: captured.len() as u32,
                 });
@@ -504,40 +500,39 @@ fn gen_arr_expr(
 }
 */
 
-/*
 // Generate code for an object literal expression
 fn gen_obj_expr(
-    extensible: bool,
     fields: &Vec<(bool, String, ExprBox)>,
     fun: &Function,
-    sym: &mut SymGen,
-    code: &mut ByteCode,
-    out: &mut String,
+    code: &mut Vec<Insn>,
 ) -> Result<(), ParseError>
 {
-    code.insn("obj_new");
+    code.push(Insn::obj_new { capacity: fields.len() as u32 });
 
     // For each field
     for (mutable, name, expr) in fields {
-        expr.gen_code(fun, sym, code, out)?;
+        expr.gen_code(fun, code)?;
 
-        code.insn_i("getn", 1);
+        /*
+        code.push("getn", 1);
 
         if *mutable {
-            code.insn_s("obj_set", name);
+            code.push("obj_set", name);
         } else {
             code.insn_s("obj_def", name);
         }
+        */
     }
 
-    if !extensible {
-        code.insn("dup");
-        code.insn("obj_seal");
-    }
+    code.push(Insn::dup);
+    code.push(Insn::obj_seal);
 
-    Ok(())
+    //Ok(())
+
+
+
+    todo!();
 }
-*/
 
 fn gen_bin_op(
     op: &BinOp,

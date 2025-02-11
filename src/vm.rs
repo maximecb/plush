@@ -91,20 +91,20 @@ pub enum Insn
     is_array,
 
     // Closure operations
-    new_clos { fun_id: FunId, num_slots: u32 },
+    clos_new { fun_id: FunId, num_slots: u32 },
     clos_set { idx: u32 },
     clos_get { idx: u32 },
 
     // Objects manipulation
-    new_obj { capacity: u16 },
+    obj_new { capacity: u32 },
     //obj_copy,
     //obj_def { field: String },
     //obj_set { field: String },
     //obj_get { field: String },
-    //obj_seal,
+    obj_seal,
 
     // Array operations
-    new_arr { capacity: u32 },
+    arr_new { capacity: u32 },
     arr_push,
     arr_len,
     arr_set,
@@ -773,10 +773,10 @@ impl Actor
                 }
 
                 // Create a new closure
-                Insn::new_clos { fun_id, num_slots } => {
+                Insn::clos_new { fun_id, num_slots } => {
                     let clos = Closure { fun_id, slots: vec![Undef; num_slots as usize] };
-                    let new_clos = self.alloc.alloc(clos);
-                    push!(Value::Closure(new_clos));
+                    let clos_val = self.alloc.alloc(clos);
+                    push!(Value::Closure(clos_val));
                 }
 
                 // Set a closure slot
