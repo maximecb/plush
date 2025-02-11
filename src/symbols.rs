@@ -209,6 +209,16 @@ impl StmtBox
             Stmt::Block(stmts) => {
                 env.push_scope();
 
+                // Pre-declare functions before symbols are resolved
+                for stmt in stmts.iter_mut() {
+                    if let Stmt::Let { mutable, var_name, init_expr, ref mut decl } = stmt.stmt.as_mut() {
+                        if let Expr::Fun { .. } = init_expr.expr.as_ref() {
+                            let new_decl = env.define_local(var_name, *mutable, fun);
+                            *decl = Some(new_decl)
+                        }
+                    }
+                }
+
                 for stmt in stmts {
                     stmt.resolve_syms(prog, fun, env)?;
                 }
@@ -236,31 +246,16 @@ impl StmtBox
 
             // Variable declaration
             Stmt::Let { mutable, var_name, init_expr, decl } => {
-                // If this is not a function declaration
-                // Resolve symbols in the initialization expression
-                // before the new definition is added
+                init_expr.resolve_syms(prog, fun, env)?;
+
+                // Functions have already been pre-declared
                 match init_expr.expr.as_ref() {
                     Expr::Fun { .. } => {}
                     _ => {
-                        init_expr.resolve_syms(prog, fun, env)?;
+                        let new_decl = env.define_local(var_name, *mutable, fun);
+                        *decl = Some(new_decl)
                     }
                 }
-
-                // If we're in a unit-level function
-                let new_decl = env.define_local(var_name, *mutable, fun);
-
-                // If this is a function declaration
-                // Resolve symbols in the initialization expression
-                // after the new definition is added to allow recursion
-                match init_expr.expr.as_ref() {
-                    Expr::Fun { .. } => {
-                        init_expr.resolve_syms(prog, fun, env)?;
-                    }
-                    _ => {}
-                }
-
-                // Store the declaration for this let statement
-                *decl = Some(new_decl)
             }
 
             //_ => todo!()

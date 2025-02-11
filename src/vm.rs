@@ -1307,8 +1307,15 @@ mod tests
     #[test]
     fn call_ahead()
     {
-        // FIXME:
-        //eval_eq("fun a() { return b(); } fun b() { return 7; } return a();", Value::Int64(7));
+        // Call a function before its definition
+        eval_eq("fun a() { return b(); } fun b() { return 7; } return a();", Value::Int64(7));
+    }
+
+    #[test]
+    fn mutual_rec()
+    {
+        // Mutual recursion
+        eval_eq("fun a(n) { return b(n-1); } fun b(n) { if (n<1) return 0; return a(n-1); } return a(8);", Value::Int64(0));
     }
 
     #[test]
