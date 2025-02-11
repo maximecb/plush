@@ -648,13 +648,11 @@ fn gen_bin_op(
     rhs.gen_code(fun, code)?;
 
     match op {
-        /*
-        BitAnd => code.insn("bit_and"),
-        BitOr => code.insn("bit_or"),
-        BitXor => code.insn("bit_xor"),
-        LShift => code.insn("lshift"),
-        RShift => code.insn("rshift"),
-        */
+        BitAnd => code.push(Insn::bit_and),
+        BitOr => code.push(Insn::bit_or),
+        BitXor => code.push(Insn::bit_xor),
+        LShift => code.push(Insn::lshift),
+        RShift => code.push(Insn::rshift),
 
         Add => code.push(Insn::add),
         Sub => code.push(Insn::sub),

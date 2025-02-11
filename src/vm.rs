@@ -66,7 +66,12 @@ pub enum Insn
     div,
     modulo,
 
-    // TODO: bitwise lsft, rsft, bit_and
+    // Bitwise operations
+    bit_and,
+    bit_or,
+    bit_xor,
+    lshift,
+    rshift,
 
     // Comparisons
     lt,
