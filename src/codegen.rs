@@ -329,23 +329,7 @@ impl ExprBox
             */
 
             Expr::Ref(decl) => {
-                match decl.kind {
-                    DeclKind::Arg => {
-                        code.push(Insn::get_arg { idx: decl.idx });
-                    }
-
-                    DeclKind::Local => {
-                        code.push(Insn::get_local { idx: decl.idx });
-                    }
-
-                    DeclKind::Captured => {
-                        if decl.mutable {
-                            todo!()
-                        }
-
-                        code.push(Insn::clos_get { idx: decl.idx });
-                    }
-                }
+                gen_var_read(decl, code);
             }
 
             /*
@@ -480,14 +464,7 @@ impl ExprBox
                 // For each variable captured by the closure
                 for (idx, decl) in captured.iter().enumerate() {
                     code.push(Insn::dup);
-
-                    // TODO: here we need to be able to eval the ref
-                    // we need a gen_ref()
-                    if decl.fun_id != fun.id {
-                        panic!();
-                    }
-                    code.push(Insn::get_local { idx: decl.idx });
-
+                    gen_var_read(decl, code);
                     code.push(Insn::clos_set { idx: idx as u32 });
                 }
             }
@@ -673,6 +650,32 @@ fn gen_var_write(
         }
 
         _ => todo!()
+    }
+}
+
+/// Generate a write to a variable
+/// Pushes the value read on the stack
+fn gen_var_read(
+    decl: &Decl,
+    code: &mut Vec<Insn>,
+)
+{
+    match decl.kind {
+        DeclKind::Arg => {
+            code.push(Insn::get_arg { idx: decl.idx });
+        }
+
+        DeclKind::Local => {
+            code.push(Insn::get_local { idx: decl.idx });
+        }
+
+        DeclKind::Captured => {
+            if decl.mutable {
+                todo!()
+            }
+
+            code.push(Insn::clos_get { idx: decl.idx });
+        }
     }
 }
 
