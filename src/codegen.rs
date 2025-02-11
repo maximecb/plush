@@ -141,11 +141,8 @@ impl StmtBox
                                 num_slots: captured.len() as u32,
                             });
 
-                            // TODO: we need a function to generate assignment code
-                            // based on a decl
-                            let decl = decl.as_ref().unwrap();
-                            assert!(decl.kind == DeclKind::Local);
-                            code.push(Insn::set_local { idx: decl.idx.try_into().unwrap() });
+                            // Initialize the local variable
+                            gen_var_write(decl.as_ref().unwrap(), code);
                         }
                     }
                 }
@@ -274,16 +271,8 @@ impl StmtBox
                     _ => init_expr.gen_code(fun, code)?
                 }
 
-                let decl = decl.as_ref().unwrap();
-                match decl.kind {
-                    DeclKind::Local => {
-                        // TODO: handle captured closure vars
-
-                        code.push(Insn::set_local { idx: decl.idx.try_into().unwrap() });
-                    }
-
-                    _ => panic!(),
-                }
+                // Initialize the local variable
+                gen_var_write(decl.as_ref().unwrap(), code);
             }
 
             _ => todo!("{:?}", self.stmt)
@@ -671,6 +660,22 @@ fn gen_bin_op(
     Ok(())
 }
 
+/// Generate a write to a variable
+/// Assumes the value to be written is on top of the stack
+fn gen_var_write(
+    decl: &Decl,
+    code: &mut Vec<Insn>,
+)
+{
+    match decl.kind {
+        DeclKind::Local => {
+            code.push(Insn::set_local { idx: decl.idx });
+        }
+
+        _ => todo!()
+    }
+}
+
 fn gen_assign(
     lhs: &ExprBox,
     rhs: &ExprBox,
@@ -691,13 +696,7 @@ fn gen_assign(
 
     match lhs.expr.as_ref() {
         Expr::Ref(decl) => {
-            match decl.kind {
-                DeclKind::Local => {
-                    code.push(Insn::set_local { idx: decl.idx });
-                }
-
-                _ => todo!()
-            }
+            gen_var_write(decl, code);
         }
 
         /*
