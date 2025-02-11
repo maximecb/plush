@@ -142,10 +142,8 @@ fn actor_sleep(actor: &mut Actor, msecs: Value)
 // Returns an actor id
 fn actor_spawn(actor: &mut Actor, fun: Value) -> Value
 {
-    //let tid = VM::new_actor(&actor.vm, fun, vec![]);
-    //Value::from(tid)
-
-    todo!();
+    let actor_id = VM::new_actor(&actor.vm, fun, vec![]);
+    Value::from(actor_id)
 }
 
 // Wait for a thread to terminate, produce the return value

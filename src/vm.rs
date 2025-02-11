@@ -418,7 +418,11 @@ impl Actor
         }
 
         if host_fn.num_params() != argc {
-            panic!();
+            panic!(
+                "incorrect argument count for host functions, got {}, expected {}",
+                argc,
+                host_fn.num_params()
+            );
         }
 
         match host_fn
@@ -496,10 +500,16 @@ impl Actor
     }
 
     /// Call and execute a function in this actor
-    pub fn call(&mut self, fun_id: FunId, args: &[Value]) -> Value
+    pub fn call(&mut self, fun: Value, args: &[Value]) -> Value
     {
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
+
+        let fun_id = match fun {
+            Value::Closure(clos) => unsafe { (*clos).fun_id },
+            Value::Fun(fun_id) => fun_id,
+            _ => panic!()
+        };
 
         // Get a compiled address for this function
         let fun_entry = self.get_compiled_fun(fun_id);
@@ -516,7 +526,7 @@ impl Actor
 
         // Push a new stack frame
         self.frames.push(StackFrame {
-            fun: Value::Fun(fun_id),
+            fun,
             argc: args.len().try_into().unwrap(),
             prev_bp: usize::MAX,
             ret_addr: usize::MAX,
@@ -1116,7 +1126,7 @@ impl VM
     }
 
     // Create a new actor
-    pub fn new_actor(vm: &Arc<Mutex<VM>>, fun: FunId, args: Vec<Value>) -> u64
+    pub fn new_actor(vm: &Arc<Mutex<VM>>, fun: Value, args: Vec<Value>) -> u64
     {
         let vm_mutex = vm.clone();
 
@@ -1128,6 +1138,12 @@ impl VM
 
         // Create a message queue for the actor
         let (queue_tx, queue_rx) = mpsc::channel::<Message>();
+
+
+        // FIXME:
+        // We need to recursively copy the function/closure
+
+
 
         // Spawn a new thread for the actor
         let handle = thread::spawn(move || {
@@ -1158,7 +1174,7 @@ impl VM
     }
 
     // Call a function in the main actor
-    pub fn call(vm: &mut Arc<Mutex<VM>>, fun: FunId, args: Vec<Value>) -> Value
+    pub fn call(vm: &mut Arc<Mutex<VM>>, fun_id: FunId, args: Vec<Value>) -> Value
     {
         let vm_mutex = vm.clone();
 
@@ -1175,7 +1191,7 @@ impl VM
         drop(vm_ref);
 
         let mut actor = Actor::new(actor_id, vm_mutex, queue_rx);
-        actor.call(fun, &args)
+        actor.call(Value::Fun(fun_id), &args)
     }
 }
 
@@ -1322,5 +1338,33 @@ mod tests
     fn host_call()
     {
         eval_eq("return $actor_id();", Value::Int64(0));
+    }
+
+    #[test]
+    fn actor_spawn()
+    {
+        eval_eq(
+            concat!(
+                "fun f() { return 77; }",
+                "let id = $actor_spawn(f);",
+                "let ret = $actor_join(id);",
+                "return ret;",
+            ),
+            Value::Int64(77)
+        );
+    }
+
+    #[test]
+    fn actor_send()
+    {
+        eval_eq(
+            concat!(
+                "fun f() { return $actor_recv() + 1; }",
+                "let id = $actor_spawn(f);",
+                "$actor_send(id, 1336);",
+                "return $actor_join(id);",
+            ),
+            Value::Int64(1337)
+        );
     }
 }
