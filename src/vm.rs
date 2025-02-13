@@ -1382,6 +1382,7 @@ mod tests
     {
         eval_eq("return $actor_id();", Value::Int64(0));
         eval("return $print_str('hi');");
+        eval("return $time_current_ms();");
     }
 
     #[test]
