@@ -146,6 +146,41 @@ pub struct Closure
     slots: Vec<Value>,
 }
 
+#[derive(Clone, Default)]
+pub struct Object
+{
+    fields: HashMap<String, (bool, Value)>,
+    sealed: bool,
+}
+
+impl Object
+{
+    fn seal(&mut self)
+    {
+        self.sealed = true;
+    }
+
+    // Define an immutable field field
+    fn def_const(&mut self, field_name: &str, val: Value)
+    {
+        if let Some(_) = self.fields.get(field_name) {
+            panic!();
+        }
+
+        self.fields.insert(field_name.to_string(), (false, val));
+    }
+
+    // Get the value associated with a given field
+    fn get(&mut self, field_name: &str) -> Value
+    {
+        if let Some((_, val)) = self.fields.get(field_name) {
+            *val
+        } else {
+            panic!();
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Value
 {
@@ -162,7 +197,10 @@ pub enum Value
 
     Fun(FunId),
     Closure(*mut Closure),
-    HostFn(HostFn)
+    HostFn(HostFn),
+
+    Object(*mut Object),
+    //Array(*mut Array),
 }
 use Value::{Undef, Nil, False, True, Int64, Float64};
 
@@ -172,26 +210,6 @@ unsafe impl Sync for Value {}
 
 impl Value
 {
-    /*
-    pub fn is_object(&self) -> bool
-    {
-        match self {
-            Value::Object(_) => true,
-            _ => false,
-        }
-    }
-    */
-
-    /*
-    pub fn is_array(&self) -> bool
-    {
-        match self {
-            Value::Array(_) => true,
-            _ => false,
-        }
-    }
-    */
-
     pub fn unwrap_usize(&self) -> usize
     {
         match self {
@@ -239,12 +257,19 @@ impl Value
             _ => panic!("expected float64 value but got {:?}", self)
         }
     }
-
     pub fn unwrap_rust_str(&self) -> &str
     {
         match self {
             Value::String(p) => unsafe { &**p },
             _ => panic!("expected string value but got {:?}", self)
+        }
+    }
+
+    pub fn unwrap_obj(&mut self) -> &mut Object
+    {
+        match self {
+            Value::Object(p) => unsafe { &mut **p },
+            _ => panic!("expected object value but got {:?}", self)
         }
     }
 }
@@ -826,47 +851,51 @@ impl Actor
                     push!(val);
                 }
 
-                /*
                 // Create new empty object
                 Insn::obj_new => {
-                    let new_obj = Object::new(&mut self.alloc);
+                    let new_obj = self.alloc.alloc(Object::default());
                     push!(Value::Object(new_obj))
                 }
 
+                /*
                 // Copy object
                 Insn::obj_copy => {
                     let obj = pop!().unwrap_obj();
                     let new_obj = Object::copy(obj, &mut self.alloc);
                     push!(Value::Object(new_obj))
                 }
+                */
 
                 // Define constant field
-                Insn::obj_def { field_name } => {
-                    let obj = pop!().unwrap_obj();
+                Insn::obj_def { field } => {
                     let val = pop!();
-                    Object::def_const(obj, Value::String(field_name), val);
+                    let mut obj = pop!();
+                    let field_name = unsafe { &*field };
+                    obj.unwrap_obj().def_const(field_name, val);
                 }
 
+                /*
                 // Set object field
                 Insn::obj_set { field_name } => {
                     let obj = pop!().unwrap_obj();
                     let val = pop!();
                     Object::set(obj, Value::String(field_name), val);
                 }
+                */
 
                 // Get object field
-                Insn::obj_get { field_name } => {
-                    let obj = pop!().unwrap_obj();
-                    let val = Object::get(obj, Value::String(field_name));
+                Insn::obj_get { field } => {
+                    let mut obj = pop!();
+                    let field_name = unsafe { &*field };
+                    let val = obj.unwrap_obj().get(field_name);
                     push!(val);
                 }
 
                 // Seal object
                 Insn::obj_seal => {
-                    let obj = pop!().unwrap_obj();
-                    Object::seal(obj);
+                    let mut obj = pop!();
+                    obj.unwrap_obj().seal();
                 }
-                */
 
                 /*
                 // Create new empty array
@@ -1352,6 +1381,7 @@ mod tests
     fn host_call()
     {
         eval_eq("return $actor_id();", Value::Int64(0));
+        eval("return $print_str('hi');");
     }
 
     #[test]
@@ -1380,5 +1410,24 @@ mod tests
             ),
             Value::Int64(1337)
         );
+    }
+
+    #[test]
+    fn objects()
+    {
+        eval("let o = {};");
+        eval("let o = { x: 1, y: 2 };");
+        eval("let o = { x: 1, f(s) {} };");
+        eval_eq("let o = { x: 1, y: 2 }; return o.x;", Value::Int64(1));
+        eval_eq("let o = { x: 1, y: 2 }; return o.x + o.y;", Value::Int64(3));
+
+        // Getter method
+        eval_eq("let o = { n: 1337, get(s) { return s.n; } }; return o.get();", Value::Int64(1337));
+
+        // TODO
+        // Increment method
+
+
+
     }
 }

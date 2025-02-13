@@ -376,12 +376,11 @@ impl ExprBox
             }
             */
 
-            /*
             Expr::Member { base, field } => {
-                base.gen_code(fun, sym, code, out)?;
-                code.insn_s("obj_get", &field);
+                base.gen_code(fun, code, alloc)?;
+                let field = alloc.str_const(field.clone());
+                code.push(Insn::obj_get { field });
             }
-            */
 
             Expr::Unary { op, child } => {
                 child.gen_code(fun, code, alloc)?;
@@ -434,23 +433,23 @@ impl ExprBox
             Expr::Call { callee, args } => {
                 let argc = args.len().try_into().unwrap();
 
-                /*
                 // If the callee has the form a.b
                 if let Expr::Member { base, field } = callee.expr.as_ref() {
                     // Evaluate the self argument
-                    base.gen_code(fun, sym, code, out)?;
+                    base.gen_code(fun, code, alloc)?;
 
                     for arg in args {
-                        arg.gen_code(fun, sym, code, out)?;
+                        arg.gen_code(fun, code, alloc)?;
                     }
 
                     // Read the method from the object
-                    code.insn_i("getn", args.len() as i64);
-                    code.insn_s("obj_get", &field);
+                    code.push(Insn::getn { idx: argc });
+                    let field = alloc.str_const(field.clone());
+                    code.push(Insn::obj_get { field });
 
                     // Pass one extra argument (self)
-                    code.insn_i("call", 1 + args.len() as i64);
-                } else*/ {
+                    code.push(Insn::call { argc: argc + 1 });
+                } else {
                     for arg in args {
                         arg.gen_code(fun, code, alloc)?;
                     }
@@ -522,9 +521,9 @@ fn gen_obj_expr(
 
     // For each field
     for (mutable, name, expr) in fields {
-        expr.gen_code(fun, code, alloc)?;
+        code.push(Insn::dup);
 
-        code.push(Insn::getn { idx: 1 });
+        expr.gen_code(fun, code, alloc)?;
 
         let field_name = alloc.str_const(name.clone());
         if *mutable {
