@@ -411,7 +411,7 @@ impl Actor
         // Borrow the function from the VM and compile it
         let vm = self.vm.lock().unwrap();
         let fun = &vm.prog.funs[&fun_id];
-        let entry = fun.gen_code(&mut self.insns).unwrap();
+        let entry = fun.gen_code(&mut self.insns, &mut self.alloc).unwrap();
         self.funs.insert(fun_id, entry);
 
         // Return the compiled function entry

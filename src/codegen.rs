@@ -3,6 +3,7 @@ use crate::ast::*;
 use crate::parsing::{ParseError};
 use crate::symbols::{Decl, DeclKind};
 use crate::vm::{Insn, Value};
+use crate::alloc::Alloc;
 
 /// Compiled function object
 #[derive(Copy, Clone)]
@@ -46,7 +47,7 @@ impl Function
         return true;
     }
 
-    pub fn gen_code(&self, code: &mut Vec<Insn>) -> Result<CompiledFun, ParseError>
+    pub fn gen_code(&self, code: &mut Vec<Insn>, alloc: &mut Alloc) -> Result<CompiledFun, ParseError>
     {
         // Entry address of the compiled function
         let entry_pc = code.len();
@@ -78,8 +79,8 @@ impl StmtBox
     fn gen_code(
         &self,
         fun: &Function,
-        break_idxs: &Vec<usize>,
-        cont_idxs: &Vec<usize>,
+        break_idxs: &mut Vec<usize>,
+        cont_idxs: &mut Vec<usize>,
         code: &mut Vec<Insn>,
     ) -> Result<(), ParseError>
     {
