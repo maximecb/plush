@@ -518,31 +518,26 @@ fn gen_obj_expr(
     alloc: &mut Alloc,
 ) -> Result<(), ParseError>
 {
-    code.push(Insn::obj_new { capacity: fields.len() as u32 });
+    code.push(Insn::obj_new);
 
     // For each field
     for (mutable, name, expr) in fields {
         expr.gen_code(fun, code, alloc)?;
 
-        /*
-        code.push("getn", 1);
+        code.push(Insn::getn { idx: 1 });
 
+        let field_name = alloc.str_const(name.clone());
         if *mutable {
-            code.push("obj_set", name);
+            code.push(Insn::obj_set { field: field_name });
         } else {
-            code.insn_s("obj_def", name);
+            code.push(Insn::obj_def { field: field_name });
         }
-        */
     }
 
     code.push(Insn::dup);
     code.push(Insn::obj_seal);
 
-    //Ok(())
-
-
-
-    todo!();
+    Ok(())
 }
 
 fn gen_bin_op(

@@ -96,7 +96,7 @@ pub enum Insn
     clos_get { idx: u32 },
 
     // Objects manipulation
-    obj_new { capacity: u32 },
+    obj_new,
     //obj_extend,
     obj_def { field: *const String },
     obj_set { field: *const String },
