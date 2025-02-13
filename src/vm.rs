@@ -97,10 +97,10 @@ pub enum Insn
 
     // Objects manipulation
     obj_new { capacity: u32 },
-    //obj_copy,
-    //obj_def { field: String },
-    //obj_set { field: String },
-    //obj_get { field: String },
+    //obj_extend,
+    obj_def { field: *const String },
+    obj_set { field: *const String },
+    obj_get { field: *const String },
     obj_seal,
 
     // Array operations

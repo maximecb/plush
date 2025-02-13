@@ -47,7 +47,11 @@ impl Function
         return true;
     }
 
-    pub fn gen_code(&self, code: &mut Vec<Insn>, alloc: &mut Alloc) -> Result<CompiledFun, ParseError>
+    pub fn gen_code(
+        &self,
+        code: &mut Vec<Insn>,
+        alloc: &mut Alloc
+    ) -> Result<CompiledFun, ParseError>
     {
         // Entry address of the compiled function
         let entry_pc = code.len();
@@ -58,7 +62,7 @@ impl Function
         }
 
         // Compile the function body
-        self.body.gen_code(self, &mut vec![], &mut vec![], code)?;
+        self.body.gen_code(self, &mut vec![], &mut vec![], code, alloc)?;
 
         // If the body needs a final return
         if self.needs_final_return() {
@@ -82,6 +86,7 @@ impl StmtBox
         break_idxs: &mut Vec<usize>,
         cont_idxs: &mut Vec<usize>,
         code: &mut Vec<Insn>,
+        alloc: &mut Alloc,
     ) -> Result<(), ParseError>
     {
         match self.stmt.as_ref() {
@@ -90,7 +95,7 @@ impl StmtBox
                     // For assignment expressions as statements,
                     // avoid generating output that we would then need to pop
                     Expr::Binary { op: BinOp::Assign, lhs, rhs } => {
-                        gen_assign(lhs, rhs, fun, code, false)?;
+                        gen_assign(lhs, rhs, fun, code, alloc, false)?;
                     }
 
                     /*
@@ -102,7 +107,7 @@ impl StmtBox
                     */
 
                     _ => {
-                        expr.gen_code(fun, code)?;
+                        expr.gen_code(fun, code, alloc)?;
                         code.push(Insn::pop);
                     }
                 }
@@ -127,7 +132,7 @@ impl StmtBox
             */
 
             Stmt::Return(expr) => {
-                expr.gen_code(fun, code)?;
+                expr.gen_code(fun, code, alloc)?;
                 code.push(Insn::ret);
             }
 
@@ -149,34 +154,34 @@ impl StmtBox
                 }
 
                 for stmt in stmts {
-                    stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
+                    stmt.gen_code(fun, break_idxs, cont_idxs, code, alloc)?;
                 }
             }
 
             Stmt::If { test_expr, then_stmt, else_stmt } => {
                 // Compile the test expression
-                test_expr.gen_code(fun, code)?;
+                test_expr.gen_code(fun, code, alloc)?;
 
                 // If false, jump to else stmt
                 let if_idx = code.len();
                 code.push(Insn::if_false { target_ofs: 0 });
 
                 if else_stmt.is_some() {
-                    then_stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
+                    then_stmt.gen_code(fun, break_idxs, cont_idxs, code, alloc)?;
                     let jump_idx = code.len();
                     code.push(Insn::jump { target_ofs: 0 });
 
                     // Patch the if_false to jump to the else clause
                     patch_jump(code, if_idx, code.len());
 
-                    else_stmt.as_ref().unwrap().gen_code(fun, break_idxs, cont_idxs, code)?;
+                    else_stmt.as_ref().unwrap().gen_code(fun, break_idxs, cont_idxs, code, alloc)?;
 
                     // Patch the jump instruction to jump after the else clause
                     patch_jump(code, jump_idx, code.len());
                 }
                 else
                 {
-                    then_stmt.gen_code(fun, break_idxs, cont_idxs, code)?;
+                    then_stmt.gen_code(fun, break_idxs, cont_idxs, code, alloc)?;
 
                     // Patch the if_false to jump to the else clause
                     let jump_ofs = (code.len() as i32) - (if_idx as i32) - 1;
@@ -194,7 +199,7 @@ impl StmtBox
                 let cont_idx = code.len();
 
                 // Evaluate the test expression
-                test_expr.gen_code(fun, code)?;
+                test_expr.gen_code(fun, code, alloc)?;
 
                 break_idxs.push(code.len());
                 code.push(Insn::if_false { target_ofs: 0 });
@@ -204,6 +209,7 @@ impl StmtBox
                     &mut break_idxs,
                     &mut cont_idxs,
                     code,
+                    alloc,
                 )?;
 
                 // Jump back to the loop test
@@ -225,7 +231,7 @@ impl StmtBox
             }
 
             Stmt::Assert { test_expr } => {
-                test_expr.gen_code(fun, code)?;
+                test_expr.gen_code(fun, code, alloc)?;
 
                 let if_idx = code.len();
                 code.push(Insn::if_true { target_ofs: 0 });
@@ -269,7 +275,7 @@ impl StmtBox
                         }
                     }
 
-                    _ => init_expr.gen_code(fun, code)?
+                    _ => init_expr.gen_code(fun, code, alloc)?
                 }
 
                 // Initialize the local variable
@@ -289,6 +295,7 @@ impl ExprBox
         &self,
         fun: &Function,
         code: &mut Vec<Insn>,
+        alloc: &mut Alloc,
     ) -> Result<(), ParseError>
     {
         match self.expr.as_ref() {
@@ -299,11 +306,12 @@ impl ExprBox
             Expr::Float64(v) => code.push(Insn::push { val: Value::Float64(*v) }),
             Expr::HostFn(f) => code.push(Insn::push { val: Value::HostFn(*f) }),
 
-            /*
             Expr::String(s) => {
-                code.insn_s("push", s);
+                let p_str = alloc.str_const(s.clone());
+                code.push(Insn::push { val: Value::String(p_str) });
             }
 
+            /*
             Expr::Array { frozen, exprs } => {
                 return gen_arr_expr(
                     *frozen,
@@ -321,6 +329,7 @@ impl ExprBox
                     fields,
                     fun,
                     code,
+                    alloc,
                 );
             }
 
@@ -375,7 +384,7 @@ impl ExprBox
             */
 
             Expr::Unary { op, child } => {
-                child.gen_code(fun, code)?;
+                child.gen_code(fun, code, alloc)?;
 
                 match op {
                     UnOp::Minus => {
@@ -399,7 +408,7 @@ impl ExprBox
             },
 
             Expr::Binary { op, lhs, rhs } => {
-                gen_bin_op(op, lhs, rhs, fun, code)?;
+                gen_bin_op(op, lhs, rhs, fun, code, alloc)?;
             }
 
             /*
@@ -443,10 +452,10 @@ impl ExprBox
                     code.insn_i("call", 1 + args.len() as i64);
                 } else*/ {
                     for arg in args {
-                        arg.gen_code(fun, code)?;
+                        arg.gen_code(fun, code, alloc)?;
                     }
 
-                    callee.gen_code(fun, code)?;
+                    callee.gen_code(fun, code, alloc)?;
                     code.push(Insn::call { argc });
                 }
             }
@@ -506,13 +515,14 @@ fn gen_obj_expr(
     fields: &Vec<(bool, String, ExprBox)>,
     fun: &Function,
     code: &mut Vec<Insn>,
+    alloc: &mut Alloc,
 ) -> Result<(), ParseError>
 {
     code.push(Insn::obj_new { capacity: fields.len() as u32 });
 
     // For each field
     for (mutable, name, expr) in fields {
-        expr.gen_code(fun, code)?;
+        expr.gen_code(fun, code, alloc)?;
 
         /*
         code.push("getn", 1);
@@ -541,6 +551,7 @@ fn gen_bin_op(
     rhs: &ExprBox,
     fun: &Function,
     code: &mut Vec<Insn>,
+    alloc: &mut Alloc,
 ) -> Result<(), ParseError>
 {
     use BinOp::*;
@@ -548,7 +559,7 @@ fn gen_bin_op(
     // Assignments are different from other kinds of expressions
     // because we don't evaluate the lhs the same way
     if *op == Assign {
-        gen_assign(lhs, rhs, fun, code, true)?;
+        gen_assign(lhs, rhs, fun, code, alloc, true)?;
         return Ok(());
     }
 
@@ -606,8 +617,8 @@ fn gen_bin_op(
     }
     */
 
-    lhs.gen_code(fun, code)?;
-    rhs.gen_code(fun, code)?;
+    lhs.gen_code(fun, code, alloc)?;
+    rhs.gen_code(fun, code, alloc)?;
 
     match op {
         BitAnd => code.push(Insn::bit_and),
@@ -680,13 +691,14 @@ fn gen_assign(
     rhs: &ExprBox,
     fun: &Function,
     code: &mut Vec<Insn>,
+    alloc: &mut Alloc,
     need_value: bool,
 ) -> Result<(), ParseError>
 {
     //dbg!(lhs);
     //dbg!(rhs);
 
-    rhs.gen_code(fun, code)?;
+    rhs.gen_code(fun, code, alloc)?;
 
     // If the output value is needed
     if need_value {
