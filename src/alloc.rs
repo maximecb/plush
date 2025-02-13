@@ -59,4 +59,11 @@ impl Alloc
 
         p
     }
+
+    // Allocate an immutable string
+    pub fn str_const(&mut self, s: String) -> *const String
+    {
+        let s_ptr = self.alloc(s);
+        s_ptr as *const String
+    }
 }

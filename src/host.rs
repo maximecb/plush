@@ -112,10 +112,8 @@ fn print_i64(actor: &mut Actor, v: Value)
 /// Print a null-terminated UTF-8 string to stdout
 fn print_str(actor: &mut Actor, s: Value)
 {
-    //let rust_str = s.unwrap_rust_str();
-    //print!("{}", rust_str);
-
-    todo!("string support");
+    let rust_str = s.unwrap_rust_str();
+    print!("{}", rust_str);
 }
 
 /// Print a newline characted to stdout

@@ -156,7 +156,10 @@ pub enum Value
     True,
     Int64(i64),
     Float64(f64),
+
+    // String constant
     String(*const String),
+
     Fun(FunId),
     Closure(*mut Closure),
     HostFn(HostFn)
@@ -234,6 +237,14 @@ impl Value
         match self {
             Float64(v) => *v,
             _ => panic!("expected float64 value but got {:?}", self)
+        }
+    }
+
+    pub fn unwrap_rust_str(&self) -> &str
+    {
+        match self {
+            Value::String(p) => unsafe { &**p },
+            _ => panic!("expected string value but got {:?}", self)
         }
     }
 }
