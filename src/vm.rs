@@ -156,6 +156,7 @@ pub enum Value
     True,
     Int64(i64),
     Float64(f64),
+    String(*const String),
     Fun(FunId),
     Closure(*mut Closure),
     HostFn(HostFn)
@@ -739,7 +740,9 @@ impl Actor
 
                     let b = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => v0 == v1,
-                        //(Value::String(p0), Value::String(p1)) => p0 == p1,
+                        // For now we intentionally don't provide string reference equality
+                        // as we may eventually choose to intern *some* strings
+                        (Value::String(_), Value::String(_)) => panic!(),
                         _ => panic!()
                     };
 
