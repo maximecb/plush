@@ -789,14 +789,10 @@ impl Actor
                     let v0 = pop!();
 
                     let b = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => v0 == v1,
                         // For now we intentionally don't provide string reference equality
                         // as we may eventually choose to intern *some* strings
                         (Value::String(_), Value::String(_)) => panic!(),
-                        (Nil, Nil) => true,
-                        (Nil, _) => false,
-                        (_, Nil) => false,
-                        _ => panic!()
+                        _ => v0 == v1
                     };
 
                     push_bool!(b);
@@ -807,12 +803,10 @@ impl Actor
                     let v0 = pop!();
 
                     let b = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => v0 != v1,
-                        //(Value::String(p0), Value::String(p1)) => p0 != p1,
-                        (Nil, Nil) => false,
-                        (Nil, _) => true,
-                        (_, Nil) => true,
-                        _ => panic!()
+                        // For now we intentionally don't provide string reference equality
+                        // as we may eventually choose to intern *some* strings
+                        (Value::String(_), Value::String(_)) => panic!(),
+                        _ => v0 != v1
                     };
 
                     push_bool!(b);
@@ -1342,6 +1336,12 @@ mod tests
         eval("let x = 1; assert(x == 1);");
         eval("let x = 1; assert(x < 2);");
         eval("let var x = 1; x = x + 1; assert(x < 10);");
+    }
+
+    fn comparisons()
+    {
+        eval_eq("let o1 = {}; let o2 = {}; return o1 == o2", Value::False);
+        eval_eq("let o1 = {}; let o2 = {}; return o1 != o2", Value::True);
     }
 
     #[test]
