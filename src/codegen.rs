@@ -311,18 +311,14 @@ impl ExprBox
                 code.push(Insn::push { val: Value::String(p_str) });
             }
 
-            /*
-            Expr::Array { frozen, exprs } => {
+            Expr::Array { exprs } => {
                 return gen_arr_expr(
-                    *frozen,
                     exprs,
                     fun,
-                    sym,
                     code,
-                    out,
+                    alloc,
                 );
             }
-            */
 
             Expr::Object { fields } => {
                 return gen_obj_expr(
@@ -480,33 +476,24 @@ impl ExprBox
     }
 }
 
-/*
 // Generate code for an array literal expression
 fn gen_arr_expr(
-    frozen: bool,
     exprs: &Vec<ExprBox>,
     fun: &Function,
-    sym: &mut SymGen,
-    code: &mut ByteCode,
-    out: &mut String,
+    code: &mut Vec<Insn>,
+    alloc: &mut Alloc,
 ) -> Result<(), ParseError>
 {
-    code.insn_i("arr_new", exprs.len() as i64);
+    code.push(Insn::arr_new { capacity: exprs.len() as u32 });
 
     for expr in exprs {
-        expr.gen_code(fun, sym, code, out)?;
-        code.insn_i("getn", 1);
-        code.insn("arr_push");
-    }
-
-    if frozen {
-        code.insn("dup");
-        code.insn("arr_freeze");
+        code.push(Insn::dup);
+        expr.gen_code(fun, code, alloc)?;
+        code.push(Insn::arr_push);
     }
 
     Ok(())
 }
-*/
 
 // Generate code for an object literal expression
 fn gen_obj_expr(
