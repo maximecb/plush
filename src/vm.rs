@@ -779,6 +779,9 @@ impl Actor
                         // For now we intentionally don't provide string reference equality
                         // as we may eventually choose to intern *some* strings
                         (Value::String(_), Value::String(_)) => panic!(),
+                        (Nil, Nil) => true,
+                        (Nil, _) => false,
+                        (_, Nil) => false,
                         _ => panic!()
                     };
 
@@ -792,6 +795,9 @@ impl Actor
                     let b = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => v0 != v1,
                         //(Value::String(p0), Value::String(p1)) => p0 != p1,
+                        (Nil, Nil) => false,
+                        (Nil, _) => true,
+                        (_, Nil) => true,
                         _ => panic!()
                     };
 
@@ -1318,6 +1324,8 @@ mod tests
     #[test]
     fn assert()
     {
+        eval("assert(1 != nil);");
+        eval("assert(nil == nil);");
         eval("let x = 1; assert(x == 1);");
         eval("let x = 1; assert(x < 2);");
         eval("let var x = 1; x = x + 1; assert(x < 10);");

@@ -4,8 +4,8 @@
 into bugs and missing features. I'm looking for collaborators who share the vision
 and want to help me make it happen.**
 
-Plush is an experimental programming language and virtual machine for fun and teaching purposes.
-It follows a minimalistic design philosph and draw inspiration from JavaScript, Lua as well as Lox.
+Plush is an experimental toy programming language and virtual machine for fun and teaching purposes.
+It follows a minimalistic design philosphy and draw inspiration from JavaScript, Lua, and Lox.
 
 If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
 
@@ -18,10 +18,10 @@ Cool/fun/notable features:
 - Memory safe, actor-based parallelism
 
 Current limitations:
+- You may run into bugs or missing features
 - Lack of error messages or good error handling
-  - You may have to look at the source code
-  - We could use your help in improving said error messages
-- You may run into incomplete features
+  - You may have to look at the source code to figure things out
+  - We could use your help in improving error messages
 
 ## Build Instructions
 
