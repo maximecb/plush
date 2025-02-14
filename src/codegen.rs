@@ -338,13 +338,11 @@ impl ExprBox
                 gen_var_read(decl, code);
             }
 
-            /*
             Expr::Index { base, index } => {
-                base.gen_code(fun, sym, code, out)?;
-                index.gen_code(fun, sym, code, out)?;
-                code.insn("arr_get");
+                base.gen_code(fun, code, alloc)?;
+                index.gen_code(fun, code, alloc)?;
+                code.push(Insn::arr_get);
             }
-            */
 
             /*
             Expr::Member { base, field } if field == "len" => {
@@ -719,13 +717,20 @@ fn gen_assign(
             }
         }
 
-        /*
         Expr::Index { base, index } => {
-            base.gen_code(fun, sym, code, out)?;
-            index.gen_code(fun, sym, code, out)?;
-            code.insn("arr_set");
+            if need_value {
+                rhs.gen_code(fun, code, alloc)?;
+                base.gen_code(fun, code, alloc)?;
+                index.gen_code(fun, code, alloc)?;
+                code.push(Insn::getn { idx: 2 });
+                code.push(Insn::arr_set);
+            } else {
+                base.gen_code(fun, code, alloc)?;
+                index.gen_code(fun, code, alloc)?;
+                rhs.gen_code(fun, code, alloc)?;
+                code.push(Insn::arr_set);
+            }
         }
-        */
 
         _ => todo!()
     }
