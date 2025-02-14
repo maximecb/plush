@@ -408,25 +408,26 @@ impl ExprBox
                 gen_bin_op(op, lhs, rhs, fun, code, alloc)?;
             }
 
-            /*
             Expr::Ternary { test_expr, then_expr, else_expr } => {
-                let false_label = sym.gen_sym("and_false");
-                let done_label = sym.gen_sym("and_done");
 
-                test_expr.gen_code(fun, sym, code, out)?;
-                out.push_str(&format!("jz {};\n", false_label));
+                //let false_label = sym.gen_sym("and_false");
+                //let done_label = sym.gen_sym("and_done");
+
+                test_expr.gen_code(fun, code, alloc)?;
+                //out.push_str(&format!("jz {};\n", false_label));
 
                 // Evaluate the then expression
-                then_expr.gen_code(fun, sym, code, out)?;
-                out.push_str(&format!("jmp {};\n", done_label));
+                //then_expr.gen_code(fun, sym, code, out)?;
+                //out.push_str(&format!("jmp {};\n", done_label));
 
                 // Evaluate the else expression
-                out.push_str(&format!("{}:\n", false_label));
-                else_expr.gen_code(fun, sym, code, out)?;
+                //out.push_str(&format!("{}:\n", false_label));
+                //else_expr.gen_code(fun, sym, code, out)?;
 
-                out.push_str(&format!("{}:\n", done_label));
+                //out.push_str(&format!("{}:\n", done_label));
+
+                todo!();
             }
-            */
 
             Expr::Call { callee, args } => {
                 let argc = args.len().try_into().unwrap();

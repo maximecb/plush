@@ -588,7 +588,6 @@ fn parse_expr(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
             break;
         }
 
-        /*
         // Ternary operator
         if input.match_token("?")? {
             // We have to evaluate lower-precedence operators now
@@ -600,15 +599,18 @@ fn parse_expr(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
             input.expect_token(":")?;
             let else_expr = parse_expr(input, prog)?;
 
-            expr_stack.push(Expr::Ternary {
-                test_expr: Box::new(test_expr),
-                then_expr: Box::new(then_expr),
-                else_expr: Box::new(else_expr),
-            });
+            let pos = test_expr.pos.clone();
+            expr_stack.push(ExprBox::new(
+                Expr::Ternary {
+                    test_expr,
+                    then_expr,
+                    else_expr,
+                },
+                pos
+            ));
 
             break;
         }
-        */
 
         let new_op = match_bin_op(input)?;
 
@@ -1107,6 +1109,13 @@ mod tests
 
         // Should not parse
         parse_fails("1 + 2 +;");
+    }
+
+    #[test]
+    fn ternary_expr()
+    {
+        parse_ok("1? 2:3;");
+        parse_ok("let a = 1? (2+3):4;");
     }
 
     #[test]

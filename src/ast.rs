@@ -106,13 +106,11 @@ pub enum Expr
         rhs: ExprBox,
     },
 
-    /*
     Ternary {
         test_expr: ExprBox,
         then_expr: ExprBox,
         else_expr: ExprBox,
     },
-    */
 
     Call {
         callee: ExprBox,

@@ -351,6 +351,12 @@ impl ExprBox
                 }
             }
 
+            Expr::Ternary { test_expr, then_expr, else_expr, .. } => {
+                test_expr.resolve_syms(prog, fun, env)?;
+                then_expr.resolve_syms(prog, fun, env)?;
+                else_expr.resolve_syms(prog, fun, env)?;
+            }
+
             Expr::Call { callee, args, .. } => {
                 callee.resolve_syms(prog, fun, env)?;
                 for arg in args {
