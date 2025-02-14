@@ -1338,10 +1338,19 @@ mod tests
         eval("let var x = 1; x = x + 1; assert(x < 10);");
     }
 
+    #[test]
     fn comparisons()
     {
-        eval_eq("let o1 = {}; let o2 = {}; return o1 == o2", Value::False);
-        eval_eq("let o1 = {}; let o2 = {}; return o1 != o2", Value::True);
+        eval_eq("let o1 = {}; let o2 = {}; return o1 == o2;", Value::False);
+        eval_eq("let o1 = {}; let o2 = {}; return o1 != o2;", Value::True);
+    }
+
+    #[test]
+    fn ternary_expr()
+    {
+        eval_eq("return true? 1:2;", Value::Int64(1));
+        eval_eq("return false? 1:2;", Value::Int64(2));
+        eval_eq("let b = (1 < 5)? 1:2; return b;", Value::Int64(1));
     }
 
     #[test]

@@ -409,24 +409,24 @@ impl ExprBox
             }
 
             Expr::Ternary { test_expr, then_expr, else_expr } => {
-
-                //let false_label = sym.gen_sym("and_false");
-                //let done_label = sym.gen_sym("and_done");
-
+                // Evaluate the test expression
                 test_expr.gen_code(fun, code, alloc)?;
-                //out.push_str(&format!("jz {};\n", false_label));
+                let if_idx = code.len();
+                code.push(Insn::if_false { target_ofs: 0 });
 
                 // Evaluate the then expression
-                //then_expr.gen_code(fun, sym, code, out)?;
-                //out.push_str(&format!("jmp {};\n", done_label));
+                then_expr.gen_code(fun, code, alloc)?;
+                let jump_idx = code.len();
+                code.push(Insn::jump { target_ofs: 0 });
+
+                // Patch the if_false to jump to the else clause
+                patch_jump(code, if_idx, code.len());
 
                 // Evaluate the else expression
-                //out.push_str(&format!("{}:\n", false_label));
-                //else_expr.gen_code(fun, sym, code, out)?;
+                else_expr.gen_code(fun, code, alloc)?;
 
-                //out.push_str(&format!("{}:\n", done_label));
-
-                todo!();
+                // Patch the jump over the else expression
+                patch_jump(code, jump_idx, code.len());
             }
 
             Expr::Call { callee, args } => {
