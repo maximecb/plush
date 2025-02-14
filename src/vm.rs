@@ -170,6 +170,20 @@ impl Object
         self.fields.insert(field_name.to_string(), (false, val));
     }
 
+    // Set the value associated with a given field
+    fn set(&mut self, field_name: &str, new_val: Value)
+    {
+        if let Some((mutable, val)) = self.fields.get_mut(field_name) {
+            if *mutable == false {
+                panic!("write to immutable field");
+            }
+
+            *val = new_val;
+        } else {
+            self.fields.insert(field_name.to_string(), (true, new_val));
+        }
+    }
+
     // Get the value associated with a given field
     fn get(&mut self, field_name: &str) -> Value
     {
@@ -880,14 +894,13 @@ impl Actor
                     obj.unwrap_obj().def_const(field_name, val);
                 }
 
-                /*
                 // Set object field
-                Insn::obj_set { field_name } => {
-                    let obj = pop!().unwrap_obj();
+                Insn::obj_set { field } => {
                     let val = pop!();
-                    Object::set(obj, Value::String(field_name), val);
+                    let mut obj = pop!();
+                    let field_name = unsafe { &*field };
+                    obj.unwrap_obj().set(field_name, val);
                 }
-                */
 
                 // Get object field
                 Insn::obj_get { field } => {
@@ -1433,10 +1446,7 @@ mod tests
         // Getter method
         eval_eq("let o = { n: 1337, get(s) { return s.n; } }; return o.get();", Value::Int64(1337));
 
-        // TODO
         // Increment method
-
-
-
+        eval_eq("let o = { var n: 1, inc(s) { s.n = s.n + 1; } }; o.inc(); return o.n;", Value::Int64(2));
     }
 }

@@ -692,24 +692,34 @@ fn gen_assign(
     //dbg!(lhs);
     //dbg!(rhs);
 
-    rhs.gen_code(fun, code, alloc)?;
-
-    // If the output value is needed
-    if need_value {
-        code.push(Insn::dup);
-    }
-
     match lhs.expr.as_ref() {
         Expr::Ref(decl) => {
+            rhs.gen_code(fun, code, alloc)?;
+
+            // If the output value is needed
+            if need_value {
+                code.push(Insn::dup);
+            }
+
             gen_var_write(decl, code);
         }
 
-        /*
         Expr::Member { base, field } => {
-            base.gen_code(fun, sym, code, out)?;
-            code.insn_s("obj_set", &field);
+            let field = alloc.str_const(field.to_string());
+
+            if need_value {
+                rhs.gen_code(fun, code, alloc)?;
+                base.gen_code(fun, code, alloc)?;
+                code.push(Insn::getn { idx: 1 });
+                code.push(Insn::obj_set { field });
+            } else {
+                base.gen_code(fun, code, alloc)?;
+                rhs.gen_code(fun, code, alloc)?;
+                code.push(Insn::obj_set { field });
+            }
         }
 
+        /*
         Expr::Index { base, index } => {
             base.gen_code(fun, sym, code, out)?;
             index.gen_code(fun, sym, code, out)?;
