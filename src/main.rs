@@ -12,6 +12,7 @@ mod codegen;
 mod vm;
 mod alloc;
 mod host;
+mod deepcopy;
 
 extern crate sdl2;
 use std::env;
