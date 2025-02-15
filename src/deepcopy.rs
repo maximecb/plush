@@ -89,14 +89,21 @@ fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
         dst_map.insert(val, new_val);
     }
 
+    // For each heap object translated
+    for (_, val) in &dst_map {
+        match val {
+            Value::String(_) => {}
 
-    // TODO: iterate over dst_map to translate the pointers
+            Value::Closure(p) => {
+                let clos = unsafe { &mut **p };
+                for slot_val in &mut clos.slots {
+                    *slot_val = *dst_map.get(slot_val).unwrap();
+                }
+            }
 
-
-
-
-
-
+            _ => panic!()
+        }
+    }
 
     *dst_map.get(&src_val).unwrap()
 }
