@@ -109,7 +109,6 @@ pub enum Insn
     arr_len,
     arr_set,
     arr_get,
-    arr_freeze,
 
     // Bytearray operations
     ba_new { capacity: u32 },
@@ -962,12 +961,6 @@ impl Actor
                     };
 
                     push!(Value::from(len));
-                }
-
-                // Freeze array
-                Insn::arr_freeze => {
-                    let arr = pop!().unwrap_arr();
-                    Array::freeze(arr);
                 }
                 */
 
