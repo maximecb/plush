@@ -223,6 +223,25 @@ unsafe impl Sync for Value {}
 
 impl Value
 {
+    pub fn is_heap(&self) -> bool
+    {
+        use Value::*;
+        match self {
+            Undef       |
+            Nil         |
+            False       |
+            True        |
+            Int64(_)    |
+            Float64(_)  |
+            HostFn(_)   |
+            Fun(_) => false,
+
+            String(_)   |
+            Closure(_)  |
+            Object(_) => true,
+        }
+    }
+
     pub fn unwrap_usize(&self) -> usize
     {
         match self {

@@ -3,7 +3,9 @@ use crate::vm::{Value, Closure, Object};
 
 fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
 {
-
+    if !src_val.is_heap() {
+        return src_val;
+    }
 
 
     // NOTE: should this be a hash of values?
