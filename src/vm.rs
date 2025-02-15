@@ -194,7 +194,7 @@ impl Object
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug)]
 pub enum Value
 {
     // Uninitialized. This should never be observed.
@@ -227,6 +227,7 @@ impl Value
     {
         use Value::*;
         match self {
+            // Non-heap values
             Undef       |
             Nil         |
             False       |
@@ -236,6 +237,7 @@ impl Value
             HostFn(_)   |
             Fun(_) => false,
 
+            // Heap values
             String(_)   |
             Closure(_)  |
             Object(_) => true,
@@ -305,6 +307,39 @@ impl Value
         }
     }
 }
+
+// Implement PartialEq for Value
+impl PartialEq for Value
+{
+    fn eq(&self, other: &Self) -> bool
+    {
+        use Value::*;
+
+        // For strings, we do a structural equality comparison, so
+        // that some strings can be interned (deduplicated)
+        if let (String(p1), String(p2)) = (self, other) {
+            return unsafe { **p1 == **p2 };
+        }
+
+        // For all other cases, use the default comparison
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+        && match (self, other) {
+            (Nil, _) => true,
+            (True, _) => true,
+            (False, _) => true,
+            (Int64(a), Int64(b))        => a == b,
+            (Float64(a), Float64(b))    => a == b,
+            (HostFn(a), HostFn(b))      => a == b,
+            (Fun(a), Fun(b))            => a == b,
+            (Closure(a), Closure(b))    => a == b,
+            (Object(a), Object(b))      => a == b,
+            _ => panic!("not yet implemented eq {:?} == {:?}", self, other),
+        }
+    }
+}
+
+// Implement Eq since our equality relation is reflexive
+impl Eq for Value {}
 
 impl From<usize> for Value {
     fn from(val: usize) -> Self {
@@ -805,29 +840,13 @@ impl Actor
                 Insn::eq => {
                     let v1 = pop!();
                     let v0 = pop!();
-
-                    let b = match (v0, v1) {
-                        // For now we intentionally don't provide string reference equality
-                        // as we may eventually choose to intern *some* strings
-                        (Value::String(_), Value::String(_)) => panic!(),
-                        _ => v0 == v1
-                    };
-
-                    push_bool!(b);
+                    push_bool!(v0 == v1);
                 }
 
                 Insn::ne => {
                     let v1 = pop!();
                     let v0 = pop!();
-
-                    let b = match (v0, v1) {
-                        // For now we intentionally don't provide string reference equality
-                        // as we may eventually choose to intern *some* strings
-                        (Value::String(_), Value::String(_)) => panic!(),
-                        _ => v0 != v1
-                    };
-
-                    push_bool!(b);
+                    push_bool!(v0 != v1);
                 }
 
                 // Logical negation
@@ -1355,6 +1374,11 @@ mod tests
     {
         eval_eq("let o1 = {}; let o2 = {}; return o1 == o2;", Value::False);
         eval_eq("let o1 = {}; let o2 = {}; return o1 != o2;", Value::True);
+
+        // String comparison
+        eval_eq("return 'foo' == 'bar';", Value::False);
+        eval_eq("return 'foo' == 'foo';", Value::True);
+        eval_eq("return 'foo' != 'foo';", Value::False);
     }
 
     #[test]
