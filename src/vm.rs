@@ -137,19 +137,20 @@ pub enum Insn
     ret,
 }
 
+#[derive(Clone)]
 pub struct Closure
 {
-    fun_id: FunId,
+    pub fun_id: FunId,
 
     // Captured variable slots
-    slots: Vec<Value>,
+    pub slots: Vec<Value>,
 }
 
 #[derive(Clone, Default)]
 pub struct Object
 {
-    fields: HashMap<String, (bool, Value)>,
-    sealed: bool,
+    pub fields: HashMap<String, (bool, Value)>,
+    pub sealed: bool,
 }
 
 impl Object

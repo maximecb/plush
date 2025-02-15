@@ -45,27 +45,55 @@ fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
     }
 
     // Mapping from old to new addresses
-    let dst_map: HashMap<Value, Value> = HashMap::new();
+    let mut dst_map: HashMap<Value, Value> = HashMap::new();
 
     // Stack of values to visit
     let mut stack: Vec<Value> = Vec::new();
 
+    // Queue the source value to be translated
     stack.push(src_val);
 
-    // We need to keep a mapping from source to dst...
-    // We'll use that to translate src_val
-
     while stack.len() > 0 {
+        let val = stack.pop().unwrap();
 
+        // If this value has already been remapped, skip it
+        if dst_map.contains_key(&val) {
+            continue;
+        }
 
+        // We should only queue heap values for performance
+        assert!(val.is_heap());
 
+        let new_val = match val {
+            Value::String(p) => {
+                let new_str = dst_alloc.alloc(unsafe { (*p).clone() });
+                Value::String(new_str)
+            }
 
+            Value::Closure(p) => {
+                let new_clos = unsafe { (*p).clone() };
 
+                for val in &new_clos.slots {
+                    if val.is_heap() {
+                        stack.push(*val);
+                    }
+                }
+
+                Value::Closure(dst_alloc.alloc(new_clos))
+            }
+
+            _ => panic!()
+        };
+
+        // Insert the new mapping into the translation map
+        dst_map.insert(val, new_val);
     }
 
 
-
     // TODO: iterate over dst_map to translate the pointers
+
+
+
 
 
 
@@ -78,15 +106,25 @@ mod tests
 {
     use super::*;
 
+    fn copy_int()
+    {
+        let mut dst_alloc = Alloc::new();
+        let v1 = Value::Int64(1337);
+        let v2 = deepcopy(v1, &mut dst_alloc);
+        assert!(v1 == v2);
+    }
 
     #[test]
-    fn copy_atoms()
+    fn copy_string()
     {
-
-
-
-
+        let mut src_alloc = Alloc::new();
+        let mut dst_alloc = Alloc::new();
+        let s1 = Value::String(src_alloc.str_const("foo".to_string()));
+        let s2 = deepcopy(s1, &mut dst_alloc);
+        assert!(s1 == s2);
     }
+
+
 
 
 
