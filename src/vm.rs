@@ -1,10 +1,11 @@
 use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::ast::{Program, FunId};
 use crate::alloc::Alloc;
 use crate::codegen::CompiledFun;
+use crate::deepcopy::deepcopy;
 use crate::host::*;
 
 /// Instruction opcodes
@@ -402,7 +403,7 @@ pub struct Actor
     queue_rx: mpsc::Receiver<Message>,
 
     // Cache of actor ids to message queue endpoints
-    actor_map: HashMap<u64, mpsc::Sender<Message>>,
+    actor_map: HashMap<u64, ActorTx>,
 
     // Value stack
     stack: Vec<Value>,
@@ -482,13 +483,27 @@ impl Actor
             }
 
             self.actor_map.insert(actor_id, tx.unwrap().clone());
-
             actor_tx = self.actor_map.get(&actor_id);
         }
 
         let actor_tx = actor_tx.unwrap();
 
-        match actor_tx.send(Message { sender: self.actor_id, msg }) {
+
+        /* FIXME: this causes a test to lock up?
+        // Copy the message using the receiver's message allocator
+        let alloc_rc = match actor_tx.msg_alloc.upgrade() {
+            Some(rc) => rc,
+            None => return Err(()),
+        };
+        */
+
+
+
+        //let msg = deepcopy(msg, msg_alloc.lock().as_mut().unwrap());
+
+        // Note: locking can fail if the receiving thread panic
+
+        match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
             Ok(_) => Ok(()),
             Err(_) => Err(()),
         }
@@ -1167,6 +1182,13 @@ impl Actor
     }
 }
 
+#[derive(Clone)]
+struct ActorTx
+{
+    sender: mpsc::Sender<Message>,
+    msg_alloc: Weak<Mutex<Alloc>>,
+}
+
 pub struct VM
 {
     // Program to run
@@ -1179,7 +1201,7 @@ pub struct VM
     threads: HashMap<u64, thread::JoinHandle<Value>>,
 
     // Map from actor ids to message queue endpoints
-    actor_txs: HashMap<u64, mpsc::Sender<Message>>,
+    actor_txs: HashMap<u64, ActorTx>,
 
     // Reference to self
     // Needed to instantiate actors
@@ -1227,6 +1249,15 @@ impl VM
         // Create a message queue for the actor
         let (queue_tx, queue_rx) = mpsc::channel::<Message>();
 
+        // Create an allocator to send messages to the actor
+        let msg_alloc = Arc::new(Mutex::new(Alloc::new()));
+
+        // Info needed to send the actor a message
+        let actor_tx = ActorTx {
+            sender: queue_tx,
+            msg_alloc: Arc::downgrade(&msg_alloc),
+        };
+
 
         // FIXME:
         // We need to recursively copy the function/closure
@@ -1242,7 +1273,7 @@ impl VM
         // Store the join handles and queue endpoints on the VM
         let mut vm_ref = vm.lock().unwrap();
         vm_ref.threads.insert(actor_id, handle);
-        vm_ref.actor_txs.insert(actor_id, queue_tx);
+        vm_ref.actor_txs.insert(actor_id, actor_tx);
         drop(vm_ref);
 
         actor_id
@@ -1269,13 +1300,24 @@ impl VM
         // Create a message queue for the actor
         let (queue_tx, queue_rx) = mpsc::channel::<Message>();
 
+        // Create an allocator to send messages to the actor
+        let msg_alloc = Arc::new(Mutex::new(Alloc::new()));
+
+        // Info needed to send the actor a message
+        let actor_tx = ActorTx {
+            sender: queue_tx,
+            msg_alloc: Arc::downgrade(&msg_alloc),
+        };
+
         // Assign an actor id
         // Store the queue endpoints on the VM
         let mut vm_ref = vm.lock().unwrap();
         let actor_id = vm_ref.next_actor_id;
         assert!(actor_id == 0);
         vm_ref.next_actor_id += 1;
-        vm_ref.actor_txs.insert(actor_id, queue_tx);
+
+        // Store the queue endpoint and message allocator on the VM
+        vm_ref.actor_txs.insert(actor_id, actor_tx);
         drop(vm_ref);
 
         let mut actor = Actor::new(actor_id, vm_mutex, queue_rx);

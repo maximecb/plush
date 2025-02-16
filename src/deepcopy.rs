@@ -38,7 +38,7 @@ impl Hash for Value
     }
 }
 
-fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
+pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
 {
     if !src_val.is_heap() {
         return src_val;
