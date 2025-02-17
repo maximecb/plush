@@ -37,7 +37,7 @@ impl Alloc
         // Bump the next allocation index
         let next_idx = obj_pos + size_bytes;
         if next_idx >= self.mem_size {
-            panic!();
+            panic!("allocator out of memory");
         }
         self.next_idx = next_idx;
 
