@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::ast::{Program, FunId};
 use crate::alloc::Alloc;
-use crate::array::Array;
+use crate::array::{Array, array_get_field};
 use crate::codegen::CompiledFun;
 use crate::deepcopy::deepcopy;
 use crate::host::*;
@@ -965,7 +965,13 @@ impl Actor
                 Insn::obj_get { field } => {
                     let mut obj = pop!();
                     let field_name = unsafe { &*field };
-                    let val = obj.unwrap_obj().get(field_name);
+
+                    let val = match obj {
+                        Value::Object(p) => unsafe { (*p).get(field_name) },
+                        Value::Array(p) => unsafe { array_get_field(&mut *p, field_name) },
+                        _ => panic!()
+                    };
+
                     push!(val);
                 }
 
@@ -1581,5 +1587,7 @@ mod tests
         eval("let a = [1, 2, 3];");
         eval_eq("let a = [11, 22, 33]; return a[0];", Value::Int64(11));
         eval_eq("let a = [11, 22, 33]; return a[2];", Value::Int64(33));
+        eval_eq("let a = [11, 22, 33]; return a.len;", Value::Int64(3));
+        eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::Int64(4));
     }
 }

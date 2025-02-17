@@ -28,6 +28,16 @@ impl Array
     }
 }
 
-//fn get_array_field(array: Value)
-//{
-//}
+pub fn array_push(actor: &mut Actor, mut array: Value, val: Value)
+{
+    array.unwrap_arr().push(val);
+}
+
+pub fn array_get_field(array: &mut Array, field_name: &str) -> Value
+{
+    match field_name {
+        "len" => array.elems.len().into(),
+        "push" => Value::HostFn(HostFn::Fn2_0(array_push)),
+        _ => panic!()
+    }
+}
