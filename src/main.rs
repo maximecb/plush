@@ -11,6 +11,7 @@ mod symbols;
 mod codegen;
 mod vm;
 mod alloc;
+mod array;
 mod host;
 mod deepcopy;
 

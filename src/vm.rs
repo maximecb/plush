@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::ast::{Program, FunId};
 use crate::alloc::Alloc;
+use crate::array::Array;
 use crate::codegen::CompiledFun;
 use crate::deepcopy::deepcopy;
 use crate::host::*;
@@ -107,14 +108,14 @@ pub enum Insn
     // Array operations
     arr_new { capacity: u32 },
     arr_push,
-    arr_len,
     arr_set,
     arr_get,
 
+    // TODO: should these all be functions/methods?
     // Bytearray operations
-    ba_new { capacity: u32 },
-    ba_resize,
-    ba_write_u32,
+    //ba_new { capacity: u32 },
+    //ba_resize,
+    //ba_write_u32,
 
     // Jump if true/false
     if_true { target_ofs: i32 },
@@ -215,7 +216,7 @@ pub enum Value
     HostFn(HostFn),
 
     Object(*mut Object),
-    //Array(*mut Array),
+    Array(*mut Array),
 }
 use Value::{Undef, Nil, False, True, Int64, Float64};
 
@@ -237,12 +238,13 @@ impl Value
             Int64(_)    |
             Float64(_)  |
             HostFn(_)   |
-            Fun(_) => false,
+            Fun(_)      => false,
 
             // Heap values
             String(_)   |
             Closure(_)  |
-            Object(_) => true,
+            Object(_)   |
+            Array(_)    => true,
         }
     }
 
@@ -965,16 +967,13 @@ impl Actor
                     obj.unwrap_obj().seal();
                 }
 
-                /*
                 // Create new empty array
                 Insn::arr_new { capacity } => {
-                    let new_arr = Array::new(
-                        &mut self.alloc,
-                        capacity as usize
-                    );
+                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity));
                     push!(Value::Array(new_arr))
                 }
 
+                /*
                 Insn::arr_push => {
                     let arr = pop!().unwrap_arr();
                     let val = pop!();
@@ -1007,16 +1006,6 @@ impl Actor
                         }
                         _ => panic!("expected array type")
                     };
-                }
-
-                Insn::arr_len => {
-                    let len = match pop!() {
-                        Value::Array(p) => Array::len(p),
-                        Value::ByteArray(p) => ByteArray::len(p),
-                        _ => panic!(),
-                    };
-
-                    push!(Value::from(len));
                 }
                 */
 
@@ -1571,5 +1560,15 @@ mod tests
 
         // Increment method
         eval_eq("let o = { var n: 1, inc(s) { s.n = s.n + 1; } }; o.inc(); return o.n;", Value::Int64(2));
+    }
+
+    #[test]
+    fn arrays()
+    {
+        eval("let a = [];");
+
+
+
+
     }
 }
