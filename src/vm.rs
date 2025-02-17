@@ -1399,10 +1399,19 @@ mod tests
     #[test]
     fn logical_and()
     {
-        eval_eq("if (false && false) return 1; else return 2;", Value::Int64(2));
-        eval_eq("if (false && true) return 1; else return 2;", Value::Int64(2));
-        eval_eq("if (true && false) return 1; else return 2;", Value::Int64(2));
-        eval_eq("if (true && true) return 1; else return 2;", Value::Int64(1));
+        eval_eq("if (false && false) return 1; else return 0;", Value::Int64(0));
+        eval_eq("if (false && true) return 1; else return 0;", Value::Int64(0));
+        eval_eq("if (true && false) return 1; else return 0;", Value::Int64(0));
+        eval_eq("if (true && true) return 1; else return 0;", Value::Int64(1));
+    }
+
+    #[test]
+    fn logical_or()
+    {
+        eval_eq("if (false || false) return 1; else return 0;", Value::Int64(0));
+        eval_eq("if (false || true) return 1; else return 0;", Value::Int64(1));
+        eval_eq("if (true || false) return 1; else return 0;", Value::Int64(1));
+        eval_eq("if (true || true) return 1; else return 0;", Value::Int64(1));
     }
 
     #[test]

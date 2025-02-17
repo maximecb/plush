@@ -565,38 +565,40 @@ fn gen_bin_op(
         patch_jump(code, if1_idx, code.len());
         code.push(Insn::push { val: Value::False });
 
-        // Done
+        // Done label
         patch_jump(code, jmp_idx, code.len());
 
         return Ok(());
     }
 
-    /*
     // Logical OR (a || b)
     if *op == Or {
-        let true_label = sym.gen_sym("or_true");
-        let done_label = sym.gen_sym("or_done");
 
-        // If a is true, the expression evaluates to true
-        lhs.gen_code(fun, sym, code, out)?;
-        code.insn_s("if_true", &true_label);
+        // If a is true, the result is true
+        lhs.gen_code(fun, code, alloc)?;
+        let if0_idx = code.len();
+        code.push(Insn::if_true { target_ofs: 0 });
 
-        // Evaluate the rhs
-        rhs.gen_code(fun, sym, code, out)?;
-        code.insn_s("if_true", &true_label);
+        // If b is true, the result is true
+        rhs.gen_code(fun, code, alloc)?;
+        let if1_idx = code.len();
+        code.push(Insn::if_true { target_ofs: 0 });
 
         // Both subexpressions are false
-        code.push("false");
-        code.jump(&done_label);
+        code.push(Insn::push { val: Value::False });
+        let jmp_idx = code.len();
+        code.push(Insn::jump { target_ofs: 0 });
 
-        code.label(&true_label);
-        code.push("true");
+        // If true, short-circuit here
+        patch_jump(code, if0_idx, code.len());
+        patch_jump(code, if1_idx, code.len());
+        code.push(Insn::push { val: Value::True });
 
-        code.label(&done_label);
+        // Done label
+        patch_jump(code, jmp_idx, code.len());
 
         return Ok(());
     }
-    */
 
     lhs.gen_code(fun, code, alloc)?;
     rhs.gen_code(fun, code, alloc)?;
