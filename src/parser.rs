@@ -1305,6 +1305,19 @@ mod tests
     {
         parse_ok("while (1) { foo(); }");
         parse_ok("let i = 0; while (i < n) { foo(); i = i + 1; }");
+
+        // Common error, don't accept
+        parse_fails("while (1);");
+    }
+
+    #[test]
+    fn for_stmt()
+    {
+        parse_ok("for (let var i = 0; i < 10; i = i + 1) {}");
+        parse_ok("for (;;) {}");
+
+        // Common error, don't accept
+        parse_fails("for (;;);");
     }
 
     #[test]
