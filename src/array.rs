@@ -16,6 +16,11 @@ impl Array
             elems: Vec::with_capacity(cap as usize)
         }
     }
+
+    pub fn push(&mut self, val: Value)
+    {
+        self.elems.push(val);
+    }
 }
 
 //fn get_array_field(array: Value)

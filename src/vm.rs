@@ -310,6 +310,14 @@ impl Value
             _ => panic!("expected object value but got {:?}", self)
         }
     }
+
+    pub fn unwrap_arr(&mut self) -> &mut Array
+    {
+        match self {
+            Value::Array(p) => unsafe { &mut **p },
+            _ => panic!("expected array value but got {:?}", self)
+        }
+    }
 }
 
 // Implement PartialEq for Value
@@ -973,13 +981,14 @@ impl Actor
                     push!(Value::Array(new_arr))
                 }
 
-                /*
+                // Append an element at the end of an array
                 Insn::arr_push => {
-                    let arr = pop!().unwrap_arr();
                     let val = pop!();
-                    Array::push(arr, val, &mut self.alloc);
+                    let mut arr = pop!();
+                    arr.unwrap_arr().push(val);
                 }
 
+                /*
                 Insn::arr_get => {
                     let idx = pop!().unwrap_u64();
                     let arr = pop!();
@@ -1566,7 +1575,7 @@ mod tests
     fn arrays()
     {
         eval("let a = [];");
-
+        eval("let a = [1, 2, 3];");
 
 
 
