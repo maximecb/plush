@@ -543,32 +543,33 @@ fn gen_bin_op(
         return Ok(());
     }
 
-    /*
     // Logical AND (a && b)
     if *op == And {
-        let false_label = sym.gen_sym("and_false");
-        let done_label = sym.gen_sym("and_done");
+        // If a is false, the result is false
+        lhs.gen_code(fun, code, alloc)?;
+        let if0_idx = code.len();
+        code.push(Insn::if_false { target_ofs: 0 });
 
-        // If a is false, the expression evaluates to false
-        lhs.gen_code(fun, sym, code, out)?;
-        code.insn_s("if_false", &false_label);
-
-        // Evaluate the rhs
-        rhs.gen_code(fun, sym, code, out)?;
-        code.insn_s("if_false", &false_label);
+        // If b is false, the result is false
+        rhs.gen_code(fun, code, alloc)?;
+        let if1_idx = code.len();
+        code.push(Insn::if_false { target_ofs: 0 });
 
         // Both subexpressions are true
-        code.push("true");
-        code.jump(&done_label);
+        code.push(Insn::push { val: Value::True });
+        let jmp_idx = code.len();
+        code.push(Insn::jump { target_ofs: 0 });
 
-        code.label(&false_label);
-        code.push("false");
+        // If false, short-circuit here
+        patch_jump(code, if0_idx, code.len());
+        patch_jump(code, if1_idx, code.len());
+        code.push(Insn::push { val: Value::False });
 
-        code.label(&done_label);
+        // Done
+        patch_jump(code, jmp_idx, code.len());
 
         return Ok(());
     }
-    */
 
     /*
     // Logical OR (a || b)
