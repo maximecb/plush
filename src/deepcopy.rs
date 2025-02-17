@@ -53,6 +53,22 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
     // Queue the source value to be translated
     stack.push(src_val);
 
+    macro_rules! push_val {
+        ($val: expr) => {
+            if $val.is_heap() {
+                stack.push(*$val);
+            }
+        }
+    }
+
+    macro_rules! remap_val {
+        ($val: expr) => {
+            if ($val.is_heap()) {
+                *$val = *dst_map.get($val).unwrap();
+            }
+        }
+    }
+
     while stack.len() > 0 {
         let val = stack.pop().unwrap();
 
@@ -74,12 +90,20 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
                 let new_clos = unsafe { (*p).clone() };
 
                 for val in &new_clos.slots {
-                    if val.is_heap() {
-                        stack.push(*val);
-                    }
+                    push_val!(val);
                 }
 
                 Value::Closure(dst_alloc.alloc(new_clos))
+            }
+
+            Value::Object(p) => {
+                let new_obj = unsafe { (*p).clone() };
+
+                for ( _, val) in new_obj.fields.values() {
+                    push_val!(val);
+                }
+
+                Value::Object(dst_alloc.alloc(new_obj))
             }
 
             _ => panic!()
@@ -97,7 +121,14 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
             Value::Closure(p) => {
                 let clos = unsafe { &mut **p };
                 for slot_val in &mut clos.slots {
-                    *slot_val = *dst_map.get(slot_val).unwrap();
+                    remap_val!(slot_val);
+                }
+            }
+
+            Value::Object(p) => {
+                let obj = unsafe { &mut **p };
+                for (_, val) in obj.fields.values_mut() {
+                    remap_val!(val);
                 }
             }
 
