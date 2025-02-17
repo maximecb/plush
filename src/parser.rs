@@ -284,25 +284,27 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
         );
     }
 
-    /*
     // Pre-increment expression
     if input.match_token("++")? {
         let sub_expr = parse_prefix(input, prog)?;
 
         // Transform into i = i + 1
-        return Ok(
-            Expr::Binary{
+        return ExprBox::new_ok(
+            Expr::Binary {
                 op: BinOp::Assign,
-                lhs: Box::new(sub_expr.clone()),
-                rhs: Box::new(Expr::Binary{
-                    op: BinOp::Add,
-                    lhs: Box::new(sub_expr.clone()),
-                    rhs: Box::new(Expr::Int(1))
-                })
-            }
+                lhs: sub_expr.clone(),
+                rhs: ExprBox::new(
+                    Expr::Binary{
+                        op: BinOp::Add,
+                        lhs: sub_expr.clone(),
+                        rhs: ExprBox::new(Expr::Int64(1), sub_expr.pos)
+                    },
+                    sub_expr.pos
+                )
+            },
+            sub_expr.pos
         );
     }
-    */
 
     /*
     // Pre-decrement expression
@@ -1147,7 +1149,9 @@ mod tests
         parse_ok("let f = 4.56e78;");
         parse_ok("let f = 4.5_6e8_;");
 
+        // Invalid format
         parse_fails("let f = 4..5;");
+        parse_fails("let f = 4.5.;");
     }
 
     #[test]
@@ -1313,7 +1317,7 @@ mod tests
     #[test]
     fn for_stmt()
     {
-        parse_ok("for (let var i = 0; i < 10; i = i + 1) {}");
+        parse_ok("for (let var i = 0; i < 10; ++i) {}");
         parse_ok("for (;;) {}");
 
         // Common error, don't accept
