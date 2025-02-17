@@ -1383,6 +1383,7 @@ mod tests
         eval_eq("return 5 - 3;", Value::Int64(2));
         eval_eq("return 2 * 3 + 4;", Value::Int64(10));
         eval_eq("return 5 + 2 * -2;", Value::Int64(1));
+        eval_eq("return 2 * 2 - 1;", Value::Int64(3));
     }
 
     #[test]
@@ -1393,6 +1394,15 @@ mod tests
         eval_eq("if (true) return 77; else return 88;", Value::Int64(77));
         eval_eq("if (false) return 77; else return 88;", Value::Int64(88));
         eval_eq("if (3 < 5) return 1; return 2;", Value::Int64(1));
+    }
+
+    #[test]
+    fn logical_and()
+    {
+        eval_eq("if (false && false) return 1; else return 2;", Value::Int64(2));
+        eval_eq("if (false && true) return 1; else return 2;", Value::Int64(2));
+        eval_eq("if (true && false) return 1; else return 2;", Value::Int64(2));
+        eval_eq("if (true && true) return 1; else return 2;", Value::Int64(1));
     }
 
     #[test]
@@ -1425,6 +1435,8 @@ mod tests
         eval("let x = 1; assert(x < 2);");
         eval("let var x = 1; x = x + 1; assert(x < 10);");
     }
+
+
 
     #[test]
     fn comparisons()
