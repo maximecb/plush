@@ -988,20 +988,23 @@ impl Actor
                     arr.unwrap_arr().push(val);
                 }
 
-                /*
                 Insn::arr_get => {
-                    let idx = pop!().unwrap_u64();
-                    let arr = pop!();
+                    let idx = pop!().unwrap_usize();
+                    let mut arr = pop!();
 
+                    /*
                     let val = match arr {
                         Value::Array(p) => Array::get(p, idx),
                         Value::ByteArray(p) => Value::from(ByteArray::get(p, idx)),
                         _ => panic!("expected array type")
                     };
+                    */
 
+                    let val = arr.unwrap_arr().get(idx);
                     push!(val);
                 }
 
+                /*
                 Insn::arr_set => {
                     let idx = pop!().unwrap_u64();
                     let arr = pop!();
@@ -1576,8 +1579,7 @@ mod tests
     {
         eval("let a = [];");
         eval("let a = [1, 2, 3];");
-
-
-
+        eval_eq("let a = [11, 22, 33]; return a[0];", Value::Int64(11));
+        eval_eq("let a = [11, 22, 33]; return a[2];", Value::Int64(33));
     }
 }

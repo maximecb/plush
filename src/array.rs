@@ -21,6 +21,11 @@ impl Array
     {
         self.elems.push(val);
     }
+
+    pub fn get(&mut self, idx: usize) -> Value
+    {
+        self.elems[idx]
+    }
 }
 
 //fn get_array_field(array: Value)
