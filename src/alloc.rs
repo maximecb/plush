@@ -67,3 +67,8 @@ impl Alloc
         s_ptr as *const String
     }
 }
+
+// Allow sending allocators between threads
+// This is needed for the message allocator
+unsafe impl Send for Alloc {}
+unsafe impl Sync for Alloc {}

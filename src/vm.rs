@@ -399,6 +399,9 @@ pub struct Actor
     // Private allocator
     pub alloc: Alloc,
 
+    // Allocator for incoming messages
+    msg_alloc: Arc<Mutex<Alloc>>,
+
     // Message queue receiver endpoint
     queue_rx: mpsc::Receiver<Message>,
 
@@ -420,12 +423,18 @@ pub struct Actor
 
 impl Actor
 {
-    pub fn new(actor_id: u64, vm: Arc<Mutex<VM>>, queue_rx: mpsc::Receiver<Message>) -> Self
+    pub fn new(
+        actor_id: u64,
+        vm: Arc<Mutex<VM>>,
+        msg_alloc: Arc<Mutex<Alloc>>,
+        queue_rx: mpsc::Receiver<Message>
+    ) -> Self
     {
         Self {
             actor_id,
             vm,
             alloc: Alloc::new(),
+            msg_alloc,
             queue_rx,
             actor_map: HashMap::default(),
             stack: Vec::default(),
@@ -488,20 +497,13 @@ impl Actor
 
         let actor_tx = actor_tx.unwrap();
 
-
-        /* FIXME: this causes a test to lock up?
         // Copy the message using the receiver's message allocator
+        // Note: locking can fail if the receiving thread panics
         let alloc_rc = match actor_tx.msg_alloc.upgrade() {
             Some(rc) => rc,
             None => return Err(()),
         };
-        */
-
-
-
-        //let msg = deepcopy(msg, msg_alloc.lock().as_mut().unwrap());
-
-        // Note: locking can fail if the receiving thread panic
+        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap());
 
         match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
             Ok(_) => Ok(()),
@@ -1250,7 +1252,14 @@ impl VM
         let (queue_tx, queue_rx) = mpsc::channel::<Message>();
 
         // Create an allocator to send messages to the actor
-        let msg_alloc = Arc::new(Mutex::new(Alloc::new()));
+        let mut msg_alloc = Alloc::new();
+
+        // We need to recursively copy the function/closure
+        // using the actor's message allocator
+        let fun = deepcopy(fun, &mut msg_alloc);
+
+        // Wrap the message allocator in a shared mutex
+        let msg_alloc = Arc::new(Mutex::new(msg_alloc));
 
         // Info needed to send the actor a message
         let actor_tx = ActorTx {
@@ -1258,15 +1267,14 @@ impl VM
             msg_alloc: Arc::downgrade(&msg_alloc),
         };
 
-
-        // FIXME:
-        // We need to recursively copy the function/closure
-
-
-
         // Spawn a new thread for the actor
         let handle = thread::spawn(move || {
-            let mut actor = Actor::new(actor_id, vm_mutex, queue_rx);
+            let mut actor = Actor::new(
+                actor_id,
+                vm_mutex,
+                msg_alloc,
+                queue_rx
+            );
             actor.call(fun, &args)
         });
 
@@ -1320,7 +1328,13 @@ impl VM
         vm_ref.actor_txs.insert(actor_id, actor_tx);
         drop(vm_ref);
 
-        let mut actor = Actor::new(actor_id, vm_mutex, queue_rx);
+        let mut actor = Actor::new(
+            actor_id,
+            vm_mutex,
+            msg_alloc,
+            queue_rx
+        );
+
         actor.call(Value::Fun(fun_id), &args)
     }
 }
