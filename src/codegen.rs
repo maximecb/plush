@@ -137,18 +137,20 @@ impl StmtBox
             }
 
             Stmt::Block(stmts) => {
-                // For each function declaration
-                for stmt in stmts {
-                    if let Stmt::Let { init_expr, decl, .. } = stmt.stmt.as_ref() {
-                        if let Expr::Fun { fun_id, captured } = init_expr.expr.as_ref() {
-                            // Create the closure
-                            code.push(Insn::clos_new {
-                                fun_id: *fun_id,
-                                num_slots: captured.len() as u32,
-                            });
+                // For each closure declaration
+                if !fun.is_unit {
+                    for stmt in stmts {
+                        if let Stmt::Let { init_expr, decl, .. } = stmt.stmt.as_ref() {
+                            if let Expr::Fun { fun_id, captured } = init_expr.expr.as_ref() {
+                                // Create the closure
+                                code.push(Insn::clos_new {
+                                    fun_id: *fun_id,
+                                    num_slots: captured.len() as u32,
+                                });
 
-                            // Initialize the local variable
-                            gen_var_write(decl.as_ref().unwrap(), code);
+                                // Initialize the local variable
+                                gen_var_write(decl.as_ref().unwrap(), code);
+                            }
                         }
                     }
                 }
@@ -251,6 +253,11 @@ impl StmtBox
 
             // Variable declaration
             Stmt::Let { mutable, var_name, init_expr, decl } => {
+                // Nothing to do for top-level functions
+                if let Some(Decl::Fun { .. }) = decl {
+                    return Ok(())
+                }
+
                 match init_expr.expr.as_ref() {
                     Expr::Fun { fun_id, captured } => {
                         // Read the closure decl
@@ -446,8 +453,14 @@ impl ExprBox
                 }
             }
 
-            // Closure expression
+            // Function expression
             Expr::Fun { fun_id, captured } => {
+                // If this is not a closure
+                if captured.len() == 0 {
+                    code.push(Insn::push { val: Value::Fun(*fun_id) });
+                    return Ok(())
+                }
+
                 code.push(Insn::clos_new {
                     fun_id: *fun_id,
                     num_slots: captured.len() as u32,

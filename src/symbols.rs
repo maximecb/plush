@@ -223,8 +223,13 @@ impl StmtBox
                 // Pre-declare functions before symbols are resolved
                 for stmt in stmts.iter_mut() {
                     if let Stmt::Let { mutable, var_name, init_expr, ref mut decl } = stmt.stmt.as_mut() {
-                        if let Expr::Fun { .. } = init_expr.expr.as_ref() {
-                            let new_decl = env.define_local(var_name, *mutable, fun);
+                        if let Expr::Fun { fun_id, .. } = init_expr.expr.as_ref() {
+                            let new_decl = if fun.is_unit && !*mutable {
+                                env.define(var_name, Decl::Fun { id: *fun_id })
+                            } else {
+                                env.define_local(var_name, *mutable, fun)
+                            };
+
                             *decl = Some(new_decl)
                         }
                     }
