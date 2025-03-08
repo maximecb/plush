@@ -2,37 +2,49 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::parsing::{ParseError};
 
-/// Global/variable/function declaration
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum DeclKind
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Decl
 {
+    // Global function
+    Fun { id: FunId },
+
+    // Class declaration
+    //Class { id: ClassId },
+
+    // Global variable
+    Global { idx: u32, mutable: bool },
+
     // Function argument
-    Arg,
+    Arg { idx: u32, src_fun: FunId },
 
     // Local variable in a function
-    Local,
+    Local { idx: u32, src_fun: FunId, mutable: bool },
 
-    // Used to mark variables as captured by the current closure
-    Captured,
+    // Variables captured by the current closure
+    Captured { idx: u32, mutable: bool },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Decl
+impl Decl
 {
-    // Kind of declaration
-    pub kind: DeclKind,
+    fn get_src_fun(&self) -> FunId
+    {
+        match *self {
+            Decl::Arg { src_fun, .. } => src_fun,
+            Decl::Local { src_fun, .. } => src_fun,
+            _ => panic!()
+        }
+    }
 
-    // Index
-    pub idx: u32,
-
-    // Function this originates from
-    pub fun_id: FunId,
-
-    // Global variable flag
-    pub global: bool,
-
-    // Mutable variable flag
-    pub mutable: bool,
+    fn is_mutable(&self) -> bool
+    {
+        match *self {
+            Decl::Fun { .. } => false,
+            Decl::Global { mutable, .. } => mutable,
+            Decl::Arg { .. } => false,
+            Decl::Local { mutable, .. } => mutable,
+            Decl::Captured { mutable, .. } => mutable,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -78,12 +90,10 @@ impl Env
         let top_scope = &mut self.scopes[num_scopes - 1];
         assert!(top_scope.decls.get(name).is_none());
 
-        let decl = Decl {
-            kind: DeclKind::Local,
+        let decl = Decl::Local {
             idx: top_scope.next_idx as u32,
-            fun_id: fun.id,
+            src_fun: fun.id,
             mutable,
-            global: fun.is_unit,
         };
 
         top_scope.next_idx += 1;
@@ -166,12 +176,9 @@ impl Function
 
         // Declare the function arguments
         for (idx, param_name) in self.params.iter().enumerate() {
-            let decl = Decl {
-                kind: DeclKind::Arg,
+            let decl = Decl::Arg {
                 idx: idx as u32,
-                fun_id: self.id,
-                global: false,
-                mutable: false
+                src_fun: self.id
             };
             env.define(param_name, decl);
         }
@@ -301,13 +308,15 @@ impl ExprBox
                 if let Some(mut decl) = env.lookup(name) {
                     // If this variable comes from another function,
                     // then it must be captured as a closure variable
-                    if decl.fun_id != fun.id {
+                    if decl.get_src_fun() != fun.id {
                         // Register and get an index for the captured variable
                         let cell_idx = fun.reg_captured(&decl);
 
                         // Identify this as a captured closure variable
-                        decl.kind = DeclKind::Captured;
-                        decl.idx = cell_idx;
+                        decl = Decl::Captured {
+                            idx: cell_idx,
+                            mutable: decl.is_mutable()
+                        };
                     }
 
                     *(self.expr) = Expr::Ref(decl);
@@ -342,11 +351,13 @@ impl ExprBox
 
                 // If this is an assignment to a constant
                 if *op == BinOp::Assign {
-                    if let Expr::Ref(Decl { mutable: false, .. }) = lhs.expr.as_ref() {
-                        return ParseError::with_pos(
-                            &format!("assignment to immutable variable"),
-                            &self.pos
-                        );
+                    if let Expr::Ref(decl) = lhs.expr.as_ref() {
+                        if !decl.is_mutable() {
+                            return ParseError::with_pos(
+                                &format!("assignment to immutable variable"),
+                                &self.pos
+                            );
+                        }
                     }
                 }
             }
@@ -379,7 +390,7 @@ impl ExprBox
                 for (decl, idx) in &child_fun.captured {
                     // If this variable doesn't comes from this function,
                     // then it must be captured as a closure variable
-                    if decl.fun_id != fun.id {
+                    if decl.get_src_fun() != fun.id {
                         fun.reg_captured(&decl);
                     }
 

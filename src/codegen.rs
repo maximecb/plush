@@ -1,7 +1,7 @@
 use std::cmp::max;
 use crate::ast::*;
 use crate::parsing::{ParseError};
-use crate::symbols::{Decl, DeclKind};
+use crate::symbols::{Decl};
 use crate::vm::{Insn, Value};
 use crate::alloc::Alloc;
 
@@ -253,24 +253,16 @@ impl StmtBox
             Stmt::Let { mutable, var_name, init_expr, decl } => {
                 match init_expr.expr.as_ref() {
                     Expr::Fun { fun_id, captured } => {
-
-                        // TODO: we need a way to eval the closure decl
+                        // Read the closure decl
                         let decl = decl.as_ref().unwrap();
-                        assert!(decl.kind == DeclKind::Local);
-                        code.push(Insn::get_local { idx: decl.idx.try_into().unwrap() });
+                        gen_var_read(decl, code);
 
                         // For each variable captured by the closure
                         for (idx, decl) in captured.iter().enumerate() {
-
                             code.push(Insn::dup);
 
-                            // TODO: here we need to be able to eval the ref
-                            // we need a gen_ref()
-                            if decl.fun_id != fun.id {
-                                panic!();
-                            }
-                            code.push(Insn::get_local { idx: decl.idx });
-
+                            // Read the variable and write its value on the closure
+                            gen_var_read(decl, code);
                             code.push(Insn::clos_set { idx: idx as u32 });
                         }
                     }
@@ -634,9 +626,9 @@ fn gen_var_write(
     code: &mut Vec<Insn>,
 )
 {
-    match decl.kind {
-        DeclKind::Local => {
-            code.push(Insn::set_local { idx: decl.idx });
+    match *decl {
+        Decl::Local { idx, .. } => {
+            code.push(Insn::set_local { idx });
         }
 
         _ => todo!()
@@ -650,21 +642,29 @@ fn gen_var_read(
     code: &mut Vec<Insn>,
 )
 {
-    match decl.kind {
-        DeclKind::Arg => {
-            code.push(Insn::get_arg { idx: decl.idx });
+    match *decl {
+        Decl::Fun { id } => {
+            code.push(Insn::push { val: Value::Fun(id) });
         }
 
-        DeclKind::Local => {
-            code.push(Insn::get_local { idx: decl.idx });
+        Decl::Global { idx, .. } => {
+            todo!();
         }
 
-        DeclKind::Captured => {
-            if decl.mutable {
+        Decl::Arg { idx, .. } => {
+            code.push(Insn::get_arg { idx });
+        }
+
+        Decl::Local { idx, .. } => {
+            code.push(Insn::get_local { idx });
+        }
+
+        Decl::Captured { idx, mutable } => {
+            if mutable {
                 todo!()
             }
 
-            code.push(Insn::clos_get { idx: decl.idx });
+            code.push(Insn::clos_get { idx });
         }
     }
 }
@@ -728,162 +728,3 @@ fn gen_assign(
 
     Ok(())
 }
-
-/*
-#[cfg(test)]
-mod tests
-{
-    use super::*;
-
-    fn gen_ok(src: &str) -> String
-    {
-        use crate::parsing::Input;
-        use crate::parser::parse_unit;
-
-        dbg!(src);
-        let mut input = Input::new(&src, "src");
-        let mut unit = parse_unit(&mut input).unwrap();
-        unit.resolve_syms().unwrap();
-        //dbg!(&unit.fun_decls[0]);
-        unit.gen_code().unwrap()
-    }
-
-    fn compile_file(file_name: &str)
-    {
-        use crate::parsing::Input;
-        use crate::parser::parse_unit;
-
-        dbg!(file_name);
-        let mut input = Input::from_file(file_name).unwrap();
-        //println!("{}", output);
-
-        let mut unit = parse_unit(&mut input).unwrap();
-        unit.resolve_syms().unwrap();
-        unit.gen_code().unwrap();
-    }
-
-    #[test]
-    fn basics()
-    {
-        gen_ok("");
-        gen_ok("{}");
-        gen_ok("{} {}");
-        gen_ok("1;");
-        gen_ok("1.5;");
-        gen_ok("-77;");
-        gen_ok("true;");
-        gen_ok("false;");
-        gen_ok("none;");
-    }
-
-    fn unary()
-    {
-        gen_ok("typeof 'str';");
-    }
-
-    fn arith()
-    {
-        gen_ok("1 + 2;");
-        gen_ok("1 + 2 * 3;");
-    }
-
-    fn call_host()
-    {
-        gen_ok("$print_endl();");
-        gen_ok("$print_i64(1 + 2);");
-    }
-
-    #[test]
-    fn globals()
-    {
-        gen_ok("let x = 3;");
-        gen_ok("let x = 3; x;");
-        gen_ok("let var x = 3;");
-        gen_ok("let var x = 3; x = 5;");
-        gen_ok("let var x = 3; x = x + 1; x;");
-    }
-
-    #[test]
-    fn functions()
-    {
-        gen_ok("let f = fun() {};");
-        gen_ok("let f = fun(x, y) {};");
-        gen_ok("let f = fun(x, y) { return x + y; };");
-        gen_ok("let f = fun(x, y) { return x + y; };");
-        gen_ok("fun f() {}");
-    }
-
-    /*
-    #[test]
-    fn call_ret()
-    {
-        gen_ok("void foo() {} void bar() {}");
-        gen_ok("void foo() {} void bar() { return foo(); } ");
-        gen_ok("void print_i64(i64 v) {} void bar(u64 v) { print_i64(v); }");
-    }
-    */
-
-    /*
-    #[test]
-    fn var_arg()
-    {
-        gen_ok("void foo(int x, ...) {} void bar() { foo(1); }");
-        gen_ok("void foo(int x, ...) {} void bar() { foo(1, 2); }");
-    }
-    */
-
-    #[test]
-    fn strings()
-    {
-        gen_ok("let str = 'foo';");
-        gen_ok("let str = \"foo\\nbar\";");
-    }
-
-    #[test]
-    fn arrays()
-    {
-        gen_ok("let a = [];");
-        gen_ok("let a = *[];");
-        gen_ok("let a = *[1, 2, 3];");
-
-        //gen_ok("let a = *[1, 2, 3]; a[0];");
-        //gen_ok("let a = *[1, 2, 3]; a[0] = 7;");
-    }
-
-    #[test]
-    fn if_else()
-    {
-        gen_ok("let a = 0; { if (a) {} }");
-        gen_ok("let a = 0; { if (a) {} else {} }");
-        gen_ok("let a = 0; let b = 1; { if (a || b) {} }");
-        gen_ok("let a = 0; let b = 1; { if (a && b) {} }");
-        gen_ok("let a = 0; let b = 1; { if (a && !b) {} }");
-    }
-
-    #[test]
-    fn while_stmt()
-    {
-        gen_ok("let i = 0; let n = 10; while (i < n) i = i + 1;");
-    }
-
-    #[test]
-    fn assert_stmt()
-    {
-        gen_ok("assert(true);");
-        gen_ok("let a = true; let b = false; assert(a && b);");
-    }
-
-    #[test]
-    fn compile_files()
-    {
-        // Make sure that we can compile all the examples
-        for file in std::fs::read_dir("./examples").unwrap() {
-            let file_path = file.unwrap().path().display().to_string();
-            if file_path.ends_with(".pls") {
-                println!("{}", file_path);
-                compile_file(&file_path);
-            }
-        }
-    }
-}
-*/
