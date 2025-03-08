@@ -26,15 +26,6 @@ pub enum Decl
 
 impl Decl
 {
-    fn get_src_fun(&self) -> FunId
-    {
-        match *self {
-            Decl::Arg { src_fun, .. } => src_fun,
-            Decl::Local { src_fun, .. } => src_fun,
-            _ => panic!()
-        }
-    }
-
     fn is_mutable(&self) -> bool
     {
         match *self {
@@ -90,10 +81,18 @@ impl Env
         let top_scope = &mut self.scopes[num_scopes - 1];
         assert!(top_scope.decls.get(name).is_none());
 
-        let decl = Decl::Local {
-            idx: top_scope.next_idx as u32,
-            src_fun: fun.id,
-            mutable,
+        let decl = if fun.is_unit {
+            Decl::Global {
+                idx: top_scope.next_idx as u32,
+                //src_fun: fun.id,
+                mutable,
+            }
+        } else {
+            Decl::Local {
+                idx: top_scope.next_idx as u32,
+                src_fun: fun.id,
+                mutable,
+            }
         };
 
         top_scope.next_idx += 1;
@@ -162,6 +161,11 @@ impl Unit
         // Process the unit function
         let mut unit_fn = std::mem::take(prog.funs.get_mut(&self.unit_fn).unwrap());
         unit_fn.resolve_syms(prog, env)?;
+
+        // Update the number of globals
+        prog.num_globals += unit_fn.num_locals;
+
+        // Move the unit function back on the program
         *prog.funs.get_mut(&self.unit_fn).unwrap() = unit_fn;
 
         Ok(())
@@ -308,16 +312,21 @@ impl ExprBox
                 if let Some(mut decl) = env.lookup(name) {
                     // If this variable comes from another function,
                     // then it must be captured as a closure variable
-                    if decl.get_src_fun() != fun.id {
-                        // Register and get an index for the captured variable
-                        let cell_idx = fun.reg_captured(&decl);
+                    let decl = match decl {
+                        Decl::Arg { src_fun, .. } |
+                        Decl::Local { src_fun, .. }
+                        if src_fun != fun.id => {
+                            // Register and get an index for the captured variable
+                            let cell_idx = fun.reg_captured(&decl);
 
-                        // Identify this as a captured closure variable
-                        decl = Decl::Captured {
-                            idx: cell_idx,
-                            mutable: decl.is_mutable()
-                        };
-                    }
+                            // Identify this as a captured closure variable
+                            Decl::Captured {
+                                idx: cell_idx,
+                                mutable: decl.is_mutable()
+                            }
+                        },
+                        _ => decl
+                    };
 
                     *(self.expr) = Expr::Ref(decl);
                 }
@@ -390,9 +399,14 @@ impl ExprBox
                 for (decl, idx) in &child_fun.captured {
                     // If this variable doesn't comes from this function,
                     // then it must be captured as a closure variable
-                    if decl.get_src_fun() != fun.id {
-                        fun.reg_captured(&decl);
-                    }
+                    match *decl {
+                        Decl::Arg { src_fun, .. } |
+                        Decl::Local { src_fun, .. }
+                        if src_fun != fun.id => {
+                            fun.reg_captured(&decl);
+                        },
+                        _ =>{}
+                    };
 
                     captured.push(decl.clone());
                 }

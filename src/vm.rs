@@ -444,7 +444,8 @@ impl Actor
         actor_id: u64,
         vm: Arc<Mutex<VM>>,
         msg_alloc: Arc<Mutex<Alloc>>,
-        queue_rx: mpsc::Receiver<Message>
+        queue_rx: mpsc::Receiver<Message>,
+        globals: Vec<Value>,
     ) -> Self
     {
         Self {
@@ -453,8 +454,8 @@ impl Actor
             alloc: Alloc::new(),
             msg_alloc,
             queue_rx,
+            globals,
             actor_map: HashMap::default(),
-            globals: Vec::default(),
             stack: Vec::default(),
             frames: Vec::default(),
             insns: Vec::default(),
@@ -779,7 +780,13 @@ impl Actor
                         panic!("invalid index {} in get_global", idx);
                     }
 
-                    push!(self.globals[idx]);
+                    let val = self.globals[idx];
+
+                    if val == Value::Undef {
+                        panic!("accessing uninitialized global");
+                    }
+
+                    push!(val);
                 }
 
                 Insn::set_global { idx } => {
@@ -787,7 +794,7 @@ impl Actor
                     let val = pop!();
 
                     if idx >= self.globals.len() {
-                        panic!("invalid index in get_global");
+                        panic!("invalid index {} in get_global", idx);
                     }
 
                     self.globals[idx] = val;
@@ -1304,9 +1311,16 @@ impl VM
         };
 
 
-        // TODO: we need to deepcopy globals
+
+
+        // TODO: we need to deepcopy globals from the parent actor
         // we want to avoid duplicates while doing this,
         // so we'll need to pass globals into deepcopy
+        let mut vm_ref = vm.lock().unwrap();
+        let globals = vec![Value::Undef; vm_ref.prog.num_globals];
+        drop(vm_ref);
+
+
 
 
 
@@ -1316,7 +1330,8 @@ impl VM
                 actor_id,
                 vm_mutex,
                 msg_alloc,
-                queue_rx
+                queue_rx,
+                globals,
             );
             actor.call(fun, &args)
         });
@@ -1369,13 +1384,18 @@ impl VM
 
         // Store the queue endpoint and message allocator on the VM
         vm_ref.actor_txs.insert(actor_id, actor_tx);
+
+        // Initialize the global slots
+        let globals = vec![Value::Undef; vm_ref.prog.num_globals];
+
         drop(vm_ref);
 
         let mut actor = Actor::new(
             actor_id,
             vm_mutex,
             msg_alloc,
-            queue_rx
+            queue_rx,
+            globals,
         );
 
         actor.call(Value::Fun(fun_id), &args)
