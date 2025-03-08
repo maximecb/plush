@@ -418,6 +418,9 @@ pub struct Actor
     // Cache of actor ids to message queue endpoints
     actor_map: HashMap<u64, ActorTx>,
 
+    // Global variable slots
+    globals: Vec<Value>,
+
     // Value stack
     stack: Vec<Value>,
 
@@ -447,6 +450,7 @@ impl Actor
             msg_alloc,
             queue_rx,
             actor_map: HashMap::default(),
+            globals: Vec::default(),
             stack: Vec::default(),
             frames: Vec::default(),
             insns: Vec::default(),
@@ -1273,6 +1277,13 @@ impl VM
             sender: queue_tx,
             msg_alloc: Arc::downgrade(&msg_alloc),
         };
+
+
+        // TODO: we need to deepcopy globals
+        // we want to avoid duplicates while doing this,
+        // so we'll need to pass globals into deepcopy
+
+
 
         // Spawn a new thread for the actor
         let handle = thread::spawn(move || {

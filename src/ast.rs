@@ -329,6 +329,9 @@ pub struct Program
     // prune unreferenced functions (remove dead code)
     pub funs: HashMap<FunId, Function>,
 
+    // Number of global variable slots
+    pub num_globals: usize,
+
     // Main/top-level unit
     pub main_unit: Unit,
 
