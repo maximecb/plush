@@ -627,8 +627,18 @@ fn gen_var_write(
 )
 {
     match *decl {
+        Decl::Global { idx, .. } => {
+            code.push(Insn::set_global { idx });
+        }
+
         Decl::Local { idx, .. } => {
             code.push(Insn::set_local { idx });
+        }
+
+        Decl::Captured { idx, mutable } => {
+            assert!(mutable == false);
+
+            todo!();
         }
 
         _ => todo!()
@@ -648,7 +658,7 @@ fn gen_var_read(
         }
 
         Decl::Global { idx, .. } => {
-            todo!();
+            code.push(Insn::get_global { idx });
         }
 
         Decl::Arg { idx, .. } => {

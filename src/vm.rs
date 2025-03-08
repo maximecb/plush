@@ -61,6 +61,10 @@ pub enum Insn
     // The index is relative to the base of the stack frame
     set_local { idx: u32 },
 
+    // Global variable access
+    get_global { idx: u32 },
+    set_global { idx: u32 },
+
     // Arithmetic
     add,
     sub,
@@ -766,6 +770,27 @@ impl Actor
                     }
 
                     self.stack[bp + idx] = val;
+                }
+
+                Insn::get_global { idx } => {
+                    let idx = idx as usize;
+
+                    if idx >= self.globals.len() {
+                        panic!("invalid index {} in get_global", idx);
+                    }
+
+                    push!(self.globals[idx]);
+                }
+
+                Insn::set_global { idx } => {
+                    let idx = idx as usize;
+                    let val = pop!();
+
+                    if idx >= self.globals.len() {
+                        panic!("invalid index in get_global");
+                    }
+
+                    self.globals[idx] = val;
                 }
 
                 Insn::add => {
