@@ -288,8 +288,22 @@ impl Function
     }
 }
 
+struct Class
+{
+    pub name: String,
+
+    // Map of field names to slot indices
+    pub fields: HashMap<String, usize>,
+
+    // Map of method names to function ids
+    pub methods: HashMap<String, FunId>,
+}
+
 #[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct FunId(u32);
+
+#[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct ClassId(u32);
 
 impl From<usize> for FunId {
     fn from(id: usize) -> Self {
@@ -304,12 +318,28 @@ impl From<FunId> for usize {
     }
 }
 
+impl From<usize> for ClassId {
+    fn from(id: usize) -> Self {
+        ClassId(id.try_into().unwrap())
+    }
+}
+
+impl From<ClassId> for usize {
+    fn from(id: ClassId) -> Self {
+        let ClassId(id) = id;
+        id as usize
+    }
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct Unit
 {
     // TODO: list of imports. Don't implement just yet.
     // These should be unit names
     // We'll want to import specific symbols from units
+
+    // Classes declared in this unit
+    pub classes: HashMap<String, ClassId>,
 
     // Unit-level (top level) function
     pub unit_fn: FunId,

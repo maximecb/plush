@@ -22,6 +22,8 @@ Current limitations:
 - Lack of error messages or good error handling
   - You may have to look at the source code to figure things out
   - We could use your help in improving error messages
+- Garbage collector planned but not yet implemented
+- Imports planned but not yet implemented
 
 ## Build Instructions
 

@@ -994,6 +994,7 @@ pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseEr
     input.eat_ws()?;
     let pos = input.get_pos();
 
+    let mut classes = HashMap::default();
     let mut stmts = Vec::default();
 
     loop
@@ -1026,6 +1027,7 @@ pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseEr
     };
 
     Ok(Unit {
+        classes,
         unit_fn: prog.reg_fun(unit_fn)
     })
 }
