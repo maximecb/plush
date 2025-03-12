@@ -288,7 +288,8 @@ impl Function
     }
 }
 
-struct Class
+#[derive(Default, Clone, Debug)]
+pub struct Class
 {
     pub name: String,
 
@@ -297,6 +298,9 @@ struct Class
 
     // Map of method names to function ids
     pub methods: HashMap<String, FunId>,
+
+    // Internal unique class id
+    pub id: ClassId,
 }
 
 #[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug)]
@@ -359,6 +363,10 @@ pub struct Program
     // prune unreferenced functions (remove dead code)
     pub funs: HashMap<FunId, Function>,
 
+    // Having a hash map of ids to functions means that we can
+    // prune unreferenced classes (remove dead code)
+    pub classes: HashMap<ClassId, Class>,
+
     // Number of global variable slots
     pub num_globals: usize,
 
@@ -377,6 +385,15 @@ impl Program
         self.last_id += 1;
         fun.id = id;
         self.funs.insert(id, fun);
+        id
+    }
+
+    pub fn reg_class(&mut self, mut class: Class) -> ClassId
+    {
+        let id = self.last_id.into();
+        self.last_id += 1;
+        class.id = id;
+        self.classes.insert(id, class);
         id
     }
 }
