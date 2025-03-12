@@ -991,6 +991,7 @@ fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcP
 /// Parse a class declaration
 fn parse_class(input: &mut Input, prog: &mut Program, pos: SrcPos) -> Result<(String, ClassId), ParseError>
 {
+    input.eat_ws()?;
     let class_name = input.parse_ident()?;
     input.expect_token("{")?;
 
@@ -1331,6 +1332,16 @@ mod tests
 
         // Methods
         parse_ok("let a = []; a.push(1);");
+    }
+
+    #[test]
+    fn classes()
+    {
+        parse_ok("class Foo {}");
+        parse_ok("let x = 1; class Foo {} let y = 2;");
+        parse_ok("class Foo { init() {} }");
+        parse_ok("class Foo { init(self) { self.x = 1; } }");
+        parse_ok("class Foo { init(self) { self.x = 1; } inc(self) { ++self.x; } }");
     }
 
     #[test]
