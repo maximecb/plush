@@ -2,7 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
-use crate::ast::{Program, FunId};
+use crate::ast::{Program, FunId, ClassId};
 use crate::alloc::Alloc;
 use crate::array::{Array, array_get_field};
 use crate::codegen::CompiledFun;
@@ -101,13 +101,12 @@ pub enum Insn
     clos_set { idx: u32 },
     clos_get { idx: u32 },
 
-    // Objects manipulation
-    obj_new,
-    //obj_extend,
-    obj_def { field: *const String },
-    obj_set { field: *const String },
-    obj_get { field: *const String },
-    obj_seal,
+    // Create class instance
+    obj_new { class_id: ClassId },
+
+    // Get/set field
+    get_field { field: *const String },
+    set_field { field: *const String },
 
     // Array operations
     arr_new { capacity: u32 },
@@ -966,31 +965,16 @@ impl Actor
                     push!(val);
                 }
 
+                /*
                 // Create new empty object
                 Insn::obj_new => {
                     let new_obj = self.alloc.alloc(Object::default());
                     push!(Value::Object(new_obj))
                 }
-
-                /*
-                // Copy object
-                Insn::obj_copy => {
-                    let obj = pop!().unwrap_obj();
-                    let new_obj = Object::copy(obj, &mut self.alloc);
-                    push!(Value::Object(new_obj))
-                }
                 */
 
-                // Define constant field
-                Insn::obj_def { field } => {
-                    let val = pop!();
-                    let mut obj = pop!();
-                    let field_name = unsafe { &*field };
-                    obj.unwrap_obj().def_const(field_name, val);
-                }
-
                 // Set object field
-                Insn::obj_set { field } => {
+                Insn::set_field { field } => {
                     let val = pop!();
                     let mut obj = pop!();
                     let field_name = unsafe { &*field };
@@ -998,7 +982,7 @@ impl Actor
                 }
 
                 // Get object field
-                Insn::obj_get { field } => {
+                Insn::get_field { field } => {
                     let mut obj = pop!();
                     let field_name = unsafe { &*field };
 
@@ -1009,12 +993,6 @@ impl Actor
                     };
 
                     push!(val);
-                }
-
-                // Seal object
-                Insn::obj_seal => {
-                    let mut obj = pop!();
-                    obj.unwrap_obj().seal();
                 }
 
                 // Create new empty array
@@ -1508,13 +1486,11 @@ mod tests
         eval("let var x = 1; x = x + 1; assert(x < 10);");
     }
 
-
-
     #[test]
     fn comparisons()
     {
-        eval_eq("let o1 = {}; let o2 = {}; return o1 == o2;", Value::False);
-        eval_eq("let o1 = {}; let o2 = {}; return o1 != o2;", Value::True);
+        //eval_eq("let o1 = {}; let o2 = {}; return o1 == o2;", Value::False);
+        //eval_eq("let o1 = {}; let o2 = {}; return o1 != o2;", Value::True);
 
         // String comparison
         eval_eq("return 'foo' == 'bar';", Value::False);
@@ -1620,6 +1596,7 @@ mod tests
         );
     }
 
+    /*
     #[test]
     fn objects()
     {
@@ -1635,6 +1612,7 @@ mod tests
         // Increment method
         eval_eq("let o = { var n: 1, inc(s) { s.n = s.n + 1; } }; o.inc(); return o.n;", Value::Int64(2));
     }
+    */
 
     #[test]
     fn arrays()

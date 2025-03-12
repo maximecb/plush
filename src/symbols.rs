@@ -305,8 +305,8 @@ impl ExprBox
                 }
             }
 
-            Expr::Object { fields, .. } => {
-                for (_, _, expr) in fields {
+            Expr::Object { pairs, .. } => {
+                for (_, expr) in pairs {
                     expr.resolve_syms(prog, fun, env)?;
                 }
             }

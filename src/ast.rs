@@ -67,9 +67,9 @@ pub enum Expr
         exprs: Vec<ExprBox>,
     },
 
-    // Object literal
+    // Object/hash literal
     Object {
-        fields: Vec<(bool, String, ExprBox)>,
+        pairs: Vec<(String, ExprBox)>,
     },
 
     Ident(String),

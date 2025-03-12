@@ -319,6 +319,7 @@ impl ExprBox
                 );
             }
 
+            /*
             Expr::Object { fields } => {
                 return gen_obj_expr(
                     fields,
@@ -327,7 +328,7 @@ impl ExprBox
                     alloc,
                 );
             }
-
+            */
 
             Expr::Ref(decl) => {
                 gen_var_read(decl, code);
@@ -372,7 +373,7 @@ impl ExprBox
             Expr::Member { base, field } => {
                 base.gen_code(fun, code, alloc)?;
                 let field = alloc.str_const(field.clone());
-                code.push(Insn::obj_get { field });
+                code.push(Insn::get_field { field });
             }
 
             Expr::Unary { op, child } => {
@@ -439,7 +440,7 @@ impl ExprBox
                     // Read the method from the object
                     code.push(Insn::getn { idx: argc });
                     let field = alloc.str_const(field.clone());
-                    code.push(Insn::obj_get { field });
+                    code.push(Insn::get_field { field });
 
                     // Pass one extra argument (self)
                     code.push(Insn::call { argc: argc + 1 });
@@ -500,6 +501,7 @@ fn gen_arr_expr(
     Ok(())
 }
 
+/*
 // Generate code for an object literal expression
 fn gen_obj_expr(
     fields: &Vec<(bool, String, ExprBox)>,
@@ -529,6 +531,7 @@ fn gen_obj_expr(
 
     Ok(())
 }
+*/
 
 fn gen_bin_op(
     op: &BinOp,
@@ -723,11 +726,11 @@ fn gen_assign(
                 rhs.gen_code(fun, code, alloc)?;
                 base.gen_code(fun, code, alloc)?;
                 code.push(Insn::getn { idx: 1 });
-                code.push(Insn::obj_set { field });
+                code.push(Insn::set_field { field });
             } else {
                 base.gen_code(fun, code, alloc)?;
                 rhs.gen_code(fun, code, alloc)?;
-                code.push(Insn::obj_set { field });
+                code.push(Insn::set_field { field });
             }
         }
 

@@ -385,8 +385,8 @@ fn parse_object(
     pos: SrcPos,
 ) -> Result<ExprBox, ParseError>
 {
-    // List of mutable, key, value triplets
-    let mut mut_key_val = Vec::default();
+    // List of key, value pairs
+    let mut pairs = Vec::default();
 
     loop
     {
@@ -400,41 +400,14 @@ fn parse_object(
             break;
         }
 
-        let mut mutable = false;
-        if input.match_keyword("var")? {
-            mutable = true;
-        }
-
         // Parse a field name
         input.eat_ws()?;
         let field_name = input.parse_ident()?;
 
-        // If this is a method definition
-        input.eat_ws()?;
-        if !mutable && input.peek_ch() == '(' {
-            let fun_id = parse_function(input, prog, field_name.clone(), pos)?;
-
-            let fun_expr = ExprBox::new(
-                Expr::Fun {
-                    fun_id,
-                    captured: Vec::default(),
-                },
-                pos
-            );
-
-            mut_key_val.push((mutable, field_name, fun_expr));
-
-            if input.match_token("}")? {
-                break;
-            }
-
-            continue;
-        }
-
         // Parse the field value
         input.expect_token(":")?;
         let field_expr = parse_expr(input, prog)?;
-        mut_key_val.push((mutable, field_name, field_expr));
+        pairs.push((field_name, field_expr));
 
         if input.match_token("}")? {
             break;
@@ -445,12 +418,8 @@ fn parse_object(
         input.expect_token(",")?;
     }
 
-    let obj_expr = Expr::Object {
-        fields: mut_key_val,
-    };
-
     ExprBox::new_ok(
-        obj_expr,
+        Expr::Object { pairs },
         pos
     )
 }
@@ -1303,17 +1272,11 @@ mod tests
     {
         // Literals
         parse_ok("let o = {};");
-        parse_ok("let o = { x: 1, var y: 2};");
+        parse_ok("let o = { x: 1, y: 2};");
 
         // Member operator
         parse_ok("let v = a.b;");
         parse_ok("a.b = c;");
-
-        // Method definitions
-        parse_ok("let o = { m() {} };");
-        parse_ok("let o = { m() {} x:1, y:2 };");
-        parse_ok("let o = { x1:1, x2:2, m1() {} m2(x,y,z) {} };");
-        parse_fails("let o = { var m() {} };");
     }
 
     #[test]
