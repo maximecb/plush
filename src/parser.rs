@@ -988,6 +988,44 @@ fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcP
     Ok(fun_id)
 }
 
+/// Parse a class declaration
+fn parse_class(input: &mut Input, prog: &mut Program, pos: SrcPos) -> Result<(String, ClassId), ParseError>
+{
+    let class_name = input.parse_ident()?;
+    input.expect_token("{")?;
+
+    let mut methods = HashMap::new();
+
+    loop
+    {
+        input.eat_ws()?;
+
+        if input.eof() {
+            return input.parse_error("unexpected end of input inside class declaration");
+        }
+
+        if input.match_token("}")? {
+            break;
+        }
+
+        // Parse a method declaration
+        let pos = input.get_pos();
+        let method_name = input.parse_ident()?;
+        let fun_id = parse_function(input, prog, method_name.clone(), pos)?;
+        methods.insert(method_name, fun_id);
+    }
+
+    let class_id = prog.reg_class(Class {
+        name: class_name.clone(),
+        fields: HashMap::default(),
+        methods,
+        pos,
+        id: ClassId::default(),
+    });
+
+    Ok((class_name, class_id))
+}
+
 /// Parse a single unit of source code (e.g. one source file)
 pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseError>
 {
@@ -1004,6 +1042,12 @@ pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseEr
 
         if input.eof() {
             break;
+        }
+
+        if input.match_keyword("class")? {
+            let (name, id) = parse_class(input, prog, pos)?;
+            classes.insert(name, id);
+            continue;
         }
 
         stmts.push(parse_stmt(input, prog)?);

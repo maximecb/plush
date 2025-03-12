@@ -299,6 +299,9 @@ pub struct Class
     // Map of method names to function ids
     pub methods: HashMap<String, FunId>,
 
+    // Source position
+    pub pos: SrcPos,
+
     // Internal unique class id
     pub id: ClassId,
 }
@@ -339,8 +342,7 @@ impl From<ClassId> for usize {
 pub struct Unit
 {
     // TODO: list of imports. Don't implement just yet.
-    // These should be unit names
-    // We'll want to import specific symbols from units
+    // We'll probably want to import specific symbols from units
 
     // Classes declared in this unit
     pub classes: HashMap<String, ClassId>,
