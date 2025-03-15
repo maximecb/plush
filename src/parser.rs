@@ -983,6 +983,11 @@ fn parse_class(input: &mut Input, prog: &mut Program, pos: SrcPos) -> Result<(St
         let pos = input.get_pos();
         let method_name = input.parse_ident()?;
         let fun_id = parse_function(input, prog, method_name.clone(), pos)?;
+
+        if method_name == "init" && prog.funs[&fun_id].params.len() == 0 {
+            return input.parse_error("the init method must have a self parameter");
+        }
+
         methods.insert(method_name, fun_id);
     }
 
@@ -1309,7 +1314,7 @@ mod tests
     {
         parse_ok("class Foo {}");
         parse_ok("let x = 1; class Foo {} let y = 2;");
-        parse_ok("class Foo { init() {} }");
+        parse_ok("class Foo { init(self) {} }");
         parse_ok("class Foo { init(self) { self.x = 1; } }");
         parse_ok("class Foo { init(self) { self.x = 1; } inc(self) { ++self.x; } }");
     }
