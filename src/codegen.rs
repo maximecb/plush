@@ -454,6 +454,21 @@ impl ExprBox
                 }
             }
 
+            Expr::New { class, args } => {
+                let argc = args.len().try_into().unwrap();
+
+                let class_id = match class.expr.as_ref() {
+                    Expr::Ref(Decl::Class { id }) => id,
+                    _ => panic!("class decl not resolved")
+                };
+
+                for arg in args {
+                    arg.gen_code(fun, code, alloc)?;
+                }
+
+                code.push(Insn::new { class_id: *class_id, argc });
+            }
+
             // Function expression
             Expr::Fun { fun_id, captured } => {
                 // If this is not a closure

@@ -102,7 +102,7 @@ pub enum Insn
     clos_get { idx: u32 },
 
     // Create class instance
-    obj_new { class_id: ClassId, argc: u16 },
+    new { class_id: ClassId, argc: u16 },
 
     // Get/set field
     get_field { field: *const String },
@@ -218,6 +218,7 @@ pub enum Value
     Closure(*mut Closure),
     HostFn(HostFn),
 
+    //Dict()
     Object(*mut Object),
     Array(*mut Array),
 }
@@ -966,8 +967,8 @@ impl Actor
                 }
 
                 /*
-                // Create new empty object
-                Insn::obj_new => {
+                // Create new empty dictionary
+                Insn::dict_new => {
                     let new_obj = self.alloc.alloc(Object::default());
                     push!(Value::Object(new_obj))
                 }
