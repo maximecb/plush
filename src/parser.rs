@@ -951,6 +951,7 @@ fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcP
         is_unit: false,
         pos,
         id: FunId::default(),
+        class_id: ClassId::default(),
     };
 
     let fun_id = prog.reg_fun(fun);
@@ -988,10 +989,15 @@ fn parse_class(input: &mut Input, prog: &mut Program, pos: SrcPos) -> Result<(St
     let class_id = prog.reg_class(Class {
         name: class_name.clone(),
         fields: HashMap::default(),
-        methods,
+        methods: methods.clone(),
         pos,
         id: ClassId::default(),
     });
+
+    // Tag each method with the class id
+    for (_, fun_id) in methods {
+        prog.funs.get_mut(&fun_id).unwrap().class_id = class_id;
+    }
 
     Ok((class_name, class_id))
 }
@@ -1038,6 +1044,7 @@ pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseEr
         is_unit: true,
         pos,
         id: FunId::default(),
+        class_id: ClassId::default(),
     };
 
     Ok(Unit {

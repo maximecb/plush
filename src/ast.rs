@@ -270,6 +270,10 @@ pub struct Function
 
     /// Internal unique function id
     pub id: FunId,
+
+    /// Class id this function is associated with
+    /// This will be zero is none
+    pub class_id: ClassId,
 }
 
 impl Function
@@ -356,6 +360,7 @@ pub struct Unit
 pub struct Program
 {
     // Last id assigned
+    // Zero is intentionally not used as an id
     last_id: usize,
 
     // Map of parsed units by name
