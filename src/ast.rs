@@ -117,8 +117,8 @@ pub enum Expr
         args: Vec<ExprBox>,
     },
 
-    HostCall {
-        fun_name: String,
+    New {
+        class: ExprBox,
         args: Vec<ExprBox>,
     },
 }

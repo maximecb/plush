@@ -407,7 +407,8 @@ impl ExprBox
                 }
             }
 
-            Expr::HostCall { fun_name, args, .. } => {
+            Expr::New { class, args, .. } => {
+                class.resolve_syms(prog, fun, env)?;
                 for arg in args {
                     arg.resolve_syms(prog, fun, env)?;
                 }

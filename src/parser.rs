@@ -374,6 +374,27 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
         );
     }
 
+    // New class instance
+    if input.match_keyword("new")? {
+        input.eat_ws()?;
+        let class_name = input.parse_ident()?;
+        input.expect_token("(")?;
+        let arg_exprs = parse_expr_list(input, prog, ")")?;
+
+        let class_expr = ExprBox::new(
+            Expr::Ident(class_name),
+            pos
+        );
+
+        return ExprBox::new_ok(
+            Expr::New {
+                class: class_expr,
+                args: arg_exprs
+            },
+            pos
+        );
+    }
+
     // Try to parse this as a postfix expression
     parse_postfix(input, prog)
 }
@@ -1317,6 +1338,8 @@ mod tests
         parse_ok("class Foo { init(self) {} }");
         parse_ok("class Foo { init(self) { self.x = 1; } }");
         parse_ok("class Foo { init(self) { self.x = 1; } inc(self) { ++self.x; } }");
+        parse_ok("let o = new Foo();");
+        parse_ok("let o = new Foo(1, 2, 3);");
     }
 
     #[test]
