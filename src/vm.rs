@@ -102,7 +102,7 @@ pub enum Insn
     clos_get { idx: u32 },
 
     // Create class instance
-    obj_new { class_id: ClassId },
+    obj_new { class_id: ClassId, argc: u16 },
 
     // Get/set field
     get_field { field: *const String },

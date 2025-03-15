@@ -692,6 +692,8 @@ fn gen_var_read(
 
             code.push(Insn::clos_get { idx });
         }
+
+        _ => panic!()
     }
 }
 

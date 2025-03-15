@@ -9,7 +9,7 @@ pub enum Decl
     Fun { id: FunId },
 
     // Class declaration
-    //Class { id: ClassId },
+    Class { id: ClassId },
 
     // Global variable
     Global { idx: u32, mutable: bool },
@@ -30,6 +30,7 @@ impl Decl
     {
         match *self {
             Decl::Fun { .. } => false,
+            Decl::Class { .. } => false,
             Decl::Global { mutable, .. } => mutable,
             Decl::Arg { .. } => false,
             Decl::Local { mutable, .. } => mutable,
@@ -158,6 +159,11 @@ impl Unit
 {
     fn resolve_syms(&mut self, prog: &mut Program, env: &mut Env) -> Result<(), ParseError>
     {
+        // Create definitions for the classes in this unit
+        for (name, id) in &self.classes {
+            env.define(name, Decl::Class { id: *id });
+        }
+
         // Process the unit function
         let mut unit_fn = std::mem::take(prog.funs.get_mut(&self.unit_fn).unwrap());
         unit_fn.resolve_syms(prog, env)?;
