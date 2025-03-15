@@ -151,48 +151,35 @@ pub struct Closure
     pub slots: Vec<Value>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Object
 {
-    pub fields: HashMap<String, (bool, Value)>,
-    pub sealed: bool,
+    class_id: ClassId,
+    slots: Vec<Value>,
 }
 
 impl Object
 {
-    fn seal(&mut self)
-    {
-        self.sealed = true;
-    }
+}
 
-    // Define an immutable field field
-    fn def_const(&mut self, field_name: &str, val: Value)
-    {
-        if let Some(_) = self.fields.get(field_name) {
-            panic!();
-        }
+#[derive(Clone, Default)]
+pub struct Dict
+{
+    pub fields: HashMap<String, Value>,
+}
 
-        self.fields.insert(field_name.to_string(), (false, val));
-    }
-
+impl Dict
+{
     // Set the value associated with a given field
     fn set(&mut self, field_name: &str, new_val: Value)
     {
-        if let Some((mutable, val)) = self.fields.get_mut(field_name) {
-            if *mutable == false {
-                panic!("write to immutable field");
-            }
-
-            *val = new_val;
-        } else {
-            self.fields.insert(field_name.to_string(), (true, new_val));
-        }
+        self.fields.insert(field_name.to_string(), new_val);
     }
 
     // Get the value associated with a given field
     fn get(&mut self, field_name: &str) -> Value
     {
-        if let Some((_, val)) = self.fields.get(field_name) {
+        if let Some(val) = self.fields.get(field_name) {
             *val
         } else {
             panic!();
@@ -976,10 +963,14 @@ impl Actor
 
                 // Set object field
                 Insn::set_field { field } => {
+                    /*
                     let val = pop!();
                     let mut obj = pop!();
                     let field_name = unsafe { &*field };
                     obj.unwrap_obj().set(field_name, val);
+                    */
+
+                    todo!();
                 }
 
                 // Get object field
@@ -988,7 +979,7 @@ impl Actor
                     let field_name = unsafe { &*field };
 
                     let val = match obj {
-                        Value::Object(p) => unsafe { (*p).get(field_name) },
+                        //Value::Object(p) => unsafe { (*p).get(field_name) },
                         Value::Array(p) => unsafe { array_get_field(&mut *p, field_name) },
                         _ => panic!()
                     };

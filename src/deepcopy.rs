@@ -96,6 +96,7 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
                 Value::Closure(dst_alloc.alloc(new_clos))
             }
 
+            /*
             Value::Object(p) => {
                 let new_obj = unsafe { (*p).clone() };
 
@@ -105,6 +106,7 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
 
                 Value::Object(dst_alloc.alloc(new_obj))
             }
+            */
 
             _ => panic!()
         };
@@ -125,12 +127,14 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
                 }
             }
 
+            /*
             Value::Object(p) => {
                 let obj = unsafe { &mut **p };
                 for (_, val) in obj.fields.values_mut() {
                     remap_val!(val);
                 }
             }
+            */
 
             _ => panic!()
         }

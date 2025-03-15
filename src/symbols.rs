@@ -311,7 +311,7 @@ impl ExprBox
                 }
             }
 
-            Expr::Object { pairs, .. } => {
+            Expr::Dict { pairs, .. } => {
                 for (_, expr) in pairs {
                     expr.resolve_syms(prog, fun, env)?;
                 }

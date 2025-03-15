@@ -128,9 +128,9 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
         ));
     }
 
-    // Object literal
+    // Dictionary literal
     if input.match_char('{') {
-        return parse_object(input, prog, pos);
+        return parse_dict(input, prog, pos);
     }
 
     // Host constant
@@ -399,8 +399,8 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
     parse_postfix(input, prog)
 }
 
-// Parse an object literal
-fn parse_object(
+// Parse a dictionary literal
+fn parse_dict(
     input: &mut Input,
     prog: &mut Program,
     pos: SrcPos,
@@ -440,7 +440,7 @@ fn parse_object(
     }
 
     ExprBox::new_ok(
-        Expr::Object { pairs },
+        Expr::Dict { pairs },
         pos
     )
 }
@@ -1301,7 +1301,7 @@ mod tests
     }
 
     #[test]
-    fn objects()
+    fn dict()
     {
         // Literals
         parse_ok("let o = {};");

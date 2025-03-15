@@ -67,8 +67,8 @@ pub enum Expr
         exprs: Vec<ExprBox>,
     },
 
-    // Object/hash literal
-    Object {
+    // Dictionary literal
+    Dict {
         pairs: Vec<(String, ExprBox)>,
     },
 
