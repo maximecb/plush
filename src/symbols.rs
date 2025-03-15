@@ -365,13 +365,25 @@ impl ExprBox
 
                 // If this is an assignment to a constant
                 if *op == BinOp::Assign {
-                    if let Expr::Ref(decl) = lhs.expr.as_ref() {
-                        if !decl.is_mutable() {
-                            return ParseError::with_pos(
-                                &format!("assignment to immutable variable"),
-                                &self.pos
-                            );
+                    match lhs.expr.as_ref() {
+                        // Detect assignments to immutable variables
+                        Expr::Ref(decl) => {
+                            if !decl.is_mutable() {
+                                return ParseError::with_pos(
+                                    &format!("assignment to immutable variable"),
+                                    &self.pos
+                                );
+                            }
                         }
+
+                        // Keep track of fields being assigned in class methods
+                        Expr::Member { field, .. } => {
+                            if let Some(class) = prog.classes.get_mut(&fun.class_id) {
+                                class.reg_field(field);
+                            }
+                        }
+
+                        _ => {}
                     }
                 }
             }

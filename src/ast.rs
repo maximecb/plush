@@ -310,6 +310,17 @@ pub struct Class
     pub id: ClassId,
 }
 
+impl Class
+{
+    pub fn reg_field(&mut self, name: &str)
+    {
+        if self.fields.get(name).is_none() {
+            let idx = self.fields.len();
+            self.fields.insert(name.to_owned(), idx);
+        }
+    }
+}
+
 #[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct FunId(u32);
 

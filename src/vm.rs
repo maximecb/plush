@@ -1624,4 +1624,12 @@ mod tests
         eval_eq("let a = [11, 22, 33]; return a.len;", Value::Int64(3));
         eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::Int64(4));
     }
+
+    #[test]
+    fn classes()
+    {
+        eval("class Foo {}");
+        eval("class Foo { init(self) {} }");
+        eval("class Foo { init(self) { self.x = 1; } }");
+    }
 }
