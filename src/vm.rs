@@ -2,7 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
-use crate::ast::{Program, FunId, ClassId};
+use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
 use crate::array::{Array, array_get_field};
 use crate::codegen::CompiledFun;
@@ -154,12 +154,19 @@ pub struct Closure
 #[derive(Clone)]
 pub struct Object
 {
-    class_id: ClassId,
-    slots: Vec<Value>,
+    pub class_id: ClassId,
+    pub slots: Vec<Value>,
 }
 
 impl Object
 {
+    fn new(class_id: ClassId, num_slots: usize) -> Self
+    {
+        Object {
+            class_id,
+            slots: vec![Value::Undef; num_slots]
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -418,6 +425,9 @@ pub struct Actor
     // List of stack frames (activation records)
     frames: Vec<StackFrame>,
 
+    // Map of classes referenced by this actor
+    classes: HashMap<ClassId, Class>,
+
     // Map of compiled functions
     funs: HashMap<FunId, CompiledFun>,
 
@@ -446,6 +456,7 @@ impl Actor
             stack: Vec::default(),
             frames: Vec::default(),
             insns: Vec::default(),
+            classes: HashMap::default(),
             funs: HashMap::default(),
         }
     }
@@ -532,6 +543,29 @@ impl Actor
 
         // Return the compiled function entry
         entry
+    }
+
+    // Compute something requiring access to a class, lazily
+    // copying the class from the parent VM as needed
+    pub fn with_class<F, T>(&mut self, class_id: ClassId, f: F) -> T
+    where F: FnOnce(&Class) -> T
+    {
+        if let Some(class) = self.classes.get(&class_id) {
+            return f(class);
+        }
+
+        // Borrow the VM and clone the class
+        let vm = self.vm.lock().unwrap();
+        let class = vm.prog.classes[&class_id].clone();
+        drop(vm);
+
+        let ret = f(&class);
+
+        // Save a cached copy of the class to avoid
+        // locking if needed again
+        self.classes.insert(class_id, class);
+
+        ret
     }
 
     /// Call a host function
@@ -979,8 +1013,14 @@ impl Actor
                     let field_name = unsafe { &*field };
 
                     let val = match obj {
-                        //Value::Object(p) => unsafe { (*p).get(field_name) },
                         Value::Array(p) => unsafe { array_get_field(&mut *p, field_name) },
+
+                        Value::Object(p) => {
+                            let obj = unsafe { &*p };
+                            let slot_idx = self.with_class(obj.class_id, |c| *c.fields.get(field_name).unwrap());
+                            obj.slots[slot_idx]
+                        },
+
                         _ => panic!()
                     };
 
