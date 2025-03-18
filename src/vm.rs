@@ -580,8 +580,14 @@ impl Actor
         self.with_class(class_id, |c| *c.fields.get(field_name).unwrap())
     }
 
+    // Get the function id for a given method of a given class
+    pub fn get_method(&mut self, class_id: ClassId, method_name: &str) -> Option<FunId>
+    {
+        self.with_class(class_id, |c| c.methods.get(method_name).copied())
+    }
+
     /// Call a host function
-    pub fn call_host(&mut self, host_fn: HostFn, argc: usize)
+    fn call_host(&mut self, host_fn: HostFn, argc: usize)
     {
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }
@@ -719,6 +725,43 @@ impl Actor
 
         macro_rules! push_bool {
             ($b: expr) => { push!(if $b { True } else { False }) }
+        }
+
+        /// Set up a new frame for a function call
+        macro_rules! call_fun {
+            ($fun: expr, $argc: expr) => {
+                if $argc as usize > self.stack.len() - bp {
+                    panic!();
+                }
+
+                let fun_id = match $fun {
+                    Value::Fun(id) => id,
+                    Value::Closure(clos) => unsafe { (*clos).fun_id },
+                    Value::HostFn(f) => {
+                        self.call_host(f, $argc.into());
+                        continue;
+                    }
+                    _ => panic!("call with non-function {:?}", fun)
+                };
+
+                // Get a compiled address for this function
+                let fun_entry = self.get_compiled_fun(fun_id);
+
+                if $argc as usize != fun_entry.num_params {
+                    panic!("incorrect argument count");
+                }
+
+                self.frames.push(StackFrame {
+                    argc: $argc,
+                    fun: $fun,
+                    prev_bp: bp,
+                    ret_addr: pc,
+                });
+
+                // The base pointer will point at the first local
+                bp = self.stack.len();
+                pc = fun_entry.entry_pc;
+            }
         }
 
         loop
@@ -1030,12 +1073,14 @@ impl Actor
                     let obj = Object::new(class_id, num_slots);
                     let obj_val = Value::Object(self.alloc.alloc(obj));
 
+                    let init_fun = self.get_method(class_id, "init");
 
-
-
-
-
-
+                    // If a constructor method is present
+                    if let Some(fun_id) = init_fun {
+                        // The self value should be first on the stack
+                        self.stack.insert(self.stack.len() - argc as usize, obj_val);
+                        call_fun!(Value::Fun(fun_id), argc + 1);
+                    }
 
                     push!(obj_val);
                 }
@@ -1051,7 +1096,13 @@ impl Actor
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
                             let slot_idx = self.get_slot_idx(obj.class_id, field_name);
-                            obj.slots[slot_idx]
+                            let val = obj.slots[slot_idx];
+
+                            if val == Value::Undef {
+                                panic!("object field not initialized");
+                            };
+
+                            val
                         },
 
                         _ => panic!()
@@ -1162,41 +1213,8 @@ impl Actor
 
                 // call (arg0, arg1, ..., argN, fun)
                 Insn::call { argc } => {
-                    // Function to call
                     let fun = pop!();
-
-                    // Argument count
-                    if argc as usize > self.stack.len() - bp {
-                        panic!();
-                    }
-
-                    let fun_id = match fun {
-                        Value::Fun(id) => id,
-                        Value::Closure(clos) => unsafe { (*clos).fun_id },
-                        Value::HostFn(f) => {
-                            self.call_host(f, argc.into());
-                            continue;
-                        }
-                        _ => panic!("call with non-function {:?}", fun)
-                    };
-
-                    // Get a compiled address for this function
-                    let fun_entry = self.get_compiled_fun(fun_id);
-
-                    if argc as usize != fun_entry.num_params {
-                        panic!("incorrect argument count");
-                    }
-
-                    self.frames.push(StackFrame {
-                        argc,
-                        fun,
-                        prev_bp: bp,
-                        ret_addr: pc,
-                    });
-
-                    // The base pointer will point at the first local
-                    bp = self.stack.len();
-                    pc = fun_entry.entry_pc;
+                    call_fun!(fun, argc);
                 }
 
                 Insn::ret => {
@@ -1656,5 +1674,14 @@ mod tests
         eval("class Foo { init(self) { self.x = 1; } }");
 
         eval("class Foo {} let o = new Foo();");
+        eval("class Foo { init(s) {} } let o = new Foo();");
+        eval("class Foo { init(s, a) {} } let o = new Foo(1);");
+
+        // FIXME:
+        //eval("class Foo { init(s) { s.x = 1; } } let o = new Foo();");
+
+
+
+
     }
 }

@@ -320,8 +320,8 @@ impl ExprBox
             }
 
             /*
-            Expr::Object { fields } => {
-                return gen_obj_expr(
+            Expr::Dict { fields } => {
+                return gen_dict_expr(
                     fields,
                     fun,
                     code,
@@ -517,8 +517,8 @@ fn gen_arr_expr(
 }
 
 /*
-// Generate code for an object literal expression
-fn gen_obj_expr(
+// Generate code for a dictionary literal expression
+fn gen_dict_expr(
     fields: &Vec<(bool, String, ExprBox)>,
     fun: &Function,
     code: &mut Vec<Insn>,
