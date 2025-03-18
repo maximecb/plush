@@ -1002,8 +1002,8 @@ impl Actor
                 /*
                 // Create new empty dictionary
                 Insn::dict_new => {
-                    let new_obj = self.alloc.alloc(Object::default());
-                    push!(Value::Object(new_obj))
+                    let new_obj = self.alloc.alloc(Dict::default());
+                    push!(Value::Dict(new_obj))
                 }
                 */
 
@@ -1023,19 +1023,22 @@ impl Actor
                     };
                 }
 
-
-
                 // Allocate a new class instance and call
                 // the constructor for the given class
                 Insn::new { class_id, argc } => {
+                    let num_slots = self.get_num_slots(class_id);
+                    let obj = Object::new(class_id, num_slots);
+                    let obj_val = Value::Object(self.alloc.alloc(obj));
 
 
 
 
-                    todo!();
+
+
+
+
+                    push!(obj_val);
                 }
-
-
 
                 // Get object field
                 Insn::get_field { field } => {
@@ -1195,41 +1198,6 @@ impl Actor
                     bp = self.stack.len();
                     pc = fun_entry.entry_pc;
                 }
-
-                /*
-                // call (arg0, arg1, ..., argN, fun)
-                Insn::call_known { argc, callee } => {
-                    // Get a compiled address for this function
-                    let target_pc = self.get_version(callee, 0);
-
-                    // Patch this instruction with the compiled pc
-                    self.insns[pc - 1] = Insn::call_pc { argc, callee, target_pc };
-
-                    // Executed the patched instruction next
-                    pc -= 1;
-                }
-                */
-
-                /*
-                // call (arg0, arg1, ..., argN, fun)
-                Insn::call_pc { argc, callee, target_pc } => {
-                    // Argument count
-                    assert!(argc as usize <= self.stack.len() - bp);
-
-                    self.frames.push(StackFrame {
-                        argc,
-                        fun,
-                        prev_bp: bp,
-                        ret_addr: pc,
-                    });
-
-                    // The base pointer will point at the first local
-                    bp = self.stack.len();
-
-                    // Get a compiled address for this function
-                    pc = target_pc;
-                }
-                */
 
                 Insn::ret => {
                     if self.stack.len() <= bp {
@@ -1660,19 +1628,12 @@ mod tests
 
     /*
     #[test]
-    fn objects()
+    fn dicts()
     {
         eval("let o = {};");
         eval("let o = { x: 1, y: 2 };");
-        eval("let o = { x: 1, f(s) {} };");
         eval_eq("let o = { x: 1, y: 2 }; return o.x;", Value::Int64(1));
         eval_eq("let o = { x: 1, y: 2 }; return o.x + o.y;", Value::Int64(3));
-
-        // Getter method
-        eval_eq("let o = { n: 1337, get(s) { return s.n; } }; return o.get();", Value::Int64(1337));
-
-        // Increment method
-        eval_eq("let o = { var n: 1, inc(s) { s.n = s.n + 1; } }; o.inc(); return o.n;", Value::Int64(2));
     }
     */
 
@@ -1693,5 +1654,7 @@ mod tests
         eval("class Foo {}");
         eval("class Foo { init(self) {} }");
         eval("class Foo { init(self) { self.x = 1; } }");
+
+        eval("class Foo {} let o = new Foo();");
     }
 }
