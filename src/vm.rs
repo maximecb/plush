@@ -545,8 +545,8 @@ impl Actor
         entry
     }
 
-    // Compute something requiring access to a class, lazily
-    // copying the class from the parent VM as needed
+    /// Compute something requiring access to a class, lazily
+    /// copying the class from the parent VM as needed
     pub fn with_class<F, T>(&mut self, class_id: ClassId, f: F) -> T
     where F: FnOnce(&Class) -> T
     {
@@ -566,6 +566,18 @@ impl Actor
         self.classes.insert(class_id, class);
 
         ret
+    }
+
+    /// Get the number of slots for a given class
+    pub fn get_num_slots(&mut self, class_id: ClassId) -> usize
+    {
+        self.with_class(class_id, |c| c.fields.len())
+    }
+
+    /// Get the slot index for a given field of a given class
+    pub fn get_slot_idx(&mut self, class_id: ClassId, field_name: &str) -> usize
+    {
+        self.with_class(class_id, |c| *c.fields.get(field_name).unwrap())
     }
 
     /// Call a host function
@@ -997,15 +1009,33 @@ impl Actor
 
                 // Set object field
                 Insn::set_field { field } => {
-                    /*
                     let val = pop!();
                     let mut obj = pop!();
                     let field_name = unsafe { &*field };
-                    obj.unwrap_obj().set(field_name, val);
-                    */
+
+                    let val = match obj {
+                        Value::Object(p) => {
+                            let obj = unsafe { &mut *p };
+                            let slot_idx = self.get_slot_idx(obj.class_id, field_name);
+                            obj.slots[slot_idx] = val;
+                        },
+                        _ => panic!()
+                    };
+                }
+
+
+
+                // Allocate a new class instance and call
+                // the constructor for the given class
+                Insn::new { class_id, argc } => {
+
+
+
 
                     todo!();
                 }
+
+
 
                 // Get object field
                 Insn::get_field { field } => {
@@ -1017,7 +1047,7 @@ impl Actor
 
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
-                            let slot_idx = self.with_class(obj.class_id, |c| *c.fields.get(field_name).unwrap());
+                            let slot_idx = self.get_slot_idx(obj.class_id, field_name);
                             obj.slots[slot_idx]
                         },
 
