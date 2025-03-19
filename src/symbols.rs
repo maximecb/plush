@@ -280,6 +280,19 @@ impl StmtBox
                 }
             }
 
+            // Class declaration
+            Stmt::ClassDecl { class_id } => {
+                let class = std::mem::take(prog.classes.get_mut(class_id).unwrap());
+
+                for (_, fun_id) in &class.methods {
+                    let mut fun = std::mem::take(prog.funs.get_mut(&fun_id).unwrap());
+                    fun.resolve_syms(prog, env)?;
+                    prog.funs.insert(*fun_id, fun);
+                }
+
+                prog.classes.insert(*class_id, class);
+            }
+
             //_ => todo!()
         }
 

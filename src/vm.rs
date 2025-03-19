@@ -1677,8 +1677,11 @@ mod tests
         eval("class Foo { init(s) {} } let o = new Foo();");
         eval("class Foo { init(s, a) {} } let o = new Foo(1);");
 
+
         // FIXME:
         //eval("class Foo { init(s) { s.x = 1; } } let o = new Foo();");
+
+
 
 
 

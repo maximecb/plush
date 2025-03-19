@@ -1049,6 +1049,10 @@ pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseEr
         if input.match_keyword("class")? {
             let (name, id) = parse_class(input, prog, pos)?;
             classes.insert(name, id);
+            stmts.push(StmtBox::new(
+                Stmt::ClassDecl { class_id: id },
+                pos
+            ));
             continue;
         }
 

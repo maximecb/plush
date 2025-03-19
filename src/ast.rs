@@ -197,6 +197,11 @@ pub enum Stmt
         var_name: String,
         init_expr: ExprBox,
         decl: Option<Decl>,
+    },
+
+    // Class declaration
+    ClassDecl {
+        class_id: ClassId,
     }
 }
 

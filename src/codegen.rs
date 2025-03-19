@@ -281,6 +281,8 @@ impl StmtBox
                 gen_var_write(decl.as_ref().unwrap(), code);
             }
 
+            Stmt::ClassDecl { .. } => {}
+
             _ => todo!("{:?}", self.stmt)
         }
 
