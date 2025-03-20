@@ -1105,7 +1105,7 @@ impl Actor
                             val
                         },
 
-                        _ => panic!()
+                        _ => panic!("get_field on non-object value {:?}", obj)
                     };
 
                     push!(val);
@@ -1677,12 +1677,14 @@ mod tests
         eval("class Foo { init(s) {} } let o = new Foo();");
         eval("class Foo { init(s, a) {} } let o = new Foo(1);");
 
+        eval("class Foo { init(s) { s.x = 1; } } let o = new Foo();");
+        eval("class Foo { init(s, a) { s.x = a; } } let o = new Foo(7);");
+
+
 
         // FIXME:
-        //eval("class Foo { init(s) { s.x = 1; } } let o = new Foo();");
-
-
-
+        //eval_eq("class Foo { init(s) { s.x = 1; } } let o = new Foo(); return o.x;", Value::Int64(1));
+        //eval_eq("class Foo { init(s, a) { s.x = a; } } let o = new Foo(7); return o.x;", Value::Int64(7));
 
 
 

@@ -319,6 +319,7 @@ impl Class
 {
     pub fn reg_field(&mut self, name: &str)
     {
+        assert!(self.id.0 != 0);
         if self.fields.get(name).is_none() {
             let idx = self.fields.len();
             self.fields.insert(name.to_owned(), idx);
@@ -404,8 +405,8 @@ impl Program
 {
     pub fn reg_fun(&mut self, mut fun: Function) -> FunId
     {
-        let id = self.last_id.into();
         self.last_id += 1;
+        let id = self.last_id.into();
         fun.id = id;
         self.funs.insert(id, fun);
         id
@@ -413,8 +414,9 @@ impl Program
 
     pub fn reg_class(&mut self, mut class: Class) -> ClassId
     {
-        let id = self.last_id.into();
         self.last_id += 1;
+        let id = self.last_id.into();
+        assert!(id != ClassId::default());
         class.id = id;
         self.classes.insert(id, class);
         id
