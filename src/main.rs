@@ -2,6 +2,7 @@
 #![allow(unused_variables)]
 #![allow(unused_mut)]
 #![allow(unused_imports)]
+#![allow(unused_parens)]
 
 mod utils;
 mod ast;

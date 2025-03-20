@@ -283,7 +283,7 @@ pub struct Function
 
 impl Function
 {
-    // Register a captured closure variable and return its slot index
+    /// Register a captured closure variable and return its slot index
     pub fn reg_captured(&mut self, decl: &Decl) -> u32
     {
         match self.captured.get(decl) {
@@ -294,6 +294,15 @@ impl Function
                 idx
             }
         }
+    }
+
+    /// Check if this function is a constructor method
+    pub fn is_ctor(&self) -> bool
+    {
+        return (
+            self.class_id != ClassId::default() &&
+            self.name == "init"
+        );
     }
 }
 

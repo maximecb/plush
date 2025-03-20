@@ -66,7 +66,13 @@ impl Function
 
         // If the body needs a final return
         if self.needs_final_return() {
-            code.push(Insn::push { val: Value::Nil });
+            // If this is a constructor, return the self argument
+            if self.is_ctor() {
+                code.push(Insn::get_arg { idx: 0 });
+            } else {
+                code.push(Insn::push { val: Value::Nil });
+            }
+
             code.push(Insn::ret);
         }
 
@@ -439,13 +445,8 @@ impl ExprBox
                         arg.gen_code(fun, code, alloc)?;
                     }
 
-                    // Read the method from the object
-                    code.push(Insn::getn { idx: argc });
-                    let field = alloc.str_const(field.clone());
-                    code.push(Insn::get_field { field });
-
-                    // Pass one extra argument (self)
-                    code.push(Insn::call { argc: argc + 1 });
+                    let name = alloc.str_const(field.clone());
+                    code.push(Insn::call_method { name, argc });
                 } else {
                     for arg in args {
                         arg.gen_code(fun, code, alloc)?;
