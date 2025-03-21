@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
-use crate::array::{Array, array_get_field};
+use crate::array::{Array, array_get_field, array_get_method};
 use crate::codegen::CompiledFun;
 use crate::deepcopy::deepcopy;
 use crate::host::*;
@@ -1223,16 +1223,21 @@ impl Actor
                     let method_name = unsafe { &*name };
                     let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
 
-                    let class_id = match self_val {
+                    let fun = match self_val {
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
-                            obj.class_id
+                            let fun_id = self.get_method(obj.class_id, &method_name).unwrap();
+                            Value::Fun(fun_id)
                         }
+
+                        Value::Array(_) => {
+                            array_get_method(&method_name)
+                        }
+
                         _ => panic!()
                     };
 
-                    let fun_id = self.get_method(class_id, &method_name).unwrap();
-                    call_fun!(Value::Fun(fun_id), argc + 1);
+                    call_fun!(fun, argc + 1);
                 }
 
                 Insn::ret => {
@@ -1681,9 +1686,7 @@ mod tests
         eval_eq("let a = [11, 22, 33]; return a[0];", Value::Int64(11));
         eval_eq("let a = [11, 22, 33]; return a[2];", Value::Int64(33));
         eval_eq("let a = [11, 22, 33]; return a.len;", Value::Int64(3));
-
-        // FIXME:
-        //eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::Int64(4));
+        eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::Int64(4));
     }
 
     #[test]
