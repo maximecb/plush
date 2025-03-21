@@ -1,11 +1,15 @@
-let var obj = {
-
-    var count: 0,
-
-    inc(self) {
-        self.count = self.count + 1;
+class Counter
+{
+    init(self)
+    {
+        self.count = 0;
     }
-};
+
+    inc(self)
+    {
+        ++self.count;
+    }
+}
 
 // The actor receives the object and sends it back to the main actor
 fun actor()
@@ -19,6 +23,8 @@ fun actor()
 }
 
 let id = $actor_spawn(actor);
+
+let var obj = new Counter();
 
 for (let var i = 0; i < 500_000; i = i + 1)
 {

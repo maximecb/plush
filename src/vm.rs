@@ -212,9 +212,9 @@ pub enum Value
     Closure(*mut Closure),
     HostFn(HostFn),
 
-    //Dict()
     Object(*mut Object),
     Array(*mut Array),
+    Dict(*mut Dict),
 }
 use Value::{Undef, Nil, False, True, Int64, Float64};
 
@@ -242,7 +242,8 @@ impl Value
             String(_)   |
             Closure(_)  |
             Object(_)   |
-            Array(_)    => true,
+            Array(_)    |
+            Dict(_)     => true,
         }
     }
 

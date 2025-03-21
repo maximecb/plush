@@ -97,7 +97,7 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
             }
 
             /*
-            Value::Object(p) => {
+            Value::Dict(p) => {
                 let new_obj = unsafe { (*p).clone() };
 
                 for ( _, val) in new_obj.fields.values() {
@@ -107,6 +107,16 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
                 Value::Object(dst_alloc.alloc(new_obj))
             }
             */
+
+            Value::Object(p) => {
+                let new_obj = unsafe { (*p).clone() };
+
+                for val in &new_obj.slots {
+                    push_val!(val);
+                }
+
+                Value::Object(dst_alloc.alloc(new_obj))
+            }
 
             _ => panic!()
         };
@@ -128,13 +138,20 @@ pub fn deepcopy(src_val: Value, dst_alloc: &mut Alloc) -> Value
             }
 
             /*
-            Value::Object(p) => {
+            Value::Dict(p) => {
                 let obj = unsafe { &mut **p };
                 for (_, val) in obj.fields.values_mut() {
                     remap_val!(val);
                 }
             }
             */
+
+            Value::Object(p) => {
+                let obj = unsafe { &mut **p };
+                for val in &mut obj.slots {
+                    remap_val!(val);
+                }
+            }
 
             _ => panic!()
         }
@@ -165,9 +182,4 @@ mod tests
         let s2 = deepcopy(s1, &mut dst_alloc);
         assert!(s1 == s2);
     }
-
-
-
-
-
 }
