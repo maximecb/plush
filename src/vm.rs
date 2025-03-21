@@ -1330,12 +1330,10 @@ impl VM
     }
 
     // Create a new actor
-    pub fn new_actor(vm: &Arc<Mutex<VM>>, fun: Value, args: Vec<Value>) -> u64
+    pub fn new_actor(parent: &mut Actor, fun: Value, args: Vec<Value>) -> u64
     {
-        let vm_mutex = vm.clone();
-
         // Assign an actor id
-        let mut vm_ref = vm.lock().unwrap();
+        let mut vm_ref = parent.vm.lock().unwrap();
         let actor_id = vm_ref.next_actor_id;
         vm_ref.next_actor_id += 1;
         drop(vm_ref);
@@ -1346,9 +1344,22 @@ impl VM
         // Create an allocator to send messages to the actor
         let mut msg_alloc = Alloc::new();
 
+
+
+
         // We need to recursively copy the function/closure
         // using the actor's message allocator
         let fun = deepcopy(fun, &mut msg_alloc);
+
+
+
+        // Copy the global variables from the parent actor
+        let mut globals = parent.globals.clone();
+        for val in &mut globals {
+            *val = deepcopy(*val, &mut msg_alloc);
+        }
+
+
 
         // Wrap the message allocator in a shared mutex
         let msg_alloc = Arc::new(Mutex::new(msg_alloc));
@@ -1362,18 +1373,12 @@ impl VM
 
 
 
-        // TODO: we need to deepcopy globals from the parent actor
-        // we want to avoid duplicates while doing this,
-        // so we'll need to pass globals into deepcopy
-        let mut vm_ref = vm.lock().unwrap();
-        let globals = vec![Value::Undef; vm_ref.prog.num_globals];
-        drop(vm_ref);
-
 
 
 
 
         // Spawn a new thread for the actor
+        let vm_mutex = parent.vm.clone();
         let handle = thread::spawn(move || {
             let mut actor = Actor::new(
                 actor_id,
@@ -1386,7 +1391,7 @@ impl VM
         });
 
         // Store the join handles and queue endpoints on the VM
-        let mut vm_ref = vm.lock().unwrap();
+        let mut vm_ref = parent.vm.lock().unwrap();
         vm_ref.threads.insert(actor_id, handle);
         vm_ref.actor_txs.insert(actor_id, actor_tx);
         drop(vm_ref);

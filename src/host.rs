@@ -140,7 +140,7 @@ fn actor_sleep(actor: &mut Actor, msecs: Value)
 // Returns an actor id
 fn actor_spawn(actor: &mut Actor, fun: Value) -> Value
 {
-    let actor_id = VM::new_actor(&actor.vm, fun, vec![]);
+    let actor_id = VM::new_actor(actor, fun, vec![]);
     Value::from(actor_id)
 }
 
