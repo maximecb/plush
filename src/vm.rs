@@ -1473,6 +1473,18 @@ mod tests
         assert_eq!(val, v);
     }
 
+
+    #[test]
+    fn insn_size()
+    {
+        use std::mem::size_of;
+        dbg!(size_of::<Insn>());
+        assert!(size_of::<Insn>() <= 24);
+
+        dbg!(size_of::<ClassId>());
+        assert!(size_of::<ClassId>() <= 32);
+    }
+
     #[test]
     fn vm_new()
     {
@@ -1560,8 +1572,11 @@ mod tests
     #[test]
     fn comparisons()
     {
-        //eval_eq("let o1 = {}; let o2 = {}; return o1 == o2;", Value::False);
-        //eval_eq("let o1 = {}; let o2 = {}; return o1 != o2;", Value::True);
+        eval_eq("class F {} let o1 = new F(); let o2 = new F(); return o1 == o2;", Value::False);
+        eval_eq("class F {} let o1 = new F(); let o2 = new F(); return o1 != o2;", Value::True);
+
+        // Integer comparisons
+        eval_eq("return 3 <= 5;", Value::True);
 
         // String comparison
         eval_eq("return 'foo' == 'bar';", Value::False);
