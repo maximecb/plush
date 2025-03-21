@@ -1352,12 +1352,15 @@ impl VM
         let fun = deepcopy(fun, &mut msg_alloc);
 
 
-
         // Copy the global variables from the parent actor
         let mut globals = parent.globals.clone();
         for val in &mut globals {
             *val = deepcopy(*val, &mut msg_alloc);
         }
+
+
+
+
 
 
 
@@ -1690,6 +1693,20 @@ mod tests
                 "return $actor_join(id);",
             ),
             Value::Int64(1337)
+        );
+    }
+
+    #[test]
+    fn actor_reads_global()
+    {
+        eval_eq(
+            concat!(
+                "let g = 33;",
+                "fun f() { return g; }",
+                "let id = $actor_spawn(f);",
+                "return $actor_join(id);",
+            ),
+            Value::Int64(33)
         );
     }
 
