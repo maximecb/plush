@@ -1547,6 +1547,12 @@ mod tests
     }
 
     #[test]
+    fn inc_dec()
+    {
+        eval_eq("let var x = 10; --x; return x;", Value::Int64(9));
+    }
+
+    #[test]
     fn assign()
     {
         eval_eq("let var x = 1; x = 2; return x;", Value::Int64(2));

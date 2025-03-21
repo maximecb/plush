@@ -306,25 +306,27 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
         );
     }
 
-    /*
     // Pre-decrement expression
     if input.match_token("--")? {
         let sub_expr = parse_prefix(input, prog)?;
 
         // Transform into i = i - 1
-        return Ok(
-            Expr::Binary{
+        return ExprBox::new_ok(
+            Expr::Binary {
                 op: BinOp::Assign,
-                lhs: Box::new(sub_expr.clone()),
-                rhs: Box::new(Expr::Binary{
-                    op: BinOp::Sub,
-                    lhs: Box::new(sub_expr.clone()),
-                    rhs: Box::new(Expr::Int(1))
-                })
-            }
+                lhs: sub_expr.clone(),
+                rhs: ExprBox::new(
+                    Expr::Binary{
+                        op: BinOp::Sub,
+                        lhs: sub_expr.clone(),
+                        rhs: ExprBox::new(Expr::Int64(1), sub_expr.pos)
+                    },
+                    sub_expr.pos
+                )
+            },
+            sub_expr.pos
         );
     }
-    */
 
     // Unary minus expression
     if ch == '-' {

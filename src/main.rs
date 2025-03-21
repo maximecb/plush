@@ -88,7 +88,14 @@ fn main()
 
     let file_name = &opts.rest[0];
 
-    let mut prog = parse_file(file_name).unwrap();
+    let mut prog = match parse_file(file_name) {
+        Ok(prog) => prog,
+        Err(err) => {
+            println!("Error while parsing source file:\n{}", err);
+            exit(-1);
+        }
+    };
+
     prog.resolve_syms().unwrap();
     let main_fn = prog.main_fn;
     let mut vm = VM::new(prog);
