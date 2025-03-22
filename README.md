@@ -12,18 +12,29 @@ If you think that Plush is cool, you can support my work via [GitHub Sponsors](h
 ## Features
 
 Cool/fun/notable features:
-- Simple JavaScript-like syntax and straightforward semantics
-- Dynamic typing
-- Stack-based bytecode interpreter
+- Simple JavaScript/lox inspired syntax and straightforward semantics
+- Simple stack-based bytecode interpreter
 - Memory safe, actor-based parallelism
+- Easily extensible set of host functions
+- Very few dependencies
+
+The Plush language supports:
+- Dynamic typing
+- Classes
+- Dynamic arrays aka vectors/lists
+- UTF-8 strings (work in progress)
+- Dictionaries with JS-like syntax (work in progress)
+- Host functions defined in `src/host.rs`
 
 Current limitations:
-- You may run into bugs or missing features
+- The language is still very  much incomplete
+  - You may run into bugs or missing features
 - Lack of error messages or good error handling
   - You may have to look at the source code to figure things out
   - We could use your help in improving error messages
-- Garbage collector planned but not yet implemented
-- Imports planned but not yet implemented
+- Copying garbage collector planned but not yet implemented
+  - With alloc-until-you-crash technology (TM)
+- Imports, support for multiple source files planned but not yet implemented
 
 ## Build Instructions
 
@@ -93,7 +104,8 @@ The code for Plush, its VM and associated tools is shared under the [Apache-2.0 
 There is a lot of work to be done to get this project going and contributions are welcome.
 
 A good first step is to look at open issues and read the available documentation. Another easy way to contribute
-is to create new example programs showcasing cool things you can do with Plush, or to open issues to report bugs.
+is to create new example programs showcasing cool things you can do with Plush, or to
+[report any bugs and issues](https://github.com/maximecb/plush/issues) you encounter.
 If you do report bugs, please provide as much context as possible, and the smallest reproduction you can
 come up with.
 
@@ -104,7 +116,7 @@ grep -IRi "todo" .
 
 In general, smaller pull requests are easier to review and have a much higher chance of getting merged than large
 pull requests. If you would like to add a new, complex feature or refactor the design of Plush, I recommend opening
-an issue or starting a discussion about your proposed change first.
+an issue or starting a discussion about your proposed changes first.
 
 Also please keep in mind that one of the core principles of Plush is to minimize dependencies to keep the VM easy
 to install and easy to port. Opening a PR that adds dependencies to multiple new packages and libraries is
