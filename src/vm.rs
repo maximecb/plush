@@ -172,7 +172,7 @@ impl Object
 #[derive(Clone, Default)]
 pub struct Dict
 {
-    pub fields: HashMap<String, Value>,
+    pub hash: HashMap<String, Value>,
 }
 
 impl Dict
@@ -180,13 +180,13 @@ impl Dict
     // Set the value associated with a given field
     fn set(&mut self, field_name: &str, new_val: Value)
     {
-        self.fields.insert(field_name.to_string(), new_val);
+        self.hash.insert(field_name.to_string(), new_val);
     }
 
     // Get the value associated with a given field
     fn get(&mut self, field_name: &str) -> Value
     {
-        if let Some(val) = self.fields.get(field_name) {
+        if let Some(val) = self.hash.get(field_name) {
             *val
         } else {
             panic!();
@@ -521,7 +521,8 @@ impl Actor
             Some(rc) => rc,
             None => return Err(()),
         };
-        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap());
+        let mut dst_map = HashMap::new();
+        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map);
 
         match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
             Ok(_) => Ok(()),
@@ -1344,25 +1345,18 @@ impl VM
         // Create an allocator to send messages to the actor
         let mut msg_alloc = Alloc::new();
 
-
-
+        // Hash map for remapping copied values
+        let mut dst_map = HashMap::new();
 
         // We need to recursively copy the function/closure
         // using the actor's message allocator
-        let fun = deepcopy(fun, &mut msg_alloc);
-
+        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map);
 
         // Copy the global variables from the parent actor
         let mut globals = parent.globals.clone();
         for val in &mut globals {
-            *val = deepcopy(*val, &mut msg_alloc);
+            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map);
         }
-
-
-
-
-
-
 
         // Wrap the message allocator in a shared mutex
         let msg_alloc = Arc::new(Mutex::new(msg_alloc));
@@ -1372,13 +1366,6 @@ impl VM
             sender: queue_tx,
             msg_alloc: Arc::downgrade(&msg_alloc),
         };
-
-
-
-
-
-
-
 
         // Spawn a new thread for the actor
         let vm_mutex = parent.vm.clone();
@@ -1480,7 +1467,6 @@ mod tests
         let val = eval(s);
         assert_eq!(val, v);
     }
-
 
     #[test]
     fn insn_size()
@@ -1707,6 +1693,24 @@ mod tests
                 "return $actor_join(id);",
             ),
             Value::Int64(33)
+        );
+    }
+
+    #[test]
+    fn actor_copy_obj()
+    {
+        // g and g2 should point to the same object after
+        // globals are copied for the new actor
+        eval_eq(
+            concat!(
+                "class F {}",
+                "let g = new F();",
+                "let g2 = g;",
+                "fun f() { return g == g2; }",
+                "let id = $actor_spawn(f);",
+                "return $actor_join(id);",
+            ),
+            Value::True
         );
     }
 
