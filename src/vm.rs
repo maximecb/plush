@@ -6,7 +6,7 @@ use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
 use crate::array::{Array, array_get_field, array_get_method};
 use crate::codegen::CompiledFun;
-use crate::deepcopy::deepcopy;
+use crate::deepcopy::{deepcopy, remap};
 use crate::host::*;
 
 /// Instruction opcodes
@@ -525,6 +525,7 @@ impl Actor
         };
         let mut dst_map = HashMap::new();
         let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map);
+        remap(dst_map);
 
         match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
             Ok(_) => Ok(()),
@@ -1359,6 +1360,8 @@ impl VM
         for val in &mut globals {
             *val = deepcopy(*val, &mut msg_alloc, &mut dst_map);
         }
+
+        remap(dst_map);
 
         // Wrap the message allocator in a shared mutex
         let msg_alloc = Arc::new(Mutex::new(msg_alloc));

@@ -67,14 +67,6 @@ pub fn deepcopy(
         }
     }
 
-    macro_rules! remap_val {
-        ($val: expr) => {
-            if ($val.is_heap()) {
-                *$val = *dst_map.get($val).unwrap();
-            }
-        }
-    }
-
     while stack.len() > 0 {
         let val = stack.pop().unwrap();
 
@@ -129,6 +121,20 @@ pub fn deepcopy(
         dst_map.insert(val, new_val);
     }
 
+    *dst_map.get(&src_val).unwrap()
+}
+
+/// Remap internal references to copied values
+pub fn remap(dst_map: HashMap<Value, Value>)
+{
+    macro_rules! remap_val {
+        ($val: expr) => {
+            if ($val.is_heap()) {
+                *$val = *dst_map.get($val).unwrap();
+            }
+        }
+    }
+
     // For each heap object translated
     for (_, val) in dst_map.iter() {
         match val {
@@ -158,8 +164,6 @@ pub fn deepcopy(
             _ => panic!()
         }
     }
-
-    *dst_map.get(&src_val).unwrap()
 }
 
 #[cfg(test)]
