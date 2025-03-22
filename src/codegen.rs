@@ -345,7 +345,7 @@ impl ExprBox
             Expr::Index { base, index } => {
                 base.gen_code(fun, code, alloc)?;
                 index.gen_code(fun, code, alloc)?;
-                code.push(Insn::arr_get);
+                code.push(Insn::get_index);
             }
 
             /*
@@ -760,12 +760,12 @@ fn gen_assign(
                 base.gen_code(fun, code, alloc)?;
                 index.gen_code(fun, code, alloc)?;
                 code.push(Insn::getn { idx: 2 });
-                code.push(Insn::arr_set);
+                code.push(Insn::set_index);
             } else {
                 base.gen_code(fun, code, alloc)?;
                 index.gen_code(fun, code, alloc)?;
                 rhs.gen_code(fun, code, alloc)?;
-                code.push(Insn::arr_set);
+                code.push(Insn::set_index);
             }
         }
 

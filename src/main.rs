@@ -13,6 +13,7 @@ mod codegen;
 mod vm;
 mod alloc;
 mod array;
+mod bytearray;
 mod host;
 mod deepcopy;
 

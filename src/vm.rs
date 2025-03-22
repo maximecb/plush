@@ -108,11 +108,13 @@ pub enum Insn
     get_field { field: *const String },
     set_field { field: *const String },
 
+    // Get/set indexed element
+    get_index,
+    set_index,
+
     // Array operations
     arr_new { capacity: u32 },
     arr_push,
-    arr_set,
-    arr_get,
 
     // TODO: should these all be functions/methods?
     // Bytearray operations
@@ -1113,20 +1115,7 @@ impl Actor
                     push!(val);
                 }
 
-                // Create new empty array
-                Insn::arr_new { capacity } => {
-                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity));
-                    push!(Value::Array(new_arr))
-                }
-
-                // Append an element at the end of an array
-                Insn::arr_push => {
-                    let val = pop!();
-                    let mut arr = pop!();
-                    arr.unwrap_arr().push(val);
-                }
-
-                Insn::arr_get => {
+                Insn::get_index => {
                     let idx = pop!().unwrap_usize();
                     let mut arr = pop!();
 
@@ -1143,7 +1132,7 @@ impl Actor
                 }
 
                 /*
-                Insn::arr_set => {
+                Insn::set_index => {
                     let idx = pop!().unwrap_u64();
                     let arr = pop!();
                     let val = pop!();
@@ -1158,6 +1147,19 @@ impl Actor
                     };
                 }
                 */
+
+                // Create new empty array
+                Insn::arr_new { capacity } => {
+                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity));
+                    push!(Value::Array(new_arr))
+                }
+
+                // Append an element at the end of an array
+                Insn::arr_push => {
+                    let val = pop!();
+                    let mut arr = pop!();
+                    arr.unwrap_arr().push(val);
+                }
 
                 /*
                 // Create new empty bytearray
