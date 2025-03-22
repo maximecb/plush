@@ -1,2 +1,2 @@
-$print_str("Hello World!");
+$print("Hello World!");
 $print_endl();

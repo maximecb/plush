@@ -1240,7 +1240,7 @@ mod tests
     fn host_call()
     {
         parse_ok("$print_endl();");
-        parse_ok("$print_i64(123);");
+        parse_ok("$print(123);");
     }
 
     #[test]

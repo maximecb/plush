@@ -112,6 +112,9 @@ pub enum Insn
     get_index,
     set_index,
 
+    // Create a new dictionary
+    dict_new,
+
     // Array operations
     arr_new { capacity: u32 },
     arr_push,
@@ -1655,7 +1658,7 @@ mod tests
     fn host_call()
     {
         eval_eq("return $actor_id();", Value::Int64(0));
-        eval("return $print_str('hi');");
+        eval("return $print('hi');");
         eval("return $time_current_ms();");
     }
 

@@ -327,16 +327,14 @@ impl ExprBox
                 );
             }
 
-            /*
-            Expr::Dict { fields } => {
+            Expr::Dict { pairs } => {
                 return gen_dict_expr(
-                    fields,
+                    pairs,
                     fun,
                     code,
                     alloc,
                 );
             }
-            */
 
             Expr::Ref(decl) => {
                 gen_var_read(decl, code);
@@ -519,37 +517,30 @@ fn gen_arr_expr(
     Ok(())
 }
 
-/*
 // Generate code for a dictionary literal expression
 fn gen_dict_expr(
-    fields: &Vec<(bool, String, ExprBox)>,
+    pairs: &Vec<(String, ExprBox)>,
     fun: &Function,
     code: &mut Vec<Insn>,
     alloc: &mut Alloc,
 ) -> Result<(), ParseError>
 {
-    code.push(Insn::obj_new);
+    code.push(Insn::dict_new);
 
     // For each field
-    for (mutable, name, expr) in fields {
+    for (name, expr) in pairs {
         code.push(Insn::dup);
 
         expr.gen_code(fun, code, alloc)?;
 
         let field_name = alloc.str_const(name.clone());
-        if *mutable {
-            code.push(Insn::obj_set { field: field_name });
-        } else {
-            code.push(Insn::obj_def { field: field_name });
-        }
+        code.push(Insn::set_field { field: field_name });
     }
 
     code.push(Insn::dup);
-    code.push(Insn::obj_seal);
 
     Ok(())
 }
-*/
 
 fn gen_bin_op(
     op: &BinOp,

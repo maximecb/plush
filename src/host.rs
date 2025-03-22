@@ -74,8 +74,7 @@ pub fn get_host_const(name: &str) -> Expr
     {
         "time_current_ms" => Expr::HostFn(Fn0_1(time_current_ms)),
 
-        "print_i64" => Expr::HostFn(Fn1_0(print_i64)),
-        "print_str" => Expr::HostFn(Fn1_0(print_str)),
+        "print" => Expr::HostFn(Fn1_0(print)),
         "print_endl" => Expr::HostFn(Fn0_0(print_endl)),
 
         "actor_id" => Expr::HostFn(Fn0_1(actor_id)),
@@ -103,17 +102,23 @@ pub fn time_current_ms(actor: &mut Actor) -> Value
     Value::from(get_time_ms())
 }
 
-fn print_i64(actor: &mut Actor, v: Value)
+/// Print a value to stdout
+fn print(actor: &mut Actor, v: Value)
 {
-    let v = v.unwrap_i64();
-    print!("{}", v);
-}
+    match v {
+        Value::String(_) => {
+            let rust_str = v.unwrap_rust_str();
+            print!("{}", rust_str);
+        }
 
-/// Print a null-terminated UTF-8 string to stdout
-fn print_str(actor: &mut Actor, s: Value)
-{
-    let rust_str = s.unwrap_rust_str();
-    print!("{}", rust_str);
+        Value::Int64(v) => print!("{}", v),
+
+        Value::True => print!("true"),
+        Value::False => print!("false"),
+        Value::Nil => print!("nil"),
+
+        _ => todo!()
+    }
 }
 
 /// Print a newline characted to stdout

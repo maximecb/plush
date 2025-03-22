@@ -8,5 +8,5 @@ fun fib(n)
 
 let r = fib(28);
 assert(r == 317811);
-$print_i64(r);
+$print(r);
 $print_endl();
