@@ -890,6 +890,13 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 + v1),
+
+                        (Value::String(s1), Value::String(s2)) => {
+                            let s1 = unsafe { &*s1 };
+                            let s2 = unsafe { &*s2 };
+                            Value::String(self.alloc.str_const(s1.to_owned() + s2))
+                        }
+
                         _ => panic!()
                     };
 
@@ -1590,6 +1597,12 @@ mod tests
         eval_eq("return 'foo' == 'bar';", Value::False);
         eval_eq("return 'foo' == 'foo';", Value::True);
         eval_eq("return 'foo' != 'foo';", Value::False);
+    }
+
+    #[test]
+    fn string_ops()
+    {
+        eval_eq("let s1 = 'foo'; let s2 = 'bar'; return s1 + s2 == 'foobar';", Value::True);
     }
 
     #[test]
