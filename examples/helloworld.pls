@@ -1,2 +1,1 @@
-$print("Hello World!");
-$print_endl();
+$println("Hello World!");

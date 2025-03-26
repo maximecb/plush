@@ -75,7 +75,7 @@ pub fn get_host_const(name: &str) -> Expr
         "time_current_ms" => Expr::HostFn(Fn0_1(time_current_ms)),
 
         "print" => Expr::HostFn(Fn1_0(print)),
-        "print_endl" => Expr::HostFn(Fn0_0(print_endl)),
+        "println" => Expr::HostFn(Fn1_0(println)),
 
         "actor_id" => Expr::HostFn(Fn0_1(actor_id)),
         "actor_sleep" => Expr::HostFn(Fn1_0(actor_sleep)),
@@ -121,9 +121,10 @@ fn print(actor: &mut Actor, v: Value)
     }
 }
 
-/// Print a newline characted to stdout
-fn print_endl(actor: &mut Actor)
+/// Print a value to stdout, followed by a newline
+fn println(actor: &mut Actor, v: Value)
 {
+    print(actor, v);
     println!();
 }
 

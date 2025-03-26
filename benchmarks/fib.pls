@@ -7,5 +7,4 @@ fun fib(n)
 }
 
 let r = fib(38);
-$print_i64(r);
-$print_endl();
+$println(r);

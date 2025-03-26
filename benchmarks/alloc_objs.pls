@@ -16,5 +16,4 @@ for (let var i = 0; i < 2_000_000; i = i + 1)
 }
 
 let end_time = $time_current_ms();
-$print_i64(end_time - start_time);
-$print_endl();
+$println(end_time - start_time);
