@@ -414,7 +414,22 @@ impl ExprBox
 
             Expr::Call { callee, args, .. } => {
                 callee.resolve_syms(prog, fun, env)?;
-                for arg in args {
+
+                // If the callee is a host function, check the arity
+                if let Expr::HostFn(host_fn) = callee.expr.as_ref() {
+                    if host_fn.num_params() != args.len() {
+                        return ParseError::with_pos(
+                            &format!(
+                                "incorrect argument count for host function, expected {}, got {}",
+                                host_fn.num_params(),
+                                args.len()
+                            ),
+                            &callee.pos
+                        );
+                    }
+                }
+
+                for arg in args.iter_mut() {
                     arg.resolve_syms(prog, fun, env)?;
                 }
             }
