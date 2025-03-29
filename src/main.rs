@@ -32,8 +32,8 @@ use crate::parser::{parse_file};
 #[derive(Debug, Clone)]
 struct Options
 {
-    // Only parse/validate the input, but don't run it
-    parse_only: bool,
+    // Parse/validate/compile the input, but don't execute it
+    no_exec: bool,
 
     rest: Vec<String>,
 }
@@ -45,7 +45,7 @@ struct Options
 fn parse_args(args: Vec<String>) -> Options
 {
     let mut opts = Options {
-        parse_only: false,
+        no_exec: false,
         rest: Vec::default(),
     };
 
@@ -68,8 +68,8 @@ fn parse_args(args: Vec<String>) -> Options
 
         // Try to match this argument as an option
         match arg.as_str() {
-            "--parse-only" => {
-                opts.parse_only = true;
+            "--no-exec" => {
+                opts.no_exec = true;
             }
 
             _ => panic!("unknown option {}", arg)
@@ -101,5 +101,8 @@ fn main()
     prog.resolve_syms().unwrap();
     let main_fn = prog.main_fn;
     let mut vm = VM::new(prog);
-    let ret = VM::call(&mut vm, main_fn, vec![]);
+
+    if !opts.no_exec {
+        let ret = VM::call(&mut vm, main_fn, vec![]);
+    }
 }
