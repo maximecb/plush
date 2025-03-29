@@ -16,6 +16,7 @@ mod array;
 mod bytearray;
 mod host;
 mod deepcopy;
+mod exec_tests;
 
 extern crate sdl2;
 use std::env;
