@@ -104,5 +104,15 @@ fn main()
 
     if !opts.no_exec {
         let ret = VM::call(&mut vm, main_fn, vec![]);
+
+        match ret {
+            Value::Nil => exit(0),
+
+            Value::Int64(v) => {
+                exit(v as i32);
+            }
+
+            _ => panic!("main unit should return an integer value")
+        }
     }
 }
