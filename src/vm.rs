@@ -1142,22 +1142,27 @@ impl Actor
                     push!(val);
                 }
 
-                /*
                 Insn::set_index => {
-                    let idx = pop!().unwrap_u64();
-                    let arr = pop!();
                     let val = pop!();
+                    let idx = pop!().unwrap_usize();
+                    let arr = pop!();
 
                     match arr {
-                        Value::Array(p) => Array::set(p, idx, val),
+                        Value::Array(p) => {
+                            let arr = unsafe { &mut *p };
+                            arr.set(idx, val);
+                        }
+
+                        /*
                         Value::ByteArray(p) => {
                             let b = val.unwrap_u8();
                             ByteArray::set(p, idx, b);
                         }
+                        */
+
                         _ => panic!("expected array type")
                     };
                 }
-                */
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
@@ -1753,6 +1758,7 @@ mod tests
         eval("let a = [1, 2, 3];");
         eval_eq("let a = [11, 22, 33]; return a[0];", Value::Int64(11));
         eval_eq("let a = [11, 22, 33]; return a[2];", Value::Int64(33));
+        eval_eq("let a = [11, 22, 33]; a[2] = 44; return a[2];", Value::Int64(44));
         eval_eq("let a = [11, 22, 33]; return a.len;", Value::Int64(3));
         eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::Int64(4));
     }

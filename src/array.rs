@@ -22,9 +22,14 @@ impl Array
         self.elems.push(val);
     }
 
-    pub fn get(&mut self, idx: usize) -> Value
+    pub fn get(&self, idx: usize) -> Value
     {
         self.elems[idx]
+    }
+
+    pub fn set(&mut self, idx: usize, val: Value)
+    {
+        self.elems[idx] = val;
     }
 }
 
