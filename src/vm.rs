@@ -104,6 +104,9 @@ pub enum Insn
     // Create class instance
     new { class_id: ClassId, argc: u16 },
 
+    // Check if instance of class
+    instanceof { class_id: ClassId },
+
     // Get/set field
     get_field { field: *const String },
     set_field { field: *const String },
@@ -1098,6 +1101,21 @@ impl Actor
                     }
 
                     push!(obj_val);
+                }
+
+                Insn::instanceof { class_id } => {
+                    let mut val = pop!();
+
+                    let r = match val {
+                        Value::Object(p) => {
+                            let obj = unsafe { &*p };
+                            obj.class_id == class_id
+                        }
+
+                        _ => false
+                    };
+
+                    push_bool!(r);
                 }
 
                 // Get object field
