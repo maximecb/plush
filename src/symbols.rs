@@ -373,6 +373,11 @@ impl ExprBox
                 base.resolve_syms(prog, fun, env)?;
             }
 
+            Expr::InstanceOf { val, class } => {
+                val.resolve_syms(prog, fun, env)?;
+                class.resolve_syms(prog, fun, env)?;
+            }
+
             Expr::Unary { op, child, .. } => {
                 child.resolve_syms(prog, fun, env)?;
             }

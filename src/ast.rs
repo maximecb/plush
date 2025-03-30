@@ -95,6 +95,11 @@ pub enum Expr
         field: String,
     },
 
+    InstanceOf {
+        val: ExprBox,
+        class: ExprBox,
+    },
+
     Unary {
         op: UnOp,
         child: ExprBox,
