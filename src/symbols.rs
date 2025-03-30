@@ -373,9 +373,17 @@ impl ExprBox
                 base.resolve_syms(prog, fun, env)?;
             }
 
-            Expr::InstanceOf { val, class } => {
+            Expr::InstanceOf { val, class_name, class_id } => {
                 val.resolve_syms(prog, fun, env)?;
-                class.resolve_syms(prog, fun, env)?;
+
+                if let Some(Decl::Class { id }) = env.lookup(class_name) {
+                    *class_id = id;
+                } else {
+                    return ParseError::with_pos(
+                        "could not match class name for instanceof",
+                        &self.pos
+                    );
+                }
             }
 
             Expr::Unary { op, child, .. } => {
@@ -439,8 +447,16 @@ impl ExprBox
                 }
             }
 
-            Expr::New { class, args, .. } => {
-                class.resolve_syms(prog, fun, env)?;
+            Expr::New { class_name, class_id, args, .. } => {
+                if let Some(Decl::Class { id }) = env.lookup(class_name) {
+                    *class_id = id;
+                } else {
+                    return ParseError::with_pos(
+                        "could not match class name for new",
+                        &self.pos
+                    );
+                }
+
                 for arg in args {
                     arg.resolve_syms(prog, fun, env)?;
                 }

@@ -455,13 +455,8 @@ impl ExprBox
                 }
             }
 
-            Expr::New { class, args } => {
+            Expr::New { class_id, args, .. } => {
                 let argc = args.len().try_into().unwrap();
-
-                let class_id = match class.expr.as_ref() {
-                    Expr::Ref(Decl::Class { id }) => id,
-                    _ => panic!("class decl not resolved")
-                };
 
                 for arg in args {
                     arg.gen_code(fun, code, alloc)?;

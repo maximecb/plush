@@ -233,6 +233,23 @@ fn parse_postfix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, Parse
             continue;
         }
 
+        // Instanceof operator
+        if input.match_token("instanceof")? {
+            input.eat_ws()?;
+            let class_name = input.parse_ident()?;
+
+            base_expr = ExprBox::new(
+                Expr::InstanceOf {
+                    val: base_expr,
+                    class_name,
+                    class_id: ClassId::default(),
+                },
+                pos
+            );
+
+            continue;
+        }
+
         /*
         // Postfix increment expression
         if input.match_token("++")? {
@@ -383,14 +400,10 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
         input.expect_token("(")?;
         let arg_exprs = parse_expr_list(input, prog, ")")?;
 
-        let class_expr = ExprBox::new(
-            Expr::Ident(class_name),
-            pos
-        );
-
         return ExprBox::new_ok(
             Expr::New {
-                class: class_expr,
+                class_name,
+                class_id: ClassId::default(),
                 args: arg_exprs
             },
             pos
@@ -1345,6 +1358,12 @@ mod tests
         parse_ok("class Foo { init(self) { self.x = 1; } inc(self) { ++self.x; } }");
         parse_ok("let o = new Foo();");
         parse_ok("let o = new Foo(1, 2, 3);");
+    }
+
+    #[test]
+    fn instanceof()
+    {
+        parse_ok("a instanceof Foo;");
     }
 
     #[test]

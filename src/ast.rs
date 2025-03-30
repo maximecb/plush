@@ -97,7 +97,8 @@ pub enum Expr
 
     InstanceOf {
         val: ExprBox,
-        class: ExprBox,
+        class_name: String,
+        class_id: ClassId,
     },
 
     Unary {
@@ -123,7 +124,8 @@ pub enum Expr
     },
 
     New {
-        class: ExprBox,
+        class_name: String,
+        class_id: ClassId,
         args: Vec<ExprBox>,
     },
 }
