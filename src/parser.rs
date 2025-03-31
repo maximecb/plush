@@ -381,6 +381,7 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
         return Ok(expr)
     }
 
+    /*
     if input.match_keyword("typeof")? {
         let child = parse_prefix(input, prog)?;
 
@@ -392,6 +393,7 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
             pos,
         );
     }
+    */
 
     // New class instance
     if input.match_keyword("new")? {
@@ -1380,7 +1382,6 @@ mod tests
         parse_ok("if (1) {} else {}");
         parse_ok("if (1) { foo(); }");
         parse_ok("if (1) { foo(); } else { bar(); }");
-        parse_ok("if (typeof true == 'bool') {}");
     }
 
     #[test]

@@ -1803,4 +1803,11 @@ mod tests
         eval_eq("class Foo { init(s, a, b) { s.x = a; s.y = b; } } let o = new Foo(5, 3); return o.x - o.y;", Value::Int64(2));
         eval_eq("class C { init(s) { s.c = 0; } inc(s) { ++s.c; } } let o = new C(); o.inc(); return o.c;", Value::Int64(1));
     }
+
+    #[test]
+    fn instanceof()
+    {
+        eval_eq("class F {} let o = new F(); return o instanceof F;", Value::True);
+        eval_eq("class F {} class G {} let o = new F(); return o instanceof G;", Value::False);
+    }
 }

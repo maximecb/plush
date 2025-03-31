@@ -346,40 +346,15 @@ impl ExprBox
                 code.push(Insn::get_index);
             }
 
-            /*
-            Expr::Member { base, field } if field == "len" => {
-                // Evaluate the base
-                base.gen_code(fun, sym, code, out)?;
-
-                let not_obj = sym.gen_sym("not_obj");
-                let len_done = sym.gen_sym("len_done");
-
-                // Is this an object?
-                code.insn("dup");
-                code.insn("typeof");
-                code.insn_s("push", "object");
-                code.insn("eq");
-
-                code.insn_s("if_false", &not_obj);
-
-                // Object case, get field
-                code.insn_s("obj_get", &field);
-                code.jump(&len_done);
-
-                // Not object case
-                code.label(&not_obj);
-
-                // Get array/string length
-                code.insn("arr_len");
-
-                code.label(&len_done);
-            }
-            */
-
             Expr::Member { base, field } => {
                 base.gen_code(fun, code, alloc)?;
                 let field = alloc.str_const(field.clone());
                 code.push(Insn::get_field { field });
+            }
+
+            Expr::InstanceOf { val, class_id, .. } => {
+                val.gen_code(fun, code, alloc)?;
+                code.push(Insn::instanceof { class_id: *class_id });
             }
 
             Expr::Unary { op, child } => {
@@ -402,7 +377,7 @@ impl ExprBox
                     }
                     */
 
-                    _ => todo!()
+                    //_ => todo!()
                 }
             },
 
