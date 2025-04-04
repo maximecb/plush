@@ -77,23 +77,22 @@ Follow the Windows-specific instructions to [install the Rust toolchain](https:/
 
 Get `SDL2.dll` from one of [SDL2 Releases](https://github.com/libsdl-org/SDL/releases).
 
-Copy `SDL2.dll` (unzip) to the `vm/` folder.
+Copy `SDL2.dll` (unzip) to the root of your cloned repo.
 
 ### Compiling the Project
 
 ```sh
-cd vm
 cargo build
 ```
 
 To run an asm file:
 ```sh
-cargo run examples/fizzbuzz.asm
+cargo run examples/helloworld.pls
 ```
 
 ### Running the Test Suite
 
-Run `cargo test` from the `vm`, and `plush` directories.
+Simply run `cargo test`.
 
 ## Open Source License
 
