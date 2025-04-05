@@ -165,6 +165,23 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
         );
     }
 
+    // New class instance
+    if input.match_keyword("new")? {
+        input.eat_ws()?;
+        let class_name = input.parse_ident()?;
+        input.expect_token("(")?;
+        let arg_exprs = parse_expr_list(input, prog, ")")?;
+
+        return ExprBox::new_ok(
+            Expr::New {
+                class_name,
+                class_id: ClassId::default(),
+                args: arg_exprs
+            },
+            pos
+        );
+    }
+
     // Identifier (variable reference)
     if is_ident_start(ch) {
         let ident = input.parse_ident()?;
@@ -394,23 +411,6 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
         );
     }
     */
-
-    // New class instance
-    if input.match_keyword("new")? {
-        input.eat_ws()?;
-        let class_name = input.parse_ident()?;
-        input.expect_token("(")?;
-        let arg_exprs = parse_expr_list(input, prog, ")")?;
-
-        return ExprBox::new_ok(
-            Expr::New {
-                class_name,
-                class_id: ClassId::default(),
-                args: arg_exprs
-            },
-            pos
-        );
-    }
 
     // Try to parse this as a postfix expression
     parse_postfix(input, prog)
@@ -1402,6 +1402,15 @@ mod tests
 
         // Common error, don't accept
         parse_fails("for (;;);");
+    }
+
+    #[test]
+    fn regress_prefix_postfix()
+    {
+        parse_ok("return !a instanceof B;");
+        parse_ok("return f() instanceof F;");
+        parse_ok("return !f() instanceof F;");
+        parse_ok("return new F() instanceof F;");
     }
 
     #[test]

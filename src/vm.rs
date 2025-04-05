@@ -1809,5 +1809,6 @@ mod tests
     {
         eval_eq("class F {} let o = new F(); return o instanceof F;", Value::True);
         eval_eq("class F {} class G {} let o = new F(); return o instanceof G;", Value::False);
+        eval_eq("class F {} return new F() instanceof F;", Value::True);
     }
 }
