@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
 use crate::array::{Array, array_get_field, array_get_method};
+use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
 use crate::deepcopy::{deepcopy, remap};
 use crate::host::*;
@@ -124,7 +125,7 @@ pub enum Insn
 
     // TODO: should these all be functions/methods?
     // Bytearray operations
-    //ba_new { capacity: u32 },
+    //ba_new,
     //ba_resize,
     //ba_write_u32,
 
@@ -222,6 +223,7 @@ pub enum Value
 
     Object(*mut Object),
     Array(*mut Array),
+    ByteArray(*mut ByteArray),
     Dict(*mut Dict),
 }
 use Value::{Undef, Nil, False, True, Int64, Float64};
@@ -251,6 +253,7 @@ impl Value
             Closure(_)  |
             Object(_)   |
             Array(_)    |
+            ByteArray(_)|
             Dict(_)     => true,
         }
     }
@@ -1171,12 +1174,12 @@ impl Actor
                             arr.set(idx, val);
                         }
 
-                        /*
                         Value::ByteArray(p) => {
+                            let arr = unsafe { &mut *p };
                             let b = val.unwrap_u8();
-                            ByteArray::set(p, idx, b);
+                            //ByteArray::set(p, idx, b);
+                            todo!();
                         }
-                        */
 
                         _ => panic!("expected array type")
                     };
