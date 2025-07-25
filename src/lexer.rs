@@ -79,7 +79,7 @@ pub struct ParseError
 
 impl ParseError
 {
-    pub fn new(input: &Input, msg: &str) -> Self
+    pub fn new(input: &Lexer, msg: &str) -> Self
     {
         ParseError {
             msg: msg.to_string(),
@@ -131,9 +131,9 @@ pub fn is_ident_ch(ch: char) -> bool
 }
 
 #[derive(Debug, Clone)]
-pub struct Input
+pub struct Lexer
 {
-    // Input string to be parsed
+    // Lexer string to be parsed
     input: Vec<char>,
 
     // Current index in the input string
@@ -149,7 +149,7 @@ pub struct Input
     pub col_no: u32,
 }
 
-impl Input
+impl Lexer
 {
     pub fn from_file(file_name: &str) -> Result<Self, ParseError>
     {
@@ -163,14 +163,14 @@ impl Input
             }
         };
 
-        Ok(Input::new(&data, file_name))
+        Ok(Self::new(&data, file_name))
     }
 
     pub fn new(input_str: &str, src_name: &str) -> Self
     {
         let file_id = get_file_id(src_name);
 
-        Input {
+        Self {
             input: input_str.chars().collect(),
             file_id,
             idx: 0,
@@ -455,7 +455,7 @@ impl Input
     /// Read the characters of a numeric value into a string
     pub fn read_numeric(&mut self) -> String
     {
-        fn read_digits(input: &mut Input)
+        fn read_digits(input: &mut Lexer)
         {
             let ch = input.peek_ch();
 
@@ -474,7 +474,7 @@ impl Input
             }
         }
 
-        fn read_sign(input: &mut Input)
+        fn read_sign(input: &mut Lexer)
         {
             let _ = input.match_char('+') || input.match_char('-');
         }

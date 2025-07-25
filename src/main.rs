@@ -6,7 +6,7 @@
 
 mod utils;
 mod ast;
-mod parsing;
+mod lexer;
 mod parser;
 mod symbols;
 mod codegen;

@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::io;
 use std::io::Read;
 use std::cmp::max;
-use crate::parsing::*;
+use crate::lexer::*;
 use crate::ast::*;
 
 /// Parse an atomic expression
-fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseError>
+fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
     input.eat_ws()?;
     let ch = input.peek_ch();
@@ -195,7 +195,7 @@ fn parse_atom(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
 }
 
 /// Parse a postfix expression
-fn parse_postfix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseError>
+fn parse_postfix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
     let mut base_expr = parse_atom(input, prog)?;
 
@@ -298,7 +298,7 @@ fn parse_postfix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, Parse
 /// Parse an prefix expression
 /// Note: this function should only call parse_postfix directly
 /// to respect the priority of operations in C
-fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseError>
+fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
     input.eat_ws()?;
     let ch = input.peek_ch();
@@ -418,7 +418,7 @@ fn parse_prefix(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseE
 
 // Parse a dictionary literal
 fn parse_dict(
-    input: &mut Input,
+    input: &mut Lexer,
     prog: &mut Program,
     pos: SrcPos,
 ) -> Result<ExprBox, ParseError>
@@ -463,7 +463,7 @@ fn parse_dict(
 }
 
 /// Parse a list of argument expressions
-fn parse_expr_list(input: &mut Input, prog: &mut Program, end_token: &str) -> Result<Vec<ExprBox>, ParseError>
+fn parse_expr_list(input: &mut Lexer, prog: &mut Program, end_token: &str) -> Result<Vec<ExprBox>, ParseError>
 {
     let mut arg_exprs = Vec::default();
 
@@ -538,7 +538,7 @@ const BIN_OPS: [OpInfo; 19] = [
 const TERNARY_PREC: usize = 13;
 
 /// Try to match a binary operator in the input
-fn match_bin_op(input: &mut Input) -> Result<Option<OpInfo>, ParseError>
+fn match_bin_op(input: &mut Lexer) -> Result<Option<OpInfo>, ParseError>
 {
     for op_info in BIN_OPS {
         if input.match_token(op_info.op_str)? {
@@ -552,7 +552,7 @@ fn match_bin_op(input: &mut Input) -> Result<Option<OpInfo>, ParseError>
 /// Parse a complex infix expression
 /// This uses the shunting yard algorithm to parse infix expressions:
 /// https://en.wikipedia.org/wiki/Shunting_yard_algorithm
-fn parse_expr(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseError>
+fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
     // Operator stack
     let mut op_stack: Vec<OpInfo> = Vec::default();
@@ -679,7 +679,7 @@ fn parse_expr(input: &mut Input, prog: &mut Program) -> Result<ExprBox, ParseErr
 }
 
 /// Parse a block statement
-fn parse_block_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, ParseError>
+fn parse_block_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseError>
 {
     input.eat_ws()?;
     let pos = input.get_pos();
@@ -712,7 +712,7 @@ fn parse_block_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, Pa
 }
 
 /// Parse a statement
-fn parse_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, ParseError>
+fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseError>
 {
     input.eat_ws()?;
     let pos = input.get_pos();
@@ -944,7 +944,7 @@ fn parse_stmt(input: &mut Input, prog: &mut Program) -> Result<StmtBox, ParseErr
 }
 
 /// Parse a function declaration
-fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcPos) -> Result<FunId, ParseError>
+fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcPos) -> Result<FunId, ParseError>
 {
     let mut params = Vec::default();
     let mut var_arg = false;
@@ -997,7 +997,7 @@ fn parse_function(input: &mut Input, prog: &mut Program, name: String, pos: SrcP
 }
 
 /// Parse a class declaration
-fn parse_class(input: &mut Input, prog: &mut Program, pos: SrcPos) -> Result<(String, ClassId), ParseError>
+fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(String, ClassId), ParseError>
 {
     input.eat_ws()?;
     let class_name = input.parse_ident()?;
@@ -1046,7 +1046,7 @@ fn parse_class(input: &mut Input, prog: &mut Program, pos: SrcPos) -> Result<(St
 }
 
 /// Parse a single unit of source code (e.g. one source file)
-pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseError>
+pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseError>
 {
     input.eat_ws()?;
     let pos = input.get_pos();
@@ -1100,7 +1100,7 @@ pub fn parse_unit(input: &mut Input, prog: &mut Program) -> Result<Unit, ParseEr
     })
 }
 
-pub fn parse_program(input: &mut Input) -> Result<Program, ParseError>
+pub fn parse_program(input: &mut Lexer) -> Result<Program, ParseError>
 {
     let mut prog = Program::default();
     let unit = parse_unit(input, &mut prog)?;
@@ -1111,13 +1111,13 @@ pub fn parse_program(input: &mut Input) -> Result<Program, ParseError>
 
 pub fn parse_str(src: &str) -> Result<Program, ParseError>
 {
-    let mut input = Input::new(&src, "src");
+    let mut input = Lexer::new(&src, "src");
     parse_program(&mut input)
 }
 
 pub fn parse_file(file_name: &str) -> Result<Program, ParseError>
 {
-    let mut input = Input::from_file(file_name)?;
+    let mut input = Lexer::from_file(file_name)?;
     parse_program(&mut input)
 }
 
@@ -1129,14 +1129,14 @@ mod tests
     fn parse_ok(src: &str)
     {
         dbg!(src);
-        let mut input = Input::new(&src, "src");
+        let mut input = Lexer::new(&src, "src");
         parse_program(&mut input).unwrap();
     }
 
     fn parse_fails(src: &str)
     {
         dbg!(src);
-        let mut input = Input::new(&src, "src");
+        let mut input = Lexer::new(&src, "src");
         assert!(parse_program(&mut input).is_err());
     }
 

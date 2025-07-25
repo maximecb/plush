@@ -1,6 +1,6 @@
 use std::fmt;
 use std::collections::HashMap;
-use crate::parsing::SrcPos;
+use crate::lexer::SrcPos;
 use crate::symbols::Decl;
 use crate::host::HostFn;
 

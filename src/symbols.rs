@@ -1,6 +1,6 @@
 use std::collections::HashMap;
+use crate::lexer::ParseError;
 use crate::ast::*;
-use crate::parsing::{ParseError};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Decl
@@ -498,13 +498,13 @@ impl ExprBox
 mod tests
 {
     use super::*;
-    use crate::parsing::Input;
+    use crate::lexer::Lexer;
     use crate::parser::parse_program;
 
     fn succeeds(src: &str)
     {
         dbg!(src);
-        let mut input = Input::new(&src, "src");
+        let mut input = Lexer::new(&src, "src");
         let mut prog = parse_program(&mut input).unwrap();
         prog.resolve_syms().unwrap();
     }
@@ -512,7 +512,7 @@ mod tests
     fn fails(src: &str)
     {
         dbg!(src);
-        let mut input = Input::new(&src, "src");
+        let mut input = Lexer::new(&src, "src");
         let mut prog = parse_program(&mut input).unwrap();
         assert!(prog.resolve_syms().is_err());
     }

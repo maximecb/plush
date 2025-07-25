@@ -1,6 +1,6 @@
 use std::cmp::max;
 use crate::ast::*;
-use crate::parsing::{ParseError};
+use crate::lexer::ParseError;
 use crate::symbols::{Decl};
 use crate::vm::{Insn, Value};
 use crate::alloc::Alloc;
