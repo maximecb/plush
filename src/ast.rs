@@ -374,6 +374,14 @@ impl From<ClassId> for usize {
     }
 }
 
+/// Constant class ids for basic classes
+pub const OBJECT_ID: ClassId = ClassId(1);
+pub const INT64_ID: ClassId = ClassId(2);
+pub const STRING_ID: ClassId = ClassId(3);
+pub const ARRAY_ID: ClassId = ClassId(4);
+pub const BYTEARRAY_ID: ClassId = ClassId(5);
+pub const LAST_RESERVED_ID: usize = 100;
+
 #[derive(Default, Clone, Debug)]
 pub struct Unit
 {
@@ -388,7 +396,7 @@ pub struct Unit
 }
 
 /// Represents an entire program containing one or more units
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Program
 {
     // Last id assigned
@@ -418,6 +426,22 @@ pub struct Program
 
 impl Program
 {
+    pub fn new() -> Program
+    {
+        let mut prog = Self {
+            last_id: LAST_RESERVED_ID,
+            units: Default::default(),
+            funs: Default::default(),
+            classes: Default::default(),
+            num_globals: Default::default(),
+            main_unit: Default::default(),
+            main_fn: Default::default(),
+        };
+
+        crate::runtime::init_runtime(&mut prog);
+        prog
+    }
+
     pub fn reg_fun(&mut self, mut fun: Function) -> FunId
     {
         self.last_id += 1;
@@ -429,10 +453,16 @@ impl Program
 
     pub fn reg_class(&mut self, mut class: Class) -> ClassId
     {
-        self.last_id += 1;
-        let id = self.last_id.into();
+        // If the class doesn't have an id assigned yet
+        if class.id == ClassId::default() {
+            self.last_id += 1;
+            let id = self.last_id.into();
+            class.id = id;
+        }
+
+        let id = class.id;
         assert!(id != ClassId::default());
-        class.id = id;
+        assert!(!self.classes.contains_key(&id));
         self.classes.insert(id, class);
         id
     }

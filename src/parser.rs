@@ -1088,7 +1088,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
 
 pub fn parse_program(input: &mut Lexer) -> Result<Program, ParseError>
 {
-    let mut prog = Program::default();
+    let mut prog = Program::new();
     let unit = parse_unit(input, &mut prog)?;
     prog.main_fn = unit.unit_fn;
     prog.main_unit = unit;

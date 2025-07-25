@@ -1,8 +1,5 @@
-use crate::ast::{Program, Class, ClassId};
+use crate::ast::*;
 use crate::vm::{Value, Actor};
-
-// Note: this maybe isn't necessary?
-//const INT64_ID: ClassId = ClassId(1);
 
 fn int64_to_s(actor: &mut Actor, v: Value) -> Value
 {
@@ -13,29 +10,31 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Value
 
 pub fn init_runtime(prog: &mut Program)
 {
-    let int64_class = Class::default();
-
-    // TODO: register to_s method for int64 class
-
-
-
+    // Int64
+    let mut int64_class = Class::default();
+    int64_class.id = INT64_ID;
     prog.reg_class(int64_class);
 
+    // ByteArray
+    let mut ba_class = Class::default();
+    ba_class.id = BYTEARRAY_ID;
+
+
+
+    prog.reg_class(ba_class);
 
 
 
 
-
-    // TODO: can we assign classes global constant indices?
-    // maybe we can simply pre-register those indices ahead of time?
 
 }
 
 /// Get the method associated with a core value
 pub fn get_method(val: Value, method_name: &str) -> Value
 {
-    use crate::array::*;
     use crate::host::HostFn;
+    use crate::array::*;
+    use crate::bytearray::*;
 
     let f = match (val, method_name) {
         (Value::Int64(_), "to_s") => HostFn::Fn1_1(int64_to_s),
@@ -48,18 +47,10 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     Value::HostFn(f)
 }
 
-
-
-
-
-//
-// NOTE: is this what we want, or do we want instanceof?
-//
-pub fn get_class_of(val: Value, prog: &Program)
+pub fn get_class_id(val: Value, prog: &Program) -> ClassId
 {
-    // Note: here you need some runtime class definitions accessible
-
     match val {
+
 
 
 

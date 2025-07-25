@@ -1523,7 +1523,7 @@ mod tests
     #[test]
     fn vm_new()
     {
-        let prog = Program::default();
+        let prog = Program::new();
         let _vm = VM::new(prog);
     }
 

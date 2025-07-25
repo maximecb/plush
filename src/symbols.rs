@@ -146,6 +146,12 @@ impl Program
         let mut env = Env::default();
         env.push_scope();
 
+        // Register core classes
+        env.define("Int64", Decl::Class { id: INT64_ID });
+        env.define("String", Decl::Class { id: STRING_ID });
+        env.define("Array", Decl::Class { id: ARRAY_ID });
+        env.define("ByteArray", Decl::Class { id: BYTEARRAY_ID });
+
         // Process the unit function
         let mut main_unit = std::mem::take(&mut self.main_unit);
         main_unit.resolve_syms(self, &mut env)?;
