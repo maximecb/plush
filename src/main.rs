@@ -14,6 +14,7 @@ mod vm;
 mod alloc;
 mod array;
 mod bytearray;
+mod runtime;
 mod host;
 mod deepcopy;
 mod exec_tests;

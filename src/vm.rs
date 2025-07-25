@@ -1109,6 +1109,7 @@ impl Actor
                 Insn::instanceof { class_id } => {
                     let mut val = pop!();
 
+                    // Check that the class id matches
                     let r = match val {
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
