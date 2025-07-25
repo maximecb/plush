@@ -33,6 +33,16 @@ impl Hash for Value
                 addr.hash(state);
             },
 
+            Array(ptr) => {
+                let addr = *ptr as usize;
+                addr.hash(state);
+            },
+
+            ByteArray(ptr) => {
+                let addr = *ptr as usize;
+                addr.hash(state);
+            },
+
             Dict(ptr) => {
                 let addr = *ptr as usize;
                 addr.hash(state);

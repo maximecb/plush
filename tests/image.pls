@@ -26,7 +26,7 @@ class Image
         for (let var j = 0; j < height; ++j)
         {
             let offset = 4 * (self.width * (ymin + j) + xmin);
-            //self.bytes.fill_u32(offset, width, color);
+            self.bytes.fill_u32(offset, width, color);
         }
     }
 }

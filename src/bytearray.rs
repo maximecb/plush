@@ -32,6 +32,19 @@ impl ByteArray
             std::ptr::write_unaligned(val_ptr, val);
         }
     }
+
+    /// Fill an interval with a given value
+    pub fn fill<T>(&mut self, pos: usize, num: usize, val: T) where T: Copy
+    {
+        assert!(pos + num * size_of::<T>() <= self.bytes.len());
+
+        unsafe {
+            let dst_ptr = self.bytes.as_mut_ptr().add(pos);
+            let dst_ptr = transmute::<*mut u8 , *mut T>(dst_ptr);
+            let slice = std::slice::from_raw_parts_mut(dst_ptr, num);
+            slice.fill(val);
+        }
+    }
 }
 
 /// Create a new ByteArray instance
@@ -62,11 +75,19 @@ Insn::ba_resize => {
 }
 */
 
-/// Create a new ByteArray instance
 pub fn ba_write_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val = val.unwrap_u32();
     ba.write(idx, val);
+}
+
+pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value)
+{
+    let ba = ba.unwrap_ba();
+    let idx = idx.unwrap_usize();
+    let num = num.unwrap_usize();
+    let val = val.unwrap_u32();
+    ba.fill(idx, num, val);
 }
