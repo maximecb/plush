@@ -244,6 +244,9 @@ impl StmtBox
                 let if_idx = code.len();
                 code.push(Insn::if_true { target_ofs: 0 });
 
+                // TODO: need to report the source position etc.
+                // Might be nice to report the assert statement
+                // contents as a string?
                 /*
                 code.insn_s("push", &format!("assertion failed at {}\n", self.pos));
                 code.add_insn(vec![
@@ -370,12 +373,6 @@ impl ExprBox
                     UnOp::Not => {
                         code.push(Insn::not);
                     }
-
-                    /*
-                    UnOp::TypeOf => {
-                        code.insn("typeof");
-                    }
-                    */
 
                     //_ => todo!()
                 }
@@ -652,6 +649,10 @@ fn gen_var_read(
             code.push(Insn::push { val: Value::Fun(id) });
         }
 
+        Decl::Class { id } => {
+            code.push(Insn::push { val: Value::Class(id) });
+        }
+
         Decl::Global { idx, .. } => {
             code.push(Insn::get_global { idx });
         }
@@ -671,8 +672,6 @@ fn gen_var_read(
 
             code.push(Insn::clos_get { idx });
         }
-
-        _ => panic!()
     }
 }
 

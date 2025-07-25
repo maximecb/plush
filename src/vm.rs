@@ -200,8 +200,10 @@ impl Dict
 #[derive(Copy, Clone, Debug)]
 pub enum Value
 {
-    // Uninitialized. This should never be observed.
+    // Undef means uninitialized.
+    // This should never be observed in user code.
     Undef,
+
     Nil,
     False,
     True,
@@ -219,6 +221,8 @@ pub enum Value
     Array(*mut Array),
     ByteArray(*mut ByteArray),
     Dict(*mut Dict),
+
+    Class(ClassId),
 }
 use Value::{Undef, Nil, False, True, Int64, Float64};
 
@@ -240,9 +244,10 @@ impl Value
             Int64(_)    |
             Float64(_)  |
             HostFn(_)   |
-            Fun(_)      => false,
+            Fun(_)      |
+            Class(_)    => false,
 
-            // Heap values
+            // Heap-allocated values
             String(_)   |
             Closure(_)  |
             Object(_)   |
@@ -320,6 +325,14 @@ impl Value
         match self {
             Value::Array(p) => unsafe { &mut **p },
             _ => panic!("expected array value but got {:?}", self)
+        }
+    }
+
+    pub fn unwrap_ba(&mut self) -> &mut ByteArray
+    {
+        match self {
+            Value::ByteArray(p) => unsafe { &mut **p },
+            _ => panic!("expected byte array value but got {:?}", self)
         }
     }
 }
@@ -1746,6 +1759,14 @@ mod tests
         eval_eq("let a = [11, 22, 33]; a[2] = 44; return a[2];", Value::Int64(44));
         eval_eq("let a = [11, 22, 33]; return a.len;", Value::Int64(3));
         eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::Int64(4));
+    }
+
+    #[test]
+    fn bytearray()
+    {
+        eval("let a = ByteArray.new();");
+        eval("let a = ByteArray.with_size(1024);");
+        eval("let a = ByteArray.with_size(32); a.write_u32(0, 0xFF_FF_FF_FF);");
     }
 
     #[test]
