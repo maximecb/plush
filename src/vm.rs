@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
-use crate::array::{Array, array_get_field, array_get_method};
+use crate::array::{Array, array_get_field};
 use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
 use crate::deepcopy::{deepcopy, remap};
@@ -1259,6 +1259,7 @@ impl Actor
                     call_fun!(fun, argc);
                 }
 
+                // Call a method with a known name
                 // call_method (self, arg0, ..., argN)
                 Insn::call_method { name, argc } => {
                     let method_name = unsafe { &*name };
@@ -1271,11 +1272,9 @@ impl Actor
                             Value::Fun(fun_id)
                         }
 
-                        Value::Array(_) => {
-                            array_get_method(&method_name)
+                        _ => {
+                            crate::runtime::get_method(self_val, &method_name)
                         }
-
-                        _ => panic!()
                     };
 
                     call_fun!(fun, argc + 1);
@@ -1760,6 +1759,12 @@ mod tests
             ),
             Value::True
         );
+    }
+
+    #[test]
+    fn int64()
+    {
+        eval("let v = 15; assert(v.to_s() == '15');");
     }
 
     /*

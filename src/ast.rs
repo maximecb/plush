@@ -10,7 +10,6 @@ pub enum UnOp
 {
     Minus,
     Not,
-    //TypeOf,
 }
 
 /// Binary operator

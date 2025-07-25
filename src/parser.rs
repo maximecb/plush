@@ -398,20 +398,6 @@ fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseE
         return Ok(expr)
     }
 
-    /*
-    if input.match_keyword("typeof")? {
-        let child = parse_prefix(input, prog)?;
-
-        return ExprBox::new_ok(
-            Expr::Unary {
-                op: UnOp::TypeOf,
-                child
-            },
-            pos,
-        );
-    }
-    */
-
     // Try to parse this as a postfix expression
     parse_postfix(input, prog)
 }

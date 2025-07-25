@@ -45,11 +45,3 @@ pub fn array_get_field(array: &mut Array, field_name: &str) -> Value
         _ => panic!()
     }
 }
-
-pub fn array_get_method( method_name: &str) -> Value
-{
-    match method_name {
-        "push" => Value::HostFn(HostFn::Fn2_0(array_push)),
-        _ => panic!()
-    }
-}
