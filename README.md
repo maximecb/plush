@@ -5,7 +5,7 @@ into bugs and missing features. I'm looking for collaborators who share the visi
 and want to help me make it happen.**
 
 Plush is an experimental toy programming language and virtual machine for fun and teaching purposes.
-It follows a minimalistic design philosphy and draw inspiration from JavaScript, Lua, and Lox.
+It follows a minimalistic design philosphy and draws inspiration from JavaScript, Lox and Lua.
 
 If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
 
@@ -17,6 +17,7 @@ Cool/fun/notable features:
 - Memory safe, actor-based parallelism
 - Easily extensible set of host functions
 - Very few dependencies
+- Well-commented codebase
 
 The Plush language supports:
 - Dynamic typing
@@ -26,14 +27,14 @@ The Plush language supports:
 - Dictionaries with JS-like syntax (work in progress)
 - Host functions defined in `src/host.rs`
 
-Current limitations:
-- The language is still very  much incomplete
+Caveats and limitations:
+- The language is still very much incomplete
   - You may run into bugs or missing features
 - Lack of error messages or good error handling
   - You may have to look at the source code to figure things out
   - We could use your help in improving error messages
 - Copying garbage collector planned but not yet implemented
-  - With alloc-until-you-crash technology (TM)
+  - Currently relying on alloc-until-you-crash technology (TM)
 - Imports, support for multiple source files planned but not yet implemented
 
 ## The Plush Language

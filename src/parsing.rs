@@ -218,17 +218,6 @@ impl Input
         return self.input[self.idx];
     }
 
-    /// Peek at a character from the input with a specific offset
-    pub fn peek_ch_at(&self, offset: usize) -> char
-    {
-        if self.idx + offset >= self.input.len()
-        {
-            return '\0';
-        }
-
-        return self.input[self.idx + offset];
-    }
-
     /// Consume a character from the input
     pub fn eat_ch(&mut self) -> char
     {
@@ -396,6 +385,7 @@ impl Input
     /// match if the following chars are also valid identifier chars.
     pub fn match_keyword(&mut self, keyword: &str) -> Result<bool, ParseError>
     {
+        // Consume preceding whitespace
         self.eat_ws()?;
 
         let chars: Vec<char> = keyword.chars().collect();
@@ -599,51 +589,5 @@ impl Input
         }
 
         return Ok(ident);
-    }
-
-    /// Try to parse something using a parsing function,
-    /// and backtrack if the parsing fails
-    pub fn with_backtracking<T, F>(&mut self, parse_fn: F) -> Result<T, ParseError>
-    where F : FnOnce(&mut Input) -> Result<T, ParseError>
-    {
-        let pos = self.idx;
-        let line_no = self.line_no;
-        let col_no = self.col_no;
-
-        // Try to parse using the parsing function provided
-        let ret = parse_fn(self);
-
-        if ret.is_err() {
-            // Backtrack
-            self.idx = pos;
-            self.line_no = line_no;
-            self.col_no = col_no;
-        }
-
-        ret
-    }
-
-    /// Try to parse something using a parsing function,
-    /// and collect the parsed input into a string representing,
-    /// all the characters that were read
-    pub fn collect<T, F>(&mut self, parse_fn: F) -> Result<String, ParseError>
-    where F : FnOnce(&mut Input) -> Result<T, ParseError>
-    {
-        let pre_pos = self.idx;
-
-        // Try to parse using the parsing function provided
-        let ret = parse_fn(self);
-
-        match ret {
-            Ok(_) => {
-                let post_pos = self.idx;
-                let chars = &self.input[pre_pos..post_pos];
-                let slice_str: String = chars.iter().collect();
-                Ok(slice_str)
-            }
-            Err(e) => {
-                Err(e)
-            }
-        }
     }
 }
