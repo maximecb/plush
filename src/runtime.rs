@@ -47,12 +47,18 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     Value::HostFn(f)
 }
 
-pub fn get_class_id(val: Value, prog: &Program) -> ClassId
+pub fn get_class_id(val: Value) -> ClassId
 {
     match val {
+        Value::Object(p) => {
+            let obj = unsafe { &*p };
+            obj.class_id
+        }
 
-
-
+        Value::Int64(_) => INT64_ID,
+        Value::String(_) => STRING_ID,
+        Value::Array(_) => ARRAY_ID,
+        Value::ByteArray(_) => BYTEARRAY_ID,
 
         _ => todo!()
     }

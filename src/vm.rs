@@ -1107,19 +1107,10 @@ impl Actor
                 }
 
                 Insn::instanceof { class_id } => {
-                    let mut val = pop!();
-
                     // Check that the class id matches
-                    let r = match val {
-                        Value::Object(p) => {
-                            let obj = unsafe { &*p };
-                            obj.class_id == class_id
-                        }
-
-                        _ => false
-                    };
-
-                    push_bool!(r);
+                    let mut val = pop!();
+                    let id = crate::runtime::get_class_id(val);
+                    push_bool!(id == class_id);
                 }
 
                 // Get object field
@@ -1819,5 +1810,11 @@ mod tests
         eval_eq("class F {} let o = new F(); return o instanceof F;", Value::True);
         eval_eq("class F {} class G {} let o = new F(); return o instanceof G;", Value::False);
         eval_eq("class F {} return new F() instanceof F;", Value::True);
+
+        // Basic runtime classes
+        eval_eq("return 5 instanceof Int64;", Value::True);
+        eval_eq("return 77 instanceof String;", Value::False);
+        eval_eq("return 'foo' instanceof String;", Value::True);
+        eval_eq("return [] instanceof Array;", Value::True);
     }
 }
