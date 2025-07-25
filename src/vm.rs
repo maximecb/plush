@@ -123,12 +123,6 @@ pub enum Insn
     arr_new { capacity: u32 },
     arr_push,
 
-    // TODO: should these all be functions/methods?
-    // Bytearray operations
-    //ba_new,
-    //ba_resize,
-    //ba_write_u32,
-
     // Jump if true/false
     if_true { target_ofs: i32 },
     if_false { target_ofs: i32 },
@@ -1189,33 +1183,6 @@ impl Actor
                     let mut arr = pop!();
                     arr.unwrap_arr().push(val);
                 }
-
-                /*
-                // Create new empty bytearray
-                Insn::ba_new { capacity } => {
-                    let new_arr = ByteArray::new(
-                        &mut self.alloc,
-                        capacity as usize
-                    );
-                    push!(Value::ByteArray(new_arr))
-                }
-
-                // Resize byte array
-                Insn::ba_resize => {
-                    let fill_val = pop!().unwrap_u8();
-                    let new_len = pop!().unwrap_u64();
-                    let arr = pop!().unwrap_ba();
-                    ByteArray::resize(arr, new_len, fill_val, &mut self.alloc);
-                }
-
-                // Write u32 value
-                Insn::ba_write_u32 => {
-                    let val = pop!().unwrap_u32();
-                    let idx = pop!().unwrap_u64();
-                    let arr = pop!().unwrap_ba();
-                    ByteArray::write_u32(arr, idx, val);
-                }
-                */
 
                 // Jump if true
                 Insn::if_true { target_ofs } => {
