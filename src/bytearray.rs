@@ -6,11 +6,21 @@ use crate::host::HostFn;
 #[derive(Clone, Default)]
 pub struct ByteArray
 {
-    pub bytes: Vec<u8>,
+    bytes: Vec<u8>,
 }
 
 impl ByteArray
 {
+    pub fn get(&self, idx: usize) -> u8
+    {
+        self.bytes[idx]
+    }
+
+    pub fn set(&mut self, idx: usize, val: u8)
+    {
+        self.bytes[idx] = val;
+    }
+
     /// Write a value at the given address
     pub fn write<T>(&mut self, pos: usize, val: T) where T: Copy
     {

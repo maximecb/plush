@@ -1150,15 +1150,20 @@ impl Actor
                     let idx = pop!().unwrap_usize();
                     let mut arr = pop!();
 
-                    /*
                     let val = match arr {
-                        Value::Array(p) => Array::get(p, idx),
-                        Value::ByteArray(p) => Value::from(ByteArray::get(p, idx)),
-                        _ => panic!("expected array type")
-                    };
-                    */
+                        Value::Array(p) => {
+                            let arr = unsafe { &mut *p };
+                            arr.get(idx)
+                        }
 
-                    let val = arr.unwrap_arr().get(idx);
+                        Value::ByteArray(p) => {
+                            let ba = unsafe { &mut *p };
+                            Value::from(ba.get(idx))
+                        }
+
+                        _ => panic!("expected array type in get_index")
+                    };
+
                     push!(val);
                 }
 
@@ -1174,10 +1179,9 @@ impl Actor
                         }
 
                         Value::ByteArray(p) => {
-                            let arr = unsafe { &mut *p };
+                            let ba = unsafe { &mut *p };
                             let b = val.unwrap_u8();
-                            //ByteArray::set(p, idx, b);
-                            todo!();
+                            ba.set(idx, b);
                         }
 
                         _ => panic!("expected array type")
@@ -1767,6 +1771,8 @@ mod tests
         eval("let a = ByteArray.new();");
         eval("let a = ByteArray.with_size(1024);");
         eval("let a = ByteArray.with_size(32); a.write_u32(0, 0xFF_FF_FF_FF);");
+        eval("let a = ByteArray.with_size(32); a.write_u32(0, 0xFF_00_00_00); assert(a[0] == 0 && a[3] == 255);");
+        eval("let a = ByteArray.with_size(32); a[11] = 77; assert(a[11] == 77);");
     }
 
     #[test]
