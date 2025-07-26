@@ -188,10 +188,6 @@ pub fn window_draw_frame(
     window.canvas.present();
 }
 
-
-
-
-
 /// Poll for UI events
 pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 {
@@ -200,6 +196,12 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 
     let mut sdl_state = SDL_STATE.lock().unwrap();
 
+    // If no window has been created, stop
+    if sdl_state.sdl.as_ref().is_none() {
+        return None;
+    }
+
+    // Create the event pump if needed
     if sdl_state.event_pump.is_none() {
         let sdl = sdl_state.sdl.as_ref().unwrap();
         sdl_state.event_pump = Some(sdl.event_pump().unwrap());
@@ -246,7 +248,10 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
     */
 
 
-    todo!()
+
+    return None;
+
+
 
 }
 

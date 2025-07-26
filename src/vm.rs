@@ -490,7 +490,7 @@ impl Actor
     /// This will block until a message is available
     pub fn recv(&mut self) -> Value
     {
-        //use crate::window::poll_ui_msg;
+        use crate::window::poll_ui_msg;
 
         if self.actor_id != 0 {
             let msg = self.queue_rx.recv().unwrap();
@@ -500,13 +500,13 @@ impl Actor
         // Actor 0 (the main actor) may need to poll for UI events
         loop {
             // Poll for UI messages
-            //let ui_msg = poll_ui_msg(self);
-            //if let Some(msg) = ui_msg {
-            //    return msg;
-            //}
+            let ui_msg = poll_ui_msg(self);
+            if let Some(msg) = ui_msg {
+                return msg;
+            }
 
-            // Block on the message queue for up to 10ms
-            let msg = self.queue_rx.recv_timeout(Duration::from_millis(10));
+            // Block on the message queue for up to 8ms
+            let msg = self.queue_rx.recv_timeout(Duration::from_millis(8));
 
             if let Ok(msg) = msg {
                 return msg.msg;

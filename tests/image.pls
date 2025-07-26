@@ -52,10 +52,19 @@ $println(img.width);
 $println(img.height);
 
 img.set_pixel(100, 50, COLOR_BLUE);
-img.fill_rect(100, 100, 300, 200, COLOR_RED);
+
+img.fill_rect(100, 100, 200, 100, COLOR_BLUE);
+img.fill_rect(150, 150, 250, 200, COLOR_RED);
 
 
 
-//let window = $window_create(800, 600, "Test window", 0);
-//$window_draw_frame(window, img.bytes);
 
+/*
+let window = $window_create(800, 600, "Test window", 0);
+$window_draw_frame(window, img.bytes);
+
+while (true)
+{
+    $actor_recv();
+}
+*/
