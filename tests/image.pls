@@ -1,3 +1,19 @@
+let COLOR_BLACK     = 0xFF_00_00_00;
+let COLOR_WHITE     = 0xFF_FF_FF_FF;
+let COLOR_GREY      = 0xFF_80_80_80;
+let COLOR_RED       = 0xFF_FF_00_00;
+let COLOR_GREEN     = 0xFF_00_FF_00;
+let COLOR_BLUE      = 0xFF_00_00_FF;
+let COLOR_ORANGE    = 0xFF_FF_A5_00;
+let COLOR_YELLOW    = 0xFF_FF_FF_00;
+let COLOR_MAGENTA   = 0xFF_FF_00_FF;
+let COLOR_PURPLE    = 0xFF_D6_00_FF;
+let COLOR_TURQUOISE = 0xFF_40_E0_D0;
+
+// Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
+//#define rgb32(r, g, b) ((u32)0xFF_00_00_00 | ((u32)r << 16) | ((u32)g << 8) | (u32)b)
+//#define rgba32(r, g, b, a) (((u32)a << 24) | ((u32)r << 16) | ((u32)g << 8) | (u32)b)
+
 class Image
 {
     init(self, width, height)
