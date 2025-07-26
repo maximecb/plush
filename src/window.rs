@@ -216,44 +216,32 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
         return None;
     }
 
-
-
-    /*
     match event.unwrap() {
         Event::Quit { .. } => {
             println!("got quit event");
 
             // { event: 'window_closed', window_id: 0 }
-            let alloc = &mut actor.alloc;
-            let obj = Object::new(alloc);
+            let msg = actor.alloc_obj(UIMESSAGE_ID);
 
-            Object::def_const(
-                obj,
-                alloc.get_string("event"),
-                alloc.get_string("window_closed"),
+            /*
+            actor.set_field(
+                msg,
+                "event",
+                actor.alloc.str_const("window_closed"),
             );
 
-            Object::def_const(
-                obj,
-                alloc.get_string("window_id"),
+            actor.set_field(
+                msg,
+                "window_id",
                 Value::from(0),
             );
+            */
 
-            Object::seal(obj);
-
-            Some(Value::Object(obj))
+            Some(msg)
         }
 
         _ => None
     }
-    */
-
-
-
-    return None;
-
-
-
 }
 
 

@@ -614,6 +614,15 @@ impl Actor
         self.with_class(class_id, |c| c.methods.get(method_name).copied())
     }
 
+    /// Allocate an object of a given class
+    /// Note that this won't call the constructor if present
+    pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
+    {
+        let num_slots = self.get_num_slots(class_id);
+        let obj = Object::new(class_id, num_slots);
+        Value::Object(self.alloc.alloc(obj))
+    }
+
     /// Call a host function
     fn call_host(&mut self, host_fn: HostFn, argc: usize)
     {
