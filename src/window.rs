@@ -14,6 +14,7 @@ use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 use crate::vm::{VM, Value, Actor};
 use crate::bytearray::ByteArray;
+use crate::ast::UIMESSAGE_ID;
 
 // Global SDL state
 struct SdlState {

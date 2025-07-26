@@ -10,6 +10,7 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Value
 
 pub fn init_runtime(prog: &mut Program)
 {
+    /*
     // Int64
     let mut int64_class = Class::default();
     int64_class.id = INT64_ID;
@@ -18,10 +19,24 @@ pub fn init_runtime(prog: &mut Program)
     // ByteArray
     let mut ba_class = Class::default();
     ba_class.id = BYTEARRAY_ID;
-
-
-
     prog.reg_class(ba_class);
+    */
+
+    // UIMessage
+    // Note: in the future we may move this into
+    // an importable module instead of making it a core
+    // runtime object class
+    let mut ui_class = Class::default();
+    ui_class.id = UIMESSAGE_ID;
+    ui_class.reg_field("kind");
+    ui_class.reg_field("window_id");
+    ui_class.reg_field("key");
+    ui_class.reg_field("button");
+    ui_class.reg_field("x");
+    ui_class.reg_field("y");
+    prog.reg_class(ui_class);
+
+
 
 
 

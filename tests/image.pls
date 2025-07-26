@@ -65,6 +65,15 @@ $window_draw_frame(window, img.bytes);
 
 while (true)
 {
-    $actor_recv();
+    let msg = $actor_recv();
+
+    if (msg instanceof UIMessage)
+    {
+
+    }
+
+
 }
 */
+
+

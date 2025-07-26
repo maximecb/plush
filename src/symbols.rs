@@ -151,6 +151,7 @@ impl Program
         env.define("String", Decl::Class { id: STRING_ID });
         env.define("Array", Decl::Class { id: ARRAY_ID });
         env.define("ByteArray", Decl::Class { id: BYTEARRAY_ID });
+        env.define("UIMessage", Decl::Class { id: UIMESSAGE_ID });
 
         // Process the unit function
         let mut main_unit = std::mem::take(&mut self.main_unit);
