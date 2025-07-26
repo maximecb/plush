@@ -223,11 +223,11 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             // { event: 'window_closed', window_id: 0 }
             let msg = actor.alloc_obj(UIMESSAGE_ID);
 
-            /*
+            let window_closed_str = Value::String(actor.alloc.str_const("window_closed".to_string()));
             actor.set_field(
                 msg,
                 "event",
-                actor.alloc.str_const("window_closed"),
+                window_closed_str,
             );
 
             actor.set_field(
@@ -235,9 +235,16 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
                 "window_id",
                 Value::from(0),
             );
-            */
 
             Some(msg)
+        }
+
+        Event::KeyDown { window_id, keycode: Some(keycode), .. } => {
+            todo!()
+
+            // event
+            // window_id
+            // key
         }
 
         _ => None

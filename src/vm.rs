@@ -623,6 +623,19 @@ impl Actor
         Value::Object(self.alloc.alloc(obj))
     }
 
+    /// Set the value of an object field
+    pub fn set_field(&mut self, obj: Value, field_name: &str, val: Value)
+    {
+        match obj {
+            Value::Object(p) => {
+                let obj = unsafe { &mut *p };
+                let slot_idx = self.get_slot_idx(obj.class_id, field_name);
+                obj.slots[slot_idx] = val;
+            },
+            _ => panic!()
+        }
+    }
+
     /// Call a host function
     fn call_host(&mut self, host_fn: HostFn, argc: usize)
     {
@@ -1099,15 +1112,7 @@ impl Actor
                     let val = pop!();
                     let mut obj = pop!();
                     let field_name = unsafe { &*field };
-
-                    let val = match obj {
-                        Value::Object(p) => {
-                            let obj = unsafe { &mut *p };
-                            let slot_idx = self.get_slot_idx(obj.class_id, field_name);
-                            obj.slots[slot_idx] = val;
-                        },
-                        _ => panic!()
-                    };
+                    self.set_field(obj, field_name, val);
                 }
 
                 // Allocate a new class instance and call

@@ -58,7 +58,6 @@ img.fill_rect(150, 150, 250, 200, COLOR_RED);
 
 
 
-
 /*
 let window = $window_create(800, 600, "Test window", 0);
 $window_draw_frame(window, img.bytes);
@@ -67,12 +66,10 @@ while (true)
 {
     let msg = $actor_recv();
 
-    if (msg instanceof UIMessage)
+    if (msg instanceof UIMessage && msg.event == "window_closed")
     {
-
+        return;
     }
-
-
 }
 */
 

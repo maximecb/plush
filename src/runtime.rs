@@ -28,7 +28,7 @@ pub fn init_runtime(prog: &mut Program)
     // runtime object class
     let mut ui_class = Class::default();
     ui_class.id = UIMESSAGE_ID;
-    ui_class.reg_field("kind");
+    ui_class.reg_field("event");
     ui_class.reg_field("window_id");
     ui_class.reg_field("key");
     ui_class.reg_field("button");
