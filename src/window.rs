@@ -192,11 +192,7 @@ pub fn window_draw_frame(
 
 
 
-
-
-
-/*
-// Poll for UI events
+/// Poll for UI events
 pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 {
     // This should only ever be called on the main thread
@@ -217,6 +213,9 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
         return None;
     }
 
+
+
+    /*
     match event.unwrap() {
         Event::Quit { .. } => {
             println!("got quit event");
@@ -244,14 +243,23 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 
         _ => None
     }
+    */
+
+
+    todo!()
+
 }
-*/
 
 
 
 
 
 
+
+
+
+// TODO: we probably want to use string constants for the event types and buttons?
+// Can we create a local class for UI events?
 
 
 /*

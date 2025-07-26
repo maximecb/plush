@@ -69,6 +69,7 @@ impl HostFn
 pub fn get_host_const(name: &str) -> Expr
 {
     use HostFn::*;
+    use crate::window::*;
 
     match name
     {
@@ -83,6 +84,9 @@ pub fn get_host_const(name: &str) -> Expr
         "actor_join" => Expr::HostFn(Fn1_1(actor_join)),
         "actor_send" => Expr::HostFn(Fn2_1(actor_send)),
         "actor_recv" => Expr::HostFn(Fn0_1(actor_recv)),
+
+        "window_create" => Expr::HostFn(Fn4_1(window_create)),
+        "window_draw_frame" => Expr::HostFn(Fn2_0(window_draw_frame)),
 
         _ => panic!("unknown host constant \"{name}\"")
     }

@@ -51,5 +51,11 @@ let img = new Image(800, 600);
 $println(img.width);
 $println(img.height);
 
-img.set_pixel(400, 300, 0xFF_FF_FF_FF);
-img.fill_rect(100, 100, 300, 200, 0xFF_FF_FF_FF);
+img.set_pixel(100, 50, COLOR_BLUE);
+img.fill_rect(100, 100, 300, 200, COLOR_RED);
+
+
+
+//let window = $window_create(800, 600, "Test window", 0);
+//$window_draw_frame(window, img.bytes);
+
