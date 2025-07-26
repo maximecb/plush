@@ -97,7 +97,7 @@ Copy `SDL2.dll` (unzip) to the root of your cloned repo.
 cargo build
 ```
 
-To run an asm file:
+To run a Plush script:
 ```sh
 cargo run examples/helloworld.pls
 ```
