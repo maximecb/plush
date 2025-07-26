@@ -43,7 +43,7 @@ Plush has similar syntax to JS and Lox. Some examples can be found under
 `/examples`, `/tests` and `/benchmarks`. There are some minor syntax differences
 such as using `.len` for the length of arrays instead of `.length`.
 
-There are a set of host functions which are defined in `src/host.rs` which are
+There are a set of host functions which are defined in [`src/host.rs`](src/host.rs) which are
 accessible by prefixing the function name with a dollar sign. For example
 `$println()` to print values, and `$time_current_ms()` to get the current
 time in milliseconds.
