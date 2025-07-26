@@ -124,7 +124,22 @@ pub fn deepcopy(
                 Value::Object(dst_alloc.alloc(new_obj))
             }
 
-            _ => panic!()
+            Value::Array(p) => {
+                let new_arr = unsafe { (*p).clone() };
+
+                for val in &new_arr.elems {
+                    push_val!(val);
+                }
+
+                Value::Array(dst_alloc.alloc(new_arr))
+            }
+
+            Value::ByteArray(p) => {
+                let new_arr = unsafe { (*p).clone() };
+                Value::ByteArray(dst_alloc.alloc(new_arr))
+            }
+
+            _ => panic!("copy unimplemented for type {:?}", val)
         };
 
         // Insert the new mapping into the translation map
@@ -169,6 +184,17 @@ pub fn remap(dst_map: HashMap<Value, Value>)
                 for val in &mut obj.slots {
                     remap_val!(val);
                 }
+            }
+
+            Value::Array(p) => {
+                let arr = unsafe { &mut **p };
+                for val in &mut arr.elems {
+                    remap_val!(val);
+                }
+            }
+
+            Value::ByteArray(_) => {
+                // Bytes don't need to be remapped
             }
 
             _ => panic!()

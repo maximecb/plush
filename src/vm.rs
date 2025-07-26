@@ -362,6 +362,7 @@ impl PartialEq for Value
             (Fun(a), Fun(b))            => a == b,
             (Closure(a), Closure(b))    => a == b,
             (Object(a), Object(b))      => a == b,
+            (Array(a), Array(b))        => a == b,
             _ => panic!("not yet implemented eq {:?} == {:?}", self, other),
         }
     }
@@ -715,7 +716,7 @@ impl Actor
         let fun_id = match fun {
             Value::Closure(clos) => unsafe { (*clos).fun_id },
             Value::Fun(fun_id) => fun_id,
-            _ => panic!()
+            _ => panic!("expected function argument")
         };
 
         // Get a compiled address for this function
@@ -723,7 +724,7 @@ impl Actor
         let mut pc = fun_entry.entry_pc;
 
         if args.len() != fun_entry.num_params {
-            panic!();
+            panic!("incorrect argument count");
         }
 
         // Push the arguments on the stack
