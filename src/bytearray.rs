@@ -21,6 +21,14 @@ impl ByteArray
         self.bytes[idx] = val;
     }
 
+    pub unsafe fn get_slice<T>(&self, pos: usize, num_elems: usize) -> &'static [T]
+    {
+        assert!(pos + num_elems * size_of::<T>() <= self.bytes.len());
+        let buf_ptr = self.bytes.as_ptr();
+        let elem_ptr = transmute::<*const u8 , *mut T>(buf_ptr.add(pos));
+        std::slice::from_raw_parts(elem_ptr, num_elems as usize)
+    }
+
     /// Write a value at the given address
     pub fn write<T>(&mut self, pos: usize, val: T) where T: Copy
     {

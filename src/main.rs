@@ -17,6 +17,7 @@ mod bytearray;
 mod runtime;
 mod host;
 mod deepcopy;
+mod window;
 mod exec_tests;
 
 extern crate sdl2;

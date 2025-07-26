@@ -388,6 +388,12 @@ impl From<u8> for Value {
     }
 }
 
+impl From<i32> for Value {
+    fn from(val: i32) -> Self {
+        Value::Int64(val as i64)
+    }
+}
+
 /// Mesage to be sent to an actor
 pub struct Message
 {
