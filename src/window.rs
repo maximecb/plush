@@ -218,17 +218,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 
     match event.unwrap() {
         Event::Quit { .. } => {
-            println!("got quit event");
-
-            // { event: 'window_closed', window_id: 0 }
             let msg = actor.alloc_obj(UIMESSAGE_ID);
-
-            let window_closed_str = Value::String(actor.alloc.str_const("window_closed".to_string()));
-            actor.set_field(
-                msg,
-                "event",
-                window_closed_str,
-            );
 
             actor.set_field(
                 msg,
@@ -236,164 +226,156 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
                 Value::from(0),
             );
 
+            let event_type = actor.intern_str("CLOSE_WINDOW");
+            actor.set_field(
+                msg,
+                "event",
+                event_type,
+            );
+
             Some(msg)
         }
 
         Event::KeyDown { window_id, keycode: Some(keycode), .. } => {
-            todo!()
+            let key_name = translate_keycode(keycode);
+            if key_name.is_none() {
+                return None;
+            }
 
-            // event
-            // window_id
-            // key
+            let msg = actor.alloc_obj(UIMESSAGE_ID);
+
+            actor.set_field(
+                msg,
+                "window_id",
+                Value::from(0),
+            );
+
+            let event_type = actor.intern_str("KEY_DOWN");
+            actor.set_field(
+                msg,
+                "event",
+                event_type,
+            );
+
+            let key_name = actor.intern_str(key_name.unwrap());
+            actor.set_field(
+                msg,
+                "key",
+                key_name,
+            );
+
+            Some(msg)
         }
 
         _ => None
     }
 }
 
-
-
-
-
-
-
-
-
-// TODO: we probably want to use string constants for the event types and buttons?
-// Can we create a local class for UI events?
-
-
-/*
-/// Process SDL events
-pub fn process_events(vm: &mut VM) -> ExitReason
+fn translate_keycode(sdl_keycode: Keycode) -> Option<&'static str>
 {
-    let mut event_pump = get_sdl_context().event_pump().unwrap();
-
-    // Process all pending events
-    // See: https://docs.rs/sdl2/0.30.0/sdl2/event/enum.Event.html
-    // TODO: we probably want to process window/input related events in window.rs ?
-    for event in event_pump.poll_iter() {
-        match event {
-            Event::Quit { .. } => {
-                return ExitReason::Exit(Value::from(0));
-            }
-
-            Event::MouseMotion { window_id, x, y, .. } => {
-                if let ExitReason::Exit(val) = window_call_mousemove(vm, window_id, x, y) {
-                    return ExitReason::Exit(val);
-                }
-            }
-
-            Event::MouseButtonDown { window_id, which, mouse_btn, x, y, .. } => {
-                if let ExitReason::Exit(val) = window_call_mousedown(vm, window_id, mouse_btn, x, y) {
-                    return ExitReason::Exit(val);
-                }
-            }
-
-            Event::MouseButtonUp { window_id, which, mouse_btn, x, y, .. } => {
-                if let ExitReason::Exit(val) = window_call_mouseup(vm, window_id, mouse_btn, x, y) {
-                    return ExitReason::Exit(val);
-                }
-            }
-
-            Event::KeyDown { window_id, keycode: Some(keycode), .. } => {
-                if let ExitReason::Exit(val) = window_call_keydown(vm, window_id, keycode) {
-                    return ExitReason::Exit(val);
-                }
-            }
-
-            Event::KeyUp { window_id, keycode: Some(keycode), .. } => {
-                if let ExitReason::Exit(val) = window_call_keyup(vm, window_id, keycode) {
-                    return ExitReason::Exit(val);
-                }
-            }
-
-            Event::TextInput { window_id, text, .. } => {
-                // For each UTF-8 byte of input
-                for ch in text.bytes() {
-                    if let ExitReason::Exit(val) = window_call_textinput(vm, window_id, ch) {
-                        return ExitReason::Exit(val);
-                    }
-                }
-            }
-
-            _ => {}
-        }
-    }
-
-    return ExitReason::default();
-}
-*/
-
-
-
-
-/*
-fn translate_keycode(sdl_keycode: Keycode) -> Option<u16>
-{
-    use crate::sys::constants::*;
-
     // https://docs.rs/sdl2/0.30.0/sdl2/keyboard/enum.Keycode.html
     match sdl_keycode {
-        Keycode::A => Some(KEY_A),
-        Keycode::B => Some(KEY_B),
-        Keycode::C => Some(KEY_C),
-        Keycode::D => Some(KEY_D),
-        Keycode::E => Some(KEY_E),
-        Keycode::F => Some(KEY_F),
-        Keycode::G => Some(KEY_G),
-        Keycode::H => Some(KEY_H),
-        Keycode::I => Some(KEY_I),
-        Keycode::J => Some(KEY_J),
-        Keycode::K => Some(KEY_K),
-        Keycode::L => Some(KEY_L),
-        Keycode::M => Some(KEY_M),
-        Keycode::N => Some(KEY_N),
-        Keycode::O => Some(KEY_O),
-        Keycode::P => Some(KEY_P),
-        Keycode::Q => Some(KEY_Q),
-        Keycode::R => Some(KEY_R),
-        Keycode::S => Some(KEY_S),
-        Keycode::T => Some(KEY_T),
-        Keycode::U => Some(KEY_U),
-        Keycode::V => Some(KEY_V),
-        Keycode::W => Some(KEY_W),
-        Keycode::X => Some(KEY_X),
-        Keycode::Y => Some(KEY_Y),
-        Keycode::Z => Some(KEY_Z),
+        Keycode::A => Some("A"),
+        Keycode::B => Some("B"),
+        Keycode::C => Some("C"),
+        Keycode::D => Some("D"),
+        Keycode::E => Some("E"),
+        Keycode::F => Some("F"),
+        Keycode::G => Some("G"),
+        Keycode::H => Some("H"),
+        Keycode::I => Some("I"),
+        Keycode::J => Some("J"),
+        Keycode::K => Some("K"),
+        Keycode::L => Some("L"),
+        Keycode::M => Some("M"),
+        Keycode::N => Some("N"),
+        Keycode::O => Some("O"),
+        Keycode::P => Some("P"),
+        Keycode::Q => Some("Q"),
+        Keycode::R => Some("R"),
+        Keycode::S => Some("S"),
+        Keycode::T => Some("T"),
+        Keycode::U => Some("U"),
+        Keycode::V => Some("V"),
+        Keycode::W => Some("W"),
+        Keycode::X => Some("X"),
+        Keycode::Y => Some("Y"),
+        Keycode::Z => Some("Z"),
+        Keycode::Num0 => Some("0"),
+        Keycode::Num1 => Some("1"),
+        Keycode::Num2 => Some("2"),
+        Keycode::Num3 => Some("3"),
+        Keycode::Num4 => Some("4"),
+        Keycode::Num5 => Some("5"),
+        Keycode::Num6 => Some("6"),
+        Keycode::Num7 => Some("7"),
+        Keycode::Num8 => Some("8"),
+        Keycode::Num9 => Some("9"),
+        Keycode::Comma => Some(","),
+        Keycode::Period => Some("."),
+        Keycode::Slash => Some("/"),
+        Keycode::Colon => Some(":"),
+        Keycode::Semicolon => Some(";"),
+        Keycode::Equals => Some("="),
+        Keycode::Question => Some("?"),
+        Keycode::Escape => Some("ESCAPE"),
+        Keycode::Backspace => Some("BACKSPACE"),
+        Keycode::Left => Some("LEFT"),
+        Keycode::Right => Some("RIGHT"),
+        Keycode::Up => Some("UP"),
+        Keycode::Down => Some("DOWN"),
+        Keycode::Space => Some("SPACE"),
+        Keycode::Return => Some("RETURN"),
+        Keycode::LShift => Some("SHIFT"),
+        Keycode::RShift => Some("SHIFT"),
+        Keycode::Tab => Some("TAB"),
+        _ => None,
+    }
+}
 
-        Keycode::Num0 => Some(KEY_NUM0),
-        Keycode::Num1 => Some(KEY_NUM1),
-        Keycode::Num2 => Some(KEY_NUM2),
-        Keycode::Num3 => Some(KEY_NUM3),
-        Keycode::Num4 => Some(KEY_NUM4),
-        Keycode::Num5 => Some(KEY_NUM5),
-        Keycode::Num6 => Some(KEY_NUM6),
-        Keycode::Num7 => Some(KEY_NUM7),
-        Keycode::Num8 => Some(KEY_NUM8),
-        Keycode::Num9 => Some(KEY_NUM9),
 
-        Keycode::Comma => Some(KEY_COMMA),
-        Keycode::Period => Some(KEY_PERIOD),
-        Keycode::Slash => Some(KEY_SLASH),
-        Keycode::Colon => Some(KEY_COLON),
-        Keycode::Semicolon => Some(KEY_SEMICOLON),
-        Keycode::Equals => Some(KEY_EQUALS),
-        Keycode::Question => Some(KEY_QUESTION),
 
-        Keycode::Escape => Some(KEY_ESCAPE),
-        Keycode::Backspace => Some(KEY_BACKSPACE),
-        Keycode::Left => Some(KEY_LEFT),
-        Keycode::Right => Some(KEY_RIGHT),
-        Keycode::Up => Some(KEY_UP),
-        Keycode::Down => Some(KEY_DOWN),
-        Keycode::Space => Some(KEY_SPACE),
-        Keycode::Return => Some(KEY_RETURN),
-        Keycode::LShift => Some(KEY_SHIFT),
-        Keycode::RShift => Some(KEY_SHIFT),
-        Keycode::Tab => Some(KEY_TAB),
 
-        _ => None
+
+
+
+/*
+Event::MouseMotion { window_id, x, y, .. } => {
+    if let ExitReason::Exit(val) = window_call_mousemove(vm, window_id, x, y) {
+        return ExitReason::Exit(val);
+    }
+}
+
+Event::MouseButtonDown { window_id, which, mouse_btn, x, y, .. } => {
+    if let ExitReason::Exit(val) = window_call_mousedown(vm, window_id, mouse_btn, x, y) {
+        return ExitReason::Exit(val);
+    }
+}
+
+Event::MouseButtonUp { window_id, which, mouse_btn, x, y, .. } => {
+    if let ExitReason::Exit(val) = window_call_mouseup(vm, window_id, mouse_btn, x, y) {
+        return ExitReason::Exit(val);
+    }
+}
+
+Event::KeyDown { window_id, keycode: Some(keycode), .. } => {
+    if let ExitReason::Exit(val) = window_call_keydown(vm, window_id, keycode) {
+        return ExitReason::Exit(val);
+    }
+}
+
+Event::KeyUp { window_id, keycode: Some(keycode), .. } => {
+    if let ExitReason::Exit(val) = window_call_keyup(vm, window_id, keycode) {
+        return ExitReason::Exit(val);
+    }
+}
+
+Event::TextInput { window_id, text, .. } => {
+    // For each UTF-8 byte of input
+    for ch in text.bytes() {
+        if let ExitReason::Exit(val) = window_call_textinput(vm, window_id, ch) {
+            return ExitReason::Exit(val);
+        }
     }
 }
 */

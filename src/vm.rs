@@ -636,6 +636,15 @@ impl Actor
         }
     }
 
+    /// Allocate/intern a constant string used by the runtime
+    /// or present as a constant in the program
+    pub fn intern_str(&mut self, str_const: &str) -> Value
+    {
+        // Note: for now this doesn't do interning but we
+        // may choose to add this optimization later
+        Value::String(self.alloc.str_const(str_const.to_string()))
+    }
+
     /// Call a host function
     fn call_host(&mut self, host_fn: HostFn, argc: usize)
     {

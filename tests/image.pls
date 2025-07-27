@@ -66,11 +66,14 @@ while (true)
 {
     let msg = $actor_recv();
 
-    if (msg instanceof UIMessage && msg.event == "window_closed")
+    if (msg instanceof UIMessage && msg.event == 'CLOSE_WINDOW')
+    {
+        return;
+    }
+
+    if (msg instanceof UIMessage && msg.event == 'KEY_DOWN' && msg.key == 'ESCAPE')
     {
         return;
     }
 }
 */
-
-
