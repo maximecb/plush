@@ -76,6 +76,7 @@ pub fn get_class_id(val: Value) -> ClassId
         }
 
         Value::Int64(_) => INT64_ID,
+        Value::Float64(_) => FLOAT64_ID,
         Value::String(_) => STRING_ID,
         Value::Array(_) => ARRAY_ID,
         Value::ByteArray(_) => BYTEARRAY_ID,

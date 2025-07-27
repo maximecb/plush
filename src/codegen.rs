@@ -119,23 +119,15 @@ impl StmtBox
                 }
             }
 
-            /*
             Stmt::Break => {
-                match break_label {
-                    Some(label) => code.insn_s("jump", label),
-                    None => return ParseError::msg_only("break outside of loop context")
-                }
+                break_idxs.push(code.len());
+                code.push(Insn::jump { target_ofs: 0});
             }
-            */
 
-            /*
             Stmt::Continue => {
-                match cont_label {
-                    Some(label) => code.insn_s("jump", label),
-                    None => return ParseError::msg_only("continue outside of loop context")
-                }
+                cont_idxs.push(code.len());
+                code.push(Insn::jump { target_ofs: 0});
             }
-            */
 
             Stmt::Return(expr) => {
                 expr.gen_code(fun, code, alloc)?;
@@ -292,7 +284,7 @@ impl StmtBox
 
             Stmt::ClassDecl { .. } => {}
 
-            _ => todo!("{:?}", self.stmt)
+            //_ => todo!("{:?}", self.stmt)
         }
 
         Ok(())
@@ -598,6 +590,7 @@ fn gen_bin_op(
         Sub => code.push(Insn::sub),
         Mul => code.push(Insn::mul),
         Div => code.push(Insn::div),
+        //Mod => code.push(Insn::mod),
 
         Eq => code.push(Insn::eq),
         Ne => code.push(Insn::ne),

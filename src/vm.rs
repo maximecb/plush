@@ -1779,6 +1779,7 @@ mod tests
     #[test]
     fn float64()
     {
+        eval_eq("return 77.0 instanceof Float64;", Value::True);
         eval_eq("return 4.0 + 1.0;", Value::Float64(5.0));
         eval_eq("return 6.0 / 2.0;", Value::Float64(3.0));
         eval_eq("return 4.0.sqrt();", Value::Float64(2.0));

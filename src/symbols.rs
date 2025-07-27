@@ -148,6 +148,7 @@ impl Program
 
         // Register core classes
         env.define("Int64", Decl::Class { id: INT64_ID });
+        env.define("Float64", Decl::Class { id: FLOAT64_ID });
         env.define("String", Decl::Class { id: STRING_ID });
         env.define("Array", Decl::Class { id: ARRAY_ID });
         env.define("ByteArray", Decl::Class { id: BYTEARRAY_ID });
