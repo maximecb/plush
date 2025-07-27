@@ -8,6 +8,12 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Value
     Value::String(actor.alloc.str_const(s))
 }
 
+fn float64_sqrt(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    Value::Float64(v.sqrt())
+}
+
 pub fn init_runtime(prog: &mut Program)
 {
     /*
@@ -35,13 +41,6 @@ pub fn init_runtime(prog: &mut Program)
     ui_class.reg_field("x");
     ui_class.reg_field("y");
     prog.reg_class(ui_class);
-
-
-
-
-
-
-
 }
 
 /// Get the method associated with a core value
@@ -53,6 +52,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
 
     let f = match (val, method_name) {
         (Value::Int64(_), "to_s") => HostFn::Fn1_1(int64_to_s),
+        (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
 
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),
 

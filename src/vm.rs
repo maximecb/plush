@@ -941,6 +941,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 + v1),
+                        (Float64(v0), Float64(v1)) => Float64(v0 + v1),
 
                         (Value::String(s1), Value::String(s2)) => {
                             let s1 = unsafe { &*s1 };
@@ -960,6 +961,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 - v1),
+                        (Float64(v0), Float64(v1)) => Float64(v0 - v1),
                         _ => panic!()
                     };
 
@@ -972,6 +974,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 * v1),
+                        (Float64(v0), Float64(v1)) => Float64(v0 * v1),
                         _ => panic!()
                     };
 
@@ -985,6 +988,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 / v1),
+                        (Float64(v0), Float64(v1)) => Float64(v0 / v1),
                         _ => panic!()
                     };
 
@@ -1770,6 +1774,14 @@ mod tests
     fn int64()
     {
         eval("let v = 15; assert(v.to_s() == '15');");
+    }
+
+    #[test]
+    fn float64()
+    {
+        eval_eq("return 4.0 + 1.0;", Value::Float64(5.0));
+        eval_eq("return 6.0 / 2.0;", Value::Float64(3.0));
+        eval_eq("return 4.0.sqrt();", Value::Float64(2.0));
     }
 
     /*
