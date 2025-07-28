@@ -43,7 +43,7 @@ class Image
     }
 }
 
-let img = new Image(800, 600);
+let img = Image(800, 600);
 $println(img.width);
 $println(img.height);
 

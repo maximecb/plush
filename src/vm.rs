@@ -1699,8 +1699,8 @@ mod tests
     #[test]
     fn comparisons()
     {
-        eval_eq("class F {} let o1 = new F(); let o2 = new F(); return o1 == o2;", Value::False);
-        eval_eq("class F {} let o1 = new F(); let o2 = new F(); return o1 != o2;", Value::True);
+        eval_eq("class F {} let o1 = F(); let o2 = F(); return o1 == o2;", Value::False);
+        eval_eq("class F {} let o1 = F(); let o2 = F(); return o1 != o2;", Value::True);
 
         // Integer comparisons
         eval_eq("return 3 <= 5;", Value::True);
@@ -1837,7 +1837,7 @@ mod tests
         eval_eq(
             concat!(
                 "class F {}",
-                "let g = new F();",
+                "let g = F();",
                 "let g2 = g;",
                 "fun f() { return g == g2; }",
                 "let id = $actor_spawn(f);",
@@ -1902,28 +1902,28 @@ mod tests
         eval("class Foo { init(self) {} }");
         eval("class Foo { init(self) { self.x = 1; } }");
 
-        eval("class Foo {} let o = new Foo();");
-        eval("class Foo { init(s) {} } let o = new Foo();");
-        eval("class Foo { init(s, a) {} } let o = new Foo(1);");
+        eval("class Foo {} let o = Foo();");
+        eval("class Foo { init(s) {} } let o = Foo();");
+        eval("class Foo { init(s, a) {} } let o = Foo(1);");
 
-        eval("class Foo { init(s) { s.x = 1; } } let o = new Foo();");
-        eval("class Foo { init(s, a) { s.x = a; } } let o = new Foo(7);");
+        eval("class Foo { init(s) { s.x = 1; } } let o = Foo();");
+        eval("class Foo { init(s, a) { s.x = a; } } let o = Foo(7);");
 
-        eval_eq("class Foo {} return new Foo() != nil;", Value::True);
-        eval_eq("class Foo { init(s) {} } return new Foo() != nil;", Value::True);
+        eval_eq("class Foo {} return Foo() != nil;", Value::True);
+        eval_eq("class Foo { init(s) {} } return Foo() != nil;", Value::True);
 
-        eval_eq("class Foo { init(s) { s.x = 1; } } let o = new Foo(); return o.x;", Value::Int64(1));
-        eval_eq("class Foo { init(s, a) { s.x = a; } } let o = new Foo(7); return o.x;", Value::Int64(7));
-        eval_eq("class Foo { init(s, a, b) { s.x = a; s.y = b; } } let o = new Foo(5, 3); return o.x - o.y;", Value::Int64(2));
-        eval_eq("class C { init(s) { s.c = 0; } inc(s) { ++s.c; } } let o = new C(); o.inc(); return o.c;", Value::Int64(1));
+        eval_eq("class Foo { init(s) { s.x = 1; } } let o = Foo(); return o.x;", Value::Int64(1));
+        eval_eq("class Foo { init(s, a) { s.x = a; } } let o = Foo(7); return o.x;", Value::Int64(7));
+        eval_eq("class Foo { init(s, a, b) { s.x = a; s.y = b; } } let o = Foo(5, 3); return o.x - o.y;", Value::Int64(2));
+        eval_eq("class C { init(s) { s.c = 0; } inc(s) { ++s.c; } } let o = C(); o.inc(); return o.c;", Value::Int64(1));
     }
 
     #[test]
     fn instanceof()
     {
-        eval_eq("class F {} let o = new F(); return o instanceof F;", Value::True);
-        eval_eq("class F {} class G {} let o = new F(); return o instanceof G;", Value::False);
-        eval_eq("class F {} return new F() instanceof F;", Value::True);
+        eval_eq("class F {} let o = F(); return o instanceof F;", Value::True);
+        eval_eq("class F {} class G {} let o = F(); return o instanceof G;", Value::False);
+        eval_eq("class F {} return F() instanceof F;", Value::True);
 
         // Basic runtime classes
         eval_eq("return 5 instanceof Int64;", Value::True);

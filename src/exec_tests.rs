@@ -7,7 +7,11 @@ use std::collections::HashSet;
 
 fn test_file(file_path: &str, no_exec: bool)
 {
-    io::stdout().write(format!("running: {}\n", file_path).as_bytes()).unwrap();
+    if no_exec {
+        io::stdout().write(format!("parsing: {}\n", file_path).as_bytes()).unwrap();
+    } else {
+        io::stdout().write(format!("running: {}\n", file_path).as_bytes()).unwrap();
+    }
     io::stdout().flush().unwrap();
 
     // Compile the source file
@@ -35,11 +39,12 @@ fn examples()
     for file in fs::read_dir("./examples").unwrap() {
         let file_path = file.unwrap().path().display().to_string();
 
-        if !file_path.ends_with(".rs") {
+        if !file_path.ends_with(".pls") {
             continue;
         }
 
-        test_file(&file_path, false);
+        // Examples get parsed but not executed
+        test_file(&file_path, true);
     }
 }
 

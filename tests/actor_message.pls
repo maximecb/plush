@@ -22,9 +22,9 @@ fun f()
 let id = $actor_spawn(f);
 
 for (let var i = 0; i < 10; ++i)
-    $actor_send(id, new Inc());
+    $actor_send(id, Inc());
 
-$actor_send(id, new Get());
+$actor_send(id, Get());
 let cnt = $actor_recv();
 $println(cnt);
 assert(cnt == 10);

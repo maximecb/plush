@@ -455,21 +455,6 @@ impl ExprBox
                 }
             }
 
-            Expr::New { class_name, class_id, args, .. } => {
-                if let Some(Decl::Class { id }) = env.lookup(class_name) {
-                    *class_id = id;
-                } else {
-                    return ParseError::with_pos(
-                        "could not match class name for new",
-                        &self.pos
-                    );
-                }
-
-                for arg in args {
-                    arg.resolve_syms(prog, fun, env)?;
-                }
-            }
-
             Expr::Fun { fun_id, captured } => {
                 // Resolve symbols in the nested function
                 let mut child_fun = std::mem::take(prog.funs.get_mut(fun_id).unwrap());

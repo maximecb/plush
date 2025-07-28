@@ -35,17 +35,17 @@ class Vec3 {
 
     // Vector addition
     add(self, other) {
-        return new Vec3(self.x + other.x, self.y + other.y, self.z + other.z);
+        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z);
     }
 
     // Vector subtraction
     sub(self, other) {
-        return new Vec3(self.x - other.x, self.y - other.y, self.z - other.z);
+        return Vec3(self.x - other.x, self.y - other.y, self.z - other.z);
     }
 
     // Scalar multiplication
     mul(self, scalar) {
-        return new Vec3(self.x * scalar, self.y * scalar, self.z * scalar);
+        return Vec3(self.x * scalar, self.y * scalar, self.z * scalar);
     }
 
     // Dot product
@@ -61,7 +61,7 @@ class Vec3 {
     // Normalize vector
     normalize(self) {
         let len = self.length_squared().sqrt();
-        return new Vec3(self.x / len, self.y / len, self.z / len);
+        return Vec3(self.x / len, self.y / len, self.z / len);
     }
 }
 
@@ -136,20 +136,20 @@ fun render()
     let viewport_width = aspect_ratio * viewport_height;
     let focal_length = 1.0;
 
-    let origin = new Vec3(0, 0, 0);
-    let horizontal = new Vec3(viewport_width, 0, 0);
-    let vertical = new Vec3(0, viewport_height, 0);
+    let origin = Vec3(0, 0, 0);
+    let horizontal = Vec3(viewport_width, 0, 0);
+    let vertical = Vec3(0, viewport_height, 0);
     let top_left_corner = origin.sub(horizontal.mul(0.5))
                                 .add(vertical.mul(0.5))
-                                .sub(new Vec3(0, 0, focal_length));
+                                .sub(Vec3(0, 0, focal_length));
 
     // Scene setup
-    let sphere = new Sphere(new Vec3(0, 0, -1), 0.5);
-    let material = new Material(new Vec3(1, 0, 0)); // Red sphere
-    let light_pos = new Vec3(2, 2, 1);
+    let sphere = Sphere(Vec3(0, 0, -1), 0.5);
+    let material = Material(Vec3(1, 0, 0)); // Red sphere
+    let light_pos = Vec3(2, 2, 1);
 
     let window = $window_create(width, height, "Render", 0);
-    let image = new Image(width, height);
+    let image = Image(width, height);
 
     // Render loop
     for (let var j = 0; j < height; j = j + 1)
@@ -161,15 +161,15 @@ fun render()
             let u = i / (width - 1);
             let v = j / (height - 1);
 
-            let ray = new Ray(origin, top_left_corner.add(horizontal.mul(u)).sub(vertical.mul(v)).sub(origin));
-            let var color = new Vec3(0, 0, 0); // Black background
+            let ray = Ray(origin, top_left_corner.add(horizontal.mul(u)).sub(vertical.mul(v)).sub(origin));
+            let var color = Vec3(0, 0, 0); // Black background
 
             let t = sphere.hit(ray, 0.001, 1000);
             if (t != nil) {
                 let point = ray.at(t);
                 let normal = point.sub(sphere.center).normalize();
                 color = material.shade(point, normal, light_pos);
-                //color = new Vec3(1, 1, 1);
+                //color = Vec3(1, 1, 1);
             }
 
             // Output color as integers [0, 255]

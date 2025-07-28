@@ -165,23 +165,6 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         );
     }
 
-    // New class instance
-    if input.match_keyword("new")? {
-        input.eat_ws()?;
-        let class_name = input.parse_ident()?;
-        input.expect_token("(")?;
-        let arg_exprs = parse_expr_list(input, prog, ")")?;
-
-        return ExprBox::new_ok(
-            Expr::New {
-                class_name,
-                class_id: ClassId::default(),
-                args: arg_exprs
-            },
-            pos
-        );
-    }
-
     // Identifier (variable reference)
     if is_ident_start(ch) {
         let ident = input.parse_ident()?;
@@ -1344,8 +1327,8 @@ mod tests
         parse_ok("class Foo { init(self) {} }");
         parse_ok("class Foo { init(self) { self.x = 1; } }");
         parse_ok("class Foo { init(self) { self.x = 1; } inc(self) { ++self.x; } }");
-        parse_ok("let o = new Foo();");
-        parse_ok("let o = new Foo(1, 2, 3);");
+        parse_ok("let o = Foo();");
+        parse_ok("let o = Foo(1, 2, 3);");
     }
 
     #[test]
@@ -1396,7 +1379,6 @@ mod tests
         parse_ok("return !a instanceof B;");
         parse_ok("return f() instanceof F;");
         parse_ok("return !f() instanceof F;");
-        parse_ok("return new F() instanceof F;");
     }
 
     #[test]

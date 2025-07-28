@@ -121,12 +121,6 @@ pub enum Expr
         callee: ExprBox,
         args: Vec<ExprBox>,
     },
-
-    New {
-        class_name: String,
-        class_id: ClassId,
-        args: Vec<ExprBox>,
-    },
 }
 
 impl Default for Expr

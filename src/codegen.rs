@@ -398,35 +398,40 @@ impl ExprBox
             Expr::Call { callee, args } => {
                 let argc = args.len().try_into().unwrap();
 
-                // If the callee has the form a.b
-                if let Expr::Member { base, field } = callee.expr.as_ref() {
-                    // Evaluate the self argument
-                    base.gen_code(fun, code, alloc)?;
+                match callee.expr.as_ref() {
+                    // New class instance
+                    Expr::Ref(Decl::Class { id }) => {
+                        // Evaluate the arguments
+                        for arg in args {
+                            arg.gen_code(fun, code, alloc)?;
+                        }
 
-                    for arg in args {
-                        arg.gen_code(fun, code, alloc)?;
+                        code.push(Insn::new { class_id: *id, argc });
                     }
 
-                    let name = alloc.str_const(field.clone());
-                    code.push(Insn::call_method { name, argc });
-                } else {
-                    for arg in args {
-                        arg.gen_code(fun, code, alloc)?;
+                    // Callee has form a.b
+                    Expr::Member { base, field } => {
+                        // Evaluate the self argument
+                        base.gen_code(fun, code, alloc)?;
+
+                        for arg in args {
+                            arg.gen_code(fun, code, alloc)?;
+                        }
+
+                        let name = alloc.str_const(field.clone());
+                        code.push(Insn::call_method { name, argc });
                     }
 
-                    callee.gen_code(fun, code, alloc)?;
-                    code.push(Insn::call { argc });
+                    // Plain regular call
+                    _ => {
+                        for arg in args {
+                            arg.gen_code(fun, code, alloc)?;
+                        }
+
+                        callee.gen_code(fun, code, alloc)?;
+                        code.push(Insn::call { argc });
+                    }
                 }
-            }
-
-            Expr::New { class_id, args, .. } => {
-                let argc = args.len().try_into().unwrap();
-
-                for arg in args {
-                    arg.gen_code(fun, code, alloc)?;
-                }
-
-                code.push(Insn::new { class_id: *class_id, argc });
             }
 
             // Function expression
