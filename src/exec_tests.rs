@@ -15,10 +15,8 @@ fn test_file(file_path: &str, no_exec: bool)
     io::stdout().flush().unwrap();
 
     // Compile the source file
-    let mut command = Command::new("cargo");
+    let mut command = Command::new("target/debug/plush");
     command.current_dir(".");
-    command.arg("run");
-    command.arg("--");
     if no_exec {
         command.arg("--no-exec");
     }

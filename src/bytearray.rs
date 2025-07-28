@@ -58,9 +58,17 @@ impl ByteArray
 
 
     /// Copy bytes from another bytearray
-    pub fn copy_from(&mut self, src: &ByteArray, dst_pos: usize, src_pos: usize, num_bytes: usize)
+    pub fn copy_from(&mut self, src: &ByteArray, src_pos: usize, dst_pos: usize, num_bytes: usize)
     {
-        //assert!(pos + num * size_of::<T>() <= self.bytes.len());
+        // TODO: make sure the slices don't overlap
+
+
+
+        let src_slice = unsafe { src.get_slice::<u8>(src_pos, num_bytes) };
+
+        //let dst_slice = unsafe {  };
+
+
 
         todo!()
 
