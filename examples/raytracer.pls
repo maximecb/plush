@@ -152,11 +152,11 @@ fun render()
     let image = Image(width, height);
 
     // Render loop
-    for (let var j = 0; j < height; j = j + 1)
+    for (let var j = 0; j < height; ++j)
     {
         //$println(j.to_s());
 
-        for (let var i = 0; i < width; i = i + 1)
+        for (let var i = 0; i < width; ++i)
         {
             let u = i / (width - 1);
             let v = j / (height - 1);
