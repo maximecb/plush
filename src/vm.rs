@@ -1040,6 +1040,19 @@ impl Actor
                     push!(r);
                 }
 
+                // Integer bitwise XOR
+                Insn::bit_xor => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let r = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => Int64(v0 ^ v1),
+                        _ => panic!()
+                    };
+
+                    push!(r);
+                }
+
                 // Integer left shift
                 Insn::lshift => {
                     let v1 = pop!();
