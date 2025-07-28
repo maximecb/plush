@@ -1014,6 +1014,58 @@ impl Actor
                     push!(r);
                 }
 
+                // Integer bitwise or
+                Insn::bit_or => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let r = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => Int64(v0 | v1),
+                        _ => panic!()
+                    };
+
+                    push!(r);
+                }
+
+                // Integer bitwise and
+                Insn::bit_and => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let r = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => Int64(v0 & v1),
+                        _ => panic!()
+                    };
+
+                    push!(r);
+                }
+
+                // Integer left shift
+                Insn::lshift => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let r = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => Int64(v0 << v1),
+                        _ => panic!()
+                    };
+
+                    push!(r);
+                }
+
+                // Integer right shift
+                Insn::rshift => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let r = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => Int64(v0 >> v1),
+                        _ => panic!()
+                    };
+
+                    push!(r);
+                }
+
                 // Less than
                 Insn::lt => {
                     let v1 = pop!();

@@ -1,7 +1,7 @@
 // Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
 fun rgb32(r, g, b)
 {
-    return 0xFF_00_00_00 + (r * 65536) + (g * 256) + b;
+    return 0xFF_00_00_00 | (r << 16) | (g << 8) | b;
 }
 
 class Image
@@ -127,8 +127,8 @@ class Material {
 fun render()
 {
     // Image settings
-    let width = 256;
-    let height = 256;
+    let width = 300;
+    let height = 300;
     let aspect_ratio = width / height;
 
     // Camera setup
@@ -146,7 +146,7 @@ fun render()
     // Scene setup
     let sphere = new Sphere(new Vec3(0, 0, -1), 0.5);
     let material = new Material(new Vec3(1, 0, 0)); // Red sphere
-    let light_pos = new Vec3(2, 2, 0);
+    let light_pos = new Vec3(2, 2, 1);
 
     let window = $window_create(width, height, "Render", 0);
     let image = new Image(width, height);

@@ -53,6 +53,25 @@ impl ByteArray
             slice.fill(val);
         }
     }
+
+
+
+
+    /// Copy bytes from another bytearray
+    pub fn copy_from(&mut self, src: &ByteArray, dst_pos: usize, src_pos: usize, num_bytes: usize)
+    {
+        //assert!(pos + num * size_of::<T>() <= self.bytes.len());
+
+        todo!()
+
+
+
+
+    }
+
+
+
+
 }
 
 /// Create a new ByteArray instance

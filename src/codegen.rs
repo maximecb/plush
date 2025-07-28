@@ -590,7 +590,7 @@ fn gen_bin_op(
         Sub => code.push(Insn::sub),
         Mul => code.push(Insn::mul),
         Div => code.push(Insn::div),
-        //Mod => code.push(Insn::mod),
+        Mod => code.push(Insn::modulo),
 
         Eq => code.push(Insn::eq),
         Ne => code.push(Insn::ne),
