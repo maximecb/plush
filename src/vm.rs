@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
-use crate::array::{Array, array_get_field};
+use crate::array::Array;
 use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
 use crate::deepcopy::{deepcopy, remap};
@@ -1015,7 +1015,9 @@ impl Actor
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Float64(v0 as f64 / v1 as f64),
                         (Float64(v0), Float64(v1)) => Float64(v0 / v1),
-                        _ => panic!()
+                        (Float64(v0), Int64(v1)) => Float64(v0 / v1 as f64),
+                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 / v1),
+                        _ => panic!("div with unsupported types")
                     };
 
                     push!(r);
@@ -1270,7 +1272,19 @@ impl Actor
                     let field_name = unsafe { &*field };
 
                     let val = match obj {
-                        Value::Array(p) => unsafe { array_get_field(&mut *p, field_name) },
+                        Value::Array(p) => {
+                            match field_name.as_str() {
+                                "len" => obj.unwrap_arr().elems.len().into(),
+                                _ => panic!()
+                            }
+                        }
+
+                        Value::ByteArray(p) => {
+                            match field_name.as_str() {
+                                "len" => obj.unwrap_ba().num_bytes().into(),
+                                _ => panic!()
+                            }
+                        }
 
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
@@ -1922,7 +1936,7 @@ mod tests
     fn bytearray()
     {
         eval("let a = ByteArray.new();");
-        eval("let a = ByteArray.with_size(1024);");
+        eval("let a = ByteArray.with_size(1024); assert(a.len == 1024);");
         eval("let a = ByteArray.with_size(32); a.write_u32(0, 0xFF_FF_FF_FF);");
         eval("let a = ByteArray.with_size(32); a.write_u32(0, 0xFF_00_00_00); assert(a[0] == 0 && a[3] == 255);");
         eval("let a = ByteArray.with_size(32); a[11] = 77; assert(a[11] == 77);");

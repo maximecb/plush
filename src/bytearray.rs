@@ -11,6 +11,11 @@ pub struct ByteArray
 
 impl ByteArray
 {
+    pub fn num_bytes(&self) -> usize
+    {
+        self.bytes.len()
+    }
+
     pub fn get(&self, idx: usize) -> u8
     {
         self.bytes[idx]
