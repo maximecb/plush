@@ -210,13 +210,12 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 
     let mut event_pump = sdl_state.event_pump.as_mut().unwrap();
 
-    let event = event_pump.poll_event();
+    let event = match event_pump.poll_event() {
+        Some(event) => event,
+        None => { return None; }
+    };
 
-    if event.is_none() {
-        return None;
-    }
-
-    match event.unwrap() {
+    match event.clone() {
         Event::Quit { .. } => {
             let msg = actor.alloc_obj(UIMESSAGE_ID);
 
@@ -236,7 +235,8 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             Some(msg)
         }
 
-        Event::KeyDown { window_id, keycode: Some(keycode), .. } => {
+        Event::KeyDown { window_id, keycode: Some(keycode), .. } |
+        Event::KeyUp { window_id, keycode: Some(keycode), .. } => {
             let key_name = translate_keycode(keycode);
             if key_name.is_none() {
                 return None;
@@ -244,25 +244,17 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 
             let msg = actor.alloc_obj(UIMESSAGE_ID);
 
-            actor.set_field(
-                msg,
-                "window_id",
-                Value::from(0),
-            );
+            actor.set_field(msg, "window_id", Value::from(0));
 
-            let event_type = actor.intern_str("KEY_DOWN");
-            actor.set_field(
-                msg,
-                "event",
-                event_type,
-            );
+            let event_type = if let Event::KeyDown { .. } = event {
+                actor.intern_str("KEY_DOWN")
+            } else {
+                actor.intern_str("KEY_UP")
+            };
+            actor.set_field(msg, "event", event_type);
 
             let key_name = actor.intern_str(key_name.unwrap());
-            actor.set_field(
-                msg,
-                "key",
-                key_name,
-            );
+            actor.set_field(msg, "key", key_name);
 
             Some(msg)
         }
@@ -333,12 +325,6 @@ fn translate_keycode(sdl_keycode: Keycode) -> Option<&'static str>
     }
 }
 
-
-
-
-
-
-
 /*
 Event::MouseMotion { window_id, x, y, .. } => {
     if let ExitReason::Exit(val) = window_call_mousemove(vm, window_id, x, y) {
@@ -354,18 +340,6 @@ Event::MouseButtonDown { window_id, which, mouse_btn, x, y, .. } => {
 
 Event::MouseButtonUp { window_id, which, mouse_btn, x, y, .. } => {
     if let ExitReason::Exit(val) = window_call_mouseup(vm, window_id, mouse_btn, x, y) {
-        return ExitReason::Exit(val);
-    }
-}
-
-Event::KeyDown { window_id, keycode: Some(keycode), .. } => {
-    if let ExitReason::Exit(val) = window_call_keydown(vm, window_id, keycode) {
-        return ExitReason::Exit(val);
-    }
-}
-
-Event::KeyUp { window_id, keycode: Some(keycode), .. } => {
-    if let ExitReason::Exit(val) = window_call_keyup(vm, window_id, keycode) {
         return ExitReason::Exit(val);
     }
 }
