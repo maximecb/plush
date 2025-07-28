@@ -800,7 +800,7 @@ impl Actor
                         self.call_host(f, $argc.into());
                         continue;
                     }
-                    _ => panic!("call with non-function {:?}", fun)
+                    _ => panic!("call to non-function {:?}", $fun)
                 };
 
                 // Get a compiled address for this function
@@ -942,6 +942,8 @@ impl Actor
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 + v1),
                         (Float64(v0), Float64(v1)) => Float64(v0 + v1),
+                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 + v1),
+                        (Float64(v0), Int64(v1)) => Float64(v0 + v1 as f64),
 
                         (Value::String(s1), Value::String(s2)) => {
                             let s1 = unsafe { &*s1 };
@@ -949,7 +951,7 @@ impl Actor
                             Value::String(self.alloc.str_const(s1.to_owned() + s2))
                         }
 
-                        _ => panic!()
+                        _ => panic!("unsupported types in add")
                     };
 
                     push!(r);
@@ -962,7 +964,9 @@ impl Actor
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 - v1),
                         (Float64(v0), Float64(v1)) => Float64(v0 - v1),
-                        _ => panic!()
+                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 - v1),
+                        (Float64(v0), Int64(v1)) => Float64(v0 - v1 as f64),
+                        _ => panic!("unsupported types in sub")
                     };
 
                     push!(r);
@@ -975,7 +979,9 @@ impl Actor
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 * v1),
                         (Float64(v0), Float64(v1)) => Float64(v0 * v1),
-                        _ => panic!()
+                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 * v1),
+                        (Float64(v0), Int64(v1)) => Float64(v0 * v1 as f64),
+                        _ => panic!("unsupported types in mul")
                     };
 
                     push!(r);
@@ -987,7 +993,7 @@ impl Actor
                     let v0 = pop!();
 
                     let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 / v1),
+                        (Int64(v0), Int64(v1)) => Float64(v0 as f64 / v1 as f64),
                         (Float64(v0), Float64(v1)) => Float64(v0 / v1),
                         _ => panic!()
                     };
@@ -1015,7 +1021,10 @@ impl Actor
 
                     let b = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => v0 < v1,
-                        _ => panic!()
+                        (Float64(v0), Float64(v1)) => v0 < v1,
+                        (Float64(v0), Int64(v1)) => v0 < (v1 as f64),
+                        (Int64(v0), Float64(v1)) => (v0 as f64) < v1,
+                        _ => panic!("unsupported types in lt")
                     };
 
                     push_bool!(b);
@@ -1029,6 +1038,22 @@ impl Actor
                     let b = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => v0 <= v1,
                         _ => panic!()
+                    };
+
+                    push_bool!(b);
+                }
+
+                // Greater than
+                Insn::gt => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let b = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => v0 > v1,
+                        (Float64(v0), Float64(v1)) => v0 > v1,
+                        (Float64(v0), Int64(v1)) => v0 > (v1 as f64),
+                        (Int64(v0), Float64(v1)) => (v0 as f64) > v1,
+                        _ => panic!("unsupported types in lt")
                     };
 
                     push_bool!(b);

@@ -10,10 +10,6 @@ let COLOR_MAGENTA   = 0xFF_FF_00_FF;
 let COLOR_PURPLE    = 0xFF_D6_00_FF;
 let COLOR_TURQUOISE = 0xFF_40_E0_D0;
 
-// Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
-//#define rgb32(r, g, b) ((u32)0xFF_00_00_00 | ((u32)r << 16) | ((u32)g << 8) | (u32)b)
-//#define rgba32(r, g, b, a) (((u32)a << 24) | ((u32)r << 16) | ((u32)g << 8) | (u32)b)
-
 class Image
 {
     init(self, width, height)
@@ -56,13 +52,10 @@ img.set_pixel(100, 50, COLOR_BLUE);
 img.fill_rect(100, 100, 200, 100, COLOR_BLUE);
 img.fill_rect(150, 150, 250, 200, COLOR_RED);
 
-
-
-
+/*
 let window = $window_create(800, 600, "Test window", 0);
 $window_draw_frame(window, img.bytes);
 
-/*
 while (true)
 {
     let msg = $actor_recv();
