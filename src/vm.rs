@@ -735,6 +735,26 @@ impl Actor
                 let v = fun(self, a0, a1, a2, a3);
                 push!(v);
             }
+
+            HostFn::Fn5_0(fun) => {
+                let a4 = pop!();
+                let a3 = pop!();
+                let a2 = pop!();
+                let a1 = pop!();
+                let a0 = pop!();
+                fun(self, a0, a1, a2, a3, a4);
+                push!(Value::Nil);
+            }
+
+            HostFn::Fn5_1(fun) => {
+                let a4 = pop!();
+                let a3 = pop!();
+                let a2 = pop!();
+                let a1 = pop!();
+                let a0 = pop!();
+                let v = fun(self, a0, a1, a2, a3, a4);
+                push!(v);
+            }
         }
     }
 

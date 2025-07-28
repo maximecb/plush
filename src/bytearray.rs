@@ -29,6 +29,14 @@ impl ByteArray
         std::slice::from_raw_parts(elem_ptr, num_elems as usize)
     }
 
+    pub unsafe fn get_slice_mut<T>(&mut self, pos: usize, num_elems: usize) -> &'static mut [T]
+    {
+        assert!(pos + num_elems * size_of::<T>() <= self.bytes.len());
+        let buf_ptr = self.bytes.as_mut_ptr();
+        let elem_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(pos));
+        std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
+    }
+
     /// Write a value at the given address
     pub fn write<T>(&mut self, pos: usize, val: T) where T: Copy
     {
@@ -42,44 +50,23 @@ impl ByteArray
     }
 
     /// Fill an interval with a given value
-    pub fn fill<T>(&mut self, pos: usize, num: usize, val: T) where T: Copy
+    pub fn fill<T>(&mut self, pos: usize, num: usize, val: T) where T: Copy + 'static
     {
-        assert!(pos + num * size_of::<T>() <= self.bytes.len());
-
         unsafe {
-            let dst_ptr = self.bytes.as_mut_ptr().add(pos);
-            let dst_ptr = transmute::<*mut u8 , *mut T>(dst_ptr);
-            let slice = std::slice::from_raw_parts_mut(dst_ptr, num);
+            let slice = self.get_slice_mut(pos, num);
             slice.fill(val);
         }
     }
-
-
-
 
     /// Copy bytes from another bytearray
     pub fn copy_from(&mut self, src: &ByteArray, src_pos: usize, dst_pos: usize, num_bytes: usize)
     {
         // TODO: make sure the slices don't overlap
 
-
-
         let src_slice = unsafe { src.get_slice::<u8>(src_pos, num_bytes) };
-
-        //let dst_slice = unsafe {  };
-
-
-
-        todo!()
-
-
-
-
+        let dst_slice = unsafe {  self.get_slice_mut::<u8>(dst_pos, num_bytes) };
+        dst_slice.copy_from_slice(src_slice);
     }
-
-
-
-
 }
 
 /// Create a new ByteArray instance
@@ -125,4 +112,19 @@ pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val
     let num = num.unwrap_usize();
     let val = val.unwrap_u32();
     ba.fill(idx, num, val);
+}
+
+pub fn ba_copy_from(actor: &mut Actor, mut dst: Value, src: Value, src_pos: Value, dst_pos: Value, num_bytes: Value)
+{
+    let dst = dst.unwrap_ba();
+
+    let src = match src {
+        Value::ByteArray(p) => unsafe { &*p }
+        _ => panic!()
+    };
+
+    let src_pos = src_pos.unwrap_usize();
+    let dst_pos = dst_pos.unwrap_usize();
+    let num_bytes = num_bytes.unwrap_usize();
+    dst.copy_from(src, dst_pos, src_pos, num_bytes);
 }

@@ -26,6 +26,9 @@ pub enum HostFn
 
     Fn4_0(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value)),
     Fn4_1(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> Value),
+
+    Fn5_0(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value)),
+    Fn5_1(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> Value),
 }
 
 impl HostFn
@@ -43,6 +46,8 @@ impl HostFn
             Self::Fn3_1(_) => 3,
             Self::Fn4_0(_) => 4,
             Self::Fn4_1(_) => 4,
+            Self::Fn5_0(_) => 5,
+            Self::Fn5_1(_) => 5,
         }
     }
 
@@ -59,6 +64,8 @@ impl HostFn
             Self::Fn3_1(_) => true,
             Self::Fn4_0(_) => false,
             Self::Fn4_1(_) => true,
+            Self::Fn5_0(_) => false,
+            Self::Fn5_1(_) => true,
         }
     }
 }
