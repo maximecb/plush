@@ -288,7 +288,7 @@ fun actor_loop()
 fun render()
 {
     let tile_size = 25;
-    let num_actors = 16;
+    let num_actors = 64;
 
     // Create the actors
     let actor_ids = [];
@@ -357,7 +357,10 @@ fun render_no_tile()
 
 // Run the renderer
 let start_time = $time_current_ms();
-let image = render_no_tile();
+
+//let image = render_no_tile();
+let image = render();
+
 let render_time = $time_current_ms() - start_time;
 $println("Render time: " + render_time.to_s() + "ms");
 

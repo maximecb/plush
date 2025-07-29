@@ -1789,6 +1789,7 @@ mod tests
     #[test]
     fn for_loop()
     {
+        eval("for (;;) break;");
         eval_eq("let x = 1; for (let var x = 0; x < 10; ++x) {} return x;", Value::Int64(1));
         eval_eq("let var x = 0; for (let var i = 0; i < 10; ++i) { x = x + 2; } return x;", Value::Int64(20));
         eval_eq("let var x = 0; for (let var i = 0; i < 10; ++i) { ++x; assert(x < 11); continue; } return x;", Value::Int64(10));
