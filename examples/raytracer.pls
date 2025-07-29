@@ -145,6 +145,7 @@ class Sphere {
     init(self, center, radius) {
         self.center = center;
         self.radius = radius;
+        self.radius_sq = radius * radius;
     }
 
     // Ray-sphere intersection, returns only the distance t
@@ -152,7 +153,7 @@ class Sphere {
         let oc = ray.origin.sub(self.center);
         let a = ray.direction.length_squared();
         let half_b = oc.dot(ray.direction);
-        let c = oc.length_squared() - self.radius * self.radius;
+        let c = oc.length_squared() - self.radius_sq;
         let discriminant = half_b * half_b - a * c;
 
         if (discriminant < 0) {
@@ -160,15 +161,20 @@ class Sphere {
         }
 
         let sqrtd = discriminant.sqrt();
-        let var t = (-half_b - sqrtd) / a;
-        if (t < t_min || t > t_max) {
-            t = (-half_b + sqrtd) / a;
-            if (t < t_min || t > t_max) {
-                return nil;
-            }
+        let inv_a = 1.0 / a;
+
+        // Find the nearest root that lies in the acceptable range
+        let var t = (-half_b - sqrtd) * inv_a;
+        if (t > t_min && t < t_max) {
+            return t;
         }
 
-        return t;
+        t = (-half_b + sqrtd) * inv_a;
+        if (t > t_min && t < t_max) {
+            return t;
+        }
+
+        return nil;
     }
 }
 
