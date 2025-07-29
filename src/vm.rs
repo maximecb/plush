@@ -1293,6 +1293,13 @@ impl Actor
                             }
                         }
 
+                        Value::String(p) => {
+                            match field_name.as_str() {
+                                "len" => obj.unwrap_rust_str().len().into(),
+                                _ => panic!()
+                            }
+                        }
+
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
                             let slot_idx = self.get_slot_idx(obj.class_id, field_name);
@@ -1924,6 +1931,13 @@ mod tests
         eval_eq("return 4.0 + 1.0;", Value::Float64(5.0));
         eval_eq("return 6.0 / 2.0;", Value::Float64(3.0));
         eval_eq("return 4.0.sqrt();", Value::Float64(2.0));
+    }
+
+    #[test]
+    fn strings()
+    {
+        eval_eq("return ''.len;", Value::Int64(0));
+        eval_eq("return 'hello'.len;", Value::Int64(5));
     }
 
     /*
