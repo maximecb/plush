@@ -1773,17 +1773,17 @@ mod tests
     }
 
     #[test]
-    fn string_ops()
-    {
-        eval_eq("let s1 = 'foo'; let s2 = 'bar'; return s1 + s2 == 'foobar';", Value::True);
-    }
-
-    #[test]
     fn ternary_expr()
     {
         eval_eq("return true? 1:2;", Value::Int64(1));
         eval_eq("return false? 1:2;", Value::Int64(2));
         eval_eq("let b = (1 < 5)? 1:2; return b;", Value::Int64(1));
+    }
+
+    #[test]
+    fn scope_shadow()
+    {
+        eval("let x = 1; { let x = x + 1; assert(x==2); } assert(x==1);");
     }
 
     #[test]
@@ -1938,6 +1938,7 @@ mod tests
     {
         eval_eq("return ''.len;", Value::Int64(0));
         eval_eq("return 'hello'.len;", Value::Int64(5));
+        eval_eq("let s1 = 'foo'; let s2 = 'bar'; return s1 + s2 == 'foobar';", Value::True);
     }
 
     /*
