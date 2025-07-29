@@ -315,7 +315,7 @@ fun actor_loop()
     }
 }
 
-// Main rendering function
+// Multi-actor, parallel rendering
 fun render()
 {
     let num_actors = 64;
@@ -370,6 +370,7 @@ fun render()
     return image;
 }
 
+// Single-threaded rendering
 fun render_no_tile()
 {
     // Image settings
@@ -402,17 +403,11 @@ while (true)
     let msg = $actor_recv();
 
     if (!(msg instanceof UIMessage))
-    {
         continue;
-    }
 
     if (msg.event == 'CLOSE_WINDOW')
-    {
         break;
-    }
 
     if (msg.event == 'KEY_DOWN' && msg.key == 'ESCAPE')
-    {
         break;
-    }
 }
