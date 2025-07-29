@@ -5,7 +5,7 @@ into bugs and missing features. I'm looking for collaborators who share the visi
 and want to help me make it happen.**
 
 Plush is an experimental toy programming language and virtual machine for fun and teaching purposes.
-It follows a minimalistic design philosphy and draws inspiration from JavaScript, Lox and Lua.
+It follows a minimalistic design philosphy and draws inspiration from JavaScript, [Lox](https://craftinginterpreters.com/the-lox-language.html), Lua and Python.
 
 If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
 
@@ -42,6 +42,15 @@ Caveats and limitations:
 Plush has similar syntax to JS and Lox. Some examples can be found under
 `/examples`, `/tests` and `/benchmarks`. There are some minor syntax differences
 such as using `.len` for the length of arrays instead of `.length`.
+
+Some notes:
+- There is no `new` operator, you can instantiate classes with just the class name,
+e.g. `MyClass(1,2,3)` like in Lox and Python
+- Plush methods take an explicit `self` argument like Python
+  - You can name this argument however you like
+  - This solves the issue JS has with closures being unable to directly access the outer `this`
+- The `==` operator performs reference equality (not structural equality) comparisons on
+objects and arrays
 
 There are a set of host functions which are defined in [`src/host.rs`](src/host.rs) which are
 accessible by prefixing the function name with a dollar sign. For example

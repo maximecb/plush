@@ -1,3 +1,5 @@
+let VEC3_ZERO = Vec3(0, 0, 0);
+
 // Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
 fun rgb32(r, g, b)
 {
@@ -48,6 +50,11 @@ class Image
 
 fun max(a, b) {
     if (a > b) return a;
+    return b;
+}
+
+fun min(a, b) {
+    if (a < b) return a;
     return b;
 }
 
@@ -149,59 +156,104 @@ class Material {
     }
 }
 
+// Camera class
+class Camera {
+    init(self, width, height) {
+        self.width = width;
+        self.height = height;
+        let aspect_ratio = width / height;
+
+        // Camera setup
+        let viewport_height = 2.0;
+        let viewport_width = aspect_ratio * viewport_height;
+        let focal_length = 1.0;
+
+        self.origin = Vec3(0, 0, 0);
+        let horizontal = Vec3(viewport_width, 0, 0);
+        let vertical = Vec3(0, viewport_height, 0);
+        let top_left_corner = self.origin.sub(horizontal.mul(0.5))
+                                     .add(vertical.mul(0.5))
+                                     .sub(Vec3(0, 0, focal_length));
+
+        self.u_vec = horizontal.mul(1.0 / (width - 1));
+        self.v_vec = vertical.mul(1.0 / (height - 1));
+        self.base_dir = top_left_corner.sub(self.origin);
+    }
+}
+
+// Scene class to hold the objects to be rendered
+class Scene {
+    init(self) {
+        self.sphere = Sphere(Vec3(0, 0, -1), 0.5);
+        self.material = Material(Vec3(1, 0, 0)); // Red sphere
+        self.light_pos = Vec3(2, 2, 1);
+    }
+
+    hit(self, ray, t_min, t_max) {
+        return self.sphere.hit(ray, t_min, t_max);
+    }
+
+    shade(self, hit_point, normal) {
+        return self.material.shade(hit_point, normal, self.light_pos);
+    }
+}
+
+// Renders a tile of the image
+fun render_tile(scene, camera, xmin, ymin, xmax, ymax) {
+    let tile_w = xmax - xmin;
+    let tile_h = ymax - ymin;
+    let tile_img = Image(tile_w, tile_h);
+
+    let tile_start_dir = camera.base_dir.add(camera.u_vec.mul(xmin)).sub(camera.v_vec.mul(ymin));
+
+    for (let var j = 0; j < tile_h; ++j) {
+        let row_start_dir = tile_start_dir.sub(camera.v_vec.mul(j));
+
+        for (let var i = 0; i < tile_w; ++i) {
+            let dir = row_start_dir.add(camera.u_vec.mul(i));
+            let ray = Ray(camera.origin, dir);
+            let var color = VEC3_ZERO; // Black background
+
+            let t = scene.hit(ray, 0.001, 1000);
+            if (t != nil) {
+                let point = ray.at(t);
+                let normal = point.sub(scene.sphere.center).normalize();
+                color = scene.shade(point, normal);
+            }
+
+            let ir = (255.999 * color.x).floor();
+            let ig = (255.999 * color.y).floor();
+            let ib = (255.999 * color.z).floor();
+            tile_img.set_pixel(i, j, rgb32(ir, ig, ib));
+        }
+    }
+
+    return tile_img;
+}
+
 // Main rendering function
 fun render()
 {
     // Image settings
-    let width = 300;
-    let height = 300;
-    let aspect_ratio = width / height;
+    let width = 256;
+    let height = 256;
 
     // Camera setup
-    let viewport_height = 2.0;
-    let viewport_width = aspect_ratio * viewport_height;
-    let focal_length = 1.0;
-
-    let origin = Vec3(0, 0, 0);
-    let horizontal = Vec3(viewport_width, 0, 0);
-    let vertical = Vec3(0, viewport_height, 0);
-    let top_left_corner = origin.sub(horizontal.mul(0.5))
-                                .add(vertical.mul(0.5))
-                                .sub(Vec3(0, 0, focal_length));
+    let camera = Camera(width, height);
 
     // Scene setup
-    let sphere = Sphere(Vec3(0, 0, -1), 0.5);
-    let material = Material(Vec3(1, 0, 0)); // Red sphere
-    let light_pos = Vec3(2, 2, 1);
+    let scene = Scene();
 
     let image = Image(width, height);
+    let tile_size = 16;
 
-    // Render loop
-    for (let var j = 0; j < height; ++j)
-    {
-        //$println(j.to_s());
-
-        for (let var i = 0; i < width; ++i)
-        {
-            let u = i / (width - 1);
-            let v = j / (height - 1);
-
-            let ray = Ray(origin, top_left_corner.add(horizontal.mul(u)).sub(vertical.mul(v)).sub(origin));
-            let var color = Vec3(0, 0, 0); // Black background
-
-            let t = sphere.hit(ray, 0.001, 1000);
-            if (t != nil) {
-                let point = ray.at(t);
-                let normal = point.sub(sphere.center).normalize();
-                color = material.shade(point, normal, light_pos);
-                //color = Vec3(1, 1, 1);
-            }
-
-            // Output color as integers [0, 255]
-            let ir = (255.999 * color.x).floor();
-            let ig = (255.999 * color.y).floor();
-            let ib = (255.999 * color.z).floor();
-            image.set_pixel(i, j, rgb32(ir, ig, ib));
+    // Render the image in tiles
+    for (let var y = 0; y < height; y = y + tile_size) {
+        for (let var x = 0; x < width; x = x + tile_size) {
+            let xmax = min(x + tile_size, width);
+            let ymax = min(y + tile_size, height);
+            let tile_img = render_tile(scene, camera, x, y, xmax, ymax);
+            image.blit(tile_img, x, y);
         }
     }
 
