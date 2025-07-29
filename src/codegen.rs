@@ -191,16 +191,24 @@ impl StmtBox
                 }
             }
 
-            Stmt::While { test_expr, body_stmt } => {
+            Stmt::For { init_stmt, test_expr, incr_expr, body_stmt } => {
+                // Generate code for the init statement
+                init_stmt.gen_code(
+                    fun,
+                    break_idxs,
+                    cont_idxs,
+                    code,
+                    alloc,
+                )?;
+
                 let mut break_idxs = Vec::new();
                 let mut cont_idxs = Vec::new();
 
-                // Continue will jump here
-                let cont_idx = code.len();
-
                 // Evaluate the test expression
+                let test_idx = code.len();
                 test_expr.gen_code(fun, code, alloc)?;
 
+                // If the test fails, jump after the loop
                 break_idxs.push(code.len());
                 code.push(Insn::if_false { target_ofs: 0 });
 
@@ -212,9 +220,15 @@ impl StmtBox
                     alloc,
                 )?;
 
+                // Continue will jump here
+                let cont_idx = code.len();
+
+                // Evaluate the increment expression
+                incr_expr.gen_code(fun, code, alloc)?;
+
                 // Jump back to the loop test
-                cont_idxs.push(code.len());
                 code.push(Insn::jump { target_ofs: 0 });
+                patch_jump(code, code.len() - 1, test_idx);
 
                 // Break will jump here
                 let break_idx = code.len();

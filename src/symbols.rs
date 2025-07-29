@@ -265,9 +265,13 @@ impl StmtBox
                 }
             }
 
-            Stmt::While { test_expr, body_stmt } => {
+            Stmt::For { init_stmt, test_expr, incr_expr, body_stmt } => {
+                env.push_scope();
+                init_stmt.resolve_syms(prog, fun, env)?;
                 test_expr.resolve_syms(prog, fun, env)?;
+                incr_expr.resolve_syms(prog, fun, env)?;
                 body_stmt.resolve_syms(prog, fun, env)?;
+                env.pop_scope();
             }
 
             Stmt::Assert { test_expr } => {

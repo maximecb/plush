@@ -61,7 +61,7 @@ fn benchmarks()
     for file in fs::read_dir("./benchmarks").unwrap() {
         let file_path = file.unwrap().path().display().to_string();
 
-        if !file_path.ends_with(".rs") {
+        if !file_path.ends_with(".pls") {
             continue;
         }
 

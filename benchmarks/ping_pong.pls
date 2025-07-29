@@ -24,7 +24,7 @@ fun actor()
 
 let id = $actor_spawn(actor);
 
-let var obj = new Counter();
+let var obj = Counter();
 
 for (let var i = 0; i < 500_000; i = i + 1)
 {

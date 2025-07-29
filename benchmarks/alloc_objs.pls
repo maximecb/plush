@@ -9,9 +9,9 @@ class Foo
     }
 }
 
-for (let var i = 0; i < 2_000_000; i = i + 1)
+for (let var i = 0; i < 4_000_000; i = i + 1)
 {
-    let o = new Foo();
+    let o = Foo();
     i = i + 1;
 }
 

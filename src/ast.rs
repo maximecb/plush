@@ -182,8 +182,10 @@ pub enum Stmt
         else_stmt: Option<StmtBox>,
     },
 
-    While {
+    For {
+        init_stmt: StmtBox,
         test_expr: ExprBox,
+        incr_expr: ExprBox,
         body_stmt: StmtBox,
     },
 
@@ -209,7 +211,7 @@ impl Default for Stmt
 {
     fn default() -> Self
     {
-        Stmt::Return(ExprBox::default())
+        Stmt::Expr(ExprBox::default())
     }
 }
 

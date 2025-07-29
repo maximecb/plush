@@ -174,7 +174,6 @@ fun render()
     let material = Material(Vec3(1, 0, 0)); // Red sphere
     let light_pos = Vec3(2, 2, 1);
 
-    let window = $window_create(width, height, "Render", 0);
     let image = Image(width, height);
 
     // Render loop
@@ -206,28 +205,31 @@ fun render()
         }
     }
 
-    $window_draw_frame(window, image.bytes);
-
-    while (true)
-    {
-        let msg = $actor_recv();
-
-        if (!(msg instanceof UIMessage))
-        {
-            continue;
-        }
-
-        if (msg.event == 'CLOSE_WINDOW')
-        {
-            break;
-        }
-
-        if (msg.event == 'KEY_DOWN' && msg.key == 'ESCAPE')
-        {
-            break;
-        }
-    }
+    return image;
 }
 
 // Run the renderer
-render();
+let image = render();
+
+let window = $window_create(image.width, image.height, "Render", 0);
+$window_draw_frame(window, image.bytes);
+
+while (true)
+{
+    let msg = $actor_recv();
+
+    if (!(msg instanceof UIMessage))
+    {
+        continue;
+    }
+
+    if (msg.event == 'CLOSE_WINDOW')
+    {
+        break;
+    }
+
+    if (msg.event == 'KEY_DOWN' && msg.key == 'ESCAPE')
+    {
+        break;
+    }
+}

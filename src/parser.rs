@@ -756,8 +756,10 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
         let body_stmt = parse_stmt(input, prog)?;
 
         return StmtBox::new_ok(
-            Stmt::While {
+            Stmt::For {
+                init_stmt: StmtBox::default(),
                 test_expr,
+                incr_expr: ExprBox::default(),
                 body_stmt,
             },
             pos
@@ -799,34 +801,15 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
         // Parse the loop body
         let body_stmt = parse_stmt(input, prog)?;
 
-        // The loop gets generated as:
-        // { init_stmt, while (test_expr) { loop_body; incr_expr; }  }
-
-        // Place the increment expression inside the body statement
-        let body_stmt = StmtBox::new(
-            Stmt::Block(vec![
+        return StmtBox::new_ok(
+            Stmt::For {
+                init_stmt,
+                test_expr,
+                incr_expr,
                 body_stmt,
-                StmtBox::new(Stmt::Expr(incr_expr), pos)
-            ]),
-            pos,
-        );
-
-        // Create the while statement
-        let while_stmt = StmtBox::new(
-            Stmt::While { test_expr, body_stmt },
+            },
             pos
         );
-
-        // Wrap the init and loop inside a block
-        let for_stmt = StmtBox::new(
-            Stmt::Block(vec![
-                init_stmt,
-                while_stmt
-            ]),
-            pos,
-        );
-
-        return Ok(for_stmt);
     }
 
     // Assert statement

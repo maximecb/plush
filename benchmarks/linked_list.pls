@@ -15,7 +15,7 @@ fun make_list(length)
     // Build the list from tail to head (so newest node becomes head)
     for (let var i = length - 1; i >= 0; --i)
     {
-        let node = new Node(i, head);
+        let node = Node(i, head);
         head = node;
     }
 
