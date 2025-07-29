@@ -8,6 +8,13 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Value
     Value::String(actor.alloc.str_const(s))
 }
 
+fn float64_to_s(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    let s = format!("{}", v);
+    Value::String(actor.alloc.str_const(s))
+}
+
 fn float64_sqrt(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_f64();
@@ -61,6 +68,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     let f = match (val, method_name) {
         (Value::Int64(_), "to_s") => HostFn::Fn1_1(int64_to_s),
 
+        (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
         (Value::Float64(_), "floor") => HostFn::Fn1_1(float64_floor),
 

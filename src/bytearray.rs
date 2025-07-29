@@ -131,5 +131,5 @@ pub fn ba_copy_from(actor: &mut Actor, mut dst: Value, src: Value, src_pos: Valu
     let src_pos = src_pos.unwrap_usize();
     let dst_pos = dst_pos.unwrap_usize();
     let num_bytes = num_bytes.unwrap_usize();
-    dst.copy_from(src, dst_pos, src_pos, num_bytes);
+    dst.copy_from(src, src_pos, dst_pos, num_bytes);
 }

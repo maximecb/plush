@@ -8,6 +8,9 @@ class Image
 {
     init(self, width, height)
     {
+        assert(width instanceof Int64);
+        assert(height instanceof Int64);
+
         self.width = width;
         self.height = height;
         self.bytes = ByteArray.with_size(4 * width * height);
@@ -16,7 +19,30 @@ class Image
     // The color is specified as an u32 value in RGBA32 format
     set_pixel(self, x, y, color)
     {
-        self.bytes.write_u32(4 * (y * self.width + x), color);
+        let idx = 4 * (y * self.width + x);
+        self.bytes.write_u32(idx, color);
+    }
+
+    // Copy a source image into this image at a given position
+    blit(self, src_img, dst_x, dst_y)
+    {
+        let src_w = src_img.width;
+        let src_h = src_img.height;
+
+        // Number of bytes per row of the images
+        let dst_pitch = self.width * 4;
+        let src_pitch = src_w * 4;
+
+        for (let var j = 0; j < src_h; ++j)
+        {
+            let dst_j = dst_y + j;
+            if (dst_j >= self.height) continue;
+
+            let src_idx = j * src_pitch;
+            let dst_idx = dst_j * dst_pitch + dst_x * 4;
+
+            self.bytes.copy_from(src_img.bytes, src_idx, dst_idx, src_pitch);
+        }
     }
 }
 
