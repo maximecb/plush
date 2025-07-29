@@ -1,5 +1,4 @@
 let TILE_SIZE = 25;
-let VEC3_ZERO = Vec3(0, 0, 0);
 
 // Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
 fun rgb32(r, g, b)
@@ -242,19 +241,19 @@ fun render_tile(scene, camera, xmin, ymin, xmax, ymax) {
         for (let var i = 0; i < tile_w; ++i) {
             let dir = row_start_dir.add(camera.u_vec.mul(i));
             let ray = Ray(camera.origin, dir);
-            let var color = VEC3_ZERO; // Black background
 
             let t = scene.hit(ray, 0.001, 1000);
             if (t != nil) {
                 let point = ray.at(t);
                 let normal = point.sub(scene.sphere.center).normalize();
-                color = scene.shade(point, normal);
+                let color = scene.shade(point, normal);
+
+                let ir = (255.999 * color.x).floor();
+                let ig = (255.999 * color.y).floor();
+                let ib = (255.999 * color.z).floor();
+                tile_img.set_pixel(i, j, rgb32(ir, ig, ib));
             }
 
-            let ir = (255.999 * color.x).floor();
-            let ig = (255.999 * color.y).floor();
-            let ib = (255.999 * color.z).floor();
-            tile_img.set_pixel(i, j, rgb32(ir, ig, ib));
         }
     }
 
