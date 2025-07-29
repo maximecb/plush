@@ -43,7 +43,7 @@ Plush has similar syntax to JS and Lox. Some examples can be found under
 `/examples`, `/tests` and `/benchmarks`. There are some minor syntax differences
 such as using `.len` for the length of arrays instead of `.length`.
 
-Some notes:
+Notes about the language:
 - There is no `new` operator, you can instantiate classes with just the class name,
 e.g. `MyClass(1,2,3)`
 - Methods take an explicit `self` argument like Python

@@ -288,7 +288,7 @@ fun actor_loop()
 fun render()
 {
     let tile_size = 25;
-    let num_actors = 8;
+    let num_actors = 16;
 
     // Create the actors
     let actor_ids = [];
@@ -296,7 +296,7 @@ fun render()
         actor_ids.push($actor_spawn(actor_loop));
 
     // Image settings
-    let width = 300;
+    let width = 400;
     let height = 300;
 
     // Camera setup
@@ -340,9 +340,24 @@ fun render()
     return image;
 }
 
+fun render_no_tile()
+{
+    // Image settings
+    let width = 400;
+    let height = 300;
+
+    // Camera setup
+    let camera = Camera(width, height);
+
+    // Scene setup
+    let scene = Scene();
+
+    return render_tile(scene, camera, 0, 0, width, height);
+}
+
 // Run the renderer
 let start_time = $time_current_ms();
-let image = render();
+let image = render_no_tile();
 let render_time = $time_current_ms() - start_time;
 $println("Render time: " + render_time.to_s() + "ms");
 
