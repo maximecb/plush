@@ -1,3 +1,4 @@
+let TILE_SIZE = 25;
 let VEC3_ZERO = Vec3(0, 0, 0);
 
 // Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
@@ -28,22 +29,51 @@ class Image
     // Copy a source image into this image at a given position
     blit(self, src_img, dst_x, dst_y)
     {
-        let src_w = src_img.width;
-        let src_h = src_img.height;
+        let var dst_x = dst_x;
+        let var dst_y = dst_y;
+        let var src_x = 0;
+        let var src_y = 0;
+        let var width = src_img.width;
+        let var height = src_img.height;
+
+        if (dst_x < 0)
+        {
+            src_x = -dst_x;
+            width = width + dst_x;
+            dst_x = 0;
+        }
+
+        if (dst_y < 0)
+        {
+            src_y = -dst_y;
+            height = height + dst_y;
+            dst_y = 0;
+        }
+
+        if (dst_x + width > self.width)
+        {
+            width = self.width - dst_x;
+        }
+
+        if (dst_y + height > self.height)
+        {
+            height = self.height - dst_y;
+        }
+
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
 
         // Number of bytes per row of the images
         let dst_pitch = self.width * 4;
-        let src_pitch = src_w * 4;
+        let src_pitch = src_img.width * 4;
 
-        for (let var j = 0; j < src_h; ++j)
+        for (let var j = 0; j < height; ++j)
         {
-            let dst_j = dst_y + j;
-            if (dst_j >= self.height) continue;
-
-            let src_idx = j * src_pitch;
-            let dst_idx = dst_j * dst_pitch + dst_x * 4;
-
-            self.bytes.memcpy(dst_idx, src_img.bytes, src_idx, src_pitch);
+            let src_idx = (src_y + j) * src_pitch + src_x * 4;
+            let dst_idx = (dst_y + j) * dst_pitch + dst_x * 4;
+            self.bytes.memcpy(dst_idx, src_img.bytes, src_idx, width * 4);
         }
     }
 }
@@ -231,10 +261,6 @@ fun render_tile(scene, camera, xmin, ymin, xmax, ymax) {
     return tile_img;
 }
 
-
-
-
-
 class RenderRequest
 {
     init(self, scene, camera, xmin, ymin, xmax, ymax, x, y)
@@ -287,7 +313,6 @@ fun actor_loop()
 // Main rendering function
 fun render()
 {
-    let tile_size = 25;
     let num_actors = 64;
 
     // Create the actors
@@ -307,10 +332,10 @@ fun render()
 
     // Create a list of tile requests to render
     let requests = [];
-    for (let var y = 0; y < height; y = y + tile_size) {
-        for (let var x = 0; x < width; x = x + tile_size) {
-            let xmax = min(x + tile_size, width);
-            let ymax = min(y + tile_size, height);
+    for (let var y = 0; y < height; y = y + TILE_SIZE) {
+        for (let var x = 0; x < width; x = x + TILE_SIZE) {
+            let xmax = min(x + TILE_SIZE, width);
+            let ymax = min(y + TILE_SIZE, height);
             requests.push(RenderRequest(scene, camera, x, y, xmax, ymax, x, y));
         }
     }
