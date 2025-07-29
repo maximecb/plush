@@ -363,6 +363,7 @@ impl PartialEq for Value
             (Closure(a), Closure(b))    => a == b,
             (Object(a), Object(b))      => a == b,
             (Array(a), Array(b))        => a == b,
+            (ByteArray(a), ByteArray(b))        => a == b,
             _ => panic!("not yet implemented eq {:?} == {:?}", self, other),
         }
     }

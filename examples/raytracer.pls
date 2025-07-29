@@ -231,12 +231,73 @@ fun render_tile(scene, camera, xmin, ymin, xmax, ymax) {
     return tile_img;
 }
 
+
+
+
+
+class RenderRequest
+{
+    init(self, scene, camera, xmin, ymin, xmax, ymax, x, y)
+    {
+        self.scene = scene;
+        self.camera = camera;
+        self.xmin = xmin;
+        self.ymin = ymin;
+        self.xmax = xmax;
+        self.ymax = ymax;
+        self.x = x;
+        self.y = y;
+    }
+}
+
+class RenderResult
+{
+    init(self, tile_img, x, y)
+    {
+        self.tile_img = tile_img;
+        self.x = x;
+        self.y = y;
+    }
+}
+
+fun actor_loop()
+{
+    while (true)
+    {
+        let msg = $actor_recv();
+
+        // Done rendering
+        if (msg == nil)
+            return;
+
+        let tile_img = render_tile(
+            msg.scene,
+            msg.camera,
+            msg.xmin,
+            msg.ymin,
+            msg.xmax,
+            msg.ymax
+        );
+
+        let result = RenderResult(tile_img, msg.x, msg.y);
+        $actor_send(0, result);
+    }
+}
+
 // Main rendering function
 fun render()
 {
+    let tile_size = 25;
+    let num_actors = 8;
+
+    // Create the actors
+    let actor_ids = [];
+    for (let var i = 0; i < num_actors; ++i)
+        actor_ids.push($actor_spawn(actor_loop));
+
     // Image settings
-    let width = 256;
-    let height = 256;
+    let width = 300;
+    let height = 300;
 
     // Camera setup
     let camera = Camera(width, height);
@@ -244,24 +305,46 @@ fun render()
     // Scene setup
     let scene = Scene();
 
-    let image = Image(width, height);
-    let tile_size = 16;
-
-    // Render the image in tiles
+    // Create a list of tile requests to render
+    let requests = [];
     for (let var y = 0; y < height; y = y + tile_size) {
         for (let var x = 0; x < width; x = x + tile_size) {
             let xmax = min(x + tile_size, width);
             let ymax = min(y + tile_size, height);
-            let tile_img = render_tile(scene, camera, x, y, xmax, ymax);
-            image.blit(tile_img, x, y);
+            requests.push(RenderRequest(scene, camera, x, y, xmax, ymax, x, y));
         }
+    }
+
+    // Send all requests to the actors, round-robin
+    for (let var i = 0; i < requests.len; ++i)
+    {
+        $actor_send(actor_ids[i % num_actors], requests[i]);
+    }
+
+    // Image to render into
+    let image = Image(width, height);
+
+    // Receive all the render results
+    for (let var i = 0; i < requests.len; ++i)
+    {
+        let msg = $actor_recv();
+        image.blit(msg.tile_img, msg.x, msg.y);
+    }
+
+    // Tell actors to terminate
+    for (let var i = 0; i < num_actors; ++i)
+    {
+        $actor_send(actor_ids[i], nil);
     }
 
     return image;
 }
 
 // Run the renderer
+let start_time = $time_current_ms();
 let image = render();
+let render_time = $time_current_ms() - start_time;
+$println("Render time: " + render_time.to_s() + "ms");
 
 let window = $window_create(image.width, image.height, "Render", 0);
 $window_draw_frame(window, image.bytes);
