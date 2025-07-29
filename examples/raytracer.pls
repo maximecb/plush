@@ -41,7 +41,7 @@ class Image
             let src_idx = j * src_pitch;
             let dst_idx = dst_j * dst_pitch + dst_x * 4;
 
-            self.bytes.copy_from(src_img.bytes, src_idx, dst_idx, src_pitch);
+            self.bytes.memcpy(dst_idx, src_img.bytes, src_idx, src_pitch);
         }
     }
 }

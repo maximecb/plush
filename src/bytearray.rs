@@ -26,50 +26,50 @@ impl ByteArray
         self.bytes[idx] = val;
     }
 
-    pub unsafe fn get_slice<T>(&self, pos: usize, num_elems: usize) -> &'static [T]
+    pub unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
     {
-        assert!(pos + num_elems * size_of::<T>() <= self.bytes.len());
+        assert!(idx + num_elems * size_of::<T>() <= self.bytes.len());
         let buf_ptr = self.bytes.as_ptr();
-        let elem_ptr = transmute::<*const u8 , *mut T>(buf_ptr.add(pos));
+        let elem_ptr = transmute::<*const u8 , *mut T>(buf_ptr.add(idx));
         std::slice::from_raw_parts(elem_ptr, num_elems as usize)
     }
 
-    pub unsafe fn get_slice_mut<T>(&mut self, pos: usize, num_elems: usize) -> &'static mut [T]
+    pub unsafe fn get_slice_mut<T>(&mut self, idx: usize, num_elems: usize) -> &'static mut [T]
     {
-        assert!(pos + num_elems * size_of::<T>() <= self.bytes.len());
+        assert!(idx + num_elems * size_of::<T>() <= self.bytes.len());
         let buf_ptr = self.bytes.as_mut_ptr();
-        let elem_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(pos));
+        let elem_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(idx));
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
 
     /// Write a value at the given address
-    pub fn write<T>(&mut self, pos: usize, val: T) where T: Copy
+    pub fn write<T>(&mut self, idx: usize, val: T) where T: Copy
     {
-        assert!(pos + size_of::<T>() <= self.bytes.len());
+        assert!(idx + size_of::<T>() <= self.bytes.len());
 
         unsafe {
             let buf_ptr = self.bytes.as_mut_ptr();
-            let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(pos));
+            let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(idx));
             std::ptr::write_unaligned(val_ptr, val);
         }
     }
 
     /// Fill an interval with a given value
-    pub fn fill<T>(&mut self, pos: usize, num: usize, val: T) where T: Copy + 'static
+    pub fn fill<T>(&mut self, idx: usize, num: usize, val: T) where T: Copy + 'static
     {
         unsafe {
-            let slice = self.get_slice_mut(pos, num);
+            let slice = self.get_slice_mut(idx, num);
             slice.fill(val);
         }
     }
 
     /// Copy bytes from another bytearray
-    pub fn copy_from(&mut self, src: &ByteArray, src_pos: usize, dst_pos: usize, num_bytes: usize)
+    pub fn memcpy(&mut self, dst_idx: usize, src: &ByteArray, src_idx: usize, num_bytes: usize)
     {
         // TODO: make sure the slices don't overlap
 
-        let src_slice = unsafe { src.get_slice::<u8>(src_pos, num_bytes) };
-        let dst_slice = unsafe {  self.get_slice_mut::<u8>(dst_pos, num_bytes) };
+        let src_slice = unsafe { src.get_slice::<u8>(src_idx, num_bytes) };
+        let dst_slice = unsafe {  self.get_slice_mut::<u8>(dst_idx, num_bytes) };
         dst_slice.copy_from_slice(src_slice);
     }
 }
@@ -119,7 +119,7 @@ pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val
     ba.fill(idx, num, val);
 }
 
-pub fn ba_copy_from(actor: &mut Actor, mut dst: Value, src: Value, src_pos: Value, dst_pos: Value, num_bytes: Value)
+pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value)
 {
     let dst = dst.unwrap_ba();
 
@@ -128,8 +128,8 @@ pub fn ba_copy_from(actor: &mut Actor, mut dst: Value, src: Value, src_pos: Valu
         _ => panic!()
     };
 
-    let src_pos = src_pos.unwrap_usize();
-    let dst_pos = dst_pos.unwrap_usize();
+    let src_idx = src_idx.unwrap_usize();
+    let dst_idx = dst_idx.unwrap_usize();
     let num_bytes = num_bytes.unwrap_usize();
-    dst.copy_from(src, src_pos, dst_pos, num_bytes);
+    dst.memcpy(dst_idx, src, src_idx, num_bytes);
 }

@@ -7,8 +7,7 @@ let start_time = $time_current_ms();
 
 for (let var i = 0; i < num_frames; ++i)
 {
-    //$println(i.to_s());
-    dst.copy_from(src, 0, 0, dst.len);
+    dst.memcpy(0, src, 0, dst.len);
 }
 
 let end_time = $time_current_ms();
