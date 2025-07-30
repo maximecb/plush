@@ -311,7 +311,7 @@ fun actor_loop()
         );
 
         let result = RenderResult(tile_img, msg.x, msg.y);
-        $actor_send(0, result);
+        $actor_send($actor_parent(), result);
     }
 }
 

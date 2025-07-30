@@ -429,7 +429,7 @@ pub struct Actor
     pub actor_id: u64,
 
     // Parent actor id
-    pub parent_id: u64,
+    pub parent_id: Option<u64>,
 
     // Parent VM
     pub vm: Arc<Mutex<VM>>,
@@ -469,7 +469,7 @@ impl Actor
 {
     pub fn new(
         actor_id: u64,
-        parent_id: u64,
+        parent_id: Option<u64>,
         vm: Arc<Mutex<VM>>,
         msg_alloc: Arc<Mutex<Alloc>>,
         queue_rx: mpsc::Receiver<Message>,
@@ -1566,7 +1566,7 @@ impl VM
         let handle = thread::spawn(move || {
             let mut actor = Actor::new(
                 actor_id,
-                parent_id,
+                Some(parent_id),
                 vm_mutex,
                 msg_alloc,
                 queue_rx,
@@ -1631,7 +1631,7 @@ impl VM
 
         let mut actor = Actor::new(
             actor_id,
-            u64::MAX,
+            None,
             vm_mutex,
             msg_alloc,
             queue_rx,
@@ -1862,6 +1862,7 @@ mod tests
     fn host_call()
     {
         eval_eq("return $actor_id();", Value::Int64(0));
+        eval_eq("return $actor_parent();", Value::Nil);
         eval("return $print('hi');");
         eval("return $time_current_ms();");
     }

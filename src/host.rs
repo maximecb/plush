@@ -149,7 +149,10 @@ fn actor_id(actor: &mut Actor) -> Value
 // Get the id of the parent actor
 fn actor_parent(actor: &mut Actor) -> Value
 {
-    Value::from(actor.parent_id)
+    match actor.parent_id {
+        Some(actor_id) => Value::from(actor_id),
+        None => Value::Nil,
+    }
 }
 
 // Make the current actor sleep
