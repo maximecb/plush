@@ -22,10 +22,7 @@ mod exec_tests;
 
 extern crate sdl2;
 use std::env;
-use std::thread::sleep;
-use std::time::Duration;
 use std::process::exit;
-use std::sync::{Arc, Mutex};
 use crate::vm::{VM, Value};
 use crate::utils::{thousands_sep};
 use crate::parser::{parse_file};
