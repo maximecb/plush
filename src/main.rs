@@ -90,28 +90,37 @@ fn main()
     let file_name = &opts.rest[0];
 
     let mut prog = match parse_file(file_name) {
-        Ok(prog) => prog,
         Err(err) => {
             println!("Error while parsing source file:\n{}", err);
             exit(-1);
         }
+        Ok(prog) => prog,
     };
 
-    prog.resolve_syms().unwrap();
+    match prog.resolve_syms() {
+        Err(err) => {
+            println!("Error while resolving symbols:\n{}", err);
+            exit(-1);
+        }
+        Ok(_) => {}
+    }
+
+    if opts.no_exec {
+        return;
+    }
+
     let main_fn = prog.main_fn;
     let mut vm = VM::new(prog);
+    let ret = VM::call(&mut vm, main_fn, vec![]);
 
-    if !opts.no_exec {
-        let ret = VM::call(&mut vm, main_fn, vec![]);
+    // This is the value returned by the main unit
+    match ret {
+        Value::Nil => exit(0),
 
-        match ret {
-            Value::Nil => exit(0),
-
-            Value::Int64(v) => {
-                exit(v as i32);
-            }
-
-            _ => panic!("main unit should return an integer value")
+        Value::Int64(v) => {
+            exit(v as i32);
         }
+
+        _ => panic!("main unit should return an integer value")
     }
 }

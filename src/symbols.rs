@@ -368,7 +368,7 @@ impl ExprBox
                 else
                 {
                     return ParseError::with_pos(
-                        &format!("reference to undeclared identifier \"{}\"", name),
+                        &format!("reference to unknown identifier \"{}\"", name),
                         &self.pos
                     );
                 }
