@@ -347,14 +347,16 @@ fun render()
     }
     let num_tiles = requests.len;
 
+    // Image to render into
+    let image = Image(width, height);
+
+    let start_time = $time_current_ms();
+
     // Send one requests to each actor, round-robin
     for (let var i = 0; i < num_actors; ++i)
     {
         $actor_send(actor_ids[i % num_actors], requests.pop());
     }
-
-    // Image to render into
-    let image = Image(width, height);
 
     // Receive all the render results
     for (let var num_received = 0; num_received < num_tiles; ++num_received)
@@ -369,6 +371,9 @@ fun render()
 
         image.blit(msg.tile_img, msg.x, msg.y);
     }
+
+    let render_time = $time_current_ms() - start_time;
+    $println("Render time: " + render_time.to_s() + "ms");
 
     // Tell actors to terminate
     for (let var i = 0; i < num_actors; ++i)
@@ -396,13 +401,8 @@ fun render_no_tile()
 }
 
 // Run the renderer
-let start_time = $time_current_ms();
-
 //let image = render_no_tile();
 let image = render();
-
-let render_time = $time_current_ms() - start_time;
-$println("Render time: " + render_time.to_s() + "ms");
 
 let window = $window_create(image.width, image.height, "Render", 0);
 $window_draw_frame(window, image.bytes);
