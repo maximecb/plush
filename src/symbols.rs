@@ -75,6 +75,14 @@ impl Env
         self.scopes.pop();
     }
 
+    /// Check if we already have a definition for a local with a given name
+    fn has_local(&self, name: &str) -> bool
+    {
+        let num_scopes = self.scopes.len();
+        let top_scope = &self.scopes[num_scopes - 1];
+        return top_scope.decls.get(name).is_some();
+    }
+
     /// Define a new local variable in the current scope
     fn define_local(&mut self, name: &str, mutable: bool, fun: &mut Function) -> Decl
     {
@@ -235,6 +243,7 @@ impl StmtBox
                 env.push_scope();
 
                 // Pre-declare functions before symbols are resolved
+                // This allows referencing functiond before their definition occurs
                 for stmt in stmts.iter_mut() {
                     if let Stmt::Let { mutable, var_name, init_expr, ref mut decl } = stmt.stmt.as_mut() {
                         if let Expr::Fun { fun_id, .. } = init_expr.expr.as_ref() {
@@ -260,8 +269,8 @@ impl StmtBox
                 test_expr.resolve_syms(prog, fun, env)?;
                 then_stmt.resolve_syms(prog, fun, env)?;
 
-                if else_stmt.is_some() {
-                    else_stmt.as_mut().unwrap().resolve_syms(prog, fun, env)?;
+                if let Some(else_stmt) = else_stmt.as_mut() {
+                    else_stmt.resolve_syms(prog, fun, env)?;
                 }
             }
 
@@ -286,6 +295,13 @@ impl StmtBox
                 match init_expr.expr.as_ref() {
                     Expr::Fun { .. } => {}
                     _ => {
+                        if env.has_local(var_name) {
+                            return ParseError::with_pos(
+                                &format!("local with name \"{}\" already exists", var_name),
+                                &self.pos
+                            );
+                        }
+
                         let new_decl = env.define_local(var_name, *mutable, fun);
                         *decl = Some(new_decl)
                     }
