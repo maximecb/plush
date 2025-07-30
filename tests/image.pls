@@ -51,28 +51,3 @@ img.set_pixel(100, 50, COLOR_BLUE);
 
 img.fill_rect(100, 100, 200, 100, COLOR_BLUE);
 img.fill_rect(150, 150, 250, 200, COLOR_RED);
-
-/*
-let window = $window_create(800, 600, "Test window", 0);
-$window_draw_frame(window, img.bytes);
-
-while (true)
-{
-    let msg = $actor_recv();
-
-    if (!(msg instanceof UIMessage))
-    {
-        continue;
-    }
-
-    if (msg.event == 'CLOSE_WINDOW')
-    {
-        break;
-    }
-
-    if (msg.event == 'KEY_DOWN' && msg.key == 'ESCAPE')
-    {
-        break;
-    }
-}
-*/

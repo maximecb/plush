@@ -14,7 +14,7 @@ use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 use crate::vm::{VM, Value, Actor};
 use crate::bytearray::ByteArray;
-use crate::ast::UIMESSAGE_ID;
+use crate::ast::UIEVENT_ID;
 
 // Global SDL state
 struct SdlState {
@@ -217,20 +217,11 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 
     match event.clone() {
         Event::Quit { .. } => {
-            let msg = actor.alloc_obj(UIMESSAGE_ID);
+            let msg = actor.alloc_obj(UIEVENT_ID);
 
-            actor.set_field(
-                msg,
-                "window_id",
-                Value::from(0),
-            );
-
+            actor.set_field(msg, "window_id", Value::from(0));
             let event_type = actor.intern_str("CLOSE_WINDOW");
-            actor.set_field(
-                msg,
-                "event",
-                event_type,
-            );
+            actor.set_field(msg, "kind", event_type);
 
             Some(msg)
         }
@@ -242,7 +233,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
                 return None;
             }
 
-            let msg = actor.alloc_obj(UIMESSAGE_ID);
+            let msg = actor.alloc_obj(UIEVENT_ID);
 
             actor.set_field(msg, "window_id", Value::from(0));
 
@@ -251,7 +242,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             } else {
                 actor.intern_str("KEY_UP")
             };
-            actor.set_field(msg, "event", event_type);
+            actor.set_field(msg, "kind", event_type);
 
             let key_name = actor.intern_str(key_name.unwrap());
             actor.set_field(msg, "key", key_name);

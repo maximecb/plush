@@ -411,12 +411,12 @@ loop
 {
     let msg = $actor_recv();
 
-    if (!(msg instanceof UIMessage))
+    if (!(msg instanceof UIEvent))
         continue;
 
-    if (msg.event == 'CLOSE_WINDOW')
+    if (msg.kind == 'CLOSE_WINDOW')
         break;
 
-    if (msg.event == 'KEY_DOWN' && msg.key == 'ESCAPE')
+    if (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')
         break;
 }
