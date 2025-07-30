@@ -410,7 +410,7 @@ $println("Render time: " + render_time.to_s() + "ms");
 let window = $window_create(image.width, image.height, "Render", 0);
 $window_draw_frame(window, image.bytes);
 
-while (true)
+loop
 {
     let msg = $actor_recv();
 

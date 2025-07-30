@@ -745,6 +745,23 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
         }
     }
 
+    // Infinite loop
+    if input.match_keyword("loop")? {
+
+        // Parse the loop body
+        let body_stmt = parse_stmt(input, prog)?;
+
+        return StmtBox::new_ok(
+            Stmt::For {
+                init_stmt: StmtBox::default(),
+                test_expr: ExprBox::new(Expr::True, pos),
+                incr_expr: ExprBox::default(),
+                body_stmt,
+            },
+            pos
+        );
+    }
+
     // While loop
     if input.match_keyword("while")? {
         // Parse the test expression
@@ -1328,6 +1345,12 @@ mod tests
         parse_ok("if (1) {} else {}");
         parse_ok("if (1) { foo(); }");
         parse_ok("if (1) { foo(); } else { bar(); }");
+    }
+
+    #[test]
+    fn loop_stmt()
+    {
+        parse_ok("loop { break; }");
     }
 
     #[test]
