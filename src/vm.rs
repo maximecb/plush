@@ -428,6 +428,9 @@ pub struct Actor
     // Actor id
     pub actor_id: u64,
 
+    // Parent actor id
+    pub parent_id: u64,
+
     // Parent VM
     pub vm: Arc<Mutex<VM>>,
 
@@ -466,6 +469,7 @@ impl Actor
 {
     pub fn new(
         actor_id: u64,
+        parent_id: u64,
         vm: Arc<Mutex<VM>>,
         msg_alloc: Arc<Mutex<Alloc>>,
         queue_rx: mpsc::Receiver<Message>,
@@ -474,6 +478,7 @@ impl Actor
     {
         Self {
             actor_id,
+            parent_id,
             vm,
             alloc: Alloc::new(),
             msg_alloc,
@@ -1522,6 +1527,7 @@ impl VM
         // Assign an actor id
         let mut vm_ref = parent.vm.lock().unwrap();
         let actor_id = vm_ref.next_actor_id;
+        let parent_id = parent.actor_id;
         vm_ref.next_actor_id += 1;
         drop(vm_ref);
 
@@ -1560,6 +1566,7 @@ impl VM
         let handle = thread::spawn(move || {
             let mut actor = Actor::new(
                 actor_id,
+                parent_id,
                 vm_mutex,
                 msg_alloc,
                 queue_rx,
@@ -1624,6 +1631,7 @@ impl VM
 
         let mut actor = Actor::new(
             actor_id,
+            u64::MAX,
             vm_mutex,
             msg_alloc,
             queue_rx,

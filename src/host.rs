@@ -86,6 +86,7 @@ pub fn get_host_const(name: &str) -> Expr
         "println" => Expr::HostFn(Fn1_0(println)),
 
         "actor_id" => Expr::HostFn(Fn0_1(actor_id)),
+        "actor_parent" => Expr::HostFn(Fn0_1(actor_parent)),
         "actor_sleep" => Expr::HostFn(Fn1_0(actor_sleep)),
         "actor_spawn" => Expr::HostFn(Fn1_1(actor_spawn)),
         "actor_join" => Expr::HostFn(Fn1_1(actor_join)),
@@ -143,6 +144,12 @@ fn println(actor: &mut Actor, v: Value)
 fn actor_id(actor: &mut Actor) -> Value
 {
     Value::from(actor.actor_id)
+}
+
+// Get the id of the parent actor
+fn actor_parent(actor: &mut Actor) -> Value
+{
+    Value::from(actor.parent_id)
 }
 
 // Make the current actor sleep
