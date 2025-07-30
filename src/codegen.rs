@@ -61,8 +61,19 @@ impl Function
             code.push(Insn::push { val: Value::Nil });
         }
 
+        //let start_idx = code.len();
+
         // Compile the function body
         self.body.gen_code(self, &mut vec![], &mut vec![], code, alloc)?;
+
+        /*
+        let end_idx = code.len();
+        println!("# {}", self.name);
+        for i in start_idx..end_idx {
+            println!("{:?}", code[i]);
+        }
+        println!();
+        */
 
         // If the body needs a final return
         if self.needs_final_return() {
