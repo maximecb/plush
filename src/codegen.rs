@@ -56,11 +56,6 @@ impl Function
         // Entry address of the compiled function
         let entry_pc = code.len();
 
-        // Allocate stack slots for the local variables
-        for i in 0..self.num_locals {
-            code.push(Insn::push { val: Value::Nil });
-        }
-
         //let start_idx = code.len();
 
         // Compile the function body

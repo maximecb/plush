@@ -815,6 +815,9 @@ impl Actor
         // The base pointer will point at the first local
         let mut bp = self.stack.len();
 
+        // Allocate stack slots for the local variables
+        self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::Nil);
+
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }
         }
@@ -861,6 +864,9 @@ impl Actor
                 // The base pointer will point at the first local
                 bp = self.stack.len();
                 pc = fun_entry.entry_pc;
+
+                // Allocate stack slots for the local variables
+                self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::Nil);
             }
         }
 
