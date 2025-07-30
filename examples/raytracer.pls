@@ -1,4 +1,4 @@
-let TILE_SIZE = 25;
+let TILE_SIZE = 30;
 
 // Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
 fun rgb32(r, g, b)
@@ -283,11 +283,12 @@ class RenderRequest
 
 class RenderResult
 {
-    init(self, tile_img, x, y)
+    init(self, tile_img, x, y, actor_id)
     {
         self.tile_img = tile_img;
         self.x = x;
         self.y = y;
+        self.actor_id = actor_id;
     }
 }
 
@@ -310,7 +311,7 @@ fun actor_loop()
             msg.ymax
         );
 
-        let result = RenderResult(tile_img, msg.x, msg.y);
+        let result = RenderResult(tile_img, msg.x, msg.y, $actor_id());
         $actor_send($actor_parent(), result);
     }
 }
@@ -318,7 +319,7 @@ fun actor_loop()
 // Multi-actor, parallel rendering
 fun render()
 {
-    let num_actors = 64;
+    let num_actors = 32;
 
     // Create the actors
     let actor_ids = [];
@@ -345,11 +346,14 @@ fun render()
         }
     }
 
-    // Send all requests to the actors, round-robin
-    for (let var i = 0; i < requests.len; ++i)
+    // Send one requests to each actor, round-robin
+    for (let var i = 0; i < num_actors; ++i)
     {
         $actor_send(actor_ids[i % num_actors], requests[i]);
     }
+
+    // Next request to send
+    let var next_req = num_actors;
 
     // Image to render into
     let image = Image(width, height);
@@ -358,6 +362,14 @@ fun render()
     for (let var i = 0; i < requests.len; ++i)
     {
         let msg = $actor_recv();
+
+        // Send more work to this actor, since it is no longer busy
+        if (next_req < requests.len)
+        {
+            $actor_send(msg.actor_id, requests[next_req]);
+            ++next_req;
+        }
+
         image.blit(msg.tile_img, msg.x, msg.y);
     }
 
