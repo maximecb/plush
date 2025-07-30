@@ -22,6 +22,11 @@ impl Array
         self.elems.push(val);
     }
 
+    pub fn pop(&mut self) -> Value
+    {
+        self.elems.pop().unwrap()
+    }
+
     pub fn get(&self, idx: usize) -> Value
     {
         self.elems[idx]
@@ -36,4 +41,9 @@ impl Array
 pub fn array_push(actor: &mut Actor, mut array: Value, val: Value)
 {
     array.unwrap_arr().push(val);
+}
+
+pub fn array_pop(actor: &mut Actor, mut array: Value) -> Value
+{
+    array.unwrap_arr().pop()
 }

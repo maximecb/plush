@@ -80,6 +80,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "floor") => HostFn::Fn1_1(float64_floor),
 
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),
+        (Value::Array(_), "pop") => HostFn::Fn1_1(array_pop),
 
         (Value::Class(BYTEARRAY_ID), "new") => HostFn::Fn1_1(ba_new),
         (Value::Class(BYTEARRAY_ID), "with_size") => HostFn::Fn2_1(ba_with_size),

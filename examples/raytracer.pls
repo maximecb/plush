@@ -345,29 +345,26 @@ fun render()
             requests.push(RenderRequest(scene, camera, x, y, xmax, ymax, x, y));
         }
     }
+    let num_tiles = requests.len;
 
     // Send one requests to each actor, round-robin
     for (let var i = 0; i < num_actors; ++i)
     {
-        $actor_send(actor_ids[i % num_actors], requests[i]);
+        $actor_send(actor_ids[i % num_actors], requests.pop());
     }
-
-    // Next request to send
-    let var next_req = num_actors;
 
     // Image to render into
     let image = Image(width, height);
 
     // Receive all the render results
-    for (let var i = 0; i < requests.len; ++i)
+    for (let var num_received = 0; num_received < num_tiles; ++num_received)
     {
         let msg = $actor_recv();
 
         // Send more work to this actor, since it is no longer busy
-        if (next_req < requests.len)
+        if (requests.len > 0)
         {
-            $actor_send(msg.actor_id, requests[next_req]);
-            ++next_req;
+            $actor_send(msg.actor_id, requests.pop());
         }
 
         image.blit(msg.tile_img, msg.x, msg.y);

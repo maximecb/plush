@@ -396,6 +396,15 @@ impl From<i32> for Value {
     }
 }
 
+impl From<bool> for Value {
+    fn from(val: bool) -> Self {
+        match val {
+            true => Value::True,
+            false => Value::False,
+        }
+    }
+}
+
 /// Mesage to be sent to an actor
 pub struct Message
 {
