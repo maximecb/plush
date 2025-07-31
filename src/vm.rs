@@ -530,6 +530,32 @@ impl Actor
         }
     }
 
+    /// Try to receive a message from the message queue
+    /// This function will not block if no message is available
+    pub fn try_recv(&mut self) -> Option<Value>
+    {
+        use crate::window::poll_ui_msg;
+
+        if self.actor_id != 0 {
+            return match self.queue_rx.try_recv() {
+                Ok(msg) => Some(msg.msg),
+                _ => None,
+            }
+        }
+
+        // Actor 0 (the main actor) needs to poll for UI events
+        let ui_msg = poll_ui_msg(self);
+        if let Some(msg) = ui_msg {
+            return Some(msg);
+        }
+
+        // Block on the message queue for up to 8ms
+        match self.queue_rx.try_recv() {
+            Ok(msg) => Some(msg.msg),
+            _ => None,
+        }
+    }
+
     /// Send a message to another actor
     pub fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
     {

@@ -456,18 +456,32 @@ impl ExprBox
             Expr::Call { callee, args, .. } => {
                 callee.resolve_syms(prog, fun, env)?;
 
-                // If the callee is a host function, check the arity
-                if let Expr::HostFn(host_fn) = callee.expr.as_ref() {
-                    if host_fn.num_params() != args.len() {
-                        return ParseError::with_pos(
-                            &format!(
-                                "incorrect argument count for host function, expected {}, got {}",
-                                host_fn.num_params(),
-                                args.len()
-                            ),
-                            &callee.pos
-                        );
+                match callee.expr.as_ref() {
+                    // New class instance
+                    Expr::Ref(Decl::Class { id }) => {
+                        if prog.classes.get(id).is_none() {
+                            return ParseError::with_pos(
+                                "cannot instantiate class because it does not have a constructor function",
+                                &callee.pos
+                            );
+                        }
                     }
+
+                    // If the callee is a host function, check the arity
+                    Expr::HostFn(host_fn) => {
+                        if host_fn.num_params() != args.len() {
+                            return ParseError::with_pos(
+                                &format!(
+                                    "incorrect argument count for host function, expected {}, got {}",
+                                    host_fn.num_params(),
+                                    args.len()
+                                ),
+                                &callee.pos
+                            );
+                        }
+                    }
+
+                    _ => {}
                 }
 
                 for arg in args.iter_mut() {
@@ -592,6 +606,12 @@ mod tests
     fn calls()
     {
         succeeds("fun foo() {} fun main() { foo(); }");
+    }
+
+    #[test]
+    fn no_ctor()
+    {
+        fails("Array();");
     }
 
     /*
