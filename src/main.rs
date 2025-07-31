@@ -34,6 +34,10 @@ struct Options
     // Parse/validate/compile the input, but don't execute it
     no_exec: bool,
 
+    // String of code to be evaluated
+    eval_str: Option<String>,
+
+    // Unnamed rest arguments
     rest: Vec<String>,
 }
 
@@ -45,6 +49,7 @@ fn parse_args(args: Vec<String>) -> Options
 {
     let mut opts = Options {
         no_exec: false,
+        eval_str: None,
         rest: Vec::default(),
     };
 
@@ -65,10 +70,27 @@ fn parse_args(args: Vec<String>) -> Options
         // Move to the next argument
         idx += 1;
 
+        macro_rules! read_arg {
+            ($name: expr) => {{
+                if idx >= args.len() {
+                    println!("Missing argument for {} command-line option", $name);
+                    exit(-1);
+                }
+
+                let arg = args[idx].clone();
+                idx += 1;
+                arg
+            }}
+        }
+
         // Try to match this argument as an option
         match arg.as_str() {
             "--no-exec" => {
                 opts.no_exec = true;
+            }
+
+            "--eval" | "-e" => {
+                opts.eval_str = Some(read_arg!(arg));
             }
 
             _ => panic!("unknown option {}", arg)
@@ -83,12 +105,21 @@ fn main()
     let opts = parse_args(env::args().collect());
     //println!("{:?}", opts);
 
+
+    if let Some(eval_str) = opts.eval_str {
+        // TODO
+        todo!()
+    }
+
+
+
+
     if opts.rest.len() != 1 {
-        panic!("must specify exactly one input file to run");
+        println!("Error: must specify exactly one input file to run");
+        exit(-1);
     }
 
     let file_name = &opts.rest[0];
-
     let mut prog = match parse_file(file_name) {
         Err(err) => {
             println!("Error while parsing source file:\n{}", err);
@@ -96,6 +127,13 @@ fn main()
         }
         Ok(prog) => prog,
     };
+
+
+
+
+
+
+
 
     match prog.resolve_syms() {
         Err(err) => {
