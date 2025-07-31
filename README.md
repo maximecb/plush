@@ -108,7 +108,7 @@ cargo test
 
 To run a plush script:
 ```sh
-# See example programs under /examples and /benchmarks
+# See example programs under /examples, /benchmarks and /tests
 cargo run examples/helloworld.pls
 cargo run examples/plasma.pls
 ```
