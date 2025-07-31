@@ -38,6 +38,15 @@ impl Array
     }
 }
 
+pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_val: Value) -> Value
+{
+    let num_elems = num_elems.unwrap_usize();
+    let mut elems = Vec::with_capacity(num_elems);
+    elems.resize(num_elems, fill_val);
+    let arr = Array { elems };
+    Value::Array(actor.alloc.alloc(arr))
+}
+
 pub fn array_push(actor: &mut Actor, mut array: Value, val: Value)
 {
     array.unwrap_arr().push(val);

@@ -2012,6 +2012,7 @@ mod tests
         eval_eq("let a = [11, 22, 33]; a[2] = 44; return a[2];", Value::Int64(44));
         eval_eq("let a = [11, 22, 33]; return a.len;", Value::Int64(3));
         eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::Int64(4));
+        eval_eq("let a = Array.with_size(5, nil); return a.len;", Value::Int64(5));
     }
 
     #[test]

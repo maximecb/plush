@@ -79,6 +79,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
         (Value::Float64(_), "floor") => HostFn::Fn1_1(float64_floor),
 
+        (Value::Class(ARRAY_ID), "with_size") => HostFn::Fn3_1(array_with_size),
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),
         (Value::Array(_), "pop") => HostFn::Fn1_1(array_pop),
 
