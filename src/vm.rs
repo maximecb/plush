@@ -1206,6 +1206,9 @@ impl Actor
 
                     let b = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => v0 >= v1,
+                        (Float64(v0), Float64(v1)) => v0 >= v1,
+                        (Float64(v0), Int64(v1)) => v0 >= (v1 as f64),
+                        (Int64(v0), Float64(v1)) => (v0 as f64) >= v1,
                         _ => panic!()
                     };
 

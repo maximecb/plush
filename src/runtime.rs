@@ -21,18 +21,24 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Value
     Value::String(actor.alloc.str_const(s))
 }
 
-fn float64_sqrt(actor: &mut Actor, v: Value) -> Value
-{
-    let v = v.unwrap_f64();
-    Value::Float64(v.sqrt())
-}
-
 fn float64_floor(actor: &mut Actor, v: Value) -> Value
 {
     // TODO: check that value fits in integer range
     let v = v.unwrap_f64();
     let int_val = v.floor() as i64;
     Value::Int64(int_val)
+}
+
+fn float64_sin(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    Value::Float64(v.sin())
+}
+
+fn float64_sqrt(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    Value::Float64(v.sqrt())
 }
 
 pub fn init_runtime(prog: &mut Program)
@@ -76,8 +82,9 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Int64(_), "to_f") => HostFn::Fn1_1(int64_to_f),
 
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
-        (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
         (Value::Float64(_), "floor") => HostFn::Fn1_1(float64_floor),
+        (Value::Float64(_), "sin") => HostFn::Fn1_1(float64_sin),
+        (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
 
         (Value::Class(ARRAY_ID), "with_size") => HostFn::Fn3_1(array_with_size),
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),
