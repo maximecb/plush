@@ -1,22 +1,16 @@
 # Plush
 
-**NOTE: this project is very much a work in progress. You're likely to run
-into bugs and missing features. I'm looking for collaborators who share the vision
-and want to help me make it happen.**
-
 Plush is an experimental toy programming language and virtual machine for fun and teaching purposes.
-It follows a minimalistic design philosphy and draws inspiration from JavaScript, [Lox](https://craftinginterpreters.com/the-lox-language.html), Lua and Python and Rust.
+It follows a minimalistic design philosphy and draws inspiration from JavaScript, [Lox](https://craftinginterpreters.com/the-lox-language.html), Lua and Python and Rust. Please do note that this project is very much a fun side-project and a work in progress. You're likely to run into bugs and missing features.
 
 If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
 
-## Features
-
-Cool/fun/notable features:
+Some cool/fun/notable features:
 - Simple JavaScript/lox inspired syntax and straightforward semantics
 - Simple stack-based bytecode interpreter
 - Memory safe, actor-based parallelism
 - Easily extensible set of host functions
-- Very few dependencies
+- Very few dependencies, good cross-platform support
 - Well-commented codebase
 
 The Plush language supports:
@@ -107,14 +101,17 @@ Copy `SDL2.dll` (unzip) to the root of your cloned repo.
 cargo build
 ```
 
-To run a Plush script:
+To run the test suite:
 ```sh
-cargo run examples/helloworld.pls
+cargo test
 ```
 
-### Running the Test Suite
-
-Simply run `cargo test`.
+To run a plush script:
+```sh
+# See example programs under /examples and /benchmarks
+cargo run examples/helloworld.pls
+cargo run examples/plasma.pls
+```
 
 ## Open Source License
 
