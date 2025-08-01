@@ -25,7 +25,8 @@ use std::env;
 use std::process::exit;
 use crate::vm::{VM, Value};
 use crate::utils::{thousands_sep};
-use crate::parser::{parse_file};
+use crate::ast::Program;
+use crate::parser::{parse_file, parse_str};
 
 /// Command-line options
 #[derive(Debug, Clone)]
@@ -100,19 +101,17 @@ fn parse_args(args: Vec<String>) -> Options
     opts
 }
 
-fn main()
+fn parse_input(opts: &Options) -> Program
 {
-    let opts = parse_args(env::args().collect());
-    //println!("{:?}", opts);
-
-
-    if let Some(eval_str) = opts.eval_str {
-        // TODO
-        todo!()
+    if let Some(eval_str) = &opts.eval_str {
+        match parse_str(&eval_str) {
+            Err(err) => {
+                println!("Error while parsing eval string:\n{}", err);
+                exit(-1);
+            }
+            Ok(prog) => return prog,
+        };
     }
-
-
-
 
     if opts.rest.len() != 1 {
         println!("Error: must specify exactly one input file to run");
@@ -120,20 +119,22 @@ fn main()
     }
 
     let file_name = &opts.rest[0];
-    let mut prog = match parse_file(file_name) {
+
+    match parse_file(file_name) {
         Err(err) => {
             println!("Error while parsing source file:\n{}", err);
             exit(-1);
         }
-        Ok(prog) => prog,
+        Ok(prog) => return prog,
     };
+}
 
+fn main()
+{
+    let opts = parse_args(env::args().collect());
+    //println!("{:?}", opts);
 
-
-
-
-
-
+    let mut prog = parse_input(&opts);
 
     match prog.resolve_syms() {
         Err(err) => {
