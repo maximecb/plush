@@ -16,6 +16,7 @@ Some cool/fun/notable features:
 The Plush language supports:
 - Dynamic typing
 - Classes
+- Closures/lambdas
 - Dynamic arrays aka vectors/lists
 - UTF-8 strings (work in progress)
 - Dictionaries with JS-like syntax (work in progress)
