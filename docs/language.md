@@ -46,7 +46,7 @@ Plush is a dynamically typed language and supports the following data types:
 Plush supports a range of arithmetic, comparison, and logical operators:
 
 -   **Arithmetic**: `+`, `-`, `*`, `/`, `%`
--   **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`
+-   **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`. Note that the `==` operator performs reference equality for objects and arrays, not structural equality.
 -   **Logical**: `&&`, `||`, `!`
 
 ### Control Flow

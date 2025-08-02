@@ -31,26 +31,7 @@ Caveats and limitations:
   - Currently relying on alloc-until-you-crash technology (TM)
 - Imports, support for multiple source files planned but not yet implemented
 
-## The Plush Language
-
-Plush has similar syntax to JS and Lox. Some examples can be found under
-`/examples`, `/tests` and `/benchmarks`. There are some minor syntax differences
-such as using `.len` for the length of arrays instead of `.length`.
-
-Notes about the language:
-- There is no `new` operator, you can instantiate classes with just the class name,
-e.g. `MyClass(1,2,3)`
-- Methods take an explicit `self` argument like Python
-  - You can name this argument however you like
-  - This solves the issue JS has with closures being unable to directly access the outer `this`
-- The `==` operator performs reference equality (not structural equality) comparisons on
-  objects and arrays
-- Array length is accessible as `[1,2,3].len`
-
-There are a set of host functions which are defined in [`src/host.rs`](src/host.rs) which are
-accessible by prefixing the function name with a dollar sign. For example
-`$println()` to print values, and `$time_current_ms()` to get the current
-time in milliseconds.
+For a detailed guide to the Plush language, please see the [Plush Language Quickstart](docs/language.md).
 
 ## Build Instructions
 
