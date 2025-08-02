@@ -97,6 +97,8 @@ pub fn get_host_const(name: &str) -> Expr
         "window_create" => Expr::HostFn(Fn4_1(window_create)),
         "window_draw_frame" => Expr::HostFn(Fn2_0(window_draw_frame)),
 
+        "exit" => Expr::HostFn(Fn1_0(exit)),
+
         _ => panic!("unknown host constant \"{name}\"")
     }
 }
@@ -209,4 +211,11 @@ fn actor_poll(actor: &mut Actor) -> Value
         Some(msg_val) => msg_val,
         None => Value::Nil,
     }
+}
+
+// End program execution
+fn exit(thread: &mut Actor, val: Value)
+{
+    let val = (val.unwrap_i64() & 0xFF) as i32;
+    std::process::exit(val);
 }
