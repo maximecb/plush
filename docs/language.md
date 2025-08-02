@@ -119,6 +119,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$time_current_ms()`: Returns the current time in milliseconds since the Unix epoch.
 -   `$print(value)`: Prints a value to the console.
 -   `$println(value)`: Prints a value to the console, followed by a newline.
+-   `$readln()`: Read one line of input into a string.
 -   `$actor_id()`: Returns the ID of the current actor.
 -   `$actor_parent()`: Returns the ID of the parent actor.
 -   `$actor_sleep(msecs)`: Pauses the current actor for the specified number of milliseconds.

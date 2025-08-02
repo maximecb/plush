@@ -84,6 +84,7 @@ pub fn get_host_const(name: &str) -> Expr
 
         "print" => Expr::HostFn(Fn1_0(print)),
         "println" => Expr::HostFn(Fn1_0(println)),
+        "readln" => Expr::HostFn(Fn0_1(readln)),
 
         "actor_id" => Expr::HostFn(Fn0_1(actor_id)),
         "actor_parent" => Expr::HostFn(Fn0_1(actor_parent)),
@@ -143,13 +144,28 @@ fn println(actor: &mut Actor, v: Value)
     println!();
 }
 
-// Get the id of the current actor
+/// Read one line of input from stdin
+fn readln(actor: &mut Actor) -> Value
+{
+    let mut line = String::new();
+
+    match std::io::stdin().read_line(&mut line) {
+        Ok(_) => {
+            let str_obj = actor.alloc.str_const(line);
+            Value::String(str_obj)
+        }
+
+        Err(_) => Value::Nil
+    }
+}
+
+/// Get the id of the current actor
 fn actor_id(actor: &mut Actor) -> Value
 {
     Value::from(actor.actor_id)
 }
 
-// Get the id of the parent actor
+/// Get the id of the parent actor
 fn actor_parent(actor: &mut Actor) -> Value
 {
     match actor.parent_id {
@@ -158,31 +174,31 @@ fn actor_parent(actor: &mut Actor) -> Value
     }
 }
 
-// Make the current actor sleep
+/// Make the current actor sleep
 fn actor_sleep(actor: &mut Actor, msecs: Value)
 {
     let msecs = msecs.unwrap_u64();
     thread::sleep(Duration::from_millis(msecs));
 }
 
-// Spawn a new actor
-// Takes a function to call as argument
-// Returns an actor id
+/// Spawn a new actor
+/// Takes a function to call as argument
+/// Returns an actor id
 fn actor_spawn(actor: &mut Actor, fun: Value) -> Value
 {
     let actor_id = VM::new_actor(actor, fun, vec![]);
     Value::from(actor_id)
 }
 
-// Wait for a thread to terminate, produce the return value
+/// Wait for a thread to terminate, produce the return value
 fn actor_join(actor: &mut Actor, actor_id: Value) -> Value
 {
     let id = actor_id.unwrap_u64();
     VM::join_actor(&actor.vm, id)
 }
 
-// Send a message to an actor
-// This will return false in case of failure
+/// Send a message to an actor
+/// This will return false in case of failure
 fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Value
 {
     let actor_id = actor_id.unwrap_u64();
@@ -196,15 +212,15 @@ fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Value
     }
 }
 
-// Receive a message from the current actor's queue
-// This will block until a message is available
+/// Receive a message from the current actor's queue
+/// This will block until a message is available
 fn actor_recv(actor: &mut Actor) -> Value
 {
     actor.recv()
 }
 
-// Receive a message from the current actor's queue
-// This will block until a message is available
+/// Receive a message from the current actor's queue
+/// This will block until a message is available
 fn actor_poll(actor: &mut Actor) -> Value
 {
     match actor.try_recv() {
@@ -213,7 +229,7 @@ fn actor_poll(actor: &mut Actor) -> Value
     }
 }
 
-// End program execution
+/// End program execution
 fn exit(thread: &mut Actor, val: Value)
 {
     let val = (val.unwrap_i64() & 0xFF) as i32;
