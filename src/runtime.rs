@@ -1,11 +1,10 @@
 use crate::ast::*;
 use crate::vm::{Value, Actor};
 
-fn int64_to_s(actor: &mut Actor, v: Value) -> Value
+fn int64_abs(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_i64();
-    let s = format!("{}", v);
-    Value::String(actor.alloc.str_const(s))
+    Value::Int64(if v > 0 { v } else { -v })
 }
 
 fn int64_to_f(actor: &mut Actor, v: Value) -> Value
@@ -14,11 +13,17 @@ fn int64_to_f(actor: &mut Actor, v: Value) -> Value
     Value::Float64(v as f64)
 }
 
-fn float64_to_s(actor: &mut Actor, v: Value) -> Value
+fn int64_to_s(actor: &mut Actor, v: Value) -> Value
 {
-    let v = v.unwrap_f64();
+    let v = v.unwrap_i64();
     let s = format!("{}", v);
     Value::String(actor.alloc.str_const(s))
+}
+
+fn float64_abs(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    Value::Float64(if v > 0.0 { v } else { -v })
 }
 
 fn float64_floor(actor: &mut Actor, v: Value) -> Value
@@ -39,6 +44,13 @@ fn float64_sqrt(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_f64();
     Value::Float64(v.sqrt())
+}
+
+fn float64_to_s(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    let s = format!("{}", v);
+    Value::String(actor.alloc.str_const(s))
 }
 
 pub fn init_runtime(prog: &mut Program)
@@ -78,13 +90,14 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     use crate::bytearray::*;
 
     let f = match (val, method_name) {
-        (Value::Int64(_), "to_s") => HostFn::Fn1_1(int64_to_s),
+        (Value::Int64(_), "abs") => HostFn::Fn1_1(int64_abs),
         (Value::Int64(_), "to_f") => HostFn::Fn1_1(int64_to_f),
+        (Value::Int64(_), "to_s") => HostFn::Fn1_1(int64_to_s),
 
-        (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
         (Value::Float64(_), "floor") => HostFn::Fn1_1(float64_floor),
         (Value::Float64(_), "sin") => HostFn::Fn1_1(float64_sin),
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
+        (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
 
         (Value::Class(ARRAY_ID), "with_size") => HostFn::Fn3_1(array_with_size),
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),

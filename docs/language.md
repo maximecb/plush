@@ -133,13 +133,15 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 ### Core Methods
 
 -   **Int64**
-    -   `to_s()`: Converts the integer to a string.
+    -   `abs()`: Get the absolute value of this number.
     -   `to_f()`: Converts the integer to a float.
+    -   `to_s()`: Converts the integer to a string.
 -   **Float64**
-    -   `to_s()`: Converts the float to a string.
+    -   `abs()`: Get the absolute value of this number.
     -   `floor()`: Returns the largest integer less than or equal to the float.
     -   `sin()`: Returns the sine of the float.
     -   `sqrt()`: Returns the square root of the float.
+    -   `to_s()`: Converts the float to a string.
 -   **Array**
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
     -   `push(value)`: Adds a value to the end of the array.
