@@ -147,6 +147,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   **ByteArray**
     -   `with_size(size)`: Creates a new `ByteArray` of the given size.
     -   `write_u32(index, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given index.
+    -   `fill_u32(start_index, count, value)`: Fills a portion of the `ByteArray` with a repeated 32-bit unsigned integer value.
     -   `memcpy(dst_idx, src_bytes, src_idx, len)`: Copies a block of memory from a source `ByteArray` to this one.
 
 ## Concurrency with Actors

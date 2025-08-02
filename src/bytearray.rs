@@ -92,16 +92,6 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Value
     Value::ByteArray(actor.alloc.alloc(ba))
 }
 
-/*
-// Resize byte array
-Insn::ba_resize => {
-    let fill_val = pop!().unwrap_u8();
-    let new_len = pop!().unwrap_u64();
-    let arr = pop!().unwrap_ba();
-    ByteArray::resize(arr, new_len, fill_val, &mut self.alloc);
-}
-*/
-
 pub fn ba_write_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
 {
     let ba = ba.unwrap_ba();
