@@ -14,7 +14,9 @@ To run a Plush script, you can use the `cargo run` command, followed by the path
 cargo run examples/helloworld.pls
 ```
 
-This will execute the `helloworld.pls` script and print "Hello, World!" to the console.
+This will execute the `helloworld.pls` script and print "Hello, World!" to the console. More example programs
+can be found in the [`examples/`](/examples) directory. These examples are available under the
+[CC0 license](https://creativecommons.org/public-domain/cc0/) (public domain).
 
 ## Language Basics
 
@@ -46,8 +48,10 @@ Plush is a dynamically typed language and supports the following data types:
 Plush supports a range of arithmetic, comparison, and logical operators:
 
 -   **Arithmetic**: `+`, `-`, `*`, `/`, `%`
--   **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`. Note that the `==` operator performs reference equality for objects and arrays, not structural equality.
+-   **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`.
 -   **Logical**: `&&`, `||`, `!`
+
+Note that unlike in JavaScript, the `==` operator performs reference equality for objects and arrays, not structural equality.
 
 ### Control Flow
 
@@ -109,6 +113,8 @@ $println(p.to_s()); // (10, 20)
 Plush provides a set of built-in host functions and methods that can be accessed from your code. Host functions are prefixed with a `$` sign.
 
 ### Host Functions
+
+These host functions are defined in [`src/host.rs`](/src/host.rs):
 
 -   `$time_current_ms()`: Returns the current time in milliseconds since the Unix epoch.
 -   `$print(value)`: Prints a value to the console.
