@@ -73,6 +73,9 @@ pub enum Insn
     div,
     modulo,
 
+    // Add an int64 constant
+    add_i64 { val: i64 },
+
     // Bitwise operations
     bit_and,
     bit_or,
@@ -92,10 +95,10 @@ pub enum Insn
     not,
 
     // Type check operations
-    is_nil,
-    is_int64,
-    is_object,
-    is_array,
+    //is_nil,
+    //is_int64,
+    //is_object,
+    //is_array,
 
     // Closure operations
     clos_new { fun_id: FunId, num_slots: u32 },
@@ -1092,6 +1095,19 @@ impl Actor
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 % v1),
                         _ => panic!("modulo with unsupported types")
+                    };
+
+                    push!(r);
+                }
+
+                // Add a constant int64 value
+                Insn::add_i64 { val } => {
+                    let v0 = pop!();
+
+                    let r = match v0 {
+                        Int64(v0) => Int64(v0 + val),
+                        Float64(v0) => Float64(v0 + val as f64),
+                        _ => panic!("unsupported types in add_i64")
                     };
 
                     push!(r);

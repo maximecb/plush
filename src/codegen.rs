@@ -610,6 +610,25 @@ fn gen_bin_op(
         return Ok(());
     }
 
+    // If the rhs is a constant integer value
+    if let Expr::Int64(int_val) = rhs.expr.as_ref() {
+        match op {
+            Add => {
+                lhs.gen_code(fun, code, alloc)?;
+                code.push(Insn::add_i64 { val: *int_val });
+                return Ok(())
+            }
+
+            Sub => {
+                lhs.gen_code(fun, code, alloc)?;
+                code.push(Insn::add_i64 { val: -int_val });
+                return Ok(())
+            }
+
+            _ => {}
+        }
+    }
+
     lhs.gen_code(fun, code, alloc)?;
     rhs.gen_code(fun, code, alloc)?;
 
