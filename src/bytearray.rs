@@ -123,3 +123,9 @@ pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, 
     let num_bytes = num_bytes.unwrap_usize();
     dst.memcpy(dst_idx, src, src_idx, num_bytes);
 }
+
+pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value)
+{
+    let ba = ba.unwrap_ba();
+    ba.bytes.fill(0);
+}

@@ -63,7 +63,7 @@ loop {
     }
 
     // --- Drawing ---
-    frame_buffer.fill_u32(0, WIDTH * HEIGHT, BLACK);
+    frame_buffer.zero_fill();
     draw_circle(frame_buffer, ball_x, ball_y, ball_radius, BLUE);
     $window_draw_frame(window, frame_buffer);
 

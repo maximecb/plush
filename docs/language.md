@@ -30,6 +30,13 @@ let var y = 20;      // Mutable variable
 y = 30;              // Reassigning a mutable variable
 ```
 
+Loop counters, which are mutable, must be declared with `let var`, e.g.
+
+```plush
+for (let var i = 0; i < 10; ++i)
+    $println(i);
+```
+
 ### Data Types
 
 Plush is a dynamically typed language and supports the following data types:
@@ -42,6 +49,8 @@ Plush is a dynamically typed language and supports the following data types:
 -   **Array**: Ordered collections of values (e.g., `[1, 2, 3]`).
 -   **ByteArray**: Raw, mutable byte buffers.
 -   **Object**: Instances of classes.
+
+The length of arrays and ByteArrays is accessed via the `.len` field.
 
 ### Operators
 
@@ -90,7 +99,7 @@ $println(result); // 15
 
 ### Classes
 
-Plush supports object-oriented programming with classes. Classes are defined using the `class` keyword, and instances are created by calling the class name as a function.
+Plush supports object-oriented programming with classes. Classes are defined using the `class` keyword, and instances are created by calling the class name as a function. Note that the first argument to a method, including `init`, is the explicit `self` argument representing the current object. This argument can have any name, which avoids the JavaScript issue with closures shadowing the implicit `this` argument.
 
 ```plush
 class Point {
@@ -150,9 +159,10 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `pop()`: Removes and returns the last value from the array.
 -   **ByteArray**
     -   `with_size(size)`: Creates a new `ByteArray` of the given size.
-    -   `write_u32(index, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given index.
     -   `fill_u32(start_index, count, value)`: Fills a portion of the `ByteArray` with a repeated 32-bit unsigned integer value.
+    -   `write_u32(index, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given index.
     -   `memcpy(dst_idx, src_bytes, src_idx, len)`: Copies a block of memory from a source `ByteArray` to this one.
+    -   `zero_fill()`: Overwrite the contents of the `ByteArray` with zeros.
 
 ## Concurrency with Actors
 
