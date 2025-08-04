@@ -141,7 +141,7 @@ pub enum Insn
     call_direct { fun_id: FunId, argc: u16 },
 
     // Call a known function by directly jumping to its entry point
-    call_offset { entry_idx: u32, argc: u16 },
+    call_pc { entry_pc: u32, fun_id: FunId, num_locals: u16, argc: u16 },
 
     // Call a method on an object
     // call_method (self, arg0, ..., argN)
@@ -864,7 +864,7 @@ impl Actor
 
         /// Set up a new frame for a function call
         macro_rules! call_fun {
-            ($fun: expr, $argc: expr) => {
+            ($fun: expr, $argc: expr) => {{
                 if $argc as usize > self.stack.len() - bp {
                     panic!();
                 }
@@ -899,7 +899,9 @@ impl Actor
 
                 // Allocate stack slots for the local variables
                 self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::Nil);
-            }
+
+                fun_entry
+            }}
         }
 
         loop
@@ -1466,7 +1468,33 @@ impl Actor
 
                 // call_direct (arg0, arg1, ..., argN)
                 Insn::call_direct { fun_id, argc } => {
-                    call_fun!(Value::Fun(fun_id), argc);
+                    let this_pc = pc - 1;
+                    let fun_entry = call_fun!(Value::Fun(fun_id), argc);
+
+                    // Patch the instruction to jump directly to the entry point next time
+                    self.insns[this_pc] = Insn::call_pc {
+                        entry_pc: fun_entry.entry_pc.try_into().unwrap(),
+                        fun_id,
+                        num_locals: fun_entry.num_locals.try_into().unwrap(),
+                        argc
+                    };
+                }
+
+                // call_pc (arg0, arg1, ..., argN)
+                Insn::call_pc { entry_pc, fun_id, num_locals, argc } => {
+                    self.frames.push(StackFrame {
+                        argc,
+                        fun: Value::Fun(fun_id),
+                        prev_bp: bp,
+                        ret_addr: pc,
+                    });
+
+                    // The base pointer will point at the first local
+                    bp = self.stack.len();
+                    pc = entry_pc as usize;
+
+                    // Allocate stack slots for the local variables
+                    self.stack.resize(self.stack.len() + num_locals as usize, Value::Nil);
                 }
 
                 // Call a method with a known name
