@@ -1102,15 +1102,15 @@ impl Actor
 
                 // Add a constant int64 value
                 Insn::add_i64 { val } => {
-                    let v0 = pop!();
-
-                    let r = match v0 {
-                        Int64(v0) => Int64(v0 + val),
-                        Float64(v0) => Float64(v0 + val as f64),
-                        _ => panic!("unsupported types in add_i64")
-                    };
-
-                    push!(r);
+                    if let Some(top_val) = self.stack.last_mut() {
+                        match top_val {
+                            Int64(v0) => *v0 += val,
+                            Float64(v0) => *v0 += val as f64,
+                            _ => panic!("unsupported types in add_i64")
+                        }
+                    } else {
+                        panic!();
+                    }
                 }
 
                 // Integer bitwise or
