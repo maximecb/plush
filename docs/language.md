@@ -99,7 +99,7 @@ $println(result); // 15
 
 ### Classes
 
-Plush supports object-oriented programming with classes. Classes are defined using the `class` keyword, and instances are created by calling the class name as a function. Note that the first argument to a method, including `init`, is the explicit `self` argument representing the current object. This argument can have any name, which avoids the JavaScript issue with closures shadowing the implicit `this` argument.
+Plush supports object-oriented programming with classes. Classes are defined using the `class` keyword, and instances are created by calling the class name as a function. Note that the first argument to a method, including `init`, is the explicit `self` argument representing the current object. This argument can have any name, which avoids the JavaScript issue with closures shadowing an implicit `this` argument.
 
 ```plush
 class Point {
@@ -180,3 +180,11 @@ $actor_join(worker_id);
 ```
 
 This example spawns a new worker actor, sends it a message, and then waits for it to complete. The worker receives the message and prints it to the console.
+
+## Debugging
+
+At the moment there is no debugger and you may find that error messages are lackluster. Unsupported behaviors can
+result in Rust panics, sometimes without helpful messages. PRs to improve this are welcome.
+
+To help in debugging, you can print values with `$println` and you can use the built in `assert` statement to
+validate your assumptions.
