@@ -218,11 +218,9 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
     match event.clone() {
         Event::Quit { .. } => {
             let msg = actor.alloc_obj(UIEVENT_ID);
-
             actor.set_field(msg, "window_id", Value::from(0));
             let event_type = actor.intern_str("CLOSE_WINDOW");
             actor.set_field(msg, "kind", event_type);
-
             Some(msg)
         }
 
@@ -234,7 +232,6 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             }
 
             let msg = actor.alloc_obj(UIEVENT_ID);
-
             actor.set_field(msg, "window_id", Value::from(0));
 
             let event_type = if let Event::KeyDown { .. } = event {
@@ -249,6 +246,53 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 
             Some(msg)
         }
+
+        Event::MouseButtonDown { window_id, which, mouse_btn, x, y, .. } |
+        Event::MouseButtonUp { window_id, which, mouse_btn, x, y, .. } => {
+            let button_name = translate_mouse_button(mouse_btn);
+            if button_name.is_none() {
+                return None;
+            }
+
+            let msg = actor.alloc_obj(UIEVENT_ID);
+            actor.set_field(msg, "window_id", Value::from(0));
+
+            let event_type = if let Event::MouseButtonDown { .. } = event {
+                actor.intern_str("MOUSE_DOWN")
+            } else {
+                actor.intern_str("MOUSE_UP")
+            };
+            actor.set_field(msg, "kind", event_type);
+
+            let button_name = actor.intern_str(button_name.unwrap());
+            actor.set_field(msg, "button", button_name);
+
+            actor.set_field(msg, "x", Value::from(x));
+            actor.set_field(msg, "y", Value::from(x));
+
+            Some(msg)
+        }
+
+        Event::MouseMotion { window_id, x, y, .. } => {
+            let msg = actor.alloc_obj(UIEVENT_ID);
+            actor.set_field(msg, "window_id", Value::from(0));
+            let event_type = actor.intern_str("MOUSE_MOVE");
+            actor.set_field(msg, "kind", event_type);
+            actor.set_field(msg, "x", Value::from(x));
+            actor.set_field(msg, "y", Value::from(x));
+            Some(msg)
+        }
+
+        /*
+        Event::TextInput { window_id, text, .. } => {
+            // For each UTF-8 byte of input
+            for ch in text.bytes() {
+                if let ExitReason::Exit(val) = window_call_textinput(vm, window_id, ch) {
+                    return ExitReason::Exit(val);
+                }
+            }
+        }
+        */
 
         _ => None
     }
@@ -316,31 +360,14 @@ fn translate_keycode(sdl_keycode: Keycode) -> Option<&'static str>
     }
 }
 
-/*
-Event::MouseMotion { window_id, x, y, .. } => {
-    if let ExitReason::Exit(val) = window_call_mousemove(vm, window_id, x, y) {
-        return ExitReason::Exit(val);
+fn translate_mouse_button(button: MouseButton) -> Option<&'static str>
+{
+    match button {
+        MouseButton::Left => Some("LEFT"),
+        MouseButton::Middle => Some("MIDDLE"),
+        MouseButton::Right => Some("RIGHT"),
+        MouseButton::X1 => Some("X1"),
+        MouseButton::X2 => Some("X2"),
+        _ => None
     }
 }
-
-Event::MouseButtonDown { window_id, which, mouse_btn, x, y, .. } => {
-    if let ExitReason::Exit(val) = window_call_mousedown(vm, window_id, mouse_btn, x, y) {
-        return ExitReason::Exit(val);
-    }
-}
-
-Event::MouseButtonUp { window_id, which, mouse_btn, x, y, .. } => {
-    if let ExitReason::Exit(val) = window_call_mouseup(vm, window_id, mouse_btn, x, y) {
-        return ExitReason::Exit(val);
-    }
-}
-
-Event::TextInput { window_id, text, .. } => {
-    // For each UTF-8 byte of input
-    for ch in text.bytes() {
-        if let ExitReason::Exit(val) = window_call_textinput(vm, window_id, ch) {
-            return ExitReason::Exit(val);
-        }
-    }
-}
-*/
