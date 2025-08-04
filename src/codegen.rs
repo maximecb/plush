@@ -442,6 +442,15 @@ impl ExprBox
                         code.push(Insn::call_method { name, argc });
                     }
 
+                    // Call to a known function
+                    Expr::Ref(Decl::Fun { id }) => {
+                        for arg in args {
+                            arg.gen_code(fun, code, alloc)?;
+                        }
+
+                        code.push(Insn::call_direct { fun_id: *id, argc });
+                    }
+
                     // Plain regular call
                     _ => {
                         for arg in args {

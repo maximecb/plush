@@ -137,6 +137,12 @@ pub enum Insn
     // call (arg0, arg1, ..., argN)
     call { argc: u16 },
 
+    // Call a known function using its function id
+    call_direct { fun_id: FunId, argc: u16 },
+
+    // Call a known function by directly jumping to its entry point
+    call_offset { entry_idx: u32, argc: u16 },
+
     // Call a method on an object
     // call_method (self, arg0, ..., argN)
     call_method { name: *const String, argc: u16 },
@@ -1456,6 +1462,11 @@ impl Actor
                 Insn::call { argc } => {
                     let fun = pop!();
                     call_fun!(fun, argc);
+                }
+
+                // call_direct (arg0, arg1, ..., argN)
+                Insn::call_direct { fun_id, argc } => {
+                    call_fun!(Value::Fun(fun_id), argc);
                 }
 
                 // Call a method with a known name
