@@ -105,6 +105,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
 
         (Value::Class(BYTEARRAY_ID), "new") => HostFn::Fn1_1(ba_new),
         (Value::Class(BYTEARRAY_ID), "with_size") => HostFn::Fn2_1(ba_with_size),
+        (Value::ByteArray(_), "read_u32") => HostFn::Fn2_1(ba_read_u32),
         (Value::ByteArray(_), "write_u32") => HostFn::Fn3_0(ba_write_u32),
         (Value::ByteArray(_), "fill_u32") => HostFn::Fn4_0(ba_fill_u32),
         (Value::ByteArray(_), "memcpy") => HostFn::Fn5_0(ba_memcpy),

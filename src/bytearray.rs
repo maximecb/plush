@@ -42,7 +42,19 @@ impl ByteArray
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
 
-    /// Write a value at the given address
+    /// Read a value at the given index
+    pub fn read<T>(&mut self, idx: usize) -> T where T: Copy
+    {
+        assert!((idx + 1) * size_of::<T>() <= self.bytes.len());
+
+        unsafe {
+            let buf_ptr = self.bytes.as_ptr();
+            let val_ptr = transmute::<*const u8 , *const T>(buf_ptr).add(idx);
+            std::ptr::read(val_ptr)
+        }
+    }
+
+    /// Write a value at the given index
     pub fn write<T>(&mut self, idx: usize, val: T) where T: Copy
     {
         assert!((idx + 1) * size_of::<T>() <= self.bytes.len());
@@ -50,7 +62,7 @@ impl ByteArray
         unsafe {
             let buf_ptr = self.bytes.as_mut_ptr();
             let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr).add(idx);
-            std::ptr::write_unaligned(val_ptr, val);
+            std::ptr::write(val_ptr, val);
         }
     }
 
@@ -90,6 +102,14 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Value
     bytes.resize(num_bytes, 0);
     let ba = ByteArray { bytes };
     Value::ByteArray(actor.alloc.alloc(ba))
+}
+
+pub fn ba_read_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
+{
+    let ba = ba.unwrap_ba();
+    let idx = idx.unwrap_usize();
+    let val: u32 = ba.read(idx);
+    Value::from(val)
 }
 
 pub fn ba_write_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)

@@ -395,7 +395,13 @@ impl From<u64> for Value {
 
 impl From<u8> for Value {
     fn from(val: u8) -> Self {
-        Value::Int64(val.try_into().unwrap())
+        Value::Int64(val as i64)
+    }
+}
+
+impl From<u32> for Value {
+    fn from(val: u32) -> Self {
+        Value::Int64(val as i64)
     }
 }
 
