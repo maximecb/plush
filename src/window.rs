@@ -268,7 +268,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             actor.set_field(msg, "button", button_name);
 
             actor.set_field(msg, "x", Value::from(x));
-            actor.set_field(msg, "y", Value::from(x));
+            actor.set_field(msg, "y", Value::from(y));
 
             Some(msg)
         }
@@ -279,7 +279,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             let event_type = actor.intern_str("MOUSE_MOVE");
             actor.set_field(msg, "kind", event_type);
             actor.set_field(msg, "x", Value::from(x));
-            actor.set_field(msg, "y", Value::from(x));
+            actor.set_field(msg, "y", Value::from(y));
             Some(msg)
         }
 
