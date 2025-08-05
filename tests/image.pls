@@ -22,7 +22,7 @@ class Image
     // The color is specified as an u32 value in RGBA32 format
     set_pixel(self, x, y, color)
     {
-        self.bytes.write_u32(4 * (y * self.width + x), color);
+        self.bytes.write_u32(y * self.width + x, color);
     }
 
     // Fill a rectangle area with a given color
@@ -37,7 +37,7 @@ class Image
     {
         for (let var j = 0; j < height; ++j)
         {
-            let offset = 4 * (self.width * (ymin + j) + xmin);
+            let offset = self.width * (ymin + j) + xmin;
             self.bytes.fill_u32(offset, width, color);
         }
     }

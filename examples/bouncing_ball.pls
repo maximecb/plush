@@ -36,7 +36,7 @@ fun draw_circle(buffer, cx, cy, radius, color) {
                 let dy = y - cy_i;
                 // Check if the pixel is inside the circle's radius
                 if (dx*dx + dy*dy < radius*radius) {
-                    let idx = (y * WIDTH + x) * 4;
+                    let idx = y * WIDTH + x;
                     buffer.write_u32(idx, color);
                 }
             }

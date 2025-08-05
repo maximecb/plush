@@ -28,28 +28,28 @@ impl ByteArray
 
     pub unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
     {
-        assert!(idx + num_elems * size_of::<T>() <= self.bytes.len());
+        assert!((idx + num_elems) * size_of::<T>() <= self.bytes.len());
         let buf_ptr = self.bytes.as_ptr();
-        let elem_ptr = transmute::<*const u8 , *mut T>(buf_ptr.add(idx));
+        let elem_ptr = transmute::<*const u8 , *mut T>(buf_ptr).add(idx);
         std::slice::from_raw_parts(elem_ptr, num_elems as usize)
     }
 
     pub unsafe fn get_slice_mut<T>(&mut self, idx: usize, num_elems: usize) -> &'static mut [T]
     {
-        assert!(idx + num_elems * size_of::<T>() <= self.bytes.len());
+        assert!((idx + num_elems) * size_of::<T>() <= self.bytes.len());
         let buf_ptr = self.bytes.as_mut_ptr();
-        let elem_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(idx));
+        let elem_ptr = transmute::<*mut u8 , *mut T>(buf_ptr).add(idx);
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
 
     /// Write a value at the given address
     pub fn write<T>(&mut self, idx: usize, val: T) where T: Copy
     {
-        assert!(idx + size_of::<T>() <= self.bytes.len());
+        assert!((idx + 1) * size_of::<T>() <= self.bytes.len());
 
         unsafe {
             let buf_ptr = self.bytes.as_mut_ptr();
-            let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(idx));
+            let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr).add(idx);
             std::ptr::write_unaligned(val_ptr, val);
         }
     }
@@ -69,7 +69,7 @@ impl ByteArray
         // TODO: make sure the slices don't overlap
 
         let src_slice = unsafe { src.get_slice::<u8>(src_idx, num_bytes) };
-        let dst_slice = unsafe {  self.get_slice_mut::<u8>(dst_idx, num_bytes) };
+        let dst_slice = unsafe { self.get_slice_mut::<u8>(dst_idx, num_bytes) };
         dst_slice.copy_from_slice(src_slice);
     }
 }

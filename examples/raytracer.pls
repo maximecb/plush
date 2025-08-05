@@ -21,7 +21,7 @@ class Image
     // The color is specified as an u32 value in RGBA32 format
     set_pixel(self, x, y, color)
     {
-        let idx = 4 * (y * self.width + x);
+        let idx = y * self.width + x;
         self.bytes.write_u32(idx, color);
     }
 

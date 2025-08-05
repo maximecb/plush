@@ -62,7 +62,7 @@ fun draw_rect(buffer, x, y, w, h, color) {
 
     for (let var j = y_start; j < y_end; ++j) {
         for (let var i = x_start; i < x_end; ++i) {
-            let idx = (j * WIDTH + i) * 4;
+            let idx = j * WIDTH + i;
             buffer.write_u32(idx, color);
         }
     }

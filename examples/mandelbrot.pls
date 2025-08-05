@@ -53,7 +53,7 @@ for (let var y = 0; y < HEIGHT; ++y) {
 
         // Set the pixel color based on the number of iterations
         let color = (iter == MAX_ITER) ? rgb32(0, 0, 0) : palette[iter];
-        let idx = (y * WIDTH + x) * 4;
+        let idx = y * WIDTH + x;
         frame_buffer.write_u32(idx, color);
     }
 }

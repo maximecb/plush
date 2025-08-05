@@ -114,7 +114,7 @@ loop
             let color_idx = row[x];
             let color = shifted_palette[color_idx];
             frame_buffer.write_u32(pixel_idx, color);
-            pixel_idx = pixel_idx + 4;
+            ++pixel_idx;
         }
     }
 

@@ -37,7 +37,7 @@ fun draw_rect(frame_buffer, x, y, width, height, color) {
     }
 
     for (let var j = y_start; j < y_end; ++j) {
-        let start_index = (j * WINDOW_WIDTH + x_start) * 4;
+        let start_index = j * WINDOW_WIDTH + x_start;
         frame_buffer.fill_u32(start_index, clipped_width, color);
     }
 }
@@ -49,14 +49,14 @@ fun draw_x(frame_buffer, x, y, size, color) {
         let px1 = x + i;
         let py1 = y + i;
         if (px1 >= 0 && px1 < WINDOW_WIDTH && py1 >= 0 && py1 < WINDOW_HEIGHT) {
-            frame_buffer.write_u32((py1 * WINDOW_WIDTH + px1) * 4, color);
+            frame_buffer.write_u32(py1 * WINDOW_WIDTH + px1, color);
         }
 
         // Top-right to bottom-left diagonal
         let px2 = x + size - 1 - i;
         let py2 = y + i;
         if (px2 >= 0 && px2 < WINDOW_WIDTH && py2 >= 0 && py2 < WINDOW_HEIGHT) {
-            frame_buffer.write_u32((py2 * WINDOW_WIDTH + px2) * 4, color);
+            frame_buffer.write_u32(py2 * WINDOW_WIDTH + px2, color);
         }
     }
 }
