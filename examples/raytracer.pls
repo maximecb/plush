@@ -373,7 +373,7 @@ fun render()
     }
 
     let render_time = $time_current_ms() - start_time;
-    $println("Render time: " + render_time.to_s() + "ms");
+    $println("Parallel render time: " + render_time.to_s() + "ms");
 
     // Tell actors to terminate
     for (let var i = 0; i < num_actors; ++i)
@@ -397,12 +397,17 @@ fun render_no_tile()
     // Scene setup
     let scene = Scene();
 
-    return render_tile(scene, camera, 0, 0, width, height);
+    let start_time = $time_current_ms();
+    let img = render_tile(scene, camera, 0, 0, width, height);
+    let render_time = $time_current_ms() - start_time;
+    $println("Single thread render time: " + render_time.to_s() + "ms");
+
+    return img;
 }
 
 // Run the renderer
-//let image = render_no_tile();
-let image = render();
+let image = render_no_tile();
+//let image = render();
 
 let window = $window_create(image.width, image.height, "Render", 0);
 $window_draw_frame(window, image.bytes);
