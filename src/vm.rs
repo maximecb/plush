@@ -1970,6 +1970,19 @@ mod tests
     }
 
     #[test]
+    fn ret_clos()
+    {
+        eval_eq("fun a() { fun b() { return 33; } return b; } let f = a(); return f();", Value::Int64(33));
+    }
+
+    #[test]
+    fn capture_local()
+    {
+        // Captured local variable
+        eval_eq("fun f(n) { return fun() { return n+1; }; } let g = f(7); return g();", Value::Int64(8));
+    }
+
+    #[test]
     fn fact()
     {
         // Recursive factorial function
@@ -1981,12 +1994,6 @@ mod tests
     {
         // Recursive fibonacci function
         eval_eq("fun f(n) { if (n < 2) return n; return f(n-1) + f(n-2); } return f(10);", Value::Int64(55));
-    }
-
-    #[test]
-    fn ret_clos()
-    {
-        eval_eq("fun a() { fun b() { return 33; } return b; } let f = a(); return f();", Value::Int64(33));
     }
 
     #[test]

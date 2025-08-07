@@ -406,8 +406,8 @@ fun render_no_tile()
 }
 
 // Run the renderer
-//let image = render_no_tile();
-let image = render();
+let image = render_no_tile();
+//let image = render();
 
 let window = $window_create(image.width, image.height, "Render", 0);
 $window_draw_frame(window, image.bytes);
