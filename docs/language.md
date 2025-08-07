@@ -50,8 +50,6 @@ Plush is a dynamically typed language and supports the following data types:
 -   **ByteArray**: Raw, mutable byte buffers.
 -   **Object**: Instances of classes.
 
-The length of arrays and ByteArrays is accessed via the `.len` field.
-
 ### Operators
 
 Plush supports a range of arithmetic, comparison, and logical operators:
@@ -61,6 +59,18 @@ Plush supports a range of arithmetic, comparison, and logical operators:
 -   **Logical**: `&&`, `||`, `!`
 
 Note that unlike in JavaScript, the `==` operator performs reference equality for objects and arrays, not structural equality.
+
+### Arrays
+
+The syntax for array literals is similar to that of JavaScript, e.g.
+
+```
+let a = [0, 1, 2, 3, 4];
+```
+
+Array elements an be accessed using the indexing operator with square brackets, e.g. `a[0] = 1`.
+ByteArrays can also be indexed using square brackets to read and write individual bytes.
+The length of arrays and ByteArrays is accessed via the `.len` field. 
 
 ### Control Flow
 
