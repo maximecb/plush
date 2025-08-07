@@ -112,8 +112,8 @@ pub enum Insn
     instanceof { class_id: ClassId },
 
     // Get/set field
-    get_field { field: *const String },
-    set_field { field: *const String },
+    get_field { field: *const String, class_id: ClassId, slot_idx: u32 },
+    set_field { field: *const String, class_id: ClassId, slot_idx: u32 },
 
     // Get/set indexed element
     get_index,
@@ -1322,11 +1322,33 @@ impl Actor
                 */
 
                 // Set object field
-                Insn::set_field { field } => {
+                Insn::set_field { field, class_id, slot_idx } => {
                     let val = pop!();
                     let mut obj = pop!();
                     let field_name = unsafe { &*field };
-                    self.set_field(obj, field_name, val);
+
+                    match obj {
+                        Value::Object(p) => {
+                            let obj = unsafe { &mut *p };
+
+                            if class_id == obj.class_id {
+                                obj.slots[slot_idx as usize] = val;
+                            } else {
+                                let slot_idx = self.get_slot_idx(obj.class_id, field_name);
+                                let class_id = obj.class_id;
+
+                                // Update the cache
+                                self.insns[pc - 1] = Insn::set_field {
+                                    field,
+                                    class_id,
+                                    slot_idx: slot_idx as u32,
+                                };
+
+                                obj.slots[slot_idx] = val;
+                            }
+                        },
+                        _ => panic!()
+                    }
                 }
 
                 // Allocate a new class instance and call
@@ -1356,7 +1378,7 @@ impl Actor
                 }
 
                 // Get object field
-                Insn::get_field { field } => {
+                Insn::get_field { field, class_id, slot_idx } => {
                     let mut obj = pop!();
                     let field_name = unsafe { &*field };
 
@@ -1384,8 +1406,23 @@ impl Actor
 
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
-                            let slot_idx = self.get_slot_idx(obj.class_id, field_name);
-                            let val = obj.slots[slot_idx];
+
+                            // If the class id doesn't match the cache, update it
+                            let val = if class_id == obj.class_id {
+                                obj.slots[slot_idx as usize]
+                            } else {
+                                let slot_idx = self.get_slot_idx(obj.class_id, field_name);
+                                let class_id = obj.class_id;
+
+                                // Update the cache
+                                self.insns[pc - 1] = Insn::get_field {
+                                    field,
+                                    class_id,
+                                    slot_idx: slot_idx as u32,
+                                };
+
+                                obj.slots[slot_idx]
+                            };
 
                             if val == Value::Undef {
                                 panic!("object field not initialized");

@@ -364,7 +364,11 @@ impl ExprBox
             Expr::Member { base, field } => {
                 base.gen_code(fun, code, alloc)?;
                 let field = alloc.str_const(field.clone());
-                code.push(Insn::get_field { field });
+                code.push(Insn::get_field {
+                    field,
+                    class_id: Default::default(),
+                    slot_idx: Default::default(),
+                });
             }
 
             Expr::InstanceOf { val, class_id, .. } => {
@@ -527,7 +531,12 @@ fn gen_dict_expr(
         expr.gen_code(fun, code, alloc)?;
 
         let field_name = alloc.str_const(name.clone());
-        code.push(Insn::set_field { field: field_name });
+
+        code.push(Insn::set_field {
+            field: field_name,
+            class_id: Default::default(),
+            slot_idx: Default::default(),
+        });
     }
 
     code.push(Insn::dup);
@@ -753,12 +762,16 @@ fn gen_assign(
                 rhs.gen_code(fun, code, alloc)?;
                 base.gen_code(fun, code, alloc)?;
                 code.push(Insn::getn { idx: 1 });
-                code.push(Insn::set_field { field });
             } else {
                 base.gen_code(fun, code, alloc)?;
                 rhs.gen_code(fun, code, alloc)?;
-                code.push(Insn::set_field { field });
             }
+
+            code.push(Insn::set_field {
+                field,
+                class_id: Default::default(),
+                slot_idx: Default::default(),
+            });
         }
 
         Expr::Index { base, index } => {

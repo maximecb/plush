@@ -371,6 +371,7 @@ impl From<ClassId> for usize {
 }
 
 /// Constant class ids for basic classes
+/// Note that id 0 is reserved as an unused value
 pub const OBJECT_ID: ClassId = ClassId(1);
 pub const INT64_ID: ClassId = ClassId(2);
 pub const FLOAT64_ID: ClassId = ClassId(3);
