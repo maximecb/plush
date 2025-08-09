@@ -1978,8 +1978,11 @@ mod tests
     #[test]
     fn capture_local()
     {
-        // Captured local variable
+        // Captured function argument
         eval_eq("fun f(n) { return fun() { return n+1; }; } let g = f(7); return g();", Value::Int64(8));
+
+        // Capture local variable
+        eval_eq("fun f(n) { let m = n+1; return fun() { return m+1; }; } let g = f(3); return g();", Value::Int64(5));
     }
 
     #[test]
