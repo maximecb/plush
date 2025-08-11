@@ -222,9 +222,12 @@ pub enum Value
     // String constant
     String(*const String),
 
+    HostFn(HostFn),
     Fun(FunId),
     Closure(*mut Closure),
-    HostFn(HostFn),
+
+    // Mutable cell, captured variable
+    Cell(*mut Value),
 
     Object(*mut Object),
     Array(*mut Array),
@@ -259,6 +262,7 @@ impl Value
             // Heap-allocated values
             String(_)   |
             Closure(_)  |
+            Cell(_)     |
             Object(_)   |
             Array(_)    |
             ByteArray(_)|
