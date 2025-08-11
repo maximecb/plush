@@ -497,7 +497,7 @@ impl ExprBox
                 // For each variable captured by the nested function
                 for (decl, idx) in &child_fun.captured {
                     // If this variable doesn't comes from this function,
-                    // then it must be captured as a closure variable
+                    // then it must be captured by this closure
                     match *decl {
                         Decl::Arg { src_fun, .. } |
                         Decl::Local { src_fun, .. }
