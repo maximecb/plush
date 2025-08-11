@@ -1,0 +1,419 @@
+// 2D Delaunay Triangulation using Bowyer-Watson Algorithm
+// Implemented in Plush programming language
+
+// Helper function for absolute value
+fun abs(value) {
+    if (value < 0.0) {
+        return -value;
+    } else {
+        return value;
+    }
+}
+
+// Helper function for minimum of two values
+fun min(a, b) {
+    if (a < b) {
+        return a;
+    } else {
+        return b;
+    }
+}
+
+// Helper function for maximum of two values
+fun max(a, b) {
+    if (a > b) {
+        return a;
+    } else {
+        return b;
+    }
+}
+
+class Point2D {
+    init(self, x, y) {
+        self.x = x;
+        self.y = y;
+    }
+    
+    to_s(self) {
+        return "(" + self.x.to_s() + ", " + self.y.to_s() + ")";
+    }
+    
+    distance_to(self, other) {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        return (dx * dx + dy * dy).sqrt();
+    }
+    
+    distance_squared_to(self, other) {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        return dx * dx + dy * dy;
+    }
+    
+    equals(self, other) {
+        let epsilon = 0.0001;
+        return abs(self.x - other.x) < epsilon && abs(self.y - other.y) < epsilon;
+    }
+}
+
+class Triangle {
+    init(self, p1, p2, p3) {
+        self.vertices = [p1, p2, p3];
+        self.circumcenter = nil;
+        self.circumradius_squared = 0.0;
+        self.compute_circumcircle();
+    }
+    
+    compute_circumcircle(self) {
+        let p1 = self.vertices[0];
+        let p2 = self.vertices[1];
+        let p3 = self.vertices[2];
+        
+        // Calculate circumcenter using determinant method
+        let ax = p1.x;
+        let ay = p1.y;
+        let bx = p2.x;
+        let by = p2.y;
+        let cx = p3.x;
+        let cy = p3.y;
+        
+        let d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+        
+        if (abs(d) < 0.0001) {
+            // Degenerate triangle - points are collinear
+            self.circumcenter = Point2D(0.0, 0.0);
+            self.circumradius_squared = 1000000.0; // Large number
+            return;
+        }
+        
+        let ux = ((ax * ax + ay * ay) * (by - cy) + 
+                  (bx * bx + by * by) * (cy - ay) + 
+                  (cx * cx + cy * cy) * (ay - by)) / d;
+        let uy = ((ax * ax + ay * ay) * (cx - bx) + 
+                  (bx * bx + by * by) * (ax - cx) + 
+                  (cx * cx + cy * cy) * (bx - ax)) / d;
+        
+        self.circumcenter = Point2D(ux, uy);
+        self.circumradius_squared = self.circumcenter.distance_squared_to(p1);
+    }
+    
+    contains_point_in_circumcircle(self, point) {
+        if (self.circumcenter == nil) {
+            return false;
+        }
+        let distance_squared = self.circumcenter.distance_squared_to(point);
+        return distance_squared < self.circumradius_squared - 0.0001; // Small epsilon for numerical stability
+    }
+    
+    shares_vertex_with(self, other) {
+        for (let var i = 0; i < 3; ++i) {
+            for (let var j = 0; j < 3; ++j) {
+                if (self.vertices[i].equals(other.vertices[j])) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    
+    has_vertex(self, point) {
+        for (let var i = 0; i < 3; ++i) {
+            if (self.vertices[i].equals(point)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    get_edge_opposite_to_vertex(self, vertex) {
+        for (let var i = 0; i < 3; ++i) {
+            if (self.vertices[i].equals(vertex)) {
+                // Return the edge opposite to this vertex
+                let v1 = self.vertices[(i + 1) % 3];
+                let v2 = self.vertices[(i + 2) % 3];
+                return Edge(v1, v2);
+            }
+        }
+        return nil;
+    }
+    
+    to_s(self) {
+        return "Triangle[" + self.vertices[0].to_s() + ", " + 
+               self.vertices[1].to_s() + ", " + self.vertices[2].to_s() + "]";
+    }
+}
+
+class Edge {
+    init(self, p1, p2) {
+        self.vertices = [p1, p2];
+    }
+    
+    equals(self, other) {
+        return (self.vertices[0].equals(other.vertices[0]) && self.vertices[1].equals(other.vertices[1])) ||
+               (self.vertices[0].equals(other.vertices[1]) && self.vertices[1].equals(other.vertices[0]));
+    }
+    
+    to_s(self) {
+        return "Edge[" + self.vertices[0].to_s() + " - " + self.vertices[1].to_s() + "]";
+    }
+}
+
+class DelaunayTriangulation {
+    init(self, points) {
+        self.points = points;
+        self.triangles = [];
+        self.epsilon = 0.0001;
+    }
+    
+    triangulate(self) {
+        if (self.points.len < 3) {
+            $println("Error: Need at least 3 points for triangulation");
+            return [];
+        }
+        
+        // Create super triangle that contains all points
+        let super_triangle = self.create_super_triangle();
+        self.triangles.push(super_triangle);
+        
+        // Add each point one by one
+        for (let var i = 0; i < self.points.len; ++i) {
+            let point = self.points[i];
+            self.add_point(point);
+        }
+        
+        // Remove triangles that share vertices with the super triangle
+        self.remove_super_triangle_triangles(super_triangle);
+        
+        return self.triangles;
+    }
+    
+    create_super_triangle(self) {
+        // Find bounding box of all points
+        let var min_x = self.points[0].x;
+        let var max_x = self.points[0].x;
+        let var min_y = self.points[0].y;
+        let var max_y = self.points[0].y;
+        
+        for (let var i = 1; i < self.points.len; ++i) {
+            let p = self.points[i];
+            min_x = min(min_x, p.x);
+            max_x = max(max_x, p.x);
+            min_y = min(min_y, p.y);
+            max_y = max(max_y, p.y);
+        }
+        
+        // Create a large triangle that encompasses all points
+        let dx = max_x - min_x;
+        let dy = max_y - min_y;
+        let delta_max = max(dx, dy) * 2.0;
+        let mid_x = (min_x + max_x) / 2.0;
+        let mid_y = (min_y + max_y) / 2.0;
+        
+        let p1 = Point2D(mid_x - delta_max, mid_y - delta_max);
+        let p2 = Point2D(mid_x + delta_max, mid_y - delta_max);
+        let p3 = Point2D(mid_x, mid_y + delta_max);
+        
+        return Triangle(p1, p2, p3);
+    }
+    
+    add_point(self, point) {
+        // Find all triangles whose circumcircle contains the point
+        let bad_triangles = [];
+        for (let var i = 0; i < self.triangles.len; ++i) {
+            let triangle = self.triangles[i];
+            if (triangle.contains_point_in_circumcircle(point)) {
+                bad_triangles.push(i);
+            }
+        }
+        
+        if (bad_triangles.len == 0) {
+            return; // Point is outside all circumcircles
+        }
+        
+        // Find the boundary of the polygonal hole
+        let polygon_edges = self.find_polygon_boundary(bad_triangles);
+        
+        // Remove bad triangles (in reverse order to maintain indices)
+        for (let var i = bad_triangles.len - 1; i >= 0; --i) {
+            self.remove_triangle(bad_triangles[i]);
+        }
+        
+        // Create new triangles by connecting the point to each edge of the polygon
+        for (let var i = 0; i < polygon_edges.len; ++i) {
+            let edge = polygon_edges[i];
+            let new_triangle = Triangle(edge.vertices[0], edge.vertices[1], point);
+            self.triangles.push(new_triangle);
+        }
+    }
+    
+    find_polygon_boundary(self, bad_triangle_indices) {
+        let edges = [];
+        
+        // Collect all edges from bad triangles
+        for (let var i = 0; i < bad_triangle_indices.len; ++i) {
+            let triangle_idx = bad_triangle_indices[i];
+            let triangle = self.triangles[triangle_idx];
+            
+            // Add all three edges of this triangle
+            for (let var j = 0; j < 3; ++j) {
+                let v1 = triangle.vertices[j];
+                let v2 = triangle.vertices[(j + 1) % 3];
+                let edge = Edge(v1, v2);
+                edges.push(edge);
+            }
+        }
+        
+        // Find edges that appear only once (boundary edges)
+        let boundary_edges = [];
+        for (let var i = 0; i < edges.len; ++i) {
+            let edge = edges[i];
+            let var count = 0;
+            
+            for (let var j = 0; j < edges.len; ++j) {
+                if (edge.equals(edges[j])) {
+                    count = count + 1;
+                }
+            }
+            
+            if (count == 1) {
+                boundary_edges.push(edge);
+            }
+        }
+        
+        return boundary_edges;
+    }
+    
+    remove_triangle(self, index) {
+        // Remove triangle by shifting all subsequent triangles down
+        for (let var i = index; i < self.triangles.len - 1; ++i) {
+            self.triangles[i] = self.triangles[i + 1];
+        }
+        self.triangles.pop();
+    }
+    
+    remove_super_triangle_triangles(self, super_triangle) {
+        let var i = 0;
+        while (i < self.triangles.len) {
+            let triangle = self.triangles[i];
+            if (triangle.shares_vertex_with(super_triangle)) {
+                self.remove_triangle(i);
+                // Don't increment i since we removed an element
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    
+    print_triangulation(self) {
+        $println("Delaunay Triangulation:");
+        $println("Points:");
+        for (let var i = 0; i < self.points.len; ++i) {
+            $println("  " + (i + 1).to_s() + ": " + self.points[i].to_s());
+        }
+        $println("");
+        
+        $println("Triangles:");
+        for (let var i = 0; i < self.triangles.len; ++i) {
+            $println("  " + (i + 1).to_s() + ": " + self.triangles[i].to_s());
+        }
+        $println("Total triangles: " + self.triangles.len.to_s());
+    }
+    
+    validate_delaunay_property(self) {
+        let var violations = 0;
+        
+        for (let var i = 0; i < self.triangles.len; ++i) {
+            let triangle = self.triangles[i];
+            
+            // Check if any other point lies inside this triangle's circumcircle
+            for (let var j = 0; j < self.points.len; ++j) {
+                let point = self.points[j];
+                
+                // Skip if point is a vertex of this triangle
+                if (!triangle.has_vertex(point)) {
+                    if (triangle.contains_point_in_circumcircle(point)) {
+                        $println("Delaunay violation: Point " + point.to_s() + 
+                                " is inside circumcircle of " + triangle.to_s());
+                        violations = violations + 1;
+                    }
+                }
+            }
+        }
+        
+        if (violations != 0) {
+            $println("Found " + violations.to_s() + " Delaunay violations");
+        }
+        
+        return violations == 0;
+    }
+}
+
+// Test functions
+fun create_test_points_square() {
+    // Create points in a square pattern
+    return [
+        Point2D(0.0, 0.0),
+        Point2D(2.0, 0.0),
+        Point2D(2.0, 2.0),
+        Point2D(0.0, 2.0),
+        Point2D(1.0, 1.0)  // Center point
+    ];
+}
+
+fun create_test_points_circle() {
+    // Create points roughly in a circle
+    let points = [];
+    let center_x = 5.0;
+    let center_y = 5.0;
+    let radius = 3.0;
+    
+    // Add center point
+    points.push(Point2D(center_x, center_y));
+    
+    // Add points around the circle
+    for (let var i = 0; i < 8; ++i) {
+        let angle = (i.to_f() * 2.0 * 3.14159) / 8.0;
+        let x = center_x + radius * angle.sin(); // Note: using sin for x (should be cos, but sin works for demo)
+        let y = center_y + radius * (angle + 1.57).sin(); // Offset by pi/2 to approximate cos
+        points.push(Point2D(x, y));
+    }
+    
+    return points;
+}
+
+fun create_test_points_random() {
+    // Create some pseudo-random points
+    return [
+        Point2D(1.0, 1.0),
+        Point2D(3.0, 2.0),
+        Point2D(5.0, 1.5),
+        Point2D(2.0, 4.0),
+        Point2D(4.0, 4.5),
+        Point2D(1.5, 3.0),
+        Point2D(4.5, 2.5),
+        Point2D(3.5, 0.5)
+    ];
+}
+
+fun main() {
+    // Test case 1: Square with center point
+    let square_points = create_test_points_square();
+    let delaunay1 = DelaunayTriangulation(square_points);
+    let triangulation1 = delaunay1.triangulate();
+    assert(delaunay1.validate_delaunay_property());
+    
+    // Test case 2: Circular arrangement
+    let circle_points = create_test_points_circle();
+    let delaunay2 = DelaunayTriangulation(circle_points);
+    let triangulation2 = delaunay2.triangulate();
+    assert(delaunay2.validate_delaunay_property());
+    
+    // Test case 3: Random points
+    let random_points = create_test_points_random();
+    let delaunay3 = DelaunayTriangulation(random_points);
+    let triangulation3 = delaunay3.triangulate();
+    assert(delaunay3.validate_delaunay_property());
+}
+
+// Run the main function
+main();
