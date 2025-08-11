@@ -102,7 +102,7 @@ let end_time = $time_current_ms() - start_time;
 $println("Rasterization time: " + end_time.to_s() + "ms");
 
 // Display in a window
-let window = $window_create(width, height, "Triangle Rasterizer (sample.pls)", 0);
+let window = $window_create(width, height, "Triangle Rasterizer", 0);
 $window_draw_frame(window, framebuffer);
 
 loop {
