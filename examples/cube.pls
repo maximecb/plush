@@ -41,15 +41,15 @@ class Vec3 {
 let WIDTH = 600;
 let HEIGHT = 600;
 
-// Vetices setup
-let a = Vec3(0, 0, 0);
-let b = Vec3(0, 1, 0);
-let c = Vec3(1, 1, 0);
-let d = Vec3(1, 0, 0);
-let e = Vec3(0, 1, 1);
-let f = Vec3(1, 1, 1);
-let g = Vec3(1, 0, 1);
-let h = Vec3(0, 0, 1);
+// Vertices setup (centered at origin)
+let a = Vec3(-1, -1, -1);
+let b = Vec3(-1,  1, -1);
+let c = Vec3( 1,  1, -1);
+let d = Vec3( 1, -1, -1);
+let e = Vec3(-1,  1,  1);
+let f = Vec3( 1,  1,  1);
+let g = Vec3( 1, -1,  1);
+let h = Vec3(-1, -1,  1);
 
 // Array of vertices
 let vertices = [a, b, c, d, e, f, g, h];
@@ -129,8 +129,8 @@ for (let var i = 0; i < 8; ++i) {
 let var screen_x = [];
 let var screen_y = [];
 for (let var i = 0; i < 8; ++i) {
-    screen_x.push((vars[i].x + 1) * 0.4 * WIDTH);
-    screen_y.push((vars[i].y + 1) * 0.4 * HEIGHT);
+    screen_x.push((vars[i].x + 1) * 0.5 * WIDTH);
+    screen_y.push((vars[i].y + 1) * 0.5 * HEIGHT);
 }
 
 // Create framebuffer
@@ -243,8 +243,8 @@ loop {
         vars[i] = multMatVec(Vec3(vars[i].x, vars[i].y, vars[i].z + 3), matProj);
 
         // Recalculate screen coordinates
-        screen_x[i] = (vars[i].x + 1) * 0.4 * WIDTH;
-        screen_y[i] = (vars[i].y + 1) * 0.4 * HEIGHT;
+        screen_x[i] = (vars[i].x + 1) * 0.5 * WIDTH;
+        screen_y[i] = (vars[i].y + 1) * 0.5 * HEIGHT;
     }
 
     framebuffer.fill_u32(0, WIDTH*HEIGHT, 0xFF000000);
@@ -256,13 +256,18 @@ loop {
 
     $window_draw_frame(window, framebuffer);
 
-    let msg = $actor_recv();
+    let msg = $actor_poll();
+
+    if (msg == nil) {
+        continue;
+    }
     if (!(msg instanceof UIEvent)) {
         continue;
     }
     if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
         break;
     }
+    $actor_sleep(16);
 }
 
 
