@@ -211,7 +211,7 @@ for (let var i = 0; i < triangles.len; ++i) {
 }
 
 // Draw in a window
-let window = $window_create(WIDTH, HEIGHT, "Render", 0);
+let window = $window_create(WIDTH, HEIGHT, "Cube", 0);
 
 $window_draw_frame(window, framebuffer);
 
@@ -267,6 +267,7 @@ loop {
     if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
         break;
     }
+    
     $actor_sleep(16);
 }
 
