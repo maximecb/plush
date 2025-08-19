@@ -70,7 +70,7 @@ let a = [0, 1, 2, 3, 4];
 
 Array elements an be accessed using the indexing operator with square brackets, e.g. `a[0] = 1`.
 ByteArrays can also be indexed using square brackets to read and write individual bytes.
-The length of arrays and ByteArrays is accessed via the `.len` field. 
+The length of arrays and ByteArrays is accessed via the `.len` field.
 
 ### Control Flow
 
@@ -161,8 +161,9 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `abs()`: Get the absolute value of this number.
     -   `floor()`: Returns the largest integer less than or equal to the float.
     -   `sin()`: Returns the sine of the float.
+    -   `cos()`: Returns the cosine of the float.
     -   `sqrt()`: Returns the square root of the float.
-    -   `to_s()`: Converts the float to a string.
+    -   `to_s()`: Returns a string representation of the float.
 -   **Array**
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
     -   `push(value)`: Adds a value to the end of the array.
