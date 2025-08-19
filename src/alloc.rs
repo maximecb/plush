@@ -11,7 +11,7 @@ impl Alloc
 {
     pub fn new() -> Self
     {
-        let mem_size = 64 * 1024 * 1024;
+        let mem_size = 128 * 1024 * 1024;
         let layout = Layout::from_size_align(mem_size, 8).unwrap();
 
         let mem_block = unsafe { alloc_zeroed(layout) };
