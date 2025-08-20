@@ -1,0 +1,125 @@
+// Helper function to find the minimum of two values
+fun min(a, b) {
+    if (a < b) {
+        return a;
+    } else {
+        return b;
+    }
+}
+
+// State class to hold all the mutable state needed for Tarjan's algorithm
+class TarjanState {
+    init(self, graph_size) {
+        self.index_counter = 0;
+        self.index_array = Array.with_size(graph_size, -1);  // -1 means unvisited
+        self.low_link_array = Array.with_size(graph_size, 0);
+        self.on_stack_array = Array.with_size(graph_size, false);
+        self.stack = [];
+        self.sccs = [];
+    }
+}
+
+// Top-level DFS function for Tarjan's algorithm
+fun strongconnect(graph, v, state) {
+    // Set the depth index for v to the smallest unused index
+    state.index_array[v] = state.index_counter;
+    state.low_link_array[v] = state.index_counter;
+    state.index_counter = state.index_counter + 1;
+    state.stack.push(v);
+    state.on_stack_array[v] = true;
+    
+    // Process all neighbors of v
+    let var i = 0;
+    while (i < graph[v].len) {
+        let w = graph[v][i];
+        
+        if (state.index_array[w] == -1) {  // Successor w has not yet been visited
+            strongconnect(graph, w, state);
+            state.low_link_array[v] = min(state.low_link_array[v], state.low_link_array[w]);
+        } else if (state.on_stack_array[w]) {  // Successor w is on the stack
+            state.low_link_array[v] = min(state.low_link_array[v], state.index_array[w]);
+        }
+        
+        i = i + 1;
+    }
+    
+    // If v is a root node, pop the stack and generate an SCC
+    if (state.low_link_array[v] == state.index_array[v]) {
+        let var scc = [];
+        let var w = -1;
+        while (w != v) {
+            w = state.stack.pop();
+            state.on_stack_array[w] = false;
+            scc.push(w);
+        }
+        state.sccs.push(scc);
+    }
+}
+
+// Main Tarjan's algorithm function
+fun tarjan(graph) {
+    let state = TarjanState(graph.len);
+    
+    // Process all unvisited nodes
+    let var i = 0;
+    while (i < graph.len) {
+        if (state.index_array[i] == -1) {
+            strongconnect(graph, i, state);
+        }
+        i = i + 1;
+    }
+    
+    return state.sccs;
+}
+
+// Test the algorithm with a sample graph
+// Graph represented as adjacency list:
+// 0 -> 1
+// 1 -> 2
+// 2 -> 0, 3
+// 3 -> 4
+// 4 -> 5
+// 5 -> 3
+// 6 -> 5, 7
+// 7 -> 8
+// 8 -> 9
+// 9 -> 6, 10
+// 10 -> 11
+// 11 -> 12
+// 12 -> 10
+let test_graph = [
+    [1],        // Node 0
+    [2],        // Node 1
+    [0, 3],     // Node 2
+    [4],        // Node 3
+    [5],        // Node 4
+    [3],        // Node 5
+    [5, 7],     // Node 6
+    [8],        // Node 7
+    [9],        // Node 8
+    [6, 10],    // Node 9
+    [11],       // Node 10
+    [12],       // Node 11
+    [10]        // Node 12
+];
+
+let sccs = tarjan(test_graph);
+
+assert(sccs.len == 4);
+assert(sccs[0].len == 3);
+assert(sccs[1].len == 3);
+assert(sccs[2].len == 3);
+assert(sccs[3].len == 4);
+assert(sccs[0][0] == 5);
+assert(sccs[0][1] == 4);
+assert(sccs[0][2] == 3);
+assert(sccs[1][0] == 2);
+assert(sccs[1][1] == 1);
+assert(sccs[1][2] == 0);
+assert(sccs[2][0] == 12);
+assert(sccs[2][1] == 11);
+assert(sccs[2][2] == 10);
+assert(sccs[3][0] == 9);
+assert(sccs[3][1] == 8);
+assert(sccs[3][2] == 7);
+assert(sccs[3][3] == 6);

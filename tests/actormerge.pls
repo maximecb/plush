@@ -1,0 +1,301 @@
+// Parallel Merge Sort using Actor-based Concurrency
+// Implemented in Plush programming language
+
+// Helper function to print arrays
+fun print_array(arr, label) {
+    $print(label + ": [");
+    for (let var i = 0; i < arr.len; ++i) {
+        $print(arr[i].to_s());
+        if (i < arr.len - 1) {
+            $print(", ");
+        }
+    }
+    $println("]");
+}
+
+// Sequential merge function for combining sorted arrays
+fun merge(left, right) {
+    let result = [];
+    let var i = 0;
+    let var j = 0;
+    
+    // Merge the two sorted arrays
+    while (i < left.len && j < right.len) {
+        if (left[i] <= right[j]) {
+            result.push(left[i]);
+            i = i + 1;
+        } else {
+            result.push(right[j]);
+            j = j + 1;
+        }
+    }
+    
+    // Add remaining elements from left array
+    while (i < left.len) {
+        result.push(left[i]);
+        i = i + 1;
+    }
+    
+    // Add remaining elements from right array
+    while (j < right.len) {
+        result.push(right[j]);
+        j = j + 1;
+    }
+    
+    return result;
+}
+
+// Sequential merge sort for small arrays or base case
+fun sequential_merge_sort(arr) {
+    if (arr.len <= 1) {
+        return arr;
+    }
+    
+    let mid = (arr.len / 2).floor();
+    
+    // Split array into two halves
+    let left = [];
+    let right = [];
+    
+    for (let var i = 0; i < mid; ++i) {
+        left.push(arr[i]);
+    }
+    
+    for (let var i = mid; i < arr.len; ++i) {
+        right.push(arr[i]);
+    }
+    
+    // Recursively sort both halves
+    let sorted_left = sequential_merge_sort(left);
+    let sorted_right = sequential_merge_sort(right);
+    
+    // Merge the sorted halves
+    return merge(sorted_left, sorted_right);
+}
+
+// Worker actor function for parallel merge sort
+fun merge_sort_worker() {
+    let actor_id = $actor_id();
+    
+    // Receive the work package
+    let work_package = $actor_recv();
+    let array = work_package[0];
+    let depth = work_package[1];
+    let max_depth = work_package[2];
+    let worker_id = work_package[3];
+    
+    // Base case: use sequential sort for small arrays or deep recursion
+    if (array.len <= 1 || depth >= max_depth) {
+        let result = sequential_merge_sort(array);
+        return result;
+    }
+    
+    // Split the array
+    let mid = (array.len / 2).floor();
+    let left = [];
+    let right = [];
+    
+    for (let var i = 0; i < mid; ++i) {
+        left.push(array[i]);
+    }
+    
+    for (let var i = mid; i < array.len; ++i) {
+        right.push(array[i]);
+    }
+    
+    // Spawn actors for left and right subarrays
+    let left_actor = $actor_spawn(merge_sort_worker);
+    let right_actor = $actor_spawn(merge_sort_worker);
+    
+    // Send work packages to child workers
+    let left_package = [left, depth + 1, max_depth, worker_id * 2];
+    let right_package = [right, depth + 1, max_depth, worker_id * 2 + 1];
+    
+    $actor_send(left_actor, left_package);
+    $actor_send(right_actor, right_package);
+    
+    // Wait for results from both child actors
+    let sorted_left = $actor_join(left_actor);
+    let sorted_right = $actor_join(right_actor);
+    
+    // Merge the results
+    let merged_result = merge(sorted_left, sorted_right);
+    
+    return merged_result;
+}
+
+// Coordinator function that orchestrates the parallel merge sort
+fun parallel_merge_sort(array, max_parallel_depth) {
+    if (array.len <= 1) {
+        return array;
+    }
+    
+    // Spawn the root worker actor
+    let root_actor = $actor_spawn(merge_sort_worker);
+    
+    // Send the initial work package
+    let work_package = [array, 0, max_parallel_depth, 1];
+    $actor_send(root_actor, work_package);
+    
+    // Wait for the final result
+    let result = $actor_join(root_actor);
+    
+    return result;
+}
+
+// Performance comparison function
+fun compare_sorting_methods(array) {
+    // Test sequential merge sort
+    let start_time = $time_current_ms();
+    let sequential_result = sequential_merge_sort(array);
+    let sequential_time = $time_current_ms() - start_time;
+    
+    // Test parallel merge sort with different depth limits
+    let depths = [1, 2, 3];
+    for (let var i = 0; i < depths.len; ++i) {
+        let depth = depths[i];
+        
+        let start_time_parallel = $time_current_ms();
+        let parallel_result = parallel_merge_sort(array, depth);
+        let parallel_time = $time_current_ms() - start_time_parallel;
+        
+        // Verify correctness
+        let var correct = true;
+        if (parallel_result.len != sequential_result.len) {
+            correct = false;
+        } else {
+            for (let var j = 0; j < parallel_result.len; ++j) {
+                if (parallel_result[j] != sequential_result[j]) {
+                    correct = false;
+                }
+            }
+        }
+        
+        if (!correct) {
+            $println("✗ Results do NOT match sequential sort");
+        }
+        
+        assert(correct);
+    }
+}
+
+// Specialized actor for merge-only operations
+fun merge_actor() {
+    let actor_id = $actor_id();
+    let work = $actor_recv();
+    
+    let left = work[0];
+    let right = work[1];
+    let merge_id = work[2];
+    
+    let result = merge(left, right);
+    
+    return result;
+}
+
+// Alternative implementation using dedicated merge actors
+fun parallel_merge_sort_v2(array) {
+    if (array.len <= 1) {
+        return array;
+    }
+    
+    // For demonstration, we'll do a 2-level parallel sort
+    let mid = (array.len / 2).floor();
+    let left = [];
+    let right = [];
+    
+    for (let var i = 0; i < mid; ++i) {
+        left.push(array[i]);
+    }
+    
+    for (let var i = mid; i < array.len; ++i) {
+        right.push(array[i]);
+    }
+    
+    // Sort left and right halves in parallel using sequential sort
+    // (In a real implementation, you'd recursively use actors here too)
+    let sorted_left = sequential_merge_sort(left);
+    let sorted_right = sequential_merge_sort(right);
+    
+    // Use a dedicated merge actor to combine results
+    let merge_actor_id = $actor_spawn(merge_actor);
+    let merge_work = [sorted_left, sorted_right, 1];
+    $actor_send(merge_actor_id, merge_work);
+    
+    let final_result = $actor_join(merge_actor_id);
+    
+    return final_result;
+}
+
+// Test data generators
+fun create_random_array(size) {
+    let arr = [];
+    let var seed = 42; // Simple pseudo-random number generator
+    
+    for (let var i = 0; i < size; ++i) {
+        seed = (seed * 1103515245 + 12345) % 2147483647;
+        let value = (seed % 100) + 1; // Values between 1-100
+        arr.push(value);
+    }
+    
+    return arr;
+}
+
+fun create_reverse_sorted_array(size) {
+    let arr = [];
+    for (let var i = size; i > 0; --i) {
+        arr.push(i);
+    }
+    return arr;
+}
+
+fun create_nearly_sorted_array(size) {
+    let arr = [];
+    for (let var i = 1; i <= size; ++i) {
+        arr.push(i);
+    }
+    
+    // Swap a few elements to make it nearly sorted
+    if (size > 4) {
+        let temp = arr[1];
+        arr[1] = arr[3];
+        arr[3] = temp;
+        
+        if (size > 8) {
+            let temp2 = arr[size - 2];
+            arr[size - 2] = arr[size - 4];
+            arr[size - 4] = temp2;
+        }
+    }
+    
+    return arr;
+}
+
+fun main() {
+    // Test with small array first
+    let small_array = [64, 34, 25, 12, 22, 11, 90, 5, 77, 30];
+    compare_sorting_methods(small_array);
+    
+    // Test with random array
+    let random_array = create_random_array(16);
+    compare_sorting_methods(random_array);
+    
+    // Test with reverse sorted array
+    let reverse_array = create_reverse_sorted_array(12);
+    compare_sorting_methods(reverse_array);
+    
+    // Test with nearly sorted array
+    let nearly_sorted = create_nearly_sorted_array(14);
+    compare_sorting_methods(nearly_sorted);
+    
+    // Demonstrate alternative implementation
+    let test_array = [9, 7, 5, 3, 1, 8, 6, 4, 2];
+    let result = parallel_merge_sort_v2(test_array);
+    assert(result.len == 9);
+    for (let var i = 0; i < result.len; ++i) {
+        assert(result[i] == i+1);
+    }
+}
+
+// Run the main function
+main();
