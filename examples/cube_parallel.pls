@@ -149,22 +149,22 @@ let g = Vec3(+1, +1, 1);
 let h = Vec3(-1, +1, 1);
 
 let triangles = [
-    //front
+    // front
     [a, c, b],
     [a, d, c],
-    //right
+    // right
     [d, f, c],
     [d, g, f],
-    //back
+    // back
     [g, h, e],
     [g, e, f],
-    //left
+    // left
     [h, a, b],
     [h, b, e],
-    //top
+    // top
     [b, f, e],
     [b, c, f],
-    //bottom
+    // bottom
     [a, h, g],
     [a, g, d]
 ];
@@ -364,6 +364,44 @@ class CubeRenderData {
     }
 }
 
+// Convert ARGB values in the range [0, 255] to a u32 encoding
+fun to_u32(a, r, g, b) {
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+// Extract ARGB components from a u32 color value
+fun to_argb(color) {
+    let a = (color >> 24) & 0xFF;
+    let r = (color >> 16) & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = color & 0xFF;
+    return [a, r, g, b];
+}
+
+// Light direction (normalized vector pointing toward the light source)
+let light_direction = Vec3(+1.6,  -1.2,  -3.0).normalize();
+let ambient_min = 0.16; // Minimum light level 
+
+// Apply directional lighting to a color based on surface normal
+fun apply_lighting(base_color, normal) {
+    // Calculate lighting intensity (dot product of normal and light direction)
+    let light_intensity = max(ambient_min, normal.dot(light_direction));
+    
+    let argb = to_argb(base_color);
+    let a = argb[0];
+    let r = argb[1];
+    let g = argb[2];
+    let b = argb[3];
+    
+    // Apply lighting to RGB components
+    let lit_r = min(255, (r.to_f() * light_intensity).floor());
+    let lit_g = min(255, (g.to_f() * light_intensity).floor());
+    let lit_b = min(255, (b.to_f() * light_intensity).floor());
+    
+    // Reconstruct u32 color
+    return to_u32(a, lit_r, lit_g, lit_b);
+}
+
 // Render a tile of the cube
 fun render_cube_tile(cube_data, tile_x, tile_y, tile_w, tile_h) {
     let tile_img = Image(tile_w, tile_h);
@@ -382,11 +420,12 @@ fun render_cube_tile(cube_data, tile_x, tile_y, tile_w, tile_h) {
                 }
             }
         }
-        // Back-face culling
+        // Backface culling
         if (cube_data.normal[i].dot(pointsRota[0].sub(cube_data.camera)) < 0) {
-            // Precompute color (u32) once per triangle
-            let color = palette[i];
-            rasterize_triangle_tile(points[0], points[1], points[2], color, tile_img, tile_x, tile_y, tile_w, tile_h);
+            // Apply lighting to the base color
+            let base_color = palette[i];
+            let lit_color = apply_lighting(base_color, cube_data.normal[i]);
+            rasterize_triangle_tile(points[0], points[1], points[2], lit_color, tile_img, tile_x, tile_y, tile_w, tile_h);
         }
     }
     
