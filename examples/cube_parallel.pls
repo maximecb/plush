@@ -10,14 +10,8 @@ fun max(a, b) {
     return b;
 }
 
-// tan(a) = sin(a)/sin((pi/2)-a)
 fun tan(a) {
-    return(a.sin()/(1.5707963-a).sin());
-}
-
-// cos using sin identity
-fun cos(a) {
-    return((a + 1.5707963).sin());
+    return(a.sin()/a.cos());
 }
 
 // Image class for framebuffer management
@@ -138,6 +132,10 @@ class Vec3 {
 // Screen setup
 let WIDTH = 600;
 let HEIGHT = 600;
+
+// Queue for UI events that arrive while renderer is waiting for TileResult
+let pending_ui_events = [];
+let var should_exit = false;
 
 // Vertices setup
 let a = Vec3(-1, +1, -1);
@@ -305,16 +303,16 @@ class CubeRenderData {
         
         // Compute rotation matrices
         self.matRotX[0][0] = 1.0;
-        self.matRotX[1][1] = cos(fTheta * 0.5);
+        self.matRotX[1][1] = (fTheta * 0.5).cos();
         self.matRotX[1][2] = (fTheta * 0.5).sin();
         self.matRotX[2][1] = -((fTheta * 0.5).sin());
-        self.matRotX[2][2] = cos(fTheta * 0.5);
+        self.matRotX[2][2] = (fTheta * 0.5).cos();
         self.matRotX[3][3] = 1.0;
         
-        self.matRotZ[0][0] = cos(fTheta);
+        self.matRotZ[0][0] = fTheta.cos();
         self.matRotZ[0][1] = (fTheta).sin();
         self.matRotZ[1][0] = -((fTheta).sin());
-        self.matRotZ[1][1] = cos(fTheta);
+        self.matRotZ[1][1] = fTheta.cos();
         self.matRotZ[2][2] = 1.0;
         self.matRotZ[3][3] = 1.0;
         
@@ -470,16 +468,30 @@ fun render_cube_parallel(fTheta) {
         $actor_send(actor_ids[i], requests.pop());
     }
     
-    // Receive all the render results
-    for (let var num_received = 0; num_received < num_tiles; ++num_received) {
+    // Receive all the render results. Buffer UI events that arrive here.
+    let var num_received = 0;
+    while (num_received < num_tiles) {
         let msg = $actor_recv();
-        
+
+        // If a UI event arrives while we're waiting for tiles, buffer it for the
+        // main loop to process and continue waiting for tile results.
+        if (msg instanceof UIEvent) {
+            pending_ui_events.push(msg);
+            continue;
+        }
+
+        // Ignore spurious nils
+        if (msg == nil) {
+            continue;
+        }
+
         // Send more work to this actor if available
         if (requests.len > 0) {
             $actor_send(msg.actor_id, requests.pop());
         }
-        
+
         image.blit(msg.tile_img, msg.tile_x, msg.tile_y);
+        num_received = num_received + 1;
     }
     
     let render_time = $time_current_ms() - start_time;
@@ -515,6 +527,10 @@ loop {
 
     fTheta = $time_current_ms().to_f() * 0.001;
 
+    if (should_exit) {
+        break;
+    }
+
     let var image = nil;
     if (use_parallel) {
         image = render_cube_parallel(fTheta);
@@ -523,21 +539,29 @@ loop {
     }
     
     $window_draw_frame(window, image.bytes);
-    continue;
+
+    // Collect any UI events that may have arrived during rendering
+    while (true) {
+        let ev = $actor_poll();
+        if (ev == nil) break;
+        pending_ui_events.push(ev);
+    }
+
+    // Process pending UI events (those collected while rendering)
+    while (pending_ui_events.len > 0) {
+        let ev = pending_ui_events.pop();
+        if (!(ev instanceof UIEvent)) continue;
+        if (ev.kind == 'CLOSE_WINDOW' || (ev.kind == 'KEY_DOWN' && ev.key == 'ESCAPE')) {
+            should_exit = true;
+            break;
+        }
+        if (ev.kind == 'KEY_DOWN' && ev.key == 'SPACE') {
+            use_parallel = !use_parallel;
+            $println("Switched to " + (use_parallel ? "parallel" : "single-threaded") + " rendering");
+        }
+    }
     
-    if (msg == nil) {
-        continue;
-    }
-    if (!(msg instanceof UIEvent)) {
-        continue;
-    }
-    if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
-        break;
-    }
-    if (msg.kind == 'KEY_DOWN' && msg.key == 'SPACE') {
-        use_parallel = !use_parallel;
-        $println("Switched to " + (use_parallel ? "parallel" : "single-threaded") + " rendering");
-    }
-    
+    if (should_exit) break;
+
     $actor_sleep(16);
 }
