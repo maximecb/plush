@@ -202,23 +202,23 @@ let fFovRad = 1/tan(fFov*0.5);
 
 let palette = [
     // front
-    0xFFDC3C3C,
-    0xFFDC3C3C,
+    0xFFFFD166,
+    0xFFFFD166,
     // right
-    0xFF3CBD5E,
-    0xFF3CBD5E,
+    0xFF6B5B95,
+    0xFF6B5B95,
     // back
-    0xFF3C6BDC,
-    0xFF3C6BDC,
+    0xFF88B04B,
+    0xFF88B04B,
     // left
-    0xFF3CBDBD,
-    0xFF3CBDBD,
+    0xFFF7CAC9,
+    0xFFF7CAC9,
     // top
-    0xFFE6C93C,
-    0xFFE6C93C,
+    0xFF92A8D1,
+    0xFF92A8D1,
     // bottom
-    0xFFBD3CBD,
-    0xFFBD3CBD,
+    0xFF955251,
+    0xFF955251,
 ];
 
 fun initMat4(m) {
@@ -379,8 +379,8 @@ fun to_argb(color) {
 }
 
 // Light direction (normalized vector pointing toward the light source)
-let light_direction = Vec3(+1.6,  -1.2,  -3.0).normalize();
-let ambient_min = 0.16; // Minimum light level 
+let light_direction = Vec3(-0.5,  -0.7,  -2.0).normalize();
+let ambient_min = 0.008; // Minimum light level 
 
 // Apply directional lighting to a color based on surface normal
 fun apply_lighting(base_color, normal) {
