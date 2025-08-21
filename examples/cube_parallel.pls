@@ -246,7 +246,7 @@ fun multMatVec(i, m) {
 }
 
 // Rasterize a triangle into a tile
-fun rasterize_triangle_tile(v0, v1, v2, paletteIndex, tile_img, tile_x, tile_y, tile_w, tile_h) {
+fun rasterize_triangle_tile(v0, v1, v2, color, tile_img, tile_x, tile_y, tile_w, tile_h) {
     // Convert vertices to integer coordinates
     let x0 = v0.x.floor();
     let y0 = v0.y.floor();
@@ -279,7 +279,6 @@ fun rasterize_triangle_tile(v0, v1, v2, paletteIndex, tile_img, tile_x, tile_y, 
                 let local_x = x - tile_x;
                 let local_y = y - tile_y;
                 if (local_x >= 0 && local_x < tile_w && local_y >= 0 && local_y < tile_h) {
-                    let color = palette[paletteIndex % palette.len];
                     tile_img.set_pixel(local_x, local_y, color);
                 }
             }
@@ -385,7 +384,9 @@ fun render_cube_tile(cube_data, tile_x, tile_y, tile_w, tile_h) {
         }
         // Back-face culling
         if (cube_data.normal[i].dot(pointsRota[0].sub(cube_data.camera)) < 0) {
-            rasterize_triangle_tile(points[0], points[1], points[2], i, tile_img, tile_x, tile_y, tile_w, tile_h);
+            // Precompute color (u32) once per triangle
+            let color = palette[i];
+            rasterize_triangle_tile(points[0], points[1], points[2], color, tile_img, tile_x, tile_y, tile_w, tile_h);
         }
     }
     
@@ -495,7 +496,7 @@ fun render_cube_parallel(fTheta) {
     }
     
     let render_time = $time_current_ms() - start_time;
-    //$println("Parallel render time: " + render_time.to_s() + "ms");
+    $println("Parallel render time: " + render_time.to_s() + "ms");
     
     // Tell actors to terminate
     for (let var i = 0; i < num_actors; ++i) {
@@ -511,7 +512,7 @@ fun render_cube_single(fTheta) {
     let cube_data = CubeRenderData(fTheta);
     let image = render_cube_tile(cube_data, 0, 0, WIDTH, HEIGHT);
     let render_time = $time_current_ms() - start_time;
-    $println("Single thread render time: " + render_time.to_s() + "ms");
+    // $println("Single thread render time: " + render_time.to_s() + "ms");
     return image;
 }
 
@@ -523,8 +524,6 @@ let var fTheta = $time_current_ms().to_f() * 0.001;
 let var use_parallel = true; 
 
 loop {
-    let msg = $actor_poll();
-
     fTheta = $time_current_ms().to_f() * 0.001;
 
     if (should_exit) {
