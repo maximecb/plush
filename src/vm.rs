@@ -669,7 +669,11 @@ impl Actor
             class_id, |c| {
                 match c.fields.get(field_name) {
                     Some(slot_idx) => *slot_idx,
-                    None => panic!("unknown field {}", field_name)
+                    None => panic!("unknown field '{}' in class '{}' (class_id: {:?}). Available fields: {:?}", 
+                        field_name, 
+                        c.name, 
+                        class_id, 
+                        c.fields.keys().collect::<Vec<_>>())
                 }
         })
     }
