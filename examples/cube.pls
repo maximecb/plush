@@ -241,7 +241,7 @@ fun multMatVec(i, m) {
         o.x = o.x/w;
         o.y = o.y/w;
     }
-    
+
     return o;
 }
 
@@ -290,16 +290,16 @@ fun rasterize_triangle_tile(v0, v1, v2, color, tile_img, tile_x, tile_y, tile_w,
 class CubeRenderData {
     init(self, fTheta) {
         self.fTheta = fTheta;
-        
+
         // Create matrices
         self.matRotX = [];
         self.matRotZ = [];
         self.matProj = [];
-        
+
         initMat4(self.matRotX);
         initMat4(self.matRotZ);
         initMat4(self.matProj);
-        
+
         // Compute rotation matrices
         self.matRotX[0][0] = 1.0;
         self.matRotX[1][1] = (fTheta * 0.5).cos();
@@ -307,21 +307,21 @@ class CubeRenderData {
         self.matRotX[2][1] = -((fTheta * 0.5).sin());
         self.matRotX[2][2] = (fTheta * 0.5).cos();
         self.matRotX[3][3] = 1.0;
-        
+
         self.matRotZ[0][0] = fTheta.cos();
         self.matRotZ[0][1] = (fTheta).sin();
         self.matRotZ[1][0] = -((fTheta).sin());
         self.matRotZ[1][1] = fTheta.cos();
         self.matRotZ[2][2] = 1.0;
         self.matRotZ[3][3] = 1.0;
-        
+
         // Projection
         self.matProj[0][0] = fAspectRatio*fFovRad;
         self.matProj[1][1] = fFovRad;
         self.matProj[2][2] = fFar / (fFar - fNear);
         self.matProj[2][3] = 1.0;
         self.matProj[3][2] = (-fFar * fNear) / (fFar - fNear);
-        
+
         // Compute transformed vertices
         self.rota = [];
         for (let var i = 0; i < 8; ++i) {
@@ -330,7 +330,7 @@ class CubeRenderData {
         for (let var i = 0; i < 8; ++i) {
             self.rota[i] = multMatVec(self.rota[i], self.matRotX);
         }
-        
+
         // Compute normals
         self.normal = [];
         for (let var i = 0; i < triangles.len; ++i) {
@@ -338,15 +338,15 @@ class CubeRenderData {
             let v0 = self.rota[idxs[0]];
             let v1 = self.rota[idxs[1]];
             let v2 = self.rota[idxs[2]];
-            
+
             let line1 = v1.sub(v0);
             let line2 = v2.sub(v0);
             let var normal = line1.cross(line2);
             normal = normal.normalize();
-            
+
             self.normal.push(normal);
         }
-        
+
         // Project vertices
         self.proj = [];
         for (let var i = 0; i < 8; ++i) {
@@ -359,7 +359,7 @@ class CubeRenderData {
                 self.proj[i].z
             );
         }
-        
+
         self.camera = Vec3(0, 0, -3);
     }
 }
@@ -380,24 +380,24 @@ fun to_argb(color) {
 
 // Light direction (normalized vector pointing toward the light source)
 let light_direction = Vec3(-0.5,  -0.7,  -2.0).normalize();
-let ambient_min = 0.008; // Minimum light level 
+let ambient_min = 0.008; // Minimum light level
 
 // Apply directional lighting to a color based on surface normal
 fun apply_lighting(base_color, normal) {
     // Calculate lighting intensity (dot product of normal and light direction)
     let light_intensity = max(ambient_min, normal.dot(light_direction));
-    
+
     let argb = to_argb(base_color);
     let a = argb[0];
     let r = argb[1];
     let g = argb[2];
     let b = argb[3];
-    
+
     // Apply lighting to RGB components
     let lit_r = min(255, (r.to_f() * light_intensity).floor());
     let lit_g = min(255, (g.to_f() * light_intensity).floor());
     let lit_b = min(255, (b.to_f() * light_intensity).floor());
-    
+
     // Reconstruct u32 color
     return to_u32(a, lit_r, lit_g, lit_b);
 }
@@ -406,7 +406,7 @@ fun apply_lighting(base_color, normal) {
 fun render_cube_tile(cube_data, tile_x, tile_y, tile_w, tile_h) {
     let tile_img = Image(tile_w, tile_h);
     tile_img.fill(0xFF000000);
-    
+
     // Draw each triangle
     for (let var i = 0; i < triangles.len; ++i) {
         let triangle = triangles[i];
@@ -428,7 +428,7 @@ fun render_cube_tile(cube_data, tile_x, tile_y, tile_w, tile_h) {
             rasterize_triangle_tile(points[0], points[1], points[2], lit_color, tile_img, tile_x, tile_y, tile_w, tile_h);
         }
     }
-    
+
     return tile_img;
 }
 
@@ -457,11 +457,11 @@ class TileResult {
 fun actor_loop() {
     while (true) {
         let msg = $actor_recv();
-        
+
         // Done rendering
         if (msg == nil)
             return;
-        
+
         let tile_img = render_cube_tile(
             msg.cube_data,
             msg.tile_x,
@@ -469,7 +469,7 @@ fun actor_loop() {
             msg.tile_w,
             msg.tile_h
         );
-        
+
         let result = TileResult(tile_img, msg.tile_x, msg.tile_y, $actor_id());
         $actor_send($actor_parent(), result);
     }
@@ -478,15 +478,15 @@ fun actor_loop() {
 // Parallel cube rendering
 fun render_cube_parallel(fTheta) {
     let num_actors = 16;
-    
+
     // Create the actors
     let actor_ids = [];
     for (let var i = 0; i < num_actors; ++i)
         actor_ids.push($actor_spawn(actor_loop));
-    
+
     // Pre-compute cube data
     let cube_data = CubeRenderData(fTheta);
-    
+
     // Create a list of tile requests
     let requests = [];
     for (let var y = 0; y < HEIGHT; y = y + TILE_SIZE) {
@@ -497,17 +497,17 @@ fun render_cube_parallel(fTheta) {
         }
     }
     let num_tiles = requests.len;
-    
+
     // Image to render into
     let image = Image(WIDTH, HEIGHT);
-    
+
     let start_time = $time_current_ms();
-    
+
     // Send initial requests to each actor
     for (let var i = 0; i < num_actors && requests.len > 0; ++i) {
         $actor_send(actor_ids[i], requests.pop());
     }
-    
+
     // Receive all the render results. Buffer UI events that arrive here.
     let var num_received = 0;
     while (num_received < num_tiles) {
@@ -531,17 +531,18 @@ fun render_cube_parallel(fTheta) {
         }
 
         image.blit(msg.tile_img, msg.tile_x, msg.tile_y);
-        num_received = num_received + 1;
+        ++num_received;
     }
-    
+
     let render_time = $time_current_ms() - start_time;
-    $println("Parallel render time: " + render_time.to_s() + "ms");
-    
+    let fps = (1000 / render_time).floor();
+    $println("Parallel render time: " + render_time.to_s() + "ms (" + fps.to_s() + " fps)");
+
     // Tell actors to terminate
     for (let var i = 0; i < num_actors; ++i) {
         $actor_send(actor_ids[i], nil);
     }
-    
+
     return image;
 }
 
@@ -561,12 +562,12 @@ let var fTheta = 0.0;
 let var previous_time = $time_current_ms();
 
 // Switch between parallel and single-threaded rendering
-let var use_parallel = true; 
+let var use_parallel = true;
 
 loop {
     let current_time = $time_current_ms();
     let delta_time = (current_time - previous_time).to_f() * 0.001;
-    fTheta = fTheta + delta_time;
+    fTheta = fTheta + delta_time * 0.85;
     previous_time = current_time;
 
     if (should_exit) {
@@ -579,7 +580,7 @@ loop {
     } else {
         image = render_cube_single(fTheta);
     }
-    
+
     $window_draw_frame(window, image.bytes);
 
     // Collect any UI events that may have arrived during rendering
@@ -602,7 +603,7 @@ loop {
             $println("Switched to " + (use_parallel ? "parallel" : "single-threaded") + " rendering");
         }
     }
-    
+
     if (should_exit) break;
 
     $actor_sleep(16);
