@@ -565,7 +565,7 @@ let var use_parallel = true;
 
 loop {
     let current_time = $time_current_ms();
-    let delta_time = (current_time - previous_time_time).to_f() * 0.001;
+    let delta_time = (current_time - previous_time).to_f() * 0.001;
     fTheta = fTheta + delta_time;
     previous_time = current_time;
 
