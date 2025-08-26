@@ -618,7 +618,7 @@ mod tests
     #[test]
     fn test_files()
     {
-        //parse_file("tests/call_ident.pls");
+        //parse_file("tests/call_ident.psh");
     }
     */
 }

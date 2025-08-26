@@ -11,10 +11,10 @@ Plush is an experimental toy programming language and virtual machine inspired b
 To run a Plush script, you can use the `cargo run` command, followed by the path to the script. For example:
 
 ```sh
-cargo run examples/helloworld.pls
+cargo run examples/helloworld.psh
 ```
 
-This will execute the `helloworld.pls` script and print "Hello, World!" to the console. More example programs
+This will execute the `helloworld.psh` script and print "Hello, World!" to the console. More example programs
 can be found in the [`examples/`](/examples) directory. These examples are available under the
 [CC0 license](https://creativecommons.org/public-domain/cc0/) (public domain).
 
