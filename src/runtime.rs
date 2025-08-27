@@ -93,6 +93,15 @@ fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Value
     Value::from(int_val as i64)
 }
 
+/// Trim whitespace
+fn string_trim(actor: &mut Actor, s: Value) -> Value
+{
+    let s = s.unwrap_rust_str();
+    let s = s.trim().to_string();
+    let str_obj = actor.alloc.str_const(s);
+    Value::String(str_obj)
+}
+
 pub fn init_runtime(prog: &mut Program)
 {
     /*
@@ -143,6 +152,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
 
         (Value::String(_), "parse_int") => HostFn::Fn2_1(string_parse_int),
+        (Value::String(_), "trim") => HostFn::Fn1_1(string_trim),
 
         (Value::Class(ARRAY_ID), "with_size") => HostFn::Fn3_1(array_with_size),
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),

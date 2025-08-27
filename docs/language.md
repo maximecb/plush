@@ -169,6 +169,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `to_s()`: Returns a string representation of the float.
 -   **String**
     -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
+    -   `trim()`: Produce a new string without whitespace at the beginning or end.
 -   **Array**
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
     -   `push(value)`: Adds a value to the end of the array.
