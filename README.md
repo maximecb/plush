@@ -1,7 +1,7 @@
 # Plush
 
 Plush is an experimental toy programming language and virtual machine for fun and teaching purposes.
-It follows a minimalistic design philosphy and draws inspiration from JavaScript, [Lox](https://craftinginterpreters.com/the-lox-language.html), Lua and Python and Rust. Please do note that this project is very much a fun side-project and a work in progress. You're likely to run into bugs and missing features.
+It follows a minimalistic design philosphy and draws inspiration from JavaScript, [Lox](https://craftinginterpreters.com/the-lox-language.html), Lua, Python and Rust. Please do note that this project is very much a fun side-project and a work in progress. You're likely to run into bugs and missing features.
 
 If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
 
