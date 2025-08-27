@@ -415,6 +415,12 @@ impl From<i32> for Value {
     }
 }
 
+impl From<i64> for Value {
+    fn from(val: i64) -> Self {
+        Value::Int64(val)
+    }
+}
+
 impl From<bool> for Value {
     fn from(val: bool) -> Self {
         match val {
@@ -669,10 +675,10 @@ impl Actor
             class_id, |c| {
                 match c.fields.get(field_name) {
                     Some(slot_idx) => *slot_idx,
-                    None => panic!("unknown field '{}' in class '{}' (class_id: {:?}). Available fields: {:?}", 
-                        field_name, 
-                        c.name, 
-                        class_id, 
+                    None => panic!("unknown field '{}' in class '{}' (class_id: {:?}). Available fields: {:?}",
+                        field_name,
+                        c.name,
+                        class_id,
                         c.fields.keys().collect::<Vec<_>>())
                 }
         })

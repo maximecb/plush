@@ -167,6 +167,8 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `cos()`: Returns the cosine of the float.
     -   `sqrt()`: Returns the square root of the float.
     -   `to_s()`: Returns a string representation of the float.
+-   **String**
+    -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
 -   **Array**
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
     -   `push(value)`: Adds a value to the end of the array.

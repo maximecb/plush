@@ -67,6 +67,32 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Value
     Value::String(actor.alloc.str_const(s))
 }
 
+/// Try to parse the string as an integer with the given radix
+fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Value
+{
+    let s = s.unwrap_rust_str();
+    let radix = radix.unwrap_u64();
+
+    let mut lexer = crate::lexer::Lexer::new(s, "");
+    let int_val = lexer.parse_int(radix.try_into().unwrap());
+
+    let int_val = match int_val {
+        Ok(int_val) => int_val,
+        Err(_) => return Value::Nil
+    };
+
+    if int_val < i64::MIN.into() || int_val > i64::MAX.into() {
+        return Value::Nil;
+    }
+
+    // If some characters in the string were not consumed, fail
+    if !lexer.eof() {
+        return Value::Nil;
+    }
+
+    Value::from(int_val as i64)
+}
+
 pub fn init_runtime(prog: &mut Program)
 {
     /*
@@ -115,6 +141,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "cos") => HostFn::Fn1_1(float64_cos),
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
+
+        (Value::String(_), "parse_int") => HostFn::Fn2_1(string_parse_int),
 
         (Value::Class(ARRAY_ID), "with_size") => HostFn::Fn3_1(array_with_size),
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),
