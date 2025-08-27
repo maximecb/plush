@@ -1081,6 +1081,12 @@ pub fn parse_str(src: &str) -> Result<Program, ParseError>
 pub fn parse_file(file_name: &str) -> Result<Program, ParseError>
 {
     let mut input = Lexer::from_file(file_name)?;
+
+    // If a shebang line is present, treat it as a comment
+    if input.match_chars(&['#', '!']) {
+        input.eat_comment();
+    }
+
     parse_program(&mut input)
 }
 
