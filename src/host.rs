@@ -82,6 +82,9 @@ pub fn get_host_const(name: &str) -> Expr
     {
         "time_current_ms" => Expr::HostFn(Fn0_1(time_current_ms)),
 
+        "cmd_num_args" => Expr::HostFn(Fn0_1(cmd_num_args)),
+        "cmd_get_arg" => Expr::HostFn(Fn1_1(cmd_get_arg)),
+
         "print" => Expr::HostFn(Fn1_0(print)),
         "println" => Expr::HostFn(Fn1_0(println)),
         "readln" => Expr::HostFn(Fn0_1(readln)),
@@ -116,6 +119,30 @@ pub fn get_time_ms() -> u64
 pub fn time_current_ms(actor: &mut Actor) -> Value
 {
     Value::from(get_time_ms())
+}
+
+/// Get the number of command-line arguments
+pub fn cmd_num_args(actor: &mut Actor) -> Value
+{
+    let num_args = crate::REST_ARGS.lock().unwrap().len();
+    Value::from(num_args)
+}
+
+/// Get a command-line argument string by index
+/// Note: if we allocate just one object then we can be
+/// guaranteed that object won't be GC'd while this function runs
+pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Value
+{
+    let idx = idx.unwrap_usize();
+
+    let args = crate::REST_ARGS.lock().unwrap();
+
+    if idx >= args.len() {
+        panic!("invalid command-line argument index");
+    }
+
+    let str_obj = actor.alloc.str_const(args[idx].clone());
+    Value::String(str_obj)
 }
 
 /// Print a value to stdout

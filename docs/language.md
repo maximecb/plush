@@ -136,6 +136,8 @@ Plush provides a set of built-in host functions and methods that can be accessed
 These host functions are defined in [`src/host.rs`](/src/host.rs):
 
 -   `$time_current_ms()`: Returns the current time in milliseconds since the Unix epoch.
+-   `$cmd_num_args()`: Get the number of command-line arguments available to the program.
+-   `$cmd_get_arg(idx)`: Get the command-line argument at the given index.
 -   `$print(value)`: Prints a value to the console.
 -   `$println(value)`: Prints a value to the console, followed by a newline.
 -   `$readln()`: Read one line of input into a string.

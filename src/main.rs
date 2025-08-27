@@ -23,10 +23,14 @@ mod exec_tests;
 extern crate sdl2;
 use std::env;
 use std::process::exit;
+use std::sync::{Arc, Mutex};
 use crate::vm::{VM, Value};
 use crate::utils::{thousands_sep};
 use crate::ast::Program;
 use crate::parser::{parse_file, parse_str};
+
+/// Command-line arguments accessible to the program
+pub static REST_ARGS: Mutex<Vec<String>> = Mutex::new(vec![]);
 
 /// Command-line options
 #[derive(Default, Debug, Clone)]
@@ -136,6 +140,14 @@ fn main()
     //println!("{:?}", opts);
 
     let mut prog = parse_input(&opts);
+
+    // Store the rest arguments in a global variable
+    // This is so we can access them from host functions
+    let mut args = opts.rest;
+    if opts.input_file.is_some() {
+        args.insert(0, opts.input_file.unwrap());
+    }
+    *REST_ARGS.lock().unwrap() = args;
 
     match prog.resolve_syms() {
         Err(err) => {
