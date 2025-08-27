@@ -29,7 +29,7 @@ use crate::ast::Program;
 use crate::parser::{parse_file, parse_str};
 
 /// Command-line options
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 struct Options
 {
     // Parse/validate/compile the input, but don't execute it
@@ -37,6 +37,9 @@ struct Options
 
     // String of code to be evaluated
     eval_str: Option<String>,
+
+    // Input script file to parse/execute
+    input_file: Option<String>,
 
     // Unnamed rest arguments
     rest: Vec<String>,
@@ -48,11 +51,7 @@ struct Options
 // --allow-all
 fn parse_args(args: Vec<String>) -> Options
 {
-    let mut opts = Options {
-        no_exec: false,
-        eval_str: None,
-        rest: Vec::default(),
-    };
+    let mut opts = Options::default();
 
     // Start parsing at argument 1 because 0 is the current program name
     let mut idx = 1;
@@ -64,7 +63,8 @@ fn parse_args(args: Vec<String>) -> Options
 
         // If this is the start of the rest arguments
         if !arg.starts_with("-") {
-            opts.rest = args[idx..].to_vec();
+            opts.input_file = Some(args[idx].clone());
+            opts.rest = args[idx+1..].to_vec();
             break;
         }
 
@@ -113,12 +113,13 @@ fn parse_input(opts: &Options) -> Program
         };
     }
 
-    if opts.rest.len() != 1 {
-        println!("Error: must specify exactly one input file to run");
-        exit(-1);
-    }
-
-    let file_name = &opts.rest[0];
+    let file_name = match &opts.input_file {
+        None => {
+            println!("Error: must specify exactly one input file to run");
+            exit(-1);
+        }
+        Some(file_name) => file_name,
+    };
 
     match parse_file(file_name) {
         Err(err) => {
