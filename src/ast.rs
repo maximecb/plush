@@ -61,6 +61,9 @@ pub enum Expr
     // Host function
     HostFn(HostFn),
 
+    // ByteArray literal
+    ByteArray(Vec<u8>),
+
     // Array literal
     Array {
         exprs: Vec<ExprBox>,
