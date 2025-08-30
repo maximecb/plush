@@ -1530,6 +1530,11 @@ mod tests
         // and potentially also automatically removed by the editor
         parse_fails("let a = #[\\aascii \n];");
 
+        // Currently ASCII sequences end with every newline
+        // This is to allow spaces at the beginning of each line
+        // for ease of formatting
+        parse_fails("let a = #[\\aascii\nfoo];");
+
         // Incomplete hex byte
         parse_fails("let a = #[\\xF];");
 
