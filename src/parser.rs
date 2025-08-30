@@ -133,6 +133,12 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         return parse_dict(input, prog, pos);
     }
 
+    // Byte array literal
+    if input.match_chars(&['#', '[']) {
+        let expr = parse_bytearray(input, prog, pos)?;
+        return Ok(expr);
+    }
+
     // Host constant
     if ch == '$' {
         input.eat_ch();
@@ -379,52 +385,6 @@ fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseE
     parse_postfix(input, prog)
 }
 
-// Parse a dictionary literal
-fn parse_dict(
-    input: &mut Lexer,
-    prog: &mut Program,
-    pos: SrcPos,
-) -> Result<ExprBox, ParseError>
-{
-    // List of key, value pairs
-    let mut pairs = Vec::default();
-
-    loop
-    {
-        input.eat_ws()?;
-
-        if input.eof() {
-            return input.parse_error("unexpected end of input inside object");
-        }
-
-        if input.match_token("}")? {
-            break;
-        }
-
-        // Parse a field name
-        input.eat_ws()?;
-        let field_name = input.parse_ident()?;
-
-        // Parse the field value
-        input.expect_token(":")?;
-        let field_expr = parse_expr(input, prog)?;
-        pairs.push((field_name, field_expr));
-
-        if input.match_token("}")? {
-            break;
-        }
-
-        // If this isn't the last field, there
-        // has to be a comma separator
-        input.expect_token(",")?;
-    }
-
-    ExprBox::new_ok(
-        Expr::Dict { pairs },
-        pos
-    )
-}
-
 /// Parse a list of argument expressions
 fn parse_expr_list(input: &mut Lexer, prog: &mut Program, end_token: &str) -> Result<Vec<ExprBox>, ParseError>
 {
@@ -455,6 +415,161 @@ fn parse_expr_list(input: &mut Lexer, prog: &mut Program, end_token: &str) -> Re
 
     Ok(arg_exprs)
 }
+
+// Parse a dictionary literal
+fn parse_dict(
+    input: &mut Lexer,
+    prog: &mut Program,
+    pos: SrcPos,
+) -> Result<ExprBox, ParseError>
+{
+    // List of key, value pairs
+    let mut pairs = Vec::default();
+
+    loop
+    {
+        input.eat_ws()?;
+
+        if input.eof() {
+            return input.parse_error("unexpected end of input inside dictionary literal");
+        }
+
+        if input.match_token("}")? {
+            break;
+        }
+
+        // Parse a field name
+        input.eat_ws()?;
+        let field_name = input.parse_ident()?;
+
+        // Parse the field value
+        input.expect_token(":")?;
+        let field_expr = parse_expr(input, prog)?;
+        pairs.push((field_name, field_expr));
+
+        if input.match_token("}")? {
+            break;
+        }
+
+        // If this isn't the last field, there
+        // has to be a comma separator
+        input.expect_token(",")?;
+    }
+
+    ExprBox::new_ok(
+        Expr::Dict { pairs },
+        pos
+    )
+}
+
+
+
+
+// Parse a byte array literal
+fn parse_bytearray(
+    input: &mut Lexer,
+    prog: &mut Program,
+    pos: SrcPos,
+) -> Result<ExprBox, ParseError>
+{
+    let mut bytes: Vec<u8> = Vec::default();
+
+    fn parse_ascii(input: &mut Lexer, bytes: &mut Vec<u8>) -> Result<(), ParseError>
+    {
+        loop {
+            let ch = input.peek_ch();
+
+            if ch == ']' {
+                break;
+            }
+
+            if input.peek_chars(&['\\', 'x']) {
+                break;
+            }
+
+            if input.peek_chars(&['\\', 'b']) {
+                break;
+            }
+
+            if ch == '\t' {
+                return input.parse_error("tabs disallowed inside bytearray literals");
+            }
+
+            // End of line terminates the ascii sequence
+            if ch == '\r' || ch == '\n' {
+                if let Some(last_byte) = bytes.last() {
+                    if *last_byte == ' ' as u8 {
+                        return input.parse_error("spaces cannot immediately precede end of line in ascii sequence");
+                    }
+                }
+
+                break;
+            }
+
+            // Escape sequence
+            if ch == '\\' {
+                match input.eat_ch() {
+                    '\\' => bytes.push('\\' as u8),
+                    '\'' => bytes.push('\'' as u8),
+                    '\"' => bytes.push('\"' as u8),
+                    't' => bytes.push('\t' as u8),
+                    'r' => bytes.push('\r' as u8),
+                    'n' => bytes.push('\n' as u8),
+                    '0' => bytes.push('\0' as u8),
+                    _ => return input.parse_error("unknown escape sequence")
+                }
+            }
+
+            if !ch.is_ascii_graphic() && ch != ' ' {
+                break;
+            }
+
+            input.eat_ch();
+            bytes.push(ch.try_into().unwrap());
+        }
+
+        Ok(())
+    }
+
+
+
+
+
+    loop
+    {
+        if input.eof() {
+            return input.parse_error("unexpected end of input inside byte array literal");
+        }
+
+        if input.match_token("]")? {
+            break;
+        }
+
+        let ch = input.eat_ch();
+
+        // Ignore whitespace
+        if ch.is_ascii_whitespace() {
+            continue;
+        }
+
+        if ch != '\\' {
+            return input.parse_error("expected control sequence inside bytearray literal")
+        }
+
+        match input.eat_ch() {
+            'a' => parse_ascii(input, &mut bytes)?,
+            _ => return input.parse_error("unknown control sequence in bytearray literal")
+        }
+    }
+
+    ExprBox::new_ok(
+        Expr::ByteArray(bytes),
+        pos
+    )
+}
+
+
+
 
 struct OpInfo
 {
@@ -1290,7 +1405,7 @@ mod tests
     }
 
     #[test]
-    fn dict()
+    fn dicts()
     {
         // Literals
         parse_ok("let o = {};");
@@ -1317,6 +1432,24 @@ mod tests
 
         // Methods
         parse_ok("let a = []; a.push(1);");
+    }
+
+    #[test]
+    fn bytearrays()
+    {
+        parse_ok("let a = #[];");
+        parse_ok("let a = #[ ];");
+        parse_ok("let a = #[\\aascii string foobar];");
+        parse_ok("let a = #[\\aascii string\\tfoobar];");
+        parse_ok("let a = #[\\aascii\n  \\astring\n  \\aover multiple lines];");
+
+
+
+
+        // Can't have space right before a newline in an ascii sequence
+        // This is because the space would be invisible in most editors,
+        // and potentially also automatically removed by the editor
+        parse_fails("let a = #[\\aascii \n];");
     }
 
     #[test]

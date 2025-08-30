@@ -344,6 +344,7 @@ impl ExprBox
             Expr::Float64 { .. } => {}
             Expr::String { .. } => {}
             Expr::HostFn { .. } => {}
+            Expr::ByteArray(_) => {}
 
             Expr::Array { exprs, .. } => {
                 for expr in exprs {
