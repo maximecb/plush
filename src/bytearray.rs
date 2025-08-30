@@ -11,6 +11,13 @@ pub struct ByteArray
 
 impl ByteArray
 {
+    pub fn new(bytes: &Vec<u8>) -> Self
+    {
+        Self {
+            bytes: bytes.clone()
+        }
+    }
+
     pub fn num_bytes(&self) -> usize
     {
         self.bytes.len()
