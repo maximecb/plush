@@ -462,9 +462,6 @@ fn parse_dict(
     )
 }
 
-
-
-
 // Parse a byte array literal
 fn parse_bytearray(
     input: &mut Lexer,
@@ -531,9 +528,82 @@ fn parse_bytearray(
         Ok(())
     }
 
+    fn parse_hex(input: &mut Lexer, bytes: &mut Vec<u8>) -> Result<(), ParseError>
+    {
+        loop {
+            let ch = input.peek_ch();
 
+            if ch == ']' {
+                break;
+            }
 
+            if ch.is_ascii_whitespace() {
+                input.eat_ch();
+                continue;
+            }
 
+            if input.peek_chars(&['\\', 'a']) {
+                break;
+            }
+
+            if input.peek_chars(&['\\', 'b']) {
+                break;
+            }
+
+            // Read one hex byte
+            let ch0 = input.eat_ch().to_digit(16);
+            let ch1 = input.eat_ch().to_digit(16);
+
+            if ch0 == None || ch1 == None {
+                return input.parse_error("invalid or incomplete hex byte")
+            }
+
+            let byte = (ch0.unwrap() * 16 + ch1.unwrap()) as u8;
+            bytes.push(byte);
+        }
+
+        Ok(())
+    }
+
+    fn parse_bin(input: &mut Lexer, bytes: &mut Vec<u8>) -> Result<(), ParseError>
+    {
+        loop {
+            let ch = input.peek_ch();
+
+            if ch == ']' {
+                break;
+            }
+
+            if ch.is_ascii_whitespace() {
+                input.eat_ch();
+                continue;
+            }
+
+            if input.peek_chars(&['\\', 'a']) {
+                break;
+            }
+
+            if input.peek_chars(&['\\', 'x']) {
+                break;
+            }
+
+            // Read one binary byte
+            let mut byte = 0;
+            for mut i in 0..8 {
+                let d = input.eat_ch().to_digit(2);
+
+                if d == None {
+                    return input.parse_error("each binary byte must contain exactly 8 bits")
+                }
+
+                byte = (byte << 1) + d.unwrap() as u8;
+            }
+
+            bytes.push(byte);
+        }
+
+        Ok(())
+    }
 
     loop
     {
@@ -558,6 +628,8 @@ fn parse_bytearray(
 
         match input.eat_ch() {
             'a' => parse_ascii(input, &mut bytes)?,
+            'x' => parse_hex(input, &mut bytes)?,
+            'b' => parse_bin(input, &mut bytes)?,
             _ => return input.parse_error("unknown control sequence in bytearray literal")
         }
     }
@@ -567,9 +639,6 @@ fn parse_bytearray(
         pos
     )
 }
-
-
-
 
 struct OpInfo
 {
@@ -1443,13 +1512,29 @@ mod tests
         parse_ok("let a = #[\\aascii string\\tfoobar];");
         parse_ok("let a = #[\\aascii\n  \\astring\n  \\aover multiple lines];");
 
+        // Hex sequences
+        parse_ok("let a = #[\\xFF];");
+        parse_ok("let a = #[\\xFF AA BB];");
+        parse_ok("let a = #[\\xFF\n AA\n BB];");
+        parse_ok("let a = #[\\xFF\n AA\n BB\n \\aascii string];");
+        parse_ok("let a = #[\\xFF\n \\aascii string\n \\xCC];");
+        parse_ok("let a = #[\\x\nFF\nAA\nBB\nCC];");
 
-
+        // Binary sequences
+        parse_ok("let a = #[\\b00000000];");
+        parse_ok("let a = #[\\b00000000 00000001];");
+        parse_ok("let a = #[\\b00000000 \\xFF \\afoobar];");
 
         // Can't have space right before a newline in an ascii sequence
         // This is because the space would be invisible in most editors,
         // and potentially also automatically removed by the editor
         parse_fails("let a = #[\\aascii \n];");
+
+        // Incomplete hex byte
+        parse_fails("let a = #[\\xF];");
+
+        // Incomplete binary byte
+        parse_fails("let a = #[\\b0000];");
     }
 
     #[test]
