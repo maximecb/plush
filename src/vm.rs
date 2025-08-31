@@ -126,6 +126,9 @@ pub enum Insn
     arr_new { capacity: u32 },
     arr_push,
 
+    // Clone a bytearray
+    ba_clone,
+
     // Jump if true/false
     if_true { target_ofs: i32 },
     if_false { target_ofs: i32 },
@@ -1504,6 +1507,14 @@ impl Actor
                     let val = pop!();
                     let mut arr = pop!();
                     arr.unwrap_arr().push(val);
+                }
+
+                // Clone a bytearray
+                Insn::ba_clone => {
+                    let mut val = pop!();
+                    let ba = val.unwrap_ba();
+                    let p_clone = self.alloc.alloc(ba.clone());
+                    push!(Value::ByteArray(p_clone));
                 }
 
                 // Jump if true
