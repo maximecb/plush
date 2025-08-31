@@ -43,9 +43,9 @@ Plush is a dynamically typed language and supports the following data types:
 
 -   **Int64**: 64-bit signed integers (e.g., `10`, `-5`).
 -   **Float64**: 64-bit floating-point numbers (e.g., `3.14`, `-0.5`).
--   **String**: UTF-8 encoded strings (e.g., `"hello"`, `'world'`).
--   **Bool**: `true` or `false`.
--   **Nil**: Represents the absence of a value.
+-   **String**: Immutable UTF-8 encoded strings (e.g., `"hello"`, `'world'`).
+-   **Bool**: The constants `true` or `false`.
+-   **Nil**: The constant `nil` represents the absence of a value.
 -   **Array**: Ordered collections of values (e.g., `[1, 2, 3]`).
 -   **ByteArray**: Raw, mutable byte buffers.
 -   **Object**: Instances of classes.
@@ -168,6 +168,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `sqrt()`: Returns the square root of the float.
     -   `to_s()`: Returns a string representation of the float.
 -   **String**
+    -   `byte_at(idx)`: Get the UTF-8 byte at the given index.
     -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
     -   `trim()`: Produce a new string without whitespace at the beginning or end.
 -   **Array**

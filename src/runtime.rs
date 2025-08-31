@@ -67,6 +67,15 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Value
     Value::String(actor.alloc.str_const(s))
 }
 
+/// Get the UTF-8 byte at the given index
+fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Value
+{
+    let s = s.unwrap_rust_str();
+    let idx = idx.unwrap_usize();
+    let byte = s.as_bytes().get(idx).unwrap();
+    Value::from(*byte)
+}
+
 /// Try to parse the string as an integer with the given radix
 fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Value
 {
@@ -151,6 +160,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
 
+        (Value::String(_), "byte_at") => HostFn::Fn2_1(string_byte_at),
         (Value::String(_), "parse_int") => HostFn::Fn2_1(string_parse_int),
         (Value::String(_), "trim") => HostFn::Fn1_1(string_trim),
 
