@@ -152,13 +152,15 @@ fun draw_char(buffer, x, y, c) {
     let adv = simplex[n][0];
     let pts = simplex[n][1];
 
-    let var j = 0;
-    while(j < pts.len) {
-        let draw = (pts[j] != -1 || pts[j+1] != -1);
-        let dx = (draw ? x + pts[j]   : -1);
-        let dy = (draw ? y - pts[j+1] : -1);
-        draw_to(buffer, dx, dy);
-        j = j+2;
+    if(buffer != 0) {
+        let var j = 0;
+        while(j < pts.len) {
+            let draw = (pts[j] != -1 || pts[j+1] != -1);
+            let dx = (draw ? x + pts[j]   : -1);
+            let dy = (draw ? y - pts[j+1] : -1);
+            draw_to(buffer, dx, dy);
+            j = j+2;
+        }
     }
     return x+adv;
 }
@@ -173,7 +175,6 @@ fun draw_string(buffer, ix, y, s) {
         draw_to(buffer, -1, -1);
         i = i+1;
     }
-    draw_to(buffer, -1, -1);
     ox = -1;
     oy = -1;
     return x;
@@ -183,19 +184,22 @@ fun draw_thick_string(buffer, x, y, s) {
     draw_string(buffer, x+0, y+0, s);
     draw_string(buffer, x+0, y+1, s);
     draw_string(buffer, x+1, y+0, s);
-    draw_string(buffer, x+1, y+1, s);
+    return draw_string(buffer, x+1, y+1, s);
 }
 
 let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 let window = $window_create(WIDTH, HEIGHT, "Hershey Text", 0);
+
+let s = #[\aHello, World!];
+$print(draw_thick_string(0, 0, 0, s));
+$print("\n");
 
 let var count = 0;
 loop {
     // --- Drawing ---
     frame_buffer.zero_fill();
 
-    let s = [72, 101, 108, 108, 111, 44, 32, 87, 111, 114, 108, 100, 33];
-    draw_thick_string(frame_buffer, WIDTH>>3, HEIGHT>>1, s);
+    draw_thick_string(frame_buffer, WIDTH>>3, HEIGHT>>1, #[\aHello, World!]);
 
     draw_thick_string(frame_buffer, WIDTH>>1, HEIGHT>>1, [40,48+count,41]);
     count = (count + 1) % 10;
