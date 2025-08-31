@@ -268,7 +268,7 @@ impl StmtBox
                 ]);
                 */
 
-                code.push(Insn::panic);
+                code.push(Insn::panic { pos: self.pos });
                 patch_jump(code, if_idx, code.len());
             }
 

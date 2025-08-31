@@ -2,6 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
+use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
 use crate::array::Array;
@@ -18,7 +19,7 @@ use crate::host::*;
 pub enum Insn
 {
     // Halt execution and produce an error
-    panic,
+    panic { pos: SrcPos },
 
     // No-op
     nop,
@@ -943,8 +944,8 @@ impl Actor
             match insn {
                 Insn::nop => {},
 
-                Insn::panic => {
-                    panic!("encountered panic opcode");
+                Insn::panic { pos } => {
+                    panic!("panic at: {}", pos);
                 }
 
                 Insn::push { val } => {
