@@ -9,7 +9,7 @@ Some cool/fun/notable features:
 - Simple JavaScript/lox inspired syntax and straightforward semantics
 - Simple stack-based bytecode interpreter
 - Memory safe, actor-based parallelism
-- Easily extensible set of host functions
+- Easily extensible set of host functions defined in `src/host.rs`
 - Very few dependencies, good cross-platform support
 - Well-commented codebase
 
@@ -20,7 +20,8 @@ The Plush language supports:
 - Dynamic arrays aka vectors/lists
 - UTF-8 strings (work in progress)
 - Dictionaries with JS-like syntax (work in progress)
-- Host functions defined in `src/host.rs`
+- A native byte array type
+- A simple frame buffer API for graphics and animations
 
 Caveats and limitations:
 - The language is still very much incomplete
