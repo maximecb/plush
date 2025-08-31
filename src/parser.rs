@@ -488,8 +488,12 @@ fn parse_bytearray(
                 break;
             }
 
-            if ch == '\t' {
-                return input.parse_error("tabs disallowed inside bytearray literals");
+            if input.peek_chars(&['/', '/']) {
+                break;
+            }
+
+            if input.peek_chars(&['/', '*']) {
+                break;
             }
 
             // End of line terminates the ascii sequence
@@ -503,18 +507,26 @@ fn parse_bytearray(
                 break;
             }
 
+            if ch == '\t' {
+                return input.parse_error("tabs disallowed inside bytearray ASCII sequences");
+            }
+
             // Escape sequence
             if ch == '\\' {
-                match input.eat_ch() {
-                    '\\' => bytes.push('\\' as u8),
-                    '\'' => bytes.push('\'' as u8),
-                    '\"' => bytes.push('\"' as u8),
-                    't' => bytes.push('\t' as u8),
-                    'r' => bytes.push('\r' as u8),
-                    'n' => bytes.push('\n' as u8),
-                    '0' => bytes.push('\0' as u8),
+                input.eat_ch();
+                let ch = match input.eat_ch() {
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    '\"' => '\"',
+                    't'  => '\t',
+                    'r'  => '\r',
+                    'n'  => '\n',
+                    '0'  => '\0',
                     _ => return input.parse_error("unknown escape sequence")
-                }
+                };
+
+                bytes.push(ch.try_into().unwrap());
+                continue;
             }
 
             if !ch.is_ascii_graphic() && ch != ' ' {
@@ -531,22 +543,16 @@ fn parse_bytearray(
     fn parse_hex(input: &mut Lexer, bytes: &mut Vec<u8>) -> Result<(), ParseError>
     {
         loop {
+            // Ignore whitespace
+            input.eat_ws()?;
+
             let ch = input.peek_ch();
 
             if ch == ']' {
                 break;
             }
 
-            if ch.is_ascii_whitespace() {
-                input.eat_ch();
-                continue;
-            }
-
-            if input.peek_chars(&['\\', 'a']) {
-                break;
-            }
-
-            if input.peek_chars(&['\\', 'b']) {
+            if !ch.is_ascii_alphanumeric() {
                 break;
             }
 
@@ -568,22 +574,16 @@ fn parse_bytearray(
     fn parse_bin(input: &mut Lexer, bytes: &mut Vec<u8>) -> Result<(), ParseError>
     {
         loop {
+            // Ignore whitespace
+            input.eat_ws()?;
+
             let ch = input.peek_ch();
 
             if ch == ']' {
                 break;
             }
 
-            if ch.is_ascii_whitespace() {
-                input.eat_ch();
-                continue;
-            }
-
-            if input.peek_chars(&['\\', 'a']) {
-                break;
-            }
-
-            if input.peek_chars(&['\\', 'x']) {
+            if ch != '0' && ch != '1' {
                 break;
             }
 
@@ -607,6 +607,9 @@ fn parse_bytearray(
 
     loop
     {
+        // Ignore whitespace
+        input.eat_ws()?;
+
         if input.eof() {
             return input.parse_error("unexpected end of input inside byte array literal");
         }
@@ -616,11 +619,6 @@ fn parse_bytearray(
         }
 
         let ch = input.eat_ch();
-
-        // Ignore whitespace
-        if ch.is_ascii_whitespace() {
-            continue;
-        }
 
         if ch != '\\' {
             return input.parse_error("expected control sequence inside bytearray literal")

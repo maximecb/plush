@@ -2,6 +2,18 @@ let ba = #[\aASCII character sequence];
 assert(ba[0] == 65);
 assert(ba.len == 24);
 
+let ba_esc = #[\a\t];
+assert(ba_esc.len == 1);
+
+let ba_comment = #[\afoo /* comment */];
+assert(ba_comment.len == 4);
+
+let ba_newline = #[
+    \afoo
+    \abar
+];
+assert(ba_newline.len == 6);
+
 let ba2 = #[
     \athis is a multiline
     \aASCII character
@@ -9,7 +21,7 @@ let ba2 = #[
     \aThere can also be escape sequences
     \alike \t and \n, or \\ inside ASCII sequences
 ];
-assert(ba2.len == 121);
+assert(ba2.len == 118);
 
 let ba_hex = #[\x
     FF AA
@@ -34,11 +46,30 @@ let ba_mix = #[
     \b
     00110011
     00000000
+
+    // You can even put comments inside of
+    // bytearray literals to explain what is being encoded
     \x
     FF AA BB CC
     DD EE BB AA
+
+    /*
+    Multiline comments
+    also work normally
+    */
     \aASCII data
+
+    \x
+    FF AA
+    BB CC // Comment inside hex sequence
+    DD EE
+    BB AA
+
     \x
     CAFEBABE
+
+    \aMore text data// Comment after text
+    \aYet more text // Another comment
 ];
-assert(ba_mix.len == 24);
+//$println(ba_mix.len);
+assert(ba_mix.len == 60);
