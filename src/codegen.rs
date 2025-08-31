@@ -337,6 +337,7 @@ impl ExprBox
                 let ba = crate::bytearray::ByteArray::new(bytes);
                 let p_ba = alloc.alloc(ba);
                 code.push(Insn::push { val: Value::ByteArray(p_ba) });
+                code.push(Insn::ba_clone);
             }
 
             Expr::Array { exprs } => {
