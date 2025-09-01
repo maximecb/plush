@@ -5,6 +5,9 @@ let HEIGHT = 480;
 let CYAN   = 0xFF_40_E0_D0;
 
 // Character Data from https://paulbourke.net/dataformats/hershey/
+// - from ' ' to '~', in ascii order
+// - the first integer is the width of the glyph
+// - the second list is the x,y pen coordinates, except (-1,-1) is pen up
 let simplex = [
 [16, [] ],
 [10, [5,21,5,7,-1,-1,5,2,4,1,5,0,6,1,5,2] ],
@@ -171,7 +174,7 @@ fun draw_string(buffer, ix, y, s) {
     oy = -1;
     let var i = 0;
     while(i < s.len) {
-        x = draw_char(buffer, x, y, s[i]);
+        x = draw_char(buffer, x, y, s.byte_at(i));
         draw_to(buffer, -1, -1);
         i = i+1;
     }
@@ -190,18 +193,21 @@ fun draw_thick_string(buffer, x, y, s) {
 let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 let window = $window_create(WIDTH, HEIGHT, "Hershey Text", 0);
 
-let s = #[\aHello, World!];
+let s = "Hello, World!";
 $print(draw_thick_string(0, 0, 0, s));
 $print("\n");
+
+let counts = [ "(0)","(1)","(2)","(3)","(4)",
+               "(5)","(6)","(7)","(8)","(9)" ];
 
 let var count = 0;
 loop {
     // --- Drawing ---
     frame_buffer.zero_fill();
 
-    draw_thick_string(frame_buffer, WIDTH>>3, HEIGHT>>1, #[\aHello, World!]);
+    draw_thick_string(frame_buffer, WIDTH>>3, HEIGHT>>1, s);
 
-    draw_thick_string(frame_buffer, WIDTH>>1, HEIGHT>>1, [40,48+count,41]);
+    draw_thick_string(frame_buffer, WIDTH>>1, HEIGHT>>1, counts[count]);
     count = (count + 1) % 10;
 
     $window_draw_frame(window, frame_buffer);
