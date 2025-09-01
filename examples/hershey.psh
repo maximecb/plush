@@ -110,8 +110,8 @@ let simplex = [
 
 // Bresenham
 fun draw_line(buffer, x0, y0, x1, y1, color) {
-    let var sx = (x0 < x1 ? 1 : -1);
-    let var sy = (y0 < y1 ? 1 : -1);
+    let sx = (x0 < x1 ? 1 : -1);
+    let sy = (y0 < y1 ? 1 : -1);
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
     
@@ -164,8 +164,8 @@ fun draw_char(buffer, x, y, c) {
         let var j = 0;
         while(j < pts.len) {
             let draw = (pts[j] != -1 || pts[j+1] != -1);
-            let nx = (draw ? x + pts[j]   : -1);
-            let ny = (draw ? y - pts[j+1] : -1);
+            let nx = (draw ? x + 2*pts[j]   : -1);
+            let ny = (draw ? y - 2*pts[j+1] : -1);
             if (ox != -1 &&  oy != -1 && nx != -1 && ny != -1) {
                 draw_line(buffer, ox, oy, nx, ny, CYAN);
             }
@@ -174,7 +174,7 @@ fun draw_char(buffer, x, y, c) {
             j = j+2;
         }
     }
-    return x+adv;
+    return x+2*adv;
 }
 
 fun utf8_advance(c) {
@@ -210,10 +210,10 @@ fun set_rgb(r,g,b) {
     return (0xFF << 24) | (r << 16) | (g << 8) | b;
 }
 
-fun blur(buffer, dx, dy) {
+fun down_sample(buffer, dx, dy) {
     let rbuf = ByteArray.with_size(WIDTH * HEIGHT * 4);
-    for(let var iy = 0; iy < dy; ++iy) {
-        for(let var ix = 0; ix < dx; ++ix) {
+    for(let var iy = 0; iy < dy; iy = iy + 2) {
+        for(let var ix = 0; ix < dx; ix = ix + 2) {
             let pixa = buffer.read_u32(iy     * WIDTH + ix);
             let pixb = buffer.read_u32((iy+1) * WIDTH + ix);
             let pixc = buffer.read_u32(iy     * WIDTH + (ix+1));
@@ -221,7 +221,7 @@ fun blur(buffer, dx, dy) {
             let r = get_r(pixa) + get_r(pixb) + get_r(pixc) + get_r(pixd);
             let g = get_g(pixa) + get_g(pixb) + get_g(pixc) + get_g(pixd);
             let b = get_b(pixa) + get_b(pixb) + get_b(pixc) + get_b(pixd);
-            rbuf.write_u32(iy * WIDTH + ix, set_rgb(r>>2,g>>2,b>>2));
+            rbuf.write_u32((iy>>1) * WIDTH + (ix>>1), set_rgb(r>>2,g>>2,b>>2));
         }
     }
     return rbuf;
@@ -231,10 +231,12 @@ class Slug {
     // Slugs are 30 pixels above the baseline; 10 below
     init(self, s) {
         self.dx = draw_thick_string(0, 0, 0, s);
-        self.dy = 40;
+        self.dy = 80;
         let buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
-        draw_thick_string(buffer, 0, 30, s);
-        self.buffer = blur(buffer, self.dx, self.dy);
+        draw_thick_string(buffer, 0, 60, s);
+        self.buffer = down_sample(buffer, self.dx, self.dy);
+        self.dx = self.dx >> 1;
+        self.dy = self.dy >> 1;
     }
 
     render(self, buffer, x, y) {
@@ -270,7 +272,7 @@ loop {
     slug_s.render(frame_buffer, (WIDTH-slug_s.dx)>>1, HEIGHT>>2);
 
     let slug = slug_counts[count];
-    slug.render(frame_buffer, (WIDTH-slug.dx)>>1, (HEIGHT>>1) + HEIGHT>>2);
+    slug.render(frame_buffer, (WIDTH-slug.dx)>>1, HEIGHT>>1);
     count = (count + 1) % 10;
 
     $window_draw_frame(window, frame_buffer);
