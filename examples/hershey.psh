@@ -150,7 +150,21 @@ fun draw_to(buffer, nx, ny) {
     oy = ny;
 }
 
+fun draw_tofu(buffer, x, y) {
+    if (buffer != 0) {
+        draw_line(buffer, x+ 2, y,    x+18, y,    CYAN);
+        draw_line(buffer, x+18, y,    x+18, y-28, CYAN);
+        draw_line(buffer, x+18, y-28, x+ 2, y-28, CYAN);
+        draw_line(buffer, x+ 2, y-28, x+ 2, y,    CYAN);
+    }
+    return x+20;
+}
+
 fun draw_char(buffer, x, y, c) {
+    if (c < 32 || c > 126) {
+        return draw_tofu(buffer, x, y);
+    }
+
     let n = c-32;
     let adv = simplex[n][0];
     let pts = simplex[n][1];
@@ -168,15 +182,23 @@ fun draw_char(buffer, x, y, c) {
     return x+adv;
 }
 
+fun utf8_advance(c) {
+    if((c & 0x80) == 0x00) return 1;
+    if((c & 0xe0) == 0xc0) return 2;
+    if((c & 0xf0) == 0xe0) return 3;
+    return 4;
+}
+
 fun draw_string(buffer, ix, y, s) {
     let var x = ix;
     ox = -1;
     oy = -1;
     let var i = 0;
     while(i < s.len) {
-        x = draw_char(buffer, x, y, s.byte_at(i));
+        let c = s.byte_at(i);
+        x = draw_char(buffer, x, y, c);
         draw_to(buffer, -1, -1);
-        i = i+1;
+        i = i + utf8_advance(c);
     }
     ox = -1;
     oy = -1;
@@ -193,7 +215,7 @@ fun draw_thick_string(buffer, x, y, s) {
 let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 let window = $window_create(WIDTH, HEIGHT, "Hershey Text", 0);
 
-let s = "Hello, World!";
+let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "Hello, World!");
 $print(draw_thick_string(0, 0, 0, s));
 $print("\n");
 
