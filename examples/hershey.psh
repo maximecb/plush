@@ -139,17 +139,6 @@ fun draw_line(buffer, x0, y0, x1, y1, color) {
     }
 }
 
-let var ox = -1;
-let var oy = -1;
-
-fun draw_to(buffer, nx, ny) {
-    if (ox != -1 &&  oy != -1 && nx != -1 && ny != -1) {
-        draw_line(buffer, ox, oy, nx, ny, CYAN);
-    }
-    ox = nx;
-    oy = ny;
-}
-
 fun draw_tofu(buffer, x, y) {
     if (buffer != 0) {
         draw_line(buffer, x+ 2, y,    x+18, y,    CYAN);
@@ -170,12 +159,18 @@ fun draw_char(buffer, x, y, c) {
     let pts = simplex[n][1];
 
     if(buffer != 0) {
+        let var ox = -1;
+        let var oy = -1;
         let var j = 0;
         while(j < pts.len) {
             let draw = (pts[j] != -1 || pts[j+1] != -1);
-            let dx = (draw ? x + pts[j]   : -1);
-            let dy = (draw ? y - pts[j+1] : -1);
-            draw_to(buffer, dx, dy);
+            let nx = (draw ? x + pts[j]   : -1);
+            let ny = (draw ? y - pts[j+1] : -1);
+            if (ox != -1 &&  oy != -1 && nx != -1 && ny != -1) {
+                draw_line(buffer, ox, oy, nx, ny, CYAN);
+            }
+            ox = nx;
+            oy = ny;
             j = j+2;
         }
     }
@@ -191,17 +186,12 @@ fun utf8_advance(c) {
 
 fun draw_string(buffer, ix, y, s) {
     let var x = ix;
-    ox = -1;
-    oy = -1;
     let var i = 0;
     while(i < s.len) {
         let c = s.byte_at(i);
         x = draw_char(buffer, x, y, c);
-        draw_to(buffer, -1, -1);
         i = i + utf8_advance(c);
     }
-    ox = -1;
-    oy = -1;
     return x;
 }
 
