@@ -80,26 +80,12 @@ fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Value
 fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Value
 {
     let s = s.unwrap_rust_str();
-    let radix = radix.unwrap_u64();
+    let radix = radix.unwrap_u32();
 
-    let mut lexer = crate::lexer::Lexer::new(s, "");
-    let int_val = lexer.parse_int(radix.try_into().unwrap());
-
-    let int_val = match int_val {
-        Ok(int_val) => int_val,
-        Err(_) => return Value::Nil
-    };
-
-    if int_val < i64::MIN.into() || int_val > i64::MAX.into() {
-        return Value::Nil;
+    match i64::from_str_radix(s, radix) {
+        Ok(int_val) => Value::from(int_val),
+        Err(_) => Value::Nil,
     }
-
-    // If some characters in the string were not consumed, fail
-    if !lexer.eof() {
-        return Value::Nil;
-    }
-
-    Value::from(int_val as i64)
 }
 
 /// Trim whitespace
