@@ -2,7 +2,7 @@
 
 let WIDTH  = 640;
 let HEIGHT = 480;
-let CYAN   = 0xFF_40_E0_D0;
+let CYAN   = 0xFF_60_FF_D0;
 
 // Character Data from https://paulbourke.net/dataformats/hershey/
 // - from ' ' to '~', in ascii order
@@ -202,27 +202,81 @@ fun draw_thick_string(buffer, x, y, s) {
     return draw_string(buffer, x+1, y+1, s);
 }
 
+
+fun get_r(p) { return (p >> 16) & 0xFF; }
+fun get_g(p) { return (p >>  8) & 0xFF; }
+fun get_b(p) { return (p >>  0) & 0xFF; }
+fun set_rgb(r,g,b) {
+    return (0xFF << 24) | (r << 16) | (g << 8) | b;
+}
+
+fun blur(buffer, dx, dy) {
+    let rbuf = ByteArray.with_size(WIDTH * HEIGHT * 4);
+    for(let var iy = 0; iy < dy; ++iy) {
+        for(let var ix = 0; ix < dx; ++ix) {
+            let pixa = buffer.read_u32(iy     * WIDTH + ix);
+            let pixb = buffer.read_u32((iy+1) * WIDTH + ix);
+            let pixc = buffer.read_u32(iy     * WIDTH + (ix+1));
+            let pixd = buffer.read_u32((iy+1) * WIDTH + (ix+1));
+            let r = get_r(pixa) + get_r(pixb) + get_r(pixc) + get_r(pixd);
+            let g = get_g(pixa) + get_g(pixb) + get_g(pixc) + get_g(pixd);
+            let b = get_b(pixa) + get_b(pixb) + get_b(pixc) + get_b(pixd);
+            rbuf.write_u32(iy * WIDTH + ix, set_rgb(r>>2,g>>2,b>>2));
+        }
+    }
+    return rbuf;
+}
+
+class Slug {
+    // Slugs are 30 pixels above the baseline; 10 below
+    init(self, s) {
+        self.dx = draw_thick_string(0, 0, 0, s);
+        self.dy = 40;
+        let buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
+        draw_thick_string(buffer, 0, 30, s);
+        // anti-alias
+        let tmp = blur(buffer, self.dx, self.dy);
+        self.buffer = blur(tmp, self.dx, self.dy);
+    }
+
+    render(self, buffer, x, y) {
+        let var iy = y - 30;
+        let var sy = 0;
+        while(iy < y + 10) {
+            buffer.memcpy((iy * WIDTH + x)*4, self.buffer, sy, self.dx * 4);
+            iy = iy + 1;
+            sy = sy + WIDTH*4;
+        }
+    }
+}
+
 let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 let window = $window_create(WIDTH, HEIGHT, "Hershey Text", 0);
 
 let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "Hello, World!");
-$print(draw_thick_string(0, 0, 0, s));
-$print("\n");
+let slug_s = Slug(s);
 
 let counts = [ "(0)","(1)","(2)","(3)","(4)",
                "(5)","(6)","(7)","(8)","(9)" ];
+
+let slug_counts= [0,0,0,0,0,0,0,0,0,0];
+for(let var i = 0; i<slug_counts.len; ++i) {
+    slug_counts[i] = Slug(counts[i]);
+}
 
 let var count = 0;
 loop {
     // --- Drawing ---
     frame_buffer.zero_fill();
 
-    draw_thick_string(frame_buffer, WIDTH>>3, HEIGHT>>1, s);
+    slug_s.render(frame_buffer, (WIDTH-slug_s.dx)>>1, HEIGHT>>2);
 
-    draw_thick_string(frame_buffer, WIDTH>>1, HEIGHT>>1, counts[count]);
+    let slug = slug_counts[count];
+    slug.render(frame_buffer, (WIDTH-slug.dx)>>1, (HEIGHT>>1) + HEIGHT>>2);
     count = (count + 1) % 10;
 
     $window_draw_frame(window, frame_buffer);
+
     $actor_sleep(200); // Limit the frame rate
 
     // --- Event Handling ---
