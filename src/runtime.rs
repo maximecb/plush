@@ -67,6 +67,23 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Value
     Value::String(actor.alloc.str_const(s))
 }
 
+/// Create a single-character string from a codepoint integer value
+fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> Value
+{
+    // TODO: eventually we can add caching for this,
+    // at least for ASCII character values, we can
+    // easily intern those strings
+
+    let codepoint = codepoint.unwrap_u32();
+    let ch = char::from_u32(codepoint).expect("Invalid Unicode codepoint");
+
+    let mut s = String::new();
+    s.push(ch);
+
+    let str_obj = actor.alloc.str_const(s);
+    Value::String(str_obj)
+}
+
 /// Get the UTF-8 byte at the given index
 fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Value
 {
@@ -146,6 +163,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
 
+        (Value::Class(STRING_ID), "from_codepoint") => HostFn::Fn2_1(string_from_codepoint),
         (Value::String(_), "byte_at") => HostFn::Fn2_1(string_byte_at),
         (Value::String(_), "parse_int") => HostFn::Fn2_1(string_parse_int),
         (Value::String(_), "trim") => HostFn::Fn1_1(string_trim),
