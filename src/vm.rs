@@ -2191,6 +2191,7 @@ mod tests
     #[test]
     fn instanceof()
     {
+        eval_eq("class F {} return nil instanceof F;", Value::False);
         eval_eq("class F {} let o = F(); return o instanceof F;", Value::True);
         eval_eq("class F {} class G {} let o = F(); return o instanceof G;", Value::False);
         eval_eq("class F {} return F() instanceof F;", Value::True);

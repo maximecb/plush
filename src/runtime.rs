@@ -201,6 +201,7 @@ pub fn get_class_id(val: Value) -> ClassId
             obj.class_id
         }
 
+        Value::Nil => NIL_ID,
         Value::Int64(_) => INT64_ID,
         Value::Float64(_) => FLOAT64_ID,
         Value::String(_) => STRING_ID,
