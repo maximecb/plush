@@ -4,6 +4,8 @@ let WIDTH  = 640;
 let HEIGHT = 480;
 let CYAN   = 0xFF_60_FF_D0;
 
+// --- Glyph Vectors ---
+
 // Character Data from https://paulbourke.net/dataformats/hershey/
 // - from ' ' to '~', in ascii order
 // - the first integer is the width of the glyph
@@ -106,6 +108,99 @@ let simplex = [
 [24, [3,6,3,8,4,11,6,12,8,12,10,11,14,8,16,7,18,7,20,8,21,10,-1,-1,3,8,4,10,6,11,8,11,10,10,14,7,16,6,18,6,20,7,21,10,21,12] ],
 ];
 
+// glyph image cache
+let glyph = [
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0
+];
+
+// --- Blitting Infra ---
+
+class Image
+{
+    init(self, width, height)
+    {
+        assert(width instanceof Int64);
+        assert(height instanceof Int64);
+
+        self.width = width;
+        self.height = height;
+        self.bytes = ByteArray.with_size(4 * width * height);
+    }
+
+    // The color is specified as an u32 value in RGBA32 format
+    get_pixel(self, x, y)
+    {
+        let idx = y * self.width + x;
+        return(self.bytes.read_u32(idx));
+    }
+
+    set_pixel(self, x, y, color)
+    {
+        let idx = y * self.width + x;
+        self.bytes.write_u32(idx, color);
+    }
+
+    // Copy a source image into this image at a given position
+    blit(self, src_img, dst_x, dst_y)
+    {
+        let var dst_x = dst_x;
+        let var dst_y = dst_y;
+        let var src_x = 0;
+        let var src_y = 0;
+        let var width = src_img.width;
+        let var height = src_img.height;
+
+        if (dst_x < 0)
+        {
+            src_x = -dst_x;
+            width = width + dst_x;
+            dst_x = 0;
+        }
+
+        if (dst_y < 0)
+        {
+            src_y = -dst_y;
+            height = height + dst_y;
+            dst_y = 0;
+        }
+
+        if (dst_x + width > self.width)
+        {
+            width = self.width - dst_x;
+        }
+
+        if (dst_y + height > self.height)
+        {
+            height = self.height - dst_y;
+        }
+
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        // Number of bytes per row of the images
+        let dst_pitch = self.width * 4;
+        let src_pitch = src_img.width * 4;
+
+        for (let var j = 0; j < height; ++j)
+        {
+            let src_idx = (src_y + j) * src_pitch + src_x * 4;
+            let dst_idx = (dst_y + j) * dst_pitch + dst_x * 4;
+            self.bytes.memcpy(dst_idx, src_img.bytes, src_idx, width * 4);
+        }
+    }
+}
+
 // --- Graphics Functions ---
 
 // Bresenham
@@ -120,8 +215,7 @@ fun draw_line(buffer, x0, y0, x1, y1, color) {
     let var y = y0;
     
     loop {
-        // Plot the current point
-        buffer.write_u32(y * WIDTH + x, color);
+        buffer.set_pixel(x, y, color);
         if (x == x1 && y == y1) {
             return;
         }
@@ -149,6 +243,54 @@ fun draw_tofu(buffer, x, y) {
     return x+20;
 }
 
+fun render_glyph(x, y, width, height, pts) {
+    let i = Image(width, height);
+    let var ox = -1;
+    let var oy = -1;
+    let var j = 0;
+    while(j < pts.len) {
+        let draw = (pts[j] != -1 || pts[j+1] != -1);
+        let nx = (draw ? x + 2*pts[j]   : -1);
+        let ny = (draw ? y - 2*pts[j+1] : -1);
+        if (ox != -1 &&  oy != -1 && nx != -1 && ny != -1) {
+            draw_line(i, ox,   oy,   nx,   ny,   CYAN);
+            draw_line(i, ox+1, oy,   nx+1, ny,   CYAN);
+            draw_line(i, ox,   oy+1, nx,   ny+1, CYAN);
+            draw_line(i, ox+1, oy+1, nx+1, ny+1, CYAN);
+        }
+        ox = nx;
+        oy = ny;
+        j = j+2;
+    }
+    return i;
+}
+
+fun get_r(p) { return (p >> 16) & 0xFF; }
+fun get_g(p) { return (p >>  8) & 0xFF; }
+fun get_b(p) { return (p >>  0) & 0xFF; }
+fun set_rgb(r,g,b) {
+    return (0xFF << 24) | (r << 16) | (g << 8) | b;
+}
+
+fun down_sample(hi) {
+    let dx = hi.width;
+    let dy = hi.height;
+    let lo = Image(dx>>1, dy>>1);
+    for(let var iy = 0; iy < dy; iy = iy + 2) {
+        for(let var ix = 0; ix < dx; ix = ix + 2) {
+            let pixa = hi.get_pixel(ix,   iy  );
+            let pixb = hi.get_pixel(ix+1, iy  );
+            let pixc = hi.get_pixel(ix,   iy+1);
+            let pixd = hi.get_pixel(ix+1, iy+1);
+            let r = get_r(pixa) + get_r(pixb) + get_r(pixc) + get_r(pixd);
+            let g = get_g(pixa) + get_g(pixb) + get_g(pixc) + get_g(pixd);
+            let b = get_b(pixa) + get_b(pixb) + get_b(pixc) + get_b(pixd);
+            lo.set_pixel(ix>>1, iy>>1, set_rgb(r>>2,g>>2,b>>2));
+        }
+    }
+    return lo;
+}
+
 fun draw_char(buffer, x, y, c) {
     if (c < 32 || c > 126) {
         return draw_tofu(buffer, x, y);
@@ -159,22 +301,12 @@ fun draw_char(buffer, x, y, c) {
     let pts = simplex[n][1];
 
     if(buffer != 0) {
-        let var ox = -1;
-        let var oy = -1;
-        let var j = 0;
-        while(j < pts.len) {
-            let draw = (pts[j] != -1 || pts[j+1] != -1);
-            let nx = (draw ? x + 2*pts[j]   : -1);
-            let ny = (draw ? y - 2*pts[j+1] : -1);
-            if (ox != -1 &&  oy != -1 && nx != -1 && ny != -1) {
-                draw_line(buffer, ox, oy, nx, ny, CYAN);
-            }
-            ox = nx;
-            oy = ny;
-            j = j+2;
+        if(glyph[n] == 0) {
+            glyph[n] = down_sample(render_glyph(0, 60, 2*adv, 80, pts));
         }
+        buffer.blit(glyph[n], x, y-30);
     }
-    return x+2*adv;
+    return x+adv;
 }
 
 fun utf8_advance(c) {
@@ -195,87 +327,28 @@ fun draw_string(buffer, ix, y, s) {
     return x;
 }
 
-fun draw_thick_string(buffer, x, y, s) {
-    draw_string(buffer, x+0, y+0, s);
-    draw_string(buffer, x+0, y+1, s);
-    draw_string(buffer, x+1, y+0, s);
-    return draw_string(buffer, x+1, y+1, s);
-}
+// --- Main Loop ---
 
-
-fun get_r(p) { return (p >> 16) & 0xFF; }
-fun get_g(p) { return (p >>  8) & 0xFF; }
-fun get_b(p) { return (p >>  0) & 0xFF; }
-fun set_rgb(r,g,b) {
-    return (0xFF << 24) | (r << 16) | (g << 8) | b;
-}
-
-fun down_sample(buffer, dx, dy) {
-    let rbuf = ByteArray.with_size(WIDTH * HEIGHT * 4);
-    for(let var iy = 0; iy < dy; iy = iy + 2) {
-        for(let var ix = 0; ix < dx; ix = ix + 2) {
-            let pixa = buffer.read_u32(iy     * WIDTH + ix);
-            let pixb = buffer.read_u32((iy+1) * WIDTH + ix);
-            let pixc = buffer.read_u32(iy     * WIDTH + (ix+1));
-            let pixd = buffer.read_u32((iy+1) * WIDTH + (ix+1));
-            let r = get_r(pixa) + get_r(pixb) + get_r(pixc) + get_r(pixd);
-            let g = get_g(pixa) + get_g(pixb) + get_g(pixc) + get_g(pixd);
-            let b = get_b(pixa) + get_b(pixb) + get_b(pixc) + get_b(pixd);
-            rbuf.write_u32((iy>>1) * WIDTH + (ix>>1), set_rgb(r>>2,g>>2,b>>2));
-        }
-    }
-    return rbuf;
-}
-
-class Slug {
-    // Slugs are 30 pixels above the baseline; 10 below
-    init(self, s) {
-        self.dx = draw_thick_string(0, 0, 0, s);
-        self.dy = 80;
-        let buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
-        draw_thick_string(buffer, 0, 60, s);
-        self.buffer = down_sample(buffer, self.dx, self.dy);
-        self.dx = self.dx >> 1;
-        self.dy = self.dy >> 1;
-    }
-
-    render(self, buffer, x, y) {
-        let var iy = y - 30;
-        let var sy = 0;
-        while(iy < y + 10) {
-            buffer.memcpy((iy * WIDTH + x)*4, self.buffer, sy, self.dx * 4);
-            iy = iy + 1;
-            sy = sy + WIDTH*4;
-        }
-    }
-}
-
-let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
+let frame_buffer = Image(WIDTH, HEIGHT);
 let window = $window_create(WIDTH, HEIGHT, "Hershey Text", 0);
 
 let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "Hello, World!");
-let slug_s = Slug(s);
+let s_w = draw_string(0, 0, 0, s);
 
 let counts = [ "(0)","(1)","(2)","(3)","(4)",
                "(5)","(6)","(7)","(8)","(9)" ];
-
-let slug_counts= [0,0,0,0,0,0,0,0,0,0];
-for(let var i = 0; i<slug_counts.len; ++i) {
-    slug_counts[i] = Slug(counts[i]);
-}
+let c_w = draw_string(0, 0, 0, counts[0]);
 
 let var count = 0;
 loop {
     // --- Drawing ---
-    frame_buffer.zero_fill();
+    frame_buffer.bytes.zero_fill();
 
-    slug_s.render(frame_buffer, (WIDTH-slug_s.dx)>>1, HEIGHT>>2);
-
-    let slug = slug_counts[count];
-    slug.render(frame_buffer, (WIDTH-slug.dx)>>1, HEIGHT>>1);
+    draw_string(frame_buffer, (WIDTH-s_w)>>1, HEIGHT>>2, s);
+    draw_string(frame_buffer, (WIDTH-c_w)>>1, HEIGHT>>1, counts[count]);
     count = (count + 1) % 10;
 
-    $window_draw_frame(window, frame_buffer);
+    $window_draw_frame(window, frame_buffer.bytes);
 
     $actor_sleep(200); // Limit the frame rate
 
