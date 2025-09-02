@@ -1,6 +1,11 @@
 use crate::ast::*;
 use crate::vm::{Value, Actor};
 
+fn identity_method(actor: &mut Actor, self_val: Value) -> Value
+{
+    self_val
+}
+
 fn int64_abs(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_i64();
@@ -161,12 +166,14 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "sin") => HostFn::Fn1_1(float64_sin),
         (Value::Float64(_), "cos") => HostFn::Fn1_1(float64_cos),
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
+        (Value::Float64(_), "to_f") => HostFn::Fn1_1(identity_method),
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
 
         (Value::Class(STRING_ID), "from_codepoint") => HostFn::Fn2_1(string_from_codepoint),
         (Value::String(_), "byte_at") => HostFn::Fn2_1(string_byte_at),
         (Value::String(_), "parse_int") => HostFn::Fn2_1(string_parse_int),
         (Value::String(_), "trim") => HostFn::Fn1_1(string_trim),
+        (Value::String(_), "to_s") => HostFn::Fn1_1(identity_method),
 
         (Value::Class(ARRAY_ID), "with_size") => HostFn::Fn3_1(array_with_size),
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),
