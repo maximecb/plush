@@ -1,0 +1,192 @@
+// Snake Game Example for Plush
+
+let FRAME_WIDTH = 640;
+let FRAME_HEIGHT = 640;
+
+let GRID_WIDTH = 32;
+let GRID_HEIGHT = 32;
+let TILE_SIZE = 20;
+let MAX_SNAKE_LEN = 2048;
+
+// --- Colors ---
+let WALL_COLOR = 0xFF873E23;
+let APPLE_COLOR = 0xFFFF0000;
+let SNAKE_BODY_COLOR = 0xFF00FF00;
+let SNAKE_HEAD_COLOR = 0xFFFF00FF;
+
+// --- Game State ---
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+let var apple_x = 10;
+let var apple_y = 10;
+let var dx = 0;
+let var dy = 1;
+let var snake_len = 5;
+let var snake_xs = Array.with_size(MAX_SNAKE_LEN, 0);
+let var snake_ys = Array.with_size(MAX_SNAKE_LEN, 0);
+
+// --- Pseudo-Random Number Generator (LCG) ---
+let var lcg_seed = 1;
+fun rand_init(seed) {
+    lcg_seed = seed & 0x7FFFFFFF;
+}
+fun rand_int(max_val) {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lcg_seed % max_val;
+}
+
+// --- Drawing Functions ---
+fun max(a, b) { if (a > b) return a; return b; }
+fun min(a, b) { if (a < b) return a; return b; }
+
+fun draw_square(buffer, xmin, ymin, size, color) {
+    let x_start = max(0, xmin);
+    let y_start = max(0, ymin);
+    let x_end = min(FRAME_WIDTH, xmin + size);
+    let y_end = min(FRAME_HEIGHT, ymin + size);
+    let clipped_width = x_end - x_start;
+    if (clipped_width <= 0) return;
+
+    for (let var j = y_start; j < y_end; ++j) {
+        let start_index = j * FRAME_WIDTH + x_start;
+        buffer.fill_u32(start_index, clipped_width, color);
+    }
+}
+
+fun draw_circle(buffer, xmin, ymin, size, color) {
+    let radius = (size / 2).floor();
+    let cx = xmin + radius;
+    let cy = ymin + radius;
+    let r2 = (radius - 1) * (radius - 1);
+
+    for (let var y = ymin; y < ymin + size; ++y) {
+        for (let var x = xmin; x < xmin + size; ++x) {
+            let p_dx = x - cx;
+            let p_dy = y - cy;
+            if ((p_dx * p_dx + p_dy * p_dy) <= r2) {
+                if (x >= 0 && x < FRAME_WIDTH && y >= 0 && y < FRAME_HEIGHT) {
+                    buffer.write_u32(y * FRAME_WIDTH + x, color);
+                }
+            }
+        }
+    }
+}
+
+// --- Game Logic ---
+fun snake_collision(x, y) {
+    for (let var i = 0; i < snake_len; ++i) {
+        if (snake_xs[i] == x && snake_ys[i] == y) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fun spawn_apple() {
+    loop {
+        let nx = 2 + rand_int(GRID_WIDTH - 4);
+        let ny = 2 + rand_int(GRID_HEIGHT - 4);
+        if (!snake_collision(nx, ny)) {
+            apple_x = nx;
+            apple_y = ny;
+            break;
+        }
+    }
+}
+
+// --- Main Program ---
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Snake Game", 0);
+rand_init($time_current_ms());
+
+// Initialize snake position
+for (let var i = 0; i < snake_len; ++i) {
+    snake_xs[i] = (GRID_WIDTH / 2).floor();
+    snake_ys[i] = (GRID_HEIGHT / 4).floor() - i;
+}
+
+spawn_apple();
+
+loop {
+    // --- Handle Input ---
+    loop {
+        let msg = $actor_poll();
+
+        if (msg == nil)
+            break;
+
+        if (msg instanceof UIEvent) {
+            if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+                break;
+            }
+
+            if (msg.kind == 'KEY_DOWN') {
+                let sdx = snake_xs[0] - snake_xs[1];
+                let sdy = snake_ys[0] - snake_ys[1];
+
+                if (msg.key == 'LEFT' && sdx != 1) { dx = -1; dy = 0; }
+                else if (msg.key == 'RIGHT' && sdx != -1) { dx = 1; dy = 0; }
+                else if (msg.key == 'UP' && sdy != 1) { dx = 0; dy = -1; }
+                else if (msg.key == 'DOWN' && sdy != -1) { dx = 0; dy = 1; }
+            }
+        }
+    }
+
+    // --- Update Game State ---
+    let nx = snake_xs[0] + dx;
+    let ny = snake_ys[0] + dy;
+
+    if (snake_collision(nx, ny)) {
+        $println("Snake ran into itself!");
+        break;
+    }
+
+    if (nx <= 0 || nx >= GRID_WIDTH - 1 || ny <= 0 || ny >= GRID_HEIGHT - 1) {
+        $println("Snake crashed into wall!");
+        break;
+    }
+
+    // Move body
+    for (let var i = snake_len - 1; i > 0; --i) {
+        snake_xs[i] = snake_xs[i-1];
+        snake_ys[i] = snake_ys[i-1];
+    }
+    // Move head
+    snake_xs[0] = nx;
+    snake_ys[0] = ny;
+
+    if (nx == apple_x && ny == apple_y) {
+        // The new segment should be at the current tail's position
+        snake_xs[snake_len] = snake_xs[snake_len - 1];
+        snake_ys[snake_len] = snake_ys[snake_len - 1];
+
+        spawn_apple();
+        snake_len = snake_len + 1;
+        $println("Got the apple! Length: " + snake_len.to_s());
+    }
+
+    // --- Drawing ---
+    frame_buffer.zero_fill();
+
+    // Draw walls
+    for (let var i = 0; i < GRID_WIDTH; ++i) {
+        draw_square(frame_buffer, i * TILE_SIZE, 0, TILE_SIZE, WALL_COLOR);
+        draw_square(frame_buffer, i * TILE_SIZE, (GRID_HEIGHT-1) * TILE_SIZE, TILE_SIZE, WALL_COLOR);
+    }
+    for (let var j = 1; j < GRID_HEIGHT - 1; ++j) {
+        draw_square(frame_buffer, 0, j * TILE_SIZE, TILE_SIZE, WALL_COLOR);
+        draw_square(frame_buffer, (GRID_WIDTH-1) * TILE_SIZE, j * TILE_SIZE, TILE_SIZE, WALL_COLOR);
+    }
+
+    // Draw apple
+    draw_circle(frame_buffer, apple_x * TILE_SIZE, apple_y * TILE_SIZE, TILE_SIZE, APPLE_COLOR);
+
+    // Draw snake
+    for (let var i = 1; i < snake_len; ++i) {
+        draw_square(frame_buffer, snake_xs[i] * TILE_SIZE, snake_ys[i] * TILE_SIZE, TILE_SIZE, SNAKE_BODY_COLOR);
+    }
+    draw_square(frame_buffer, snake_xs[0] * TILE_SIZE, snake_ys[0] * TILE_SIZE, TILE_SIZE, SNAKE_HEAD_COLOR);
+
+    $window_draw_frame(window, frame_buffer);
+    $actor_sleep(100);
+}
+
+$println("Game Over!");
