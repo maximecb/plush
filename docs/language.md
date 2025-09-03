@@ -163,11 +163,13 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `abs()`: Get the absolute value of this number.
     -   `ceil()`: Returns the smallest integer greater than or equal to the float.
     -   `floor()`: Returns the largest integer less than or equal to the float.
+    -   `trunc()`: Truncate the float and produce an integer value.
     -   `sin()`: Returns the sine of the float.
     -   `cos()`: Returns the cosine of the float.
     -   `sqrt()`: Returns the square root of the float.
     -   `to_s()`: Returns a string representation of the float.
 -   **String**
+    -   `from_codepoint(int_val)`: Get a single-character string representing the given unicode codepoint value.
     -   `byte_at(idx)`: Get the UTF-8 byte at the given index.
     -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
     -   `trim()`: Produce a new string without whitespace at the beginning or end.

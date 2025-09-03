@@ -375,13 +375,14 @@ impl From<ClassId> for usize {
 
 /// Constant class ids for basic classes
 /// Note that id 0 is reserved as an unused value
-pub const OBJECT_ID: ClassId = ClassId(1);
-pub const INT64_ID: ClassId = ClassId(2);
-pub const FLOAT64_ID: ClassId = ClassId(3);
-pub const STRING_ID: ClassId = ClassId(4);
-pub const ARRAY_ID: ClassId = ClassId(5);
-pub const BYTEARRAY_ID: ClassId = ClassId(6);
-pub const UIEVENT_ID: ClassId = ClassId(7);
+pub const NIL_ID: ClassId = ClassId(1);
+pub const OBJECT_ID: ClassId = ClassId(2);
+pub const INT64_ID: ClassId = ClassId(3);
+pub const FLOAT64_ID: ClassId = ClassId(4);
+pub const STRING_ID: ClassId = ClassId(5);
+pub const ARRAY_ID: ClassId = ClassId(6);
+pub const BYTEARRAY_ID: ClassId = ClassId(7);
+pub const UIEVENT_ID: ClassId = ClassId(8);
 pub const LAST_RESERVED_ID: usize = 0xFF;
 
 #[derive(Default, Clone, Debug)]

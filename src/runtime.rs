@@ -1,6 +1,11 @@
 use crate::ast::*;
 use crate::vm::{Value, Actor};
 
+fn identity_method(actor: &mut Actor, self_val: Value) -> Value
+{
+    self_val
+}
+
 fn int64_abs(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_i64();
@@ -42,6 +47,14 @@ fn float64_floor(actor: &mut Actor, v: Value) -> Value
     Value::Int64(int_val)
 }
 
+fn float64_trunc(actor: &mut Actor, v: Value) -> Value
+{
+    // TODO: check that float value fits in integer range
+    let v = v.unwrap_f64();
+    let int_val = v.trunc() as i64;
+    Value::Int64(int_val)
+}
+
 fn float64_sin(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_f64();
@@ -65,6 +78,23 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Value
     let v = v.unwrap_f64();
     let s = format!("{}", v);
     Value::String(actor.alloc.str_const(s))
+}
+
+/// Create a single-character string from a codepoint integer value
+fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> Value
+{
+    // TODO: eventually we can add caching for this,
+    // at least for ASCII character values, we can
+    // easily intern those strings
+
+    let codepoint = codepoint.unwrap_u32();
+    let ch = char::from_u32(codepoint).expect("Invalid Unicode codepoint");
+
+    let mut s = String::new();
+    s.push(ch);
+
+    let str_obj = actor.alloc.str_const(s);
+    Value::String(str_obj)
 }
 
 /// Get the UTF-8 byte at the given index
@@ -141,14 +171,18 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "abs") => HostFn::Fn1_1(float64_abs),
         (Value::Float64(_), "ceil") => HostFn::Fn1_1(float64_ceil),
         (Value::Float64(_), "floor") => HostFn::Fn1_1(float64_floor),
+        (Value::Float64(_), "trunc") => HostFn::Fn1_1(float64_trunc),
         (Value::Float64(_), "sin") => HostFn::Fn1_1(float64_sin),
         (Value::Float64(_), "cos") => HostFn::Fn1_1(float64_cos),
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
+        (Value::Float64(_), "to_f") => HostFn::Fn1_1(identity_method),
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
 
+        (Value::Class(STRING_ID), "from_codepoint") => HostFn::Fn2_1(string_from_codepoint),
         (Value::String(_), "byte_at") => HostFn::Fn2_1(string_byte_at),
         (Value::String(_), "parse_int") => HostFn::Fn2_1(string_parse_int),
         (Value::String(_), "trim") => HostFn::Fn1_1(string_trim),
+        (Value::String(_), "to_s") => HostFn::Fn1_1(identity_method),
 
         (Value::Class(ARRAY_ID), "with_size") => HostFn::Fn3_1(array_with_size),
         (Value::Array(_), "push") => HostFn::Fn2_0(array_push),
@@ -176,6 +210,7 @@ pub fn get_class_id(val: Value) -> ClassId
             obj.class_id
         }
 
+        Value::Nil => NIL_ID,
         Value::Int64(_) => INT64_ID,
         Value::Float64(_) => FLOAT64_ID,
         Value::String(_) => STRING_ID,
