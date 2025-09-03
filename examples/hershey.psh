@@ -3,8 +3,12 @@
 let WIDTH  = 640;
 let HEIGHT = 480;
 let CYAN   = 0xFF_60_FF_D0;
+let AA_MUL = 2;
 
 // --- Glyph Vectors ---
+
+let LEADING = 40;
+let ASCENT  = 30;
 
 // Character Data from https://paulbourke.net/dataformats/hershey/
 // - from ' ' to '~', in ascii order
@@ -106,10 +110,11 @@ let simplex = [
 [8, [4,25,4,-7] ],
 [14, [5,25,7,24,8,23,9,21,9,19,8,17,7,16,6,14,6,12,8,10,-1,-1,7,24,8,22,8,20,7,18,6,17,5,15,5,13,6,11,10,9,6,7,5,5,5,3,6,1,7,0,8,-2,8,-4,7,-6,-1,-1,8,8,6,6,6,4,7,2,8,1,9,-1,9,-3,8,-5,7,-6,5,-7] ],
 [24, [3,6,3,8,4,11,6,12,8,12,10,11,14,8,16,7,18,7,20,8,21,10,-1,-1,3,8,4,10,6,11,8,11,10,10,14,7,16,6,18,6,20,7,21,10,21,12] ],
+[20, [2,0,2,28,18,28,18,0,2,0] ],
 ];
 
 // glyph image cache
-let glyph = Array.with_size(95, 0);
+let glyph = Array.with_size(96, 0);
 
 // --- Blitting Infra ---
 
@@ -222,34 +227,27 @@ fun draw_line(buffer, x0, y0, x1, y1, color) {
     }
 }
 
-fun draw_tofu(buffer, x, y) {
-    if (buffer != 0) {
-        draw_line(buffer, x+ 2, y,    x+18, y,    CYAN);
-        draw_line(buffer, x+18, y,    x+18, y-28, CYAN);
-        draw_line(buffer, x+18, y-28, x+ 2, y-28, CYAN);
-        draw_line(buffer, x+ 2, y-28, x+ 2, y,    CYAN);
+fun draw_thick_line(buffer, x0, y0, x1, y1, color, scale) {
+    for(let var ay=0; ay < scale; ay = ay + 1) {
+        for(let var ax=0; ax < scale; ax = ax + 1) {
+            draw_line(buffer, x0+ax, y0+ay, x1+ax, y1+ay, color);
+        }
     }
-    return x+20;
 }
 
 fun render_glyph(x, y, width, height, pts) {
     let i = Image(width, height);
     let var ox = -1;
     let var oy = -1;
-    let var j = 0;
-    while(j < pts.len) {
+    for(let var j=0; j < pts.len; j = j+2) {
         let draw = (pts[j] != -1 || pts[j+1] != -1);
-        let nx = (draw ? x + 2*pts[j]   : -1);
-        let ny = (draw ? y - 2*pts[j+1] : -1);
+        let nx = (draw ? x + AA_MUL*pts[j]   : -1);
+        let ny = (draw ? y - AA_MUL*pts[j+1] : -1);
         if (ox != -1 &&  oy != -1 && nx != -1 && ny != -1) {
-            draw_line(i, ox,   oy,   nx,   ny,   CYAN);
-            draw_line(i, ox+1, oy,   nx+1, ny,   CYAN);
-            draw_line(i, ox,   oy+1, nx,   ny+1, CYAN);
-            draw_line(i, ox+1, oy+1, nx+1, ny+1, CYAN);
+            draw_thick_line(i, ox, oy, nx, ny, CYAN, AA_MUL);
         }
         ox = nx;
         oy = ny;
-        j = j+2;
     }
     return i;
 }
@@ -261,39 +259,47 @@ fun set_rgb(r,g,b) {
     return (0xFF << 24) | (r << 16) | (g << 8) | b;
 }
 
+fun div(x,y) {
+    return (x.to_f()/y.to_f()).floor();
+}
+
 fun down_sample(hi) {
     let dx = hi.width;
     let dy = hi.height;
-    let lo = Image(dx>>1, dy>>1);
-    for(let var iy = 0; iy < dy; iy = iy + 2) {
-        for(let var ix = 0; ix < dx; ix = ix + 2) {
-            let pixa = hi.get_pixel(ix,   iy  );
-            let pixb = hi.get_pixel(ix+1, iy  );
-            let pixc = hi.get_pixel(ix,   iy+1);
-            let pixd = hi.get_pixel(ix+1, iy+1);
-            let r = get_r(pixa) + get_r(pixb) + get_r(pixc) + get_r(pixd);
-            let g = get_g(pixa) + get_g(pixb) + get_g(pixc) + get_g(pixd);
-            let b = get_b(pixa) + get_b(pixb) + get_b(pixc) + get_b(pixd);
-            lo.set_pixel(ix>>1, iy>>1, set_rgb(r>>2,g>>2,b>>2));
+    let lo = Image(div(dx,AA_MUL), div(dy,AA_MUL));
+    for(let var iy = 0; iy < dy; iy = iy + AA_MUL) {
+        for(let var ix = 0; ix < dx; ix = ix + AA_MUL) {
+            let var r = 0;
+            let var g = 0;
+            let var b = 0;
+            let var c = 0;
+            for(let var ay = 0; ay < AA_MUL; ay = ay + 1) {
+                for(let var ax = 0; ax < AA_MUL; ax = ax + 1) {
+                    let pix = hi.get_pixel(ix+ax, iy+ay);
+                    r = r + get_r(pix);
+                    g = g + get_g(pix);
+                    b = b + get_b(pix);
+                    c = c + 1;
+                }
+            }
+            lo.set_pixel(div(ix,AA_MUL), div(iy,AA_MUL),
+                set_rgb(div(r,c), div(g,c), div(b,c)));
         }
     }
     return lo;
 }
 
 fun draw_char(buffer, x, y, c) {
-    if (c < 32 || c > 126) {
-        return draw_tofu(buffer, x, y);
-    }
-
-    let n = c-32;
+    let n = (32 <= c && c <= 126 ? c-32 : 127-32);
     let adv = simplex[n][0];
     let pts = simplex[n][1];
 
     if(buffer != 0) {
         if(glyph[n] == 0) {
-            glyph[n] = down_sample(render_glyph(0, 60, 2*adv, 80, pts));
+            glyph[n] = down_sample(render_glyph(0, AA_MUL*ASCENT,
+                           AA_MUL*adv, AA_MUL*LEADING, pts));
         }
-        buffer.blit(glyph[n], x, y-30);
+        buffer.blit(glyph[n], x, y-ASCENT);
     }
     return x+adv;
 }
@@ -324,8 +330,7 @@ let window = $window_create(WIDTH, HEIGHT, "Hershey Text", 0);
 let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "Hello, World!");
 let s_w = draw_string(0, 0, 0, s);
 
-let counts = [ "(0)","(1)","(2)","(3)","(4)",
-               "(5)","(6)","(7)","(8)","(9)" ];
+let counts = [ "(0)","(1)","(2)","(3)","(4)", "(5)","(6)","(7)","(8)","(9)" ];
 let c_w = draw_string(0, 0, 0, counts[0]);
 
 let var count = 0;
