@@ -371,9 +371,6 @@ let window = $window_create(WIDTH, HEIGHT, "Hershey Text", 0);
 let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "Hello, Beautiful World!");
 let s_w = draw_string(0, 0, 0, s);
 
-let counts = [ "(0)","(1)","(2)","(3)","(4)", "(5)","(6)","(7)","(8)","(9)" ];
-let c_w = draw_string(0, 0, 0, counts[0]);
-
 // Drawable ASCII chars
 // 32 to 126, 94 chars
 // Go with rows of 16
@@ -397,9 +394,12 @@ loop {
     frame_buffer.bytes.zero_fill();
 
     let start_time = $time_current_ms();
+
     draw_string(frame_buffer, (WIDTH-s_w)>>1, (HEIGHT>>2), s);
-    draw_string(frame_buffer, (WIDTH-c_w)>>1, (HEIGHT>>2) + 60, counts[count]);
-    count = (count + 1) % 10;
+    let count_str = "(" + count.to_s() + ")";
+    let c_w = draw_string(0, 0, 0, count_str);
+    draw_string(frame_buffer, (WIDTH-c_w)>>1, (HEIGHT>>2) + 60, count_str);
+    ++count;
     for (let var i = 0; i < char_lines.len; ++i)
         draw_string(frame_buffer, 20, (HEIGHT>>1) + 60 + (40 * i), char_lines[i]);
 
