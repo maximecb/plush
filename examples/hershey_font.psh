@@ -11,7 +11,7 @@ let LEADING = 40;
 let ASCENT  = 30;
 
 // Character Data from https://paulbourke.net/dataformats/hershey/
-// - from ' ' to '~', in ascii order
+// - from ' ' to '~', in ascii order (0x20 to 0x7E)
 // - the first integer is the width of the glyph
 // - the second list is the x,y pen coordinates, except (-1,-1) is pen up
 let simplex = [
@@ -244,23 +244,23 @@ fun draw_line(buffer, x0, y0, x1, y1, color) {
     let sy = (y0 < y1 ? 1 : -1);
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
-    
+
     let var err = dx - dy;
     let var x = x0;
     let var y = y0;
-    
+
     loop {
         buffer.set_pixel(x, y, color);
         if (x == x1 && y == y1) {
             return;
         }
-        
+
         let e2 = 2 * err;
         if (e2 > -dy) {
             err = err - dy;
             x = x + sx;
         }
-        
+
         if (e2 < dx) {
             err = err + dx;
             y = y + sy;
@@ -368,20 +368,45 @@ fun draw_string(buffer, ix, y, s) {
 let frame_buffer = Image(WIDTH, HEIGHT);
 let window = $window_create(WIDTH, HEIGHT, "Hershey Text", 0);
 
-let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "Hello, World!");
+let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "Hello, Beautiful World!");
 let s_w = draw_string(0, 0, 0, s);
 
 let counts = [ "(0)","(1)","(2)","(3)","(4)", "(5)","(6)","(7)","(8)","(9)" ];
 let c_w = draw_string(0, 0, 0, counts[0]);
+
+// Drawable ASCII chars
+// 32 to 126, 94 chars
+// Go with rows of 16
+let char_lines = [];
+let CHARS_PER_LINE = 28;
+let var char_idx = 32;
+while (char_idx < 126)
+{
+    let var char_s = '';
+    for (let var i = 0; i < CHARS_PER_LINE; ++i)
+    {
+        char_s = char_s + String.from_codepoint(char_idx + i);
+    }
+    char_lines.push(char_s);
+    char_idx = char_idx + char_s.len;
+}
 
 let var count = 0;
 loop {
     // --- Drawing ---
     frame_buffer.bytes.zero_fill();
 
-    draw_string(frame_buffer, (WIDTH-s_w)>>1, HEIGHT>>2, s);
-    draw_string(frame_buffer, (WIDTH-c_w)>>1, HEIGHT>>1, counts[count]);
+    let start_time = $time_current_ms();
+    draw_string(frame_buffer, (WIDTH-s_w)>>1, (HEIGHT>>2), s);
+    draw_string(frame_buffer, (WIDTH-c_w)>>1, (HEIGHT>>2) + 60, counts[count]);
     count = (count + 1) % 10;
+    for (let var i = 0; i < char_lines.len; ++i)
+        draw_string(frame_buffer, 20, (HEIGHT>>1) + 60 + (40 * i), char_lines[i]);
+
+    let end_time = $time_current_ms();
+    $print('redraw time: ');
+    $print(end_time - start_time);
+    $println('ms');
 
     $window_draw_frame(window, frame_buffer.bytes);
 
@@ -390,9 +415,6 @@ loop {
     // --- Event Handling ---
     let msg = $actor_poll();
 
-    if (msg == nil) {
-        continue;
-    }
     if (!(msg instanceof UIEvent)) {
         continue;
     }
