@@ -1,0 +1,37 @@
+/*
+This is the basic CRC-32 calculation with some optimization but no
+table lookup. The the byte reversal is avoided by shifting the crc reg
+right instead of left and by using a reversed 32-bit word to represent
+the polynomial.
+*/
+
+fun crc32b(message) {
+    let var crc = 0xFFFFFFFF;
+
+    for (let var i = 0; i < message.len; ++i) {
+        let byte = message.byte_at(i);
+        crc = crc ^ byte;
+
+        for (let var j = 0; j < 8; ++j) {
+            if ((crc & 1) == 1) {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc = crc >> 1;
+            }
+        }
+    }
+
+    // Bitwise NOT for a 32-bit integer
+    return crc ^ 0xFFFFFFFF;
+}
+
+let r = crc32b("");
+assert(r == 0);
+
+let r2 = crc32b("foobar");
+assert(r2 == 2666930069);
+
+let r3 = crc32b("One day at a time, one step at a time.");
+assert(r3 == 237905478);
+
+$println("CRC32 tests passed!");
