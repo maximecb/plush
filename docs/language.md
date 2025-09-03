@@ -163,6 +163,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `abs()`: Get the absolute value of this number.
     -   `ceil()`: Returns the smallest integer greater than or equal to the float.
     -   `floor()`: Returns the largest integer less than or equal to the float.
+    -   `trunc()`: Truncate the float and produce an integer value.
     -   `sin()`: Returns the sine of the float.
     -   `cos()`: Returns the cosine of the float.
     -   `sqrt()`: Returns the square root of the float.

@@ -47,6 +47,14 @@ fn float64_floor(actor: &mut Actor, v: Value) -> Value
     Value::Int64(int_val)
 }
 
+fn float64_trunc(actor: &mut Actor, v: Value) -> Value
+{
+    // TODO: check that float value fits in integer range
+    let v = v.unwrap_f64();
+    let int_val = v.trunc() as i64;
+    Value::Int64(int_val)
+}
+
 fn float64_sin(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_f64();
@@ -163,6 +171,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "abs") => HostFn::Fn1_1(float64_abs),
         (Value::Float64(_), "ceil") => HostFn::Fn1_1(float64_ceil),
         (Value::Float64(_), "floor") => HostFn::Fn1_1(float64_floor),
+        (Value::Float64(_), "trunc") => HostFn::Fn1_1(float64_trunc),
         (Value::Float64(_), "sin") => HostFn::Fn1_1(float64_sin),
         (Value::Float64(_), "cos") => HostFn::Fn1_1(float64_cos),
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
