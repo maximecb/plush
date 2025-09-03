@@ -1157,7 +1157,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 & v1),
-                        _ => panic!()
+                        _ => panic!("bitwise AND with non-integer values")
                     };
 
                     push!(r);
