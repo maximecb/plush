@@ -1,17 +1,14 @@
 # Plush
 
 Plush is an experimental toy programming language and virtual machine for fun and teaching purposes.
-It follows a minimalistic design philosphy and draws inspiration from JavaScript, [Lox](https://craftinginterpreters.com/the-lox-language.html), Lua, Python and Rust. Please do note that this project is very much a fun side-project and a work in progress. You're likely to run into bugs and missing features.
+It follows a minimalistic design philosphy and draws inspiration from JavaScript, [Lox](https://craftinginterpreters.com/the-lox-language.html), Lua, Python and Rust.
+Plush supports actor-based parallelism and is designed such that there is no global VM lock.
+The language has straightforward semantics and is built around a simple stack-based interpreter. The codebase is well-commented, has very few depencencies, and
+good cross-platform support.
+Please do note however that this project is very much a fun side-project and a work in progress. You're likely to run into bugs and
+missing features.
 
 If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
-
-Some cool/fun/notable features:
-- Simple JavaScript/lox inspired syntax and straightforward semantics
-- Simple stack-based bytecode interpreter
-- Memory safe, actor-based parallelism
-- Easily extensible set of host functions defined in `src/host.rs`
-- Very few dependencies, good cross-platform support
-- Well-commented codebase
 
 The Plush language supports:
 - Dynamic typing
@@ -20,8 +17,10 @@ The Plush language supports:
 - Dynamic arrays aka vectors/lists
 - UTF-8 strings (work in progress)
 - Dictionaries with JS-like syntax (work in progress)
+- Memory safe, actor-based parallelism
 - A native byte array type
 - A simple frame buffer API for graphics and animations
+- An extensible set of host functions defined in `src/host.rs`
 
 Caveats and limitations:
 - The language is still very much incomplete
