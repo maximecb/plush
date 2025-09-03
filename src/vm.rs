@@ -361,27 +361,30 @@ impl PartialEq for Value
     {
         use Value::*;
 
-        // For strings, we do a structural equality comparison, so
-        // that some strings can be interned (deduplicated)
-        if let (String(p1), String(p2)) = (self, other) {
-            return unsafe { **p1 == **p2 };
-        }
+        match (self, other) {
+            (Nil, Nil) => true,
+            (True, True) => true,
+            (False, False) => true,
 
-        // For all other cases, use the default comparison
-        std::mem::discriminant(self) == std::mem::discriminant(other)
-        && match (self, other) {
-            (Nil, _) => true,
-            (True, _) => true,
-            (False, _) => true,
+            // For strings, we do a structural equality comparison, so
+            // that some strings can be interned (deduplicated)
+            (String(p1), String(p2))    => unsafe { **p1 == **p2 },
+
+            // For int & float, we may need type conversions
+            (Float64(a), Int64(b))      => *a == *b as f64,
+            (Int64(a), Float64(b))      => *a as f64 == *b,
+
+            // For all other cases, use structural equality
             (Int64(a), Int64(b))        => a == b,
             (Float64(a), Float64(b))    => a == b,
             (HostFn(a), HostFn(b))      => a == b,
             (Fun(a), Fun(b))            => a == b,
             (Closure(a), Closure(b))    => a == b,
             (Object(a), Object(b))      => a == b,
-            (Array(a), Array(b))        => a == b,
-            (ByteArray(a), ByteArray(b))        => a == b,
-            _ => panic!("not yet implemented eq {:?} == {:?}", self, other),
+            (Array(a), Array(b))            => a == b,
+            (ByteArray(a), ByteArray(b))    => a == b,
+
+            _ => false,
         }
     }
 }
