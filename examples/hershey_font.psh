@@ -269,8 +269,8 @@ fun draw_line(buffer, x0, y0, x1, y1, color) {
 }
 
 fun draw_thick_line(buffer, x0, y0, x1, y1, color) {
-    for(let var ay=0; ay < AA_MUL; ay = ay + 1) {
-        for(let var ax=0; ax < AA_MUL; ax = ax + 1) {
+    for(let var ay=0; ay < AA_MUL<<1; ay = ay + 1) {
+        for(let var ax=0; ax < AA_MUL<<1; ax = ax + 1) {
             draw_line(buffer, x0+ax, y0+ay, x1+ax, y1+ay, color);
         }
     }
@@ -338,7 +338,7 @@ fun draw_char(buffer, x, y, c) {
     if(buffer != 0) {
         if(glyph[n] == 0) {
             glyph[n] = down_sample(render_glyph(0, AA_MUL*ASCENT,
-                           AA_MUL*adv, AA_MUL*LEADING, pts));
+                           AA_MUL*(adv+2), AA_MUL*LEADING, pts));
         }
         buffer.blit(glyph[n], x, y-ASCENT);
     }
@@ -358,6 +358,21 @@ fun draw_string(buffer, ix, y, s) {
     while(i < s.len) {
         let c = s.byte_at(i);
         x = draw_char(buffer, x, y, c);
+        i = i + utf8_advance(c);
+    }
+    return x;
+}
+
+fun draw_mono(buffer, ix, y, s) {
+    let MONO = 22;
+    let var x = ix;
+    let var i = 0;
+    while(i < s.len) {
+        let c = s.byte_at(i);
+        let w = draw_char(0, 0, 0, c);
+        let a = (MONO-w)>>1;
+        draw_char(buffer, x+a, y, c);
+        x = x + MONO;
         i = i + utf8_advance(c);
     }
     return x;
@@ -401,7 +416,7 @@ loop {
     draw_string(frame_buffer, (WIDTH-c_w)>>1, (HEIGHT>>2) + 60, count_str);
     ++count;
     for (let var i = 0; i < char_lines.len; ++i)
-        draw_string(frame_buffer, 20, (HEIGHT>>1) + 60 + (40 * i), char_lines[i]);
+        draw_mono(frame_buffer, 10, (HEIGHT>>1) + 60 + (40 * i), char_lines[i]);
 
     let end_time = $time_current_ms();
     $print('redraw time: ');
