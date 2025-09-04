@@ -741,7 +741,7 @@ impl Actor
 
         if host_fn.num_params() != argc {
             panic!(
-                "incorrect argument count for host functions, got {}, expected {}",
+                "incorrect argument count for host function, got {}, expected {}",
                 argc,
                 host_fn.num_params()
             );
@@ -913,7 +913,11 @@ impl Actor
                 let fun_entry = self.get_compiled_fun(fun_id);
 
                 if $argc as usize != fun_entry.num_params {
-                    panic!("incorrect argument count");
+                    panic!(
+                        "incorrect argument count in call, got {}, expected {}",
+                        $argc,
+                        fun_entry.num_params
+                    );
                 }
 
                 self.frames.push(StackFrame {
