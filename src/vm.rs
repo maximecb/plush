@@ -913,8 +913,12 @@ impl Actor
                 let fun_entry = self.get_compiled_fun(fun_id);
 
                 if $argc as usize != fun_entry.num_params {
+                    let vm = self.vm.lock().unwrap();
+                    let fun = &vm.prog.funs[&fun_id];
                     panic!(
-                        "incorrect argument count in call, got {}, expected {}",
+                        "incorrect argument count in call to function \"{}\", defined at {}, received {} arguments, expected {}",
+                        fun.name,
+                        fun.pos,
                         $argc,
                         fun_entry.num_params
                     );
