@@ -236,48 +236,71 @@ class Image
     }
 }
 
+class GraphicsContext {
+    init(self, canvas, color) {
+        assert(canvas instanceof Image);
+        assert(color instanceof Int64);
+        self.canvas = canvas;
+        self.color = color;
+    }
+
+    clear(self) {
+        self.canvas.bytes.zero_fill();
+    }
+
+    render(self, window) {
+        $window_draw_frame(window, self.canvas.bytes);
+    }
+
+    // Bresenham
+    draw_line(self, x0, y0, x1, y1) {
+        let sx = (x0 < x1 ? 1 : -1);
+        let sy = (y0 < y1 ? 1 : -1);
+        let dx = (x1 - x0).abs();
+        let dy = (y1 - y0).abs();
+
+        let var err = dx - dy;
+        let var x = x0;
+        let var y = y0;
+
+        loop {
+            self.canvas.set_pixel(x, y, self.color);
+            if (x == x1 && y == y1) {
+                return;
+            }
+
+            let e2 = 2 * err;
+            if (e2 > -dy) {
+                err = err - dy;
+                x = x + sx;
+            }
+
+            if (e2 < dx) {
+                err = err + dx;
+                y = y + sy;
+            }
+        }
+    }
+
+    blit(self, img, x, y) {
+        self.canvas.blit(img, x, y);
+    }
+}
+
 // --- Graphics Functions ---
 
-// Bresenham
-fun draw_line(buffer, x0, y0, x1, y1, color) {
-    let sx = (x0 < x1 ? 1 : -1);
-    let sy = (y0 < y1 ? 1 : -1);
-    let dx = (x1 - x0).abs();
-    let dy = (y1 - y0).abs();
 
-    let var err = dx - dy;
-    let var x = x0;
-    let var y = y0;
-
-    loop {
-        buffer.set_pixel(x, y, color);
-        if (x == x1 && y == y1) {
-            return;
-        }
-
-        let e2 = 2 * err;
-        if (e2 > -dy) {
-            err = err - dy;
-            x = x + sx;
-        }
-
-        if (e2 < dx) {
-            err = err + dx;
-            y = y + sy;
-        }
-    }
-}
-
-fun draw_thick_line(buffer, x0, y0, x1, y1, color) {
+fun draw_thick_line(buffer, x0, y0, x1, y1) {
     for(let var ay=0; ay < AA_MUL<<1; ay = ay + 1) {
         for(let var ax=0; ax < AA_MUL<<1; ax = ax + 1) {
-            draw_line(buffer, x0+ax, y0+ay, x1+ax, y1+ay, color);
+            buffer.draw_line(x0+ax, y0+ay, x1+ax, y1+ay);
         }
     }
 }
 
-fun render_glyph(x, y, width, height, pts) {
+fun render_glyph(x, y, width, height, pts, color) {
     let i = Image(width, height);
+    let gc = GraphicsContext(i, color);
     let var ox = -1;
     let var oy = -1;
     for(let var j=0; j < pts.len; j = j+2) {
@@ -285,7 +308,7 @@ fun render_glyph(x, y, width, height, pts) {
         let nx = (draw ? x + AA_MUL*pts[j]   : -1);
         let ny = (draw ? y - AA_MUL*pts[j+1] : -1);
         if (ox != -1 &&  oy != -1 && nx != -1 && ny != -1) {
-            draw_thick_line(i, ox, oy, nx, ny, CYAN);
+            draw_thick_line(gc, ox, oy, nx, ny);
         }
         ox = nx;
         oy = ny;
@@ -293,11 +316,12 @@ fun render_glyph(x, y, width, height, pts) {
     return i;
 }
 
+fun get_a(p) { return (p >> 24) & 0xFF; }
 fun get_r(p) { return (p >> 16) & 0xFF; }
 fun get_g(p) { return (p >>  8) & 0xFF; }
 fun get_b(p) { return (p >>  0) & 0xFF; }
-fun set_rgb(r,g,b) {
-    return (0xFF << 24) | (r << 16) | (g << 8) | b;
+fun set_rgba(r,g,b,a) {
+    return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
 fun div(x,y) {
@@ -313,6 +337,7 @@ fun down_sample(hi) {
             let var r = 0;
             let var g = 0;
             let var b = 0;
+            let var a = 0;
             let var c = 0;
             for(let var ay = 0; ay < AA_MUL; ay = ay + 1) {
                 for(let var ax = 0; ax < AA_MUL; ax = ax + 1) {
@@ -320,11 +345,12 @@ fun down_sample(hi) {
                     r = r + get_r(pix);
                     g = g + get_g(pix);
                     b = b + get_b(pix);
+                    a = a + get_a(pix);
                     c = c + 1;
                 }
             }
             lo.set_pixel(div(ix,AA_MUL), div(iy,AA_MUL),
-                set_rgb(div(r,c), div(g,c), div(b,c)));
+                set_rgba(div(r,c), div(g,c), div(b,c), div(a,c)));
         }
     }
     return lo;
@@ -338,7 +364,7 @@ fun draw_char(buffer, x, y, c) {
     if(buffer != 0) {
         if(glyph[n] == 0) {
             glyph[n] = down_sample(render_glyph(0, AA_MUL*ASCENT,
-                           AA_MUL*(adv+2), AA_MUL*LEADING, pts));
+                           AA_MUL*(adv+2), AA_MUL*LEADING, pts, buffer.color));
         }
         buffer.blit(glyph[n], x, y-ASCENT);
     }
@@ -403,27 +429,30 @@ while (char_idx < 126)
     char_idx = char_idx + char_s.len;
 }
 
+let gc = GraphicsContext(frame_buffer, CYAN);
+
 let var count = 0;
 loop {
     // --- Drawing ---
-    frame_buffer.bytes.zero_fill();
+    gc.clear();
 
     let start_time = $time_current_ms();
 
-    draw_string(frame_buffer, (WIDTH-s_w)>>1, (HEIGHT>>2), s);
+    draw_string(gc, (WIDTH-s_w)>>1, (HEIGHT>>2), s);
     let count_str = "(" + count.to_s() + ")";
     let c_w = draw_string(0, 0, 0, count_str);
-    draw_string(frame_buffer, (WIDTH-c_w)>>1, (HEIGHT>>2) + 60, count_str);
+    draw_string(gc, (WIDTH-c_w)>>1, (HEIGHT>>2) + 60, count_str);
     ++count;
-    for (let var i = 0; i < char_lines.len; ++i)
-        draw_mono(frame_buffer, 10, (HEIGHT>>1) + 60 + (40 * i), char_lines[i]);
+    for (let var i = 0; i < char_lines.len; ++i) {
+        draw_mono(gc, 10, (HEIGHT>>1) + 60 + (40 * i), char_lines[i]);
+    }
 
     let end_time = $time_current_ms();
     $print('redraw time: ');
     $print(end_time - start_time);
     $println('ms');
 
-    $window_draw_frame(window, frame_buffer.bytes);
+    gc.render(window);
 
     $actor_sleep(200); // Limit the frame rate
 
