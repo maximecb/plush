@@ -93,6 +93,77 @@ impl ByteArray
     }
 }
 
+/// Copy image data from a source image into a destination image
+/// while performing A-over-B alpha compositing
+/// Pixels use the BGRA byte order (0xAA_RR_GG_BB on a little-endian machine)
+fn blit_bgra32(
+    dst: &mut [u32],
+    dst_width: usize,
+    dst_height: usize,
+    src: &[u32],
+    src_width: usize,
+    src_height: usize,
+    dst_x: i32,
+    dst_y: i32,
+)
+{
+    for sy in 0..src_height as i32 {
+        let dy = dst_y + sy;
+        if dy < 0 || dy >= dst_height as i32 {
+            continue;
+        }
+
+        for sx in 0..src_width as i32 {
+            let dx = dst_x + sx;
+            if dx < 0 || dx >= dst_width as i32 {
+                continue;
+            }
+
+            let src_idx = (sy as usize * src_width + sx as usize) as usize;
+            let dst_idx = (dy as usize * dst_width + dx as usize) as usize;
+
+            // Extract source pixel components
+            let src_pixel = src[src_idx];
+            let src_b = src_pixel & 0xFF;
+            let src_g = (src_pixel >> 8) & 0xFF;
+            let src_r = (src_pixel >> 16) & 0xFF;
+            let src_a = (src_pixel >> 24) & 0xFF;
+
+            // Extract destination pixel components
+            let dst_pixel = dst[dst_idx];
+            let dst_b = dst_pixel & 0xFF;
+            let dst_g = (dst_pixel >> 8) & 0xFF;
+            let dst_r = (dst_pixel >> 16) & 0xFF;
+            let dst_a = (dst_pixel >> 24) & 0xFF;
+
+            // Perform alpha blending using integer arithmetic
+            // out_a = src_a + dst_a * (255 - src_a) / 255
+            let one_minus_src_a = 255 - src_a;
+            let out_a = src_a + (dst_a * one_minus_src_a + 127) / 255;
+
+            // Avoid division by zero
+            if out_a == 0 {
+                dst[dst_idx] = 0; // Fully transparent result
+                continue;
+            }
+
+            // out_color = (src_color * src_a + dst_color * dst_a * (255 - src_a) / 255) / out_a
+            let out_r = (src_r * src_a + dst_r * dst_a * one_minus_src_a / 255 + out_a / 2) / out_a;
+            let out_g = (src_g * src_a + dst_g * dst_a * one_minus_src_a / 255 + out_a / 2) / out_a;
+            let out_b = (src_b * src_a + dst_b * dst_a * one_minus_src_a / 255 + out_a / 2) / out_a;
+
+            // Clamp values to [0, 255]
+            let out_r = out_r.min(255) as u32;
+            let out_g = out_g.min(255) as u32;
+            let out_b = out_b.min(255) as u32;
+            let out_a = out_a.min(255) as u32;
+
+            // Pack the result back into a u32
+            dst[dst_idx] = (out_r << 16) | (out_g << 8) | out_b | (out_a << 24);
+        }
+    }
+}
+
 /// Create a new ByteArray instance
 pub fn ba_new(actor: &mut Actor, _self: Value) -> Value
 {
@@ -155,4 +226,39 @@ pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value)
 {
     let ba = ba.unwrap_ba();
     ba.bytes.fill(0);
+}
+
+pub fn ba_blit_bgra32(
+    actor: &mut Actor,
+    mut dst: Value,
+    dst_width: Value,
+    dst_height: Value,
+    mut src: Value,
+    src_width: Value,
+    src_height: Value,
+    dst_x: Value,
+    dst_y: Value,
+)
+{
+    let dst = dst.unwrap_ba();
+    let dst_width = dst_width.unwrap_usize();
+    let dst_height = dst_height.unwrap_usize();
+
+    let src = src.unwrap_ba();
+    let src_width = src_width.unwrap_usize();
+    let src_height = src_height.unwrap_usize();
+
+    let dst_x = dst_x.unwrap_i32();
+    let dst_y = dst_y.unwrap_i32();
+
+    blit_bgra32(
+        unsafe { dst.get_slice_mut(0, dst_width * dst_height) },
+        dst_width,
+        dst_height,
+        unsafe { src.get_slice(0, src_width * src_height) },
+        src_width,
+        src_height,
+        dst_x,
+        dst_y,
+    );
 }

@@ -1,0 +1,91 @@
+// Alpha Blending Test for blit_bgra32()
+
+let WIDTH = 800;
+let HEIGHT = 600;
+
+// Helper to create a 32-bit BGRA color value
+fun bgra32(r, g, b, a) {
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+fun max(a, b) { if (a > b) return a; return b; }
+fun min(a, b) { if (a < b) return a; return b; }
+
+// Helper function to draw a filled rectangle
+fun draw_rect(buffer, xmin, ymin, w, h, color) {
+    let x_start = max(0, xmin);
+    let y_start = max(0, ymin);
+    let x_end = min(WIDTH, xmin + w);
+    let y_end = min(HEIGHT, ymin + h);
+    let clipped_width = x_end - x_start;
+    if (clipped_width <= 0) return;
+
+    for (let var j = y_start; j < y_end; ++j) {
+        let start_index = j * WIDTH + x_start;
+        buffer.fill_u32(start_index, clipped_width, color);
+    }
+}
+
+// --- 1. Create a checkerboard background ---
+let bg_buf = ByteArray.with_size(WIDTH * HEIGHT * 4);
+let TILE_SIZE = 20;
+for (let var j = 0; j < (HEIGHT / TILE_SIZE).ceil(); ++j) {
+    for (let var i = 0; i < (WIDTH / TILE_SIZE).ceil(); ++i) {
+        let color = ((i + j) % 2 == 0) ? bgra32(100, 100, 100, 255) : bgra32(150, 150, 150, 255);
+        draw_rect(bg_buf, i * TILE_SIZE, j * TILE_SIZE, TILE_SIZE, TILE_SIZE, color);
+    }
+}
+
+// --- 2. Create a foreground surface with an alpha gradient ---
+let FG_WIDTH = 400;
+let FG_HEIGHT = 400;
+let fg_buf = ByteArray.with_size(FG_WIDTH * FG_HEIGHT * 4);
+
+for (let var j = 0; j < FG_HEIGHT; ++j) {
+    for (let var i = 0; i < FG_WIDTH; ++i) {
+        // Horizontal gradient from transparent to opaque red
+        let alpha = (i * 255 / FG_WIDTH).floor();
+        let color = bgra32(255, 30, 30, alpha);
+        fg_buf.write_u32(j * FG_WIDTH + i, color);
+    }
+}
+
+// --- 3. Blit the foreground onto the background ---
+// The user mentioned this is a method on ByteArray
+// The arguments are: dst_width, dst_height, src_buf, src_width, src_height, dst_x, dst_y
+bg_buf.blit_bgra32(
+    WIDTH, HEIGHT,
+    fg_buf, FG_WIDTH, FG_HEIGHT,
+    ((WIDTH - FG_WIDTH) / 2).floor(), ((HEIGHT - FG_HEIGHT) / 2).floor()
+);
+
+/*
+// --- 4. Performance Test ---
+let NUM_BLITS = 1000;
+let start_time = $time_current_ms();
+for (let var i = 0; i < NUM_BLITS; ++i) {
+    bg_buf.blit_bgra32(
+        WIDTH, HEIGHT,
+        fg_buf, FG_WIDTH, FG_HEIGHT,
+        ((WIDTH - FG_WIDTH) / 2).floor(), ((HEIGHT - FG_HEIGHT) / 2).floor()
+    );
+}
+let end_time = $time_current_ms();
+let total_time = end_time - start_time;
+let avg_time = total_time / NUM_BLITS;
+$println("Blit performance test:");
+$println("Total time for " + NUM_BLITS.to_s() + " blits: " + total_time.to_s() + " ms");
+$println("Average time per blit: " + avg_time.to_s() + " ms");
+*/
+
+// --- 5. Create a window and draw the result ---
+let window = $window_create(WIDTH, HEIGHT, "Alpha Blending Test", 0);
+$window_draw_frame(window, bg_buf);
+
+// --- 5. Event Loop ---
+loop {
+    let msg = $actor_recv();
+    if (msg instanceof UIEvent && (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE'))) {
+        break;
+    }
+}

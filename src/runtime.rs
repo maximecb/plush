@@ -195,6 +195,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::ByteArray(_), "fill_u32") => HostFn::Fn4_0(ba_fill_u32),
         (Value::ByteArray(_), "memcpy") => HostFn::Fn5_0(ba_memcpy),
         (Value::ByteArray(_), "zero_fill") => HostFn::Fn1_0(ba_zero_fill),
+        (Value::ByteArray(_), "blit_bgra32") => HostFn::Fn8_0(ba_blit_bgra32),
 
         _ => panic!("unknown method {}", method_name)
     };

@@ -306,6 +306,14 @@ impl Value
         }
     }
 
+    pub fn unwrap_i32(&self) -> i32
+    {
+        match self {
+            Int64(v) => (*v).try_into().unwrap(),
+            _ => panic!("expected int64 value but got {:?}", self)
+        }
+    }
+
     pub fn unwrap_i64(&self) -> i64
     {
         match self {
@@ -837,6 +845,19 @@ impl Actor
                 let a0 = pop!();
                 let v = fun(self, a0, a1, a2, a3, a4);
                 push!(v);
+            }
+
+            HostFn::Fn8_0(fun) => {
+                let a7 = pop!();
+                let a6 = pop!();
+                let a5 = pop!();
+                let a4 = pop!();
+                let a3 = pop!();
+                let a2 = pop!();
+                let a1 = pop!();
+                let a0 = pop!();
+                fun(self, a0, a1, a2, a3, a4, a5, a6, a7);
+                push!(Value::Nil);
             }
         }
     }
