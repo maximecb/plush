@@ -207,5 +207,53 @@ This example spawns a new worker actor, sends it a message, and then waits for i
 At the moment there is no debugger and you may find that error messages are lackluster. Unsupported behaviors can
 result in Rust panics, sometimes without helpful messages. PRs to improve this are welcome.
 
-To help in debugging, you can print values with `$println` and you can use the built in `assert` statement to
+To help in debugging, you can print values with `$println()` and you can use the built in `assert()` statement to
 validate your assumptions.
+
+## Manipulating Image Data
+
+In Plush, graphical applications often handle image data directly in memory. This is typically done using `ByteArray` objects, which represent raw, mutable buffers. This approach provides a high degree of control and performance for graphics-intensive tasks.
+
+### Pixel Format: BGRA32
+
+The pixel data for frame buffers is stored in the BGRA32 format. This means that each pixel occupies 4 bytes in memory, with the
+blue component at the lowest memory address, and the alpha component at the highest address.
+When working with 32-bit integer values to represent colors, this corresponds to a little-endian `0xAARRGGBB` format. Most examples in this project use a helper function to construct color values:
+
+```plush
+// Helper function to convert RGB values to a 32-bit color
+fun rgb32(r, g, b) {
+    // The alpha channel is set to 0xFF (fully opaque)
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+let red = rgb32(255, 0, 0);
+```
+
+### Common Operations
+
+Here are some of the common operations used to manipulate image data stored in a `ByteArray`:
+
+*   **Creating a framebuffer:** A `ByteArray` is created to hold the pixel data for a window or image.
+    ```plush
+    let frame_buffer = ByteArray.with_size(width * height * 4);
+    ```
+*   **Setting a single pixel:** The `write_u32` method can be used to set the color of a single pixel at a given `(x, y)` coordinate.
+    ```plush
+    let index = y * width + x;
+    frame_buffer.write_u32(index, color);
+    ```
+*   **Filling a rectangle:** The `fill_u32` method is an efficient way to fill a rectangular area with a single color.
+    ```plush
+    // Fills a width x height rectangle at (x, y)
+    for (let var j = y; j < y + height; ++j) {
+        let start_index = j * width + x;
+        frame_buffer.fill_u32(start_index, width, color);
+    }
+    ```
+*   **Clearing the buffer:** The `zero_fill` method can be used to quickly clear the entire buffer to black.
+    ```plush
+    frame_buffer.zero_fill();
+    ```
+
+By manipulating the `ByteArray` directly, you can implement a wide range of graphics effects and rendering techniques.
