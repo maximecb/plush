@@ -2,8 +2,6 @@ name: Build extension
 
 on:
   push:
-    tags:
-      - "*.*.*"
     paths:
       - 'tmbundle/**'
   workflow_dispatch:
@@ -23,10 +21,21 @@ jobs:
     - name: Install vsce
       run: npm install -g @vscode/vsce
 
+    - name: Extract version
+      run: echo "TAG=$(jq -r '.version' package.json)" >> $GITHUB_ENV
+
+    - name: Create tag
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git tag $TAG
+        git push origin $TAG
+
     - name: Package .vsix
       run: cd tmbundle && vsce package
 
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
+        tag_name: ${{ env.TAG }}
         files: tmbundle/*.vsix
