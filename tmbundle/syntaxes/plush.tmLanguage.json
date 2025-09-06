@@ -1,0 +1,629 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Plush",
+    "patterns": [
+        {
+            "include": "#comments"
+        },
+        {
+            "include": "#class"
+        },
+        {
+            "include": "#keywords"
+        },
+        {
+            "include": "#constructor"
+        },
+        {
+            "include": "#function-calls"
+        },
+        {
+            "include": "#for-loop"
+        },
+        {
+            "include": "#while-loop"
+        },
+        {
+            "include": "#loop-infinite"
+        },
+        {
+            "include": "#builtin-functions"
+        },
+        {
+            "include": "#host-functions"
+        },
+        {
+            "include": "#bytearray-literals"
+        },
+        {
+            "include": "#strings"
+        },
+        {
+            "include": "#numbers"
+        },
+        {
+            "include": "#operators"
+        },
+        {
+            "include": "#properties"
+        },
+        {
+            "include": "#variables"
+        },
+        {
+            "include": "#punctuation"
+        }
+    ],
+    "repository": {
+        "comments": {
+            "patterns": [
+                {
+                    "name": "comment.line.double-slash.plush",
+                    "match": "//.*$"
+                },
+                {
+                    "name": "comment.block.plush",
+                    "begin": "/\\*",
+                    "end": "\\*/",
+                    "patterns": [
+                        {
+                            "name": "comment.block.nested.plush",
+                            "begin": "/\\*",
+                            "end": "\\*/"
+                        }
+                    ]
+                }
+            ]
+        },
+        "keywords": {
+            "patterns": [
+                {
+                    "name": "keyword.control.conditional.plush",
+                    "match": "\\b(if|else|instanceof)\\b"
+                },
+                {
+                    "name": "keyword.control.loop.plush",
+                    "match": "\\b(for|while|loop)\\b"
+                },
+                {
+                    "name": "keyword.control.flow.plush",
+                    "match": "\\b(return|break|continue|assert)\\b"
+                },
+                {
+                    "name": "constant.language.boolean.plush",
+                    "match": "\\b(true|false)\\b"
+                },
+                {
+                    "name": "constant.language.null.plush",
+                    "match": "\\b(nil)\\b"
+                },
+                {
+                    "match": "\\b(fun)\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+                    "captures": {
+                        "1": {
+                            "name": "storage.type.function.plush"
+                        },
+                        "2": {
+                            "name": "entity.name.function.plush"
+                        }
+                    }
+                },
+                {
+                    "match": "\\b(let)\\s+(var)\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s*[=;]|$)",
+                    "captures": {
+                        "1": {
+                            "name": "storage.type.plush"
+                        },
+                        "2": {
+                            "name": "storage.modifier.var.plush"
+                        },
+                        "3": {
+                            "name": "variable.other.declaration.plush"
+                        }
+                    }
+                },
+                {
+                    "match": "\\b(let)\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s*[=;]|$)",
+                    "captures": {
+                        "1": {
+                            "name": "storage.type.plush"
+                        },
+                        "2": {
+                            "name": "variable.other.declaration.plush"
+                        }
+                    }
+                }
+            ]
+        },
+        "for-loop": {
+            "name": "meta.for.loop.plush",
+            "begin": "\\b(for)\\s*\\(",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.control.loop.for.plush"
+                }
+            },
+            "end": "\\)",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "match": "\\b(let)\\s+(var)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(=)",
+                    "captures": {
+                        "1": {
+                            "name": "storage.type.plush"
+                        },
+                        "2": {
+                            "name": "storage.modifier.var.plush"
+                        },
+                        "3": {
+                            "name": "variable.other.declaration.plush"
+                        },
+                        "4": {
+                            "name": "keyword.operator.assignment.plush"
+                        }
+                    }
+                },
+                {
+                    "match": "\\b(let)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(=)",
+                    "captures": {
+                        "1": {
+                            "name": "storage.type.plush"
+                        },
+                        "2": {
+                            "name": "variable.other.declaration.plush"
+                        },
+                        "3": {
+                            "name": "keyword.operator.assignment.plush"
+                        }
+                    }
+                },
+                {
+                    "include": "#operators"
+                },
+                {
+                    "name": "punctuation.separator.for-loop.plush",
+                    "match": ";"
+                },
+                {
+                    "include": "#expressions"
+                }
+            ]
+        },
+        "while-loop": {
+            "name": "meta.while.loop.plush",
+            "begin": "\\b(while)\\s*\\(",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.control.loop.while.plush"
+                }
+            },
+            "end": "\\)",
+            "patterns": [
+                {
+                    "include": "#expressions"
+                }
+            ]
+        },
+        "loop-infinite": {
+            "name": "meta.loop.infinite.plush",
+            "match": "\\b(loop)\\b",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.loop.infinite.plush"
+                }
+            }
+        },
+        "host-functions": {
+            "patterns": [
+                {
+                    "name": "support.function.host.time.plush",
+                    "match": "\\$(time_current_ms)\\b"
+                },
+                {
+                    "name": "support.function.host.io.plush",
+                    "match": "\\$(print|println|readln)\\b"
+                },
+                {
+                    "name": "support.function.host.actor.plush",
+                    "match": "\\$(actor_id|actor_parent|actor_sleep|actor_spawn|actor_join|actor_send|actor_recv|actor_poll)\\b"
+                },
+                {
+                    "name": "support.function.host.window.plush",
+                    "match": "\\$(window_create|window_draw_frame)\\b"
+                },
+                {
+                    "name": "support.function.host.system.plush",
+                    "match": "\\$(exit)\\b"
+                },
+                {
+                    "name": "support.function.host.arguments.plush",
+                    "match": "\\$(cmd_num_args|cmd_get_arg)\\b"
+                }
+            ]
+        },
+        "class": {
+            "patterns": [
+                {
+                    "name": "meta.class.plush",
+                    "begin": "\\b(class)\\s+([A-Z][A-Za-z0-9_]*)\\s*\\{",
+                    "beginCaptures": {
+                        "1": {
+                            "name": "storage.type.class.plush"
+                        },
+                        "2": {
+                            "name": "entity.name.type.class.plush"
+                        }
+                    },
+                    "end": "\\}",
+                    "endCaptures": {
+                        "0": {
+                            "name": "punctuation.definition.class.end.plush"
+                        }
+                    },
+                    "patterns": [
+                        {
+                            "include": "#comments"
+                        },
+                        {
+                            "include": "#method-definition"
+                        },
+                        {
+                            "include": "#keywords"
+                        },
+                        {
+                            "include": "#strings"
+                        },
+                        {
+                            "include": "#numbers"
+                        },
+                        {
+                            "include": "#operators"
+                        },
+                        {
+                            "include": "#variables"
+                        },
+                        {
+                            "include": "#punctuation"
+                        }
+                    ]
+                }
+            ]
+        },
+        "method-definition": {
+            "name": "meta.method.plush",
+            "begin": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\(",
+            "beginCaptures": {
+                "1": {
+                    "name": "entity.name.function.method.plush"
+                }
+            },
+            "end": "\\)",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.parameters.end.plush"
+                }
+            },
+            "patterns": [
+                {
+                    "name": "variable.parameter.plush",
+                    "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b"
+                },
+                {
+                    "name": "punctuation.separator.parameter.plush",
+                    "match": ","
+                }
+            ]
+        },
+        "constructor": {
+            "patterns": [
+                {
+                    "name": "meta.function.constructor.plush",
+                    "match": "\\b([A-Z][A-Za-z0-9_]*)(?=\\s*\\()",
+                    "captures": {
+                        "1": {
+                            "name": "entity.name.type.constructor.plush"
+                        }
+                    }
+                }
+            ]
+        },
+        "function-calls": {
+            "patterns": [
+                {
+                    "name": "meta.function-call.plush",
+                    "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+                    "captures": {
+                        "1": {
+                            "name": "entity.name.function.call.plush"
+                        }
+                    }
+                }
+            ]
+        },
+        "builtin-functions": {
+            "patterns": [
+                {
+                    "name": "meta.function.builtin.integer.plush",
+                    "match": "(?<=\\.)\\b(abs|to_f|to_s)(?=\\s*\\()",
+                    "captures": {
+                        "1": {
+                            "name": "entity.name.function.builtin.plush"
+                        }
+                    }
+                },
+                {
+                    "name": "meta.function.builtin.float.plush",
+                    "match": "(?<=\\.)\\b(abs|ceil|floor|trunc|sin|cos|sqrt|to_s)(?=\\s*\\()",
+                    "captures": {
+                        "1": {
+                            "name": "entity.name.function.builtin.plush"
+                        }
+                    }
+                },
+                {
+                    "name": "meta.function.builtin.string.plush",
+                    "match": "(?<=\\.)\\b(form_codepoint|byte_at|parse_int|trim)(?=\\s*\\()",
+                    "captures": {
+                        "1": {
+                            "name": "entity.name.function.builtin.plush"
+                        }
+                    }
+                },
+                {
+                    "name": "meta.function.builtin.array.plush",
+                    "match": "(?<=\\.)\\b(with_size|push|pop)(?=\\s*\\()",
+                    "captures": {
+                        "1": {
+                            "name": "entity.name.function.builtin.plush"
+                        }
+                    }
+                },
+                {
+                    "name": "meta.function.builtin.bytearray.plush",
+                    "match": "(?<=\\.)\\b(with_size|fill_u32|read_32|write_u32|memcpy|zero_fill|blit_bgra_32)(?=\\s*\\()",
+                    "captures": {
+                        "1": {
+                            "name": "entity.name.function.builtin.plush"
+                        }
+                    }
+                }
+            ]
+        },
+        "bytearray-literals": {
+            "name": "string.unquoted.bytearray.plush",
+            "begin": "#\\[",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.bytearray.begin.plush"
+                }
+            },
+            "end": "\\]",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.bytearray.end.plush"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "name": "constant.character.escape.plush",
+                    "match": "\\\\[axb]"
+                },
+                {
+                    "include": "#strings"
+                },
+                {
+                    "include": "#numbers"
+                },
+                {
+                    "name": "punctuation.separator.comma.plush",
+                    "match": ","
+                }
+            ]
+        },
+        "strings": {
+            "patterns": [
+                {
+                    "name": "string.quoted.double.plush",
+                    "begin": "\"",
+                    "beginCaptures": {
+                        "0": {
+                            "name": "punctuation.definition.string.begin.plush"
+                        }
+                    },
+                    "end": "\"",
+                    "endCaptures": {
+                        "0": {
+                            "name": "punctuation.definition.string.end.plush"
+                        }
+                    },
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.plush",
+                            "match": "\\\\([\\\\\"/bfnrt]|u[0-9A-Fa-f]{4})"
+                        },
+                        {
+                            "name": "invalid.illegal.unrecognized-string-escape.plush",
+                            "match": "\\\\."
+                        }
+                    ]
+                },
+                {
+                    "name": "string.quoted.single.plush",
+                    "begin": "'",
+                    "beginCaptures": {
+                        "0": {
+                            "name": "punctuation.definition.string.begin.plush"
+                        }
+                    },
+                    "end": "'",
+                    "endCaptures": {
+                        "0": {
+                            "name": "punctuation.definition.string.end.plush"
+                        }
+                    },
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.plush",
+                            "match": "\\\\([\\\\\\'/bfnrt]|u[0-9A-Fa-f]{4})"
+                        },
+                        {
+                            "name": "invalid.illegal.unrecognized-string-escape.plush",
+                            "match": "\\\\."
+                        }
+                    ]
+                }
+            ]
+        },
+        "numbers": {
+            "patterns": [
+                {
+                    "name": "constant.numeric.binary.plush",
+                    "match": "\\b0b[01](?:[01_]*[01])?\\b"
+                },
+                {
+                    "name": "constant.numeric.hex.plush",
+                    "match": "\\b0x[0-9A-Fa-f](?:[0-9A-Fa-f_]*[0-9A-Fa-f])?\\b"
+                },
+                {
+                    "name": "constant.numeric.float.plush",
+                    "match": "\\b\\d(?:[\\d_]*\\d)?\\.\\d(?:[\\d_]*\\d)?\\b"
+                },
+                {
+                    "name": "constant.numeric.integer.plush",
+                    "match": "\\b\\d(?:[\\d_]*\\d)?\\b"
+                }
+            ]
+        },
+        "operators": {
+            "patterns": [
+                {
+                    "name": "keyword.operator.increment.plush",
+                    "match": "(\\+\\+|--)"
+                },
+                {
+                    "name": "keyword.operator.comparison.plush",
+                    "match": "(==|!=|<=|>=|<|>)"
+                },
+                {
+                    "name": "keyword.operator.logical.plush",
+                    "match": "(&&|\\|\\||!)"
+                },
+                {
+                    "name": "keyword.operator.arithmetic.plush",
+                    "match": "(\\+|\\-|\\*|/|%)"
+                },
+                {
+                    "name": "keyword.operator.assignment.plush",
+                    "match": "="
+                },
+                {
+                    "name": "punctuation.accessor.plush",
+                    "match": "\\."
+                }
+            ]
+        },
+        "properties": {
+            "patterns": [
+                {
+                    "name": "meta.property-access.plush",
+                    "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+                    "captures": {
+                        "1": {
+                            "name": "variable.other.object.plush"
+                        },
+                        "2": {
+                            "name": "punctuation.accessor.plush"
+                        },
+                        "3": {
+                            "name": "variable.other.property.plush"
+                        }
+                    }
+                }
+            ]
+        },
+        "variables": {
+            "patterns": [
+                {
+                    "name": "variable.other.plush",
+                    "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+                }
+            ]
+        },
+        "expressions": {
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#strings"
+                },
+                {
+                    "include": "#numbers"
+                },
+                {
+                    "include": "#keywords"
+                },
+                {
+                    "include": "#host-functions"
+                },
+                {
+                    "include": "#builtin-functions"
+                },
+                {
+                    "include": "#function-calls"
+                },
+                {
+                    "include": "#properties"
+                },
+                {
+                    "include": "#operators"
+                },
+                {
+                    "include": "#variables"
+                }
+            ]
+        },
+        "punctuation": {
+            "patterns": [
+                {
+                    "name": "punctuation.terminator.statement.plush",
+                    "match": ";"
+                },
+                {
+                    "name": "punctuation.definition.block.begin.plush",
+                    "match": "\\{"
+                },
+                {
+                    "name": "punctuation.definition.block.end.plush",
+                    "match": "\\}"
+                },
+                {
+                    "name": "punctuation.definition.parameters.begin.plush",
+                    "match": "\\("
+                },
+                {
+                    "name": "punctuation.definition.parameters.end.plush",
+                    "match": "\\)"
+                },
+                {
+                    "name": "punctuation.definition.array.begin.plush",
+                    "match": "\\["
+                },
+                {
+                    "name": "punctuation.definition.array.end.plush",
+                    "match": "\\]"
+                },
+                {
+                    "name": "punctuation.separator.comma.plush",
+                    "match": ","
+                }
+            ]
+        }
+    },
+    "scopeName": "source.psh"
+}
