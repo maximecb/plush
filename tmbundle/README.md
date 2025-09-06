@@ -6,7 +6,7 @@ A syntax highlighting extension for [Plush](https://github.com/maximecb/plush) (
 
 ### Using .vsix
 
-1. Download the `plush-1.0.0.vsix` file from the [releases](https://github.com/farooqameen/plush.tmbundle/releases) page.
+1. Download the `.vsix` file from the [releases](https://github.com/maximecb/plush/releases) page.
 
 2. Install the extension:
     - Press Ctrl+Shift+P (or Cmd+Shift+P on macOS)
