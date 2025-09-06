@@ -1,0 +1,62 @@
+// Example of a simple Linear Congruential Generator (LCG)
+// This is a basic pseudo-random number generator.
+
+// --- LCG State and Functions ---
+
+let var lcg_seed = 1;
+
+// Initializes the random number generator with a seed value.
+// Using a different seed will produce a different sequence of random numbers.
+fun rand_init(seed) {
+    // We use a bitwise AND to keep the seed as a positive 31-bit integer.
+    lcg_seed = seed & 0x7FFFFFFF;
+}
+
+// Returns a random integer in the range [0, max_val).
+fun rand_int(max_val) {
+    // These LCG parameters are from the POSIX C standard.
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lcg_seed % max_val;
+}
+
+// Returns a random float in the range [0.0, 1.0).
+fun rand_float() {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    // We divide by the maximum possible seed value to get a float between 0 and 1.
+    return lcg_seed.to_f() / 0x7FFFFFFF.to_f();
+}
+
+
+// --- Demonstration ---
+
+// Seed the generator with the current time for a different sequence on each run.
+rand_init($time_current_ms());
+
+$println("--- 10 Random Integers (0-99) ---");
+for (let var i = 0; i < 10; ++i) {
+    $println(rand_int(100));
+}
+
+$println("\n--- 5 Random Floats (0.0-1.0) ---");
+for (let var i = 0; i < 5; ++i) {
+    $println(rand_float().to_s());
+}
+
+$println("\n--- 5 Random Integers in a specific range (50-74) ---");
+for (let var i = 0; i < 5; ++i) {
+    // To get a number in a range [min, max), use: min + rand_int(max - min)
+    let random_in_range = 50 + rand_int(25); // 25 is the size of the range (75 - 50)
+    $println(random_in_range);
+}
+
+// --- Reseeding the generator ---
+$println("\n--- Reseeding with a fixed seed (42) ---");
+rand_init(42);
+$println(rand_int(100));
+$println(rand_int(100));
+
+$println("\n--- Reseeding with the same fixed seed (42) ---");
+// This will produce the exact same sequence as before.
+rand_init(42);
+$println(rand_int(100));
+$println(rand_int(100));
