@@ -168,6 +168,8 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `cos()`: Returns the cosine of the float.
     -   `sqrt()`: Returns the square root of the float.
     -   `to_s()`: Returns a string representation of the float.
+    -   `min(other)`: Returns the minimum of this number and `other`.
+    -   `max(other)`: Returns the maximum of this number and `other`.
 -   **String**
     -   `from_codepoint(int_val)`: Get a single-character string representing the given unicode codepoint value.
     -   `byte_at(idx)`: Get the UTF-8 byte at the given index.

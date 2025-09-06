@@ -153,10 +153,10 @@ fn blit_bgra32(
             let out_b = (src_b * src_a + dst_b * dst_a * one_minus_src_a / 255 + out_a / 2) / out_a;
 
             // Clamp values to [0, 255]
-            let out_r = out_r.min(255) as u32;
-            let out_g = out_g.min(255) as u32;
-            let out_b = out_b.min(255) as u32;
-            let out_a = out_a.min(255) as u32;
+            let out_r = out_r.min(255);
+            let out_g = out_g.min(255);
+            let out_b = out_b.min(255);
+            let out_a = out_a.min(255);
 
             // Pack the result back into a u32
             dst[dst_idx] = (out_r << 16) | (out_g << 8) | out_b | (out_a << 24);
