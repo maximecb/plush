@@ -1,15 +1,5 @@
 let TILE_SIZE = 75; // Size of each tile for parallel rendering
 
-fun min(a, b) {
-    if (a < b) return a;
-    return b;
-}
-
-fun max(a, b) {
-    if (a > b) return a;
-    return b;
-}
-
 fun tan(a) {
     return(a.sin()/a.cos());
 }
@@ -256,10 +246,10 @@ fun rasterize_triangle_tile(v0, v1, v2, color, tile_img, tile_x, tile_y, tile_w,
     let y2 = v2.y.floor();
 
     // Compute bounding box, clipped to tile
-    let minX = max(tile_x, min(x0, min(x1, x2)));
-    let maxX = min(tile_x + tile_w - 1, max(x0, max(x1, x2)));
-    let minY = max(tile_y, min(y0, min(y1, y2)));
-    let maxY = min(tile_y + tile_h - 1, max(y0, max(y1, y2)));
+    let minX = tile_x.max(x0.min(x1.min(x2)));
+    let maxX = (tile_x + tile_w - 1).min(x0.max(x1.max(x2)));
+    let minY = tile_y.max(y0.min(y1.min(y2)));
+    let maxY = (tile_y + tile_h - 1).min(y0.max(y1.max(y2)));
 
     // Precompute barycentric coordinate divisors
     let area = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
@@ -385,7 +375,7 @@ let ambient_min = 0.008; // Minimum light level
 // Apply directional lighting to a color based on surface normal
 fun apply_lighting(base_color, normal) {
     // Calculate lighting intensity (dot product of normal and light direction)
-    let light_intensity = max(ambient_min, normal.dot(light_direction));
+    let light_intensity = ambient_min.max(normal.dot(light_direction));
 
     let argb = to_argb(base_color);
     let a = argb[0];
@@ -394,9 +384,9 @@ fun apply_lighting(base_color, normal) {
     let b = argb[3];
 
     // Apply lighting to RGB components
-    let lit_r = min(255, (r.to_f() * light_intensity).floor());
-    let lit_g = min(255, (g.to_f() * light_intensity).floor());
-    let lit_b = min(255, (b.to_f() * light_intensity).floor());
+    let lit_r = (255).min((r.to_f() * light_intensity).floor());
+    let lit_g = (255).min((g.to_f() * light_intensity).floor());
+    let lit_b = (255).min((b.to_f() * light_intensity).floor());
 
     // Reconstruct u32 color
     return to_u32(a, lit_r, lit_g, lit_b);
@@ -491,8 +481,8 @@ fun render_cube_parallel(fTheta) {
     let requests = [];
     for (let var y = 0; y < HEIGHT; y = y + TILE_SIZE) {
         for (let var x = 0; x < WIDTH; x = x + TILE_SIZE) {
-            let tile_w = min(TILE_SIZE, WIDTH - x);
-            let tile_h = min(TILE_SIZE, HEIGHT - y);
+            let tile_w = TILE_SIZE.min(WIDTH - x);
+            let tile_h = TILE_SIZE.min(HEIGHT - y);
             requests.push(TileRequest(cube_data, x, y, tile_w, tile_h));
         }
     }

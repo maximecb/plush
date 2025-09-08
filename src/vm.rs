@@ -306,6 +306,14 @@ impl Value
         }
     }
 
+    pub fn unwrap_i32(&self) -> i32
+    {
+        match self {
+            Int64(v) => (*v).try_into().unwrap(),
+            _ => panic!("expected int64 value but got {:?}", self)
+        }
+    }
+
     pub fn unwrap_i64(&self) -> i64
     {
         match self {
@@ -741,7 +749,7 @@ impl Actor
 
         if host_fn.num_params() != argc {
             panic!(
-                "incorrect argument count for host functions, got {}, expected {}",
+                "incorrect argument count for host function, got {}, expected {}",
                 argc,
                 host_fn.num_params()
             );
@@ -838,6 +846,19 @@ impl Actor
                 let v = fun(self, a0, a1, a2, a3, a4);
                 push!(v);
             }
+
+            HostFn::Fn8_0(fun) => {
+                let a7 = pop!();
+                let a6 = pop!();
+                let a5 = pop!();
+                let a4 = pop!();
+                let a3 = pop!();
+                let a2 = pop!();
+                let a1 = pop!();
+                let a0 = pop!();
+                fun(self, a0, a1, a2, a3, a4, a5, a6, a7);
+                push!(Value::Nil);
+            }
         }
     }
 
@@ -913,7 +934,15 @@ impl Actor
                 let fun_entry = self.get_compiled_fun(fun_id);
 
                 if $argc as usize != fun_entry.num_params {
-                    panic!("incorrect argument count");
+                    let vm = self.vm.lock().unwrap();
+                    let fun = &vm.prog.funs[&fun_id];
+                    panic!(
+                        "incorrect argument count in call to function \"{}\", defined at {}, received {} arguments, expected {}",
+                        fun.name,
+                        fun.pos,
+                        $argc,
+                        fun_entry.num_params
+                    );
                 }
 
                 self.frames.push(StackFrame {
