@@ -2037,10 +2037,11 @@ mod tests
     fn capture_local()
     {
         // Captured function argument
-        eval_eq("fun f(n) { return fun() { return n+1; }; } let g = f(7); return g();", Value::Int64(8));
+        eval_eq("fun f(n) { return || n+1; } let g = f(7); return g();", Value::Int64(8));
 
         // Capture local variable
-        eval_eq("fun f(n) { let m = n+1; return fun() { return m+1; }; } let g = f(3); return g();", Value::Int64(5));
+        eval_eq("fun f(n) { let m = n+1; return || m+1; } let g = f(3); return g();", Value::Int64(5));
+        eval_eq("fun f(n) { let m = n+1; return |x| m+x; } let g = f(3); return g(4);", Value::Int64(8));
     }
 
     #[test]

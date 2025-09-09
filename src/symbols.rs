@@ -556,7 +556,7 @@ mod tests
     fn basics()
     {
         succeeds("");
-        succeeds("let foo = fun() {};");
+        succeeds("let foo = || {};");
         succeeds("fun foo(a) { return a; }");
 
         // Local variables
@@ -591,7 +591,7 @@ mod tests
     fn immutable()
     {
         succeeds("let var g = 5; g = 6;");
-        succeeds("let var f = fun() {}; f = 6;");
+        succeeds("let var f = || {}; f = 6;");
 
         fails("let g = 5; g = 6;");
         fails("fun f() {} f = 6;");
