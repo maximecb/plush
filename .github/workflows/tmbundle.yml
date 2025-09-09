@@ -10,6 +10,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
     - uses: actions/checkout@v2
 
@@ -21,19 +24,13 @@ jobs:
     - name: Install vsce
       run: npm install -g @vscode/vsce
 
+    - name: Package .vsix
+      run: cd plush.tmbundle && vsce package
+
     - name: Extract version
       run: echo "TAG=$(jq -r '.version' plush.tmbundle/package.json)" >> $GITHUB_ENV
 
-    - name: Create tag
-      run: |
-        git tag $TAG
-        git push origin $TAG
-
-    - name: Package .vsix
-      run: cd tmbundle && vsce package
-
     - name: Create Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ env.TAG }}
-        files: plush.tmbundle/*.vsix
+      run: gh release create $TAG 'plush.tmbundle/*.vsix' --generate-notes
+      env:
+        GH_TOKEN: ${{ github.token }}
