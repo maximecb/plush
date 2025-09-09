@@ -151,16 +151,11 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         );
     }
 
-    // Function expression
-    if input.match_keyword("fun")? {
+    // Lambda expression
+    if ch == '|' {
         input.eat_ws()?;
 
-        let mut name = "".to_string();
-        if input.peek_ch() != '(' {
-            name = input.parse_ident()?;
-        }
-
-        let fun_id = parse_function(input, prog, name, pos)?;
+        let fun_id = parse_lambda(input, prog, pos)?;
 
         return ExprBox::new_ok(
             Expr::Fun {
@@ -1108,7 +1103,7 @@ fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcP
             break;
         }
 
-        // Parse one parameter and its type
+        // Parse one parameter
         let param_name = input.parse_ident()?;
         params.push(param_name);
 
@@ -1126,6 +1121,69 @@ fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcP
 
     let fun = Function {
         name,
+        params,
+        var_arg,
+        body,
+        num_locals: 0,
+        captured: HashMap::default(),
+        is_unit: false,
+        pos,
+        id: FunId::default(),
+        class_id: ClassId::default(),
+    };
+
+    let fun_id = prog.reg_fun(fun);
+    Ok(fun_id)
+}
+
+/// Parse a lambda expression
+fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<FunId, ParseError>
+{
+    let mut params = Vec::default();
+    let mut var_arg = false;
+
+    input.expect_token("|")?;
+
+    loop
+    {
+        input.eat_ws()?;
+
+        if input.eof() {
+            return input.parse_error("unexpected end of input inside lambda parameter list");
+        }
+
+        if input.match_token("|")? {
+            break;
+        }
+
+        // Parse one parameter
+        let param_name = input.parse_ident()?;
+        params.push(param_name);
+
+        if input.match_token("|")? {
+            break;
+        }
+
+        // If this isn't the last argument, there
+        // has to be a comma separator
+        input.expect_token(",")?;
+    }
+
+    input.eat_ws()?;
+
+    let body = if input.peek_ch() == '{' {
+        // Parse the function body (must be a block statement)
+        parse_block_stmt(input, prog)?
+    } else {
+        let expr = parse_expr(input, prog)?;
+        StmtBox::new(
+            Stmt::Return(expr),
+            pos
+        )
+    };
+
+    let fun = Function {
+        name: "lambda".to_owned(),
         params,
         var_arg,
         body,
@@ -1411,10 +1469,6 @@ mod tests
     #[test]
     fn fun_decl()
     {
-        parse_ok("let main = fun() {};");
-        parse_ok("let main = fun() { return; };");
-        parse_ok("let main = fun() { return 0; };");
-
         parse_ok("fun main() {}");
         parse_ok("fun main(argc, argv) { return 0; }");
         parse_ok("fun main(argc, argv) {}");
@@ -1463,12 +1517,15 @@ mod tests
     #[test]
     fn fun_expr()
     {
-        parse_ok("let f = fun() {};");
-        parse_ok("let f = fun(x) {};");
-        parse_ok("let f = fun(x,) {};");
-        parse_ok("let f = fun(x,y) {};");
-        parse_ok("let f = fun(x,y) { return 1; };");
-        parse_fails("let f = fun(x,y,1) {};");
+        parse_ok("let f = || {};");
+        parse_ok("let f = |x| {};");
+        parse_ok("let f = |x| x;");
+        parse_ok("let f = |x| x + 1;");
+        parse_ok("let f = |x| (x+1);");
+        parse_ok("let f = |x,| {};");
+        parse_ok("let f = |x,y| {};");
+        parse_ok("let f = |x, y| { return 1; };");
+        parse_fails("let f = |x,y,1| {};");
     }
 
     #[test]
