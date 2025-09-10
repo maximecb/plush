@@ -430,7 +430,7 @@ impl ExprBox
                         Expr::Ref(decl) => {
                             if !decl.is_mutable() {
                                 return ParseError::with_pos(
-                                    &format!("assignment to immutable variable"),
+                                    &format!("assignment to immutable variable, use `let var` to declare mutable variables"),
                                     &self.pos
                                 );
                             }

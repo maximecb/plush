@@ -29,6 +29,7 @@ pub enum BinOp
     Sub,
     Mul,
     Div,
+    IntDiv,
     Mod,
 
     // Comparison
