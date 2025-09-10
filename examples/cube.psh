@@ -200,44 +200,75 @@ fun multMatVec(i, m) {
     return o;
 }
 
-// Rasterize a triangle into a tile
 fun rasterize_triangle_tile(v0, v1, v2, color, tile_img, tile_x, tile_y, tile_w, tile_h) {
-    // Convert vertices to integer coordinates
-    let x0 = v0.x.floor();
-    let y0 = v0.y.floor();
-    let x1 = v1.x.floor();
-    let y1 = v1.y.floor();
-    let x2 = v2.x.floor();
-    let y2 = v2.y.floor();
+    // Sort vertices by y-coordinate
+    let var p0 = v0;
+    let var p1 = v1;
+    let var p2 = v2;
+    if (p0.y > p1.y) { let tmp = p0; p0 = p1; p1 = tmp; }
+    if (p0.y > p2.y) { let tmp = p0; p0 = p2; p2 = tmp; }
+    if (p1.y > p2.y) { let tmp = p1; p1 = p2; p2 = tmp; }
 
-    // Compute bounding box, clipped to tile
-    let minX = tile_x.max(x0.min(x1.min(x2)));
-    let maxX = (tile_x + tile_w - 1).min(x0.max(x1.max(x2)));
-    let minY = tile_y.max(y0.min(y1.min(y2)));
-    let maxY = (tile_y + tile_h - 1).min(y0.max(y1.max(y2)));
+    let y0 = p0.y.floor();
+    let y1 = p1.y.floor();
+    let y2 = p2.y.floor();
 
-    // Precompute barycentric coordinate divisors
-    let area = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
-    if (area == 0) return; // Degenerate triangle
+    // Check for degenerate triangles
+    if (y0 == y2) {
+        return;
+    }
 
-    // Scan through bounding box
-    for (let var y = minY; y <= maxY; y = y + 1) {
-        for (let var x = minX; x <= maxX; x = x + 1) {
-            // Compute barycentric coordinates
-            let w0 = (y1 - y2) * (x - x2) + (x2 - x1) * (y - y2);
-            let w1 = (y2 - y0) * (x - x2) + (x0 - x2) * (y - y2);
-            let w2 = area - w0 - w1;
+    let x0 = p0.x;
+    let x1 = p1.x;
+    let x2 = p2.x;
 
-            // Check if point is inside triangle
-            if (w0 <= 0 && w1 <= 0 && w2 <= 0) {
-                // Convert to tile-local coordinates
-                let local_x = x - tile_x;
-                let local_y = y - tile_y;
-                if (local_x >= 0 && local_x < tile_w && local_y >= 0 && local_y < tile_h) {
-                    tile_img.set_pixel(local_x, local_y, color);
-                }
-            }
+    let inv_slope1 = (x1 - x0) / (p1.y - p0.y);
+    let inv_slope2 = (x2 - x0) / (p2.y - p0.y);
+
+    let var cur_x1 = x0;
+    let var cur_x2 = x0;
+
+    // Draw the upper part of the triangle
+    for (let var scanline_y = y0; scanline_y < y1; ++scanline_y) {
+        let start_x = cur_x1.min(cur_x2).floor();
+        let end_x = cur_x1.max(cur_x2).floor();
+
+        let clipped_start_x = start_x.max(tile_x);
+        let clipped_end_x = end_x.min(tile_x + tile_w);
+
+        if (clipped_start_x < clipped_end_x && scanline_y >= tile_y && scanline_y < tile_y + tile_h) {
+            let local_y = scanline_y - tile_y;
+            let local_x = clipped_start_x - tile_x;
+            let fill_len = clipped_end_x - clipped_start_x;
+            let start_idx = local_y * tile_w + local_x;
+            tile_img.bytes.fill_u32(start_idx, fill_len, color);
         }
+
+        cur_x1 = cur_x1 + inv_slope1;
+        cur_x2 = cur_x2 + inv_slope2;
+    }
+
+    // Draw the lower part of the triangle
+    let inv_slope3 = (x2 - x1) / (p2.y - p1.y);
+    cur_x1 = x1;
+
+    for (let var scanline_y = y1; scanline_y < y2; ++scanline_y) {
+        let start_x = cur_x1.min(cur_x2).floor();
+        let end_x = cur_x1.max(cur_x2).floor();
+
+        let clipped_start_x = start_x.max(tile_x);
+        let clipped_end_x = end_x.min(tile_x + tile_w);
+
+        if (clipped_start_x < clipped_end_x && scanline_y >= tile_y && scanline_y < tile_y + tile_h) {
+            let local_y = scanline_y - tile_y;
+            let local_x = clipped_start_x - tile_x;
+            let fill_len = clipped_end_x - clipped_start_x;
+            let start_idx = local_y * tile_w + local_x;
+            tile_img.bytes.fill_u32(start_idx, fill_len, color);
+        }
+
+        cur_x1 = cur_x1 + inv_slope3;
+        cur_x2 = cur_x2 + inv_slope2;
     }
 }
 
