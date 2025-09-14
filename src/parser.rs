@@ -644,9 +644,10 @@ struct OpInfo
 /// Binary operators and their precedence level
 /// Lower numbers mean higher precedence
 /// https://en.cppreference.com/w/c/language/operator_precedence
-const BIN_OPS: [OpInfo; 19] = [
+const BIN_OPS: [OpInfo; 20] = [
     OpInfo { op_str: "*", prec: 3, op: BinOp::Mul, rtl: false },
     OpInfo { op_str: "/", prec: 3, op: BinOp::Div, rtl: false },
+    OpInfo { op_str: "_/", prec: 3, op: BinOp::IntDiv, rtl: false },
     OpInfo { op_str: "%", prec: 3, op: BinOp::Mod, rtl: false },
     OpInfo { op_str: "+", prec: 4, op: BinOp::Add, rtl: false },
     OpInfo { op_str: "-", prec: 4, op: BinOp::Sub, rtl: false },
@@ -661,8 +662,8 @@ const BIN_OPS: [OpInfo; 19] = [
     OpInfo { op_str: "==", prec: 7, op: BinOp::Eq, rtl: false },
     OpInfo { op_str: "!=", prec: 7, op: BinOp::Ne, rtl: false },
 
-    // Logical and, logical or
-    // We place these first because they are longer tokens
+    // Logical AND, logical OR
+    // We place these before bitwise ops because they are longer tokens
     OpInfo { op_str: "&&", prec: 11, op: BinOp::And, rtl: false },
     OpInfo { op_str: "||", prec: 12, op: BinOp::Or, rtl: false },
 

@@ -54,9 +54,12 @@ Plush is a dynamically typed language and supports the following data types:
 
 Plush supports a range of arithmetic, comparison, and logical operators:
 
--   **Arithmetic**: `+`, `-`, `*`, `/`, `%`
+-   **Arithmetic**: `+`, `-`, `*`, `/`, `_/`, `%`
 -   **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`.
 -   **Logical**: `&&`, `||`, `!`
+
+The `_/` operator performs integer division, that is, truncated division which only accepts integer inputs and yields
+an integer output, whereas the division operator `/` yields a floating-point value as output.
 
 Note that unlike in JavaScript, the `==` operator performs reference equality for objects and arrays, not structural equality.
 

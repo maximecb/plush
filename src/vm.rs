@@ -72,6 +72,7 @@ pub enum Insn
     sub,
     mul,
     div,
+    div_int,
     modulo,
 
     // Add an int64 constant
@@ -1143,6 +1144,20 @@ impl Actor
                     push!(r);
                 }
 
+                // Integer division
+                // Division by zero will cause a panic (this is intentional)
+                Insn::div_int => {
+                    let v1 = pop!();
+                    let v0 = pop!();
+
+                    let r = match (v0, v1) {
+                        (Int64(v0), Int64(v1)) => Int64(v0 / v1),
+                        _ => panic!("modulo with non-integer types")
+                    };
+
+                    push!(r);
+                }
+
                 // Division by zero will cause a panic (this is intentional)
                 Insn::modulo => {
                     let v1 = pop!();
@@ -1150,7 +1165,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 % v1),
-                        _ => panic!("modulo with unsupported types")
+                        _ => panic!("modulo with non-integer types")
                     };
 
                     push!(r);
