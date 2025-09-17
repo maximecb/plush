@@ -94,6 +94,14 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Value
     Value::String(actor.alloc.str_const(s))
 }
 
+fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Value
+{
+    let num = v.unwrap_f64();
+    let decimals = decimals.unwrap_usize();
+    let s = format!("{:.*}", decimals, num);
+    Value::String(actor.alloc.str_const(s))
+}
+
 fn float64_min(actor: &mut Actor, v: Value, other: Value) -> Value
 {
     let v = v.unwrap_f64();
@@ -208,6 +216,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
         (Value::Float64(_), "to_f") => HostFn::Fn1_1(identity_method),
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
+        (Value::Float64(_), "format_decimals") => HostFn::Fn2_1(float64_format_decimals),
         (Value::Float64(_), "min") => HostFn::Fn2_1(float64_min),
         (Value::Float64(_), "max") => HostFn::Fn2_1(float64_max),
 

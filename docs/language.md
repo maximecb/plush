@@ -171,6 +171,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `cos()`: Returns the cosine of the float.
     -   `sqrt()`: Returns the square root of the float.
     -   `to_s()`: Returns a string representation of the float.
+    -   `format_decimals(n)`: Produce a string representation with a given number of decimals.
     -   `min(other)`: Returns the minimum of this number and `other`.
     -   `max(other)`: Returns the maximum of this number and `other`.
 -   **String**
