@@ -27,9 +27,18 @@ jobs:
     - name: Bump Version
       run: |
         cd plush.tmbundle
+        if [ ! -f package.json ]; then
+          echo "Error: package.json not found in plush.tmbundle"
+          exit 1
+        fi
         npm version patch --no-git-tag-version
-        git add package.json package-lock.json
-        git commit -m "Bump version to $(jq -r '.version' package.json)"
+        NEW_VERSION=$(jq -r '.version' package.json)
+        echo "New version: $NEW_VERSION"
+        git add package.json
+        if [ -f package-lock.json ]; then
+          git add package-lock.json
+        fi
+        git commit -m "Bump version to $NEW_VERSION" || echo "No changes to commit"
         git push
       env:
         GH_TOKEN: ${{ github.token }}
