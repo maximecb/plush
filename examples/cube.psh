@@ -84,9 +84,16 @@ class Vec3 {
     }
 }
 
+// Set the number of actors
+let var num_actors = 16;
+if ($cmd_get_arg(1) != nil) num_actors = $cmd_get_arg(1).parse_int(10);
+let var use_parallel = num_actors > 1;
+
 // Screen setup
-let WIDTH = 600;
-let HEIGHT = 600;
+let var frame_width = 600;
+let var frame_height = 600;
+if ($cmd_get_arg(2) != nil) frame_width = $cmd_get_arg(2).parse_int(10);
+if ($cmd_get_arg(3) != nil) frame_height = $cmd_get_arg(3).parse_int(10);
 
 // Queue for UI events that arrive while renderer is waiting for TileResult
 let pending_ui_events = [];
@@ -152,7 +159,7 @@ let trianglesIndex = [
 let fNear = -0.1;
 let fFar = 1000.0;
 let fFov = 1.5707963; // radians
-let fAspectRatio = WIDTH/HEIGHT.to_f(); // float
+let fAspectRatio = frame_height / frame_width;
 let fFovRad = 1/tan(fFov*0.5);
 
 let palette = [
@@ -362,8 +369,8 @@ class CubeRenderData {
         }
         for (let var i = 0; i < 8; ++i) {
             self.proj[i] = Vec3(
-                (self.proj[i].x + 1) * 0.5 * WIDTH,
-                (self.proj[i].y + 1) * 0.5 * HEIGHT,
+                (self.proj[i].x + 1) * 0.5 * frame_width,
+                (self.proj[i].y + 1) * 0.5 * frame_height,
                 self.proj[i].z
             );
         }
@@ -495,17 +502,17 @@ fun render_cube_parallel(fTheta, num_actors) {
 
     // Create a list of tile requests
     let requests = [];
-    for (let var y = 0; y < HEIGHT; y = y + TILE_SIZE) {
-        for (let var x = 0; x < WIDTH; x = x + TILE_SIZE) {
-            let tile_w = TILE_SIZE.min(WIDTH - x);
-            let tile_h = TILE_SIZE.min(HEIGHT - y);
+    for (let var y = 0; y < frame_height; y = y + TILE_SIZE) {
+        for (let var x = 0; x < frame_width; x = x + TILE_SIZE) {
+            let tile_w = TILE_SIZE.min(frame_width - x);
+            let tile_h = TILE_SIZE.min(frame_height - y);
             requests.push(TileRequest(cube_data, x, y, tile_w, tile_h));
         }
     }
     let num_tiles = requests.len;
 
     // Image to render into
-    let image = Image(WIDTH, HEIGHT);
+    let image = Image(frame_width, frame_height);
 
     let start_time = $time_current_ms();
 
@@ -556,23 +563,17 @@ fun render_cube_parallel(fTheta, num_actors) {
 fun render_cube_single(fTheta) {
     let start_time = $time_current_ms();
     let cube_data = CubeRenderData(fTheta);
-    let image = render_cube_tile(cube_data, 0, 0, WIDTH, HEIGHT);
+    let image = render_cube_tile(cube_data, 0, 0, frame_width, frame_height);
     let render_time = $time_current_ms() - start_time;
-    // $println("Single thread render time: " + render_time.to_s() + "ms");
+    let fps = (1000 / render_time).floor();
+    $println("Single actor render time: " + render_time.to_s() + "ms (" + fps.to_s() + " fps)");
     return image;
 }
 
 // Main rendering loop
-let window = $window_create(WIDTH, HEIGHT, "3D Cube with Parallel Rendering", 0);
+let window = $window_create(frame_width, frame_height, "3D Cube with Parallel Rendering", 0);
 let var fTheta = 0.0;
 let var previous_time = $time_current_ms();
-
-// Set the number of actors
-let var num_actors = 16;
-if ($cmd_get_arg(1) != nil) {
-    num_actors = $cmd_get_arg(1).parse_int(10);
-}
-let var use_parallel = num_actors > 1;
 
 loop {
     let current_time = $time_current_ms();
