@@ -484,9 +484,7 @@ fun actor_loop() {
 }
 
 // Parallel cube rendering
-fun render_cube_parallel(fTheta) {
-    let num_actors = 16;
-
+fun render_cube_parallel(fTheta, num_actors) {
     // Create the actors
     let actor_ids = [];
     for (let var i = 0; i < num_actors; ++i)
@@ -565,12 +563,16 @@ fun render_cube_single(fTheta) {
 }
 
 // Main rendering loop
-let window = $window_create(WIDTH, HEIGHT, "Cube (Parallel)", 0);
+let window = $window_create(WIDTH, HEIGHT, "3D Cube with Parallel Rendering", 0);
 let var fTheta = 0.0;
 let var previous_time = $time_current_ms();
 
-// Switch between parallel and single-threaded rendering
-let var use_parallel = true;
+// Set the number of actors
+let var num_actors = 16;
+if ($cmd_get_arg(1) != nil) {
+    num_actors = $cmd_get_arg(1).parse_int(10);
+}
+let var use_parallel = num_actors > 1;
 
 loop {
     let current_time = $time_current_ms();
@@ -584,7 +586,7 @@ loop {
 
     let var image = nil;
     if (use_parallel) {
-        image = render_cube_parallel(fTheta);
+        image = render_cube_parallel(fTheta, num_actors);
     } else {
         image = render_cube_single(fTheta);
     }

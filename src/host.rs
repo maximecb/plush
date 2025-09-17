@@ -142,7 +142,7 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Value
     let args = crate::REST_ARGS.lock().unwrap();
 
     if idx >= args.len() {
-        panic!("invalid command-line argument index");
+        return Value::Nil;
     }
 
     let str_obj = actor.alloc.str_const(args[idx].clone());
