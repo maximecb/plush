@@ -20,17 +20,30 @@ jobs:
       uses: actions/setup-node@v5
       with:
         node-version: '>=20.x.x'
-    
+
     - name: Install vsce
       run: npm install -g @vscode/vsce
 
     - name: Package .vsix
       run: cd plush.tmbundle && vsce package
 
-    - name: Extract version
-      run: echo "TAG=$(jq -r '.version' plush.tmbundle/package.json)" >> $GITHUB_ENV
+    - name: Extract version and set tag
+      run: |
+        VERSION=$(jq -r '.version' plush.tmbundle/package.json)
+        echo "TAG=vsix-$VERSION" >> $GITHUB_ENV
+
+    - name: Delete Existing Release (if any)
+      run: |
+        if gh release view ${{ env.TAG }} --repo ${{ github.repository }} > /dev/null 2>&1; then
+          echo "Release with tag ${{ env.TAG }} exists, deleting it..."
+          gh release delete ${{ env.TAG }} --repo ${{ github.repository }} --yes
+        else
+          echo "No release with tag ${{ env.TAG }} exists, proceeding..."
+        fi
+      env:
+        GH_TOKEN: ${{ github.token }}
 
     - name: Create Release
-      run: gh release create $TAG 'plush.tmbundle/*.vsix' --generate-notes
+      run: gh release create ${{ env.TAG }} 'plush.tmbundle/*.vsix' --generate-notes
       env:
         GH_TOKEN: ${{ github.token }}
