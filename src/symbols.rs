@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::lexer::ParseError;
+use crate::lexer::{ParseError, SrcPos};
 use crate::ast::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -18,7 +18,7 @@ pub enum Decl
     Arg { idx: u32, src_fun: FunId },
 
     // Local variable in a function
-    Local { idx: u32, src_fun: FunId, mutable: bool },
+    Local { idx: u32, src_fun: FunId, mutable: bool, captured: bool, },
 
     // Variables captured by the current closure
     Captured { idx: u32, mutable: bool },
@@ -101,6 +101,7 @@ impl Env
                 idx: top_scope.next_idx as u32,
                 src_fun: fun.id,
                 mutable,
+                captured: false,
             }
         };
 
