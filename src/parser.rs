@@ -1126,11 +1126,12 @@ fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcP
         var_arg,
         body,
         num_locals: 0,
-        captured: HashMap::default(),
+        captured: Default::default(),
+        escaping: Default::default(),
         is_unit: false,
         pos,
-        id: FunId::default(),
-        class_id: ClassId::default(),
+        id: Default::default(),
+        class_id: Default::default(),
     };
 
     let fun_id = prog.reg_fun(fun);
@@ -1189,11 +1190,12 @@ fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<Fu
         var_arg,
         body,
         num_locals: 0,
-        captured: HashMap::default(),
+        captured: Default::default(),
+        escaping: Default::default(),
         is_unit: false,
         pos,
-        id: FunId::default(),
-        class_id: ClassId::default(),
+        id: Default::default(),
+        class_id: Default::default(),
     };
 
     let fun_id = prog.reg_fun(fun);
@@ -1287,15 +1289,16 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
 
     let unit_fn = Function {
         name: input.get_src_name(),
-        params: Vec::default(),
+        params: Default::default(),
         var_arg: false,
         body,
         num_locals: 0,
-        captured: HashMap::default(),
+        captured: Default::default(),
+        escaping: Default::default(),
         is_unit: true,
         pos,
-        id: FunId::default(),
-        class_id: ClassId::default(),
+        id: Default::default(),
+        class_id: Default::default(),
     };
 
     Ok(Unit {
