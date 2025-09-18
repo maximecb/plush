@@ -384,6 +384,7 @@ pub const STRING_ID: ClassId = ClassId(5);
 pub const ARRAY_ID: ClassId = ClassId(6);
 pub const BYTEARRAY_ID: ClassId = ClassId(7);
 pub const UIEVENT_ID: ClassId = ClassId(8);
+pub const AUDIO_NEEDED_ID: ClassId = ClassId(9);
 pub const LAST_RESERVED_ID: usize = 0xFF;
 
 #[derive(Default, Clone, Debug)]

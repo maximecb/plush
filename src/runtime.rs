@@ -197,6 +197,16 @@ pub fn init_runtime(prog: &mut Program)
     ui_class.reg_field("x");
     ui_class.reg_field("y");
     prog.reg_class(ui_class);
+
+    // AudioNeeded
+    // Note: in the future we may move this into
+    // an importable module instead of making it a core
+    // runtime object class
+    let mut audio_needed = Class::default();
+    audio_needed.id = AUDIO_NEEDED_ID;
+    audio_needed.reg_field("num_samples");
+    audio_needed.reg_field("num_channels");
+    prog.reg_class(audio_needed);
 }
 
 /// Get the method associated with a core value
