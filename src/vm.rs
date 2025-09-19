@@ -107,6 +107,10 @@ pub enum Insn
     clos_set { idx: u32 },
     clos_get { idx: u32 },
 
+    // Mutable cell access
+    cell_set,
+    cell_get,
+
     // Create class instance
     new { class_id: ClassId, argc: u16 },
 
@@ -1374,6 +1378,29 @@ impl Actor
                     if val == Value::Undef {
                         panic!("executing uninitialized closure");
                     }
+
+                    push!(val);
+                }
+
+                // Set the value stored in a mutable cell
+                Insn::cell_set => {
+                    let val = pop!();
+                    let cell = pop!();
+
+                    match cell {
+                        Value::Cell(p_cell) => unsafe { *p_cell = val },
+                        _ => panic!()
+                    };
+                }
+
+                // Get the value stored in a mutable cell
+                Insn::cell_get => {
+                    let cell = pop!();
+
+                    let val = match cell {
+                        Value::Cell(p_cell) => unsafe { *p_cell },
+                        _ => panic!()
+                    };
 
                     push!(val);
                 }

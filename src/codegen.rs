@@ -153,7 +153,7 @@ impl StmtBox
                                 });
 
                                 // Initialize the local variable for this closure
-                                gen_var_write(decl.as_ref().unwrap(), code);
+                                gen_var_write(decl.as_ref().unwrap(), fun, code);
                             }
                         }
                     }
@@ -283,14 +283,14 @@ impl StmtBox
                     Expr::Fun { fun_id, captured } => {
                         // Read the closure decl
                         let decl = decl.as_ref().unwrap();
-                        gen_var_read(decl, code);
+                        gen_var_read(decl, fun, code);
 
                         // For each variable captured by the closure
                         for (idx, decl) in captured.iter().enumerate() {
                             code.push(Insn::dup);
 
                             // Read the variable and write its value on the closure
-                            gen_var_read(decl, code);
+                            gen_var_read(decl, fun, code);
                             code.push(Insn::clos_set { idx: idx as u32 });
                         }
                     }
@@ -313,7 +313,7 @@ impl StmtBox
                 }
 
                 // Initialize the local variable
-                gen_var_write(decl.as_ref().unwrap(), code);
+                gen_var_write(decl.as_ref().unwrap(), fun, code);
             }
 
             Stmt::ClassDecl { .. } => {}
@@ -373,7 +373,7 @@ impl ExprBox
             }
 
             Expr::Ref(decl) => {
-                gen_var_read(decl, code);
+                gen_var_read(decl, fun, code);
             }
 
             Expr::Index { base, index } => {
@@ -504,7 +504,7 @@ impl ExprBox
                 // For each variable captured by the closure
                 for (idx, decl) in captured.iter().enumerate() {
                     code.push(Insn::dup);
-                    gen_var_read(decl, code);
+                    gen_var_read(decl, fun, code);
                     code.push(Insn::clos_set { idx: idx as u32 });
                 }
             }
@@ -693,6 +693,7 @@ fn gen_bin_op(
 /// Assumes the value to be written is on top of the stack
 fn gen_var_write(
     decl: &Decl,
+    fun: &Function,
     code: &mut Vec<Insn>,
 )
 {
@@ -719,6 +720,7 @@ fn gen_var_write(
 /// Pushes the value read on the stack
 fn gen_var_read(
     decl: &Decl,
+    fun: &Function,
     code: &mut Vec<Insn>,
 )
 {
@@ -774,7 +776,7 @@ fn gen_assign(
                 code.push(Insn::dup);
             }
 
-            gen_var_write(decl, code);
+            gen_var_write(decl, fun, code);
         }
 
         Expr::Member { base, field } => {
