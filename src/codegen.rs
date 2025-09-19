@@ -289,15 +289,19 @@ impl StmtBox
                         for (idx, decl) in captured.iter().enumerate() {
                             code.push(Insn::dup);
 
-                            // Read the variable and write its value on the closure
-                            gen_var_read(decl, fun, code);
+                            // Copy variables and cells captured by the closure
+                            match decl {
+                                Decl::Local { idx, mutable: true, .. } => {
+                                    code.push(Insn::get_local { idx: *idx });
+                                }
+                                _ => gen_var_read(decl, fun, code)
+                            }
                             code.push(Insn::clos_set { idx: idx as u32 });
                         }
                     }
 
                     _ => init_expr.gen_code(fun, code, alloc)?
                 }
-
 
                 // If this is an escaping mutable variable
                 if fun.escaping.contains(decl.as_ref().unwrap()) {
@@ -504,7 +508,14 @@ impl ExprBox
                 // For each variable captured by the closure
                 for (idx, decl) in captured.iter().enumerate() {
                     code.push(Insn::dup);
-                    gen_var_read(decl, fun, code);
+
+                    // Copy variables and cells captured by the closure
+                    match decl {
+                        Decl::Local { idx, mutable: true, .. } => {
+                            code.push(Insn::get_local { idx: *idx });
+                        }
+                        _ => gen_var_read(decl, fun, code)
+                    }
                     code.push(Insn::clos_set { idx: idx as u32 });
                 }
             }
@@ -703,13 +714,20 @@ fn gen_var_write(
         }
 
         Decl::Local { idx, .. } => {
-            code.push(Insn::set_local { idx });
+            // If this is an escaping mutable variable
+            if fun.escaping.contains(decl) {
+                code.push(Insn::get_local { idx });
+                code.push(Insn::cell_set);
+
+            } else {
+                code.push(Insn::set_local { idx });
+            }
         }
 
         Decl::Captured { idx, mutable } => {
-            assert!(mutable == false);
-
-            todo!();
+            assert!(mutable);
+            code.push(Insn::clos_get { idx });
+            code.push(Insn::cell_set);
         }
 
         _ => todo!()
@@ -742,15 +760,23 @@ fn gen_var_read(
         }
 
         Decl::Local { idx, .. } => {
-            code.push(Insn::get_local { idx });
+            // If this is an escaping mutable variable
+            if fun.escaping.contains(decl) {
+                code.push(Insn::get_local { idx });
+                code.push(Insn::cell_get);
+
+            } else {
+                code.push(Insn::get_local { idx });
+            }
         }
 
         Decl::Captured { idx, mutable } => {
             if mutable {
-                todo!()
+                code.push(Insn::clos_get { idx });
+                code.push(Insn::cell_get);
+            } else {
+                code.push(Insn::clos_get { idx });
             }
-
-            code.push(Insn::clos_get { idx });
         }
     }
 }
