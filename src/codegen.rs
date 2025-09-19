@@ -1,7 +1,7 @@
 use std::cmp::max;
 use crate::ast::*;
 use crate::lexer::ParseError;
-use crate::symbols::{Decl};
+use crate::symbols::Decl;
 use crate::vm::{Insn, Value};
 use crate::alloc::Alloc;
 
@@ -152,7 +152,7 @@ impl StmtBox
                                     num_slots: captured.len() as u32,
                                 });
 
-                                // Initialize the local variable
+                                // Initialize the local variable for this closure
                                 gen_var_write(decl.as_ref().unwrap(), code);
                             }
                         }
@@ -296,6 +296,20 @@ impl StmtBox
                     }
 
                     _ => init_expr.gen_code(fun, code, alloc)?
+                }
+
+
+                // If this is an escaping mutable variable
+                if fun.escaping.contains(decl.as_ref().unwrap()) {
+                    let local_idx = match decl.unwrap() {
+                        Decl::Local { idx, .. } => idx,
+                        _ => panic!()
+                    };
+
+                    // Allocate a mutable closure cell for this variable
+                    let p_cell = alloc.alloc(Value::Nil);
+                    code.push(Insn::push { val: Value::Cell(p_cell) });
+                    code.push(Insn::set_local { idx: local_idx });
                 }
 
                 // Initialize the local variable
