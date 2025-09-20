@@ -210,28 +210,43 @@ fun rand_float() {
     return lcg_seed.to_f() / 0x7FFFFFFF.to_f();
 }
 
+class RenderData {
+    init(self) {
+        self.vertices = [];
+        self.indices = [];
+        self.colors = [];
+    }
+
+    transform(self, mat) {
+        for (let var i = 0; i < self.vertices.len; ++i) {
+            let v = mat4_mul_vec(self.vertices[i], mat);
+            v.x = (v.x + 1) * 0.5 * FRAME_WIDTH;
+            v.y = (v.y + 1) * 0.5 * FRAME_HEIGHT;
+            self.vertices[i] = v;
+        }
+    }
+}
+
 fun generate_random_triangles(num_triangles) {
-    let vertices = [];
-    let indices = [];
-    let colors = [];
+    let data = RenderData();
 
     for (let var i = 0; i < num_triangles; ++i) {
         let r = (rand_float() * 255).floor();
         let g = (rand_float() * 255).floor();
         let b = (rand_float() * 255).floor();
-        colors.push(0xFF000000 | (r << 16) | (g << 8) | b);
+        data.colors.push(0xFF000000 | (r << 16) | (g << 8) | b);
 
-        let v_idx_start = vertices.len;
+        let v_idx_start = data.vertices.len;
         for (let var j = 0; j < 3; ++j) {
             let x = (rand_float() - 0.5) * 4;
             let y = (rand_float() - 0.5) * 4;
             let z = (rand_float() - 0.5) * 4 - 5; // Place triangles in front of camera
-            vertices.push(Vec3(x, y, z));
+            data.vertices.push(Vec3(x, y, z));
         }
-        indices.push([v_idx_start, v_idx_start + 1, v_idx_start + 2]);
+        data.indices.push([v_idx_start, v_idx_start + 1, v_idx_start + 2]);
     }
 
-    return [vertices, indices, colors];
+    return data;
 }
 
 // --- Main Benchmark ---
@@ -254,42 +269,32 @@ let mat_vp = mat4_mul(mat_view, mat_proj);
 // Generate triangles
 rand_init(123);
 let data = generate_random_triangles(200);
-let vertices = data[0];
-let indices = data[1];
-let colors = data[2];
-
-let start_time = $time_current_ms();
 
 // Clear background
 image.fill(0xFF101020);
 
+// Transform all vertices once
+let start_transform = $time_current_ms();
+data.transform(mat_vp);
+let end_transform = $time_current_ms();
+
 // Render all triangles
-for (let var i = 0; i < indices.len; ++i) {
-    let tri_indices = indices[i];
-    let v_world0 = vertices[tri_indices[0]];
-    let v_world1 = vertices[tri_indices[1]];
-    let v_world2 = vertices[tri_indices[2]];
+let start_render = $time_current_ms();
+for (let var i = 0; i < data.indices.len; ++i) {
+    let tri_indices = data.indices[i];
+    let v0 = data.vertices[tri_indices[0]];
+    let v1 = data.vertices[tri_indices[1]];
+    let v2 = data.vertices[tri_indices[2]];
 
-    // Project vertices
-    let v0 = mat4_mul_vec(v_world0, mat_vp);
-    let v1 = mat4_mul_vec(v_world1, mat_vp);
-    let v2 = mat4_mul_vec(v_world2, mat_vp);
-
-    // Scale to screen coordinates
-    v0.x = (v0.x + 1) * 0.5 * FRAME_WIDTH;
-    v0.y = (v0.y + 1) * 0.5 * FRAME_HEIGHT;
-    v1.x = (v1.x + 1) * 0.5 * FRAME_WIDTH;
-    v1.y = (v1.y + 1) * 0.5 * FRAME_HEIGHT;
-    v2.x = (v2.x + 1) * 0.5 * FRAME_WIDTH;
-    v2.y = (v2.y + 1) * 0.5 * FRAME_HEIGHT;
-
-    rasterize_triangle(v0, v1, v2, colors[i], image);
+    rasterize_triangle(v0, v1, v2, data.colors[i], image);
 }
+let end_render = $time_current_ms();
 
-let end_time = $time_current_ms();
-let elapsed_ms = end_time - start_time;
+let transform_ms = end_transform - start_transform;
+let render_ms = end_render - start_render;
 
-$println("Rendering " + indices.len.to_s() + " triangles took " + elapsed_ms.to_s() + " ms.");
+$println("Transforming " + data.vertices.len.to_s() + " vertices took " + transform_ms.to_s() + " ms.");
+$println("Rendering " + data.indices.len.to_s() + " triangles took " + render_ms.to_s() + " ms.");
 
 $window_draw_frame(window, image.bytes);
 
