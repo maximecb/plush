@@ -6,6 +6,13 @@ let FRAME_HEIGHT = 600;
 
 // --- 3D Math and Classes (from cube.psh) ---
 
+let PI = 3.1415926535;
+
+// Converts an angle from degrees to radians
+fun deg2rad(deg) {
+    return deg * PI / 180.0;
+}
+
 class Image {
     init(self, width, height) {
         self.width = width;
@@ -62,6 +69,7 @@ class Vec3 {
     }
 }
 
+// Initializes a 4x4 matrix with zeros
 fun initMat4(m) {
     for (let var i = 0; i < 4; ++i) {
         let row = Array.with_size(4, 0.0);
@@ -69,6 +77,7 @@ fun initMat4(m) {
     }
 }
 
+// Multiplies a 4x4 matrix by a 3D vector
 fun mat4_mul_vec(i, m) {
     let o = Vec3(0, 0, 0);
     o.x = i.x * m[0][0] + i.y * m[1][0] + i.z * m[2][0] + m[3][0];
@@ -83,6 +92,7 @@ fun mat4_mul_vec(i, m) {
     return o;
 }
 
+// Multiplies two 4x4 matrices
 fun mat4_mul(a, b) {
     let result = [];
     initMat4(result);
@@ -96,6 +106,7 @@ fun mat4_mul(a, b) {
     return result;
 }
 
+// Creates a perspective projection matrix from vertical FOV
 fun perspective(fov_rad, aspect, near, far) {
     let m = [];
     initMat4(m);
@@ -109,6 +120,22 @@ fun perspective(fov_rad, aspect, near, far) {
     return m;
 }
 
+// FIXME: this function won't be needed once we have .atan()
+// Creates a perspective projection matrix from the tangent of the vertical FOV
+fun perspective_from_tan_fov(tan_fov_y_half, aspect, near, far) {
+    let m = [];
+    initMat4(m);
+    let f = 1.0 / tan_fov_y_half;
+    m[0][0] = f / aspect;
+    m[1][1] = f;
+    m[2][2] = (far + near) / (near - far);
+    m[2][3] = -1.0;
+    m[3][2] = (2.0 * far * near) / (near - far);
+    m[3][3] = 0.0;
+    return m;
+}
+
+// Creates a view matrix that looks at a target from a given position
 fun lookat(eye, target, up) {
     let z_axis = eye.sub(target).normalize();
     let x_axis = up.cross(z_axis).normalize();
@@ -133,6 +160,42 @@ fun lookat(eye, target, up) {
     m[3][2] = -z_axis.dot(eye);
     m[3][3] = 1.0;
     return m;
+}
+
+// Represents a 3D camera
+class Camera {
+    // Initializes the camera
+    init(self, pos, yaw, pitch, fov_x) {
+        self.pos = pos;
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self.fov_x = fov_x;
+    }
+
+    // Calculates the view matrix for the camera
+    view_matrix(self) {
+        let yaw_rad = deg2rad(self.yaw);
+        let pitch_rad = deg2rad(self.pitch);
+
+        let dir_x = -yaw_rad.sin() * pitch_rad.cos();
+        let dir_y = pitch_rad.sin();
+        let dir_z = -yaw_rad.cos() * pitch_rad.cos();
+        let direction = Vec3(dir_x, dir_y, dir_z);
+
+        let target = self.pos.add(direction);
+        let up = Vec3(0.0, 1.0, 0.0);
+
+        return lookat(self.pos, target, up);
+    }
+
+    // Calculates the projection matrix for the camera
+    projection_matrix(self, aspect, near, far) {
+        let fov_x_rad = deg2rad(self.fov_x);
+
+        let tan_fov_y_half = (fov_x_rad / 2.0).tan() / aspect;
+
+        return perspective_from_tan_fov(tan_fov_y_half, aspect, near, far);
+    }
 }
 
 // --- Triangle Rasterization ---
@@ -257,15 +320,10 @@ let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Triangle Rendering Bench
 let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Matrix setup
-let fov = 1.5707963; // 90 degrees in radians
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
-let mat_proj = perspective(fov, aspect, 0.1, 1000.0);
-
-let eye = Vec3(0.0, 0.0, 0.0);
-let target = Vec3(0.0, 0.0, -1.0);
-let up = Vec3(0.0, 1.0, 0.0);
-let mat_view = lookat(eye, target, up);
-
+let camera = Camera(Vec3(0.0, 0.0, 0.0), 0.0, 0.0, 90.0);
+let mat_view = camera.view_matrix();
+let mat_proj = camera.projection_matrix(aspect, 0.1, 1000.0);
 let mat_vp = mat4_mul(mat_view, mat_proj);
 
 // Generate triangles
