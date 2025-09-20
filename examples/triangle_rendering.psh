@@ -1,0 +1,302 @@
+
+// Benchmark for rendering a list of triangles from vertex and index arrays
+
+let FRAME_WIDTH = 800;
+let FRAME_HEIGHT = 600;
+
+// --- 3D Math and Classes (from cube.psh) ---
+
+class Image {
+    init(self, width, height) {
+        self.width = width;
+        self.height = height;
+        self.bytes = ByteArray.with_size(4 * width * height);
+    }
+
+    fill(self, color) {
+        self.bytes.fill_u32(0, self.width * self.height, color);
+    }
+}
+
+class Vec3 {
+    init(self, x, y, z) {
+        self.x = x;
+        self.y = y;
+        self.z = z;
+    }
+
+    add(self, other) {
+        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z);
+    }
+
+    sub(self, other) {
+        return Vec3(self.x - other.x, self.y - other.y, self.z - other.z);
+    }
+
+    mul(self, scalar) {
+        return Vec3(self.x * scalar, self.y * scalar, self.z * scalar);
+    }
+
+    dot(self, other) {
+        return self.x * other.x + self.y * other.y + self.z * other.z;
+    }
+
+    cross(self, other) {
+        return Vec3(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x
+        );
+    }
+
+    length_squared(self) {
+        return self.dot(self);
+    }
+
+    normalize(self) {
+        let len = self.length_squared().sqrt();
+        if (len == 0.0) {
+            return Vec3(0.0, 0.0, 0.0);
+        }
+        return Vec3(self.x / len, self.y / len, self.z / len);
+    }
+}
+
+fun initMat4(m) {
+    for (let var i = 0; i < 4; ++i) {
+        let row = Array.with_size(4, 0.0);
+        m.push(row);
+    }
+}
+
+fun mat4_mul_vec(i, m) {
+    let o = Vec3(0, 0, 0);
+    o.x = i.x * m[0][0] + i.y * m[1][0] + i.z * m[2][0] + m[3][0];
+    o.y = i.x * m[0][1] + i.y * m[1][1] + i.z * m[2][1] + m[3][1];
+    o.z = i.x * m[0][2] + i.y * m[1][2] + i.z * m[2][2] + m[3][2];
+    let w = i.x * m[0][3] + i.y * m[1][3] + i.z * m[2][3] + m[3][3];
+
+    if (w.floor() != 0) {
+        o.x = o.x/w;
+        o.y = o.y/w;
+    }
+    return o;
+}
+
+fun mat4_mul(a, b) {
+    let result = [];
+    initMat4(result);
+    for (let var i = 0; i < 4; ++i) {
+        for (let var j = 0; j < 4; ++j) {
+            for (let var k = 0; k < 4; ++k) {
+                result[i][j] = result[i][j] + a[k][j] * b[i][k];
+            }
+        }
+    }
+    return result;
+}
+
+fun perspective(fov_rad, aspect, near, far) {
+    let m = [];
+    initMat4(m);
+    let f = 1.0 / (fov_rad / 2.0).tan();
+    m[0][0] = f / aspect;
+    m[1][1] = f;
+    m[2][2] = (far + near) / (near - far);
+    m[2][3] = -1.0;
+    m[3][2] = (2.0 * far * near) / (near - far);
+    m[3][3] = 0.0;
+    return m;
+}
+
+fun lookat(eye, target, up) {
+    let z_axis = eye.sub(target).normalize();
+    let x_axis = up.cross(z_axis).normalize();
+    let y_axis = z_axis.cross(x_axis);
+
+    let m = [];
+    initMat4(m);
+    m[0][0] = x_axis.x;
+    m[0][1] = y_axis.x;
+    m[0][2] = z_axis.x;
+    m[0][3] = 0.0;
+    m[1][0] = x_axis.y;
+    m[1][1] = y_axis.y;
+    m[1][2] = z_axis.y;
+    m[1][3] = 0.0;
+    m[2][0] = x_axis.z;
+    m[2][1] = y_axis.z;
+    m[2][2] = z_axis.z;
+    m[2][3] = 0.0;
+    m[3][0] = -x_axis.dot(eye);
+    m[3][1] = -y_axis.dot(eye);
+    m[3][2] = -z_axis.dot(eye);
+    m[3][3] = 1.0;
+    return m;
+}
+
+// --- Triangle Rasterization ---
+
+fun rasterize_triangle(v0, v1, v2, color, image) {
+    let var p0 = v0;
+    let var p1 = v1;
+    let var p2 = v2;
+    if (p0.y > p1.y) { let tmp = p0; p0 = p1; p1 = tmp; }
+    if (p0.y > p2.y) { let tmp = p0; p0 = p2; p2 = tmp; }
+    if (p1.y > p2.y) { let tmp = p1; p1 = p2; p2 = tmp; }
+
+    let y0 = p0.y.floor();
+    let y1 = p1.y.floor();
+    let y2 = p2.y.floor();
+
+    if (y0 == y2) return;
+
+    let x0 = p0.x;
+    let x1 = p1.x;
+    let x2 = p2.x;
+
+    let var inv_slope1 = 0.0;
+    if (p1.y > p0.y) inv_slope1 = (x1 - x0) / (p1.y - p0.y);
+
+    let var inv_slope2 = 0.0;
+    if (p2.y > p0.y) inv_slope2 = (x2 - x0) / (p2.y - p0.y);
+
+    let start_scanline_y_top = y0.max(0);
+    let end_scanline_y_top = y1.min(FRAME_HEIGHT);
+
+    if (start_scanline_y_top < end_scanline_y_top) {
+        let var cur_x1 = x0 + (start_scanline_y_top - y0) * inv_slope1;
+        let var cur_x2 = x0 + (start_scanline_y_top - y0) * inv_slope2;
+
+        for (let var scanline_y = start_scanline_y_top; scanline_y < end_scanline_y_top; ++scanline_y) {
+            let start_x = cur_x1.min(cur_x2).floor().max(0);
+            let end_x = cur_x1.max(cur_x2).floor().min(FRAME_WIDTH);
+            if (start_x < end_x) {
+                image.bytes.fill_u32(scanline_y * FRAME_WIDTH + start_x, end_x - start_x, color);
+            }
+            cur_x1 = cur_x1 + inv_slope1;
+            cur_x2 = cur_x2 + inv_slope2;
+        }
+    }
+
+    let var inv_slope3 = 0.0;
+    if (p2.y > p1.y) inv_slope3 = (x2 - x1) / (p2.y - p1.y);
+
+    let start_scanline_y_bot = y1.max(0);
+    let end_scanline_y_bot = y2.min(FRAME_HEIGHT);
+
+    if (start_scanline_y_bot < end_scanline_y_bot) {
+        let var cur_x1 = x1 + (start_scanline_y_bot - y1) * inv_slope3;
+        let var cur_x2 = x0 + (start_scanline_y_bot - y0) * inv_slope2;
+
+        for (let var scanline_y = start_scanline_y_bot; scanline_y < end_scanline_y_bot; ++scanline_y) {
+            let start_x = cur_x1.min(cur_x2).floor().max(0);
+            let end_x = cur_x1.max(cur_x2).floor().min(FRAME_WIDTH);
+            if (start_x < end_x) {
+                image.bytes.fill_u32(scanline_y * FRAME_WIDTH + start_x, end_x - start_x, color);
+            }
+            cur_x1 = cur_x1 + inv_slope3;
+            cur_x2 = cur_x2 + inv_slope2;
+        }
+    }
+}
+
+// --- Random Data Generation ---
+
+let var lcg_seed = 1;
+fun rand_init(seed) { lcg_seed = seed & 0x7FFFFFFF; }
+fun rand_float() {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lcg_seed.to_f() / 0x7FFFFFFF.to_f();
+}
+
+fun generate_random_triangles(num_triangles) {
+    let vertices = [];
+    let indices = [];
+    let colors = [];
+
+    for (let var i = 0; i < num_triangles; ++i) {
+        let r = (rand_float() * 255).floor();
+        let g = (rand_float() * 255).floor();
+        let b = (rand_float() * 255).floor();
+        colors.push(0xFF000000 | (r << 16) | (g << 8) | b);
+
+        let v_idx_start = vertices.len;
+        for (let var j = 0; j < 3; ++j) {
+            let x = (rand_float() - 0.5) * 4;
+            let y = (rand_float() - 0.5) * 4;
+            let z = (rand_float() - 0.5) * 4 - 5; // Place triangles in front of camera
+            vertices.push(Vec3(x, y, z));
+        }
+        indices.push([v_idx_start, v_idx_start + 1, v_idx_start + 2]);
+    }
+
+    return [vertices, indices, colors];
+}
+
+// --- Main Benchmark ---
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Triangle Rendering Benchmark", 0);
+let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
+
+// Matrix setup
+let fov = 1.5707963; // 90 degrees in radians
+let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
+let mat_proj = perspective(fov, aspect, 0.1, 1000.0);
+
+let eye = Vec3(0.0, 0.0, 0.0);
+let target = Vec3(0.0, 0.0, -1.0);
+let up = Vec3(0.0, 1.0, 0.0);
+let mat_view = lookat(eye, target, up);
+
+let mat_vp = mat4_mul(mat_view, mat_proj);
+
+// Generate triangles
+rand_init(123);
+let data = generate_random_triangles(200);
+let vertices = data[0];
+let indices = data[1];
+let colors = data[2];
+
+let start_time = $time_current_ms();
+
+// Clear background
+image.fill(0xFF101020);
+
+// Render all triangles
+for (let var i = 0; i < indices.len; ++i) {
+    let tri_indices = indices[i];
+    let v_world0 = vertices[tri_indices[0]];
+    let v_world1 = vertices[tri_indices[1]];
+    let v_world2 = vertices[tri_indices[2]];
+
+    // Project vertices
+    let v0 = mat4_mul_vec(v_world0, mat_vp);
+    let v1 = mat4_mul_vec(v_world1, mat_vp);
+    let v2 = mat4_mul_vec(v_world2, mat_vp);
+
+    // Scale to screen coordinates
+    v0.x = (v0.x + 1) * 0.5 * FRAME_WIDTH;
+    v0.y = (v0.y + 1) * 0.5 * FRAME_HEIGHT;
+    v1.x = (v1.x + 1) * 0.5 * FRAME_WIDTH;
+    v1.y = (v1.y + 1) * 0.5 * FRAME_HEIGHT;
+    v2.x = (v2.x + 1) * 0.5 * FRAME_WIDTH;
+    v2.y = (v2.y + 1) * 0.5 * FRAME_HEIGHT;
+
+    rasterize_triangle(v0, v1, v2, colors[i], image);
+}
+
+let end_time = $time_current_ms();
+let elapsed_ms = end_time - start_time;
+
+$println("Rendering " + indices.len.to_s() + " triangles took " + elapsed_ms.to_s() + " ms.");
+
+$window_draw_frame(window, image.bytes);
+
+// Event loop to keep the window open
+loop {
+    let msg = $actor_recv();
+    if (msg instanceof UIEvent && (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE'))) {
+        break;
+    }
+}
