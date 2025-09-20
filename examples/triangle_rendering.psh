@@ -243,7 +243,9 @@ fun generate_random_triangles(num_triangles) {
             let z = (rand_float() - 0.5) * 4 - 5; // Place triangles in front of camera
             data.vertices.push(Vec3(x, y, z));
         }
-        data.indices.push([v_idx_start, v_idx_start + 1, v_idx_start + 2]);
+        data.indices.push(v_idx_start);
+        data.indices.push(v_idx_start + 1);
+        data.indices.push(v_idx_start + 2);
     }
 
     return data;
@@ -280,13 +282,12 @@ let end_transform = $time_current_ms();
 
 // Render all triangles
 let start_render = $time_current_ms();
-for (let var i = 0; i < data.indices.len; ++i) {
-    let tri_indices = data.indices[i];
-    let v0 = data.vertices[tri_indices[0]];
-    let v1 = data.vertices[tri_indices[1]];
-    let v2 = data.vertices[tri_indices[2]];
+for (let var i = 0; i < data.indices.len; i = i + 3) {
+    let v0 = data.vertices[data.indices[i]];
+    let v1 = data.vertices[data.indices[i+1]];
+    let v2 = data.vertices[data.indices[i+2]];
 
-    rasterize_triangle(v0, v1, v2, data.colors[i], image);
+    rasterize_triangle(v0, v1, v2, data.colors[i _/ 3], image);
 }
 let end_render = $time_current_ms();
 
@@ -294,7 +295,7 @@ let transform_ms = end_transform - start_transform;
 let render_ms = end_render - start_render;
 
 $println("Transforming " + data.vertices.len.to_s() + " vertices took " + transform_ms.to_s() + " ms.");
-$println("Rendering " + data.indices.len.to_s() + " triangles took " + render_ms.to_s() + " ms.");
+$println("Rendering " + (data.indices.len / 3).to_s() + " triangles took " + render_ms.to_s() + " ms.");
 
 $window_draw_frame(window, image.bytes);
 
