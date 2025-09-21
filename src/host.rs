@@ -159,6 +159,7 @@ fn print(actor: &mut Actor, v: Value)
         }
 
         Value::Int64(v) => print!("{}", v),
+        Value::Float64(v) => print!("{}", v),
 
         Value::True => print!("true"),
         Value::False => print!("false"),
