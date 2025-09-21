@@ -496,9 +496,14 @@ impl ExprBox
                 let mut child_fun = std::mem::take(prog.funs.get_mut(fun_id).unwrap());
                 child_fun.resolve_syms(prog, env)?;
 
+                // We need to copy captured entries on the function expression but
+                // we also need to make sure that this array is in the correct order
+                let mut entries: Vec<(Decl, u32)> = child_fun.captured.clone().into_iter().collect();
+                entries.sort_by_key(|&(_, idx)| idx);
+
                 // For each variable captured by the nested function
-                for (decl, idx) in &child_fun.captured {
-                    match *decl {
+                for (decl, idx) in entries {
+                    match decl {
                         // If this variable doesn't comes from this function,
                         // then it must be captured by this closure
                         Decl::Arg { src_fun, .. } |
@@ -509,7 +514,7 @@ impl ExprBox
                         // If the variable is a mutable local from this function,
                         // register it as escaping and needing a mutable closure cell
                         Decl::Local { src_fun, mutable: true, .. } if src_fun == fun.id => {
-                            fun.escaping.insert(*decl);
+                            fun.escaping.insert(decl);
                         },
 
                         _ =>{}
@@ -517,6 +522,11 @@ impl ExprBox
 
                     captured.push(decl.clone());
                 }
+
+
+
+
+
 
                 // Put the child function back in place
                 *prog.funs.get_mut(fun_id).unwrap() = child_fun;
