@@ -4,7 +4,7 @@
 let FRAME_WIDTH = 800;
 let FRAME_HEIGHT = 600;
 
-// --- 3D Math and Classes (from cube.psh) ---
+// --- 3D Math and Classes ---
 
 let PI = 3.1415926535;
 
@@ -89,6 +89,7 @@ fun mat4_mul_vec(i, m) {
         o.x = o.x/w;
         o.y = o.y/w;
     }
+
     return o;
 }
 
@@ -273,6 +274,94 @@ class RenderData {
             self.vertices[i] = v;
         }
     }
+
+    // Sort the triangles by depth so that they can be rendered back to front
+    sort_triangles(self) {
+        let num_triangles = self.indices.len _/ 3;
+        if (num_triangles == 0) {
+            return;
+        }
+
+        // Calculate the depth of each triangle
+        let depths = Array.with_size(num_triangles, 0.0);
+        for (let var i = 0; i < num_triangles; ++i) {
+            let v0 = self.vertices[self.indices[i*3]];
+            let v1 = self.vertices[self.indices[i*3+1]];
+            let v2 = self.vertices[self.indices[i*3+2]];
+            depths[i] = (v0.z + v1.z + v2.z) / 3.0;
+        }
+
+        // Partition function for quicksort (adapted for triangles)
+        fun partition(low, high) {
+            let pivot = depths[high];
+            let var i = low - 1;
+
+            for (let var j = low; j < high; ++j) {
+                // Sort back to front (larger Z is further away)
+                if (depths[j] > pivot) {
+                    i = i + 1;
+
+                    // Swap depths
+                    let temp_depth = depths[i];
+                    depths[i] = depths[j];
+                    depths[j] = temp_depth;
+
+                    // Swap colors
+                    let temp_color = self.colors[i];
+                    self.colors[i] = self.colors[j];
+                    self.colors[j] = temp_color;
+
+                    // Swap indices (3 per triangle)
+                    let i_idx = i * 3;
+                    let j_idx = j * 3;
+                    let temp_idx0 = self.indices[i_idx];
+                    let temp_idx1 = self.indices[i_idx+1];
+                    let temp_idx2 = self.indices[i_idx+2];
+                    self.indices[i_idx]   = self.indices[j_idx];
+                    self.indices[i_idx+1] = self.indices[j_idx+1];
+                    self.indices[i_idx+2] = self.indices[j_idx+2];
+                    self.indices[j_idx]   = temp_idx0;
+                    self.indices[j_idx+1] = temp_idx1;
+                    self.indices[j_idx+2] = temp_idx2;
+                }
+            }
+
+            // Swap the pivot element
+            let i1 = i + 1;
+            let temp_depth = depths[i1];
+            depths[i1] = depths[high];
+            depths[high] = temp_depth;
+
+            let temp_color = self.colors[i1];
+            self.colors[i1] = self.colors[high];
+            self.colors[high] = temp_color;
+
+            let i1_idx = i1 * 3;
+            let high_idx = high * 3;
+            let temp_idx0 = self.indices[i1_idx];
+            let temp_idx1 = self.indices[i1_idx+1];
+            let temp_idx2 = self.indices[i1_idx+2];
+            self.indices[i1_idx]   = self.indices[high_idx];
+            self.indices[i1_idx+1] = self.indices[high_idx+1];
+            self.indices[i1_idx+2] = self.indices[high_idx+2];
+            self.indices[high_idx]   = temp_idx0;
+            self.indices[high_idx+1] = temp_idx1;
+            self.indices[high_idx+2] = temp_idx2;
+
+            return i1;
+        }
+
+        // Quicksort implementation
+        fun quicksort(low, high) {
+            if (low < high) {
+                let pi = partition(low, high);
+                quicksort(low, pi - 1);
+                quicksort(pi + 1, high);
+            }
+        }
+
+        quicksort(0, num_triangles - 1);
+    }
 }
 
 fun generate_random_triangles(num_triangles) {
@@ -322,6 +411,7 @@ image.fill(0xFF101020);
 // Transform all vertices once
 let start_transform = $time_current_ms();
 data.transform(mat_vp);
+data.sort_triangles();
 let end_transform = $time_current_ms();
 
 // Render all triangles
