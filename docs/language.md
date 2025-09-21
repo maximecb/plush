@@ -170,6 +170,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `sin()`: Returns the sine of the float.
     -   `cos()`: Returns the cosine of the float.
     -   `tan()`: Returns the tangent of the float.
+    -   `atan()`: Returns the arctangent of the float.
     -   `sqrt()`: Returns the square root of the float.
     -   `to_s()`: Returns a string representation of the float.
     -   `format_decimals(n)`: Produce a string representation with a given number of decimals.

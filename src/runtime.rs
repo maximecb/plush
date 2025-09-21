@@ -87,6 +87,12 @@ fn float64_tan(actor: &mut Actor, v: Value) -> Value
     Value::Float64(v.tan())
 }
 
+fn float64_atan(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    Value::Float64(v.atan())
+}
+
 fn float64_sqrt(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_f64();
@@ -230,6 +236,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "sin") => HostFn::Fn1_1(float64_sin),
         (Value::Float64(_), "cos") => HostFn::Fn1_1(float64_cos),
         (Value::Float64(_), "tan") => HostFn::Fn1_1(float64_tan),
+        (Value::Float64(_), "atan") => HostFn::Fn1_1(float64_atan),
         (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
         (Value::Float64(_), "to_f") => HostFn::Fn1_1(identity_method),
         (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),

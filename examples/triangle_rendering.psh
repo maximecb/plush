@@ -120,21 +120,6 @@ fun perspective(fov_rad, aspect, near, far) {
     return m;
 }
 
-// FIXME: this function won't be needed once we have .atan()
-// Creates a perspective projection matrix from the tangent of the vertical FOV
-fun perspective_from_tan_fov(tan_fov_y_half, aspect, near, far) {
-    let m = [];
-    initMat4(m);
-    let f = 1.0 / tan_fov_y_half;
-    m[0][0] = f / aspect;
-    m[1][1] = f;
-    m[2][2] = (far + near) / (near - far);
-    m[2][3] = -1.0;
-    m[3][2] = (2.0 * far * near) / (near - far);
-    m[3][3] = 0.0;
-    return m;
-}
-
 // Creates a view matrix that looks at a target from a given position
 fun lookat(eye, target, up) {
     let z_axis = eye.sub(target).normalize();
@@ -165,11 +150,13 @@ fun lookat(eye, target, up) {
 // Represents a 3D camera
 class Camera {
     // Initializes the camera
-    init(self, pos, yaw, pitch, fov_x) {
+    init(self, pos, yaw, pitch, fov_x, near, far) {
         self.pos = pos;
         self.yaw = yaw;
         self.pitch = pitch;
         self.fov_x = fov_x;
+        self.near = near;
+        self.far = far;
     }
 
     // Calculates the view matrix for the camera
@@ -189,12 +176,10 @@ class Camera {
     }
 
     // Calculates the projection matrix for the camera
-    projection_matrix(self, aspect, near, far) {
+    projection_matrix(self, aspect) {
         let fov_x_rad = deg2rad(self.fov_x);
-
-        let tan_fov_y_half = (fov_x_rad / 2.0).tan() / aspect;
-
-        return perspective_from_tan_fov(tan_fov_y_half, aspect, near, far);
+        let fov_y_rad = 2 * ((fov_x_rad / 2.0).tan() / aspect).atan();
+        return perspective(fov_y_rad, aspect, self.near, self.far);
     }
 }
 
@@ -321,9 +306,10 @@ let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Matrix setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
-let camera = Camera(Vec3(0.0, 0.0, 0.0), 0.0, 0.0, 90.0);
+let camera = Camera(Vec3(0.0, 0.0, 0.0), 0.0, 0.0, 90.0, 0.1, 1000.0);
 let mat_view = camera.view_matrix();
-let mat_proj = camera.projection_matrix(aspect, 0.1, 1000.0);
+let mat_proj = camera.projection_matrix(aspect);
+
 let mat_vp = mat4_mul(mat_view, mat_proj);
 
 // Generate triangles
