@@ -461,22 +461,77 @@ class RenderData {
     }
 }
 
+fun generate_cube(data, center_x, y, center_z, size_x, size_y, size_z, color) {
+    let base_idx = data.vertices.len;
 
+    let half_x = size_x / 2.0;
+    let half_z = size_z / 2.0;
 
-fun generate_block()
-{
+    // Vertices of the cube
+    data.vertices.push(Vec3(center_x - half_x, y,        center_z - half_z)); // 0
+    data.vertices.push(Vec3(center_x + half_x, y,        center_z - half_z)); // 1
+    data.vertices.push(Vec3(center_x + half_x, y,        center_z + half_z)); // 2
+    data.vertices.push(Vec3(center_x - half_x, y,        center_z + half_z)); // 3
+    data.vertices.push(Vec3(center_x - half_x, y + size_y, center_z - half_z)); // 4
+    data.vertices.push(Vec3(center_x + half_x, y + size_y, center_z - half_z)); // 5
+    data.vertices.push(Vec3(center_x + half_x, y + size_y, center_z + half_z)); // 6
+    data.vertices.push(Vec3(center_x - half_x, y + size_y, center_z + half_z)); // 7
 
+    // Indices for the 12 triangles of the cube
+    // Bottom face
+    //data.indices.push(base_idx + 0); data.indices.push(base_idx + 1); data.indices.push(base_idx + 2);
+    //data.indices.push(base_idx + 0); data.indices.push(base_idx + 2); data.indices.push(base_idx + 3);
+    // Top face
+    data.indices.push(base_idx + 7); data.indices.push(base_idx + 6); data.indices.push(base_idx + 5);
+    data.indices.push(base_idx + 7); data.indices.push(base_idx + 5); data.indices.push(base_idx + 4);
+    // Front face
+    data.indices.push(base_idx + 3); data.indices.push(base_idx + 2); data.indices.push(base_idx + 6);
+    data.indices.push(base_idx + 3); data.indices.push(base_idx + 6); data.indices.push(base_idx + 7);
+    // Back face
+    data.indices.push(base_idx + 4); data.indices.push(base_idx + 5); data.indices.push(base_idx + 1);
+    data.indices.push(base_idx + 4); data.indices.push(base_idx + 1); data.indices.push(base_idx + 0);
+    // Left face
+    data.indices.push(base_idx + 0); data.indices.push(base_idx + 3); data.indices.push(base_idx + 7);
+    data.indices.push(base_idx + 0); data.indices.push(base_idx + 7); data.indices.push(base_idx + 4);
+    // Right face
+    data.indices.push(base_idx + 6); data.indices.push(base_idx + 2); data.indices.push(base_idx + 1);
+    data.indices.push(base_idx + 6); data.indices.push(base_idx + 1); data.indices.push(base_idx + 5);
 
-
-
+    // Add colors for each triangle
+    for (let var i = 0; i < 12; ++i) {
+        data.colors.push(color);
+    }
 }
-
 
 fun generate_city(data, grid_size)
 {
+    let cell_size = 100.0;
+    let building_padding = 22.0;
+    let max_height = 350.0;
+    let building_base_size = cell_size - building_padding * 2.0;
 
+    for (let var iz = 0; iz < grid_size; ++iz) {
+        for (let var ix = 0; ix < grid_size; ++ix) {
+            let center_x = ix * cell_size + cell_size / 2.0;
+            let center_z = iz * cell_size + cell_size / 2.0;
 
+            let height = rand_float(50.0, max_height);
+            let gray = rand_float(0.3, 0.8);
+            let color_val = (gray * 255).floor();
+            let color = 0xFF000000 | (color_val << 16) | (color_val << 8) | color_val;
 
+            generate_cube(
+                data,
+                center_x,
+                0.0,
+                center_z,
+                building_base_size,
+                height,
+                building_base_size,
+                color
+            );
+        }
+    }
 }
 
 
@@ -487,16 +542,20 @@ fun generate_city(data, grid_size)
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Procedural City Example", 0);
 let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
+// Generate city
+let data = RenderData();
+generate_city(data, 10);
+
 // Camera setup
 // The camera looks towards negative Z
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
 let camera = Camera(
-    Vec3(0.0, 0.0, 400.0),
+    Vec3(500.0, 400.0, 1600.0),
     0.0,    // yaw
-    0.0,    // pitch
+   -3.0,    // pitch
     90.0,   // fov
     0.1,
-    1000.0
+    10_000.0
 );
 let mat_view = camera.view_matrix();
 let mat_proj = camera.projection_matrix(aspect);
@@ -505,17 +564,6 @@ let mat_vp = mat4_mul(mat_view, mat_proj);
 
 
 
-// Generate city
-let data = RenderData();
-//generate_city(data, 1);
-
-
-
-
-// Test triangle
-data.vertices = [Vec3(0.0, 0.0, 0.0), Vec3(20.0, 0.0, 0.0), Vec3(20.0, 200.0, 0.0)];
-data.indices = [0, 1, 2];
-data.colors = [0xFF_FF_00_00];
 
 
 
