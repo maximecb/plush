@@ -108,11 +108,51 @@ fun mat4_mul(a, b) {
     return result;
 }
 
+// Matrix for a rotation around the X axis
+fun mat4_rotx(theta)
+{
+    let result = [];
+    mat4_init(result);
 
+    let cost = theta.cos();
+    let sint = theta.sin();
 
+    // First row
+    result[0][0] = 1.0;
 
+    // Second
+    result[1][1] = cost;
+    result[1][2] = -sint;
 
+    // Third row
+    result[2][1] = sint;
+    result[2][2] = cost;
 
+    return result;
+}
+
+// Matrix for a rotation around the Y axis
+fun mat4_roty(theta)
+{
+    let result = [];
+    mat4_init(result);
+
+    let cost = theta.cos();
+    let sint = theta.sin();
+
+    // First row
+    result[0][0] = cost;
+    result[0][2] = sint;
+
+    // Second row
+    result[1][1] = 1.0;
+
+    // Third row
+    result[2][0] = -sint;
+    result[2][2] = cost;
+
+    return result;
+}
 
 // Generate a perspective projection matrix identical to that
 // produced by the gluPerspective() function.
@@ -212,12 +252,14 @@ class Camera {
         // Pitch is the up/down angle
         let pitch_rad = deg2rad(self.pitch);
 
-        let dir_x = -yaw_rad.sin() * pitch_rad.cos();
-        let dir_y = pitch_rad.sin();
-        let dir_z = -yaw_rad.cos() * pitch_rad.cos();
-        let direction = Vec3(dir_x, dir_y, dir_z);
+        // Rotate the camera direction vector
+        let dir = Vec3(0.0, 0.0, -1.0);
+        let roty = mat4_roty(yaw_rad);
+        let rotx = mat4_rotx(pitch_rad);
+        let mat_rot = mat4_mul(roty, rotx);
+        let dir_rot = mat4_mul_vec(dir, mat_rot);
 
-        let target = self.pos.add(direction);
+        let target = self.pos.add(dir_rot);
         let up = Vec3(0.0, 1.0, 0.0);
 
         return lookat(self.pos, target, up);
@@ -429,24 +471,33 @@ let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Matrix setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
-let camera = Camera(Vec3(0.0, 0.0, 2.0), 0.0, 0.0, 90.0, 0.1, 1000.0);
+let camera = Camera(
+    Vec3(0.0, 0.0, 2.0),
+    0.0,    // yaw
+    0.0,    // pitch
+    90.0,   // fov
+    0.1,
+    1000.0
+);
 let mat_view = camera.view_matrix();
 let mat_proj = camera.projection_matrix(aspect);
 let mat_vp = mat4_mul(mat_view, mat_proj);
 
 // Generate city
 rand_init(123);
+
+
 //let data = generate_city();
 
 
 let data = RenderData();
 
 
+/*
 data.vertices = [Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(1.0, 1.0, 0.0)];
-
 data.indices = [0, 1, 2];
 data.colors = [0xFF_FF_00_00];
-
+*/
 
 
 
