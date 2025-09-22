@@ -70,7 +70,8 @@ class Vec3 {
 }
 
 // Initializes a 4x4 matrix with zeros
-fun initMat4(m) {
+// Matrices are row-major
+fun mat4_init(m) {
     for (let var i = 0; i < 4; ++i) {
         let row = Array.with_size(4, 0.0);
         m.push(row);
@@ -96,7 +97,7 @@ fun mat4_mul_vec(i, m) {
 // Multiplies two 4x4 matrices
 fun mat4_mul(a, b) {
     let result = [];
-    initMat4(result);
+    mat4_init(result);
     for (let var i = 0; i < 4; ++i) {
         for (let var j = 0; j < 4; ++j) {
             for (let var k = 0; k < 4; ++k) {
@@ -107,44 +108,81 @@ fun mat4_mul(a, b) {
     return result;
 }
 
-// Creates a perspective projection matrix from vertical FOV
-fun perspective(fov_rad, aspect, near, far) {
+// Generate a perspective projection matrix identical to that
+// produced by the gluPerspective() function.
+// This is used to project coordinates from eye space into clip space.
+// We follow OpenGL conventions.
+//
+// aspect = screen_width / screen_height
+// fovy is in radians
+//
+// +Y points up,
+// +X points to the right,
+// -Z points into the screen.
+//
+// Points are projected such that X/Y are in [-1, 1]
+// Z values between [near, far] get projected into [-1, 1]
+// Points behind the near plane should be discarded (clipped) ahead of time.
+//
+fun perspective(fovy_rad, aspect, near, far) {
     let m = [];
-    initMat4(m);
-    let f = 1.0 / (fov_rad / 2.0).tan();
+    mat4_init(m);
+
+    let f = 1.0 / (fovy_rad / 2.0).tan();
+    let nf = 1.0 / (near - far);
+
     m[0][0] = f / aspect;
+    m[0][1] = 0.0;
+    m[0][2] = 0.0;
+    m[0][3] = 0.0;
+
+    m[1][0] = 0.0;
     m[1][1] = f;
-    m[2][2] = (far + near) / (near - far);
-    m[2][3] = -1.0;
-    m[3][2] = (2.0 * far * near) / (near - far);
+    m[1][2] = 0.0;
+    m[1][3] = 0.0;
+
+    m[2][0] = 0.0;
+    m[2][1] = 0.0;
+    m[2][2] = (far + near) * nf;
+    m[2][3] = 2.0 * far * near * nf;
+
+    m[3][0] = 0.0;
+    m[3][1] = 0.0;
+    m[3][2] = -1.0;
     m[3][3] = 0.0;
+
     return m;
 }
 
 // Creates a view matrix that looks at a target from a given position
 fun lookat(eye, target, up) {
-    let z_axis = eye.sub(target).normalize();
-    let x_axis = up.cross(z_axis).normalize();
-    let y_axis = x_axis.cross(z_axis);
+    let forward = target.sub(eye).normalize();
+    let right = forward.cross(up).normalize();
+    let new_up = right.cross(forward);
 
     let m = [];
-    initMat4(m);
-    m[0][0] = x_axis.x;
-    m[0][1] = y_axis.x;
-    m[0][2] = z_axis.x;
-    m[0][3] = 0.0;
-    m[1][0] = x_axis.y;
-    m[1][1] = y_axis.y;
-    m[1][2] = z_axis.y;
-    m[1][3] = 0.0;
-    m[2][0] = x_axis.z;
-    m[2][1] = y_axis.z;
-    m[2][2] = z_axis.z;
-    m[2][3] = 0.0;
-    m[3][0] = -x_axis.dot(eye);
-    m[3][1] = -y_axis.dot(eye);
-    m[3][2] = -z_axis.dot(eye);
+    mat4_init(m);
+
+    m[0][0] = right.x;
+    m[0][1] = right.y;
+    m[0][2] = right.z;
+    m[0][3] = -right.dot(eye);
+
+    m[1][0] = new_up.x;
+    m[1][1] = new_up.y;
+    m[1][2] = new_up.z;
+    m[1][3] = -new_up.dot(eye);
+
+    m[2][0] = -forward.x;
+    m[2][1] = -forward.y;
+    m[2][2] = -forward.z;
+    m[2][3] = forward.dot(eye);
+
+    m[3][0] = 0.0;
+    m[3][1] = 0.0;
+    m[3][2] = 0.0;
     m[3][3] = 1.0;
+
     return m;
 }
 
@@ -270,7 +308,7 @@ class RenderData {
         for (let var i = 0; i < self.vertices.len; ++i) {
             let v = mat4_mul_vec(self.vertices[i], mat);
             v.x = (v.x + 1) * 0.5 * FRAME_WIDTH;
-            v.y = (1 - v.y) * 0.5 * FRAME_HEIGHT;
+            v.y = (v.y + 1) * 0.5 * FRAME_HEIGHT;
             self.vertices[i] = v;
         }
     }
@@ -462,7 +500,7 @@ let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Matrix setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
-let camera = Camera(Vec3(0.0, 60.0, 100.0), 0.0, -45.0, 90.0, 0.1, 1000.0);
+let camera = Camera(Vec3(0.0, 0.0, 3.0), 0.0, 0.0, 90.0, 0.1, 1000.0);
 let mat_view = camera.view_matrix();
 let mat_proj = camera.projection_matrix(aspect);
 
