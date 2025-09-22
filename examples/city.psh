@@ -32,6 +32,10 @@ class Vec3 {
         self.z = z;
     }
 
+    clone(self) {
+        return Vec3(self.x, self.y, self.z);
+    }
+
     add(self, other) {
         return Vec3(self.x + other.x, self.y + other.y, self.z + other.z);
     }
@@ -236,10 +240,9 @@ fun lookat(eye, target, up) {
 // Represents a 3D camera
 class Camera {
     // Initializes the camera
-    init(self, pos, yaw, pitch, fov_x, near, far) {
+    init(self, pos, target, fov_x, near, far) {
         self.pos = pos;
-        self.yaw = yaw;
-        self.pitch = pitch;
+        self.target = target;
         self.fov_x = fov_x;
         self.near = near;
         self.far = far;
@@ -247,23 +250,8 @@ class Camera {
 
     // Calculates the view matrix for the camera
     view_matrix(self) {
-        // Yaw is the left/right angle
-        let yaw_rad = deg2rad(self.yaw);
-
-        // Pitch is the up/down angle
-        let pitch_rad = deg2rad(self.pitch);
-
-        // Rotate the camera direction vector
-        let dir = Vec3(0.0, 0.0, -1.0);
-        let roty = mat4_roty(yaw_rad);
-        let rotx = mat4_rotx(pitch_rad);
-        let mat_rot = mat4_mul(roty, rotx);
-        let dir_rot = mat4_mul_vec(dir, mat_rot);
-
-        let target = self.pos.add(dir_rot);
         let up = Vec3(0.0, 1.0, 0.0);
-
-        return lookat(self.pos, target, up);
+        return lookat(self.pos, self.target, up);
     }
 
     // Calculates the projection matrix for the camera
@@ -385,8 +373,8 @@ class RenderData {
             let v0 = self.vertices[self.indices[i*3]];
             let v1 = self.vertices[self.indices[i*3+1]];
             let v2 = self.vertices[self.indices[i*3+2]];
-            //depths[i] = (v0.z + v1.z + v2.z) / 3.0;
-            depths[i] = v0.z.max(v1.z).max(v2.z);
+            depths[i] = (v0.z + v1.z + v2.z) / 3.0;
+            //depths[i] = v0.z.max(v1.z).max(v2.z);
         }
 
         // Partition function for quicksort (adapted for triangles)
@@ -478,10 +466,6 @@ fun generate_cube(data, center_x, y, center_z, size_x, size_y, size_z, color) {
     data.vertices.push(Vec3(center_x + half_x, y + size_y, center_z + half_z)); // 6
     data.vertices.push(Vec3(center_x - half_x, y + size_y, center_z + half_z)); // 7
 
-    // Indices for the 12 triangles of the cube
-    // Bottom face
-    //data.indices.push(base_idx + 0); data.indices.push(base_idx + 1); data.indices.push(base_idx + 2);
-    //data.indices.push(base_idx + 0); data.indices.push(base_idx + 2); data.indices.push(base_idx + 3);
     // Top face
     data.indices.push(base_idx + 7); data.indices.push(base_idx + 6); data.indices.push(base_idx + 5);
     data.indices.push(base_idx + 7); data.indices.push(base_idx + 5); data.indices.push(base_idx + 4);
@@ -576,66 +560,81 @@ generate_city(data, grid_size);
 
 // Generate ground plane
 let city_size = grid_size * 100.0;
-generate_ground_plane(data, -50, city_size + 50, 0xFF_00_38_00);
+let ground_min = -city_size * 0.1;
+let ground_max = city_size * 1.1;
+//let ground_color = 0xFF383838; // Dark gray
+//generate_ground_plane(data, ground_min, ground_max, ground_color);
+
+// Keep a copy of the original vertices
+let orig_vertices = [];
+for (let var i = 0; i < data.vertices.len; ++i) {
+    orig_vertices.push(data.vertices[i].clone());
+}
 
 // Camera setup
-// The camera looks towards negative Z
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
+let city_center = Vec3(city_size / 2.0, 150.0, city_size / 2.0);
 let camera = Camera(
     Vec3(500.0, 400.0, 1600.0),
-    0.0,    // yaw
-   -3.0,    // pitch
+    city_center,
     90.0,   // fov
     0.1,
     10_000.0
 );
-let mat_view = camera.view_matrix();
+
 let mat_proj = camera.projection_matrix(aspect);
-let mat_vp = mat4_mul(mat_view, mat_proj);
+let var anim_time = 0.0;
 
-
-
-
-
-
-
-
-
-
-
-
-
-// Clear background
-image.fill(0xFF101020);
-
-// Transform all vertices once
-let start_transform = $time_current_ms();
-data.transform(mat_vp);
-data.sort_triangles();
-let end_transform = $time_current_ms();
-
-// Render all triangles
-let start_render = $time_current_ms();
-for (let var i = 0; i < data.indices.len; i = i + 3) {
-    let v0 = data.vertices[data.indices[i]];
-    let v1 = data.vertices[data.indices[i+1]];
-    let v2 = data.vertices[data.indices[i+2]];
-    rasterize_triangle(v0, v1, v2, data.colors[i _/ 3], image);
-}
-let end_render = $time_current_ms();
-
-let transform_ms = end_transform - start_transform;
-let render_ms = end_render - start_render;
-
-$println("Transforming " + data.vertices.len.to_s() + " vertices took " + transform_ms.to_s() + " ms.");
-$println("Rendering " + (data.indices.len / 3).to_s() + " triangles took " + render_ms.to_s() + " ms.");
-
-$window_draw_frame(window, image.bytes);
-
-// Event loop to keep the window open
+// Main animation loop
 loop {
-    let msg = $actor_recv();
-    if (msg instanceof UIEvent && (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE'))) {
+    // --- Event Handling ---
+    let msg = $actor_poll();
+    if (msg != nil && msg instanceof UIEvent && (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE'))) {
         break;
     }
+
+
+    // --- Animation Update ---
+    anim_time = anim_time + 0.01;
+
+    // --- Update the camera position ---
+    let radius = 1000.0;
+    let cam_x = city_center.x + radius * anim_time.cos();
+    let cam_z = city_center.z + radius * anim_time.sin();
+    camera.pos = Vec3(cam_x, 600.0, cam_z);
+
+    // --- Matrix Calculation ---
+    let mat_view = camera.view_matrix();
+    let mat_vp = mat4_mul(mat_view, mat_proj);
+
+    // --- Reset vertices to original state ---
+    data.vertices = [];
+    for (let var i = 0; i < orig_vertices.len; ++i) {
+        data.vertices.push(orig_vertices[i].clone());
+    }
+
+    let start_time = $time_current_ms();
+
+    // --- Transform and Sort ---
+    data.transform(mat_vp);
+    data.sort_triangles();
+
+    // --- Rendering ---
+    image.fill(0xFF101020); // Clear background
+
+    for (let var i = 0; i < data.indices.len; i = i + 3) {
+        let v0 = data.vertices[data.indices[i]];
+        let v1 = data.vertices[data.indices[i+1]];
+        let v2 = data.vertices[data.indices[i+2]];
+        rasterize_triangle(v0, v1, v2, data.colors[i _/ 3], image);
+    }
+
+    let end_time = $time_current_ms();
+    let frame_time = end_time - start_time;
+    $println(frame_time.to_s() + 'ms');
+
+    $window_draw_frame(window, image.bytes);
+
+    // --- Frame Limiting ---
+    //$actor_sleep(10);
 }
