@@ -385,7 +385,8 @@ class RenderData {
             let v0 = self.vertices[self.indices[i*3]];
             let v1 = self.vertices[self.indices[i*3+1]];
             let v2 = self.vertices[self.indices[i*3+2]];
-            depths[i] = (v0.z + v1.z + v2.z) / 3.0;
+            //depths[i] = (v0.z + v1.z + v2.z) / 3.0;
+            depths[i] = v0.z.max(v1.z).max(v2.z);
         }
 
         // Partition function for quicksort (adapted for triangles)
@@ -503,6 +504,32 @@ fun generate_cube(data, center_x, y, center_z, size_x, size_y, size_z, color) {
     }
 }
 
+fun generate_ground_plane(data, min_coord, max_coord, color) {
+    let base_idx = data.vertices.len;
+
+    let y = 0.0;
+
+    // Vertices of the plane
+    data.vertices.push(Vec3(min_coord, y, min_coord)); // 0
+    data.vertices.push(Vec3(max_coord, y, min_coord)); // 1
+    data.vertices.push(Vec3(max_coord, y, max_coord)); // 2
+    data.vertices.push(Vec3(min_coord, y, max_coord)); // 3
+
+    // Indices for the 2 triangles of the plane (quad)
+    // With normals pointing up (+Y)
+    data.indices.push(base_idx + 0);
+    data.indices.push(base_idx + 3);
+    data.indices.push(base_idx + 2);
+
+    data.indices.push(base_idx + 0);
+    data.indices.push(base_idx + 2);
+    data.indices.push(base_idx + 1);
+
+    // Add colors for each triangle
+    data.colors.push(color);
+    data.colors.push(color);
+}
+
 fun generate_city(data, grid_size)
 {
     let cell_size = 100.0;
@@ -544,7 +571,12 @@ let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Generate city
 let data = RenderData();
-generate_city(data, 10);
+let grid_size = 10;
+generate_city(data, grid_size);
+
+// Generate ground plane
+let city_size = grid_size * 100.0;
+generate_ground_plane(data, -50, city_size + 50, 0xFF_00_38_00);
 
 // Camera setup
 // The camera looks towards negative Z
