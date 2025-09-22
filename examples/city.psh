@@ -108,6 +108,12 @@ fun mat4_mul(a, b) {
     return result;
 }
 
+
+
+
+
+
+
 // Generate a perspective projection matrix identical to that
 // produced by the gluPerspective() function.
 // This is used to project coordinates from eye space into clip space.
@@ -200,7 +206,10 @@ class Camera {
 
     // Calculates the view matrix for the camera
     view_matrix(self) {
+        // Yaw is the left/right angle
         let yaw_rad = deg2rad(self.yaw);
+
+        // Pitch is the up/down angle
         let pitch_rad = deg2rad(self.pitch);
 
         let dir_x = -yaw_rad.sin() * pitch_rad.cos();
@@ -224,6 +233,9 @@ class Camera {
 
 // --- Triangle Rasterization ---
 
+// This function expects the coordinates to be floats such that
+// x is in [0, FRAME_WIDTH] and +x points right
+// y is in [0, FRAME_HEIGHT] and +y points down
 fun rasterize_triangle(v0, v1, v2, color, image) {
     let var p0 = v0;
     let var p1 = v1;
@@ -308,8 +320,11 @@ class RenderData {
     transform(self, mat) {
         for (let var i = 0; i < self.vertices.len; ++i) {
             let v = mat4_mul_vec(self.vertices[i], mat);
+
+            // We need to invert Y to match screen coordinates
             v.x = (v.x + 1) * 0.5 * FRAME_WIDTH;
-            v.y = (v.y + 1) * 0.5 * FRAME_HEIGHT;
+            v.y = (1 - v.y) * 0.5 * FRAME_HEIGHT;
+
             self.vertices[i] = v;
         }
     }
@@ -414,7 +429,7 @@ let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Matrix setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
-let camera = Camera(Vec3(0.0, 0.0, 100.0), 0.0, 0.0, 90.0, 0.1, 1000.0);
+let camera = Camera(Vec3(0.0, 0.0, 2.0), 0.0, 0.0, 90.0, 0.1, 1000.0);
 let mat_view = camera.view_matrix();
 let mat_proj = camera.projection_matrix(aspect);
 let mat_vp = mat4_mul(mat_view, mat_proj);
@@ -427,6 +442,10 @@ rand_init(123);
 let data = RenderData();
 
 
+data.vertices = [Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(1.0, 1.0, 0.0)];
+
+data.indices = [0, 1, 2];
+data.colors = [0xFF_FF_00_00];
 
 
 
@@ -452,7 +471,6 @@ for (let var i = 0; i < data.indices.len; i = i + 3) {
     let v0 = data.vertices[data.indices[i]];
     let v1 = data.vertices[data.indices[i+1]];
     let v2 = data.vertices[data.indices[i+2]];
-
     rasterize_triangle(v0, v1, v2, data.colors[i _/ 3], image);
 }
 let end_render = $time_current_ms();
