@@ -1,6 +1,3 @@
-
-// Benchmark for rendering a list of triangles from vertex and index arrays
-
 let FRAME_WIDTH = 800;
 let FRAME_HEIGHT = 600;
 
@@ -491,7 +488,7 @@ fun generate_cube(data, center_x, y, center_z, size_x, size_y, size_z, color) {
 fun generate_ground_plane(data, min_coord, max_coord, color) {
     let base_idx = data.vertices.len;
 
-    let y = 0.0;
+    let y = -0.01;
 
     // Vertices of the plane
     data.vertices.push(Vec3(min_coord, y, min_coord)); // 0
@@ -545,30 +542,32 @@ fun generate_city(data, grid_size)
     }
 }
 
-
-
-
 // --- Main ---
 
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Procedural City Example", 0);
 let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Generate city
-let data = RenderData();
+let city_data = RenderData();
 let grid_size = 10;
-generate_city(data, grid_size);
+generate_city(city_data, grid_size);
 
 // Generate ground plane
+let ground_data = RenderData();
 let city_size = grid_size * 100.0;
-let ground_min = -city_size * 0.1;
-let ground_max = city_size * 1.1;
-//let ground_color = 0xFF383838; // Dark gray
-//generate_ground_plane(data, ground_min, ground_max, ground_color);
+let ground_min = -city_size * 0.15;
+let ground_max = city_size * 1.15;
+let ground_color = 0xFF383838; // Dark gray
+generate_ground_plane(ground_data, ground_min, ground_max, ground_color);
 
 // Keep a copy of the original vertices
-let orig_vertices = [];
-for (let var i = 0; i < data.vertices.len; ++i) {
-    orig_vertices.push(data.vertices[i].clone());
+let orig_city_vertices = [];
+for (let var i = 0; i < city_data.vertices.len; ++i) {
+    orig_city_vertices.push(city_data.vertices[i].clone());
+}
+let orig_ground_vertices = [];
+for (let var i = 0; i < ground_data.vertices.len; ++i) {
+    orig_ground_vertices.push(ground_data.vertices[i].clone());
 }
 
 // Camera setup
@@ -593,12 +592,11 @@ loop {
         break;
     }
 
-
     // --- Animation Update ---
     anim_time = anim_time + 0.01;
 
-    // --- Update the camera position ---
-    let radius = 1000.0;
+    // --- Camera Update ---
+    let radius = 1200.0;
     let cam_x = city_center.x + radius * anim_time.cos();
     let cam_z = city_center.z + radius * anim_time.sin();
     camera.pos = Vec3(cam_x, 600.0, cam_z);
@@ -607,34 +605,38 @@ loop {
     let mat_view = camera.view_matrix();
     let mat_vp = mat4_mul(mat_view, mat_proj);
 
-    // --- Reset vertices to original state ---
-    data.vertices = [];
-    for (let var i = 0; i < orig_vertices.len; ++i) {
-        data.vertices.push(orig_vertices[i].clone());
-    }
-
-    let start_time = $time_current_ms();
-
-    // --- Transform and Sort ---
-    data.transform(mat_vp);
-    data.sort_triangles();
-
     // --- Rendering ---
     image.fill(0xFF101020); // Clear background
 
-    for (let var i = 0; i < data.indices.len; i = i + 3) {
-        let v0 = data.vertices[data.indices[i]];
-        let v1 = data.vertices[data.indices[i+1]];
-        let v2 = data.vertices[data.indices[i+2]];
-        rasterize_triangle(v0, v1, v2, data.colors[i _/ 3], image);
+    // --- Render Ground Plane ---
+    ground_data.vertices = [];
+    for (let var i = 0; i < orig_ground_vertices.len; ++i) {
+        ground_data.vertices.push(orig_ground_vertices[i].clone());
+    }
+    ground_data.transform(mat_vp);
+    for (let var i = 0; i < ground_data.indices.len; i = i + 3) {
+        let v0 = ground_data.vertices[ground_data.indices[i]];
+        let v1 = ground_data.vertices[ground_data.indices[i+1]];
+        let v2 = ground_data.vertices[ground_data.indices[i+2]];
+        rasterize_triangle(v0, v1, v2, ground_data.colors[i _/ 3], image);
     }
 
-    let end_time = $time_current_ms();
-    let frame_time = end_time - start_time;
-    $println(frame_time.to_s() + 'ms');
+    // --- Render City ---
+    city_data.vertices = [];
+    for (let var i = 0; i < orig_city_vertices.len; ++i) {
+        city_data.vertices.push(orig_city_vertices[i].clone());
+    }
+    city_data.transform(mat_vp);
+    city_data.sort_triangles();
+    for (let var i = 0; i < city_data.indices.len; i = i + 3) {
+        let v0 = city_data.vertices[city_data.indices[i]];
+        let v1 = city_data.vertices[city_data.indices[i+1]];
+        let v2 = city_data.vertices[city_data.indices[i+2]];
+        rasterize_triangle(v0, v1, v2, city_data.colors[i _/ 3], image);
+    }
 
     $window_draw_frame(window, image.bytes);
 
     // --- Frame Limiting ---
-    //$actor_sleep(10);
+    //$actor_sleep(16);
 }
