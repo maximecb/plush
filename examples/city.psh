@@ -292,9 +292,10 @@ fun rasterize_triangle(v0, v1, v2, color, image) {
 
 let var lcg_seed = 1;
 fun rand_init(seed) { lcg_seed = seed & 0x7FFFFFFF; }
-fun rand_float() {
+fun rand_float(min_val, max_val) {
     lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
-    return lcg_seed.to_f() / 0x7FFFFFFF.to_f();
+    let val = lcg_seed.to_f() / 0x7FFFFFFF.to_f();
+    return min_val + val * (max_val - min_val);
 }
 
 class RenderData {
@@ -402,96 +403,9 @@ class RenderData {
     }
 }
 
-fun generate_city() {
-    let data = RenderData();
-    let grid_size = 5;
-    let building_width = 2.0;
-    let building_depth = 2.0;
-    let spacing = 1.0;
 
-    fun add_cube(center_x, center_z, width, height, depth) {
-        let w2 = width / 2.0;
-        let d2 = depth / 2.0;
 
-        let v_idx_start = data.vertices.len;
 
-        // 8 vertices of the cube
-        data.vertices.push(Vec3(center_x - w2, 0,      center_z - d2)); // 0
-        data.vertices.push(Vec3(center_x + w2, 0,      center_z - d2)); // 1
-        data.vertices.push(Vec3(center_x + w2, 0,      center_z + d2)); // 2
-        data.vertices.push(Vec3(center_x - w2, 0,      center_z + d2)); // 3
-        data.vertices.push(Vec3(center_x - w2, height, center_z - d2)); // 4
-        data.vertices.push(Vec3(center_x + w2, height, center_z - d2)); // 5
-        data.vertices.push(Vec3(center_x + w2, height, center_z + d2)); // 6
-        data.vertices.push(Vec3(center_x - w2, height, center_z + d2)); // 7
-
-        // Indices for 5 faces (10 triangles), bottom face is missing
-
-        // Front face
-        data.indices.push(v_idx_start + 0);
-        data.indices.push(v_idx_start + 1);
-        data.indices.push(v_idx_start + 5);
-        data.indices.push(v_idx_start + 0);
-        data.indices.push(v_idx_start + 5);
-        data.indices.push(v_idx_start + 4);
-
-        // Back face
-        data.indices.push(v_idx_start + 3);
-        data.indices.push(v_idx_start + 7);
-        data.indices.push(v_idx_start + 6);
-        data.indices.push(v_idx_start + 3);
-        data.indices.push(v_idx_start + 6);
-        data.indices.push(v_idx_start + 2);
-
-        // Left face
-        data.indices.push(v_idx_start + 0);
-        data.indices.push(v_idx_start + 4);
-        data.indices.push(v_idx_start + 7);
-        data.indices.push(v_idx_start + 0);
-        data.indices.push(v_idx_start + 7);
-        data.indices.push(v_idx_start + 3);
-
-        // Right face
-        data.indices.push(v_idx_start + 1);
-        data.indices.push(v_idx_start + 2);
-        data.indices.push(v_idx_start + 6);
-        data.indices.push(v_idx_start + 1);
-        data.indices.push(v_idx_start + 6);
-        data.indices.push(v_idx_start + 5);
-
-        // Top face
-        data.indices.push(v_idx_start + 4);
-        data.indices.push(v_idx_start + 5);
-        data.indices.push(v_idx_start + 6);
-        data.indices.push(v_idx_start + 4);
-        data.indices.push(v_idx_start + 6);
-        data.indices.push(v_idx_start + 7);
-    }
-
-    for (let var i = 0; i < grid_size; ++i) {
-        for (let var j = 0; j < grid_size; ++j) {
-            let center_x = (i - grid_size / 2.0) * (building_width + spacing);
-            let center_z = (j - grid_size / 2.0) * (building_depth + spacing) - 15.0;
-
-            let height = 2.0 + rand_float() * 8.0;
-
-            add_cube(center_x, center_z, building_width, height, building_depth);
-
-            let grey_val = (rand_float() * 120 + 100).floor();
-            let r = grey_val;
-            let g = grey_val;
-            let b = (grey_val + 40).min(255);
-            let color = 0xFF000000 | (r << 16) | (g << 8) | b;
-
-            // Add color for each of the 10 triangles of the building
-            for (let var k = 0; k < 10; ++k) {
-                data.colors.push(color);
-            }
-        }
-    }
-
-    return data;
-}
 
 // --- Main ---
 
@@ -500,15 +414,28 @@ let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Matrix setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
-let camera = Camera(Vec3(0.0, 0.0, 3.0), 0.0, 0.0, 90.0, 0.1, 1000.0);
+let camera = Camera(Vec3(0.0, 0.0, 100.0), 0.0, 0.0, 90.0, 0.1, 1000.0);
 let mat_view = camera.view_matrix();
 let mat_proj = camera.projection_matrix(aspect);
-
 let mat_vp = mat4_mul(mat_view, mat_proj);
 
 // Generate city
 rand_init(123);
-let data = generate_city();
+//let data = generate_city();
+
+
+let data = RenderData();
+
+
+
+
+
+
+
+
+
+
+
 
 // Clear background
 image.fill(0xFF101020);
