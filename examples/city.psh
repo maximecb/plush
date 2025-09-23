@@ -160,6 +160,63 @@ fun mat4_roty(theta)
     return result;
 }
 
+// --- Color Conversion (HSL to RGB) ---
+
+fun hue2rgb(p, q, t)
+{
+    let var t_ = t;
+    if (t_ < 0.0)
+        t_ = t_ + 1.0;
+    if (t_ > 1.0)
+        t_ = t_ - 1.0;
+    if (t_ < 1.0 / 6.0)
+        return p + (q - p) * 6.0 * t_;
+    if (t_ < 1.0 / 2.0)
+        return q;
+    if (t_ < 2.0 / 3.0)
+        return p + (q - p) * (2.0 / 3.0 - t_) * 6.0;
+    return p;
+}
+
+fun hsl_to_rgb(h, s, l)
+{
+    if (s < 0.01)
+    {
+        // simple gray conversion
+        let c = (l * 255.0).floor();
+        return 0xFF000000 | (c << 16) | (c << 8) | c;
+    }
+
+    // convert hue from [0, 360( to range [0,6)
+    let var h_ = h / 60.0;
+    if (h_ >= 6.0)
+        h_ = h_ - 6.0;
+
+    // break "h" down into integer and fractional parts.
+    let i = h_.floor();
+    let f = h_ - i;
+
+    // Compute the permuted RGB values
+    let vi = (l * 255.0).floor();
+    let p = ((l * (1.0 - s)) * 255.0).floor();
+    let q = ((l * (1.0 - (s * f))) * 255.0).floor();
+    let t = ((l * (1.0 - (s * (1.0 - f)))) * 255.0).floor();
+
+    // map l, p, q, and t into red, green, and blue values
+    if (i == 0)
+        return 0xFF000000 | (vi << 16) | (t << 8) | p;
+    if (i == 1)
+        return 0xFF000000 | (q << 16) | (vi << 8) | p;
+    if (i == 2)
+        return 0xFF000000 | (p << 16) | (vi << 8) | t;
+    if (i == 3)
+        return 0xFF000000 | (p << 16) | (q << 8) | vi;
+    if (i == 4)
+        return 0xFF000000 | (t << 16) | (p << 8) | vi;
+
+    return 0xFF000000 | (vi << 16) | (p << 8) | q;
+}
+
 // Generate a perspective projection matrix identical to that
 // produced by the gluPerspective() function.
 // This is used to project coordinates from eye space into clip space.
@@ -624,7 +681,32 @@ loop {
     let mat_vp = mat4_mul(mat_view, mat_proj);
 
     // --- Rendering ---
-    image.fill(0xFF101020); // Clear background
+    // Draw sky gradient (sunset)
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+        let t = y.to_f() / FRAME_HEIGHT.to_f(); // Normalized position from bottom to top
+
+        // Interpolate HSL values for sunset
+        // Hue: from orange (e.g., 30) to deep blue (e.g., 240)
+        // Saturation: from high (e.g., 0.9) to medium (e.g., 0.6)
+        // Lightness: from medium (e.g., 0.5) to low (e.g., 0.2)
+
+        let h_start = 220.0;
+        let h_end = 240.0;
+        let s_start = 0.6;
+        let s_end = 0.95;
+        let l_start = 0.99;
+        let l_end = 0.8;
+
+        // Quadratic interpolation to make changes faster at the bottom (horizon)
+        let gradient_t = t * t;
+
+        let h = h_start + (h_end - h_start) * gradient_t;
+        let s = s_start + (s_end - s_start) * gradient_t;
+        let l = l_start + (l_end - l_start) * gradient_t;
+
+        let color = hsl_to_rgb(h, s, l);
+        image.bytes.fill_u32(y * FRAME_WIDTH, FRAME_WIDTH, color);
+    }
 
     // --- Render City ---
     let transform_start = $time_current_ms();
