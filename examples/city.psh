@@ -1,5 +1,9 @@
 let FRAME_WIDTH = 1024;
-let FRAME_HEIGHT = 768;
+let FRAME_HEIGHT = 600;
+
+// --- Lighting ---
+let LIGHT_DIRECTION = Vec3(0.5, 1.0, -0.5).normalize(); // Example: from top-right-front
+let AMBIENT_LIGHT = 0.3; // A small constant light
 
 // --- 3D Math and Classes ---
 
@@ -343,6 +347,7 @@ class RenderData {
         self.vertices = [];
         self.indices = [];
         self.colors = [];
+        self.normals = []; // New: Store normals for each triangle
     }
 
     transform(self, mat) {
@@ -416,9 +421,10 @@ class RenderData {
 
         quicksort(0, num_triangles - 1);
 
-        // Rearrange self.indices and self.colors based on the sorted triangle_order
+        // Rearrange self.indices, self.colors, and self.normals based on the sorted triangle_order
         let new_indices = Array.with_size(num_triangles * 3, 0);
         let new_colors = Array.with_size(num_triangles, 0);
+        let new_normals = Array.with_size(num_triangles, 0); // New: for normals
 
         for (let var k = 0; k < num_triangles; ++k) {
             let original_triangle_idx = triangle_order[k];
@@ -426,9 +432,11 @@ class RenderData {
             new_indices[k*3] = self.indices[original_triangle_idx*3];
             new_indices[k*3+1] = self.indices[original_triangle_idx*3+1];
             new_indices[k*3+2] = self.indices[original_triangle_idx*3+2];
+            new_normals[k] = self.normals[original_triangle_idx]; // New: copy normal
         }
         self.indices = new_indices;
         self.colors = new_colors;
+        self.normals = new_normals; // New: assign new normals array
     }
 }
 
@@ -464,8 +472,24 @@ fun generate_cube(data, center_x, y, center_z, size_x, size_y, size_z, color) {
     data.indices.push(base_idx + 6); data.indices.push(base_idx + 2); data.indices.push(base_idx + 1);
     data.indices.push(base_idx + 6); data.indices.push(base_idx + 1); data.indices.push(base_idx + 5);
 
-    // Add colors for each triangle
-    for (let var i = 0; i < 10; ++i) {
+    // Add colors and normals for each triangle
+    // Top face
+    data.normals.push(Vec3(0.0, 1.0, 0.0)); // Normal for (7,6,5)
+    data.normals.push(Vec3(0.0, 1.0, 0.0)); // Normal for (7,5,4)
+    // Front face
+    data.normals.push(Vec3(0.0, 0.0, 1.0)); // Normal for (3,2,6)
+    data.normals.push(Vec3(0.0, 0.0, 1.0)); // Normal for (3,6,7)
+    // Back face
+    data.normals.push(Vec3(0.0, 0.0, -1.0)); // Normal for (4,5,1)
+    data.normals.push(Vec3(0.0, 0.0, -1.0)); // Normal for (4,1,0)
+    // Left face
+    data.normals.push(Vec3(-1.0, 0.0, 0.0)); // Normal for (0,3,7)
+    data.normals.push(Vec3(-1.0, 0.0, 0.0)); // Normal for (0,7,4)
+    // Right face
+    data.normals.push(Vec3(1.0, 0.0, 0.0)); // Normal for (6,2,1)
+    data.normals.push(Vec3(1.0, 0.0, 0.0)); // Normal for (6,1,5)
+
+    for (let var i = 0; i < 12; ++i) {
         data.colors.push(color);
     }
 }
@@ -491,9 +515,11 @@ fun generate_ground_plane(data, min_coord, max_coord, color) {
     data.indices.push(base_idx + 2);
     data.indices.push(base_idx + 1);
 
-    // Add colors for each triangle
+    // Add colors and normals for each triangle
     data.colors.push(color);
     data.colors.push(color);
+    data.normals.push(Vec3(0.0, 1.0, 0.0)); // Normal for first triangle
+    data.normals.push(Vec3(0.0, 1.0, 0.0)); // Normal for second triangle
 }
 
 fun generate_city(data, grid_size)
@@ -566,7 +592,7 @@ for (let var i = 0; i < city_data.vertices.len; ++i) {
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
 let city_center = Vec3(city_size / 2.0, 150.0, city_size / 2.0);
 let camera = Camera(
-    Vec3(500.0, 400.0, 1600.0),
+    Vec3(500.0, 100.0, 1600.0),
     city_center,
     90.0,   // fov
     0.1,
@@ -623,7 +649,25 @@ loop {
         // This calculates the signed area of the 2D triangle.
         // If the area is negative, it's front-facing (clockwise winding).
         if ((v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y) < 0) {
-            rasterize_triangle(v0, v1, v2, city_data.colors[i _/ 3], image);
+            let triangle_normal = city_data.normals[i _/ 3]; // Get the normal for this triangle
+            let base_color = city_data.colors[i _/ 3];
+
+            // Calculate diffuse component (clamped to 0)
+            let diffuse_intensity = (0.0).max(triangle_normal.dot(LIGHT_DIRECTION));
+
+            // Apply lighting
+            let var final_intensity = AMBIENT_LIGHT + diffuse_intensity;
+            // Clamp final_intensity to 1.0 to prevent over-brightening
+            final_intensity = final_intensity.min(1.0);
+
+            // Extract color components and apply intensity
+            let r = ((base_color >> 16) & 0xFF).to_f() * final_intensity;
+            let g = ((base_color >> 8) & 0xFF).to_f() * final_intensity;
+            let b = (base_color & 0xFF).to_f() * final_intensity;
+
+            let shaded_color = 0xFF000000 | (r.floor() << 16) | (g.floor() << 8) | b.floor();
+
+            rasterize_triangle(v0, v1, v2, shaded_color, image);
         }
     }
     let raster_time = $time_current_ms() - raster_start;
