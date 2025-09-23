@@ -370,8 +370,8 @@ class RenderData {
             let v0 = self.vertices[self.indices[i*3]];
             let v1 = self.vertices[self.indices[i*3+1]];
             let v2 = self.vertices[self.indices[i*3+2]];
-            depths[i] = (v0.z + v1.z + v2.z) / 3.0;
-            //depths[i] = v0.z.max(v1.z).max(v2.z);
+            //depths[i] = (v0.z + v1.z + v2.z) / 3.0;
+            depths[i] = v0.z.max(v1.z).max(v2.z);
         }
 
         // Partition function for quicksort (adapted for triangles)
@@ -553,21 +553,16 @@ let grid_size = 10;
 generate_city(city_data, grid_size);
 
 // Generate ground plane
-let ground_data = RenderData();
 let city_size = grid_size * 100.0;
 let ground_min = -city_size * 0.15;
 let ground_max = city_size * 1.15;
 let ground_color = 0xFF383838; // Dark gray
-generate_ground_plane(ground_data, ground_min, ground_max, ground_color);
+generate_ground_plane(city_data, ground_min, ground_max, ground_color);
 
 // Keep a copy of the original vertices
 let orig_city_vertices = [];
 for (let var i = 0; i < city_data.vertices.len; ++i) {
     orig_city_vertices.push(city_data.vertices[i].clone());
-}
-let orig_ground_vertices = [];
-for (let var i = 0; i < ground_data.vertices.len; ++i) {
-    orig_ground_vertices.push(ground_data.vertices[i].clone());
 }
 
 // Camera setup
@@ -601,39 +596,42 @@ loop {
     let cam_z = city_center.z + radius * anim_time.sin();
     camera.pos = Vec3(cam_x, 600.0, cam_z);
 
-    // --- Matrix Calculation ---
+    // --- Camera Matrix Calculation ---
     let mat_view = camera.view_matrix();
     let mat_vp = mat4_mul(mat_view, mat_proj);
 
     // --- Rendering ---
     image.fill(0xFF101020); // Clear background
 
-    // --- Render Ground Plane ---
-    ground_data.vertices = [];
-    for (let var i = 0; i < orig_ground_vertices.len; ++i) {
-        ground_data.vertices.push(orig_ground_vertices[i].clone());
-    }
-    ground_data.transform(mat_vp);
-    for (let var i = 0; i < ground_data.indices.len; i = i + 3) {
-        let v0 = ground_data.vertices[ground_data.indices[i]];
-        let v1 = ground_data.vertices[ground_data.indices[i+1]];
-        let v2 = ground_data.vertices[ground_data.indices[i+2]];
-        rasterize_triangle(v0, v1, v2, ground_data.colors[i _/ 3], image);
-    }
-
     // --- Render City ---
+    let transform_start = $time_current_ms();
     city_data.vertices = [];
     for (let var i = 0; i < orig_city_vertices.len; ++i) {
         city_data.vertices.push(orig_city_vertices[i].clone());
     }
     city_data.transform(mat_vp);
+    let transform_time = $time_current_ms() - transform_start;
+
+    let sort_start = $time_current_ms();
     city_data.sort_triangles();
+    let sort_time = $time_current_ms() - sort_start;
+
+    let raster_start = $time_current_ms();
     for (let var i = 0; i < city_data.indices.len; i = i + 3) {
         let v0 = city_data.vertices[city_data.indices[i]];
         let v1 = city_data.vertices[city_data.indices[i+1]];
         let v2 = city_data.vertices[city_data.indices[i+2]];
-        rasterize_triangle(v0, v1, v2, city_data.colors[i _/ 3], image);
+
+        // Backface culling: check winding order in screen space.
+        // This calculates the signed area of the 2D triangle.
+        // If the area is negative, it's front-facing (clockwise winding).
+        if ((v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y) < 0) {
+            rasterize_triangle(v0, v1, v2, city_data.colors[i _/ 3], image);
+        }
     }
+    let raster_time = $time_current_ms() - raster_start;
+
+    $println("transform: " + transform_time.to_s() + "ms, sort: " + sort_time.to_s() + "ms, rasterize: " + raster_time.to_s() + "ms");
 
     $window_draw_frame(window, image.bytes);
 
