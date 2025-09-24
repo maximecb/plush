@@ -2324,6 +2324,22 @@ mod tests
     }
 
     #[test]
+    #[should_panic]
+    fn ctor_argc_mismatch()
+    {
+        // Passing an argument to a constructor that accepts none
+        eval("class Foo { init(s) {} } let o = Foo(1);");
+    }
+
+    #[test]
+    #[should_panic]
+    fn no_ctor_arg()
+    {
+        // Passing an argument to a non-existent constructor
+        eval("class Foo {} let o = Foo(1);");
+    }
+
+    #[test]
     fn instanceof()
     {
         eval_eq("class F {} return nil instanceof F;", Value::False);

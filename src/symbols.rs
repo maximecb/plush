@@ -316,6 +316,8 @@ impl StmtBox
 
                 for fun_id in method_ids {
                     let mut fun = std::mem::take(prog.funs.get_mut(&fun_id).unwrap());
+                    // We may need to know the parameter count of the init function
+                    prog.funs.get_mut(&fun_id).unwrap().params = fun.params.clone();
                     fun.resolve_syms(prog, env)?;
                     prog.funs.insert(fun_id, fun);
                 }
@@ -461,11 +463,28 @@ impl ExprBox
                 match callee.expr.as_ref() {
                     // New class instance
                     Expr::Ref(Decl::Class { id }) => {
-                        if prog.classes.get(id).is_none() {
-                            return ParseError::with_pos(
-                                "cannot instantiate class because it does not have a constructor function",
-                                &callee.pos
-                            );
+                        match prog.classes.get(id) {
+                            // If this is a core class with no definition
+                            None => {
+                                return ParseError::with_pos(
+                                    "cannot instantiate core class because it has no constructor function",
+                                    &callee.pos
+                                );
+                            },
+
+                            Some(class) => {
+                                let ctor_argc = match class.methods.get("init") {
+                                    Some(init_id) => prog.funs[init_id].params.len(),
+                                    None => 1
+                                };
+
+                                if args.len() + 1 != ctor_argc {
+                                    return ParseError::with_pos(
+                                        "argument mismatch for class constructor call",
+                                        &callee.pos
+                                    );
+                                }
+                            }
                         }
                     }
 
