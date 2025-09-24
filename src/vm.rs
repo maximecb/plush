@@ -114,6 +114,9 @@ pub enum Insn
     // Create class instance
     new { class_id: ClassId, argc: u16 },
 
+    // Create a class instance with a known number of slots and constructor
+    new_known_ctor { class_id: ClassId, argc: u16, num_slots: u16, ctor_pc: u32, fun_id: FunId, num_locals: u16 },
+
     // Check if instance of class
     instanceof { class_id: ClassId },
 
@@ -158,6 +161,11 @@ pub enum Insn
     // Call a method on an object
     // call_method (self, arg0, ..., argN)
     call_method { name: *const String, argc: u16 },
+
+
+
+    //call_method_pc { name: *const String, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u8 },
+
 
     // Return
     ret,
@@ -1450,16 +1458,54 @@ impl Actor
                     let obj = Object::new(class_id, num_slots);
                     let obj_val = Value::Object(self.alloc.alloc(obj));
 
-                    let init_fun = self.get_method(class_id, "init");
-
                     // If a constructor method is present
+                    let init_fun = self.get_method(class_id, "init");
                     if let Some(fun_id) = init_fun {
-                        // The self value should be first on the stack
-                        self.stack.insert(self.stack.len() - argc as usize, obj_val);
-                        call_fun!(Value::Fun(fun_id), argc + 1);
-                    }
+                        let this_pc = pc - 1;
 
-                    push!(obj_val);
+                        // The self value should be first argument to the constructor
+                        // The constructor also returns the allocated object
+                        self.stack.insert(self.stack.len() - argc as usize, obj_val);
+                        let ctor_entry = call_fun!(Value::Fun(fun_id), argc + 1);
+
+                        // Patch the instruction to avoid lookups next time
+                        self.insns[this_pc] = Insn::new_known_ctor {
+                            class_id,
+                            argc,
+                            num_slots: num_slots.try_into().unwrap(),
+                            ctor_pc: ctor_entry.entry_pc as u32,
+                            fun_id,
+                            num_locals: ctor_entry.num_locals.try_into().unwrap(),
+                        };
+                    } else {
+                        // Return the allocated object
+                        push!(obj_val);
+                    }
+                }
+
+                Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
+                    // Allocate the object
+                    let obj = Object::new(class_id, num_slots as usize);
+                    let obj_val = Value::Object(self.alloc.alloc(obj));
+
+                    // The self value should be first argument to the constructor
+                    // The constructor also returns the allocated object
+                    self.stack.insert(self.stack.len() - argc as usize, obj_val);
+
+                    // We add an extra argument for the self value
+                    self.frames.push(StackFrame {
+                        argc: (argc + 1) as u16,
+                        fun: Value::Fun(fun_id),
+                        prev_bp: bp,
+                        ret_addr: pc,
+                    });
+
+                    // The base pointer will point at the first local
+                    bp = self.stack.len();
+                    pc = ctor_pc as usize;
+
+                    // Allocate stack slots for the local variables
+                    self.stack.resize(self.stack.len() + num_locals as usize, Value::Nil);
                 }
 
                 Insn::instanceof { class_id } => {
