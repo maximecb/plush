@@ -1074,6 +1074,11 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
         );
     }
 
+    // Unexpected semicolon
+    if input.peek_ch() == ';' {
+        return input.parse_error("extraneous semicolon `;`");
+    }
+
     // Try to parse this as an expression statement
     let expr = parse_expr(input, prog)?;
     input.expect_token(";")?;
