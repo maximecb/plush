@@ -162,10 +162,8 @@ pub enum Insn
     // call_method (self, arg0, ..., argN)
     call_method { name: *const String, argc: u16 },
 
-
-
-    //call_method_pc { name: *const String, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u8 },
-
+    // Call a method with a previously known pc
+    call_method_pc { name: *const String, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u8 },
 
     // Return
     ret,
@@ -1708,19 +1706,66 @@ impl Actor
                     let method_name = unsafe { &*name };
                     let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
 
-                    let fun = match self_val {
+                    match self_val {
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
                             let fun_id = self.get_method(obj.class_id, &method_name).unwrap();
-                            Value::Fun(fun_id)
+
+                            let this_pc = pc - 1;
+                            let fun_entry = call_fun!(Value::Fun(fun_id), argc + 1);
+
+                            // Patch this instruction to avoid the method lookup next time
+                            self.insns[this_pc] = Insn::call_method_pc {
+                                name,
+                                argc: argc.try_into().unwrap(),
+                                class_id: obj.class_id,
+                                entry_pc: fun_entry.entry_pc.try_into().unwrap(),
+                                fun_id,
+                                num_locals: fun_entry.num_locals.try_into().unwrap(),
+                            };
                         }
 
                         _ => {
-                            crate::runtime::get_method(self_val, &method_name)
+                            let fun = crate::runtime::get_method(self_val, &method_name);
+                            call_fun!(fun, argc + 1);
                         }
                     };
+                }
 
-                    call_fun!(fun, argc + 1);
+                Insn::call_method_pc { name, argc, class_id, entry_pc, fun_id, num_locals } => {
+                    let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
+
+                    // Guard that self is an object with a matching class id
+                    if let Value::Object(p_obj) = self_val {
+                        let obj = unsafe { &*p_obj };
+
+                        if obj.class_id == class_id {
+                            let argc: u16 = argc.into();
+                            self.frames.push(StackFrame {
+                                argc: argc + 1,
+                                fun: Value::Fun(fun_id),
+                                prev_bp: bp,
+                                ret_addr: pc,
+                            });
+
+                            // The base pointer will point at the first local
+                            bp = self.stack.len();
+                            pc = entry_pc as usize;
+
+                            // Allocate stack slots for the local variables
+                            self.stack.resize(self.stack.len() + num_locals as usize, Value::Nil);
+
+                            // Proceed with the call
+                            continue;
+                        }
+                    }
+
+                    // The guard fail, deoptimize this instruction and try again
+                    pc -= 1;
+                    self.insns[pc] = Insn::call_method {
+                        name,
+                        argc: argc.into(),
+                    };
                 }
 
                 Insn::ret => {
