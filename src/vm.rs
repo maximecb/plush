@@ -112,10 +112,10 @@ pub enum Insn
     cell_get,
 
     // Create class instance
-    new { class_id: ClassId, argc: u16 },
+    new { class_id: ClassId, argc: u8 },
 
     // Create a class instance with a known number of slots and constructor
-    new_known_ctor { class_id: ClassId, argc: u16, num_slots: u16, ctor_pc: u32, fun_id: FunId, num_locals: u16 },
+    new_known_ctor { class_id: ClassId, argc: u8, num_slots: u16, ctor_pc: u32, fun_id: FunId, num_locals: u16 },
 
     // Check if instance of class
     instanceof { class_id: ClassId },
@@ -146,24 +146,24 @@ pub enum Insn
     jump { target_ofs: i32 },
 
     // Call a host function
-    //call_host { host_fn: HostFn, argc: u16 },
+    //call_host { host_fn: HostFn, argc: u8 },
 
     // Call a function using the call stack
     // call (arg0, arg1, ..., argN)
-    call { argc: u16 },
+    call { argc: u8 },
 
     // Call a known function using its function id
-    call_direct { fun_id: FunId, argc: u16 },
+    call_direct { fun_id: FunId, argc: u8 },
 
     // Call a known function by directly jumping to its entry point
-    call_pc { entry_pc: u32, fun_id: FunId, num_locals: u16, argc: u16 },
+    call_pc { entry_pc: u32, fun_id: FunId, num_locals: u16, argc: u8 },
 
     // Call a method on an object
     // call_method (self, arg0, ..., argN)
-    call_method { name: *const String, argc: u16 },
+    call_method { name: *const String, argc: u8 },
 
     // Call a method with a previously known pc
-    call_method_pc { name: *const String, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u8 },
+    call_method_pc { name: *const String, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
 
     // Return
     ret,
@@ -474,7 +474,7 @@ struct StackFrame
     fun: Value,
 
     // Argument count (number of args supplied)
-    argc: u16,
+    argc: u8,
 
     // Previous base pointer at the time of call
     prev_bp: usize,
@@ -1492,7 +1492,7 @@ impl Actor
 
                     // We add an extra argument for the self value
                     self.frames.push(StackFrame {
-                        argc: (argc + 1) as u16,
+                        argc: argc + 1,
                         fun: Value::Fun(fun_id),
                         prev_bp: bp,
                         ret_addr: pc,
@@ -1740,7 +1740,7 @@ impl Actor
                         let obj = unsafe { &*p_obj };
 
                         if obj.class_id == class_id {
-                            let argc: u16 = argc.into();
+                            let argc: u8 = argc.into();
                             self.frames.push(StackFrame {
                                 argc: argc + 1,
                                 fun: Value::Fun(fun_id),
