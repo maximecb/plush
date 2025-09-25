@@ -376,7 +376,7 @@ impl ExprBox
                 );
             }
 
-            Expr::Ref(decl) => {
+            Expr::Ref {decl, .. } => {
                 gen_var_read(decl, fun, code);
             }
 
@@ -449,7 +449,7 @@ impl ExprBox
 
                 match callee.expr.as_ref() {
                     // New class instance
-                    Expr::Ref(Decl::Class { id }) => {
+                    Expr::Ref { decl: Decl::Class { id }, .. } => {
                         // Evaluate the arguments
                         for arg in args {
                             arg.gen_code(fun, code, alloc)?;
@@ -472,7 +472,7 @@ impl ExprBox
                     }
 
                     // Call to a known function
-                    Expr::Ref(Decl::Fun { id }) => {
+                    Expr::Ref { decl: Decl::Fun { id }, .. } => {
                         for arg in args {
                             arg.gen_code(fun, code, alloc)?;
                         }
@@ -794,7 +794,7 @@ fn gen_assign(
     //dbg!(rhs);
 
     match lhs.expr.as_ref() {
-        Expr::Ref(decl) => {
+        Expr::Ref { decl, .. } => {
             rhs.gen_code(fun, code, alloc)?;
 
             // If the output value is needed

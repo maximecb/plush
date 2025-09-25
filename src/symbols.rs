@@ -298,7 +298,7 @@ impl StmtBox
                     _ => {
                         if env.has_local(var_name) {
                             return ParseError::with_pos(
-                                &format!("local with name \"{}\" already exists", var_name),
+                                &format!("local with name `{}` already exists", var_name),
                                 &self.pos
                             );
                         }
@@ -383,12 +383,15 @@ impl ExprBox
                         _ => decl
                     };
 
-                    *(self.expr) = Expr::Ref(decl);
+                    *(self.expr) = Expr::Ref {
+                        name: name.clone(),
+                        decl
+                    };
                 }
                 else
                 {
                     return ParseError::with_pos(
-                        &format!("reference to unknown identifier \"{}\"", name),
+                        &format!("reference to unknown identifier `{}`", name),
                         &self.pos
                     );
                 }
@@ -430,10 +433,10 @@ impl ExprBox
                 if *op == BinOp::Assign {
                     match lhs.expr.as_ref() {
                         // Detect assignments to immutable variables
-                        Expr::Ref(decl) => {
+                        Expr::Ref { name, decl } => {
                             if !decl.is_mutable() {
                                 return ParseError::with_pos(
-                                    &format!("assignment to immutable variable, use `let var` to declare mutable variables"),
+                                    &format!("assignment to immutable variable `{}`, use `let var` to declare mutable variables", name),
                                     &self.pos
                                 );
                             }
@@ -462,12 +465,12 @@ impl ExprBox
 
                 match callee.expr.as_ref() {
                     // New class instance
-                    Expr::Ref(Decl::Class { id }) => {
+                    Expr::Ref { decl: Decl::Class { id }, name } => {
                         match prog.classes.get(id) {
                             // If this is a core class with no definition
                             None => {
                                 return ParseError::with_pos(
-                                    "cannot instantiate core class because it has no constructor function",
+                                    &format!("cannot instantiate core class `{}` via constructor call", name),
                                     &callee.pos
                                 );
                             },
@@ -480,7 +483,7 @@ impl ExprBox
 
                                 if args.len() + 1 != ctor_argc {
                                     return ParseError::with_pos(
-                                        "argument mismatch for class constructor call",
+                                        &format!("argument mismatch in call to constructor of class `{}`", name),
                                         &callee.pos
                                     );
                                 }

@@ -78,7 +78,10 @@ pub enum Expr
     Ident(String),
 
     // Reference to a variable/function declaration
-    Ref(Decl),
+    Ref {
+        name: String,
+        decl: Decl,
+    },
 
     // Function/closure expression
     Fun {
