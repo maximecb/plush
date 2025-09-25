@@ -502,6 +502,101 @@ class RenderData {
         self.colors = new_colors;
         self.normals = new_normals; // New: assign new normals array
     }
+
+    // Sort the triangles by depth using a bucket sort
+    sort_triangles_bucket(self, num_bins) {
+        let num_triangles = self.indices.len _/ 3;
+        if (num_triangles == 0) {
+            return;
+        }
+
+        // Calculate the depth of each triangle
+        let depths = Array.with_size(num_triangles, 0.0);
+        for (let var i = 0; i < num_triangles; ++i) {
+            let v0 = self.vertices[self.indices[i*3]];
+            let v1 = self.vertices[self.indices[i*3+1]];
+            let v2 = self.vertices[self.indices[i*3+2]];
+            depths[i] = v0.z.max(v1.z).max(v2.z);
+        }
+
+        // Find the min and max depth
+        let var min_depth = depths[0];
+        let var max_depth = depths[0];
+        for (let var i = 1; i < num_triangles; ++i) {
+            if (depths[i] < min_depth) {
+                min_depth = depths[i];
+            }
+            if (depths[i] > max_depth) {
+                max_depth = depths[i];
+            }
+        }
+
+        let depth_range = max_depth - min_depth;
+
+        // Create buckets
+        let buckets = [];
+        for (let var i = 0; i < num_bins; ++i) {
+            buckets.push([]);
+        }
+
+        // Distribute triangles into buckets
+        for (let var i = 0; i < num_triangles; ++i) {
+            let var bin_idx = ((depths[i] - min_depth) / depth_range * (num_bins - 1)).trunc();
+            if (bin_idx < 0) {
+                bin_idx = 0;
+            }
+            if (bin_idx >= num_bins) {
+                bin_idx = num_bins - 1;
+            }
+            buckets[bin_idx].push(i);
+        }
+
+        // Create an array to store the final order of triangles
+        let triangle_order = [];
+
+        // Sort each bucket and concatenate the results
+        // The buckets should be processed from far to near for back-to-front rendering
+        for (let var i = num_bins - 1; i >= 0; --i) {
+            let bucket = buckets[i];
+            let bucket_len = bucket.len;
+            if (bucket_len == 0) {
+                continue;
+            }
+
+            // Using insertion sort for simplicity within buckets (sorts back to front)
+            for (let var j = 1; j < bucket_len; ++j) {
+                let key_idx = bucket[j];
+                let key_depth = depths[key_idx];
+                let var k = j - 1;
+                while (k >= 0 && depths[bucket[k]] < key_depth) {
+                    bucket[k+1] = bucket[k];
+                    k = k - 1;
+                }
+                bucket[k+1] = key_idx;
+            }
+
+            for (let var j = 0; j < bucket_len; ++j) {
+                triangle_order.push(bucket[j]);
+            }
+        }
+
+        // Rearrange self.indices, self.colors, and self.normals based on the sorted triangle_order
+        let new_indices = Array.with_size(num_triangles * 3, 0);
+        let new_colors = Array.with_size(num_triangles, 0);
+        let new_normals = Array.with_size(num_triangles, 0);
+
+        for (let var k = 0; k < num_triangles; ++k) {
+            let original_triangle_idx = triangle_order[k];
+            new_colors[k] = self.colors[original_triangle_idx];
+            new_indices[k*3] = self.indices[original_triangle_idx*3];
+            new_indices[k*3+1] = self.indices[original_triangle_idx*3+1];
+            new_indices[k*3+2] = self.indices[original_triangle_idx*3+2];
+            new_normals[k] = self.normals[original_triangle_idx];
+        }
+        self.indices = new_indices;
+        self.colors = new_colors;
+        self.normals = new_normals;
+    }
 }
 
 fun generate_cube(data, center_x, y, center_z, size_x, size_y, size_z, color) {
@@ -636,14 +731,14 @@ let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 // Generate city
 let city_data = RenderData();
-let grid_size = 10;
+let grid_size = 15;
 generate_city(city_data, grid_size);
 
 // Generate ground plane
 let city_size = grid_size * 100.0;
 let ground_min = -city_size * 0.15;
 let ground_max = city_size * 1.15;
-let ground_color = 0xFF_77_77_77; // Dark gray
+let ground_color = 0xFF_77_77_77; // Grey
 generate_ground_plane(city_data, ground_min, ground_max, ground_color);
 
 // Keep a copy of the original vertices
@@ -659,8 +754,8 @@ let camera = Camera(
     Vec3(500.0, 100.0, 1600.0),
     city_center,
     90.0,   // fov
-    0.1,
-    10_000.0
+    20.0,
+    3_000.0
 );
 
 let mat_proj = camera.projection_matrix(aspect);
@@ -683,12 +778,12 @@ loop {
 
     // --- Animation Update ---
     if (!paused) {
-        anim_time = anim_time + 0.01;
+        anim_time = anim_time + 0.008;
     }
 
     // --- Camera Update ---
-    let radius = 1000.0 + anim_time.sin() * 200;
-    let height = 500 + anim_time.sin() * 100;
+    let radius = 1500.0 + anim_time.sin() * 200;
+    let height = 500 + (0.9 * anim_time.sin()) * 300;
     let cam_x = city_center.x + radius * anim_time.cos();
     let cam_z = city_center.z + radius * anim_time.sin();
     camera.pos = Vec3(cam_x, height, cam_z);
@@ -735,7 +830,7 @@ loop {
     let transform_time = $time_current_ms() - transform_start;
 
     let sort_start = $time_current_ms();
-    city_data.sort_triangles();
+    city_data.sort_triangles_bucket(4096);
     let sort_time = $time_current_ms() - sort_start;
 
     let raster_start = $time_current_ms();
@@ -781,5 +876,5 @@ loop {
     $window_draw_frame(window, image.bytes);
 
     // --- Frame Limiting ---
-    $actor_sleep(16);
+    $actor_sleep(20);
 }
