@@ -440,7 +440,11 @@ class RenderData {
             let v0 = self.vertices[self.indices[i*3]];
             let v1 = self.vertices[self.indices[i*3+1]];
             let v2 = self.vertices[self.indices[i*3+2]];
+
+            // Centroid Z
             //depths[i] = (v0.z + v1.z + v2.z) / 3;
+
+            // Minimum Z
             depths[i] = v0.z.max(v1.z).max(v2.z);
         }
 
@@ -661,17 +665,26 @@ let camera = Camera(
 
 let mat_proj = camera.projection_matrix(aspect);
 let var anim_time = 0.0;
+let var paused = false;
 
 // Main animation loop
 loop {
     // --- Event Handling ---
     let msg = $actor_poll();
-    if (msg != nil && msg instanceof UIEvent && (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE'))) {
-        break;
+    if (msg != nil && msg instanceof UIEvent) {
+        if (msg.kind == 'CLOSE_WINDOW' || msg.key == 'ESCAPE') {
+            break;
+        }
+
+        if (msg.kind == 'KEY_DOWN' && msg.key == 'SPACE') {
+            paused = !paused;
+        }
     }
 
     // --- Animation Update ---
-    anim_time = anim_time + 0.01;
+    if (!paused) {
+        anim_time = anim_time + 0.01;
+    }
 
     // --- Camera Update ---
     let radius = 1000.0 + anim_time.sin() * 200;
