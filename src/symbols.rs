@@ -446,6 +446,13 @@ impl ExprBox
                         Expr::Member { field, .. } => {
                             if let Some(class) = prog.classes.get_mut(&fun.class_id) {
                                 class.reg_field(field);
+
+                                if class.fields.len() > u16::MAX.into() {
+                                    return ParseError::with_pos(
+                                        &format!("too many fields in class `{}`", class.name),
+                                        &self.pos
+                                    );
+                                }
                             }
                         }
 

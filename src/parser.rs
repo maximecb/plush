@@ -192,6 +192,11 @@ fn parse_postfix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, Parse
         if input.match_token("(")? {
             let arg_exprs = parse_expr_list(input, prog, ")")?;
 
+            // Add one to account for self in constructor and method calls
+            if arg_exprs.len() + 1 > u8::MAX.into() {
+                return input.parse_error("too many arguments in function call");
+            }
+
             base_expr = ExprBox::new(
                 Expr::Call {
                     callee: base_expr,
@@ -1122,6 +1127,10 @@ fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcP
         input.expect_token(",")?;
     }
 
+    if params.len() > u8::MAX.into() {
+        return input.parse_error("too many function parameters");
+    }
+
     // Parse the function body (must be a block statement)
     let body = parse_block_stmt(input, prog)?;
 
@@ -1174,6 +1183,10 @@ fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<Fu
         // If this isn't the last argument, there
         // has to be a comma separator
         input.expect_token(",")?;
+    }
+
+    if params.len() > u8::MAX.into() {
+        return input.parse_error("too many function parameters");
     }
 
     input.eat_ws()?;
