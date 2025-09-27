@@ -2004,11 +2004,15 @@ mod tests
     fn insn_size()
     {
         use std::mem::size_of;
+
+        dbg!(size_of::<Value>());
+        assert!(size_of::<Value>() <= 16);
+
         dbg!(size_of::<Insn>());
         assert!(size_of::<Insn>() <= 24);
 
         dbg!(size_of::<ClassId>());
-        assert!(size_of::<ClassId>() <= 32);
+        assert!(size_of::<ClassId>() <= 4);
     }
 
     #[test]
