@@ -231,12 +231,12 @@ fun rasterize_triangle_tile(v0, v1, v2, color, tile_img, tile_x, tile_y, tile_w,
 
     let var inv_slope1 = 0.0;
     if (p1.y > p0.y) {
-        inv_slope1 = (x1 - x0) / (p1.y - p0.y);
+        inv_slope1 = (p1.x - p0.x) / (p1.y - p0.y);
     }
 
     let var inv_slope2 = 0.0;
     if (p2.y > p0.y) {
-        inv_slope2 = (x2 - x0) / (p2.y - p0.y);
+        inv_slope2 = (p2.x - p0.x) / (p2.y - p0.y);
     }
 
     // Draw the upper part of the triangle
@@ -244,8 +244,8 @@ fun rasterize_triangle_tile(v0, v1, v2, color, tile_img, tile_x, tile_y, tile_w,
     let end_scanline_y_top = y1.min(tile_y + tile_h);
 
     if (start_scanline_y_top < end_scanline_y_top) {
-        let var cur_x1 = x0 + (start_scanline_y_top - y0) * inv_slope1;
-        let var cur_x2 = x0 + (start_scanline_y_top - y0) * inv_slope2;
+        let var cur_x1 = x0 + (start_scanline_y_top + 1 - p0.y) * inv_slope1;
+        let var cur_x2 = x0 + (start_scanline_y_top + 1 - p0.y) * inv_slope2;
 
         for (let var scanline_y = start_scanline_y_top; scanline_y < end_scanline_y_top; ++scanline_y) {
             let start_x = cur_x1.min(cur_x2).floor();
@@ -270,15 +270,15 @@ fun rasterize_triangle_tile(v0, v1, v2, color, tile_img, tile_x, tile_y, tile_w,
     // Draw the lower part of the triangle
     let var inv_slope3 = 0.0;
     if (p2.y > p1.y) {
-        inv_slope3 = (x2 - x1) / (p2.y - p1.y);
+        inv_slope3 = (p2.x - p1.x) / (p2.y - p1.y);
     }
 
     let start_scanline_y_bot = y1.max(tile_y);
     let end_scanline_y_bot = y2.min(tile_y + tile_h);
 
     if (start_scanline_y_bot < end_scanline_y_bot) {
-        let var cur_x1 = x1 + (start_scanline_y_bot - y1) * inv_slope3;
-        let var cur_x2 = x0 + (start_scanline_y_bot - y0) * inv_slope2;
+        let var cur_x1 = x1 + (start_scanline_y_bot + 1 - p1.y) * inv_slope3;
+        let var cur_x2 = x0 + (start_scanline_y_bot + 1 - p0.y) * inv_slope2;
 
         for (let var scanline_y = start_scanline_y_bot; scanline_y < end_scanline_y_bot; ++scanline_y) {
             let start_x = cur_x1.min(cur_x2).floor();
