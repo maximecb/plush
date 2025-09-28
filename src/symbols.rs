@@ -503,7 +503,8 @@ impl ExprBox
                         if host_fn.num_params() != args.len() {
                             return ParseError::with_pos(
                                 &format!(
-                                    "incorrect argument count for host function, expected {}, got {}",
+                                    "incorrect argument count for host function `{}`, expected {}, got {}",
+                                    host_fn.name,
                                     host_fn.num_params(),
                                     args.len()
                                 ),

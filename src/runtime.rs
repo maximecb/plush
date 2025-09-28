@@ -219,49 +219,90 @@ pub fn init_runtime(prog: &mut Program)
 pub fn get_method(val: Value, method_name: &str) -> Value
 {
     use crate::host::HostFn;
+    use crate::host::FnPtr::*;
     use crate::array::*;
     use crate::bytearray::*;
 
+    static INT64_ABS: HostFn = HostFn { name: "abs", f: Fn1_1(int64_abs) };
+    static INT64_TO_F: HostFn = HostFn { name: "to_f", f: Fn1_1(int64_to_f) };
+    static INT64_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(int64_to_s) };
+    static INT64_MIN: HostFn = HostFn { name: "min", f: Fn2_1(int64_min) };
+    static INT64_MAX: HostFn = HostFn { name: "max", f: Fn2_1(int64_max) };
+
+    static FLOAT64_ABS: HostFn = HostFn { name: "abs", f: Fn1_1(float64_abs) };
+    static FLOAT64_CEIL: HostFn = HostFn { name: "ceil", f: Fn1_1(float64_ceil) };
+    static FLOAT64_FLOOR: HostFn = HostFn { name: "floor", f: Fn1_1(float64_floor) };
+    static FLOAT64_TRUNC: HostFn = HostFn { name: "trunc", f: Fn1_1(float64_trunc) };
+    static FLOAT64_SIN: HostFn = HostFn { name: "sin", f: Fn1_1(float64_sin) };
+    static FLOAT64_COS: HostFn = HostFn { name: "cos", f: Fn1_1(float64_cos) };
+    static FLOAT64_TAN: HostFn = HostFn { name: "tan", f: Fn1_1(float64_tan) };
+    static FLOAT64_ATAN: HostFn = HostFn { name: "atan", f: Fn1_1(float64_atan) };
+    static FLOAT64_SQRT: HostFn = HostFn { name: "sqrt", f: Fn1_1(float64_sqrt) };
+    static FLOAT64_TO_F: HostFn = HostFn { name: "to_f", f: Fn1_1(identity_method) };
+    static FLOAT64_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(float64_to_s) };
+    static FLOAT64_FORMAT_DECIMALS: HostFn = HostFn { name: "format_decimals", f: Fn2_1(float64_format_decimals) };
+    static FLOAT64_MIN: HostFn = HostFn { name: "min", f: Fn2_1(float64_min) };
+    static FLOAT64_MAX: HostFn = HostFn { name: "max", f: Fn2_1(float64_max) };
+
+    static STRING_FROM_CODEPOINT: HostFn = HostFn { name: "from_codepoint", f: Fn2_1(string_from_codepoint) };
+    static STRING_BYTE_AT: HostFn = HostFn { name: "byte_at", f: Fn2_1(string_byte_at) };
+    static STRING_PARSE_INT: HostFn = HostFn { name: "parse_int", f: Fn2_1(string_parse_int) };
+    static STRING_TRIM: HostFn = HostFn { name: "trim", f: Fn1_1(string_trim) };
+    static STRING_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(identity_method) };
+
+    static ARRAY_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn3_1(array_with_size) };
+    static ARRAY_PUSH: HostFn = HostFn { name: "push", f: Fn2_0(array_push) };
+    static ARRAY_POP: HostFn = HostFn { name: "pop", f: Fn1_1(array_pop) };
+
+    static BA_NEW: HostFn = HostFn { name: "new", f: Fn1_1(ba_new) };
+    static BA_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn2_1(ba_with_size) };
+    static BA_READ_U32: HostFn = HostFn { name: "read_u32", f: Fn2_1(ba_read_u32) };
+    static BA_WRITE_U32: HostFn = HostFn { name: "write_u32", f: Fn3_0(ba_write_u32) };
+    static BA_FILL_U32: HostFn = HostFn { name: "fill_u32", f: Fn4_0(ba_fill_u32) };
+    static BA_MEMCPY: HostFn = HostFn { name: "memcpy", f: Fn5_0(ba_memcpy) };
+    static BA_ZERO_FILL: HostFn = HostFn { name: "zero_fill", f: Fn1_0(ba_zero_fill) };
+    static BA_BLIT_BGRA32: HostFn = HostFn { name: "blit_bgra32", f: Fn8_0(ba_blit_bgra32) };
+
     let f = match (val, method_name) {
-        (Value::Int64(_), "abs") => HostFn::Fn1_1(int64_abs),
-        (Value::Int64(_), "to_f") => HostFn::Fn1_1(int64_to_f),
-        (Value::Int64(_), "to_s") => HostFn::Fn1_1(int64_to_s),
-        (Value::Int64(_), "min") => HostFn::Fn2_1(int64_min),
-        (Value::Int64(_), "max") => HostFn::Fn2_1(int64_max),
+        (Value::Int64(_), "abs") => &INT64_ABS,
+        (Value::Int64(_), "to_f") => &INT64_TO_F,
+        (Value::Int64(_), "to_s") => &INT64_TO_S,
+        (Value::Int64(_), "min") => &INT64_MIN,
+        (Value::Int64(_), "max") => &INT64_MAX,
 
-        (Value::Float64(_), "abs") => HostFn::Fn1_1(float64_abs),
-        (Value::Float64(_), "ceil") => HostFn::Fn1_1(float64_ceil),
-        (Value::Float64(_), "floor") => HostFn::Fn1_1(float64_floor),
-        (Value::Float64(_), "trunc") => HostFn::Fn1_1(float64_trunc),
-        (Value::Float64(_), "sin") => HostFn::Fn1_1(float64_sin),
-        (Value::Float64(_), "cos") => HostFn::Fn1_1(float64_cos),
-        (Value::Float64(_), "tan") => HostFn::Fn1_1(float64_tan),
-        (Value::Float64(_), "atan") => HostFn::Fn1_1(float64_atan),
-        (Value::Float64(_), "sqrt") => HostFn::Fn1_1(float64_sqrt),
-        (Value::Float64(_), "to_f") => HostFn::Fn1_1(identity_method),
-        (Value::Float64(_), "to_s") => HostFn::Fn1_1(float64_to_s),
-        (Value::Float64(_), "format_decimals") => HostFn::Fn2_1(float64_format_decimals),
-        (Value::Float64(_), "min") => HostFn::Fn2_1(float64_min),
-        (Value::Float64(_), "max") => HostFn::Fn2_1(float64_max),
+        (Value::Float64(_), "abs") => &FLOAT64_ABS,
+        (Value::Float64(_), "ceil") => &FLOAT64_CEIL,
+        (Value::Float64(_), "floor") => &FLOAT64_FLOOR,
+        (Value::Float64(_), "trunc") => &FLOAT64_TRUNC,
+        (Value::Float64(_), "sin") => &FLOAT64_SIN,
+        (Value::Float64(_), "cos") => &FLOAT64_COS,
+        (Value::Float64(_), "tan") => &FLOAT64_TAN,
+        (Value::Float64(_), "atan") => &FLOAT64_ATAN,
+        (Value::Float64(_), "sqrt") => &FLOAT64_SQRT,
+        (Value::Float64(_), "to_f") => &FLOAT64_TO_F,
+        (Value::Float64(_), "to_s") => &FLOAT64_TO_S,
+        (Value::Float64(_), "format_decimals") => &FLOAT64_FORMAT_DECIMALS,
+        (Value::Float64(_), "min") => &FLOAT64_MIN,
+        (Value::Float64(_), "max") => &FLOAT64_MAX,
 
-        (Value::Class(STRING_ID), "from_codepoint") => HostFn::Fn2_1(string_from_codepoint),
-        (Value::String(_), "byte_at") => HostFn::Fn2_1(string_byte_at),
-        (Value::String(_), "parse_int") => HostFn::Fn2_1(string_parse_int),
-        (Value::String(_), "trim") => HostFn::Fn1_1(string_trim),
-        (Value::String(_), "to_s") => HostFn::Fn1_1(identity_method),
+        (Value::Class(STRING_ID), "from_codepoint") => &STRING_FROM_CODEPOINT,
+        (Value::String(_), "byte_at") => &STRING_BYTE_AT,
+        (Value::String(_), "parse_int") => &STRING_PARSE_INT,
+        (Value::String(_), "trim") => &STRING_TRIM,
+        (Value::String(_), "to_s") => &STRING_TO_S,
 
-        (Value::Class(ARRAY_ID), "with_size") => HostFn::Fn3_1(array_with_size),
-        (Value::Array(_), "push") => HostFn::Fn2_0(array_push),
-        (Value::Array(_), "pop") => HostFn::Fn1_1(array_pop),
+        (Value::Class(ARRAY_ID), "with_size") => &ARRAY_WITH_SIZE,
+        (Value::Array(_), "push") => &ARRAY_PUSH,
+        (Value::Array(_), "pop") => &ARRAY_POP,
 
-        (Value::Class(BYTEARRAY_ID), "new") => HostFn::Fn1_1(ba_new),
-        (Value::Class(BYTEARRAY_ID), "with_size") => HostFn::Fn2_1(ba_with_size),
-        (Value::ByteArray(_), "read_u32") => HostFn::Fn2_1(ba_read_u32),
-        (Value::ByteArray(_), "write_u32") => HostFn::Fn3_0(ba_write_u32),
-        (Value::ByteArray(_), "fill_u32") => HostFn::Fn4_0(ba_fill_u32),
-        (Value::ByteArray(_), "memcpy") => HostFn::Fn5_0(ba_memcpy),
-        (Value::ByteArray(_), "zero_fill") => HostFn::Fn1_0(ba_zero_fill),
-        (Value::ByteArray(_), "blit_bgra32") => HostFn::Fn8_0(ba_blit_bgra32),
+        (Value::Class(BYTEARRAY_ID), "new") => &BA_NEW,
+        (Value::Class(BYTEARRAY_ID), "with_size") => &BA_WITH_SIZE,
+        (Value::ByteArray(_), "read_u32") => &BA_READ_U32,
+        (Value::ByteArray(_), "write_u32") => &BA_WRITE_U32,
+        (Value::ByteArray(_), "fill_u32") => &BA_FILL_U32,
+        (Value::ByteArray(_), "memcpy") => &BA_MEMCPY,
+        (Value::ByteArray(_), "zero_fill") => &BA_ZERO_FILL,
+        (Value::ByteArray(_), "blit_bgra32") => &BA_BLIT_BGRA32,
 
         _ => panic!("unknown method {}", method_name)
     };

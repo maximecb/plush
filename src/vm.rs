@@ -237,7 +237,7 @@ pub enum Value
     // String constant
     String(*const String),
 
-    HostFn(HostFn),
+    HostFn(&'static HostFn),
     Fun(FunId),
     Closure(*mut Closure),
 
@@ -396,7 +396,7 @@ impl PartialEq for Value
             // For all other cases, use structural equality
             (Int64(a), Int64(b))        => a == b,
             (Float64(a), Float64(b))    => a == b,
-            (HostFn(a), HostFn(b))      => a == b,
+            (HostFn(a), HostFn(b))      => *a as *const crate::host::HostFn == *b as *const crate::host::HostFn,
             (Fun(a), Fun(b))            => a == b,
             (Closure(a), Closure(b))    => a == b,
             (Object(a), Object(b))      => a == b,
@@ -748,7 +748,7 @@ impl Actor
     }
 
     /// Call a host function
-    fn call_host(&mut self, host_fn: HostFn, argc: usize)
+    fn call_host(&mut self, host_fn: &HostFn, argc: usize)
     {
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }
@@ -766,45 +766,45 @@ impl Actor
             );
         }
 
-        match host_fn
+        match host_fn.f
         {
-            HostFn::Fn0_0(fun) => {
+            FnPtr::Fn0_0(fun) => {
                 fun(self);
                 push!(Value::Nil);
             }
 
-            HostFn::Fn0_1(fun) => {
+            FnPtr::Fn0_1(fun) => {
                 let v = fun(self);
                 push!(v);
             }
 
-            HostFn::Fn1_0(fun) => {
+            FnPtr::Fn1_0(fun) => {
                 let a0 = pop!();
                 fun(self, a0);
                 push!(Value::Nil);
             }
 
-            HostFn::Fn1_1(fun) => {
+            FnPtr::Fn1_1(fun) => {
                 let a0 = pop!();
                 let v = fun(self, a0);
                 push!(v);
             }
 
-            HostFn::Fn2_0(fun) => {
+            FnPtr::Fn2_0(fun) => {
                 let a1 = pop!();
                 let a0 = pop!();
                 fun(self, a0, a1);
                 push!(Value::Nil);
             }
 
-            HostFn::Fn2_1(fun) => {
+            FnPtr::Fn2_1(fun) => {
                 let a1 = pop!();
                 let a0 = pop!();
                 let v = fun(self, a0, a1);
                 push!(v);
             }
 
-            HostFn::Fn3_0(fun) => {
+            FnPtr::Fn3_0(fun) => {
                 let a2 = pop!();
                 let a1 = pop!();
                 let a0 = pop!();
@@ -812,7 +812,7 @@ impl Actor
                 push!(Value::Nil);
             }
 
-            HostFn::Fn3_1(fun) => {
+            FnPtr::Fn3_1(fun) => {
                 let a2 = pop!();
                 let a1 = pop!();
                 let a0 = pop!();
@@ -820,7 +820,7 @@ impl Actor
                 push!(v);
             }
 
-            HostFn::Fn4_0(fun) => {
+            FnPtr::Fn4_0(fun) => {
                 let a3 = pop!();
                 let a2 = pop!();
                 let a1 = pop!();
@@ -829,7 +829,7 @@ impl Actor
                 push!(Value::Nil);
             }
 
-            HostFn::Fn4_1(fun) => {
+            FnPtr::Fn4_1(fun) => {
                 let a3 = pop!();
                 let a2 = pop!();
                 let a1 = pop!();
@@ -838,7 +838,7 @@ impl Actor
                 push!(v);
             }
 
-            HostFn::Fn5_0(fun) => {
+            FnPtr::Fn5_0(fun) => {
                 let a4 = pop!();
                 let a3 = pop!();
                 let a2 = pop!();
@@ -848,7 +848,7 @@ impl Actor
                 push!(Value::Nil);
             }
 
-            HostFn::Fn5_1(fun) => {
+            FnPtr::Fn5_1(fun) => {
                 let a4 = pop!();
                 let a3 = pop!();
                 let a2 = pop!();
@@ -858,7 +858,7 @@ impl Actor
                 push!(v);
             }
 
-            HostFn::Fn8_0(fun) => {
+            FnPtr::Fn8_0(fun) => {
                 let a7 = pop!();
                 let a6 = pop!();
                 let a5 = pop!();

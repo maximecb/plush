@@ -60,7 +60,7 @@ pub enum Expr
     String(String),
 
     // Host function
-    HostFn(HostFn),
+    HostFn(&'static HostFn),
 
     // ByteArray literal
     ByteArray(Vec<u8>),
