@@ -190,6 +190,8 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `fill_u32(start_index, count, value)`: Fills a portion of the `ByteArray` with a repeated 32-bit unsigned integer value.
     -   `read_u32(index)`: Reads a 32-bit unsigned integer from the `ByteArray` at the given index.
     -   `write_u32(index, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given index.
+    -   `read_f32(index)`: Reads a 32-bit float from the `ByteArray` at the given index.
+    -   `write_f32(index, value)`: Writes a 32-bit float to the `ByteArray` at the given index.
     -   `memcpy(dst_idx, src_bytes, src_idx, len)`: Copies a block of memory from a source `ByteArray` to this one.
     -   `zero_fill()`: Overwrite the contents of the `ByteArray` with zeros.
     -   `blit_bgra32(dst_width, dst_height, src, src_width, src_height, dst_x, dst_y)`: Copies a rectangular region from a source `ByteArray` into this `ByteArray` at a specified position, with alpha blending. This method assumes that both the source and destination buffers contain pixel data in the BGRA32 format.

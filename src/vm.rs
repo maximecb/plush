@@ -447,6 +447,12 @@ impl From<i64> for Value {
     }
 }
 
+impl From<f64> for Value {
+    fn from(val: f64) -> Self {
+        Value::Float64(val)
+    }
+}
+
 impl From<bool> for Value {
     fn from(val: bool) -> Self {
         match val {

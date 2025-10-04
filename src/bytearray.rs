@@ -182,6 +182,15 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Value
     Value::ByteArray(actor.alloc.alloc(ba))
 }
 
+pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value)
+{
+    let ba = ba.unwrap_ba();
+    let idx = idx.unwrap_usize();
+    let num = num.unwrap_usize();
+    let val = val.unwrap_u32();
+    ba.fill(idx, num, val);
+}
+
 pub fn ba_read_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
 {
     let ba = ba.unwrap_ba();
@@ -198,13 +207,20 @@ pub fn ba_write_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
     ba.write(idx, val);
 }
 
-pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value)
+pub fn ba_read_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
-    let num = num.unwrap_usize();
-    let val = val.unwrap_u32();
-    ba.fill(idx, num, val);
+    let val: f32 = ba.read(idx);
+    Value::from(val as f64)
+}
+
+pub fn ba_write_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
+{
+    let ba = ba.unwrap_ba();
+    let idx = idx.unwrap_usize();
+    let val = val.unwrap_f64();
+    ba.write(idx, val as f32);
 }
 
 pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value)
