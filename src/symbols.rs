@@ -390,6 +390,13 @@ impl ExprBox
                 }
                 else
                 {
+                    if name == "null" {
+                        return ParseError::with_pos(
+                            "there is no `null` value in plush, use `nil` instead",
+                            &self.pos
+                        );
+                    }
+
                     return ParseError::with_pos(
                         &format!("reference to unknown identifier `{}`", name),
                         &self.pos
