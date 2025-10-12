@@ -1,4 +1,4 @@
-let TILE_SIZE = 30;
+let TILE_SIZE = 50;
 
 // Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
 fun rgb32(r, g, b)
@@ -265,18 +265,12 @@ fun actor_loop()
 }
 
 // Multi-actor, parallel rendering
-fun render()
+fun render(num_actors, width, height)
 {
-    let num_actors = 32;
-
     // Create the actors
     let actor_ids = [];
     for (let var i = 0; i < num_actors; ++i)
         actor_ids.push($actor_spawn(actor_loop));
-
-    // Image settings
-    let width = 400;
-    let height = 300;
 
     // Camera setup
     let camera = Camera(width, height);
@@ -333,12 +327,8 @@ fun render()
 }
 
 // Single-threaded rendering
-fun render_no_tile()
+fun render_no_tile(width, height)
 {
-    // Image settings
-    let width = 400;
-    let height = 300;
-
     // Camera setup
     let camera = Camera(width, height);
 
@@ -353,9 +343,23 @@ fun render_no_tile()
     return img;
 }
 
+// Set the number of actors
+let var num_actors = 16;
+if ($cmd_get_arg(1) != nil) num_actors = $cmd_get_arg(1).parse_int(10);
+let var use_parallel = num_actors > 1;
+
+// Screen setup
+let var frame_width = 400;
+let var frame_height = 300;
+if ($cmd_get_arg(2) != nil) frame_width = $cmd_get_arg(2).parse_int(10);
+if ($cmd_get_arg(3) != nil) frame_height = $cmd_get_arg(3).parse_int(10);
+
 // Run the renderer
-//let image = render_no_tile();
-let image = render();
+let var image = nil;
+if (num_actors > 1)
+    image = render(num_actors, frame_width, frame_height);
+else
+    image = render_no_tile(frame_width, frame_height);
 
 let window = $window_create(image.width, image.height, "Render", 0);
 $window_draw_frame(window, image.bytes);
