@@ -29,8 +29,8 @@ struct OutputCB
 
 impl AudioCallback for OutputCB
 {
-    // Using signed 16-bit samples
-    type Channel = i16;
+    // 32-bit floating-point samples
+    type Channel = f32;
 
     fn callback(&mut self, out: &mut [i16])
     {
@@ -70,7 +70,7 @@ thread_local! {
 }
 */
 
-pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value, format: Value) -> Value
+pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Value
 {
     /*
     if thread.id != 0 {
@@ -88,7 +88,6 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
 
     let sample_rate = sample_rate.unwrap_u32();
     let num_channels = num_channels.unwrap_u32();
-    let format = format.unwrap_u32();
 
     if sample_rate != 44100 {
         panic!("for now, only 44100Hz sample rate suppored");
@@ -98,12 +97,6 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     if num_channels != 1 {
         panic!("for now, only one output channel supported");
     }
-
-    /*
-    if format != AUDIO_FORMAT_I16 {
-        panic!("for now, only i16, 16-bit signed audio format supported");
-    }
-    */
 
     let desired_spec = AudioSpecDesired {
         freq: Some(sample_rate as i32),

@@ -136,8 +136,8 @@ pub fn get_host_const(name: &str) -> Expr
         "window_draw_frame" => &WINDOW_DRAW_FRAME,
 
 
-        //"audio_open_output" => ,
-
+        //"audio_open_output" => &AUDIO_OPEN_OUTPUT,
+        //"audio_write_samples" =>
 
 
 
