@@ -212,6 +212,7 @@ pub fn init_runtime(prog: &mut Program)
     audio_needed.id = AUDIO_NEEDED_ID;
     audio_needed.reg_field("num_samples");
     audio_needed.reg_field("num_channels");
+    audio_needed.reg_field("device_id");
     prog.reg_class(audio_needed);
 }
 

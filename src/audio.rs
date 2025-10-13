@@ -10,21 +10,17 @@ use crate::vm::{Value, VM, Actor};
 
 
 
-/*
-// Audio output callback
+// SDL audio output callback
 struct OutputCB
 {
     // Number of audio output channels
     num_channels: usize,
 
-    // Expected buffer size
+    // Expected buffer size in samples
     buf_size: usize,
 
-    // VM thread in which to execute the audio callback
-    thread: Thread,
-
-    // Callback function pointer
-    cb: u64,
+    // Actor responsible for generating audio
+    actor_id: u64,
 }
 
 impl AudioCallback for OutputCB
@@ -32,7 +28,7 @@ impl AudioCallback for OutputCB
     // 32-bit floating-point samples
     type Channel = f32;
 
-    fn callback(&mut self, out: &mut [i16])
+    fn callback(&mut self, out: &mut [f32])
     {
         let output_len = out.len();
         assert!(output_len % self.num_channels == 0);
@@ -40,16 +36,28 @@ impl AudioCallback for OutputCB
         assert!(samples_per_chan == self.buf_size);
 
         // Clear the buffer
-        out.fill(0);
+        out.fill(0.0);
 
+
+
+
+        /*
         // Run the audio callback
         let ptr = self.thread.call(self.cb, &[Value::from(self.num_channels), Value::from(samples_per_chan)]);
 
-        let mem_slice: &[i16] = self.thread.get_heap_slice_mut(ptr.as_usize(), output_len);
+        let mem_slice: &[f32] = self.thread.get_heap_slice_mut(ptr.as_usize(), output_len);
         out.copy_from_slice(&mem_slice);
+        */
+
+
+
+
+        todo!();
     }
 }
-*/
+
+
+
 
 /*
 #[derive(Default)]
@@ -60,23 +68,14 @@ struct AudioState
 }
 */
 
-/*
-thread_local! {
-    // This is only accessed from the main thread
-    static AUDIO_STATE: RefCell<AudioState> = RefCell::new(AudioState::default());
 
-    // Audio input state. Accessed from the input thread.
-    static INPUT_STATE: RefCell<InputState> = RefCell::new(InputState::default());
-}
-*/
+
+
+
 
 pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Value
 {
-    /*
-    if thread.id != 0 {
-        panic!("audio functions should only be called from the main thread");
-    }
-    */
+
 
     /*
     AUDIO_STATE.with_borrow(|s| {
@@ -85,6 +84,10 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
         }
     });
     */
+
+
+
+
 
     let sample_rate = sample_rate.unwrap_u32();
     let num_channels = num_channels.unwrap_u32();
@@ -109,10 +112,8 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
 
 
 
-    /*
-    // Create a new VM thread in which to run the audio callback
-    let audio_thread = VM::new_thread(&thread.vm);
 
+    /*
     let sdl = get_sdl_context();
     let audio_subsystem = sdl.audio().unwrap();
 
@@ -120,10 +121,12 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
         OutputCB {
             num_channels: num_channels.into(),
             buf_size: desired_spec.samples.unwrap() as usize,
-            thread: audio_thread,
-            cb: cb,
+            actor_id: actor.actor_id,
         }
     }).unwrap();
+
+
+
 
     // Start playback
     device.resume();
@@ -132,14 +135,28 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     AUDIO_STATE.with_borrow_mut(|s| {
         s.output_dev = Some(device);
     });
-
-    // FIXME: return the device_id (u32)
-    Value::from(0)
     */
 
 
-    todo!();
+
+
+
+
+
+
+
+    // For now just assume device id zero
+    Value::from(0)
 }
+
+
+
+
+
+//TODO:
+// audio_write_samples()
+
+
 
 
 
