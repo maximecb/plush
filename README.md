@@ -12,10 +12,11 @@ If you think that Plush is cool, you can support my work via [GitHub Sponsors](h
 
 The Plush language supports:
 - Dynamic typing
-- Classes
+- Classes and objects
 - Closures/lambdas
+- Separate `Float64` and `Int64` types
 - Dynamic arrays aka vectors/lists
-- UTF-8 strings (work in progress)
+- Immutable UTF-8 strings
 - Dictionaries with JS-like syntax (work in progress)
 - Memory safe, actor-based parallelism
 - A native byte array type
