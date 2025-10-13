@@ -1,9 +1,8 @@
 use sdl2::audio::{AudioCallback, AudioSpecDesired, AudioDevice};
 use std::sync::{Arc, Weak, Mutex};
 use std::collections::HashMap;
-use std::cell::RefCell;
 use crate::vm::{Value, VM, Actor};
-
+use crate::alloc::Alloc;
 
 
 //use crate::host::{get_sdl_context};
@@ -21,6 +20,17 @@ struct OutputCB
 
     // Actor responsible for generating audio
     actor_id: u64,
+
+
+
+    // VM reference, to send messages to the actor
+    vm: Arc<Mutex<VM>>,
+
+    // Message allocator for the actor
+    msg_alloc: Weak<Mutex<Alloc>>,
+
+
+
 }
 
 impl AudioCallback for OutputCB
@@ -41,13 +51,8 @@ impl AudioCallback for OutputCB
 
 
 
-        /*
-        // Run the audio callback
-        let ptr = self.thread.call(self.cb, &[Value::from(self.num_channels), Value::from(samples_per_chan)]);
 
-        let mem_slice: &[f32] = self.thread.get_heap_slice_mut(ptr.as_usize(), output_len);
-        out.copy_from_slice(&mem_slice);
-        */
+
 
 
 
@@ -56,17 +61,18 @@ impl AudioCallback for OutputCB
     }
 }
 
-
-
-
-/*
-#[derive(Default)]
-struct AudioState
+//#[derive(Default)]
+struct OutputState
 {
-    output_dev: Option<AudioDevice<OutputCB>>,
-    input_dev: Option<AudioDevice<InputCB>>,
+    output_dev: AudioDevice<OutputCB>,
+
+    // Samples queued for output
+    out_queue: Vec<f32>,
 }
-*/
+
+unsafe impl Send for OutputState {}
+static AUDIO_STATE: Mutex<Option<OutputState>> = Mutex::new(None);
+
 
 
 
@@ -75,19 +81,10 @@ struct AudioState
 
 pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Value
 {
-
-
-    /*
-    AUDIO_STATE.with_borrow(|s| {
-        if s.output_dev.is_some() {
-            panic!("audio output device already open");
-        }
-    });
-    */
-
-
-
-
+    let audio_state = AUDIO_STATE.lock().unwrap();
+    if audio_state.is_some() {
+        panic!("audio output device already open");
+    }
 
     let sample_rate = sample_rate.unwrap_u32();
     let num_channels = num_channels.unwrap_u32();
@@ -116,12 +113,20 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     /*
     let sdl = get_sdl_context();
     let audio_subsystem = sdl.audio().unwrap();
+    */
 
+
+
+
+
+    /*
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
         OutputCB {
             num_channels: num_channels.into(),
             buf_size: desired_spec.samples.unwrap() as usize,
             actor_id: actor.actor_id,
+            actor.vm.clone(),
+            msg_alloc,
         }
     }).unwrap();
 
@@ -153,8 +158,15 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
 
 
 
-//TODO:
-// audio_write_samples()
+pub fn audio_write_samples(actor: &mut Actor)
+{
+
+
+
+
+    todo!();
+}
+
 
 
 
