@@ -38,6 +38,16 @@ fn init_sdl()
     }
 }
 
+/*
+pub fn with_sdl_context() -> &'static sdl2::Sdl
+{
+    init_sdl();
+
+    let mut sdl_state = SDL_STATE.lock().unwrap();
+    sdl_state.sdl.as_ref().unwrap()
+}
+*/
+
 fn init_sdl_video()
 {
     init_sdl();

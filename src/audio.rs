@@ -76,17 +76,19 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     if thread.id != 0 {
         panic!("audio functions should only be called from the main thread");
     }
+    */
 
+    /*
     AUDIO_STATE.with_borrow(|s| {
         if s.output_dev.is_some() {
             panic!("audio output device already open");
         }
     });
+    */
 
-    let sample_rate = sample_rate.as_u32();
-    let num_channels = num_channels.as_u16();
-    let format = format.as_u16();
-    let cb = cb.as_u64();
+    let sample_rate = sample_rate.unwrap_u32();
+    let num_channels = num_channels.unwrap_u32();
+    let format = format.unwrap_u32();
 
     if sample_rate != 44100 {
         panic!("for now, only 44100Hz sample rate suppored");
@@ -97,9 +99,11 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
         panic!("for now, only one output channel supported");
     }
 
+    /*
     if format != AUDIO_FORMAT_I16 {
         panic!("for now, only i16, 16-bit signed audio format supported");
     }
+    */
 
     let desired_spec = AudioSpecDesired {
         freq: Some(sample_rate as i32),
@@ -107,6 +111,12 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
         samples: Some(1024) // buffer size, 1024 samples
     };
 
+
+
+
+
+
+    /*
     // Create a new VM thread in which to run the audio callback
     let audio_thread = VM::new_thread(&thread.vm);
 
