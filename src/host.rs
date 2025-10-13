@@ -135,6 +135,13 @@ pub fn get_host_const(name: &str) -> Expr
         "window_create" => &WINDOW_CREATE,
         "window_draw_frame" => &WINDOW_DRAW_FRAME,
 
+
+        //"audio_open_output" => ,
+
+
+
+
+
         "exit" => &EXIT,
 
         _ => panic!("unknown host constant \"{name}\"")
