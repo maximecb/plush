@@ -90,11 +90,10 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     let num_channels = num_channels.unwrap_u32();
 
     if sample_rate != 44100 {
-        panic!("for now, only 44100Hz sample rate suppored");
+        panic!("for now, only 44100Hz sample rate supported");
     }
 
-    //if num_channels > 2 {
-    if num_channels != 1 {
+    if num_channels > 1 {
         panic!("for now, only one output channel supported");
     }
 
@@ -154,12 +153,19 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     Value::from(0)
 }
 
-
-
-
-
-pub fn audio_write_samples(actor: &mut Actor)
+/// Write samples to an audio device
+/// The samples must be a ByteArray containing float32 values
+pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value)
 {
+    let device_id = device_id.unwrap_usize();
+
+    if device_id != 0 {
+        panic!("for now, only one audio output device is supported");
+    }
+
+
+
+
 
 
 

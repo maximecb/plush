@@ -110,6 +110,9 @@ pub fn get_host_const(name: &str) -> Expr
     static ACTOR_POLL: HostFn = HostFn { name: "actor_poll", f: Fn0_1(actor_poll) };
     static WINDOW_CREATE: HostFn = HostFn { name: "window_create", f: Fn4_1(window_create) };
     static WINDOW_DRAW_FRAME: HostFn = HostFn { name: "window_draw_frame", f: Fn2_0(window_draw_frame) };
+
+
+
     static EXIT: HostFn = HostFn { name: "exit", f: Fn1_0(exit) };
 
     let fn_ref = match name
@@ -135,16 +138,12 @@ pub fn get_host_const(name: &str) -> Expr
         "window_create" => &WINDOW_CREATE,
         "window_draw_frame" => &WINDOW_DRAW_FRAME,
 
-
         //"audio_open_output" => &AUDIO_OPEN_OUTPUT,
-        //"audio_write_samples" =>
-
-
-
+        //"audio_write_samples" => &AUDIO_WRITE_SAMPLES,
 
         "exit" => &EXIT,
 
-        _ => panic!("unknown host constant \"{name}\"")
+        _ => panic!("unknown host constant `{name}`")
     };
 
     Expr::HostFn(fn_ref)
