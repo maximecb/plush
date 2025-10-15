@@ -3,11 +3,7 @@ use std::sync::{Arc, Weak, Mutex};
 use std::collections::HashMap;
 use crate::vm::{Value, VM, Actor};
 use crate::alloc::Alloc;
-
-
-//use crate::host::{get_sdl_context};
-
-
+use crate::window::with_sdl_context;
 
 // SDL audio output callback
 struct OutputCB
@@ -21,16 +17,11 @@ struct OutputCB
     // Actor responsible for generating audio
     actor_id: u64,
 
-
-
     // VM reference, to send messages to the actor
     vm: Arc<Mutex<VM>>,
 
     // Message allocator for the actor
     msg_alloc: Weak<Mutex<Alloc>>,
-
-
-
 }
 
 impl AudioCallback for OutputCB
@@ -73,17 +64,13 @@ struct OutputState
 unsafe impl Send for OutputState {}
 static AUDIO_STATE: Mutex<Option<OutputState>> = Mutex::new(None);
 
-
-
-
-
-
-
 pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Value
 {
-    let audio_state = AUDIO_STATE.lock().unwrap();
-    if audio_state.is_some() {
-        panic!("audio output device already open");
+    {
+        let audio_state = AUDIO_STATE.lock().unwrap();
+        if audio_state.is_some() {
+            panic!("audio output device already open");
+        }
     }
 
     let sample_rate = sample_rate.unwrap_u32();
@@ -103,51 +90,27 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
         samples: Some(1024) // buffer size, 1024 samples
     };
 
+    let audio_subsystem = with_sdl_context(|sdl| sdl.audio().unwrap());
 
-
-
-
-
-
-    /*
-    let sdl = get_sdl_context();
-    let audio_subsystem = sdl.audio().unwrap();
-    */
-
-
-
-
-
-    /*
     let device = audio_subsystem.open_playback(None, &desired_spec, |spec| {
+        // The audio callback runs in a separate thread, so we need to
+        // clone the actor's VM and allocator references
         OutputCB {
-            num_channels: num_channels.into(),
-            buf_size: desired_spec.samples.unwrap() as usize,
+            num_channels: num_channels as usize,
+            buf_size: spec.samples as usize,
             actor_id: actor.actor_id,
-            actor.vm.clone(),
-            msg_alloc,
+            vm: actor.vm.clone(),
+            msg_alloc: Arc::downgrade(&actor.msg_alloc),
         }
     }).unwrap();
 
-
-
-
-    // Start playback
     device.resume();
 
-    // Keep the audio device alive
-    AUDIO_STATE.with_borrow_mut(|s| {
-        s.output_dev = Some(device);
+    let mut audio_state = AUDIO_STATE.lock().unwrap();
+    *audio_state = Some(OutputState {
+        output_dev: device,
+        out_queue: Vec::new(),
     });
-    */
-
-
-
-
-
-
-
-
 
     // For now just assume device id zero
     Value::from(0)

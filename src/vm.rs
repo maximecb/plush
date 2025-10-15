@@ -504,7 +504,7 @@ pub struct Actor
     pub alloc: Alloc,
 
     // Allocator for incoming messages
-    msg_alloc: Arc<Mutex<Alloc>>,
+    pub msg_alloc: Arc<Mutex<Alloc>>,
 
     // Message queue receiver endpoint
     queue_rx: mpsc::Receiver<Message>,
