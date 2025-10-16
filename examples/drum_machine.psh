@@ -8,13 +8,17 @@ let SAMPLE_RATE = 44100;
 let TEMPO = 120.0; // BPM
 
 // --- Sequencer Pattern ---
-// Each step is a 4-element array: [kick, snare, hi-hat, clap]
-// 1 for on, 0 for off.
+// Each row is an instrument pattern across all steps.
+// pattern[0] = kick, pattern[1] = snare, pattern[2] = hi-hat, pattern[3] = clap
 let pattern = [
-    [1, 0, 1, 0], [0, 0, 1, 0], [0, 1, 1, 1], [0, 0, 1, 0],
-    [1, 0, 1, 0], [0, 0, 1, 0], [0, 1, 1, 0], [0, 0, 1, 0],
-    [1, 0, 1, 0], [0, 0, 1, 0], [0, 1, 1, 1], [0, 0, 1, 0],
-    [1, 0, 1, 0], [0, 0, 1, 0], [0, 1, 1, 0], [0, 0, 1, 0],
+    // Kick pattern
+    [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+    // Snare pattern
+    [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+    // Hi-hat pattern
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    // Clap pattern
+    [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
 ];
 
 // --- Predefined Patterns ---
@@ -91,33 +95,34 @@ let var total_steps = 0;
 // --- Pattern Mutation ---
 fun mutate_pattern() {
     let instrument_to_change = rand_int(4); // 0: kick, 1: snare, 2: hat, 3: clap
+    let num_steps = pattern[0].len; // Assuming all instrument patterns have the same length
 
     if (instrument_to_change == 0) {
         let new_pattern_idx = rand_int(kick_patterns.len);
         let new_kick_pattern = kick_patterns[new_pattern_idx];
-        for (let var i = 0; i < pattern.len; ++i) {
-            pattern[i][0] = new_kick_pattern[i];
+        for (let var i = 0; i < num_steps; ++i) {
+            pattern[0][i] = new_kick_pattern[i];
         }
         $println("Kick pattern changed.");
     } else if (instrument_to_change == 1) {
         let new_pattern_idx = rand_int(snare_patterns.len);
         let new_snare_pattern = snare_patterns[new_pattern_idx];
-        for (let var i = 0; i < pattern.len; ++i) {
-            pattern[i][1] = new_snare_pattern[i];
+        for (let var i = 0; i < num_steps; ++i) {
+            pattern[1][i] = new_snare_pattern[i];
         }
         $println("Snare pattern changed.");
     } else if (instrument_to_change == 2) {
         let new_pattern_idx = rand_int(hat_patterns.len);
         let new_hat_pattern = hat_patterns[new_pattern_idx];
-        for (let var i = 0; i < pattern.len; ++i) {
-            pattern[i][2] = new_hat_pattern[i];
+        for (let var i = 0; i < num_steps; ++i) {
+            pattern[2][i] = new_hat_pattern[i];
         }
         $println("Hi-hat pattern changed.");
     } else { // instrument_to_change == 3
         let new_pattern_idx = rand_int(clap_patterns.len);
         let new_clap_pattern = clap_patterns[new_pattern_idx];
-        for (let var i = 0; i < pattern.len; ++i) {
-            pattern[i][3] = new_clap_pattern[i];
+        for (let var i = 0; i < num_steps; ++i) {
+            pattern[3][i] = new_clap_pattern[i];
         }
         $println("Clap pattern changed.");
     }
@@ -126,11 +131,11 @@ fun mutate_pattern() {
 
 // --- Main Synthesis and Sequencing Logic ---
 
-fun trigger_step(step_info, current_total_steps) {
-    let kick_on = step_info[0];
-    let snare_on = step_info[1];
-    let hat_on = step_info[2];
-    let clap_on = step_info[3];
+fun trigger_step(current_total_steps) {
+    let kick_on = pattern[0][step_idx];
+    let snare_on = pattern[1][step_idx];
+    let hat_on = pattern[2][step_idx];
+    let clap_on = pattern[3][step_idx];
 
     let current_bar = (current_total_steps / 16).floor();
 
@@ -183,7 +188,7 @@ fun generate_samples(num_samples) {
                 $println("Bar: " + bar_num.to_s());
             }
 
-            trigger_step(pattern[step_idx], total_steps);
+            trigger_step(total_steps);
 
             // Mutate pattern every 4 bars, starting after all instruments are in
             if (total_steps >= 192 && total_steps % 64 == 0) {
