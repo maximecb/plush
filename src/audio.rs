@@ -74,19 +74,11 @@ impl AudioCallback for OutputCB
             audio_state_lock = cvar.wait(audio_state_lock).unwrap();
         }
 
+        // Copy samples to the output
         let state = audio_state_lock.as_mut().unwrap();
         let queue = &mut state.out_queue;
-
-        // If we don't have enough samples to fill the buffer, fill with silence
-        if queue.len() < output_len {
-            out.fill(0.0);
-            return;
-        }
-
-        // Copy samples to the output
+        assert!(queue.len() >= output_len);
         out.copy_from_slice(&queue[..output_len]);
-
-        // Drain the copied samples
         queue.drain(0..output_len);
     }
 }
