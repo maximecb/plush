@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::alloc::Alloc;
 use crate::vm::{Value, VM, Actor};
 use crate::ast::Expr;
+use crate::audio::{audio_open_output, audio_write_samples};
 
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
@@ -110,9 +111,8 @@ pub fn get_host_const(name: &str) -> Expr
     static ACTOR_POLL: HostFn = HostFn { name: "actor_poll", f: Fn0_1(actor_poll) };
     static WINDOW_CREATE: HostFn = HostFn { name: "window_create", f: Fn4_1(window_create) };
     static WINDOW_DRAW_FRAME: HostFn = HostFn { name: "window_draw_frame", f: Fn2_0(window_draw_frame) };
-
-
-
+    static AUDIO_OPEN_OUTPUT: HostFn = HostFn { name: "audio_open_output", f: Fn2_1(audio_open_output) };
+    static AUDIO_WRITE_SAMPLES: HostFn = HostFn { name: "audio_write_samples", f: Fn2_0(audio_write_samples) };
     static EXIT: HostFn = HostFn { name: "exit", f: Fn1_0(exit) };
 
     let fn_ref = match name
@@ -138,8 +138,8 @@ pub fn get_host_const(name: &str) -> Expr
         "window_create" => &WINDOW_CREATE,
         "window_draw_frame" => &WINDOW_DRAW_FRAME,
 
-        //"audio_open_output" => &AUDIO_OPEN_OUTPUT,
-        //"audio_write_samples" => &AUDIO_WRITE_SAMPLES,
+        "audio_open_output" => &AUDIO_OPEN_OUTPUT,
+        "audio_write_samples" => &AUDIO_WRITE_SAMPLES,
 
         "exit" => &EXIT,
 

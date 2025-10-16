@@ -187,7 +187,7 @@ pub struct Object
 
 impl Object
 {
-    fn new(class_id: ClassId, num_slots: usize) -> Self
+    pub fn new(class_id: ClassId, num_slots: usize) -> Self
     {
         Object {
             class_id,
@@ -616,10 +616,6 @@ impl Actor
     /// Send a message to another actor
     pub fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
     {
-        //
-        // TODO: logic to copy objects
-        //
-
         // Lookup the queue endpoint in our local cache
         let mut actor_tx = self.actor_map.get(&actor_id);
 
@@ -1981,6 +1977,21 @@ impl VM
         );
 
         actor.call(Value::Fun(fun_id), &args)
+    }
+
+    /// Send a message to an actor
+    pub fn send(&self, actor_id: u64, msg: Value) -> Result<(), ()> {
+        let actor_tx = self.actor_txs.get(&actor_id).ok_or(())?;
+
+        // We need to copy objects to the actor's message allocator
+        let alloc_rc = actor_tx.msg_alloc.upgrade().ok_or(())?;
+        let mut msg_alloc = alloc_rc.lock().unwrap();
+
+        let mut dst_map = HashMap::new();
+        let msg = deepcopy(msg, &mut msg_alloc, &mut dst_map);
+        remap(dst_map);
+
+        actor_tx.sender.send(Message { sender: 0, msg }).map_err(|_| ())
     }
 }
 

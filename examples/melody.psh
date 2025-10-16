@@ -1,0 +1,71 @@
+fun main() {
+    let SAMPLE_RATE = 44100;
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+
+    let note_names = ['C4', 'C#4', 'D4', 'D#4', 'E4', 'F4', 'F#4', 'G4', 'G#4', 'A4', 'A#4', 'B4', 'C5', 'C#5', 'D5', 'D#5', 'E5'];
+    let note_freqs = [261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392.00, 415.30, 440.00, 466.16, 493.88, 523.25, 554.37, 587.33, 622.25, 659.25];
+
+    fun get_freq(note_name) {
+        for (let var i = 0; i < note_names.len; ++i) {
+            if (note_names[i] == note_name) {
+                return note_freqs[i];
+            }
+        }
+        return 0;
+    }
+
+    // Rondo Alla Turca by Mozart
+    let melody = [
+        'E5', 'D#5', 'E5', 'D#5', 'E5', 'B4', 'D5', 'C#5', 'D5', 'A4', 'C5', 'B4', 'A4', 'B4', 'G#4', 'B4', 'E4',
+        'E5', 'D#5', 'E5', 'D#5', 'E5', 'B4', 'D5', 'C#5', 'D5', 'A4', 'C5', 'B4', 'A4', 'B4', 'G#4', 'B4', 'A4',
+        'B4', 'C5', 'D5', 'E5', 'D5', 'C5', 'B4', 'A4', 'B4', 'C5', 'B4', 'A4', 'G#4', 'A4', 'E4'
+    ];
+
+    let note_duration = 0.2; // seconds
+    let samples_per_note = (SAMPLE_RATE * note_duration).floor();
+    let var current_note_idx = 0;
+    let var samples_in_note = 0;
+    let var phase = 0.0;
+
+    fun gen_samples(num_samples, freq) {
+        let samples = ByteArray.with_size(num_samples * 4);
+        let two_pi = 2.0 * 3.1415926535;
+        let angular_freq = freq * two_pi / SAMPLE_RATE;
+
+        for (let var i = 0; i < num_samples; ++i) {
+            let sample_val = phase.sin() * 0.5;
+            samples.write_f32(i, sample_val);
+            phase = phase + angular_freq;
+        }
+        return samples;
+    }
+
+    loop {
+        let msg = $actor_recv();
+
+        if (msg instanceof AudioNeeded) {
+            if (current_note_idx >= melody.len) {
+                // End of melody
+                break;
+            }
+
+            let remaining_in_note = samples_per_note - samples_in_note;
+            let num_to_write = msg.num_samples.min(remaining_in_note);
+
+            let note_name = melody[current_note_idx];
+            let freq = get_freq(note_name);
+
+            let samples = gen_samples(num_to_write, freq);
+            $audio_write_samples(dev, samples);
+
+            samples_in_note = samples_in_note + num_to_write;
+
+            if (samples_in_note >= samples_per_note) {
+                current_note_idx = current_note_idx + 1;
+                samples_in_note = 0;
+            }
+        }
+    }
+}
+
+main();
