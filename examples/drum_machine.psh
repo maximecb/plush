@@ -7,6 +7,22 @@
 let SAMPLE_RATE = 44100;
 let TEMPO = 120.0; // BPM
 
+// --- Visualization State ---
+let VIS_WIDTH = 800;
+let VIS_HEIGHT = 400;
+
+let KICK_COLOR = 0xFF0000FF; // Blue
+let SNARE_COLOR = 0xFF00FF00; // Green
+let HAT_COLOR = 0xFFFFFF00; // Yellow
+let CLAP_COLOR = 0xFFFF00FF; // Magenta
+
+let var kick_vis_amp = 0.0;
+let var snare_vis_amp = 0.0;
+let var hat_vis_amp = 0.0;
+let var clap_vis_amp = 0.0;
+
+let VIS_DECAY_RATE = 0.05; // How fast visual elements fade (per frame)
+
 // --- Sequencer Pattern ---
 // Each row is an instrument pattern across all steps.
 // pattern[0] = kick, pattern[1] = snare, pattern[2] = hi-hat, pattern[3] = clap
@@ -71,6 +87,25 @@ fun rand_int(max_val) {
 
 // --- Synthesis State ---
 let PI = 3.1415926535;
+
+// Helper function to draw a rectangle using fill_u32 for efficiency
+fun draw_rect(buffer, x, y, width, height, color) {
+    let x_start = (0).max(x);
+    let y_start = (0).max(y);
+    let x_end = VIS_WIDTH.min(x + width);
+    let y_end = VIS_HEIGHT.min(y + height);
+
+    let clipped_width = x_end - x_start;
+
+    if (clipped_width <= 0) {
+        return;
+    }
+
+    for (let var j = y_start; j < y_end; ++j) {
+        let start_index = j * VIS_WIDTH + x_start;
+        buffer.fill_u32(start_index, clipped_width, color);
+    }
+}
 
 // Kick state
 let var kick_phase = 0.0;
@@ -188,6 +223,7 @@ fun trigger_step(current_total_steps) {
     if (kick_on == 1) {
         kick_amp_env = 1.0;
         kick_pitch_env = 1.0;
+        kick_vis_amp = 1.0;
     }
 
     if (current_bar >= 4) { // Start snare on bar 5
@@ -195,12 +231,14 @@ fun trigger_step(current_total_steps) {
             snare_amp_env = 1.0;
             snare_tone_amp_env = 1.0;
             snare_tone_freq_env = 1.0;
+            snare_vis_amp = 1.0;
         }
     }
 
     if (current_bar >= 8) { // Start hi-hat on bar 9
         if (hat_on == 1) {
             hat_amp_env = 1.0;
+            hat_vis_amp = 1.0;
         }
     }
 
@@ -209,6 +247,7 @@ fun trigger_step(current_total_steps) {
             for (let var i = 0; i < CLAP_COUNT; ++i) {
                 clap_amp_envs[i] = 1.0;
             }
+            clap_vis_amp = 1.0;
         }
     }
 }
@@ -336,20 +375,75 @@ fun generate_samples(num_samples) {
     return samples;
 }
 
+// Helper function to convert RGB values to a 32-bit color
+fun rgb32(r, g, b) {
+    return 0xFF_00_00_00 | (r << 16) | (g << 8) | b;
+}
+
+fun draw_visualization(frame_buffer) {
+    // Clear the background
+    draw_rect(frame_buffer, 0, 0, VIS_WIDTH, VIS_HEIGHT, rgb32(20, 20, 20)); // Dark gray background
+
+    let element_width = VIS_WIDTH _/ 4;
+    let element_height = VIS_HEIGHT;
+
+    let base_size_ratio = 0.8;
+    let max_extra_size_ratio = 0.2;
+
+    // Draw Kick visual
+    let kick_size_float = element_width.to_f() * base_size_ratio + element_width.to_f() * max_extra_size_ratio * kick_vis_amp;
+    let kick_size = kick_size_float.floor();
+    let kick_x = (element_width * 0) + (element_width _/ 2 - kick_size _/ 2);
+    let kick_y = element_height _/ 2 - kick_size _/ 2;
+    draw_rect(frame_buffer, kick_x, kick_y, kick_size, kick_size, KICK_COLOR);
+
+    // Draw Snare visual
+    let snare_size_float = element_width.to_f() * base_size_ratio + element_width.to_f() * max_extra_size_ratio * snare_vis_amp;
+    let snare_size = snare_size_float.floor();
+    let snare_x = (element_width * 1) + (element_width _/ 2 - snare_size _/ 2);
+    let snare_y = element_height _/ 2 - snare_size _/ 2;
+    draw_rect(frame_buffer, snare_x, snare_y, snare_size, snare_size, SNARE_COLOR);
+
+    // Draw Hi-hat visual
+    let hat_size_float = element_width.to_f() * base_size_ratio + element_width.to_f() * max_extra_size_ratio * hat_vis_amp;
+    let hat_size = hat_size_float.floor();
+    let hat_x = (element_width * 2) + (element_width _/ 2 - hat_size _/ 2);
+    let hat_y = element_height _/ 2 - hat_size _/ 2;
+    draw_rect(frame_buffer, hat_x, hat_y, hat_size, hat_size, HAT_COLOR);
+
+    // Draw Clap visual
+    let clap_size_float = element_width.to_f() * base_size_ratio + element_width.to_f() * max_extra_size_ratio * clap_vis_amp;
+    let clap_size = clap_size_float.floor();
+    let clap_x = (element_width * 3) + (element_width _/ 2 - clap_size _/ 2);
+    let clap_y = element_height _/ 2 - clap_size _/ 2;
+    draw_rect(frame_buffer, clap_x, clap_y, clap_size, clap_size, CLAP_COLOR);
+
+    // Decay visual amplitudes
+    kick_vis_amp = (kick_vis_amp - VIS_DECAY_RATE).max(0.0);
+    snare_vis_amp = (snare_vis_amp - VIS_DECAY_RATE).max(0.0);
+    hat_vis_amp = (hat_vis_amp - VIS_DECAY_RATE).max(0.0);
+    clap_vis_amp = (clap_vis_amp - VIS_DECAY_RATE).max(0.0);
+}
+
 // --- Main Program ---
 
 fun main() {
     rand_init($time_current_ms());
 
-    // Open the audio device
+    // Create a window to allow graceful exit
+    let window = $window_create(VIS_WIDTH, VIS_HEIGHT, "808 Drum Machine", 0);
+    let frame_buffer = ByteArray.with_size(VIS_WIDTH * VIS_HEIGHT * 4); // Create frame buffer
+
+    // Initial draw to ensure window is ready
+    draw_visualization(frame_buffer);
+    $window_draw_frame(window, frame_buffer);
+
+    // Open the audio device AFTER the first frame is drawn
     let audio_dev = $audio_open_output(SAMPLE_RATE, 1); // 1 channel (mono)
     if (audio_dev == nil) {
         $println("Failed to open audio device.");
         return;
     }
-
-    // Create a window to allow graceful exit
-    let window = $window_create(400, 200, "808 Drum Machine", 0);
 
     $println("Playing drum pattern... Press ESC or close the window to exit.");
 
@@ -364,9 +458,14 @@ fun main() {
         }
         else if (msg instanceof UIEvent) {
             if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+                $println('User closed window');
                 break;
             }
         }
+
+        // Draw visualization every frame
+        draw_visualization(frame_buffer);
+        $window_draw_frame(window, frame_buffer);
     }
 }
 
