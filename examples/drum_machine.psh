@@ -1,0 +1,241 @@
+
+// 808-style Drum Machine
+//
+// This example demonstrates procedural audio synthesis to create a simple
+// drum pattern with a kick, snare, and hi-hat.
+
+let SAMPLE_RATE = 44100;
+let TEMPO = 120.0; // BPM
+
+// --- Sequencer Pattern ---
+// Each step is a 3-element array: [kick, snare, hi-hat]
+// 1 for on, 0 for off.
+let pattern = [
+    [1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 0, 1],
+    [1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 0, 1],
+    [1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 0, 1],
+    [1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 0, 1],
+];
+
+// --- Predefined Patterns ---
+let kick_patterns = [
+    [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], // Four on the floor
+    [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], // 8th notes
+    [1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0], // Syncopated
+];
+
+let snare_patterns = [
+    [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0], // On 2 and 4
+    [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0], // Just on 2 and 4
+    [0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1], // With ghost notes
+];
+
+let hat_patterns = [
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], // 16th notes
+    [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], // 8th notes
+    [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0], // Offbeats
+];
+
+
+// --- Pseudo-Random Number Generator (LCG) ---
+let var lcg_seed = 1;
+fun rand_init(seed) {
+    lcg_seed = seed & 0x7FFFFFFF;
+}
+fun rand_float() {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (lcg_seed.to_f() / 0x7FFFFFFF.to_f()) * 2.0 - 1.0; // -1.0 to 1.0
+}
+
+fun rand_int(max_val) {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lcg_seed % max_val;
+}
+
+
+// --- Synthesis State ---
+let PI = 3.1415926535;
+
+// Kick state
+let var kick_phase = 0.0;
+let var kick_amp_env = 0.0;
+let var kick_pitch_env = 0.0;
+let KICK_START_FREQ = 200.0;
+let KICK_END_FREQ = 50.0;
+let KICK_DECAY = 0.2; // seconds
+
+// Snare state
+let var snare_amp_env = 0.0;
+let var snare_noise = 0.0;
+let SNARE_DECAY = 0.15; // seconds
+
+// Hi-hat state
+let var hat_amp_env = 0.0;
+let var hat_noise = 0.0;
+let HAT_DECAY = 0.05; // seconds
+
+
+// --- Sequencer State ---
+let var step_idx = 0;
+let samples_per_step = ((60.0 / TEMPO) / 4.0 * SAMPLE_RATE).floor(); // 16th notes
+let var sample_in_step = 0;
+let var total_steps = 0;
+
+// --- Pattern Mutation ---
+fun mutate_pattern() {
+    let instrument_to_change = rand_int(3); // 0: kick, 1: snare, 2: hat
+
+    if (instrument_to_change == 0) {
+        let new_pattern_idx = rand_int(kick_patterns.len);
+        let new_kick_pattern = kick_patterns[new_pattern_idx];
+        for (let var i = 0; i < pattern.len; ++i) {
+            pattern[i][0] = new_kick_pattern[i];
+        }
+        $println("Kick pattern changed.");
+    } else if (instrument_to_change == 1) {
+        let new_pattern_idx = rand_int(snare_patterns.len);
+        let new_snare_pattern = snare_patterns[new_pattern_idx];
+        for (let var i = 0; i < pattern.len; ++i) {
+            pattern[i][1] = new_snare_pattern[i];
+        }
+        $println("Snare pattern changed.");
+    } else { // instrument_to_change == 2
+        let new_pattern_idx = rand_int(hat_patterns.len);
+        let new_hat_pattern = hat_patterns[new_pattern_idx];
+        for (let var i = 0; i < pattern.len; ++i) {
+            pattern[i][2] = new_hat_pattern[i];
+        }
+        $println("Hi-hat pattern changed.");
+    }
+}
+
+
+// --- Main Synthesis and Sequencing Logic ---
+
+fun trigger_step(step_info, current_total_steps) {
+    let kick_on = step_info[0];
+    let snare_on = step_info[1];
+    let hat_on = step_info[2];
+
+    let current_bar = (current_total_steps / 16).floor();
+
+    if (kick_on == 1) {
+        kick_amp_env = 1.0;
+        kick_pitch_env = 1.0;
+    }
+
+    // Introduce snare and hi-hat after the first 4 bars
+    if (current_bar >= 4) {
+        if (snare_on == 1) {
+            snare_amp_env = 1.0;
+        }
+        if (hat_on == 1) {
+            hat_amp_env = 1.0;
+        }
+    }
+}
+
+fun generate_samples(num_samples) {
+    let samples = ByteArray.with_size(num_samples * 4); // 4 bytes per float32
+
+    for (let var i = 0; i < num_samples; ++i) {
+        // --- Sequencer ---
+        if (sample_in_step == 0) {
+            // Print bar number
+            if (total_steps % 16 == 0) {
+                let bar_num = (total_steps / 16).floor() + 1;
+                $println("Bar: " + bar_num.to_s());
+            }
+
+            trigger_step(pattern[step_idx], total_steps);
+
+            // Mutate pattern every 4 bars (64 steps), starting after the intro
+            if (total_steps >= 64 && total_steps % 64 == 0) {
+                mutate_pattern();
+            }
+        }
+
+        // --- Synthesis ---
+        let var kick_sample = 0.0;
+        if (kick_amp_env > 0) {
+            let freq = KICK_END_FREQ + (kick_pitch_env * (KICK_START_FREQ - KICK_END_FREQ));
+            kick_phase = kick_phase + freq / SAMPLE_RATE;
+            if (kick_phase >= 1.0) {
+                kick_phase = kick_phase - 1.0;
+            }
+            kick_sample = (kick_phase * 2.0 * PI).sin() * kick_amp_env;
+
+            kick_amp_env = kick_amp_env - (1.0 / (KICK_DECAY * SAMPLE_RATE));
+            kick_pitch_env = kick_pitch_env - (1.0 / (KICK_DECAY * 0.5 * SAMPLE_RATE));
+            if (kick_amp_env < 0) { kick_amp_env = 0; }
+            if (kick_pitch_env < 0) { kick_pitch_env = 0; }
+        }
+
+        let var snare_sample = 0.0;
+        if (snare_amp_env > 0) {
+            snare_noise = rand_float();
+            snare_sample = snare_noise * snare_amp_env;
+            snare_amp_env = snare_amp_env - (1.0 / (SNARE_DECAY * SAMPLE_RATE));
+            if (snare_amp_env < 0) { snare_amp_env = 0; }
+        }
+
+        let var hat_sample = 0.0;
+        if (hat_amp_env > 0) {
+            hat_noise = rand_float();
+            hat_sample = hat_noise * hat_amp_env;
+            hat_amp_env = hat_amp_env - (1.0 / (HAT_DECAY * SAMPLE_RATE));
+            if (hat_amp_env < 0) { hat_amp_env = 0; }
+        }
+
+        // --- Mixdown ---
+        let final_sample = (kick_sample * 0.8 + snare_sample * 0.4 + hat_sample * 0.2);
+        samples.write_f32(i, final_sample);
+
+
+        // --- Advance Sequencer ---
+        sample_in_step = sample_in_step + 1;
+        if (sample_in_step >= samples_per_step) {
+            sample_in_step = 0;
+            step_idx = (step_idx + 1) % pattern.len;
+            total_steps = total_steps + 1;
+        }
+    }
+
+    return samples;
+}
+
+// --- Main Program ---
+
+fun main() {
+    rand_init($time_current_ms());
+
+    // Open the audio device
+    let audio_dev = $audio_open_output(SAMPLE_RATE, 1); // 1 channel (mono)
+    if (audio_dev == nil) {
+        $println("Failed to open audio device.");
+        return;
+    }
+
+    // Create a window to allow graceful exit
+    let window = $window_create(400, 200, "808 Drum Machine", 0);
+
+    $println("Playing drum pattern... Press ESC or close the window to exit.");
+
+    // Main event loop
+    loop {
+        let msg = $actor_recv();
+
+        if (msg instanceof AudioNeeded) {
+            // The audio driver needs more samples
+            let samples = generate_samples(msg.num_samples);
+            $audio_write_samples(audio_dev, samples);
+        }
+        else if (msg instanceof UIEvent) {
+            if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+                break;
+            }
+        }
+    }
+}
+
+main();
