@@ -148,67 +148,37 @@ let var sample_in_step = 0;
 let var total_steps = 0;
 
 // Variables to track the last selected pattern index for each instrument
-let var last_kick_pattern_idx = -1;
-let var last_snare_pattern_idx = -1;
-let var last_hat_pattern_idx = -1;
-let var last_clap_pattern_idx = -1;
+let var last_pattern_indices = [-1, -1, -1, -1];
+let all_instrument_patterns = [kick_patterns, snare_patterns, hat_patterns, clap_patterns];
+let instrument_names = ["Kick", "Snare", "Hi-hat", "Clap"];
 
 let var clap_sample_counter = 0;
 
 // --- Pattern Mutation ---
 fun mutate_pattern() {
-    let instrument_to_change = rand_int(4); // 0: kick, 1: snare, 2: hat, 3: clap
-    let num_steps = pattern[0].len; // Assuming all instrument patterns have the same length
+    // 0: kick, 1: snare, 2: hat, 3: clap
+    let instrument_to_change = rand_int(pattern.len);
+    let instrument_name = instrument_names[instrument_to_change];
 
-    if (instrument_to_change == 0) {
-        let var new_pattern_idx = rand_int(kick_patterns.len);
-        // Ensure the new pattern is different from the last one
-        while (new_pattern_idx == last_kick_pattern_idx && kick_patterns.len > 1) {
-            new_pattern_idx = rand_int(kick_patterns.len);
-        }
-        let new_kick_pattern = kick_patterns[new_pattern_idx];
-        for (let var i = 0; i < num_steps; ++i) {
-            pattern[0][i] = new_kick_pattern[i];
-        }
-        last_kick_pattern_idx = new_pattern_idx; // Update last selected index
-        $println("Kick pattern changed.");
-    } else if (instrument_to_change == 1) {
-        let var new_pattern_idx = rand_int(snare_patterns.len);
-        // Ensure the new pattern is different from the last one
-        while (new_pattern_idx == last_snare_pattern_idx && snare_patterns.len > 1) {
-            new_pattern_idx = rand_int(snare_patterns.len);
-        }
-        let new_snare_pattern = snare_patterns[new_pattern_idx];
-        for (let var i = 0; i < num_steps; ++i) {
-            pattern[1][i] = new_snare_pattern[i];
-        }
-        last_snare_pattern_idx = new_pattern_idx; // Update last selected index
-        $println("Snare pattern changed.");
-    } else if (instrument_to_change == 2) {
-        let var new_pattern_idx = rand_int(hat_patterns.len);
-        // Ensure the new pattern is different from the last one
-        while (new_pattern_idx == last_hat_pattern_idx && hat_patterns.len > 1) {
-            new_pattern_idx = rand_int(hat_patterns.len);
-        }
-        let new_hat_pattern = hat_patterns[new_pattern_idx];
-        for (let var i = 0; i < num_steps; ++i) {
-            pattern[2][i] = new_hat_pattern[i];
-        }
-        last_hat_pattern_idx = new_pattern_idx; // Update last selected index
-        $println("Hi-hat pattern changed.");
-    } else { // instrument_to_change == 3
-        let var new_pattern_idx = rand_int(clap_patterns.len);
-        // Ensure the new pattern is different from the last one
-        while (new_pattern_idx == last_clap_pattern_idx && clap_patterns.len > 1) {
-            new_pattern_idx = rand_int(clap_patterns.len);
-        }
-        let new_clap_pattern = clap_patterns[new_pattern_idx];
-        for (let var i = 0; i < num_steps; ++i) {
-            pattern[3][i] = new_clap_pattern[i];
-        }
-        last_clap_pattern_idx = new_pattern_idx; // Update last selected index
-        $println("Clap pattern changed.");
+    let available_patterns = all_instrument_patterns[instrument_to_change];
+    let var current_last_idx = last_pattern_indices[instrument_to_change];
+
+    // Ensure the new pattern is different from the last one
+    let var new_pattern_idx = rand_int(available_patterns.len);
+    while (new_pattern_idx == current_last_idx && available_patterns.len > 1) {
+        new_pattern_idx = rand_int(available_patterns.len);
     }
+
+    let new_instrument_pattern = available_patterns[new_pattern_idx];
+    let num_steps = pattern[0].len;
+    for (let var i = 0; i < num_steps; ++i) {
+        pattern[instrument_to_change][i] = new_instrument_pattern[i];
+    }
+
+    last_pattern_indices[instrument_to_change] = new_pattern_idx;
+    $println(instrument_name + " pattern changed.");
+
+    assert(pattern[1] != pattern[3]);
 }
 
 // --- Main Synthesis and Sequencing Logic ---
