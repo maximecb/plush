@@ -1645,7 +1645,7 @@ impl Actor
                     match v {
                         Value::True => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
                         Value::False => {}
-                        _ => panic!()
+                        _ => panic!("if_true instruction only accepts boolean values")
                     }
                 }
 
@@ -1656,7 +1656,7 @@ impl Actor
                     match v {
                         Value::False => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
                         Value::True => {}
-                        _ => panic!("{:?}", v)
+                        _ => panic!("if_false instruction only accepts boolean values")
                     }
                 }
 

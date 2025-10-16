@@ -142,7 +142,6 @@ let var clap_noises = Array.with_size(CLAP_COUNT, 0.0);
 let CLAP_DECAY = 0.08; // seconds
 
 // --- Sequencer State ---
-let var step_idx = 0;
 let samples_per_step = ((60.0 / TEMPO) / 4.0 * SAMPLE_RATE).floor(); // 16th notes
 let var sample_in_step = 0;
 let var total_steps = 0;
@@ -180,13 +179,30 @@ fun mutate_pattern() {
 
 // --- Main Synthesis and Sequencing Logic ---
 
+fun print_pattern(pattern)
+{
+    for (let var row = 0; row < pattern.len; ++row)
+    {
+        let row = pattern[row];
+        for (let var step = 0; step < row.len; ++ step)
+        {
+            if (row[step] != 0)
+                $print('X,');
+            else
+                $print(' ,');
+        }
+        $println('');
+    }
+}
+
 fun trigger_step(current_total_steps) {
+    let current_bar = (current_total_steps / 16).floor();
+    let step_idx = current_total_steps % 16;
+
     let kick_on = pattern[0][step_idx];
     let snare_on = pattern[1][step_idx];
     let hat_on = pattern[2][step_idx];
     let clap_on = pattern[3][step_idx];
-
-    let current_bar = (current_total_steps / 16).floor();
 
     if (kick_on == 1) {
         kick_amp_env = 1.0;
@@ -248,6 +264,11 @@ fun generate_samples(num_samples) {
             if (total_steps % 16 == 0) {
                 let bar_num = (total_steps / 16).floor() + 1;
                 $println("Bar: " + bar_num.to_s());
+            }
+
+            if (total_steps % 64 == 0)
+            {
+                print_pattern(pattern);
             }
 
             trigger_step(total_steps);
@@ -335,7 +356,6 @@ fun generate_samples(num_samples) {
         sample_in_step = sample_in_step + 1;
         if (sample_in_step >= samples_per_step) {
             sample_in_step = 0;
-            step_idx = (step_idx + 1) % pattern.len;
             total_steps = total_steps + 1;
         }
     }
