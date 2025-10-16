@@ -21,6 +21,7 @@ The Plush language supports:
 - Memory safe, actor-based parallelism
 - A native byte array type
 - A simple frame buffer API for graphics and animations
+- A simple audio output API
 - An extensible set of host functions defined in `src/host.rs`
 
 Caveats and limitations:
