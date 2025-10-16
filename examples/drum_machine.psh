@@ -54,10 +54,11 @@ let clap_patterns = [
 ];
 
 // --- Pseudo-Random Number Generator (LCG) ---
-let var lcg_seed = 1;
+let var lcg_seed = $time_current_ms();
 fun rand_init(seed) {
     lcg_seed = seed & 0x7FFFFFFF;
 }
+
 fun rand_float() {
     lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
     return (lcg_seed.to_f() / 0x7FFFFFFF.to_f()) * 2.0 - 1.0; // -1.0 to 1.0
@@ -98,11 +99,11 @@ let var hat_noise = 0.0;
 let HAT_DECAY = 0.05; // seconds
 
 // Clap state
-let CLAP_COUNT = 3; // Number of individual claps
-let CLAP_DELAY_SAMPLES = (0.01 * SAMPLE_RATE).floor(); // Delay between claps in samples
+let CLAP_COUNT = 4; // Number of individual claps
+let CLAP_DELAY_SAMPLES = (0.008 * SAMPLE_RATE).floor(); // Delay between claps in samples
 let var clap_amp_envs = Array.with_size(CLAP_COUNT, 0.0);
 let var clap_noises = Array.with_size(CLAP_COUNT, 0.0);
-let CLAP_DECAY = 0.1; // seconds
+let CLAP_DECAY = 0.08; // seconds
 
 // --- Sequencer State ---
 let var step_idx = 0;
@@ -173,7 +174,6 @@ fun mutate_pattern() {
         $println("Clap pattern changed.");
     }
 }
-
 
 // --- Main Synthesis and Sequencing Logic ---
 
