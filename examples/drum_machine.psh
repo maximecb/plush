@@ -84,14 +84,24 @@ let var snare_amp_env = 0.0;
 let var snare_noise = 0.0;
 let SNARE_DECAY = 0.15; // seconds
 
+// Snare tone component
+let var snare_tone_phase = 0.0;
+let var snare_tone_amp_env = 0.0;
+let var snare_tone_freq_env = 0.0;
+let SNARE_TONE_START_FREQ = 200.0;
+let SNARE_TONE_END_FREQ = 100.0;
+let SNARE_TONE_DECAY = 0.12; // seconds
+
 // Hi-hat state
 let var hat_amp_env = 0.0;
 let var hat_noise = 0.0;
 let HAT_DECAY = 0.05; // seconds
 
 // Clap state
-let var clap_amp_env = 0.0;
-let var clap_noise = 0.0;
+let CLAP_COUNT = 3; // Number of individual claps
+let CLAP_DELAY_SAMPLES = (0.01 * SAMPLE_RATE).floor(); // Delay between claps in samples
+let var clap_amp_envs = Array.with_size(CLAP_COUNT, 0.0);
+let var clap_noises = Array.with_size(CLAP_COUNT, 0.0);
 let CLAP_DECAY = 0.1; // seconds
 
 // --- Sequencer State ---
@@ -105,6 +115,8 @@ let var last_kick_pattern_idx = -1;
 let var last_snare_pattern_idx = -1;
 let var last_hat_pattern_idx = -1;
 let var last_clap_pattern_idx = -1;
+
+let var clap_sample_counter = 0;
 
 // --- Pattern Mutation ---
 fun mutate_pattern() {
@@ -181,6 +193,8 @@ fun trigger_step(current_total_steps) {
     if (current_bar >= 4) { // Start snare on bar 5
         if (snare_on == 1) {
             snare_amp_env = 1.0;
+            snare_tone_amp_env = 1.0;
+            snare_tone_freq_env = 1.0;
         }
     }
 
@@ -192,7 +206,9 @@ fun trigger_step(current_total_steps) {
 
     if (current_bar >= 12) { // Start clap on bar 13
         if (clap_on == 1) {
-            clap_amp_env = 1.0;
+            for (let var i = 0; i < CLAP_COUNT; ++i) {
+                clap_amp_envs[i] = 1.0;
+            }
         }
     }
 }
@@ -216,6 +232,11 @@ fun generate_samples(num_samples) {
                 $println("Clap starts");
             }
 
+            // Mutate pattern every 4 bars, starting after all instruments are in
+            if (total_steps >= 4*16*4 && total_steps % 64 == 0) {
+                mutate_pattern();
+            }
+
             // Print bar number
             if (total_steps % 16 == 0) {
                 let bar_num = (total_steps / 16).floor() + 1;
@@ -223,11 +244,6 @@ fun generate_samples(num_samples) {
             }
 
             trigger_step(total_steps);
-
-            // Mutate pattern every 4 bars, starting after all instruments are in
-            if (total_steps >= 192 && total_steps % 64 == 0) {
-                mutate_pattern();
-            }
         }
 
         // --- Synthesis ---
@@ -247,11 +263,30 @@ fun generate_samples(num_samples) {
         }
 
         let var snare_sample = 0.0;
-        if (snare_amp_env > 0) {
+        if (snare_amp_env > 0 || snare_tone_amp_env > 0) {
+            // Noise component
             snare_noise = rand_float();
-            snare_sample = snare_noise * snare_amp_env;
+            let noise_component = snare_noise * snare_amp_env;
+
+            // Tone component
+            let tone_freq = SNARE_TONE_END_FREQ + (snare_tone_freq_env * (SNARE_TONE_START_FREQ - SNARE_TONE_END_FREQ));
+            snare_tone_phase = snare_tone_phase + tone_freq / SAMPLE_RATE;
+            if (snare_tone_phase >= 1.0) {
+                snare_tone_phase = snare_tone_phase - 1.0;
+            }
+            let tone_component = (snare_tone_phase * 2.0 * PI).sin() * snare_tone_amp_env;
+
+            // Mix noise and tone
+            snare_sample = (noise_component * 0.7) + (tone_component * 0.3); // Adjust mix as needed
+
+            // Decay envelopes
             snare_amp_env = snare_amp_env - (1.0 / (SNARE_DECAY * SAMPLE_RATE));
+            snare_tone_amp_env = snare_tone_amp_env - (1.0 / (SNARE_TONE_DECAY * SAMPLE_RATE));
+            snare_tone_freq_env = snare_tone_freq_env - (1.0 / (SNARE_TONE_DECAY * 0.5 * SAMPLE_RATE)); // Faster freq decay
+
             if (snare_amp_env < 0) { snare_amp_env = 0; }
+            if (snare_tone_amp_env < 0) { snare_tone_amp_env = 0; }
+            if (snare_tone_freq_env < 0) { snare_tone_freq_env = 0; }
         }
 
         let var hat_sample = 0.0;
@@ -263,17 +298,31 @@ fun generate_samples(num_samples) {
         }
 
         let var clap_sample = 0.0;
-        if (clap_amp_env > 0) {
-            clap_noise = rand_float();
-            clap_sample = clap_noise * clap_amp_env;
-            clap_amp_env = clap_amp_env - (1.0 / (CLAP_DECAY * SAMPLE_RATE));
-            if (clap_amp_env < 0) { clap_amp_env = 0; }
+        let var any_clap_active = false;
+        for (let var i = 0; i < CLAP_COUNT; ++i) {
+            if (clap_amp_envs[i] > 0) {
+                any_clap_active = true;
+                let delay_offset = i * CLAP_DELAY_SAMPLES;
+                if (clap_sample_counter >= delay_offset) {
+                    // Generate new noise for each clap burst
+                    clap_noises[i] = rand_float();
+                    clap_sample = clap_sample + (clap_noises[i] * clap_amp_envs[i]);
+
+                    // Decay envelope
+                    clap_amp_envs[i] = clap_amp_envs[i] - (1.0 / (CLAP_DECAY * SAMPLE_RATE));
+                    if (clap_amp_envs[i] < 0) { clap_amp_envs[i] = 0; }
+                }
+            }
+        }
+        if (any_clap_active) {
+            clap_sample_counter = clap_sample_counter + 1;
+        } else {
+            clap_sample_counter = 0; // Reset when all claps are done
         }
 
         // --- Mixdown ---
-        let final_sample = (kick_sample * 0.8 + snare_sample * 0.4 + hat_sample * 0.2 + clap_sample * 0.5);
+        let final_sample = (kick_sample * 0.8 + snare_sample * 0.5 + hat_sample * 0.2 + clap_sample * 0.4);
         samples.write_f32(i, final_sample);
-
 
         // --- Advance Sequencer ---
         sample_in_step = sample_in_step + 1;
