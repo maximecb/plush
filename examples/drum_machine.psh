@@ -26,23 +26,31 @@ let kick_patterns = [
     [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], // Four on the floor
     [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], // 8th notes
     [1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0], // Syncopated
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], // Simple kick
+    [0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0], // Driving kick
 ];
 
 let snare_patterns = [
     [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0], // On 2 and 4
     [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0], // Just on 2 and 4
     [0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1], // With ghost notes
+    [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0], // Simple snare
+    [0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0], // Snare roll
 ];
 
 let hat_patterns = [
     [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], // 16th notes
     [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], // 8th notes
     [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0], // Offbeats
+    [1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1], // Varied 16th
+    [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1], // Off-beat 8th
 ];
 
 let clap_patterns = [
     [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0], // On 2 and 4
     [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1], // Syncopated
+    [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0], // Simple clap
+    [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0], // Off-beat clap
 ];
 
 // --- Pseudo-Random Number Generator (LCG) ---
@@ -92,38 +100,64 @@ let samples_per_step = ((60.0 / TEMPO) / 4.0 * SAMPLE_RATE).floor(); // 16th not
 let var sample_in_step = 0;
 let var total_steps = 0;
 
+// Variables to track the last selected pattern index for each instrument
+let var last_kick_pattern_idx = -1;
+let var last_snare_pattern_idx = -1;
+let var last_hat_pattern_idx = -1;
+let var last_clap_pattern_idx = -1;
+
 // --- Pattern Mutation ---
 fun mutate_pattern() {
     let instrument_to_change = rand_int(4); // 0: kick, 1: snare, 2: hat, 3: clap
     let num_steps = pattern[0].len; // Assuming all instrument patterns have the same length
 
     if (instrument_to_change == 0) {
-        let new_pattern_idx = rand_int(kick_patterns.len);
+        let var new_pattern_idx = rand_int(kick_patterns.len);
+        // Ensure the new pattern is different from the last one
+        while (new_pattern_idx == last_kick_pattern_idx && kick_patterns.len > 1) {
+            new_pattern_idx = rand_int(kick_patterns.len);
+        }
         let new_kick_pattern = kick_patterns[new_pattern_idx];
         for (let var i = 0; i < num_steps; ++i) {
             pattern[0][i] = new_kick_pattern[i];
         }
+        last_kick_pattern_idx = new_pattern_idx; // Update last selected index
         $println("Kick pattern changed.");
     } else if (instrument_to_change == 1) {
-        let new_pattern_idx = rand_int(snare_patterns.len);
+        let var new_pattern_idx = rand_int(snare_patterns.len);
+        // Ensure the new pattern is different from the last one
+        while (new_pattern_idx == last_snare_pattern_idx && snare_patterns.len > 1) {
+            new_pattern_idx = rand_int(snare_patterns.len);
+        }
         let new_snare_pattern = snare_patterns[new_pattern_idx];
         for (let var i = 0; i < num_steps; ++i) {
             pattern[1][i] = new_snare_pattern[i];
         }
+        last_snare_pattern_idx = new_pattern_idx; // Update last selected index
         $println("Snare pattern changed.");
     } else if (instrument_to_change == 2) {
-        let new_pattern_idx = rand_int(hat_patterns.len);
+        let var new_pattern_idx = rand_int(hat_patterns.len);
+        // Ensure the new pattern is different from the last one
+        while (new_pattern_idx == last_hat_pattern_idx && hat_patterns.len > 1) {
+            new_pattern_idx = rand_int(hat_patterns.len);
+        }
         let new_hat_pattern = hat_patterns[new_pattern_idx];
         for (let var i = 0; i < num_steps; ++i) {
             pattern[2][i] = new_hat_pattern[i];
         }
+        last_hat_pattern_idx = new_pattern_idx; // Update last selected index
         $println("Hi-hat pattern changed.");
     } else { // instrument_to_change == 3
-        let new_pattern_idx = rand_int(clap_patterns.len);
+        let var new_pattern_idx = rand_int(clap_patterns.len);
+        // Ensure the new pattern is different from the last one
+        while (new_pattern_idx == last_clap_pattern_idx && clap_patterns.len > 1) {
+            new_pattern_idx = rand_int(clap_patterns.len);
+        }
         let new_clap_pattern = clap_patterns[new_pattern_idx];
         for (let var i = 0; i < num_steps; ++i) {
             pattern[3][i] = new_clap_pattern[i];
         }
+        last_clap_pattern_idx = new_pattern_idx; // Update last selected index
         $println("Clap pattern changed.");
     }
 }
