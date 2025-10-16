@@ -9,7 +9,7 @@ let TEMPO = 120.0; // BPM
 
 // --- Visualization State ---
 let VIS_WIDTH = 800;
-let VIS_HEIGHT = 400;
+let VIS_HEIGHT = 300;
 
 let KICK_COLOR = 0xFF0000FF; // Blue
 let SNARE_COLOR = 0xFF00FF00; // Green
@@ -40,7 +40,7 @@ let pattern = [
     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
 
     // Bass pattern
-    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+    [1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
 ];
 
 // --- Predefined Patterns ---
@@ -76,10 +76,10 @@ let clap_patterns = [
 ];
 
 let bass_patterns = [
-    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], // Simple 4-on-the-floor
-    [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], // Same as kick
-    [1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0], // Syncopated
-    [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0], // On 2 and 4
+    [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], // Four on the floor
+    [1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1], // Varied 16th
+    [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], // 8th notes
+    [1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0], // Syncopated
 ];
 
 // --- Pseudo-Random Number Generator (LCG) ---
@@ -156,13 +156,21 @@ let CLAP_DECAY = 0.08; // seconds
 // Bass state
 let var bass_phase = 0.0;
 let var bass_amp_env = 0.0;
-let BASS_FREQ = 55.0; // Hz (low C)
-let BASS_DECAY = 0.35; // seconds
+let BASS_FREQ = 50; // Hz
+let BASS_DECAY = 0.30; // seconds
+
+// Bass LPF state
+let var bass_lpf_low = 0.0;
+let var bass_lpf_band = 0.0;
+let var bass_lpf_f = 0.0;
+let var bass_lpf_q = 0.0;
+let BASS_LPF_CUTOFF_FREQ = 4000.0; // Hz
+let BASS_LPF_RESONANCE = 0.5; // 0.0 to 1.0
 
 // --- Sequencer State ---
 let samples_per_step = ((60.0 / TEMPO) / 4.0 * SAMPLE_RATE).floor(); // 16th notes
 let var sample_in_step = 0;
-let var total_steps = 256;
+let var total_steps = 0;
 
 // Variables to track the last selected pattern index for each instrument
 let all_instrument_patterns = [kick_patterns, snare_patterns, hat_patterns, clap_patterns, bass_patterns];
@@ -385,12 +393,22 @@ fun generate_samples(num_samples) {
             }
             bass_sample = (2.0 * (bass_phase - 0.5)) * bass_amp_env;
 
+            // Calculate LPF coefficients (moved here for scope debugging)
+            let lpf_f = 2.0 * (PI * BASS_LPF_CUTOFF_FREQ / SAMPLE_RATE).sin();
+            let lpf_q = BASS_LPF_RESONANCE;
+
+            // Apply 2-pole resonant LPF
+            bass_lpf_low = bass_lpf_low + lpf_f * bass_lpf_band;
+            let high = bass_sample - bass_lpf_low - bass_lpf_band * lpf_q;
+            bass_lpf_band = bass_lpf_band + lpf_f * high;
+            bass_sample = bass_lpf_low;
+
             bass_amp_env = bass_amp_env - (1.0 / (BASS_DECAY * SAMPLE_RATE));
             if (bass_amp_env < 0) { bass_amp_env = 0; }
         }
 
         // --- Mixdown ---
-        let final_sample = (kick_sample * 0.8 + snare_sample * 0.5 + hat_sample * 0.2 + clap_sample * 0.4 + bass_sample * 0.6);
+        let final_sample = (kick_sample * 0.8 + snare_sample * 0.5 + hat_sample * 0.2 + clap_sample * 0.4 + bass_sample * 0.8);
         samples.write_f32(i, final_sample);
 
         // --- Advance Sequencer ---
