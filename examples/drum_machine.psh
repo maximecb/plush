@@ -148,7 +148,6 @@ let var sample_in_step = 0;
 let var total_steps = 0;
 
 // Variables to track the last selected pattern index for each instrument
-let var last_pattern_indices = [-1, -1, -1, -1];
 let all_instrument_patterns = [kick_patterns, snare_patterns, hat_patterns, clap_patterns];
 let instrument_names = ["Kick", "Snare", "Hi-hat", "Clap"];
 
@@ -157,26 +156,24 @@ let var clap_sample_counter = 0;
 // --- Pattern Mutation ---
 fun mutate_pattern() {
     // 0: kick, 1: snare, 2: hat, 3: clap
-    let instrument_to_change = rand_int(pattern.len);
-    let instrument_name = instrument_names[instrument_to_change];
+    let instrument_idx = rand_int(pattern.len);
+    let instrument_name = instrument_names[instrument_idx];
+    let available_patterns = all_instrument_patterns[instrument_idx];
 
-    let available_patterns = all_instrument_patterns[instrument_to_change];
-    let var current_last_idx = last_pattern_indices[instrument_to_change];
+    // Pick a new pattern
+    while (available_patterns.len > 1) {
+        let new_pattern_idx = rand_int(available_patterns.len);
+        let new_pattern = available_patterns[new_pattern_idx];
 
-    // Ensure the new pattern is different from the last one
-    let var new_pattern_idx = rand_int(available_patterns.len);
-    while (new_pattern_idx == current_last_idx && available_patterns.len > 1) {
-        new_pattern_idx = rand_int(available_patterns.len);
+        // Ensure the new pattern is different from the last one
+        if (new_pattern != pattern[instrument_idx])
+        {
+            // Change the pattern for this instrument
+            pattern[instrument_idx] = new_pattern;
+            $println(instrument_name + " pattern changed to " + new_pattern_idx.to_s())
+            break;
+        }
     }
-
-    let new_instrument_pattern = available_patterns[new_pattern_idx];
-    let num_steps = pattern[0].len;
-    for (let var i = 0; i < num_steps; ++i) {
-        pattern[instrument_to_change][i] = new_instrument_pattern[i];
-    }
-
-    last_pattern_indices[instrument_to_change] = new_pattern_idx;
-    $println(instrument_name + " pattern changed.");
 
     assert(pattern[1] != pattern[3]);
 }
