@@ -30,8 +30,9 @@ impl OutputCB
     /// Request more samples from the parent actor
     fn request_samples(&self, num_samples: usize)
     {
-        // Create a temporary allocator for the message object
-        let mut temp_alloc = Alloc::new();
+        // We'll use the message allocator of the parent thread
+        let alloc_rc = self.msg_alloc.upgrade().unwrap();
+        let mut msg_alloc = alloc_rc.lock().unwrap();
 
         // Create the AudioNeeded object
         let obj = {
@@ -39,12 +40,12 @@ impl OutputCB
             obj.slots[0] = Value::from(num_samples);
             obj.slots[1] = Value::from(self.num_channels);
             obj.slots[2] = Value::from(0); // device_id 0
-            Value::Object(temp_alloc.alloc(obj))
+            Value::Object(msg_alloc.alloc(obj))
         };
 
         // Get the VM and send the message
         let vm = self.vm.lock().unwrap();
-        let _ = vm.send(self.actor_id, obj);
+        let _ = vm.send_nocopy(self.actor_id, obj);
     }
 }
 
