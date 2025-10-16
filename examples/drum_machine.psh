@@ -11,10 +11,10 @@ let TEMPO = 120.0; // BPM
 // Each step is a 3-element array: [kick, snare, hi-hat]
 // 1 for on, 0 for off.
 let pattern = [
-    [1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 0, 1],
-    [1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 0, 1],
-    [1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 0, 1],
-    [1, 0, 1], [0, 0, 1], [0, 1, 1], [0, 0, 1],
+    [1, 0, 1, 0], [0, 0, 1, 0], [0, 1, 1, 1], [0, 0, 1, 0],
+    [1, 0, 1, 0], [0, 0, 1, 0], [0, 1, 1, 0], [0, 0, 1, 0],
+    [1, 0, 1, 0], [0, 0, 1, 0], [0, 1, 1, 1], [0, 0, 1, 0],
+    [1, 0, 1, 0], [0, 0, 1, 0], [0, 1, 1, 0], [0, 0, 1, 0],
 ];
 
 // --- Predefined Patterns ---
@@ -34,6 +34,11 @@ let hat_patterns = [
     [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], // 16th notes
     [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], // 8th notes
     [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0], // Offbeats
+];
+
+let clap_patterns = [
+    [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0], // On 2 and 4
+    [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1], // Syncopated
 ];
 
 
@@ -74,6 +79,11 @@ let var hat_amp_env = 0.0;
 let var hat_noise = 0.0;
 let HAT_DECAY = 0.05; // seconds
 
+// Clap state
+let var clap_amp_env = 0.0;
+let var clap_noise = 0.0;
+let CLAP_DECAY = 0.1; // seconds
+
 
 // --- Sequencer State ---
 let var step_idx = 0;
@@ -83,7 +93,7 @@ let var total_steps = 0;
 
 // --- Pattern Mutation ---
 fun mutate_pattern() {
-    let instrument_to_change = rand_int(3); // 0: kick, 1: snare, 2: hat
+    let instrument_to_change = rand_int(4); // 0: kick, 1: snare, 2: hat, 3: clap
 
     if (instrument_to_change == 0) {
         let new_pattern_idx = rand_int(kick_patterns.len);
@@ -99,13 +109,20 @@ fun mutate_pattern() {
             pattern[i][1] = new_snare_pattern[i];
         }
         $println("Snare pattern changed.");
-    } else { // instrument_to_change == 2
+    } else if (instrument_to_change == 2) {
         let new_pattern_idx = rand_int(hat_patterns.len);
         let new_hat_pattern = hat_patterns[new_pattern_idx];
         for (let var i = 0; i < pattern.len; ++i) {
             pattern[i][2] = new_hat_pattern[i];
         }
         $println("Hi-hat pattern changed.");
+    } else { // instrument_to_change == 3
+        let new_pattern_idx = rand_int(clap_patterns.len);
+        let new_clap_pattern = clap_patterns[new_pattern_idx];
+        for (let var i = 0; i < pattern.len; ++i) {
+            pattern[i][3] = new_clap_pattern[i];
+        }
+        $println("Clap pattern changed.");
     }
 }
 
@@ -116,6 +133,7 @@ fun trigger_step(step_info, current_total_steps) {
     let kick_on = step_info[0];
     let snare_on = step_info[1];
     let hat_on = step_info[2];
+    let clap_on = step_info[3];
 
     let current_bar = (current_total_steps / 16).floor();
 
@@ -124,13 +142,21 @@ fun trigger_step(step_info, current_total_steps) {
         kick_pitch_env = 1.0;
     }
 
-    // Introduce snare and hi-hat after the first 4 bars
-    if (current_bar >= 4) {
+    if (current_bar >= 4) { // Start snare on bar 5
         if (snare_on == 1) {
             snare_amp_env = 1.0;
         }
+    }
+
+    if (current_bar >= 8) { // Start hi-hat on bar 9
         if (hat_on == 1) {
             hat_amp_env = 1.0;
+        }
+    }
+
+    if (current_bar >= 12) { // Start clap on bar 13
+        if (clap_on == 1) {
+            clap_amp_env = 1.0;
         }
     }
 }
@@ -141,6 +167,19 @@ fun generate_samples(num_samples) {
     for (let var i = 0; i < num_samples; ++i) {
         // --- Sequencer ---
         if (sample_in_step == 0) {
+            if (total_steps == 0) {
+                $println("Kick starts");
+            }
+            if (total_steps == 64) { // Bar 5
+                $println("Snare starts");
+            }
+            if (total_steps == 128) { // Bar 9
+                $println("Hi-hat starts");
+            }
+            if (total_steps == 192) { // Bar 13
+                $println("Clap starts");
+            }
+
             // Print bar number
             if (total_steps % 16 == 0) {
                 let bar_num = (total_steps / 16).floor() + 1;
@@ -149,8 +188,8 @@ fun generate_samples(num_samples) {
 
             trigger_step(pattern[step_idx], total_steps);
 
-            // Mutate pattern every 4 bars (64 steps), starting after the intro
-            if (total_steps >= 64 && total_steps % 64 == 0) {
+            // Mutate pattern every 4 bars, starting after all instruments are in
+            if (total_steps >= 192 && total_steps % 64 == 0) {
                 mutate_pattern();
             }
         }
@@ -187,8 +226,16 @@ fun generate_samples(num_samples) {
             if (hat_amp_env < 0) { hat_amp_env = 0; }
         }
 
+        let var clap_sample = 0.0;
+        if (clap_amp_env > 0) {
+            clap_noise = rand_float();
+            clap_sample = clap_noise * clap_amp_env;
+            clap_amp_env = clap_amp_env - (1.0 / (CLAP_DECAY * SAMPLE_RATE));
+            if (clap_amp_env < 0) { clap_amp_env = 0; }
+        }
+
         // --- Mixdown ---
-        let final_sample = (kick_sample * 0.8 + snare_sample * 0.4 + hat_sample * 0.2);
+        let final_sample = (kick_sample * 0.8 + snare_sample * 0.4 + hat_sample * 0.2 + clap_sample * 0.5);
         samples.write_f32(i, final_sample);
 
 
