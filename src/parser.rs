@@ -17,7 +17,7 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         let int_val = input.parse_int(16)?;
 
         if int_val < i64::MIN.into() || int_val > i64::MAX.into() {
-            return input.parse_error("integer literal outside of int64 range")
+            return input.parse_error("hex integer literal outside of int64 range")
         }
 
         return Ok(ExprBox::new(
@@ -31,7 +31,7 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         let int_val = input.parse_int(2)?;
 
         if int_val < i64::MIN.into() || int_val > i64::MAX.into() {
-            return input.parse_error("integer literal outside of int64 range")
+            return input.parse_error("binary integer literal outside of int64 range")
         }
 
         return Ok(ExprBox::new(
@@ -375,7 +375,7 @@ fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseE
         let expr = match sub_expr.expr.as_ref() {
             Expr::Int64(int_val) => sub_expr,
             Expr::Float64(f_val) => sub_expr,
-            _ => return input.parse_error("plus operator applied to non-constant value")
+            _ => return input.parse_error("unary plus operator applied to non-constant value")
         };
 
         return Ok(expr)
@@ -522,7 +522,7 @@ fn parse_bytearray(
                     'r'  => '\r',
                     'n'  => '\n',
                     '0'  => '\0',
-                    _ => return input.parse_error("unknown escape sequence")
+                    _ => return input.parse_error("unknown ASCII escape sequence")
                 };
 
                 bytes.push(ch.try_into().unwrap());
@@ -1247,7 +1247,7 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
         let fun_id = parse_function(input, prog, method_name.clone(), pos)?;
 
         if method_name == "init" && prog.funs[&fun_id].params.len() == 0 {
-            return input.parse_error("the init method must have a self parameter");
+            return input.parse_error("the init method must have a `self` parameter");
         }
 
         methods.insert(method_name, fun_id);
