@@ -156,6 +156,8 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$window_draw_frame(window_id, frame_buffer)`: Draws a frame buffer to the specified window.
 -   `$audio_open_output(sample_rate, num_channels)`: Opens an audio output device with the specified sample rate and number of channels. Returns a device ID.
 -   `$audio_write_samples(device_id, samples)`: Writes a `ByteArray` of `float32` audio samples to the specified audio device.
+-   `$audio_open_input(sample_rate, num_channels)`: Opens an audio input device with the specified sample rate and number of channels. Returns a device ID .
+-   `$audio_read_samples(device_id, num_samples, dst_ba, index)`: Reads `num_samples` of `float32` audio samples from the specified audio device into a destination `ByteArray` starting at `index`. This function blocks until enough samples are available.
 -   `$exit(code)`: End program execution and produce the given exit code.
 
 ### Core Methods
