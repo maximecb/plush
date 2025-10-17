@@ -128,6 +128,13 @@ fn float64_max(actor: &mut Actor, v: Value, other: Value) -> Value
     Value::Float64(v.max(other))
 }
 
+fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    let exponent = exponent.unwrap_f64();
+    Value::Float64(v.powf(exponent))
+}
+
 
 /// Create a single-character string from a codepoint integer value
 fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> Value
@@ -244,6 +251,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static FLOAT64_FORMAT_DECIMALS: HostFn = HostFn { name: "format_decimals", f: Fn2_1(float64_format_decimals) };
     static FLOAT64_MIN: HostFn = HostFn { name: "min", f: Fn2_1(float64_min) };
     static FLOAT64_MAX: HostFn = HostFn { name: "max", f: Fn2_1(float64_max) };
+    static FLOAT64_POW: HostFn = HostFn { name: "pow", f: Fn2_1(float64_pow) };
 
     static STRING_FROM_CODEPOINT: HostFn = HostFn { name: "from_codepoint", f: Fn2_1(string_from_codepoint) };
     static STRING_BYTE_AT: HostFn = HostFn { name: "byte_at", f: Fn2_1(string_byte_at) };
@@ -287,6 +295,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "format_decimals") => &FLOAT64_FORMAT_DECIMALS,
         (Value::Float64(_), "min") => &FLOAT64_MIN,
         (Value::Float64(_), "max") => &FLOAT64_MAX,
+        (Value::Float64(_), "pow") => &FLOAT64_POW,
 
         (Value::Class(STRING_ID), "from_codepoint") => &STRING_FROM_CODEPOINT,
         (Value::String(_), "byte_at") => &STRING_BYTE_AT,
