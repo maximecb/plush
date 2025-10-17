@@ -1,0 +1,51 @@
+// Benchmark for matrix-vector multiplication
+
+let var num_inputs = 8192;
+if ($cmd_num_args() > 1) {
+    num_inputs = $cmd_get_arg(1).parse_int(10);
+}
+
+let var num_outputs = 32;
+if ($cmd_num_args() > 2) {
+    num_outputs = $cmd_get_arg(2).parse_int(10);
+}
+
+$println("Matrix size: " + num_outputs.to_s() + "x" + num_inputs.to_s());
+
+// Initialize matrix and vector with random values
+let var lcg_seed = 1;
+fun rand_float() {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (lcg_seed.to_f() / 0x7FFFFFFF.to_f()) * 2.0 - 1.0; // -1.0 to 1.0
+}
+
+let matrix = Array.with_size(num_outputs, 0);
+for (let var i = 0; i < num_outputs; ++i) {
+    matrix[i] = Array.with_size(num_inputs, 0);
+    for (let var j = 0; j < num_inputs; ++j) {
+        matrix[i][j] = rand_float();
+    }
+}
+
+let vector = Array.with_size(num_inputs, 0);
+for (let var i = 0; i < num_inputs; ++i) {
+    vector[i] = rand_float();
+}
+
+let result = Array.with_size(num_outputs, 0);
+
+// Perform matrix-vector multiplication
+let start_time = $time_current_ms();
+
+for (let var i = 0; i < num_outputs; ++i) {
+    let var sum = 0.0;
+    for (let var j = 0; j < num_inputs; ++j) {
+        sum = sum + matrix[i][j] * vector[j];
+    }
+    result[i] = sum;
+}
+
+let end_time = $time_current_ms();
+let elapsed_ms = end_time - start_time;
+
+$println("Matrix-vector multiplication took " + elapsed_ms.to_s() + " ms.");
