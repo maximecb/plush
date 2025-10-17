@@ -1556,6 +1556,7 @@ mod tests
         // Literals
         parse_ok("let o = {};");
         parse_ok("let o = { x: 1, y: 2};");
+        parse_ok("let o = { x: 1, y: 2, };");
 
         // Member operator
         parse_ok("let v = a.b;");
