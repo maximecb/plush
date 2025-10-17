@@ -299,7 +299,7 @@ impl StmtBox
                     _ => {
                         if env.has_local(var_name) {
                             return ParseError::with_pos(
-                                &format!("local with name `{}` already exists", var_name),
+                                &format!("local variable with name `{}` already exists", var_name),
                                 &self.pos
                             );
                         }

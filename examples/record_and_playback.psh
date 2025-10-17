@@ -1,0 +1,50 @@
+// Constants for audio recording and playback
+let SAMPLE_RATE = 44100;
+let NUM_CHANNELS = 1;
+let RECORD_DURATION_SECS = 7;
+
+// Calculate total samples needed
+let TOTAL_SAMPLES = SAMPLE_RATE * RECORD_DURATION_SECS;
+
+// Create a ByteArray to store audio samples (float32, so 4 bytes per sample)
+let audio_buffer = ByteArray.with_size(TOTAL_SAMPLES * 4);
+
+let input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
+
+$println("Recording audio for " + RECORD_DURATION_SECS.to_s() + " seconds...");
+
+let var recorded_samples = 0;
+let var last_printed_percentage = 0;
+
+// Record audio in chunks
+while (recorded_samples < TOTAL_SAMPLES) {
+    // Read a chunk of samples. The buffer size is 1024 samples.
+    // We'll read in chunks of 1024 samples to match the internal buffer size.
+    let var samples_to_read = 1024;
+    if (recorded_samples + samples_to_read > TOTAL_SAMPLES) {
+        samples_to_read = TOTAL_SAMPLES - recorded_samples;
+    }
+
+    // Read samples into the audio_buffer starting at the current recorded_samples index
+    $audio_read_samples(input_device_id, samples_to_read, audio_buffer, recorded_samples);
+    recorded_samples = recorded_samples + samples_to_read;
+
+    // Calculate and print percentage
+    let current_percentage = (recorded_samples * 100.0) / TOTAL_SAMPLES;
+    let next_threshold = (last_printed_percentage + 5.0).trunc();
+    if (current_percentage >= next_threshold) {
+        $println("Recorded: " + next_threshold.to_s() + "%");
+        last_printed_percentage = next_threshold;
+    }
+}
+
+$println("Recording complete. Playing back audio...");
+
+// Play back the recorded audio
+let output_device_id = $audio_open_output(SAMPLE_RATE, NUM_CHANNELS);
+$audio_write_samples(output_device_id, audio_buffer);
+
+$println("Playback complete.");
+
+// Sleep for the duration of the recording to allow playback to finish
+$actor_sleep(RECORD_DURATION_SECS * 1000 + 200);
