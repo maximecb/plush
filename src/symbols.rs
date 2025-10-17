@@ -423,7 +423,7 @@ impl ExprBox
                     *class_id = id;
                 } else {
                     return ParseError::with_pos(
-                        "could not match class name for instanceof",
+                        &format!("could not match class name `{}` for instanceof", class_name),
                         &self.pos
                     );
                 }
