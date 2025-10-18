@@ -49,6 +49,7 @@ Plush is a dynamically typed language and supports the following data types:
 -   **Array**: Ordered collections of values (e.g., `[1, 2, 3]`).
 -   **ByteArray**: Raw, mutable byte buffers.
 -   **Object**: Instances of classes.
+-   **Dictionaries**: Hash maps with string keys, like JS/Python/JSON (e.g., `{a:1, b: 2}`)
 
 ### Operators
 
@@ -221,10 +222,17 @@ This example spawns a new worker actor, sends it a message, and then waits for i
 ## Debugging
 
 At the moment there is no debugger and you may find that error messages are lackluster. Unsupported behaviors can
-result in Rust panics, sometimes without helpful messages. PRs to improve this are welcome.
+result in Rust panics, sometimes without helpful messages. I've been working on gradually improving the error
+messages to make Plush more user-friendly, but PRs to improve this are welcome.
 
 To help in debugging, you can print values with `$println()` and you can use the built in `assert()` statement to
-validate your assumptions.
+validate your assumptions. If you run into a Rust panic with not enough context, you can also run Plush with
+`RUST_BACKTRACE=1` to produce a backtrace,
+e.g.
+
+```
+RUST_BACKTRACE=1 cargo run my_program.psh
+```
 
 ## Manipulating Image Data
 
