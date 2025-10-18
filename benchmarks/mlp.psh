@@ -1,0 +1,312 @@
+// Two-Layer MLP Benchmark
+// This benchmark tests the performance of a simple two-layer Multi-Layer Perceptron (MLP).
+// It includes the forward pass, backward pass (backpropagation), and weight updates.
+
+// --- Pseudo-Random Number Generator (LCG) ---
+let var lcg_seed = 1;
+
+// Initializes the random number generator with a seed.
+// - seed: The integer seed value.
+fun rand_init(seed) {
+    lcg_seed = seed & 0x7FFFFFFF;
+}
+
+// Returns a random float in the range [-0.5, 0.5).
+fun rand_float() {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    // We divide by the maximum possible seed value to get a float between 0 and 1, then shift.
+    return (lcg_seed.to_f() / 0x7FFFFFFF.to_f()) - 0.5;
+}
+
+// Creates a matrix (array of arrays) with random values.
+// - rows: The number of rows in the matrix.
+// - cols: The number of columns in the matrix.
+fun random_matrix(rows, cols) {
+    let m = Array.with_size(rows, nil);
+    for (let var r = 0; r < rows; ++r) {
+        let row = Array.with_size(cols, 0.0);
+        for (let var c = 0; c < cols; ++c) {
+            row[c] = rand_float();
+        }
+        m[r] = row;
+    }
+    return m;
+}
+
+// Creates a vector (array) with random values.
+// - size: The number of elements in the vector.
+fun random_vector(size) {
+    let v = Array.with_size(size, 0.0);
+    for (let var i = 0; i < size; ++i) {
+        v[i] = rand_float();
+    }
+    return v;
+}
+
+// --- Matrix/Vector Math ---
+
+// Multiplies a matrix by a vector.
+// - m: The matrix (array of arrays).
+// - v: The vector (array).
+fun mat_vec_mult(m, v) {
+    let rows = m.len;
+    let cols = m[0].len;
+    assert(cols == v.len);
+    let result = Array.with_size(rows, 0.0);
+    for (let var r = 0; r < rows; ++r) {
+        let var sum = 0.0;
+        for (let var c = 0; c < cols; ++c) {
+            sum = sum + m[r][c] * v[c];
+        }
+        result[r] = sum;
+    }
+    return result;
+}
+
+// Adds two vectors element-wise.
+// - v1: The first vector.
+// - v2: The second vector.
+fun vec_add(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] + v2[i];
+    }
+    return result;
+}
+
+// Subtracts the second vector from the first, element-wise.
+// - v1: The first vector.
+// - v2: The second vector.
+fun vec_sub(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] - v2[i];
+    }
+    return result;
+}
+
+// Multiplies two vectors element-wise (Hadamard product).
+// - v1: The first vector.
+// - v2: The second vector.
+fun vec_elem_mult(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] * v2[i];
+    }
+    return result;
+}
+
+// Computes the outer product of two vectors, resulting in a matrix.
+// - v1: The first vector (determines rows).
+// - v2: The second vector (determines columns).
+fun vec_outer_prod(v1, v2) {
+    let m = Array.with_size(v1.len, nil);
+    for (let var r = 0; r < v1.len; ++r) {
+        let row = Array.with_size(v2.len, 0.0);
+        for (let var c = 0; c < v2.len; ++c) {
+            row[c] = v1[r] * v2[c];
+        }
+        m[r] = row;
+    }
+    return m;
+}
+
+// Transposes a matrix.
+// - m: The matrix to transpose.
+fun mat_transpose(m) {
+    let rows = m.len;
+    let cols = m[0].len;
+    let t = Array.with_size(cols, nil);
+    for (let var c = 0; c < cols; ++c) {
+        let row = Array.with_size(rows, 0.0);
+        for (let var r = 0; r < rows; ++r) {
+            row[r] = m[r][c];
+        }
+        t[c] = row;
+    }
+    return t;
+}
+
+// Updates a matrix using its gradient and a learning rate.
+// - m: The matrix to update.
+// - grad: The gradient matrix.
+// - learning_rate: The learning rate.
+fun mat_update(m, grad, learning_rate) {
+    let rows = m.len;
+    let cols = m[0].len;
+    for (let var r = 0; r < rows; ++r) {
+        for (let var c = 0; c < cols; ++c) {
+            m[r][c] = m[r][c] - learning_rate * grad[r][c];
+        }
+    }
+}
+
+// Updates a vector using its gradient and a learning rate.
+// - v: The vector to update.
+// - grad: The gradient vector.
+// - learning_rate: The learning rate.
+fun vec_update(v, grad, learning_rate) {
+    for (let var i = 0; i < v.len; ++i) {
+        v[i] = v[i] - learning_rate * grad[i];
+    }
+}
+
+// --- Activation Functions ---
+
+// Applies the Rectified Linear Unit (ReLU) activation function to a vector.
+// - v: The input vector.
+fun relu(v) {
+    let result = Array.with_size(v.len, 0.0);
+    for (let var i = 0; i < v.len; ++i) {
+        result[i] = v[i].max(0.0);
+    }
+    return result;
+}
+
+// Computes the derivative of the ReLU function for a vector.
+// - v: The input vector (values from before ReLU was applied).
+fun relu_derivative(v) {
+    let result = Array.with_size(v.len, 0.0);
+    for (let var i = 0; i < v.len; ++i) {
+        if (v[i] > 0.0) {
+            result[i] = 1.0;
+        } else {
+            result[i] = 0.0;
+        }
+    }
+    return result;
+}
+
+// --- MLP Definition ---
+
+// A simple two-layer MLP.
+class MLP {
+    // Initializes the MLP with random weights and biases.
+    // - self: The object instance.
+    // - input_size: The number of input neurons.
+    // - hidden_size: The number of hidden neurons.
+    // - output_size: The number of output neurons.
+    init(self, input_size, hidden_size, output_size) {
+        self.W1 = random_matrix(hidden_size, input_size);
+        self.b1 = random_vector(hidden_size);
+        self.W2 = random_matrix(output_size, hidden_size);
+        self.b2 = random_vector(output_size);
+        self.z1 = nil;
+        self.a1 = nil;
+    }
+
+    // Performs the forward pass of the network.
+    // - self: The MLP instance.
+    // - x: The input vector.
+    // Returns the predicted output vector.
+    forward(self, x) {
+        self.z1 = vec_add(mat_vec_mult(self.W1, x), self.b1);
+        self.a1 = relu(self.z1);
+        let z2 = vec_add(mat_vec_mult(self.W2, self.a1), self.b2);
+        // No activation on the output layer for simple MSE loss calculation.
+        let y_pred = z2;
+        return y_pred;
+    }
+
+    // Performs the backward pass (backpropagation) to compute gradients.
+    // - self: The MLP instance.
+    // - x: The input vector.
+    // - y_true: The ground truth output vector.
+    // - y_pred: The predicted output vector from the forward pass.
+    // Returns an array of gradients: [d_W1, d_b1, d_W2, d_b2].
+    backward(self, x, y_true, y_pred) {
+        // Using Mean Squared Error loss derivative: 2 * (y_pred - y_true).
+        // The factor of 2 can be absorbed into the learning rate, so we just use (y_pred - y_true).
+        let d_loss = vec_sub(y_pred, y_true);
+
+        // Gradients for the second layer (output layer).
+        let d_W2 = vec_outer_prod(d_loss, self.a1);
+        let d_b2 = d_loss;
+
+        // Propagate gradient to the first layer (hidden layer).
+        let W2_T = mat_transpose(self.W2);
+        let d_a1 = mat_vec_mult(W2_T, d_loss);
+        let d_z1 = vec_elem_mult(d_a1, relu_derivative(self.z1));
+
+        // Gradients for the first layer.
+        let d_W1 = vec_outer_prod(d_z1, x);
+        let d_b1 = d_z1;
+
+        return [d_W1, d_b1, d_W2, d_b2];
+    }
+}
+
+// Updates the MLP's weights and biases using the computed gradients.
+// - mlp: The MLP instance to update.
+// - grads: The array of gradients from the backward pass.
+// - learning_rate: The learning rate for the update step.
+fun update(mlp, grads, learning_rate) {
+    let d_W1 = grads[0];
+    let d_b1 = grads[1];
+    let d_W2 = grads[2];
+    let d_b2 = grads[3];
+
+    mat_update(mlp.W1, d_W1, learning_rate);
+    vec_update(mlp.b1, d_b1, learning_rate);
+    mat_update(mlp.W2, d_W2, learning_rate);
+    vec_update(mlp.b2, d_b2, learning_rate);
+}
+
+// --- Main Benchmark ---
+
+// Main function to run the MLP benchmark.
+fun main() {
+    let INPUT_SIZE = 1600;
+    let HIDDEN_SIZE = 128;
+    let OUTPUT_SIZE = 4;
+    let LEARNING_RATE = 0.01;
+    let NUM_ITERATIONS = 100;
+
+    rand_init($time_current_ms());
+
+    // --- Initialization ---
+    $println("Initializing MLP and data...");
+    let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
+    let x = random_vector(INPUT_SIZE);
+    let y_true = random_vector(OUTPUT_SIZE);
+    $println("Initialization complete.");
+
+    let var total_forward_time = 0;
+    let var total_backward_time = 0;
+    let var total_update_time = 0;
+
+    $println("\nStarting benchmark for " + NUM_ITERATIONS.to_s() + " iterations...");
+
+    for (let var i = 0; i < NUM_ITERATIONS; ++i) {
+        // --- Forward Pass ---
+        let start_forward = $time_current_ms();
+        let y_pred = mlp.forward(x);
+        let end_forward = $time_current_ms();
+        total_forward_time = total_forward_time + (end_forward - start_forward);
+
+        // --- Backward Pass ---
+        let start_backward = $time_current_ms();
+        let grads = mlp.backward(x, y_true, y_pred);
+        let end_backward = $time_current_ms();
+        total_backward_time = total_backward_time + (end_backward - start_backward);
+
+        // --- Weight Update ---
+        let start_update = $time_current_ms();
+        update(mlp, grads, LEARNING_RATE);
+        let end_update = $time_current_ms();
+        total_update_time = total_update_time + (end_update - start_update);
+    }
+
+    $println("\n--- Benchmark Results ---");
+    $println("Total iterations: " + NUM_ITERATIONS.to_s());
+    $println("Average forward pass:  " + (total_forward_time / NUM_ITERATIONS).to_s() + " ms");
+    $println("Average backward pass: " + (total_backward_time / NUM_ITERATIONS).to_s() + " ms");
+    $println("Average weight update: " + (total_update_time / NUM_ITERATIONS).to_s() + " ms");
+    let total_avg = (total_forward_time + total_backward_time + total_update_time) / NUM_ITERATIONS;
+    $println("Average total per iteration: " + total_avg.to_s() + " ms");
+}
+
+main();
