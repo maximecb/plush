@@ -110,14 +110,6 @@ impl StmtBox
                         gen_assign(lhs, rhs, fun, code, alloc, false)?;
                     }
 
-                    /*
-                    // For asm expressions with void output type, don't pop
-                    // the output because no output is produced
-                    Expr::Asm { out_type: Type::Void, .. } => {
-                        expr.gen_code(fun, sym, code, out)?;
-                    }
-                    */
-
                     _ => {
                         expr.gen_code(fun, code, alloc)?;
                         code.push(Insn::pop);
@@ -255,19 +247,6 @@ impl StmtBox
 
                 let if_idx = code.len();
                 code.push(Insn::if_true { target_ofs: 0 });
-
-                // TODO: need to report the source position etc.
-                // Might be nice to report the assert statement
-                // contents as a string?
-                /*
-                code.insn_s("push", &format!("assertion failed at {}\n", self.pos));
-                code.add_insn(vec![
-                    "'call_host'".to_string(),
-                    "'print_str'".to_string(),
-                    "1".to_string(),
-                ]);
-                */
-
                 code.push(Insn::panic { pos: self.pos });
                 patch_jump(code, if_idx, code.len());
             }
