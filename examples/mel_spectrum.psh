@@ -9,8 +9,10 @@ let PI = 3.141592653589793;
 let DECAY_FACTOR = 0.94; // For gradual decay
 let BAR_HORIZONTAL_GAP = 2; // Horizontal gap between bars
 
-let MAX_DISPLAY_FREQ = 6000.0; // Cap display at 6 KHz
-let EFFECTIVE_FFT_BINS = (MAX_DISPLAY_FREQ * FFT_SIZE / SAMPLE_RATE).trunc();
+let MIN_FREQ = 300.0;
+let MAX_FREQ = 3500.0;
+
+let AUDIO_FRAME_TIME = 1000 * (FFT_SIZE / SAMPLE_RATE);
 
 // Helper function to convert RGB values to a 32-bit color
 fun rgb32(r, g, b) {
@@ -18,23 +20,7 @@ fun rgb32(r, g, b) {
     return 0xFF000000 | (r << 16) | (g << 8) | b;
 }
 
-// Helper function to adjust the brightness of a color
-fun adjust_brightness(color, factor) {
-    let a = (color _/ (1 << 24)) & 0xFF;
-    let r = (color _/ (1 << 16)) & 0xFF;
-    let g = (color _/ (1 << 8)) & 0xFF;
-    let b = color & 0xFF;
-
-    let new_r = (r.to_f() * factor).trunc().min(255);
-    let new_g = (g.to_f() * factor).trunc().min(255);
-    let new_b = (b.to_f() * factor).trunc().min(255);
-
-    return (a << 24) | (new_r << 16) | (new_g << 8) | new_b;
-}
-
 // Function to perform in-place iterative FFT (Cooley-Tukey)
-// Input: two ByteArray of float32 values, one for real parts and one for imaginary parts
-// Output: the FFT of the input, in-place in the same ByteArrays
 fun fft(real_parts, imag_parts, inverse) {
     let n = real_parts.len _/ 4; // Number of complex samples (each float32 is 4 bytes)
     if (n == 0) {
@@ -84,21 +70,17 @@ fun fft(real_parts, imag_parts, inverse) {
                 let u_re = real_parts.read_f32(i + j);
                 let u_im = imag_parts.read_f32(i + j);
 
-                // v = x[i + j + len / 2] * w
                 let x_half_re = real_parts.read_f32(i + j + len _/ 2);
                 let x_half_im = imag_parts.read_f32(i + j + len _/ 2);
                 let v_re = x_half_re * w_re - x_half_im * w_im;
                 let v_im = x_half_re * w_im + x_half_im * w_re;
 
-                // x[i + j] = u + v
                 real_parts.write_f32(i + j, u_re + v_re);
                 imag_parts.write_f32(i + j, u_im + v_im);
 
-                // x[i + j + len / 2] = u - v
                 real_parts.write_f32(i + j + len _/ 2, u_re - v_re);
                 imag_parts.write_f32(i + j + len _/ 2, u_im - v_im);
 
-                // w = w * wlen
                 let next_w_re = w_re * wlen_re - w_im * wlen_im;
                 let next_w_im = w_re * wlen_im + w_im * wlen_re;
                 w_re = next_w_re;
@@ -111,7 +93,6 @@ fun fft(real_parts, imag_parts, inverse) {
         len = len * 2;
     }
 
-    // Apply 1/N factor for inverse FFT
     if (inverse) {
         for (let var k = 0; k < n; ++k) {
             real_parts.write_f32(k, real_parts.read_f32(k) / n);
@@ -129,64 +110,83 @@ fun hanning_window(buffer) {
     }
 }
 
-fun main() {
-    // Initialize window
-    let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Spectrum Analyzer", 0);
+fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sample_rate) {
+    // This function could be optimized by pre-calculating and caching the fft_bins array.
+    let fft_bins = Array.with_size(num_bins + 2, 0);
+    for (let var i = 0; i < fft_bins.len; ++i) {
+        let freq = min_freq * (max_freq/min_freq).pow(i.to_f() / (num_bins + 1).to_f());
+        fft_bins[i] = (freq * fft_size / sample_rate).floor();
+    }
 
-    // Open audio input
+    let magnitudes = Array.with_size(num_bins, 0.0);
+    for (let var band_idx = 0; band_idx < num_bins; ++band_idx) {
+        let var band_magnitude = 0.0;
+        let start_bin = fft_bins[band_idx];
+        let center_bin = fft_bins[band_idx + 1];
+        let end_bin = fft_bins[band_idx + 2];
+
+        let max_bin = (fft_size / 2) - 1;
+        if (start_bin > max_bin) continue;
+
+        for (let var bin = start_bin; bin <= end_bin; ++bin) {
+            if (bin > max_bin) break;
+
+            let re = real_parts.read_f32(bin);
+            let im = imag_parts.read_f32(bin);
+            let magnitude = (re * re + im * im).sqrt();
+
+            let var weight = 0.0;
+            if (bin >= start_bin && bin <= center_bin) {
+                if (center_bin - start_bin > 0) {
+                    weight = (bin - start_bin).to_f() / (center_bin - start_bin);
+                } else if (bin == center_bin) {
+                    weight = 1.0;
+                }
+            } else if (bin > center_bin && bin <= end_bin) {
+                if (end_bin - center_bin > 0) {
+                    weight = (end_bin - bin).to_f() / (end_bin - center_bin);
+                }
+            }
+            band_magnitude = band_magnitude + magnitude * weight;
+        }
+        magnitudes[band_idx] = band_magnitude;
+    }
+
+    return magnitudes;
+}
+
+fun main() {
+    let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Mel Spectrum Analyzer", 0);
     let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
 
-    // ByteArrays for FFT
     let real_parts = ByteArray.with_size(FFT_SIZE * 4);
     let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
-    imag_parts.zero_fill(); // Initialize imaginary parts to zero
+    imag_parts.zero_fill();
 
-    // Array to store current display height for each band (for decay effect)
     let band_heights = Array.with_size(NUM_FREQUENCY_BANDS, 0.0);
-
-    // Frame buffer for drawing
     let frame_buffer = ByteArray.with_size(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
 
     let var running = true;
     while (running) {
-        // Read audio samples
         $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
 
-        // Reset imaginary parts to zero before each FFT
+        let start_time = $time_current_ms();
         imag_parts.zero_fill();
-
-        // Apply Hanning window
         hanning_window(real_parts);
-
-        // Perform FFT
         fft(real_parts, imag_parts, false);
+        let magnitudes = mel_bins(real_parts, imag_parts, NUM_FREQUENCY_BANDS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
+        let end_time = $time_current_ms();
+        $println("Audio analysis time: " + (end_time - start_time).to_s() + "ms (/" + AUDIO_FRAME_TIME.format_decimals(1) + "ms)");
 
-        // Calculate magnitudes and map to frequency bands
-        frame_buffer.zero_fill(); // Clear the frame buffer
-
+        frame_buffer.zero_fill();
         let bar_width_total = WINDOW_WIDTH _/ NUM_FREQUENCY_BANDS;
-        let var bar_width_drawn = bar_width_total - BAR_HORIZONTAL_GAP;
-        if (bar_width_drawn < 1) { // Ensure bar is at least 1 pixel wide
-            bar_width_drawn = 1;
-        }
-        let max_magnitude = 8.0; // Adjust this value based on expected audio input levels
+        let bar_width_drawn = (bar_width_total - BAR_HORIZONTAL_GAP).max(1);
+        let max_magnitude = 10.0;
 
         for (let var band_idx = 0; band_idx < NUM_FREQUENCY_BANDS; ++band_idx) {
-            let var band_magnitude = 0.0;
-            let start_fft_idx = (band_idx * EFFECTIVE_FFT_BINS / NUM_FREQUENCY_BANDS).trunc();
-            let end_fft_idx = ((band_idx + 1) * EFFECTIVE_FFT_BINS / NUM_FREQUENCY_BANDS).trunc();
-
-            for (let var fft_idx = start_fft_idx; fft_idx < end_fft_idx; ++fft_idx) {
-                let re = real_parts.read_f32(fft_idx);
-                let im = imag_parts.read_f32(fft_idx);
-                let magnitude = (re * re + im * im).sqrt();
-                band_magnitude = band_magnitude.max(magnitude);
-            }
-
-            // Draw bar
+            let band_magnitude = magnitudes[band_idx];
             let new_bar_height = (band_magnitude / max_magnitude * WINDOW_HEIGHT.to_f()).min(WINDOW_HEIGHT.to_f());
 
-            // Fast attack, slow decay
             if (new_bar_height > band_heights[band_idx]) {
                 band_heights[band_idx] = new_bar_height;
             } else {
@@ -194,12 +194,11 @@ fun main() {
             }
 
             let current_display_height = band_heights[band_idx];
-            let x_draw = band_idx * bar_width_total + (BAR_HORIZONTAL_GAP _/ 2); // Calculate drawing x position
-            let y_start_drawing = WINDOW_HEIGHT - current_display_height.trunc(); // Draw from bottom up
+            let x_draw = band_idx * bar_width_total + (BAR_HORIZONTAL_GAP _/ 2);
+            let y_start_drawing = WINDOW_HEIGHT - current_display_height.trunc();
 
-            let color = rgb32(255, 0, 0); // Red bars
+            let color = rgb32(255, 0, 0);
 
-            // Draw bar segments
             let BAR_SEGMENT_HEIGHT = 5;
             let BAR_GAP_HEIGHT = 2;
             let total_segment_height = BAR_SEGMENT_HEIGHT + BAR_GAP_HEIGHT;
@@ -207,7 +206,6 @@ fun main() {
             for (let var segment_y = WINDOW_HEIGHT - total_segment_height; segment_y >= y_start_drawing; segment_y = segment_y - total_segment_height) {
                 for (let var i = 0; i < bar_width_drawn; ++i) {
                     for (let var j = segment_y; j < segment_y + BAR_SEGMENT_HEIGHT; ++j) {
-                        // Ensure j is within bounds and above y_start_drawing
                         if (j >= y_start_drawing && j < WINDOW_HEIGHT) {
                             let pixel_idx = (j * WINDOW_WIDTH + (x_draw + i));
                             frame_buffer.write_u32(pixel_idx, color);
@@ -217,10 +215,8 @@ fun main() {
             }
         }
 
-        // Draw frame
         $window_draw_frame(window_id, frame_buffer);
 
-        // Handle UI events
         let event = $actor_poll();
         if (event instanceof UIEvent) {
             if (event.kind == "CLOSE_WINDOW" || event.key == "ESCAPE") {
@@ -229,7 +225,6 @@ fun main() {
         }
     }
 
-    // Add a small sleep to allow audio threads to finish before program exits
     $actor_sleep(500);
 }
 
