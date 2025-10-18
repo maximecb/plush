@@ -216,7 +216,7 @@ impl Dict
         if let Some(val) = self.hash.get(field_name) {
             *val
         } else {
-            panic!();
+            panic!("key `{}` not found in dict", field_name);
         }
     }
 }
@@ -1421,13 +1421,11 @@ impl Actor
                     push!(val);
                 }
 
-                /*
                 // Create new empty dictionary
                 Insn::dict_new => {
                     let new_obj = self.alloc.alloc(Dict::default());
                     push!(Value::Dict(new_obj))
                 }
-                */
 
                 // Set object field
                 Insn::set_field { field, class_id, slot_idx } => {
@@ -1808,6 +1806,7 @@ impl Actor
                     push!(ret_val);
                 }
 
+                #[allow(unreachable_patterns)]
                 _ => panic!("unknown opcode {:?}", insn)
             }
         }
