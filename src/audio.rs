@@ -34,7 +34,11 @@ impl OutputCB
     fn request_samples(&self, num_samples: usize)
     {
         // We'll use the message allocator of the parent thread
-        let alloc_rc = self.msg_alloc.upgrade().unwrap();
+        let alloc_rc = self.msg_alloc.upgrade();
+        if alloc_rc.is_none() {
+            return; // Parent actor is terminated
+        }
+        let alloc_rc = alloc_rc.unwrap();
         let mut msg_alloc = alloc_rc.lock().unwrap();
 
         // Create the AudioNeeded object
@@ -212,7 +216,11 @@ impl InputCB
     fn send_audio_data_message(&self, device_id: usize, num_samples: usize)
     {
         // We'll use the message allocator of the parent thread
-        let alloc_rc = self.msg_alloc.upgrade().unwrap();
+        let alloc_rc = self.msg_alloc.upgrade();
+        if alloc_rc.is_none() {
+            return; // Parent actor is terminated
+        }
+        let alloc_rc = alloc_rc.unwrap();
         let mut msg_alloc = alloc_rc.lock().unwrap();
 
         // Create the AudioData object
