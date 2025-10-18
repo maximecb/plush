@@ -2349,6 +2349,7 @@ mod tests
         eval("let o = { x: 1, y: 2 };");
         eval_eq("let o = { x: 1, y: 2 }; return o.x;", Value::Int64(1));
         eval_eq("let o = { x: 1, y: 2 }; return o.x + o.y;", Value::Int64(3));
+        eval_eq("let o = { 'x': 77 }; return o.x;", Value::Int64(77));
     }
 
     #[test]

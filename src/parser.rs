@@ -440,7 +440,12 @@ fn parse_dict(
 
         // Parse a field name
         input.eat_ws()?;
-        let field_name = input.parse_ident()?;
+        let ch = input.peek_ch();
+        let field_name = if ch == '\"' || ch == '\'' {
+            input.parse_str(ch)?
+        } else {
+            input.parse_ident()?
+        };
 
         // Parse the field value
         input.expect_token(":")?;
@@ -1557,6 +1562,9 @@ mod tests
         parse_ok("let o = {};");
         parse_ok("let o = { x: 1, y: 2};");
         parse_ok("let o = { x: 1, y: 2, };");
+
+        // With quoted field names
+        parse_ok("let o = { 'x': 1, \"y\": 2, 'z w': 3 };");
 
         // Member operator
         parse_ok("let v = a.b;");
