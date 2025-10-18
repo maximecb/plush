@@ -1453,6 +1453,12 @@ impl Actor
                                 obj.slots[slot_idx] = val;
                             }
                         },
+
+                        Value::Dict(p) => {
+                            let dict = unsafe { &mut *p };
+                            dict.set(field_name, val);
+                        }
+
                         _ => panic!()
                     }
                 }
@@ -1574,6 +1580,11 @@ impl Actor
 
                             val
                         },
+
+                        Value::Dict(p) => {
+                            let dict = unsafe { &mut *p };
+                            dict.get(field_name)
+                        }
 
                         _ => panic!("get_field on non-object value {:?}", obj)
                     };
@@ -2331,7 +2342,6 @@ mod tests
         eval_eq("let s1 = 'foo'; let s2 = 'bar'; return s1 + s2 == 'foobar';", Value::True);
     }
 
-    /*
     #[test]
     fn dicts()
     {
@@ -2340,7 +2350,6 @@ mod tests
         eval_eq("let o = { x: 1, y: 2 }; return o.x;", Value::Int64(1));
         eval_eq("let o = { x: 1, y: 2 }; return o.x + o.y;", Value::Int64(3));
     }
-    */
 
     #[test]
     fn arrays()

@@ -16,7 +16,7 @@ The Plush language supports:
 - Separate `Float64` and `Int64` types
 - Dynamic arrays aka vectors/lists
 - Immutable UTF-8 strings
-- Dictionaries with JS-like syntax (work in progress)
+- Dictionaries with JSON-like syntax
 - Memory safe, actor-based parallelism
 - A native byte array type
 - A simple frame buffer API for graphics and animations
