@@ -1,0 +1,194 @@
+// Constants
+let SAMPLE_RATE = 44100;
+let NUM_CHANNELS = 1;
+let WINDOW_WIDTH = 800;
+let WINDOW_HEIGHT = 600;
+let FFT_SIZE = 1024; // Must be a power of 2
+let NUM_FREQUENCY_BANDS = 32;
+let PI = 3.141592653589793;
+
+let MAX_DISPLAY_FREQ = 8000.0; // Cap display at 8 KHz
+let EFFECTIVE_FFT_BINS = (MAX_DISPLAY_FREQ * FFT_SIZE / SAMPLE_RATE).trunc();
+
+// Helper function to convert RGB values to a 32-bit color
+fun rgb32(r, g, b) {
+    // The alpha channel is set to 0xFF (fully opaque)
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// Function to perform in-place iterative FFT (Cooley-Tukey)
+// Input: two ByteArray of float32 values, one for real parts and one for imaginary parts
+// Output: the FFT of the input, in-place in the same ByteArrays
+fun fft(real_parts, imag_parts, inverse) {
+    let n = real_parts.len _/ 4; // Number of complex samples (each float32 is 4 bytes)
+    if (n == 0) {
+        return;
+    }
+
+    // Bit-reversal permutation
+    let var i = 0;
+    let var j = 0;
+    while (i < n) {
+        if (j > i) {
+            // Swap real parts
+            let temp_re = real_parts.read_f32(i);
+            real_parts.write_f32(i, real_parts.read_f32(j));
+            real_parts.write_f32(j, temp_re);
+
+            // Swap imaginary parts
+            let temp_im = imag_parts.read_f32(i);
+            imag_parts.write_f32(i, imag_parts.read_f32(j));
+            imag_parts.write_f32(j, temp_im);
+        }
+        let var m = n _/ 2;
+        while (m >= 1 && j >= m) {
+            j = j - m;
+            m = m _/ 2;
+        }
+        j = j + m;
+        i = i + 1;
+    }
+
+    // Cooley-Tukey butterfly operations
+    let var len = 2;
+    while (len <= n) {
+        let var ang = 2.0 * PI / len;
+        if (inverse) {
+            ang = -ang;
+        }
+        let wlen_re = ang.cos();
+        let wlen_im = ang.sin();
+
+        let var i = 0;
+        while (i < n) {
+            let var w_re = 1.0;
+            let var w_im = 0.0;
+            let var j = 0;
+            while (j < len _/ 2) {
+                let u_re = real_parts.read_f32(i + j);
+                let u_im = imag_parts.read_f32(i + j);
+
+                // v = x[i + j + len / 2] * w
+                let x_half_re = real_parts.read_f32(i + j + len _/ 2);
+                let x_half_im = imag_parts.read_f32(i + j + len _/ 2);
+                let v_re = x_half_re * w_re - x_half_im * w_im;
+                let v_im = x_half_re * w_im + x_half_im * w_re;
+
+                // x[i + j] = u + v
+                real_parts.write_f32(i + j, u_re + v_re);
+                imag_parts.write_f32(i + j, u_im + v_im);
+
+                // x[i + j + len / 2] = u - v
+                real_parts.write_f32(i + j + len _/ 2, u_re - v_re);
+                imag_parts.write_f32(i + j + len _/ 2, u_im - v_im);
+
+                // w = w * wlen
+                let next_w_re = w_re * wlen_re - w_im * wlen_im;
+                let next_w_im = w_re * wlen_im + w_im * wlen_re;
+                w_re = next_w_re;
+                w_im = next_w_im;
+
+                j = j + 1;
+            }
+            i = i + len;
+        }
+        len = len * 2;
+    }
+
+    // Apply 1/N factor for inverse FFT
+    if (inverse) {
+        for (let var k = 0; k < n; ++k) {
+            real_parts.write_f32(k, real_parts.read_f32(k) / n);
+            imag_parts.write_f32(k, imag_parts.read_f32(k) / n);
+        }
+    }
+}
+
+// Function to apply a Hanning window to a buffer
+fun hanning_window(buffer) {
+    let n = buffer.len _/ 4;
+    for (let var i = 0; i < n; ++i) {
+        let multiplier = 0.5 * (1.0 - (2.0 * PI * i / (n - 1)).cos());
+        buffer.write_f32(i, buffer.read_f32(i) * multiplier);
+    }
+}
+
+fun main() {
+    // Initialize window
+    let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Spectrum Analyzer", 0);
+
+    // Open audio input
+    let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
+
+    // ByteArrays for FFT
+    let real_parts = ByteArray.with_size(FFT_SIZE * 4);
+    let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
+    imag_parts.zero_fill(); // Initialize imaginary parts to zero
+
+    // Frame buffer for drawing
+    let frame_buffer = ByteArray.with_size(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
+
+    let var running = true;
+    while (running) {
+        // Read audio samples
+        $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
+
+        // Reset imaginary parts to zero before each FFT
+        imag_parts.zero_fill();
+
+        // Apply Hanning window
+        hanning_window(real_parts);
+
+        // Perform FFT
+        fft(real_parts, imag_parts, false);
+
+        // Calculate magnitudes and map to frequency bands
+        frame_buffer.zero_fill(); // Clear the frame buffer
+
+        let bar_width = WINDOW_WIDTH _/ NUM_FREQUENCY_BANDS;
+        let max_magnitude = 10.0; // Adjust this value based on expected audio input levels
+
+        for (let var band_idx = 0; band_idx < NUM_FREQUENCY_BANDS; ++band_idx) {
+            let var band_magnitude = 0.0;
+            let start_fft_idx = (band_idx * EFFECTIVE_FFT_BINS / NUM_FREQUENCY_BANDS).trunc();
+            let end_fft_idx = ((band_idx + 1) * EFFECTIVE_FFT_BINS / NUM_FREQUENCY_BANDS).trunc();
+
+            for (let var fft_idx = start_fft_idx; fft_idx < end_fft_idx; ++fft_idx) {
+                let re = real_parts.read_f32(fft_idx);
+                let im = imag_parts.read_f32(fft_idx);
+                let magnitude = (re * re + im * im).sqrt();
+                band_magnitude = band_magnitude.max(magnitude);
+            }
+
+            // Draw bar
+            let bar_height = (band_magnitude / max_magnitude * WINDOW_HEIGHT.to_f()).min(WINDOW_HEIGHT.to_f());
+            let x = band_idx * bar_width;
+            let y = WINDOW_HEIGHT - bar_height.trunc(); // Draw from bottom up
+
+            let color = rgb32(255, 0, 0); // Red bars
+
+            for (let var i = 0; i < bar_width; ++i) {
+                for (let var j = y; j < WINDOW_HEIGHT; ++j) {
+                    let pixel_idx = (j * WINDOW_WIDTH + (x + i));
+                    frame_buffer.write_u32(pixel_idx, color);
+                }
+            }
+        }
+
+        // Draw frame
+        $window_draw_frame(window_id, frame_buffer);
+
+        // Handle UI events
+        let event = $actor_poll();
+        if (event != nil && event instanceof UIEvent) {
+            if (event.kind == "CLOSE_WINDOW") {
+                running = false;
+            }
+        }
+    }
+
+    // Add a small sleep to allow audio threads to finish before program exits
+    $actor_sleep(500);
+}
+
+main();

@@ -678,7 +678,14 @@ impl Actor
 
         // Borrow the VM and clone the class
         let vm = self.vm.lock().unwrap();
-        let class = vm.prog.classes[&class_id].clone();
+
+        let class = vm.prog.classes.get(&class_id);
+
+        if class.is_none() {
+            panic!("could not find class with id={:?}", class_id);
+        }
+
+        let class = class.unwrap().clone();
         drop(vm);
 
         let ret = f(&class);
@@ -707,7 +714,8 @@ impl Actor
                         field_name,
                         c.name,
                         class_id,
-                        c.fields.keys().collect::<Vec<_>>())
+                        c.fields.keys().collect::<Vec<_>>()
+                    )
                 }
         })
     }
