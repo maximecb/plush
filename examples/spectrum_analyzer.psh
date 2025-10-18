@@ -6,14 +6,29 @@ let WINDOW_HEIGHT = 600;
 let FFT_SIZE = 1024; // Must be a power of 2
 let NUM_FREQUENCY_BANDS = 32;
 let PI = 3.141592653589793;
+let DECAY_FACTOR = 0.94; // For gradual decay
 
-let MAX_DISPLAY_FREQ = 8000.0; // Cap display at 8 KHz
+let MAX_DISPLAY_FREQ = 6000.0; // Cap display at 6 KHz
 let EFFECTIVE_FFT_BINS = (MAX_DISPLAY_FREQ * FFT_SIZE / SAMPLE_RATE).trunc();
 
 // Helper function to convert RGB values to a 32-bit color
 fun rgb32(r, g, b) {
     // The alpha channel is set to 0xFF (fully opaque)
     return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// Helper function to adjust the brightness of a color
+fun adjust_brightness(color, factor) {
+    let a = (color _/ (1 << 24)) & 0xFF;
+    let r = (color _/ (1 << 16)) & 0xFF;
+    let g = (color _/ (1 << 8)) & 0xFF;
+    let b = color & 0xFF;
+
+    let new_r = (r.to_f() * factor).trunc().min(255);
+    let new_g = (g.to_f() * factor).trunc().min(255);
+    let new_b = (b.to_f() * factor).trunc().min(255);
+
+    return (a << 24) | (new_r << 16) | (new_g << 8) | new_b;
 }
 
 // Function to perform in-place iterative FFT (Cooley-Tukey)
@@ -125,6 +140,9 @@ fun main() {
     let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
     imag_parts.zero_fill(); // Initialize imaginary parts to zero
 
+    // Array to store current display height for each band (for decay effect)
+    let band_heights = Array.with_size(NUM_FREQUENCY_BANDS, 0.0);
+
     // Frame buffer for drawing
     let frame_buffer = ByteArray.with_size(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
 
@@ -146,7 +164,7 @@ fun main() {
         frame_buffer.zero_fill(); // Clear the frame buffer
 
         let bar_width = WINDOW_WIDTH _/ NUM_FREQUENCY_BANDS;
-        let max_magnitude = 10.0; // Adjust this value based on expected audio input levels
+        let max_magnitude = 8.0; // Adjust this value based on expected audio input levels
 
         for (let var band_idx = 0; band_idx < NUM_FREQUENCY_BANDS; ++band_idx) {
             let var band_magnitude = 0.0;
@@ -161,16 +179,35 @@ fun main() {
             }
 
             // Draw bar
-            let bar_height = (band_magnitude / max_magnitude * WINDOW_HEIGHT.to_f()).min(WINDOW_HEIGHT.to_f());
+            let new_bar_height = (band_magnitude / max_magnitude * WINDOW_HEIGHT.to_f()).min(WINDOW_HEIGHT.to_f());
+
+            // Fast attack, slow decay
+            if (new_bar_height > band_heights[band_idx]) {
+                band_heights[band_idx] = new_bar_height;
+            } else {
+                band_heights[band_idx] = band_heights[band_idx] * DECAY_FACTOR;
+            }
+
+            let current_display_height = band_heights[band_idx];
             let x = band_idx * bar_width;
-            let y = WINDOW_HEIGHT - bar_height.trunc(); // Draw from bottom up
+            let y_start_drawing = WINDOW_HEIGHT - current_display_height.trunc(); // Draw from bottom up
 
             let color = rgb32(255, 0, 0); // Red bars
 
-            for (let var i = 0; i < bar_width; ++i) {
-                for (let var j = y; j < WINDOW_HEIGHT; ++j) {
-                    let pixel_idx = (j * WINDOW_WIDTH + (x + i));
-                    frame_buffer.write_u32(pixel_idx, color);
+            // Draw bar segments
+            let BAR_SEGMENT_HEIGHT = 5;
+            let BAR_GAP_HEIGHT = 2;
+            let total_segment_height = BAR_SEGMENT_HEIGHT + BAR_GAP_HEIGHT;
+
+            for (let var segment_y = WINDOW_HEIGHT - total_segment_height; segment_y >= y_start_drawing; segment_y = segment_y - total_segment_height) {
+                for (let var i = 0; i < bar_width; ++i) {
+                    for (let var j = segment_y; j < segment_y + BAR_SEGMENT_HEIGHT; ++j) {
+                        // Ensure j is within bounds and above y_start_drawing
+                        if (j >= y_start_drawing && j < WINDOW_HEIGHT) {
+                            let pixel_idx = (j * WINDOW_WIDTH + (x + i));
+                            frame_buffer.write_u32(pixel_idx, color);
+                        }
+                    }
                 }
             }
         }
