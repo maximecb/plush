@@ -7,6 +7,7 @@ let FFT_SIZE = 1024; // Must be a power of 2
 let NUM_FREQUENCY_BANDS = 32;
 let PI = 3.141592653589793;
 let DECAY_FACTOR = 0.94; // For gradual decay
+let BAR_HORIZONTAL_GAP = 2; // Horizontal gap between bars
 
 let MAX_DISPLAY_FREQ = 6000.0; // Cap display at 6 KHz
 let EFFECTIVE_FFT_BINS = (MAX_DISPLAY_FREQ * FFT_SIZE / SAMPLE_RATE).trunc();
@@ -163,7 +164,11 @@ fun main() {
         // Calculate magnitudes and map to frequency bands
         frame_buffer.zero_fill(); // Clear the frame buffer
 
-        let bar_width = WINDOW_WIDTH _/ NUM_FREQUENCY_BANDS;
+        let bar_width_total = WINDOW_WIDTH _/ NUM_FREQUENCY_BANDS;
+        let var bar_width_drawn = bar_width_total - BAR_HORIZONTAL_GAP;
+        if (bar_width_drawn < 1) { // Ensure bar is at least 1 pixel wide
+            bar_width_drawn = 1;
+        }
         let max_magnitude = 8.0; // Adjust this value based on expected audio input levels
 
         for (let var band_idx = 0; band_idx < NUM_FREQUENCY_BANDS; ++band_idx) {
@@ -189,7 +194,7 @@ fun main() {
             }
 
             let current_display_height = band_heights[band_idx];
-            let x = band_idx * bar_width;
+            let x_draw = band_idx * bar_width_total + (BAR_HORIZONTAL_GAP _/ 2); // Calculate drawing x position
             let y_start_drawing = WINDOW_HEIGHT - current_display_height.trunc(); // Draw from bottom up
 
             let color = rgb32(255, 0, 0); // Red bars
@@ -200,11 +205,11 @@ fun main() {
             let total_segment_height = BAR_SEGMENT_HEIGHT + BAR_GAP_HEIGHT;
 
             for (let var segment_y = WINDOW_HEIGHT - total_segment_height; segment_y >= y_start_drawing; segment_y = segment_y - total_segment_height) {
-                for (let var i = 0; i < bar_width; ++i) {
+                for (let var i = 0; i < bar_width_drawn; ++i) {
                     for (let var j = segment_y; j < segment_y + BAR_SEGMENT_HEIGHT; ++j) {
                         // Ensure j is within bounds and above y_start_drawing
                         if (j >= y_start_drawing && j < WINDOW_HEIGHT) {
-                            let pixel_idx = (j * WINDOW_WIDTH + (x + i));
+                            let pixel_idx = (j * WINDOW_WIDTH + (x_draw + i));
                             frame_buffer.write_u32(pixel_idx, color);
                         }
                     }
