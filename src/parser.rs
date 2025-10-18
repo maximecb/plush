@@ -448,10 +448,17 @@ fn parse_dict(
         };
 
         // Parse the field value
-        input.expect_token(":")?;
-        let field_expr = parse_expr(input, prog)?;
+        let field_expr = if input.match_token(":")? {
+            parse_expr(input, prog)?
+        } else {
+            ExprBox::new(
+                Expr::True,
+                pos
+            )
+        };
         pairs.push((field_name, field_expr));
 
+        // End of dict
         if input.match_token("}")? {
             break;
         }
@@ -1562,6 +1569,8 @@ mod tests
         parse_ok("let o = {};");
         parse_ok("let o = { x: 1, y: 2};");
         parse_ok("let o = { x: 1, y: 2, };");
+        parse_ok("let o = { x: 1, y: 2, z };");
+        parse_ok("let o = { A, B, C };");
 
         // With quoted field names
         parse_ok("let o = { 'x': 1, \"y\": 2, 'z w': 3 };");
