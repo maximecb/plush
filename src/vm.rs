@@ -1593,18 +1593,26 @@ impl Actor
                 }
 
                 Insn::get_index => {
-                    let idx = pop!().unwrap_usize();
+                    let idx = pop!();
                     let mut arr = pop!();
 
                     let val = match arr {
                         Value::Array(p) => {
                             let arr = unsafe { &mut *p };
+                            let idx = idx.unwrap_usize();
                             arr.get(idx)
                         }
 
                         Value::ByteArray(p) => {
                             let ba = unsafe { &mut *p };
+                            let idx = idx.unwrap_usize();
                             Value::from(ba.get(idx))
+                        }
+
+                        Value::Dict(p) => {
+                            let dict = unsafe { &mut *p };
+                            let key = idx.unwrap_rust_str();
+                            dict.get(key)
                         }
 
                         _ => panic!("expected array type in get_index")
@@ -2350,6 +2358,7 @@ mod tests
         eval_eq("let o = { x: 1, y: 2 }; return o.x;", Value::Int64(1));
         eval_eq("let o = { x: 1, y: 2 }; return o.x + o.y;", Value::Int64(3));
         eval_eq("let o = { 'x': 77 }; return o.x;", Value::Int64(77));
+        eval_eq("let o = { 'foo bar': 5 }; return o['foo bar'];", Value::Int64(5));
     }
 
     #[test]
