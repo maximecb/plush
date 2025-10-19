@@ -15,6 +15,7 @@ let HIDDEN_SIZE = 64;
 let LEARNING_RATE = 0.01;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
 let OUTPUT_SIZE = 1;
+let DETECTION_THRESHOLD = 0.75;
 
 // Helper function to convert RGB values to a 32-bit color
 fun rgb32(r, g, b) {
@@ -337,11 +338,12 @@ fun rand_int(min, max) {
     return min + (lcg_seed % (max - min + 1));
 }
 
-fun training_actor() {
+fun training_actor(detection_actor_id) {
     rand_init($time_current_ms());
     let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
 
     let training_data = [];
+    let var iteration_count = 0;
 
     while (true) {
         let msg = $actor_poll();
@@ -363,15 +365,50 @@ fun training_actor() {
             update(mlp, grads, LEARNING_RATE);
 
             let loss = (y_pred[0] - y_true[0]).pow(2.0);
-            $println("Loss: " + loss.to_s());
+
+            //if (iteration_count % 2 == 0) {
+            //    $println("Loss: " + loss.format_decimals(9));
+            //}
+
+            iteration_count = iteration_count + 1;
+            if (iteration_count % 100 == 0) {
+                // Send the current model to the detection actor
+                $println("Sending model update to detection actor.");
+                $println("Loss: " + loss.format_decimals(9));
+                $actor_send(detection_actor_id, mlp);
+            }
         }
 
         $actor_sleep(10);
     }
 }
 
+fun detection_actor() {
+    let var current_mlp = nil;
+
+    while (true) {
+        let msg = $actor_recv(); // Blocks until a message is received
+
+        if (msg instanceof MLP) {
+            // Received a new MLP model from the training actor
+            current_mlp = msg;
+            //$println("Detection actor received new MLP model.");
+        } else if (current_mlp != nil) {
+            // Received magnitudes from the main actor
+            let magnitudes = msg;
+            let x = flatten_and_pad([magnitudes], MAX_FRAMES, NUM_MEL_BINS);
+            let y_pred = current_mlp.forward(x);
+
+            if (y_pred[0] > DETECTION_THRESHOLD) {
+                $println("DETECTED");
+            }
+        }
+    }
+}
+
 fun main() {
-    let trainer_id = $actor_spawn(training_actor);
+    let detector_id = $actor_spawn(detection_actor);
+    let trainer_id = $actor_spawn(|| training_actor(detector_id));
 
     let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Word Detector", 0);
     let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
@@ -395,6 +432,7 @@ fun main() {
             fft(real_parts, imag_parts, false);
             let magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
             recorded_frames.push(magnitudes);
+            $actor_send(detector_id, magnitudes);
         }
 
         frame_buffer.zero_fill();
