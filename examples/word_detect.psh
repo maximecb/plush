@@ -210,26 +210,6 @@ fun update(mlp, grads, learning_rate) {
     let d_W2 = grads[2];
     let d_b2 = grads[3];
 
-    /*
-    // Apply gradient clipping
-    for (let var r = 0; r < d_W1.len; ++r) {
-        for (let var c = 0; c < d_W1[0].len; ++c) {
-            d_W1[r][c] = d_W1[r][c].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
-        }
-    }
-    for (let var i = 0; i < d_b1.len; ++i) {
-        d_b1[i] = d_b1[i].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
-    }
-    for (let var r = 0; r < d_W2.len; ++r) {
-        for (let var c = 0; c < d_W2[0].len; ++c) {
-            d_W2[r][c] = d_W2[r][c].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
-        }
-    }
-    for (let var i = 0; i < d_b2.len; ++i) {
-        d_b2[i] = d_b2[i].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
-    }
-    */
-
     mat_update(mlp.W1, d_W1, learning_rate);
     vec_update(mlp.b1, d_b1, learning_rate);
     mat_update(mlp.W2, d_W2, learning_rate);
@@ -501,7 +481,6 @@ fun training_actor(detection_actor_id) {
             if (iteration_count % 100 == 0) {
                 // Send the current model to the detection actor
                 //$println("Sending model update to detection actor.");
-                //$println("Loss: " + loss.format_decimals(9));
                 $actor_send(detection_actor_id, mlp);
             }
         }
@@ -520,7 +499,6 @@ fun detection_actor(beep_actor_id) {
         if (msg instanceof MLP) {
             // Received a new MLP model from the training actor
             current_mlp = msg;
-            //$println("Detection actor received new MLP model.");
             continue;
         }
 
@@ -559,11 +537,6 @@ fun detection_actor(beep_actor_id) {
 
 fun beep_actor() {
     let audio_out_id = $audio_open_output(SAMPLE_RATE, NUM_CHANNELS);
-
-    if (audio_out_id == nil) {
-        $println("Failed to open audio output device.");
-        return;
-    }
 
     let var is_recording = false;
     let var last_beep_time = 0;
