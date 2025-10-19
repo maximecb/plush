@@ -10,30 +10,213 @@ let PI = 3.141592653589793;
 let MIN_FREQ = 300.0;
 let MAX_FREQ = 3500.0;
 
+let MAX_FRAMES = 64;
+let HIDDEN_SIZE = 64;
+let LEARNING_RATE = 0.01;
+let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
+let OUTPUT_SIZE = 1;
+
 // Helper function to convert RGB values to a 32-bit color
 fun rgb32(r, g, b) {
     // The alpha channel is set to 0xFF (fully opaque)
     return 0xFF000000 | (r << 16) | (g << 8) | b;
 }
 
+// --- Pseudo-Random Number Generator (LCG) ---
+let var lcg_seed = 1;
+
+fun rand_init(seed) {
+    lcg_seed = seed & 0x7FFFFFFF;
+}
+
+fun rand_float() {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (lcg_seed.to_f() / 0x7FFFFFFF.to_f()) - 0.5;
+}
+
+fun random_matrix(rows, cols) {
+    let m = Array.with_size(rows, nil);
+    for (let var r = 0; r < rows; ++r) {
+        let row = Array.with_size(cols, 0.0);
+        for (let var c = 0; c < cols; ++c) {
+            row[c] = rand_float();
+        }
+        m[r] = row;
+    }
+    return m;
+}
+
+fun random_vector(size) {
+    let v = Array.with_size(size, 0.0);
+    for (let var i = 0; i < size; ++i) {
+        v[i] = rand_float();
+    }
+    return v;
+}
+
+// --- Matrix/Vector Math ---
+fun mat_vec_mult(m, v) {
+    let rows = m.len;
+    let cols = m[0].len;
+    assert(cols == v.len);
+    let result = Array.with_size(rows, 0.0);
+    for (let var r = 0; r < rows; ++r) {
+        let var sum = 0.0;
+        for (let var c = 0; c < cols; ++c) {
+            sum = sum + m[r][c] * v[c];
+        }
+        result[r] = sum;
+    }
+    return result;
+}
+
+fun vec_add(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] + v2[i];
+    }
+    return result;
+}
+
+fun vec_sub(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] - v2[i];
+    }
+    return result;
+}
+
+fun vec_elem_mult(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] * v2[i];
+    }
+    return result;
+}
+
+fun vec_outer_prod(v1, v2) {
+    let m = Array.with_size(v1.len, nil);
+    for (let var r = 0; r < v1.len; ++r) {
+        let row = Array.with_size(v2.len, 0.0);
+        for (let var c = 0; c < v2.len; ++c) {
+            row[c] = v1[r] * v2[c];
+        }
+        m[r] = row;
+    }
+    return m;
+}
+
+fun mat_transpose(m) {
+    let rows = m.len;
+    let cols = m[0].len;
+    let t = Array.with_size(cols, nil);
+    for (let var c = 0; c < cols; ++c) {
+        let row = Array.with_size(rows, 0.0);
+        for (let var r = 0; r < rows; ++r) {
+            row[r] = m[r][c];
+        }
+        t[c] = row;
+    }
+    return t;
+}
+
+fun mat_update(m, grad, learning_rate) {
+    let rows = m.len;
+    let cols = m[0].len;
+    for (let var r = 0; r < rows; ++r) {
+        for (let var c = 0; c < cols; ++c) {
+            m[r][c] = m[r][c] - learning_rate * grad[r][c];
+        }
+    }
+}
+
+fun vec_update(v, grad, learning_rate) {
+    for (let var i = 0; i < v.len; ++i) {
+        v[i] = v[i] - learning_rate * grad[i];
+    }
+}
+
+// --- Activation Functions ---
+fun relu(v) {
+    let result = Array.with_size(v.len, 0.0);
+    for (let var i = 0; i < v.len; ++i) {
+        result[i] = v[i].max(0.0);
+    }
+    return result;
+}
+
+fun relu_derivative(v) {
+    let result = Array.with_size(v.len, 0.0);
+    for (let var i = 0; i < v.len; ++i) {
+        if (v[i] > 0.0) {
+            result[i] = 1.0;
+        } else {
+            result[i] = 0.0;
+        }
+    }
+    return result;
+}
+
+// --- MLP Definition ---
+class MLP {
+    init(self, input_size, hidden_size, output_size) {
+        self.W1 = random_matrix(hidden_size, input_size);
+        self.b1 = random_vector(hidden_size);
+        self.W2 = random_matrix(output_size, hidden_size);
+        self.b2 = random_vector(output_size);
+        self.z1 = nil;
+        self.a1 = nil;
+    }
+
+    forward(self, x) {
+        self.z1 = vec_add(mat_vec_mult(self.W1, x), self.b1);
+        self.a1 = relu(self.z1);
+        let z2 = vec_add(mat_vec_mult(self.W2, self.a1), self.b2);
+        let y_pred = z2;
+        return y_pred;
+    }
+
+    backward(self, x, y_true, y_pred) {
+        let d_loss = vec_sub(y_pred, y_true);
+        let d_W2 = vec_outer_prod(d_loss, self.a1);
+        let d_b2 = d_loss;
+        let W2_T = mat_transpose(self.W2);
+        let d_a1 = mat_vec_mult(W2_T, d_loss);
+        let d_z1 = vec_elem_mult(d_a1, relu_derivative(self.z1));
+        let d_W1 = vec_outer_prod(d_z1, x);
+        let d_b1 = d_z1;
+        return [d_W1, d_b1, d_W2, d_b2];
+    }
+}
+
+fun update(mlp, grads, learning_rate) {
+    let d_W1 = grads[0];
+    let d_b1 = grads[1];
+    let d_W2 = grads[2];
+    let d_b2 = grads[3];
+
+    mat_update(mlp.W1, d_W1, learning_rate);
+    vec_update(mlp.b1, d_b1, learning_rate);
+    mat_update(mlp.W2, d_W2, learning_rate);
+    vec_update(mlp.b2, d_b2, learning_rate);
+}
+
 // Function to perform in-place iterative FFT (Cooley-Tukey)
 fun fft(real_parts, imag_parts, inverse) {
-    let n = real_parts.len _/ 4; // Number of complex samples (each float32 is 4 bytes)
+    let n = real_parts.len _/ 4;
     if (n == 0) {
         return;
     }
-
-    // Bit-reversal permutation
     let var i = 0;
     let var j = 0;
     while (i < n) {
         if (j > i) {
-            // Swap real parts
             let temp_re = real_parts.read_f32(i);
             real_parts.write_f32(i, real_parts.read_f32(j));
             real_parts.write_f32(j, temp_re);
-
-            // Swap imaginary parts
             let temp_im = imag_parts.read_f32(i);
             imag_parts.write_f32(i, imag_parts.read_f32(j));
             imag_parts.write_f32(j, temp_im);
@@ -46,8 +229,6 @@ fun fft(real_parts, imag_parts, inverse) {
         j = j + m;
         i = i + 1;
     }
-
-    // Cooley-Tukey butterfly operations
     let var len = 2;
     while (len <= n) {
         let var ang = 2.0 * PI / len;
@@ -56,7 +237,6 @@ fun fft(real_parts, imag_parts, inverse) {
         }
         let wlen_re = ang.cos();
         let wlen_im = ang.sin();
-
         let var i = 0;
         while (i < n) {
             let var w_re = 1.0;
@@ -65,30 +245,24 @@ fun fft(real_parts, imag_parts, inverse) {
             while (j < len _/ 2) {
                 let u_re = real_parts.read_f32(i + j);
                 let u_im = imag_parts.read_f32(i + j);
-
                 let x_half_re = real_parts.read_f32(i + j + len _/ 2);
                 let x_half_im = imag_parts.read_f32(i + j + len _/ 2);
                 let v_re = x_half_re * w_re - x_half_im * w_im;
                 let v_im = x_half_re * w_im + x_half_im * w_re;
-
                 real_parts.write_f32(i + j, u_re + v_re);
                 imag_parts.write_f32(i + j, u_im + v_im);
-
                 real_parts.write_f32(i + j + len _/ 2, u_re - v_re);
                 imag_parts.write_f32(i + j + len _/ 2, u_im - v_im);
-
                 let next_w_re = w_re * wlen_re - w_im * wlen_im;
                 let next_w_im = w_re * wlen_im + w_im * wlen_re;
                 w_re = next_w_re;
                 w_im = next_w_im;
-
                 j = j + 1;
             }
             i = i + len;
         }
         len = len * 2;
     }
-
     if (inverse) {
         for (let var k = 0; k < n; ++k) {
             real_parts.write_f32(k, real_parts.read_f32(k) / n);
@@ -97,7 +271,6 @@ fun fft(real_parts, imag_parts, inverse) {
     }
 }
 
-// Function to apply a Hanning window to a buffer
 fun hanning_window(buffer) {
     let n = buffer.len _/ 4;
     for (let var i = 0; i < n; ++i) {
@@ -107,30 +280,24 @@ fun hanning_window(buffer) {
 }
 
 fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sample_rate) {
-    // This function could be optimized by pre-calculating and caching the fft_bins array.
     let fft_bins = Array.with_size(num_bins + 2, 0);
     for (let var i = 0; i < fft_bins.len; ++i) {
         let freq = min_freq * (max_freq/min_freq).pow(i.to_f() / (num_bins + 1).to_f());
         fft_bins[i] = (freq * fft_size / sample_rate).floor();
     }
-
     let magnitudes = Array.with_size(num_bins, 0.0);
     for (let var band_idx = 0; band_idx < num_bins; ++band_idx) {
         let var band_magnitude = 0.0;
         let start_bin = fft_bins[band_idx];
         let center_bin = fft_bins[band_idx + 1];
         let end_bin = fft_bins[band_idx + 2];
-
         let max_bin = (fft_size / 2) - 1;
         if (start_bin > max_bin) continue;
-
         for (let var bin = start_bin; bin <= end_bin; ++bin) {
             if (bin > max_bin) break;
-
             let re = real_parts.read_f32(bin);
             let im = imag_parts.read_f32(bin);
             let magnitude = (re * re + im * im).sqrt();
-
             let var weight = 0.0;
             if (bin >= start_bin && bin <= center_bin) {
                 if (center_bin - start_bin > 0) {
@@ -147,11 +314,62 @@ fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sam
         }
         magnitudes[band_idx] = band_magnitude;
     }
-
     return magnitudes;
 }
 
+fun flatten_and_pad(frames, max_frames, num_bins) {
+    let input_size = max_frames * num_bins;
+    let flat = Array.with_size(input_size, 0.0);
+    let num_frames = frames.len.min(max_frames);
+    for (let var i = 0; i < num_frames; ++i) {
+        let frame = frames[i];
+        for (let var j = 0; j < num_bins; ++j) {
+            flat[i * num_bins + j] = frame[j];
+        }
+    }
+    return flat;
+}
+
+fun rand_int(min, max) {
+    return min + (rand_float() * (max - min)).floor();
+}
+
+fun training_actor() {
+    rand_init($time_current_ms());
+    let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
+
+    let training_data = [];
+
+    while (true) {
+        let msg = $actor_poll();
+        if (msg != nil) {
+            training_data.push(msg);
+        }
+
+        if (training_data.len > 0) {
+            let idx = rand_int(0, training_data.len);
+            let sample = training_data[idx];
+            let frames = sample[0];
+            let label = sample[1];
+
+            let x = flatten_and_pad(frames, MAX_FRAMES, NUM_MEL_BINS);
+            let y_true = [label];
+
+            let y_pred = mlp.forward(x);
+            let grads = mlp.backward(x, y_true, y_pred);
+            update(mlp, grads, LEARNING_RATE);
+
+            let loss = (y_pred[0] - y_true[0]).pow(2.0);
+            $println("Loss: " + loss.to_s());
+        }
+
+        $actor_sleep(10);
+    }
+}
+
 fun main() {
+    let trainer_id = $actor_spawn(training_actor);
+
     let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Word Detector", 0);
     let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
 
@@ -165,8 +383,6 @@ fun main() {
     let var recording = false;
     let var waiting_for_label = false;
     let var recorded_frames = [];
-    let training_pos = [];
-    let training_neg = [];
 
     while (running) {
         if (recording) {
@@ -178,10 +394,8 @@ fun main() {
             recorded_frames.push(magnitudes);
         }
 
-        // Basic visualization
         frame_buffer.zero_fill();
         if (recording) {
-            // Draw a red circle to indicate recording
             let cx = WINDOW_WIDTH - 30;
             let cy = 30;
             let radius = 20;
@@ -196,7 +410,6 @@ fun main() {
                 }
             }
         } else if (waiting_for_label) {
-            // Draw a yellow circle to indicate waiting for label
             let cx = WINDOW_WIDTH - 30;
             let cy = 30;
             let radius = 20;
@@ -211,12 +424,6 @@ fun main() {
                 }
             }
         }
-
-        // Display counts
-        // Note: This part is not implemented yet, we need a font rendering utility
-        // $draw_text("Positive: " + training_pos.len.to_s(), 10, 10, rgb32(0, 255, 0));
-        // $draw_text("Negative: " + training_neg.len.to_s(), 10, 30, rgb32(255, 0, 0));
-
 
         $window_draw_frame(window_id, frame_buffer);
 
@@ -239,13 +446,13 @@ fun main() {
                     }
                 } else if (waiting_for_label) {
                     if (event.key == "P") {
-                        training_pos.push(recorded_frames);
-                        $println("Saved as positive example. Total positive: " + training_pos.len.to_s());
+                        $println("Saved as positive example.");
+                        $actor_send(trainer_id, [recorded_frames, 1.0]);
                         recorded_frames = [];
                         waiting_for_label = false;
                     } else if (event.key == "N") {
-                        training_neg.push(recorded_frames);
-                        $println("Saved as negative example. Total negative: " + training_neg.len.to_s());
+                        $println("Saved as negative example.");
+                        $actor_send(trainer_id, [recorded_frames, 0.0]);
                         recorded_frames = [];
                         waiting_for_label = false;
                     }

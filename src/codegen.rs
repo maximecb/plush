@@ -550,8 +550,6 @@ fn gen_dict_expr(
         });
     }
 
-    code.push(Insn::dup);
-
     Ok(())
 }
 
