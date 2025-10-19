@@ -16,7 +16,7 @@ let LEARNING_RATE = 0.01;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
 let OUTPUT_SIZE = 1;
 let DETECTION_THRESHOLD = 0.92;
-let NOISE_MAGNITUDE = 0.04;
+let NOISE_MAGNITUDE = 0.10;
 let GRADIENT_CLIP_THRESHOLD = 1.0;
 let MAX_ZERO_FRAMES_TO_ADD = 10;
 
@@ -435,7 +435,7 @@ fun training_actor(detection_actor_id) {
             let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
 
             // Apply random scaling for data augmentation
-            let scale_factor = 1.0 + (rand_float() * 0.25);
+            let scale_factor = 1.0 + (rand_float() * 0.30);
             for (let var i = 0; i < x.len; ++i) {
                 x[i] = x[i] * scale_factor;
             }
@@ -472,7 +472,7 @@ fun training_actor(detection_actor_id) {
     }
 }
 
-fun detection_actor() {
+fun detection_actor(beep_actor_id) {
     let var current_mlp = nil;
     let var frame_buffer = []; // To store recent magnitudes
 
@@ -513,13 +513,96 @@ fun detection_actor() {
 
             if (y_pred[0] > DETECTION_THRESHOLD) {
                 $println("DETECTED");
+                $actor_send(beep_actor_id, "detected");
             }
         }
     }
 }
 
+fun beep_actor() {
+    let audio_out_id = $audio_open_output(SAMPLE_RATE, NUM_CHANNELS);
+
+    if (audio_out_id == nil) {
+        $println("Failed to open audio output device.");
+        return;
+    }
+
+    let var last_beep_time = 0;
+    let cooldown_ms = 2000;
+
+    let beep_duration_ms = 80;
+    let pause_duration_ms = 30;
+    let beep_freq = 1400.0;
+
+    let beep_duration_samples = (SAMPLE_RATE * beep_duration_ms _/ 1000);
+    let pause_duration_samples = (SAMPLE_RATE * pause_duration_ms _/ 1000);
+
+    let var beep_state = 0; // 0:idle, 1:beep1, 2:pause1, 3:beep2, 4:pause2, 5:beep3
+    let var samples_in_state = 0;
+    let var time_in_beep = 0;
+
+    loop {
+        let msg = $actor_recv();
+
+        if (msg == "detected") {
+            let current_time = $time_current_ms();
+            if (current_time - last_beep_time > cooldown_ms) {
+                last_beep_time = current_time;
+                if (beep_state == 0) { // Start only if idle
+                    beep_state = 1;
+                    samples_in_state = 0;
+                    time_in_beep = 0;
+                }
+            }
+            continue;
+        }
+
+        if (msg instanceof AudioNeeded) {
+            let num_samples_needed = msg.num_samples;
+            let samples = ByteArray.with_size(num_samples_needed * 4);
+
+            for (let var i = 0; i < num_samples_needed; ++i) {
+                let var sample_val = 0.0;
+
+                if (beep_state == 1 || beep_state == 3 || beep_state == 5) { // Beeping
+                    let period_samples = (SAMPLE_RATE.to_f() / beep_freq).trunc();
+                    let pos_in_period = time_in_beep % period_samples;
+                    let half_period = (period_samples / 2).trunc();
+
+                    if (pos_in_period < half_period) {
+                        sample_val = -0.5 + (pos_in_period.to_f() / half_period.to_f());
+                    } else {
+                        sample_val = 0.5 - ((pos_in_period - half_period).to_f() / half_period.to_f());
+                    }
+                    time_in_beep = time_in_beep + 1;
+
+                    samples_in_state = samples_in_state + 1;
+                    if (samples_in_state >= beep_duration_samples) {
+                        beep_state = beep_state + 1; // to pause or idle
+                        samples_in_state = 0;
+                        if (beep_state == 6) { beep_state = 0; } // End of sequence
+                    }
+                }
+                else if (beep_state == 2 || beep_state == 4) { // Pausing
+                    samples_in_state = samples_in_state + 1;
+                    if (samples_in_state >= pause_duration_samples) {
+                        beep_state = beep_state + 1; // to next beep
+                        samples_in_state = 0;
+                        time_in_beep = 0; // Reset phase for next beep
+                    }
+                }
+
+                samples.write_f32(i, sample_val);
+            }
+
+            $audio_write_samples(audio_out_id, samples);
+        }
+    }
+}
+
 fun main() {
-    let detector_id = $actor_spawn(detection_actor);
+    let beep_actor_id = $actor_spawn(beep_actor);
+    let detector_id = $actor_spawn(|| detection_actor(beep_actor_id));
     let trainer_id = $actor_spawn(|| training_actor(detector_id));
 
     let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Word Detector", 0);
