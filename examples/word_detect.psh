@@ -12,7 +12,7 @@ let MAX_FREQ = 3500.0;
 
 let MAX_FRAMES = 64;
 let HIDDEN_SIZE = 64;
-let LEARNING_RATE = 0.001;
+let LEARNING_RATE = 0.01;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
 let OUTPUT_SIZE = 1;
 let DETECTION_THRESHOLD = 0.9;
@@ -466,7 +466,7 @@ fun detection_actor() {
     let var frame_buffer = []; // To store recent magnitudes
 
     while (true) {
-        let msg = $actor_recv(); // Blocks until a message is received
+        let msg = $actor_poll(); // Blocks until a message is received
 
         if (msg instanceof MLP) {
             // Received a new MLP model from the training actor
@@ -475,30 +475,28 @@ fun detection_actor() {
             continue;
         }
 
-        if (current_mlp == nil) {
-            continue;
-        }
+        if (msg instanceof Array) {
+            // Received magnitudes from the main actor
+            let magnitudes = msg;
+            frame_buffer.push(magnitudes);
 
-        // Received magnitudes from the main actor
-        let magnitudes = msg;
-        frame_buffer.push(magnitudes);
-
-        // Keep only the latest MAX_FRAMES
-        if (frame_buffer.len > MAX_FRAMES) {
-            // If buffer is full, remove the oldest frame (at index 0)
-            // and add the new one at the end.
-            // Plush arrays don't have a direct slice/shift, so we'll rebuild.
-            let new_frame_buffer = Array.with_size(MAX_FRAMES, nil);
-            for (let var i = 0; i < MAX_FRAMES - 1; ++i) {
-                new_frame_buffer[i] = frame_buffer[i + 1];
+            // Keep only the latest MAX_FRAMES
+            if (frame_buffer.len > MAX_FRAMES) {
+                // If buffer is full, remove the oldest frame (at index 0)
+                // and add the new one at the end.
+                // Plush arrays don't have a direct slice/shift, so we'll rebuild.
+                let new_frame_buffer = Array.with_size(MAX_FRAMES, nil);
+                for (let var i = 0; i < MAX_FRAMES - 1; ++i) {
+                    new_frame_buffer[i] = frame_buffer[i + 1];
+                }
+                new_frame_buffer[MAX_FRAMES - 1] = magnitudes;
+                frame_buffer = new_frame_buffer;
             }
-            new_frame_buffer[MAX_FRAMES - 1] = magnitudes;
-            frame_buffer = new_frame_buffer;
+            assert(frame_buffer.len <= MAX_FRAMES);
         }
-        assert(frame_buffer.len <= MAX_FRAMES);
 
         // Only make a prediction if we have enough frames
-        if (frame_buffer.len == MAX_FRAMES) {
+        if (msg == nil && current_mlp != nil && frame_buffer.len == MAX_FRAMES) {
             let x = flatten_and_pad(frame_buffer, MAX_FRAMES, NUM_MEL_BINS);
             let y_pred = current_mlp.forward(x);
 
