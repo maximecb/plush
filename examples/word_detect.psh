@@ -343,12 +343,16 @@ fun flatten_and_pad(frames, max_frames, num_bins) {
     let input_size = max_frames * num_bins;
     let flat = Array.with_size(input_size, 0.0);
     let num_frames = frames.len.min(max_frames);
+
+    // Write frames in reverse order, so the most recent frames are at the end of the flattened array
     for (let var i = 0; i < num_frames; ++i) {
-        let frame = frames[i];
+        let frame = frames[num_frames - 1 - i]; // Get frames in reverse chronological order
+        let flat_start_idx = (max_frames - 1 - i) * num_bins; // Calculate target index in flat array
         for (let var j = 0; j < num_bins; ++j) {
-            flat[i * num_bins + j] = frame[j];
+            flat[flat_start_idx + j] = frame[j];
         }
     }
+
     return flat;
 }
 
