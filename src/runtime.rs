@@ -348,6 +348,8 @@ pub fn get_class_id(val: Value) -> ClassId
         }
 
         Value::Nil => NIL_ID,
+        Value::True => BOOL_ID,
+        Value::False => BOOL_ID,
         Value::Int64(_) => INT64_ID,
         Value::Float64(_) => FLOAT64_ID,
         Value::String(_) => STRING_ID,

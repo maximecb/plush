@@ -2437,7 +2437,9 @@ mod tests
         eval_eq("class F {} class G {} let o = F(); return o instanceof G;", Value::False);
         eval_eq("class F {} return F() instanceof F;", Value::True);
 
-        // Basic runtime classes
+        // Core runtime classes
+        eval_eq("return nil instanceof Int64;", Value::False);
+        eval_eq("return true instanceof Int64;", Value::False);
         eval_eq("return 5 instanceof Int64;", Value::True);
         eval_eq("return 77 instanceof String;", Value::False);
         eval_eq("return 'foo' instanceof String;", Value::True);
