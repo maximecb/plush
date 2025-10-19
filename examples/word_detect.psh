@@ -18,6 +18,7 @@ let OUTPUT_SIZE = 1;
 let DETECTION_THRESHOLD = 0.9;
 let NOISE_MAGNITUDE = 0.03;
 let GRADIENT_CLIP_THRESHOLD = 1.0;
+let MAX_ZERO_FRAMES_TO_ADD = 20;
 
 // Helper function to convert RGB values to a 32-bit color
 fun rgb32(r, g, b) {
@@ -404,6 +405,17 @@ fun training_actor(detection_actor_id) {
                     truncated_frames[i] = frames[start_idx + i];
                 }
                 current_frames = truncated_frames;
+            }
+
+            // For negative examples, randomly append zero frames
+            if (label == 0.0 && MAX_ZERO_FRAMES_TO_ADD > 0) {
+                let num_zero_frames = rand_int(0, MAX_ZERO_FRAMES_TO_ADD);
+                if (num_zero_frames > 0) {
+                    let zero_frame = Array.with_size(NUM_MEL_BINS, 0.0);
+                    for (let var i = 0; i < num_zero_frames; ++i) {
+                        current_frames.push(zero_frame);
+                    }
+                }
             }
 
             let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
