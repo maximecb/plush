@@ -16,7 +16,7 @@ let LEARNING_RATE = 0.01;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
 let OUTPUT_SIZE = 1;
 let DETECTION_THRESHOLD = 0.92;
-let NOISE_MAGNITUDE = 0.10;
+let NOISE_MAGNITUDE = 0.12;
 let GRADIENT_CLIP_THRESHOLD = 1.0;
 let MAX_ZERO_FRAMES_TO_ADD = 10;
 
@@ -432,10 +432,21 @@ fun training_actor(detection_actor_id) {
                 }
             }
 
+            // With a small probability, for negative examples only, randomly permute the frames
+            if (label == 0.0 && current_frames.len > 1 && (rand_float() + 0.5) < 0.30) {
+                let n = current_frames.len;
+                for (let var i = n - 1; i > 0; --i) {
+                    let j = rand_int(0, i);
+                    let temp = current_frames[i];
+                    current_frames[i] = current_frames[j];
+                    current_frames[j] = temp;
+                }
+            }
+
             let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
 
             // Apply random scaling for data augmentation
-            let scale_factor = 1.0 + (rand_float() * 0.30);
+            let scale_factor = 1.0 + (rand_float() * 0.35);
             for (let var i = 0; i < x.len; ++i) {
                 x[i] = x[i] * scale_factor;
             }
