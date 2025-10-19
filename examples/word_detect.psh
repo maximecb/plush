@@ -15,7 +15,9 @@ let HIDDEN_SIZE = 64;
 let LEARNING_RATE = 0.01;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
 let OUTPUT_SIZE = 1;
-let DETECTION_THRESHOLD = 0.75;
+let DETECTION_THRESHOLD = 0.9;
+let NOISE_MAGNITUDE = 0.03;
+let GRADIENT_CLIP_THRESHOLD = 1.0;
 
 // Helper function to convert RGB values to a 32-bit color
 fun rgb32(r, g, b) {
@@ -199,6 +201,24 @@ fun update(mlp, grads, learning_rate) {
     let d_W2 = grads[2];
     let d_b2 = grads[3];
 
+    // Apply gradient clipping
+    for (let var r = 0; r < d_W1.len; ++r) {
+        for (let var c = 0; c < d_W1[0].len; ++c) {
+            d_W1[r][c] = d_W1[r][c].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
+        }
+    }
+    for (let var i = 0; i < d_b1.len; ++i) {
+        d_b1[i] = d_b1[i].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
+    }
+    for (let var r = 0; r < d_W2.len; ++r) {
+        for (let var c = 0; c < d_W2[0].len; ++c) {
+            d_W2[r][c] = d_W2[r][c].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
+        }
+    }
+    for (let var i = 0; i < d_b2.len; ++i) {
+        d_b2[i] = d_b2[i].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
+    }
+
     mat_update(mlp.W1, d_W1, learning_rate);
     vec_update(mlp.b1, d_b1, learning_rate);
     mat_update(mlp.W2, d_W2, learning_rate);
@@ -344,11 +364,19 @@ fun training_actor(detection_actor_id) {
 
     let training_data = [];
     let var iteration_count = 0;
+    let var positive_examples_count = 0;
+    let var negative_examples_count = 0;
 
     while (true) {
         let msg = $actor_poll();
         if (msg != nil) {
             training_data.push(msg);
+            if (msg[1] == 1.0) {
+                positive_examples_count = positive_examples_count + 1;
+            } else {
+                negative_examples_count = negative_examples_count + 1;
+            }
+            $println("Positive samples: " + positive_examples_count.to_s() + ", negative samples: " + negative_examples_count.to_s());
         }
 
         if (training_data.len > 0) {
@@ -357,14 +385,41 @@ fun training_actor(detection_actor_id) {
             let frames = sample[0];
             let label = sample[1];
 
-            let x = flatten_and_pad(frames, MAX_FRAMES, NUM_MEL_BINS);
+            let var current_frames = frames;
+
+            // For negative examples, randomly truncate the frames
+            if (label == 0.0 && frames.len > 1) {
+                let max_len = frames.len;
+                let var start_idx = rand_int(0, max_len - 1);
+                let var end_idx = rand_int(start_idx, max_len - 1);
+                if (start_idx == end_idx) {
+                    // Ensure at least one frame is selected
+                    end_idx = start_idx + 1;
+                    if (end_idx > max_len) end_idx = max_len;
+                }
+
+                let truncated_len = end_idx - start_idx;
+                let truncated_frames = Array.with_size(truncated_len, nil);
+                for (let var i = 0; i < truncated_len; ++i) {
+                    truncated_frames[i] = frames[start_idx + i];
+                }
+                current_frames = truncated_frames;
+            }
+
+            let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
+
+            // Add some noise for data augmentation
+            for (let var i = 0; i < x.len; ++i) {
+                x[i] = x[i] + rand_float() * NOISE_MAGNITUDE;
+            }
             let y_true = [label];
 
             let y_pred = mlp.forward(x);
             let grads = mlp.backward(x, y_true, y_pred);
             update(mlp, grads, LEARNING_RATE);
 
-            let loss = (y_pred[0] - y_true[0]).pow(2.0);
+            let var loss = (y_pred[0] - y_true[0]).pow(2.0);
+            //$println("Loss: " + loss.to_s()); // Commented out for less console spam
 
             if (iteration_count % 25 == 0) {
                 $println("Loss: " + loss.format_decimals(9));
