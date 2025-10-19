@@ -424,10 +424,17 @@ fun training_actor(detection_actor_id) {
 
             let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
 
+            // Apply random scaling for data augmentation
+            let scale_factor = 1.0 + (rand_float() * 0.2);
+            for (let var i = 0; i < x.len; ++i) {
+                x[i] = x[i] * scale_factor;
+            }
+
             // Add some noise for data augmentation
             for (let var i = 0; i < x.len; ++i) {
                 x[i] = x[i] + rand_float() * NOISE_MAGNITUDE;
             }
+
             let y_true = [label];
 
             let y_pred = mlp.forward(x);
