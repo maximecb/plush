@@ -18,7 +18,7 @@ let OUTPUT_SIZE = 1;
 let DETECTION_THRESHOLD = 0.92;
 let NOISE_MAGNITUDE = 0.04;
 let GRADIENT_CLIP_THRESHOLD = 1.0;
-let MAX_ZERO_FRAMES_TO_ADD = 24;
+let MAX_ZERO_FRAMES_TO_ADD = 10;
 
 // Helper function to convert RGB values to a 32-bit color
 fun rgb32(r, g, b) {
@@ -164,6 +164,14 @@ fun relu_derivative(v) {
     return result;
 }
 
+fun sigmoid(v) {
+    let result = Array.with_size(v.len, 0.0);
+    for (let var i = 0; i < v.len; ++i) {
+        result[i] = 1.0 / (1.0 + (-v[i]).exp());
+    }
+    return result;
+}
+
 // --- MLP Definition ---
 class MLP {
     init(self, input_size, hidden_size, output_size) {
@@ -179,7 +187,7 @@ class MLP {
         self.z1 = vec_add(mat_vec_mult(self.W1, x), self.b1);
         self.a1 = relu(self.z1);
         let z2 = vec_add(mat_vec_mult(self.W2, self.a1), self.b2);
-        let y_pred = z2;
+        let y_pred = sigmoid(z2);
         return y_pred;
     }
 
@@ -202,6 +210,7 @@ fun update(mlp, grads, learning_rate) {
     let d_W2 = grads[2];
     let d_b2 = grads[3];
 
+    /*
     // Apply gradient clipping
     for (let var r = 0; r < d_W1.len; ++r) {
         for (let var c = 0; c < d_W1[0].len; ++c) {
@@ -219,6 +228,7 @@ fun update(mlp, grads, learning_rate) {
     for (let var i = 0; i < d_b2.len; ++i) {
         d_b2[i] = d_b2[i].max(-GRADIENT_CLIP_THRESHOLD).min(GRADIENT_CLIP_THRESHOLD);
     }
+    */
 
     mat_update(mlp.W1, d_W1, learning_rate);
     vec_update(mlp.b1, d_b1, learning_rate);
@@ -441,7 +451,9 @@ fun training_actor(detection_actor_id) {
             let grads = mlp.backward(x, y_true, y_pred);
             update(mlp, grads, LEARNING_RATE);
 
-            let var loss = (y_pred[0] - y_true[0]).pow(2.0);
+            let p = y_pred[0].max(1e-9).min(1.0 - 1e-9);
+            let y = y_true[0];
+            let var loss = -(y * p.ln() + (1.0 - y) * (1.0 - p).ln());
 
             if (iteration_count % 1 == 0) {
                 $println("Loss: " + loss.format_decimals(9) + ", dataset size: " + training_data.len.to_s());
@@ -450,8 +462,8 @@ fun training_actor(detection_actor_id) {
             iteration_count = iteration_count + 1;
             if (iteration_count % 100 == 0) {
                 // Send the current model to the detection actor
-                $println("Sending model update to detection actor.");
-                $println("Loss: " + loss.format_decimals(9));
+                //$println("Sending model update to detection actor.");
+                //$println("Loss: " + loss.format_decimals(9));
                 $actor_send(detection_actor_id, mlp);
             }
         }
@@ -470,7 +482,7 @@ fun detection_actor() {
         if (msg instanceof MLP) {
             // Received a new MLP model from the training actor
             current_mlp = msg;
-            $println("Detection actor received new MLP model.");
+            //$println("Detection actor received new MLP model.");
             continue;
         }
 
