@@ -135,6 +135,17 @@ fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> Value
     Value::Float64(v.powf(exponent))
 }
 
+fn float64_exp(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    Value::Float64(v.exp())
+}
+
+fn float64_ln(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    Value::Float64(v.ln())
+}
 
 /// Create a single-character string from a codepoint integer value
 fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> Value
@@ -252,6 +263,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static FLOAT64_MIN: HostFn = HostFn { name: "min", f: Fn2_1(float64_min) };
     static FLOAT64_MAX: HostFn = HostFn { name: "max", f: Fn2_1(float64_max) };
     static FLOAT64_POW: HostFn = HostFn { name: "pow", f: Fn2_1(float64_pow) };
+    static FLOAT64_EXP: HostFn = HostFn { name: "exp", f: Fn1_1(float64_exp) };
+    static FLOAT64_LN: HostFn = HostFn { name: "ln", f: Fn1_1(float64_ln) };
 
     static STRING_FROM_CODEPOINT: HostFn = HostFn { name: "from_codepoint", f: Fn2_1(string_from_codepoint) };
     static STRING_BYTE_AT: HostFn = HostFn { name: "byte_at", f: Fn2_1(string_byte_at) };
@@ -296,6 +309,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "min") => &FLOAT64_MIN,
         (Value::Float64(_), "max") => &FLOAT64_MAX,
         (Value::Float64(_), "pow") => &FLOAT64_POW,
+        (Value::Float64(_), "exp") => &FLOAT64_EXP,
+        (Value::Float64(_), "ln") => &FLOAT64_LN,
 
         (Value::Class(STRING_ID), "from_codepoint") => &STRING_FROM_CODEPOINT,
         (Value::String(_), "byte_at") => &STRING_BYTE_AT,
