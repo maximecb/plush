@@ -354,6 +354,6 @@ pub fn get_class_id(val: Value) -> ClassId
         Value::Array(_) => ARRAY_ID,
         Value::ByteArray(_) => BYTEARRAY_ID,
 
-        _ => todo!()
+        _ => todo!("get_class_id for unsupported type")
     }
 }

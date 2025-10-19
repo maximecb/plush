@@ -528,7 +528,7 @@ fun detection_actor(beep_actor_id) {
             let y_pred = current_mlp.forward(x);
 
             if (y_pred[0] > DETECTION_THRESHOLD) {
-                $println("DETECTED");
+                $println("DETECTED: " + y_pred[0].format_decimals(1));
                 $actor_send(beep_actor_id, "detected");
             }
         }
@@ -543,6 +543,7 @@ fun beep_actor() {
         return;
     }
 
+    let var is_recording = false;
     let var last_beep_time = 0;
     let cooldown_ms = 1200;
 
@@ -560,7 +561,13 @@ fun beep_actor() {
     loop {
         let msg = $actor_recv();
 
-        if (msg == "detected") {
+        if (msg == true || msg == false) {
+            is_recording = msg;
+            last_beep_time = $time_current_ms();
+            continue;
+        }
+
+        if (msg == "detected" && !is_recording) {
             let current_time = $time_current_ms();
             if (current_time - last_beep_time > cooldown_ms) {
                 last_beep_time = current_time;
@@ -674,6 +681,7 @@ fun main() {
             if (event.kind == "KEY_DOWN") {
                 if (event.key == "SPACE") {
                     recording = !recording;
+                    $actor_send(beep_actor_id, recording);
                     if (!recording && recorded_frames.len > 0) {
                         $println("Recording stopped. Press P for positive, N for negative.");
                     } else if (recording) {
@@ -686,11 +694,13 @@ fun main() {
                         $actor_send(trainer_id, [recorded_frames, 1.0]);
                         recorded_frames = [];
                         recording = false; // Stop recording when labeled
+                        $actor_send(beep_actor_id, recording);
                     } else if (event.key == "N") {
                         $println("Saved as negative example.");
                         $actor_send(trainer_id, [recorded_frames, 0.0]);
                         recorded_frames = [];
                         recording = false; // Stop recording when labeled
+                        $actor_send(beep_actor_id, recording);
                     }
                 }
             }
