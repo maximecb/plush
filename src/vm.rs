@@ -402,6 +402,7 @@ impl PartialEq for Value
             (Object(a), Object(b))      => a == b,
             (Array(a), Array(b))            => a == b,
             (ByteArray(a), ByteArray(b))    => a == b,
+            (Dict(a), Dict(b))          => a == b,
 
             _ => false,
         }

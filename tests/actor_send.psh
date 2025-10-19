@@ -1,0 +1,42 @@
+// Worker actor function
+fun worker() {
+    // Receive the array
+    let received_array = $actor_recv();
+    assert(received_array.len == 3);
+    assert(received_array[0] == 1);
+    assert(received_array[1] == "hello");
+    assert(received_array[2] == true);
+    $actor_send(0, "array_received"); // Send confirmation back to main actor
+
+    // Receive the dictionary
+    let received_dict = $actor_recv();
+    assert(received_dict.a == 10);
+    assert(received_dict.b == "world");
+    assert(received_dict.c == false);
+    $actor_send(0, "dict_received"); // Send confirmation back to main actor
+}
+
+fun main() {
+    // Spawn the worker actor
+    let worker_id = $actor_spawn(worker);
+
+    // Test sending an array
+    let my_array = [1, "hello", true];
+    $actor_send(worker_id, my_array);
+    let array_confirmation = $actor_recv();
+    assert(array_confirmation == "array_received");
+    $println("Array sent and received successfully!");
+
+    // Test sending a dictionary
+    let my_dict = {a: 10, b: "world", c: false};
+    $actor_send(worker_id, my_dict);
+    let dict_confirmation = $actor_recv();
+    assert(dict_confirmation == "dict_received");
+    $println("Dictionary sent and received successfully!");
+
+    // Join the worker actor
+    $actor_join(worker_id);
+    $println("Actor send test completed successfully!");
+}
+
+main();
