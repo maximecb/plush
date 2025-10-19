@@ -1599,14 +1599,20 @@ impl Actor
                     let val = match arr {
                         Value::Array(p) => {
                             let arr = unsafe { &mut *p };
-                            let idx = idx.unwrap_usize();
-                            arr.get(idx)
+                            let idx = idx.unwrap_i64();
+                            if idx < 0 {
+                                panic!("array index is negative");
+                            }
+                            arr.get(idx as usize)
                         }
 
                         Value::ByteArray(p) => {
                             let ba = unsafe { &mut *p };
-                            let idx = idx.unwrap_usize();
-                            Value::from(ba.get(idx))
+                            let idx = idx.unwrap_i64();
+                            if idx < 0 {
+                                panic!("array index is negative");
+                            }
+                            Value::from(ba.get(idx as usize))
                         }
 
                         Value::Dict(p) => {
