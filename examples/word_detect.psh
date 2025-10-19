@@ -382,7 +382,7 @@ fun training_actor(detection_actor_id) {
     let var positive_examples_count = 0;
     let var negative_examples_count = 0;
 
-    while (true) {
+    for (let var training_itr = 1;; ++training_itr) {
         let msg = $actor_poll();
         if (msg != nil) {
             training_data.push(msg);
@@ -456,7 +456,12 @@ fun training_actor(detection_actor_id) {
             let var loss = -(y * p.ln() + (1.0 - y) * (1.0 - p).ln());
 
             if (iteration_count % 1 == 0) {
-                $println("Loss: " + loss.format_decimals(9) + ", dataset size: " + training_data.len.to_s());
+                $println(
+                    "Itr#" + training_itr.to_s() +
+                    ", loss: " + loss.format_decimals(9) +
+                    ", dataset size: " +
+                    training_data.len.to_s()
+                );
             }
 
             iteration_count = iteration_count + 1;
@@ -528,11 +533,11 @@ fun beep_actor() {
     }
 
     let var last_beep_time = 0;
-    let cooldown_ms = 2000;
+    let cooldown_ms = 1200;
 
     let beep_duration_ms = 80;
     let pause_duration_ms = 30;
-    let beep_freq = 1400.0;
+    let beep_freq = 1200.0;
 
     let beep_duration_samples = (SAMPLE_RATE * beep_duration_ms _/ 1000);
     let pause_duration_samples = (SAMPLE_RATE * pause_duration_ms _/ 1000);
