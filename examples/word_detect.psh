@@ -311,6 +311,26 @@ fun hanning_window(buffer) {
     }
 }
 
+fun normalize_magnitudes(magnitudes) {
+    let var max_mag = 1e-9;
+    for (let var i = 0; i < magnitudes.len; ++i) {
+        if (magnitudes[i] > max_mag) {
+            max_mag = magnitudes[i];
+        }
+    }
+
+    // Don't amplify silence or near-silence
+    if (max_mag < 1.0) {
+        return magnitudes;
+    }
+
+    for (let var i = 0; i < magnitudes.len; ++i) {
+        magnitudes[i] = magnitudes[i] / max_mag;
+    }
+
+    return magnitudes;
+}
+
 fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sample_rate) {
     let fft_bins = Array.with_size(num_bins + 2, 0);
     for (let var i = 0; i < fft_bins.len; ++i) {
@@ -470,8 +490,10 @@ fun training_actor(detection_actor_id) {
                 $println(
                     "Itr#" + training_itr.to_s() +
                     ", loss: " + loss.format_decimals(9) +
-                    ", dataset size: " +
-                    training_data.len.to_s()
+                    ", pos: " +
+                    positive_examples_count.to_s() +
+                    ", neg: " +
+                    negative_examples_count.to_s()
                 );
             }
 
@@ -646,7 +668,8 @@ fun main() {
         imag_parts.zero_fill();
         hanning_window(real_parts);
         fft(real_parts, imag_parts, false);
-        let magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
+        let var magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
+        magnitudes = normalize_magnitudes(magnitudes);
         $actor_send(detector_id, magnitudes);
 
         if (recording) {
