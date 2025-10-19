@@ -385,6 +385,7 @@ fun training_actor(detection_actor_id) {
 
 fun detection_actor() {
     let var current_mlp = nil;
+    let var frame_buffer = []; // To store recent magnitudes
 
     while (true) {
         let msg = $actor_recv(); // Blocks until a message is received
@@ -392,11 +393,35 @@ fun detection_actor() {
         if (msg instanceof MLP) {
             // Received a new MLP model from the training actor
             current_mlp = msg;
-            //$println("Detection actor received new MLP model.");
-        } else if (current_mlp != nil) {
-            // Received magnitudes from the main actor
-            let magnitudes = msg;
-            let x = flatten_and_pad([magnitudes], MAX_FRAMES, NUM_MEL_BINS);
+            $println("Detection actor received new MLP model.");
+            continue;
+        }
+
+        if (current_mlp == nil) {
+            continue;
+        }
+
+        // Received magnitudes from the main actor
+        let magnitudes = msg;
+        frame_buffer.push(magnitudes);
+
+        // Keep only the latest MAX_FRAMES
+        if (frame_buffer.len > MAX_FRAMES) {
+            // If buffer is full, remove the oldest frame (at index 0)
+            // and add the new one at the end.
+            // Plush arrays don't have a direct slice/shift, so we'll rebuild.
+            let new_frame_buffer = Array.with_size(MAX_FRAMES, nil);
+            for (let var i = 0; i < MAX_FRAMES - 1; ++i) {
+                new_frame_buffer[i] = frame_buffer[i + 1];
+            }
+            new_frame_buffer[MAX_FRAMES - 1] = magnitudes;
+            frame_buffer = new_frame_buffer;
+        }
+        assert(frame_buffer.len <= MAX_FRAMES);
+
+        // Only make a prediction if we have enough frames
+        if (frame_buffer.len == MAX_FRAMES) {
+            let x = flatten_and_pad(frame_buffer, MAX_FRAMES, NUM_MEL_BINS);
             let y_pred = current_mlp.forward(x);
 
             if (y_pred[0] > DETECTION_THRESHOLD) {
@@ -425,14 +450,15 @@ fun main() {
     let var recorded_frames = [];
 
     while (running) {
+        $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
+        imag_parts.zero_fill();
+        hanning_window(real_parts);
+        fft(real_parts, imag_parts, false);
+        let magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
+        $actor_send(detector_id, magnitudes);
+
         if (recording) {
-            $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
-            imag_parts.zero_fill();
-            hanning_window(real_parts);
-            fft(real_parts, imag_parts, false);
-            let magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
             recorded_frames.push(magnitudes);
-            $actor_send(detector_id, magnitudes);
         }
 
         frame_buffer.zero_fill();
