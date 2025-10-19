@@ -446,7 +446,6 @@ fun main() {
 
     let var running = true;
     let var recording = false;
-    let var waiting_for_label = false;
     let var recorded_frames = [];
 
     while (running) {
@@ -476,20 +475,6 @@ fun main() {
                     }
                 }
             }
-        } else if (waiting_for_label) {
-            let cx = WINDOW_WIDTH - 30;
-            let cy = 30;
-            let radius = 20;
-            for (let var y = cy - radius; y < cy + radius; ++y) {
-                for (let var x = cx - radius; x < cx + radius; ++x) {
-                    let dx = x - cx;
-                    let dy = y - cy;
-                    if (dx*dx + dy*dy < radius*radius) {
-                        let pixel_idx = (y * WINDOW_WIDTH + x);
-                        frame_buffer.write_u32(pixel_idx, rgb32(255, 255, 0));
-                    }
-                }
-            }
         }
 
         $window_draw_frame(window_id, frame_buffer);
@@ -505,23 +490,21 @@ fun main() {
                     recording = !recording;
                     if (!recording && recorded_frames.len > 0) {
                         $println("Recording stopped. Press P for positive, N for negative.");
-                        waiting_for_label = true;
                     } else if (recording) {
                         $println("Recording started...");
                         recorded_frames = [];
-                        waiting_for_label = false;
                     }
-                } else if (waiting_for_label) {
+                } else if (recorded_frames.len > 0) {
                     if (event.key == "P") {
                         $println("Saved as positive example.");
                         $actor_send(trainer_id, [recorded_frames, 1.0]);
                         recorded_frames = [];
-                        waiting_for_label = false;
+                        recording = false; // Stop recording when labeled
                     } else if (event.key == "N") {
                         $println("Saved as negative example.");
                         $actor_send(trainer_id, [recorded_frames, 0.0]);
                         recorded_frames = [];
-                        waiting_for_label = false;
+                        recording = false; // Stop recording when labeled
                     }
                 }
             }
