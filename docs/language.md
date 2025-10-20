@@ -203,6 +203,8 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `memcpy(dst_idx, src_bytes, src_idx, len)`: Copies a block of memory from a source `ByteArray` to this one.
     -   `zero_fill()`: Overwrite the contents of the `ByteArray` with zeros.
     -   `blit_bgra32(dst_width, dst_height, src, src_width, src_height, dst_x, dst_y)`: Copies a rectangular region from a source `ByteArray` into this `ByteArray` at a specified position, with alpha blending. This method assumes that both the source and destination buffers contain pixel data in the BGRA32 format.
+-   **Dict**
+    -   `has(key)`: Check if the dictionary contains this key.
 
 ## Concurrency with Actors
 

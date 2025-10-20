@@ -234,6 +234,13 @@ pub fn init_runtime(prog: &mut Program)
     prog.reg_class(audio_needed);
 }
 
+fn dict_has(actor: &mut Actor, mut d: Value, key: Value) -> Value
+{
+    let d = d.unwrap_dict();
+    let key = key.unwrap_rust_str();
+    Value::from(d.has(key))
+}
+
 /// Get the method associated with a core value
 pub fn get_method(val: Value, method_name: &str) -> Value
 {
@@ -287,6 +294,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static BA_ZERO_FILL: HostFn = HostFn { name: "zero_fill", f: Fn1_0(ba_zero_fill) };
     static BA_BLIT_BGRA32: HostFn = HostFn { name: "blit_bgra32", f: Fn8_0(ba_blit_bgra32) };
 
+    static DICT_HAS: HostFn = HostFn { name: "has", f: Fn2_1(dict_has) };
+
     let f = match (val, method_name) {
         (Value::Int64(_), "abs") => &INT64_ABS,
         (Value::Int64(_), "to_f") => &INT64_TO_F,
@@ -333,6 +342,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::ByteArray(_), "zero_fill") => &BA_ZERO_FILL,
         (Value::ByteArray(_), "blit_bgra32") => &BA_BLIT_BGRA32,
 
+        (Value::Dict(_), "has") => &DICT_HAS,
+
         _ => panic!("unknown method {}", method_name)
     };
 
@@ -355,6 +366,7 @@ pub fn get_class_id(val: Value) -> ClassId
         Value::String(_) => STRING_ID,
         Value::Array(_) => ARRAY_ID,
         Value::ByteArray(_) => BYTEARRAY_ID,
+        Value::Dict(_) => DICT_ID,
 
         _ => todo!("get_class_id for unsupported type")
     }

@@ -219,6 +219,12 @@ impl Dict
             panic!("key `{}` not found in dict", field_name);
         }
     }
+
+    // Check if the dictionary has a given key
+    pub fn has(&mut self, field_name: &str) -> bool
+    {
+        self.hash.contains_key(field_name)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -369,6 +375,14 @@ impl Value
         match self {
             Value::ByteArray(p) => unsafe { &mut **p },
             _ => panic!("expected byte array value but got {:?}", self)
+        }
+    }
+
+    pub fn unwrap_dict(&mut self) -> &mut Dict
+    {
+        match self {
+            Value::Dict(p) => unsafe { &mut **p },
+            _ => panic!("expected dict value but got {:?}", self)
         }
     }
 }
@@ -2381,6 +2395,7 @@ mod tests
         eval_eq("let o = { 'x': 77 }; return o.x;", Value::Int64(77));
         eval_eq("let o = { 'foo bar': 5 }; return o['foo bar'];", Value::Int64(5));
         eval_eq("let o = { x:5 }; o['x'] = 3; return o.x;", Value::Int64(3));
+        eval_eq("let o = { x:5 }; return o.has('x');", Value::True);
     }
 
     #[test]
@@ -2460,5 +2475,6 @@ mod tests
         eval_eq("return 77 instanceof String;", Value::False);
         eval_eq("return 'foo' instanceof String;", Value::True);
         eval_eq("return [] instanceof Array;", Value::True);
+        eval_eq("return {} instanceof Dict;", Value::True);
     }
 }

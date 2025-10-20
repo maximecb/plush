@@ -160,6 +160,7 @@ impl Program
         env.define("String", Decl::Class { id: STRING_ID });
         env.define("Array", Decl::Class { id: ARRAY_ID });
         env.define("ByteArray", Decl::Class { id: BYTEARRAY_ID });
+        env.define("Dict", Decl::Class { id: DICT_ID });
         env.define("UIEvent", Decl::Class { id: UIEVENT_ID });
         env.define("AudioNeeded", Decl::Class { id: AUDIO_NEEDED_ID });
         env.define("AudioData", Decl::Class { id: AUDIO_DATA_ID });
