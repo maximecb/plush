@@ -1602,7 +1602,7 @@ impl Actor
                             let arr = unsafe { &mut *p };
                             let idx = idx.unwrap_i64();
                             if idx < 0 {
-                                panic!("array index is negative");
+                                panic!("negative array index in get_index");
                             }
                             arr.get(idx as usize)
                         }
@@ -1611,7 +1611,7 @@ impl Actor
                             let ba = unsafe { &mut *p };
                             let idx = idx.unwrap_i64();
                             if idx < 0 {
-                                panic!("array index is negative");
+                                panic!("negative array index in get_index");
                             }
                             Value::from(ba.get(idx as usize))
                         }
@@ -1630,19 +1630,33 @@ impl Actor
 
                 Insn::set_index => {
                     let val = pop!();
-                    let idx = pop!().unwrap_usize();
+                    let idx = pop!();
                     let arr = pop!();
 
                     match arr {
                         Value::Array(p) => {
                             let arr = unsafe { &mut *p };
-                            arr.set(idx, val);
+                            let idx = idx.unwrap_i64();
+                            if idx < 0 {
+                                panic!("negative array index in set_index");
+                            }
+                            arr.set(idx as usize, val);
                         }
 
                         Value::ByteArray(p) => {
                             let ba = unsafe { &mut *p };
+                            let idx = idx.unwrap_i64();
+                            if idx < 0 {
+                                panic!("negative array index in set_index");
+                            }
                             let b = val.unwrap_u8();
-                            ba.set(idx, b);
+                            ba.set(idx as usize, b);
+                        }
+
+                        Value::Dict(p) => {
+                            let dict = unsafe { &mut *p };
+                            let key = idx.unwrap_rust_str();
+                            dict.set(key, val);
                         }
 
                         _ => panic!("expected array type")
@@ -2366,6 +2380,7 @@ mod tests
         eval_eq("let o = { x: 1, y: 2 }; return o.x + o.y;", Value::Int64(3));
         eval_eq("let o = { 'x': 77 }; return o.x;", Value::Int64(77));
         eval_eq("let o = { 'foo bar': 5 }; return o['foo bar'];", Value::Int64(5));
+        eval_eq("let o = { x:5 }; o['x'] = 3; return o.x;", Value::Int64(3));
     }
 
     #[test]
