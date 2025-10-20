@@ -1326,7 +1326,7 @@ impl Actor
                         (Float64(v0), Float64(v1)) => v0 > v1,
                         (Float64(v0), Int64(v1)) => v0 > (v1 as f64),
                         (Int64(v0), Float64(v1)) => (v0 as f64) > v1,
-                        _ => panic!("unsupported types in lt")
+                        _ => panic!("unsupported types in gt")
                     };
 
                     push_bool!(b);
@@ -1342,7 +1342,7 @@ impl Actor
                         (Float64(v0), Float64(v1)) => v0 >= v1,
                         (Float64(v0), Int64(v1)) => v0 >= (v1 as f64),
                         (Int64(v0), Float64(v1)) => (v0 as f64) >= v1,
-                        _ => panic!()
+                        _ => panic!("unsupported types in ge")
                     };
 
                     push_bool!(b);
