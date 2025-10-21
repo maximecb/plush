@@ -111,6 +111,21 @@ class WavePlot {
         self.e_idx = s_idx_raw.max(e_idx_raw).max(0).min(self.num_samples);
     }
 
+    get_selection(self) {
+        if (self.s_idx == nil || self.e_idx == nil) {
+            return ByteArray.with_size(0);
+        }
+
+        let start_byte = self.s_idx * 4;
+        let end_byte = self.e_idx * 4;
+        let selection_size = end_byte - start_byte;
+
+        let selection_data = ByteArray.with_size(selection_size);
+        selection_data.memcpy(0, self.audio_data, start_byte, selection_size);
+
+        return selection_data;
+    }
+
     // Delete the current selection
     delete_sel(self) {
         if (self.s_idx == nil || self.e_idx == nil) {
