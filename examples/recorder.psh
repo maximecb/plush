@@ -202,6 +202,65 @@ class WavePlot {
     }
 }
 
+fun playback_actor()
+{
+    let audio_out = $audio_open_output(SAMPLE_RATE, NUM_CHANNELS);
+
+    let var samples_to_play = nil;
+    let var playing = false;
+    let var looping = false;
+    let var play_pos = 0; // in samples
+
+    loop {
+        let msg = $actor_poll();
+
+        if (msg instanceof AudioNeeded)
+        {
+            let num_samples_needed = msg.num_samples;
+            let silent_chunk = ByteArray.with_size(num_samples_needed * 4);
+            silent_chunk.zero_fill();
+
+            if (playing) {
+                let total_samples = samples_to_play.len _/ 4;
+                let samples_available = total_samples - play_pos;
+                let num_samples_to_send = num_samples_needed.min(samples_available);
+
+                if (num_samples_to_send > 0) {
+                    let start_byte = play_pos * 4;
+                    let num_bytes_to_send = num_samples_to_send * 4;
+                    silent_chunk.memcpy(0, samples_to_play, start_byte, num_bytes_to_send);
+                    play_pos = play_pos + num_samples_to_send;
+                }
+
+                if (play_pos >= total_samples) {
+                    if (looping) {
+                        play_pos = 0;
+                    } else {
+                        playing = false;
+                    }
+                }
+            }
+
+            $audio_write_samples(audio_out, silent_chunk);
+
+        } else if (msg == 'PLAY') {
+            playing = true;
+            play_pos = 0;
+        } else if (msg == 'STOP') {
+            playing = false;
+            play_pos = 0;
+        } else if (msg == 'PLAY_LOOPING') {
+            playing = true;
+            looping = true;
+            play_pos = 0;
+        } else if (msg instanceof ByteArray) {
+            samples_to_play = msg;
+            playing = false;
+            play_pos = 0;
+        }
+    }
+}
+
 // --- Main Program ---
 let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 let window = $window_create(WIDTH, HEIGHT, "Audio Recorder", 0);
@@ -213,6 +272,9 @@ let var recording = false;
 let var is_dragging = false;
 let var drag_start_x = nil;
 let var drag_end_x = nil;
+
+// Spawn the playback actor
+let playback_actor_id = $actor_spawn(playback_actor);
 
 $println("Press SPACE to record audio, click and drag to select samples");
 
@@ -238,6 +300,11 @@ loop {
             } else {
                 $println("Recording stopped.");
             }
+        }
+
+        if (msg.kind == 'KEY_DOWN' && msg.key == 'P') {
+            $actor_send(playback_actor_id, wave_plot.get_selection());
+            $actor_send(playback_actor_id, 'PLAY');
         }
 
         if (msg.kind == 'MOUSE_DOWN') {
