@@ -49,8 +49,8 @@ class WavePlot {
         self.max_sample_range = 0.0; // Reset max_sample_range
 
         // Reset selection state
-        self.s_idx = -1;
-        self.e_idx = -1;
+        self.s_idx = nil;
+        self.e_idx = nil;
     }
 
     append_samples(self, new_samples) {
@@ -95,6 +95,13 @@ class WavePlot {
     }
 
     select(self, start_norm, end_norm) {
+        // If no selection, reset to nil
+        if (start_norm == nil || end_norm == nil) {
+            self.s_idx = nil;
+            self.e_idx = nil;
+            return;
+        }
+
         // Convert normalized coordinates to sample indices
         let s_idx_raw = (start_norm * self.num_samples.to_f()).floor();
         let e_idx_raw = (end_norm * self.num_samples.to_f()).floor();
@@ -102,17 +109,11 @@ class WavePlot {
         // Ensure indices are within bounds and correctly ordered
         self.s_idx = s_idx_raw.min(e_idx_raw).max(0).min(self.num_samples);
         self.e_idx = s_idx_raw.max(e_idx_raw).max(0).min(self.num_samples);
-
-        // If no selection (e.g., start_norm == -1.0), reset to -1
-        if (start_norm == -1.0 || end_norm == -1.0) {
-            self.s_idx = -1;
-            self.e_idx = -1;
-        }
     }
 
     // Delete the current selection
     delete_sel(self) {
-        if (self.s_idx == -1 || self.e_idx == -1) {
+        if (self.s_idx == nil || self.e_idx == nil) {
             return;
         }
 
@@ -134,7 +135,7 @@ class WavePlot {
         self.num_samples = new_size _/ 4;
 
         // Clear the selection
-        self.select(-1.0, -1.0);
+        self.select(nil, nil);
     }
 
     redraw(self, frame_buffer) {
@@ -146,7 +147,7 @@ class WavePlot {
         }
 
         // Draw selection highlight first
-        if (self.s_idx != -1 && self.e_idx != -1) {
+        if (self.s_idx != nil && self.e_idx != nil) {
             // Convert sample indices to pixel coordinates for drawing
             let x1_pixel = (self.s_idx.to_f() / self.num_samples.to_f() * self.width.to_f()).floor();
             let x2_pixel = (self.e_idx.to_f() / self.num_samples.to_f() * self.width.to_f()).floor();
@@ -195,8 +196,8 @@ let var recording = false;
 
 // Variables for mouse selection
 let var is_dragging = false;
-let var drag_start_x = -1;
-let var drag_end_x = -1;
+let var drag_start_x = nil;
+let var drag_end_x = nil;
 
 $println("Press SPACE to record audio, click and drag to select samples");
 
@@ -218,7 +219,7 @@ loop {
             if (recording) {
                 $println("Recording started...");
                 wave_plot.clear_samples();
-                wave_plot.select(-1.0, -1.0); // Clear selection on new recording
+                wave_plot.select(nil, nil); // Clear selection on new recording
             } else {
                 $println("Recording stopped.");
             }
