@@ -21,8 +21,9 @@ class WavePlot {
         self.height = height;
         self.color = color;
         self.audio_data = ByteArray.with_size(0);
-        self.max_abs_sample = 0.0; // Initialize max_abs_sample
         self.num_samples = 0; // Initialize num_samples
+        self.magnitude_buckets = Array.with_size(100, 0); // 100 buckets for magnitudes [0, 1]
+        self.max_sample_range = 0.0; // Initialize max_sample_range
     }
 
     append_samples(self, new_samples) {
@@ -32,30 +33,54 @@ class WavePlot {
         new_buffer.memcpy(self.audio_data.len, new_samples, 0, new_samples.len);
         self.audio_data = new_buffer;
 
+        // Update num_samples
         let num_new_samples = new_samples.len _/ 4;
-        self.num_samples = self.num_samples + num_new_samples; // Update num_samples
+        self.num_samples = self.num_samples + num_new_samples;
 
-        // Update max_abs_sample
+        // Update magnitude_buckets
         for (let var i = 0; i < num_new_samples; i = i + 1) {
             let sample = new_samples.read_f32(i);
-            if (sample.abs() > self.max_abs_sample) {
-                self.max_abs_sample = sample.abs();
+            let abs_sample = sample.abs();
+
+            // Increment magnitude bucket
+            let bucket_idx = (abs_sample * 100).floor().min(99); // Clamp to 99 for the last bucket
+            self.magnitude_buckets[bucket_idx] = self.magnitude_buckets[bucket_idx] + 1;
+        }
+
+        // Calculate 99th percentile magnitude for normalization (max_sample_range)
+        let target_samples = self.num_samples * 0.99;
+        let var cumulative_samples = 0;
+        let var calculated_max_sample_range = 0.0;
+        for (let var i = 0; i < 100; ++i) {
+            cumulative_samples = cumulative_samples + self.magnitude_buckets[i];
+            if (cumulative_samples >= target_samples) {
+                // Upper bound of the bucket
+                calculated_max_sample_range = (i + 1).to_f() / 100.0;
+
+                break;
             }
         }
-        self.max_abs_sample = self.max_abs_sample.min(1.0); // Clamp to 1.0
+
+        // Fallback if no samples or all samples are very small
+        if (calculated_max_sample_range == 0.0) {
+            self.max_sample_range = 0.01; // A small default to avoid division by zero
+        } else {
+            self.max_sample_range = calculated_max_sample_range * 1.20;
+        }
     }
 
     clear_samples(self) {
         self.audio_data = ByteArray.with_size(0);
-        self.max_abs_sample = 0.0; // Reset max_abs_sample
         self.num_samples = 0; // Reset num_samples
+        self.magnitude_buckets = Array.with_size(100, 0); // Reset magnitude buckets
+        self.max_sample_range = 0.0; // Reset max_sample_range
     }
 
     redraw(self, frame_buffer) {
         // Clear the buffer
         frame_buffer.zero_fill();
 
-        if (self.num_samples == 0 || self.max_abs_sample == 0.0) {
+        if (self.num_samples == 0 || self.max_sample_range == 0.0) {
             return;
         }
 
@@ -72,7 +97,7 @@ class WavePlot {
                 max_sample = max_sample.max(self.audio_data.read_f32(k));
 
             // Compute the Y coordinate in the frame buffer for this sample
-            let norm_v = (max_sample / self.max_abs_sample).min(1.0).max(-1.0);
+            let norm_v = (max_sample / self.max_sample_range).min(1.0).max(-1.0);
             let pos_v = ((1.0 + norm_v) / 2.0).min(1.0);
             let j = (pos_v * (self.height - 1)).floor();
 
