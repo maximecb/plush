@@ -110,6 +110,33 @@ class WavePlot {
         }
     }
 
+    // Delete the current selection
+    delete_sel(self) {
+        if (self.s_idx == -1 || self.e_idx == -1) {
+            return;
+        }
+
+        assert(self.s_idx instanceof Int64);
+        assert(self.e_idx instanceof Int64);
+        let start_byte = self.s_idx * 4;
+        let end_byte = self.e_idx * 4;
+
+        let new_size = self.audio_data.len - (end_byte - start_byte);
+        let new_buffer = ByteArray.with_size(new_size);
+
+        // Copy the part before the selection
+        new_buffer.memcpy(0, self.audio_data, 0, start_byte);
+
+        // Copy the part after the selection
+        new_buffer.memcpy(start_byte, self.audio_data, end_byte, self.audio_data.len - end_byte);
+
+        self.audio_data = new_buffer;
+        self.num_samples = new_size _/ 4;
+
+        // Clear the selection
+        self.select(-1.0, -1.0);
+    }
+
     redraw(self, frame_buffer) {
         // Clear the buffer
         frame_buffer.zero_fill();
@@ -180,6 +207,10 @@ loop {
     if (msg instanceof UIEvent) {
         if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
             break;
+        }
+
+        if (msg.kind == 'KEY_DOWN' && (msg.key == 'DELETE' || msg.key == 'BACKSPACE')) {
+            wave_plot.delete_sel();
         }
 
         if (msg.kind == 'KEY_DOWN' && msg.key == 'SPACE') {
