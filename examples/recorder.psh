@@ -202,6 +202,17 @@ class WavePlot {
     }
 }
 
+fun reverse_samples(ba) {
+    let len = ba.len;
+    let reversed_ba = ByteArray.with_size(len);
+    let num_floats = len _/ 4;
+    for (let var i = 0; i < num_floats; i = i + 1) {
+        let val = ba.read_f32(i);
+        reversed_ba.write_f32(num_floats - 1 - i, val);
+    }
+    return reversed_ba;
+}
+
 fun playback_actor()
 {
     let audio_out = $audio_open_output(SAMPLE_RATE, NUM_CHANNELS);
@@ -283,6 +294,7 @@ $println("Backspace: delete samples");
 $println("Space: start playback");
 $println("S: stop playback");
 $println("L: looping playback");
+$println("B: reverse looping playback");
 
 loop {
     // --- Event Handling ---
@@ -315,6 +327,13 @@ loop {
 
         if (msg.kind == 'KEY_DOWN' && msg.key == 'L') {
             $actor_send(playback_actor_id, wave_plot.get_selection());
+            $actor_send(playback_actor_id, 'PLAY_LOOPING');
+        }
+
+        if (msg.kind == 'KEY_DOWN' && msg.key == 'B') {
+            let selection = wave_plot.get_selection();
+            let reversed_selection = reverse_samples(selection);
+            $actor_send(playback_actor_id, reversed_selection);
             $actor_send(playback_actor_id, 'PLAY_LOOPING');
         }
 
