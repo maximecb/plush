@@ -49,8 +49,8 @@ class WavePlot {
         self.max_sample_range = 0.0; // Reset max_sample_range
 
         // Reset selection state
-        self.selection_norm_start = -1.0;
-        self.selection_norm_end = -1.0;
+        self.s_idx = -1;
+        self.e_idx = -1;
     }
 
     append_samples(self, new_samples) {
@@ -70,7 +70,7 @@ class WavePlot {
             let abs_sample = sample.abs();
 
             // Increment magnitude bucket
-            let bucket_idx = (abs_sample * 100).floor().min(99); // Clamp to 99 for the last bucket
+            let bucket_idx = (abs_sample * 100).floor().min(99);
             self.magnitude_buckets[bucket_idx] = self.magnitude_buckets[bucket_idx] + 1;
         }
 
@@ -81,9 +81,7 @@ class WavePlot {
         for (let var i = 0; i < 100; ++i) {
             cumulative_samples = cumulative_samples + self.magnitude_buckets[i];
             if (cumulative_samples >= target_samples) {
-                // Upper bound of the bucket
                 calculated_max_sample_range = (i + 1).to_f() / 100.0;
-
                 break;
             }
         }
@@ -97,8 +95,19 @@ class WavePlot {
     }
 
     select(self, start_norm, end_norm) {
-        self.selection_norm_start = start_norm;
-        self.selection_norm_end = end_norm;
+        // Convert normalized coordinates to sample indices
+        let s_idx_raw = (start_norm * self.num_samples.to_f()).floor();
+        let e_idx_raw = (end_norm * self.num_samples.to_f()).floor();
+
+        // Ensure indices are within bounds and correctly ordered
+        self.s_idx = s_idx_raw.min(e_idx_raw).max(0).min(self.num_samples);
+        self.e_idx = s_idx_raw.max(e_idx_raw).max(0).min(self.num_samples);
+
+        // If no selection (e.g., start_norm == -1.0), reset to -1
+        if (start_norm == -1.0 || end_norm == -1.0) {
+            self.s_idx = -1;
+            self.e_idx = -1;
+        }
     }
 
     redraw(self, frame_buffer) {
@@ -110,9 +119,10 @@ class WavePlot {
         }
 
         // Draw selection highlight first
-        if (self.selection_norm_start != -1.0 && self.selection_norm_end != -1.0) {
-            let x1_pixel = (self.selection_norm_start * self.width.to_f()).floor();
-            let x2_pixel = (self.selection_norm_end * self.width.to_f()).floor();
+        if (self.s_idx != -1 && self.e_idx != -1) {
+            // Convert sample indices to pixel coordinates for drawing
+            let x1_pixel = (self.s_idx.to_f() / self.num_samples.to_f() * self.width.to_f()).floor();
+            let x2_pixel = (self.e_idx.to_f() / self.num_samples.to_f() * self.width.to_f()).floor();
 
             let draw_x1 = x1_pixel.min(x2_pixel);
             let draw_x2 = x1_pixel.max(x2_pixel);
@@ -187,46 +197,43 @@ loop {
             is_dragging = true;
             drag_start_x = msg.x;
             drag_end_x = msg.x; // Start with a single point selection
-            // Update selection in WavePlot
-            wave_plot.select(
-                drag_start_x.to_f() / wave_plot.width.to_f(),
-                drag_end_x.to_f() / wave_plot.width.to_f()
-            );
+
+            // Calculate normalized coordinates and pass to WavePlot
+            let norm_start = drag_start_x.to_f() / wave_plot.width.to_f();
+            let norm_end = drag_end_x.to_f() / wave_plot.width.to_f();
+            wave_plot.select(norm_start, norm_end);
         }
 
         if (msg.kind == 'MOUSE_MOVE') {
             if (is_dragging) {
                 drag_end_x = msg.x;
-                // Update selection in WavePlot
-                wave_plot.select(
-                    drag_start_x.to_f() / wave_plot.width.to_f(),
-                    drag_end_x.to_f() / wave_plot.width.to_f()
-                );
+
+                // Calculate normalized coordinates and pass to WavePlot
+                let norm_start = drag_start_x.to_f() / wave_plot.width.to_f();
+                let norm_end = drag_end_x.to_f() / wave_plot.width.to_f();
+                wave_plot.select(norm_start, norm_end);
             }
         }
 
         if (msg.kind == 'MOUSE_UP') {
             is_dragging = false;
-            // Finalize selection in WavePlot
-            wave_plot.select(
-                drag_start_x.to_f() / wave_plot.width.to_f(),
-                drag_end_x.to_f() / wave_plot.width.to_f()
-            );
 
-            // Calculate and print selected sample indices
+            // Calculate normalized coordinates and pass to WavePlot
             let norm_start = drag_start_x.to_f() / wave_plot.width.to_f();
             let norm_end = drag_end_x.to_f() / wave_plot.width.to_f();
+            wave_plot.select(norm_start, norm_end);
 
-            let var selected_start_idx = (norm_start * wave_plot.num_samples.to_f()).floor();
-            let var selected_end_idx = (norm_end * wave_plot.num_samples.to_f()).floor();
+            // Calculate and print selected sample indices for user feedback
+            let var s_idx = (norm_start * wave_plot.num_samples.to_f()).floor();
+            let var e_idx = (norm_end * wave_plot.num_samples.to_f()).floor();
 
             // Ensure start_idx and end_idx are correctly ordered
-            let temp_start = selected_start_idx.min(selected_end_idx);
-            let temp_end = selected_start_idx.max(selected_end_idx);
-            selected_start_idx = temp_start;
-            selected_end_idx = temp_end;
+            let temp_s_idx = s_idx.min(e_idx);
+            let temp_e_idx = s_idx.max(e_idx);
+            s_idx = temp_s_idx;
+            e_idx = temp_e_idx;
 
-            $println("Selected samples: [" + selected_start_idx.to_s() + ", " + selected_end_idx.to_s() + "]");
+            $println("Selected samples: [" + s_idx.to_s() + ", " + e_idx.to_s() + "]");
         }
     }
 
