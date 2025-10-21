@@ -14,56 +14,82 @@ let WHITE = rgb32(255, 255, 255);
 let SAMPLE_RATE = 44100;
 let NUM_CHANNELS = 1;
 let var recording = false;
-let var audio_data = ByteArray.with_size(0);
+
+class WavePlot {
+    init(self, width, height, color) {
+        self.width = width;
+        self.height = height;
+        self.color = color;
+        self.audio_data = ByteArray.with_size(0);
+        self.max_abs_sample = 0.0; // Initialize max_abs_sample
+        self.num_samples = 0; // Initialize num_samples
+    }
+
+    append_samples(self, new_samples) {
+        let new_size = self.audio_data.len + new_samples.len;
+        let new_buffer = ByteArray.with_size(new_size);
+        new_buffer.memcpy(0, self.audio_data, 0, self.audio_data.len);
+        new_buffer.memcpy(self.audio_data.len, new_samples, 0, new_samples.len);
+        self.audio_data = new_buffer;
+
+        let num_new_samples = new_samples.len _/ 4;
+        self.num_samples = self.num_samples + num_new_samples; // Update num_samples
+
+        // Update max_abs_sample
+        for (let var i = 0; i < num_new_samples; i = i + 1) {
+            let sample = new_samples.read_f32(i);
+            if (sample.abs() > self.max_abs_sample) {
+                self.max_abs_sample = sample.abs();
+            }
+        }
+        self.max_abs_sample = self.max_abs_sample.min(1.0); // Clamp to 1.0
+    }
+
+    clear_samples(self) {
+        self.audio_data = ByteArray.with_size(0);
+        self.max_abs_sample = 0.0; // Reset max_abs_sample
+        self.num_samples = 0; // Reset num_samples
+    }
+
+    redraw(self, frame_buffer) {
+        // Clear the buffer
+        frame_buffer.zero_fill();
+
+        if (self.num_samples == 0 || self.max_abs_sample == 0.0) {
+            return;
+        }
+
+        // For each column of the frame buffer
+        for (let var i = 0; i < self.width; ++i)
+        {
+            let samples_per_col = (self.num_samples / self.width).max(1.0).min(200.0).floor();
+            let start_idx = ((i / (self.width - 1)) * (self.num_samples - 1)).floor();
+            let end_idx = (start_idx + samples_per_col).min(self.num_samples);
+
+            // Determine the max sample value for this column
+            let var max_sample = 0.0;
+            for (let var k = start_idx; k < end_idx; ++k)
+                max_sample = max_sample.max(self.audio_data.read_f32(k));
+
+            // Compute the Y coordinate in the frame buffer for this sample
+            let norm_v = (max_sample / self.max_abs_sample).min(1.0).max(-1.0);
+            let pos_v = ((1.0 + norm_v) / 2.0).min(1.0);
+            let j = (pos_v * (self.height - 1)).floor();
+
+            let mid_y = self.height _/ 2;
+            let end_y = (j - mid_y).abs();
+            for (let var k = mid_y - end_y; k < mid_y + end_y; ++k) {
+                frame_buffer.write_u32(k * self.width + i, self.color);
+            }
+        }
+    }
+}
 
 // --- Main Program ---
 let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 let window = $window_create(WIDTH, HEIGHT, "Audio Recorder", 0);
 let audio_in = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
-
-fun draw_waveform(frame_buffer, data) {
-    // Clear the buffer
-    frame_buffer.zero_fill();
-
-    let num_samples = data.len _/ 4;
-    if (num_samples == 0) {
-        return;
-    }
-
-    // Find the maximum absolute sample value
-    let var max_abs_sample = 0.0;
-    for (let var i = 0; i < num_samples; i = i + 1) {
-        let sample = data.read_f32(i);
-        if (sample.abs() > max_abs_sample) {
-            max_abs_sample = sample.abs();
-        }
-    }
-    max_abs_sample = max_abs_sample.min(1.0);
-
-    // For each column of the frame buffer
-    for (let var i = 0; i < WIDTH; ++i)
-    {
-        let samples_per_col = (num_samples / WIDTH).max(1.0).min(200.0).floor();
-        let start_idx = ((i / (WIDTH - 1)) * (num_samples - 1)).floor();
-        let end_idx = (start_idx + samples_per_col).min(num_samples);
-
-        // Determine the max sample value for this column
-        let var max_sample = 0.0;
-        for (let var i = start_idx; i < end_idx; ++i)
-            max_sample = max_sample.max(data.read_f32(i));
-
-        // Compute the Y coordinate in the frame buffer for this sample
-        let norm_v = (max_sample / max_abs_sample).min(1.0).max(-1.0);
-        let pos_v = ((1.0 + norm_v) / 2.0).min(1.0);
-        let j = (pos_v * (HEIGHT - 1)).floor();
-
-        let mid_y = HEIGHT _/ 2;
-        let end_y = (j - mid_y).abs();
-        for (let var k = mid_y - end_y; k < mid_y + end_y; ++k) {
-            frame_buffer.write_u32(k * WIDTH + i, BLUE);
-        }
-    }
-}
+let wave_plot = WavePlot(WIDTH, HEIGHT, BLUE);
 
 $println("Press SPACE to record audio, press again to stop recording");
 
@@ -80,7 +106,7 @@ loop {
             recording = !recording;
             if (recording) {
                 $println("Recording started...");
-                audio_data = ByteArray.with_size(0);
+                wave_plot.clear_samples();
             } else {
                 $println("Recording stopped.");
             }
@@ -92,14 +118,10 @@ loop {
     $audio_read_samples(audio_in, 1024, chunk, 0);
 
     if (recording) {
-        let new_size = audio_data.len + chunk.len;
-        let new_data = ByteArray.with_size(new_size);
-        new_data.memcpy(0, audio_data, 0, audio_data.len);
-        new_data.memcpy(audio_data.len, chunk, 0, chunk.len);
-        audio_data = new_data;
+        wave_plot.append_samples(chunk);
     }
 
     // --- Drawing ---
-    draw_waveform(frame_buffer, audio_data);
+    wave_plot.redraw(frame_buffer);
     $window_draw_frame(window, frame_buffer);
 }
