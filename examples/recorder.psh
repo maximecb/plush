@@ -1,3 +1,6 @@
+let SAMPLE_RATE = 44100;
+let NUM_CHANNELS = 1;
+
 let WIDTH = 800;
 let HEIGHT = 600;
 
@@ -7,23 +10,47 @@ fun rgb32(r, g, b) {
 }
 
 let BLACK = rgb32(0, 0, 0);
+let RED = rgb32(255, 0, 0);
 let BLUE = rgb32(50, 100, 255);
 let WHITE = rgb32(255, 255, 255);
+let SELECTION_COLOR = rgb32(80, 80, 80);
 
-// --- Audio State ---
-let SAMPLE_RATE = 44100;
-let NUM_CHANNELS = 1;
-let var recording = false;
+// Helper function to draw a rectangle (for selection highlight)
+fun draw_rect(buffer, x, y, width, height, color) {
+    let x_start = x.max(0);
+    let y_start = y.max(0);
+    let x_end = (x + width).min(WIDTH);
+    let y_end = (y + height).min(HEIGHT);
+
+    let clipped_width = x_end - x_start;
+
+    if (clipped_width <= 0) {
+        return;
+    }
+
+    for (let var j = y_start; j < y_end; ++j) {
+        let start_index = j * WIDTH + x_start;
+        buffer.fill_u32(start_index, clipped_width, color);
+    }
+}
 
 class WavePlot {
     init(self, width, height, color) {
         self.width = width;
         self.height = height;
         self.color = color;
+        self.clear_samples();
+    }
+
+    clear_samples(self) {
         self.audio_data = ByteArray.with_size(0);
-        self.num_samples = 0; // Initialize num_samples
-        self.magnitude_buckets = Array.with_size(100, 0); // 100 buckets for magnitudes [0, 1]
-        self.max_sample_range = 0.0; // Initialize max_sample_range
+        self.num_samples = 0; // Reset num_samples
+        self.magnitude_buckets = Array.with_size(100, 0); // Reset magnitude buckets
+        self.max_sample_range = 0.0; // Reset max_sample_range
+
+        // Reset selection state
+        self.selection_norm_start = -1.0;
+        self.selection_norm_end = -1.0;
     }
 
     append_samples(self, new_samples) {
@@ -69,11 +96,9 @@ class WavePlot {
         }
     }
 
-    clear_samples(self) {
-        self.audio_data = ByteArray.with_size(0);
-        self.num_samples = 0; // Reset num_samples
-        self.magnitude_buckets = Array.with_size(100, 0); // Reset magnitude buckets
-        self.max_sample_range = 0.0; // Reset max_sample_range
+    select(self, start_norm, end_norm) {
+        self.selection_norm_start = start_norm;
+        self.selection_norm_end = end_norm;
     }
 
     redraw(self, frame_buffer) {
@@ -82,6 +107,20 @@ class WavePlot {
 
         if (self.num_samples == 0 || self.max_sample_range == 0.0) {
             return;
+        }
+
+        // Draw selection highlight first
+        if (self.selection_norm_start != -1.0 && self.selection_norm_end != -1.0) {
+            let x1_pixel = (self.selection_norm_start * self.width.to_f()).floor();
+            let x2_pixel = (self.selection_norm_end * self.width.to_f()).floor();
+
+            let draw_x1 = x1_pixel.min(x2_pixel);
+            let draw_x2 = x1_pixel.max(x2_pixel);
+            let highlight_width = draw_x2 - draw_x1 + 1;
+
+            if (highlight_width > 0) {
+                draw_rect(frame_buffer, draw_x1, 0, highlight_width, self.height, SELECTION_COLOR);
+            }
         }
 
         // For each column of the frame buffer
@@ -115,8 +154,14 @@ let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 let window = $window_create(WIDTH, HEIGHT, "Audio Recorder", 0);
 let audio_in = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
 let wave_plot = WavePlot(WIDTH, HEIGHT, BLUE);
+let var recording = false;
 
-$println("Press SPACE to record audio, press again to stop recording");
+// Variables for mouse selection
+let var is_dragging = false;
+let var drag_start_x = -1;
+let var drag_end_x = -1;
+
+$println("Press SPACE to record audio, click and drag to select samples");
 
 loop {
     // --- Event Handling ---
@@ -132,9 +177,56 @@ loop {
             if (recording) {
                 $println("Recording started...");
                 wave_plot.clear_samples();
+                wave_plot.select(-1.0, -1.0); // Clear selection on new recording
             } else {
                 $println("Recording stopped.");
             }
+        }
+
+        if (msg.kind == 'MOUSE_DOWN') {
+            is_dragging = true;
+            drag_start_x = msg.x;
+            drag_end_x = msg.x; // Start with a single point selection
+            // Update selection in WavePlot
+            wave_plot.select(
+                drag_start_x.to_f() / wave_plot.width.to_f(),
+                drag_end_x.to_f() / wave_plot.width.to_f()
+            );
+        }
+
+        if (msg.kind == 'MOUSE_MOVE') {
+            if (is_dragging) {
+                drag_end_x = msg.x;
+                // Update selection in WavePlot
+                wave_plot.select(
+                    drag_start_x.to_f() / wave_plot.width.to_f(),
+                    drag_end_x.to_f() / wave_plot.width.to_f()
+                );
+            }
+        }
+
+        if (msg.kind == 'MOUSE_UP') {
+            is_dragging = false;
+            // Finalize selection in WavePlot
+            wave_plot.select(
+                drag_start_x.to_f() / wave_plot.width.to_f(),
+                drag_end_x.to_f() / wave_plot.width.to_f()
+            );
+
+            // Calculate and print selected sample indices
+            let norm_start = drag_start_x.to_f() / wave_plot.width.to_f();
+            let norm_end = drag_end_x.to_f() / wave_plot.width.to_f();
+
+            let var selected_start_idx = (norm_start * wave_plot.num_samples.to_f()).floor();
+            let var selected_end_idx = (norm_end * wave_plot.num_samples.to_f()).floor();
+
+            // Ensure start_idx and end_idx are correctly ordered
+            let temp_start = selected_start_idx.min(selected_end_idx);
+            let temp_end = selected_start_idx.max(selected_end_idx);
+            selected_start_idx = temp_start;
+            selected_end_idx = temp_end;
+
+            $println("Selected samples: [" + selected_start_idx.to_s() + ", " + selected_end_idx.to_s() + "]");
         }
     }
 
