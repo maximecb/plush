@@ -113,7 +113,7 @@ class WavePlot {
 
     get_selection(self) {
         if (self.s_idx == nil || self.e_idx == nil) {
-            return ByteArray.with_size(0);
+            return self.audio_data;
         }
 
         let start_byte = self.s_idx * 4;
@@ -245,6 +245,7 @@ fun playback_actor()
 
         } else if (msg == 'PLAY') {
             playing = true;
+            looping = false;
             play_pos = 0;
         } else if (msg == 'STOP') {
             playing = false;
@@ -276,7 +277,12 @@ let var drag_end_x = nil;
 // Spawn the playback actor
 let playback_actor_id = $actor_spawn(playback_actor);
 
-$println("Press SPACE to record audio, click and drag to select samples");
+$println("Press R to record audio or stop recording");
+$println("Click and drag to select samples");
+$println("Backspace: delete samples");
+$println("Space: start playback");
+$println("S: stop playback");
+$println("L: looping playback");
 
 loop {
     // --- Event Handling ---
@@ -291,7 +297,7 @@ loop {
             wave_plot.delete_sel();
         }
 
-        if (msg.kind == 'KEY_DOWN' && msg.key == 'SPACE') {
+        if (msg.kind == 'KEY_DOWN' && msg.key == 'R') {
             recording = !recording;
             if (recording) {
                 $println("Recording started...");
@@ -302,9 +308,18 @@ loop {
             }
         }
 
-        if (msg.kind == 'KEY_DOWN' && msg.key == 'P') {
+        if (msg.kind == 'KEY_DOWN' && msg.key == 'SPACE') {
             $actor_send(playback_actor_id, wave_plot.get_selection());
             $actor_send(playback_actor_id, 'PLAY');
+        }
+
+        if (msg.kind == 'KEY_DOWN' && msg.key == 'L') {
+            $actor_send(playback_actor_id, wave_plot.get_selection());
+            $actor_send(playback_actor_id, 'PLAY_LOOPING');
+        }
+
+        if (msg.kind == 'KEY_DOWN' && msg.key == 'S') {
+            $actor_send(playback_actor_id, 'STOP');
         }
 
         if (msg.kind == 'MOUSE_DOWN') {
