@@ -253,6 +253,11 @@ impl AudioCallback for InputCB
         let (lock, cvar) = &AUDIO_IN_PAIR;
         let mut audio_state_lock = lock.lock().unwrap();
 
+        // Clip the samples in [-1, 1] for portability
+        for mut s in input.iter_mut() {
+            *s = s.max(-1.0).min(1.0);
+        }
+
         let state = audio_state_lock.as_mut().unwrap();
         state.in_queue.extend_from_slice(input);
 
