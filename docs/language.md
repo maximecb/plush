@@ -1,4 +1,4 @@
-# Plush Language Quickstart
+# Plush Language Guide
 
 This document provides a quick overview of the Plush programming language, its syntax, features, and built-in capabilities. It is intended for developers who want to get started with Plush and learn the basics of the language.
 
