@@ -9,30 +9,6 @@ missing features.
 
 To get a feel for what Plush code looks like, have a look at the programs in the [/examples](/examples) directory. For a detailed guide to the Plush language, please see the [Plush Language Guide](docs/language.md).
 
-The Plush language supports:
-- Dynamic typing
-- Classes and objects
-- Closures/lambdas
-- Separate `Float64` and `Int64` types
-- Dynamic arrays aka vectors/lists
-- Immutable UTF-8 strings
-- Dictionaries with JSON-like syntax
-- Memory safe, actor-based parallelism
-- A native byte array type
-- A simple frame buffer API for graphics and animations
-- A simple audio output API
-- An extensible set of host functions defined in `src/host.rs`
-
-Caveats and limitations:
-- The language is still very much incomplete
-  - You may run into bugs or missing features
-- Lack of error messages or good error handling
-  - You may have to look at the source code to figure things out
-  - We could use your help in improving error messages
-- Copying garbage collector planned but not yet implemented
-  - Currently relying on alloc-until-you-crash technology (TM)
-- Imports, support for multiple source files planned but not yet implemented
-
 ## Build Instructions
 
 Dependencies:
