@@ -291,6 +291,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static BA_READ_F32: HostFn = HostFn { name: "read_f32", f: Fn2_1(ba_read_f32) };
     static BA_WRITE_F32: HostFn = HostFn { name: "write_f32", f: Fn3_0(ba_write_f32) };
     static BA_MEMCPY: HostFn = HostFn { name: "memcpy", f: Fn5_0(ba_memcpy) };
+    static BA_RESIZE: HostFn = HostFn { name: "resize", f: Fn2_0(ba_resize) };
     static BA_ZERO_FILL: HostFn = HostFn { name: "zero_fill", f: Fn1_0(ba_zero_fill) };
     static BA_BLIT_BGRA32: HostFn = HostFn { name: "blit_bgra32", f: Fn8_0(ba_blit_bgra32) };
 
@@ -339,6 +340,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::ByteArray(_), "read_f32") => &BA_READ_F32,
         (Value::ByteArray(_), "write_f32") => &BA_WRITE_F32,
         (Value::ByteArray(_), "memcpy") => &BA_MEMCPY,
+        (Value::ByteArray(_), "resize") => &BA_RESIZE,
         (Value::ByteArray(_), "zero_fill") => &BA_ZERO_FILL,
         (Value::ByteArray(_), "blit_bgra32") => &BA_BLIT_BGRA32,
 

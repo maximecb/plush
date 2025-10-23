@@ -217,6 +217,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `pop()`: Removes and returns the last value from the array.
 -   **ByteArray**
     -   `with_size(size)`: Creates a new `ByteArray` of the given size.
+    -   `resize(new_size)`: Resizes the `ByteArray`. If the new size is larger, the new bytes are filled with zeros.
     -   `fill_u32(start_index, count, value)`: Fills a portion of the `ByteArray` with a repeated 32-bit unsigned integer value.
     -   `read_u32(index)`: Reads a 32-bit unsigned integer from the `ByteArray` at the given index.
     -   `write_u32(index, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given index.

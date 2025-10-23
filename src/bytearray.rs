@@ -91,6 +91,11 @@ impl ByteArray
         let dst_slice = unsafe { self.get_slice_mut::<u8>(dst_idx, num_bytes) };
         dst_slice.copy_from_slice(src_slice);
     }
+
+    pub fn resize(&mut self, new_size: usize)
+    {
+        self.bytes.resize(new_size, 0);
+    }
 }
 
 /// Copy image data from a source image into a destination image
@@ -242,6 +247,13 @@ pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value)
 {
     let ba = ba.unwrap_ba();
     ba.bytes.fill(0);
+}
+
+pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value)
+{
+    let ba = ba.unwrap_ba();
+    let new_size = new_size.unwrap_usize();
+    ba.resize(new_size);
 }
 
 pub fn ba_blit_bgra32(
