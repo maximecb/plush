@@ -54,11 +54,10 @@ class WavePlot {
     }
 
     append_samples(self, new_samples) {
-        let new_size = self.audio_data.len + new_samples.len;
-        let new_buffer = ByteArray.with_size(new_size);
-        new_buffer.memcpy(0, self.audio_data, 0, self.audio_data.len);
-        new_buffer.memcpy(self.audio_data.len, new_samples, 0, new_samples.len);
-        self.audio_data = new_buffer;
+        let old_size = self.audio_data.len;
+        let new_size = old_size + new_samples.len;
+        self.audio_data.resize(new_size);
+        self.audio_data.memcpy(old_size, new_samples, 0, new_samples.len);
 
         // Update num_samples
         let num_new_samples = new_samples.len _/ 4;
