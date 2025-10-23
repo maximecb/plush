@@ -4,6 +4,30 @@ This document provides a quick overview of the Plush programming language, its s
 
 Plush is an experimental toy programming language and virtual machine inspired by JavaScript, Lox, Lua, and Python. It features a simple, minimalistic design with a stack-based bytecode interpreter, actor-based parallelism, and an easily extensible set of host functions.
 
+The Plush language supports:
+- Dynamic typing
+- Classes and objects
+- Closures/lambdas
+- Separate `Float64` and `Int64` types
+- Dynamic arrays aka vectors/lists
+- Immutable UTF-8 strings
+- Dictionaries with JSON-like syntax
+- Memory safe, actor-based parallelism
+- A native byte array type
+- A simple frame buffer API for graphics and animations
+- A simple audio output API
+- An extensible set of host functions defined in `src/host.rs`
+
+Caveats and limitations:
+- The language is still very much incomplete
+  - You may run into bugs or missing features
+- Lack of error messages or good error handling
+  - You may have to look at the source code to figure things out
+  - We could use your help in improving error messages
+- Copying garbage collector planned but not yet implemented
+  - Currently relying on alloc-until-you-crash technology (TM)
+- Imports, support for multiple source files planned but not yet implemented
+
 ## Getting Started
 
 To run a Plush script, you can use the `cargo run` command, followed by the path to the script. For example:
