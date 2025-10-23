@@ -2,8 +2,6 @@
 
 This document provides a quick overview of the Plush programming language, its syntax, features, and built-in capabilities. It is intended for developers who want to get started with Plush and learn the basics of the language.
 
-## Introduction
-
 Plush is an experimental toy programming language and virtual machine inspired by JavaScript, Lox, Lua, and Python. It features a simple, minimalistic design with a stack-based bytecode interpreter, actor-based parallelism, and an easily extensible set of host functions.
 
 ## Getting Started
