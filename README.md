@@ -1,13 +1,13 @@
 # The Plush Programming Language
 
 Plush is an experimental toy programming language and virtual machine for fun and teaching purposes.
-It follows a minimalistic design philosphy and draws inspiration from JavaScript, [Lox](https://craftinginterpreters.com/the-lox-language.html), Lua, Python and Rust.
+It follows a minimalistic design philosphy and draws inspiration from JavaScript, Lox, Lua, Python and Rust.
 Plush supports actor-based parallelism and is designed such that there is no global VM lock.
 The language has straightforward semantics and is built around a simple stack-based interpreter. The codebase is well-commented, has very few depencencies, and good cross-platform support. It has been tested on Linux, Mac and Windows.
 Please do note however that this project is very much a fun side-project and a work in progress. You're likely to run into bugs and
 missing features.
 
-If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
+To get a feel for what Plush code looks like, have a look at the programs in the [/examples](/examples) directory. For a detailed guide to the Plush language, please see the [Plush Language Guide](docs/language.md).
 
 The Plush language supports:
 - Dynamic typing
@@ -32,8 +32,6 @@ Caveats and limitations:
 - Copying garbage collector planned but not yet implemented
   - Currently relying on alloc-until-you-crash technology (TM)
 - Imports, support for multiple source files planned but not yet implemented
-
-For a detailed guide to the Plush language, please see the [Plush Language Quickstart](docs/language.md).
 
 ## Build Instructions
 
@@ -123,3 +121,5 @@ Also please keep in mind that one of the core principles of Plush is to minimize
 to install and easy to port. Opening a PR that adds dependencies to multiple new packages and libraries is
 unlikely to get merged. If you believe you have a valid argument in favor of doing so, please open an issue to
 share your point of view.
+
+If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
