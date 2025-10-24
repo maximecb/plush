@@ -217,6 +217,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$println(value)`: Prints a value to the console, followed by a newline.
 -   `$readln()`: Read one line of input into a string.
 -   `$read_file(file_path)`: Read an entire file into a new `ByteArray`.
+-   `$read_file_utf8(file_path)`: Read an entire file encoded as valid UTF-8 into a `String`.
 -   `$write_file(file_path, bytes)`: Writes a `ByteArray` to a file.
 -   `$actor_id()`: Returns the ID of the current actor.
 -   `$actor_parent()`: Returns the ID of the parent actor.

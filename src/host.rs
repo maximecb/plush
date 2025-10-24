@@ -102,6 +102,7 @@ pub fn get_host_const(name: &str) -> Expr
     static PRINTLN: HostFn = HostFn { name: "println", f: Fn1_0(println) };
     static READLN: HostFn = HostFn { name: "readln", f: Fn0_1(readln) };
     static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1_1(read_file) };
+    static READ_FILE_UTF8: HostFn = HostFn { name: "read_file", f: Fn1_1(read_file_utf8) };
     static WRITE_FILE: HostFn = HostFn { name: "write_file", f: Fn2_1(write_file) };
     static ACTOR_ID: HostFn = HostFn { name: "actor_id", f: Fn0_1(actor_id) };
     static ACTOR_PARENT: HostFn = HostFn { name: "actor_parent", f: Fn0_1(actor_parent) };
@@ -130,6 +131,7 @@ pub fn get_host_const(name: &str) -> Expr
         "println" => &PRINTLN,
         "readln" => &READLN,
         "read_file" => &READ_FILE,
+        "read_file_utf8" => &READ_FILE_UTF8,
         "write_file" => &WRITE_FILE,
 
         "actor_id" => &ACTOR_ID,
@@ -329,6 +331,24 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Value
     let ba = crate::bytearray::ByteArray::new(bytes);
     let ba_obj = actor.alloc.alloc(ba);
     Value::ByteArray(ba_obj)
+}
+
+/// Read the contents of an entire file encoded as valid UTF-8
+fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Value
+{
+    let file_path = file_path.unwrap_rust_str();
+
+    if !is_safe_path(&file_path) {
+        panic!("requested file path breaks sandboxing rules");
+    }
+
+    let s: String = match std::fs::read_to_string(file_path) {
+        Err(_) => return Value::Nil,
+        Ok(s) => s
+    };
+
+    let s_obj = actor.alloc.str_const(s);
+    Value::String(s_obj)
 }
 
 /// Writes the contents of a ByteArray to a file

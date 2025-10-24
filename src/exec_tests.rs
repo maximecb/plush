@@ -51,6 +51,11 @@ fn tests()
 {
     for file in fs::read_dir("./tests").unwrap() {
         let file_path = file.unwrap().path().display().to_string();
+
+        if !file_path.ends_with(".psh") {
+            continue;
+        }
+
         test_file(&file_path, false);
     }
 }
