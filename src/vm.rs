@@ -1294,7 +1294,14 @@ impl Actor
                         (Float64(v0), Float64(v1)) => v0 < v1,
                         (Float64(v0), Int64(v1)) => v0 < (v1 as f64),
                         (Int64(v0), Float64(v1)) => (v0 as f64) < v1,
-                        _ => panic!("unsupported types in lt")
+
+                        (Value::String(s1), Value::String(s2)) => {
+                            let s1 = unsafe { &*s1 };
+                            let s2 = unsafe { &*s2 };
+                            s1 < s2
+                        }
+
+                        _ => panic!("unsupported types in less-than")
                     };
 
                     push_bool!(b);
@@ -1310,7 +1317,14 @@ impl Actor
                         (Float64(v0), Float64(v1)) => v0 <= v1,
                         (Float64(v0), Int64(v1)) => v0 <= (v1 as f64),
                         (Int64(v0), Float64(v1)) => (v0 as f64) <= v1,
-                        _ => panic!("unsupported types in le")
+
+                        (Value::String(s1), Value::String(s2)) => {
+                            let s1 = unsafe { &*s1 };
+                            let s2 = unsafe { &*s2 };
+                            s1 <= s2
+                        }
+
+                        _ => panic!("unsupported types in less-than-or-equal")
                     };
 
                     push_bool!(b);
@@ -1326,7 +1340,14 @@ impl Actor
                         (Float64(v0), Float64(v1)) => v0 > v1,
                         (Float64(v0), Int64(v1)) => v0 > (v1 as f64),
                         (Int64(v0), Float64(v1)) => (v0 as f64) > v1,
-                        _ => panic!("unsupported types in gt")
+
+                        (Value::String(s1), Value::String(s2)) => {
+                            let s1 = unsafe { &*s1 };
+                            let s2 = unsafe { &*s2 };
+                            s1 > s2
+                        }
+
+                        _ => panic!("unsupported types in greather-than")
                     };
 
                     push_bool!(b);
@@ -1342,7 +1363,14 @@ impl Actor
                         (Float64(v0), Float64(v1)) => v0 >= v1,
                         (Float64(v0), Int64(v1)) => v0 >= (v1 as f64),
                         (Int64(v0), Float64(v1)) => (v0 as f64) >= v1,
-                        _ => panic!("unsupported types in ge")
+
+                        (Value::String(s1), Value::String(s2)) => {
+                            let s1 = unsafe { &*s1 };
+                            let s2 = unsafe { &*s2 };
+                            s1 >= s2
+                        }
+
+                        _ => panic!("unsupported types in greater-than-or-equal")
                     };
 
                     push_bool!(b);
