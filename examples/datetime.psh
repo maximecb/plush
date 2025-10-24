@@ -1,0 +1,71 @@
+// Parses a timestamp in milliseconds into a date/time object.
+
+class DateTime {
+    init(self, timestamp_ms, utc_offset_hours) {
+        // Helper function to check for leap years
+        fun is_leap(year) {
+            return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        }
+
+        let secs_in_day = 86400;
+        let timestamp_secs = (timestamp_ms / 1000).floor();
+
+        // Apply UTC offset
+        let adjusted_secs = timestamp_secs + utc_offset_hours * 3600;
+
+        // Calculate date components
+        let var days = (adjusted_secs / secs_in_day).floor();
+        let var year = 1970;
+        let var days_in_year = 365;
+        while (days >= days_in_year) {
+            days = days - days_in_year;
+            year = year + 1;
+            days_in_year = is_leap(year) ? 366 : 365;
+        }
+
+        let var month = 1;
+        let var days_in_month = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        if (is_leap(year)) {
+            days_in_month[2] = 29;
+        }
+
+        while (days >= days_in_month[month]) {
+            days = days - days_in_month[month];
+            month = month + 1;
+        }
+
+        let day = days + 1;
+
+        // Calculate time components
+        let secs_today = adjusted_secs % secs_in_day;
+        let hour = (secs_today / 3600).floor();
+        let minute = ((secs_today % 3600) / 60).floor();
+        let second = secs_today % 60;
+
+        self.year = year;
+        self.month = month;
+        self.day = day;
+        self.hour = hour;
+        self.minute = minute;
+        self.second = second;
+    }
+}
+
+fun main() {
+    let current_time_ms = $time_current_ms();
+    let utc_offset = -4; // Example: EDT
+
+    $println("Current timestamp (ms): " + current_time_ms.to_s());
+
+    let datetime = DateTime(current_time_ms, utc_offset);
+
+    $println("Parsed Date/Time (UTC" + utc_offset.to_s() + "):");
+    $println("  Year: " + datetime.year.to_s());
+    $println("  Month: " + datetime.month.to_s());
+    $println("  Day: " + datetime.day.to_s());
+    $println("  Hour: " + datetime.hour.to_s());
+    $println("  Minute: " + datetime.minute.to_s());
+    $println("  Second: " + datetime.second.to_s());
+}
+
+main();
