@@ -1,0 +1,65 @@
+// CSV Parser Example
+
+fun parse_csv(csv_string)
+{
+    let rows = [];
+    let var current_row = [];
+    let var field = "";
+    let var in_quote = false;
+    let var i = 0;
+
+    while (i < csv_string.len) {
+        let char = csv_string.char_at(i);
+
+        if (in_quote) {
+            if (char == '"') {
+                if (i + 1 < csv_string.len && csv_string.char_at(i + 1) == '"') {
+                    field = field + '"';
+                    i = i + 1;
+                } else {
+                    in_quote = false;
+                }
+            } else {
+                field = field + char;
+            }
+        } else {
+            if (char == '"') {
+                in_quote = true;
+            } else if (char == ',') {
+                current_row.push(field.trim());
+                field = "";
+            } else if (char == '\n') {
+                current_row.push(field.trim());
+                rows.push(current_row);
+                current_row = [];
+                field = "";
+            } else {
+                field = field + char;
+            }
+        }
+        i = i + 1;
+    }
+
+    if (field.len > 0 || current_row.len > 0) {
+        current_row.push(field);
+        rows.push(current_row);
+    }
+
+    return rows;
+}
+
+let file_content = $read_file_utf8("examples/test_data.csv");
+if (file_content == nil) {
+    $println("Error reading test_data.csv");
+    return;
+}
+
+let rows = parse_csv(file_content);
+
+for (let var i = 0; i < rows.len; ++i) {
+    $println("Row " + (i + 1).to_s() + ":");
+    let row = rows[i];
+    for (let var j = 0; j < row.len; ++j) {
+        $println("  Cell " + (j + 1).to_s() + ": " + row[j]);
+    }
+}
