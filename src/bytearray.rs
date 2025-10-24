@@ -11,10 +11,10 @@ pub struct ByteArray
 
 impl ByteArray
 {
-    pub fn new(bytes: &Vec<u8>) -> Self
+    pub fn new(bytes: Vec<u8>) -> Self
     {
         Self {
-            bytes: bytes.clone()
+            bytes
         }
     }
 

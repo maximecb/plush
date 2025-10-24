@@ -101,6 +101,7 @@ pub fn get_host_const(name: &str) -> Expr
     static PRINT: HostFn = HostFn { name: "print", f: Fn1_0(print) };
     static PRINTLN: HostFn = HostFn { name: "println", f: Fn1_0(println) };
     static READLN: HostFn = HostFn { name: "readln", f: Fn0_1(readln) };
+    static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1_1(read_file) };
     static ACTOR_ID: HostFn = HostFn { name: "actor_id", f: Fn0_1(actor_id) };
     static ACTOR_PARENT: HostFn = HostFn { name: "actor_parent", f: Fn0_1(actor_parent) };
     static ACTOR_SLEEP: HostFn = HostFn { name: "actor_sleep", f: Fn1_0(actor_sleep) };
@@ -127,6 +128,7 @@ pub fn get_host_const(name: &str) -> Expr
         "print" => &PRINT,
         "println" => &PRINTLN,
         "readln" => &READLN,
+        "read_file" => &READ_FILE,
 
         "actor_id" => &ACTOR_ID,
         "actor_parent" => &ACTOR_PARENT,
@@ -232,6 +234,87 @@ fn readln(actor: &mut Actor) -> Value
 
         Err(_) => Value::Nil
     }
+}
+
+/// Do some basic safety checking (sandboxing) to minimize
+/// security risks for file accesses
+fn is_safe_path(file_path: &str) -> bool
+{
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    let file_path = file_path.trim();
+
+    // Reject absolute paths, accept relative paths only
+    if file_path.starts_with("/") || file_path.contains(":") {
+        return false;
+    }
+    if file_path.contains("..") {
+        return false;
+    }
+
+    // Get the absolute path for the file, resolving symlinks
+    let file_path = std::fs::canonicalize(&file_path).unwrap();
+    println!("Canonical path: {:?}", file_path);
+
+    // Get the current working directory
+    let cwd = std::env::current_dir().unwrap();
+    let cwd = std::fs::canonicalize(&cwd).unwrap();
+    println!("Canonical cwd: {:?}", cwd);
+
+    // For now, only allow access to paths inside the CWD
+    if !file_path.starts_with(cwd) {
+        return false;
+    }
+
+    // Don't allow access to the current executable
+    let current_exe = std::env::current_exe().unwrap();
+    let current_exe = std::fs::canonicalize(&current_exe).unwrap();
+    if file_path == current_exe {
+        return false;
+    }
+
+    // Reject extensions associated with executable files
+    let ext = match file_path.extension() {
+        Some(ext) => ext.to_str().unwrap(),
+        None => ""
+    };
+    if ext == "exe" || ext == "bat" || ext == "cmd" || ext == "com" || ext == "sh" {
+        return false;
+    }
+
+    // On Unix/Linux platforms, deny access to files marked as executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(file_path).unwrap();
+        let permissions = metadata.permissions();
+        let mode = permissions.mode();
+        if (mode & 0o111) != 0 {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Read the contents of an entire file into a ByteArray object
+fn read_file(actor: &mut Actor, file_path: Value) -> Value
+{
+    let file_path = file_path.unwrap_rust_str();
+
+    if !is_safe_path(&file_path) {
+        panic!("requested file path breaks sandboxing rules");
+    }
+
+    let bytes: Vec<u8> = match std::fs::read(file_path) {
+        Err(_) => return Value::Nil,
+        Ok(bytes) => bytes
+    };
+
+    let ba = crate::bytearray::ByteArray::new(bytes);
+    let ba_obj = actor.alloc.alloc(ba);
+    Value::ByteArray(ba_obj)
 }
 
 /// Get the id of the current actor
