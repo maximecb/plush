@@ -155,41 +155,11 @@ $println(p.to_s()); // (10, 20)
 
 ## Built-in Functions and Methods
 
-Plush provides a set of built-in host functions and methods that can be accessed from your code. Host functions are prefixed with a `$` sign.
-
-### Host Functions
-
-These host functions are defined in [`src/host.rs`](/src/host.rs):
-
--   `$time_current_ms()`: Returns the current time in milliseconds since the Unix epoch.
--   `$cmd_num_args()`: Get the number of command-line arguments available to the program.
--   `$cmd_get_arg(idx)`: Get the command-line argument at the given index. Returns `nil` if absent.
--   `$print(value)`: Prints a value to the console.
--   `$println(value)`: Prints a value to the console, followed by a newline.
--   `$readln()`: Read one line of input into a string.
--   `$read_file(file_path)`: Read an entire file into a new `ByteArray`.
--   `$write_file(file_path, bytes)`: Writes a `ByteArray` to a file.
--   `$actor_id()`: Returns the ID of the current actor.
--   `$actor_parent()`: Returns the ID of the parent actor.
--   `$actor_sleep(msecs)`: Pauses the current actor for the specified number of milliseconds.
--   `$actor_spawn(function)`: Spawns a new actor that executes the given function.
--   `$actor_join(actor_id)`: Waits for an actor to finish and returns its result.
--   `$actor_send(actor_id, message)`: Sends a message to the specified actor.
--   `$actor_recv()`: Receives a message from the current actor's mailbox, blocking if empty.
--   `$actor_poll()`: Polls the actor's mailbox for a message, returning `nil` if empty.
--   `$window_create(width, height, title, flags)`: Creates a new window.
--   `$window_draw_frame(window_id, frame_buffer)`: Draws a frame buffer to the specified window.
--   `$audio_open_output(sample_rate, num_channels)`: Opens an audio output device with the specified sample rate and number of channels. Returns a device ID.
--   `$audio_write_samples(device_id, samples)`: Writes a `ByteArray` of `float32` audio samples to the specified audio device.
--   `$audio_open_input(sample_rate, num_channels)`: Opens an audio input device with the specified sample rate and number of channels. Returns a device ID .
--   `$audio_read_samples(device_id, num_samples, dst_ba, index)`: Reads `num_samples` of `float32` audio samples from the specified audio device into a destination `ByteArray` starting at `index`. This function blocks until enough samples are available.
--   `$exit(code)`: End program execution and produce the given exit code.
-
 ### Core Methods
 
 -   **Int64**
     -   `abs()`: Get the absolute value of this number.
-    -   `to_f()`: Converts the integer to a float.
+    -   `to_f()`: Converts the integer to a 64-bit float.
     -   `to_s()`: Converts the integer to a string.
 -   **Float64**
     -   `abs()`: Get the absolute value of this number.
@@ -230,6 +200,39 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
     -   `blit_bgra32(dst_width, dst_height, src, src_width, src_height, dst_x, dst_y)`: Copies a rectangular region from a source `ByteArray` into this `ByteArray` at a specified position, with alpha blending. This method assumes that both the source and destination buffers contain pixel data in the BGRA32 format.
 -   **Dict**
     -   `has(key)`: Check if the dictionary contains this key.
+
+### Host Functions
+
+Plush provides a set of built-in host functions that can be accessed from your code. Host
+functions are prefixed with a `$` sign and serve to expose functionality from the host system,
+including various input/output functions, as well as the ability to create new actors and
+communicate with them.
+
+These host functions are defined in [`src/host.rs`](/src/host.rs):
+
+-   `$time_current_ms()`: Returns the current time in milliseconds since the Unix epoch.
+-   `$cmd_num_args()`: Get the number of command-line arguments available to the program.
+-   `$cmd_get_arg(idx)`: Get the command-line argument at the given index. Returns `nil` if absent.
+-   `$print(value)`: Prints a value to the console.
+-   `$println(value)`: Prints a value to the console, followed by a newline.
+-   `$readln()`: Read one line of input into a string.
+-   `$read_file(file_path)`: Read an entire file into a new `ByteArray`.
+-   `$write_file(file_path, bytes)`: Writes a `ByteArray` to a file.
+-   `$actor_id()`: Returns the ID of the current actor.
+-   `$actor_parent()`: Returns the ID of the parent actor.
+-   `$actor_sleep(msecs)`: Pauses the current actor for the specified number of milliseconds.
+-   `$actor_spawn(function)`: Spawns a new actor that executes the given function.
+-   `$actor_join(actor_id)`: Waits for an actor to finish and returns its result.
+-   `$actor_send(actor_id, message)`: Sends a message to the specified actor.
+-   `$actor_recv()`: Receives a message from the current actor's mailbox, blocking until a message is available.
+-   `$actor_poll()`: Polls the actor's mailbox for a message, returning `nil` if empty.
+-   `$window_create(width, height, title, flags)`: Creates a new window.
+-   `$window_draw_frame(window_id, frame_buffer)`: Draws a frame buffer to the specified window.
+-   `$audio_open_output(sample_rate, num_channels)`: Opens an audio output device with the specified sample rate and number of channels. Returns a device ID.
+-   `$audio_write_samples(device_id, samples)`: Writes a `ByteArray` of `float32` audio samples to the specified audio device.
+-   `$audio_open_input(sample_rate, num_channels)`: Opens an audio input device with the specified sample rate and number of channels. Returns a device ID .
+-   `$audio_read_samples(device_id, num_samples, dst_ba, index)`: Reads `num_samples` of `float32` audio samples from the specified audio device into a destination `ByteArray` starting at `index`. This function blocks until enough samples are available.
+-   `$exit(code)`: End program execution and produce the given exit code.
 
 ## Concurrency with Actors
 
