@@ -173,6 +173,33 @@ fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Value
     Value::from(*byte)
 }
 
+/// Get a string containing the single character at the given byte index
+fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Value
+{
+    let s = s.unwrap_rust_str();
+    let byte_idx = byte_idx.unwrap_usize();
+
+    if byte_idx >= s.len() {
+        panic!("invalid string byte index");
+    }
+
+    // Indexing in the middle of a character
+    if !s.is_char_boundary(byte_idx) {
+        return Value::Nil;
+    }
+
+    let ch = s[byte_idx..].chars().next();
+
+    let ch = match ch {
+        // Not a valid character
+        None => return Value::Nil,
+        Some(ch) => ch,
+    };
+
+    let str_obj = actor.alloc.str_const(ch.to_string());
+    Value::String(str_obj)
+}
+
 /// Try to parse the string as an integer with the given radix
 fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Value
 {
@@ -275,6 +302,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
 
     static STRING_FROM_CODEPOINT: HostFn = HostFn { name: "from_codepoint", f: Fn2_1(string_from_codepoint) };
     static STRING_BYTE_AT: HostFn = HostFn { name: "byte_at", f: Fn2_1(string_byte_at) };
+    static STRING_CHAR_AT: HostFn = HostFn { name: "char_at", f: Fn2_1(string_char_at) };
     static STRING_PARSE_INT: HostFn = HostFn { name: "parse_int", f: Fn2_1(string_parse_int) };
     static STRING_TRIM: HostFn = HostFn { name: "trim", f: Fn1_1(string_trim) };
     static STRING_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(identity_method) };
@@ -324,6 +352,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
 
         (Value::Class(STRING_ID), "from_codepoint") => &STRING_FROM_CODEPOINT,
         (Value::String(_), "byte_at") => &STRING_BYTE_AT,
+        (Value::String(_), "char_at") => &STRING_CHAR_AT,
         (Value::String(_), "parse_int") => &STRING_PARSE_INT,
         (Value::String(_), "trim") => &STRING_TRIM,
         (Value::String(_), "to_s") => &STRING_TO_S,

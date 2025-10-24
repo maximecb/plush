@@ -180,7 +180,8 @@ $println(p.to_s()); // (10, 20)
     -   `max(other)`: Returns the maximum of this number and `other`.
 -   **String**
     -   `from_codepoint(int_val)`: Get a single-character string representing the given unicode codepoint value.
-    -   `byte_at(idx)`: Get the UTF-8 byte at the given index.
+    -   `byte_at(byte_idx)`: Get the UTF-8 byte at the given byte index.
+    -   `char_at(byte_idx)`: Get a string for the single character at the given byte index. Returns `nil` if invalid.
     -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
     -   `trim()`: Produce a new string without whitespace at the beginning or end.
 -   **Array**

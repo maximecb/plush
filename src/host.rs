@@ -248,6 +248,12 @@ fn is_safe_path(file_path: &str) -> bool
     use std::path::PathBuf;
     use std::fs::canonicalize;
 
+    // Extra paranoid check
+    if file_path.contains("..") {
+        println!("file path contains parent operator");
+        return false;
+    }
+
     let file_path = file_path.trim();
     let mut file_path = PathBuf::from(file_path);
 
