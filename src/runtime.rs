@@ -221,6 +221,21 @@ fn string_trim(actor: &mut Actor, s: Value) -> Value
     Value::String(str_obj)
 }
 
+fn true_to_s(actor: &mut Actor, _v: Value) -> Value
+{
+    Value::String(actor.alloc.str_const("true".to_string()))
+}
+
+fn false_to_s(actor: &mut Actor, _v: Value) -> Value
+{
+    Value::String(actor.alloc.str_const("false".to_string()))
+}
+
+fn nil_to_s(actor: &mut Actor, _v: Value) -> Value
+{
+    Value::String(actor.alloc.str_const("nil".to_string()))
+}
+
 pub fn init_runtime(prog: &mut Program)
 {
     /*
@@ -275,6 +290,10 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     use crate::host::FnPtr::*;
     use crate::array::*;
     use crate::bytearray::*;
+
+    static TRUE_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(true_to_s) };
+    static FALSE_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(false_to_s) };
+    static NIL_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(nil_to_s) };
 
     static INT64_ABS: HostFn = HostFn { name: "abs", f: Fn1_1(int64_abs) };
     static INT64_TO_F: HostFn = HostFn { name: "to_f", f: Fn1_1(int64_to_f) };
@@ -374,6 +393,10 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::ByteArray(_), "blit_bgra32") => &BA_BLIT_BGRA32,
 
         (Value::Dict(_), "has") => &DICT_HAS,
+
+        (Value::True, "to_s") => &TRUE_TO_S,
+        (Value::False, "to_s") => &FALSE_TO_S,
+        (Value::Nil, "to_s") => &NIL_TO_S,
 
         _ => panic!("unknown method {}", method_name)
     };
