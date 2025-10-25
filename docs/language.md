@@ -188,6 +188,7 @@ $println(p.to_s()); // (10, 20)
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
     -   `push(value)`: Adds a value to the end of the array.
     -   `pop()`: Removes and returns the last value from the array.
+    -   `remove(idx)`: Removes and returns the element at the given index.
 -   **ByteArray**
     -   `with_size(size)`: Creates a new `ByteArray` of the given size.
     -   `resize(new_size)`: Resizes the `ByteArray`. If the new size is larger, the new bytes are filled with zeros.

@@ -330,6 +330,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static ARRAY_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn3_1(array_with_size) };
     static ARRAY_PUSH: HostFn = HostFn { name: "push", f: Fn2_0(array_push) };
     static ARRAY_POP: HostFn = HostFn { name: "pop", f: Fn1_1(array_pop) };
+    static ARRAY_REMOVE: HostFn = HostFn { name: "remove", f: Fn2_1(array_remove) };
 
     static BA_NEW: HostFn = HostFn { name: "new", f: Fn1_1(ba_new) };
     static BA_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn2_1(ba_with_size) };
@@ -380,6 +381,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Class(ARRAY_ID), "with_size") => &ARRAY_WITH_SIZE,
         (Value::Array(_), "push") => &ARRAY_PUSH,
         (Value::Array(_), "pop") => &ARRAY_POP,
+        (Value::Array(_), "remove") => &ARRAY_REMOVE,
 
         (Value::Class(BYTEARRAY_ID), "new") => &BA_NEW,
         (Value::Class(BYTEARRAY_ID), "with_size") => &BA_WITH_SIZE,
