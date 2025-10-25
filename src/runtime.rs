@@ -6,6 +6,21 @@ fn identity_method(actor: &mut Actor, self_val: Value) -> Value
     self_val
 }
 
+fn true_to_s(actor: &mut Actor, _v: Value) -> Value
+{
+    Value::String(actor.alloc.str_const("true".to_string()))
+}
+
+fn false_to_s(actor: &mut Actor, _v: Value) -> Value
+{
+    Value::String(actor.alloc.str_const("false".to_string()))
+}
+
+fn nil_to_s(actor: &mut Actor, _v: Value) -> Value
+{
+    Value::String(actor.alloc.str_const("nil".to_string()))
+}
+
 fn int64_abs(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_i64();
@@ -174,6 +189,7 @@ fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Value
 }
 
 /// Get a string containing the single character at the given byte index
+/// Returns nil if not a valid character boundary or character
 fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Value
 {
     let s = s.unwrap_rust_str();
@@ -219,21 +235,6 @@ fn string_trim(actor: &mut Actor, s: Value) -> Value
     let s = s.trim().to_string();
     let str_obj = actor.alloc.str_const(s);
     Value::String(str_obj)
-}
-
-fn true_to_s(actor: &mut Actor, _v: Value) -> Value
-{
-    Value::String(actor.alloc.str_const("true".to_string()))
-}
-
-fn false_to_s(actor: &mut Actor, _v: Value) -> Value
-{
-    Value::String(actor.alloc.str_const("false".to_string()))
-}
-
-fn nil_to_s(actor: &mut Actor, _v: Value) -> Value
-{
-    Value::String(actor.alloc.str_const("nil".to_string()))
 }
 
 pub fn init_runtime(prog: &mut Program)
