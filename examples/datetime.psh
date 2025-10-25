@@ -1,6 +1,14 @@
-// Parses a timestamp in milliseconds into a date/time object.
+// Parses a timestamp in milliseconds from the UNIX epoch into a date/time object.
 
-class DateTime {
+fun pad_zero(n) {
+    if (n < 10) {
+        return "0" + n.to_s();
+    }
+    return n.to_s();
+}
+
+class DateTime
+{
     init(self, timestamp_ms, utc_offset_hours) {
         // Helper function to check for leap years
         fun is_leap(year) {
@@ -49,6 +57,17 @@ class DateTime {
         self.minute = minute;
         self.second = second;
     }
+
+    to_s(self) {
+        return (
+            self.year.to_s() + "-" +
+            pad_zero(self.month) + "-" +
+            pad_zero(self.day) + " " +
+            pad_zero(self.hour) + ":" +
+            pad_zero(self.minute) + ":" +
+            pad_zero(self.second)
+        );
+    }
 }
 
 fun main() {
@@ -69,3 +88,38 @@ fun main() {
 }
 
 main();
+
+fun test() {
+    $println("\nRunning tests...");
+
+    fun assert_equal(actual, expected, message) {
+        if (actual != expected) {
+            $println("Assertion failed: " + message);
+            $println("  Expected: " + expected);
+            $println("  Actual:   " + actual);
+        } else {
+            $println("Test passed: " + message);
+        }
+    }
+
+    // Test case 1: Unix epoch zero
+    let dt1 = DateTime(0, 0);
+    assert_equal(dt1.to_s(), "1970-01-01 00:00:00", "Unix epoch zero");
+
+    // Test case 2: A known date
+    // 2023-10-26 10:00:00 UTC is 1698314400000 ms
+    let dt2 = DateTime(1698314400000, 0);
+    assert_equal(dt2.to_s(), "2023-10-26 10:00:00", "A known date");
+
+    // Test case 3: Another known date with offset
+    // 2023-10-26 10:00:00 UTC is 2023-10-26 06:00:00 EDT (UTC-4)
+    let dt3 = DateTime(1698314400000, -4);
+    assert_equal(dt3.to_s(), "2023-10-26 06:00:00", "A known date with offset");
+
+    // Test case 4: A leap year
+    // 2020-02-29 12:00:00 UTC is 1582977600000 ms
+    let dt4 = DateTime(1582977600000, 0);
+    assert_equal(dt4.to_s(), "2020-02-29 12:00:00", "A leap year");
+}
+
+test();
