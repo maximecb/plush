@@ -1355,7 +1355,8 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         let import = Import {
             import_path,
             full_path: full_path.display().to_string(),
-            symbols
+            symbols,
+            pos,
         };
         imports.push(import);
     }

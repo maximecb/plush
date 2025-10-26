@@ -181,16 +181,32 @@ impl Unit
 {
     fn resolve_syms(&mut self, prog: &mut Program, env: &mut Env) -> Result<(), ParseError>
     {
+        env.push_scope();
 
-        // For each imported unit
+        // For each import directive
         for import in &self.imports {
+            let unit = &prog.units[&import.full_path];
 
-            // TODO:
+            // For each imported symbol
+            for symbol in &import.symbols {
+                // If the unit defines this function
+                if let Some(fun_id) = unit.funs.get(symbol) {
+                    env.define(symbol, Decl::Fun { id: *fun_id });
+                    continue;
+                }
 
+                // If the unit defines this class
+                if let Some(class_id) = unit.classes.get(symbol) {
+                    env.define(symbol, Decl::Class { id: *class_id });
+                    continue;
+                }
 
+                return ParseError::with_pos(
+                    &format!("symbol `{}` not defined by imported unit", symbol),
+                    &import.pos
+                );
+            }
         }
-
-
 
         // Create definitions for the classes in this unit
         for (name, id) in &self.classes {
@@ -206,6 +222,8 @@ impl Unit
 
         // Move the unit function back on the program
         *prog.funs.get_mut(&self.unit_fn).unwrap() = unit_fn;
+
+        env.pop_scope();
 
         Ok(())
     }

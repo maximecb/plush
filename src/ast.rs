@@ -408,6 +408,9 @@ pub struct Import
 
     // Imported symbols
     pub symbols: Vec<String>,
+
+    // Source position
+    pub pos: SrcPos,
 }
 
 #[derive(Default, Clone, Debug)]
