@@ -1298,7 +1298,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
         input.eat_ws()?;
         let pos = input.get_pos();
 
-        if !input.match_keyword("import")? {
+        if !input.match_keyword("from")? {
             break;
         }
 
@@ -1314,7 +1314,8 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
             let ident = input.parse_ident()?;
             path += &ident;
 
-            if input.match_token("{")? {
+            // Start of imported symbols
+            if input.match_keyword("import")? {
                 break;
             }
 
@@ -1328,7 +1329,8 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
             input.eat_ws()?;
             symbols.push(input.parse_ident()?);
 
-            if input.match_token("}")? {
+            // End of import directive
+            if input.match_token(";")? {
                 break;
             }
 
@@ -1475,6 +1477,16 @@ mod tests
 
         // No semicolon
         parse_fails("x");
+    }
+
+    #[test]
+    fn imports()
+    {
+        parse_ok("from ./datetime import DateTime;");
+        parse_ok("from ./graphics import Vec3, Matrix;");
+        parse_ok("from ./csv import parse_csv;");
+        parse_ok("from ./foo/bar/bif import a, b, c;");
+        parse_ok("from audio import audio_open_device;");
     }
 
     #[test]
