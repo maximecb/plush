@@ -173,16 +173,6 @@ impl Program
             *self.units.get_mut(&full_path).unwrap() = unit;
         }
 
-
-
-        // Process the unit function
-        let mut main_unit = std::mem::take(&mut self.main_unit);
-        main_unit.resolve_syms(self, &mut env)?;
-        self.main_unit = main_unit;
-
-
-
-
         Ok(())
     }
 }

@@ -1282,8 +1282,11 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
 }
 
 /// Parse a single unit of source code (e.g. one source file)
-pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseError>
+pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseError>
 {
+    // Add a dummy unit to the map so we can avoid infinite import cycles
+    prog.units.insert(input.get_pos().get_src_name().clone(), Unit::default());
+
     input.eat_ws()?;
     let unit_pos = input.get_pos();
 
@@ -1359,9 +1362,12 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
     // Parse the imported units
     for import in &imports
     {
+        if prog.units.contains_key(&import.full_path) {
+            continue;
+        }
+
         let mut input = Lexer::from_file(&import.full_path)?;
-        let unit = parse_unit(&mut input, prog)?;
-        prog.units.insert(import.full_path.clone(), unit);
+        parse_unit(&mut input, prog)?;
     }
 
     // Parse the unit body
@@ -1416,20 +1422,26 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
         class_id: Default::default(),
     };
 
-    Ok(Unit {
+    let unit_fn_id = prog.reg_fun(unit_fn);
+    let unit = Unit {
         imports,
         classes,
         funs,
-        unit_fn: prog.reg_fun(unit_fn)
-    })
+        unit_fn: unit_fn_id,
+    };
+
+    // Add the unit to the program
+    prog.units.insert(unit_pos.get_src_name().clone(), unit);
+
+    Ok(unit_fn_id)
 }
 
 pub fn parse_program(input: &mut Lexer) -> Result<Program, ParseError>
 {
     let mut prog = Program::new();
-    let unit = parse_unit(input, &mut prog)?;
-    prog.main_fn = unit.unit_fn;
-    prog.main_unit = unit;
+    let main_fn = parse_unit(input, &mut prog)?;
+    prog.main_fn = main_fn;
+
     Ok(prog)
 }
 

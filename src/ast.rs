@@ -448,9 +448,6 @@ pub struct Program
     // Number of global variable slots
     pub num_globals: usize,
 
-    // Main/top-level unit
-    pub main_unit: Unit,
-
     // Top-level unit function
     pub main_fn: FunId,
 }
@@ -465,7 +462,6 @@ impl Program
             funs: Default::default(),
             classes: Default::default(),
             num_globals: Default::default(),
-            main_unit: Default::default(),
             main_fn: Default::default(),
         };
 
