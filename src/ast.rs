@@ -398,10 +398,20 @@ pub const AUDIO_DATA_ID: ClassId = ClassId(102);
 pub const LAST_RESERVED_ID: usize = 0xFF;
 
 #[derive(Default, Clone, Debug)]
+pub struct Import
+{
+    // Path to the imported unit
+    path: String,
+
+    // Imported symbols
+    symbols: Vec<String>,
+}
+
+#[derive(Default, Clone, Debug)]
 pub struct Unit
 {
-    // TODO: list of imports. Don't implement just yet.
-    // We'll probably want to import specific symbols from units
+    // List of imports
+    pub imports: Vec<Import>,
 
     // Classes declared in this unit
     pub classes: HashMap<String, ClassId>,

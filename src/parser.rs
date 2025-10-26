@@ -1287,6 +1287,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
     input.eat_ws()?;
     let pos = input.get_pos();
 
+    let mut imports = Vec::default();
     let mut classes = HashMap::default();
     let mut funs = HashMap::default();
     let mut stmts = Vec::default();
@@ -1343,6 +1344,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
     };
 
     Ok(Unit {
+        imports,
         classes,
         funs,
         unit_fn: prog.reg_fun(unit_fn)
