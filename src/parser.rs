@@ -1285,7 +1285,7 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
 pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseError>
 {
     input.eat_ws()?;
-    let pos = input.get_pos();
+    let unit_pos = input.get_pos();
 
     let mut imports = Vec::default();
     let mut classes = HashMap::default();
@@ -1302,17 +1302,21 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
             break;
         }
 
-        let mut path = String::new();
+        let mut import_path = String::new();
 
         input.eat_ws()?;
-        if input.match_token("./")? {
-            path += "./";
-        }
+        //if input.match_token("./")? {
+        //    import_path += "./";
+        //}
+
+        // For now, only relative imports are supported
+        input.expect_token("./")?;
+        import_path += "./";
 
         // Parse path elements
         loop {
             let ident = input.parse_ident()?;
-            path += &ident;
+            import_path += &ident;
 
             // Start of imported symbols
             if input.match_keyword("import")? {
@@ -1320,11 +1324,17 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
             }
 
             input.expect_token("/")?;
+            import_path += "/";
         }
 
-        let mut symbols = Vec::new();
+        // Compute the full path of the imported unit
+        let unit_path = unit_pos.get_src_name();
+        let base_path = std::path::PathBuf::from(unit_path);
+        let mut full_path = base_path.join(&import_path);
+        full_path.set_extension("psh");
 
-        // Parse imported symbols
+        // Parse list of imported symbols
+        let mut symbols = Vec::new();
         loop {
             input.eat_ws()?;
             symbols.push(input.parse_ident()?);
@@ -1337,15 +1347,23 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
             input.expect_token(",")?;
         }
 
-        let import = Import { path, symbols };
+        let import = Import {
+            import_path,
+            full_path: full_path.display().to_string(),
+            symbols
+        };
         imports.push(import);
     }
 
+    // Parse the imported units
+    for import in &imports
+    {
+        let mut input = Lexer::from_file(&import.full_path)?;
+        let unit = parse_unit(&mut input, prog)?;
+        prog.units.insert(import.full_path.clone(), unit);
+    }
 
-
-
-
-
+    // Parse the unit body
     loop
     {
         input.eat_ws()?;
@@ -1380,7 +1398,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
 
     let body = StmtBox::new(
         Stmt::Block(stmts),
-        pos
+        unit_pos
     );
 
     let unit_fn = Function {
@@ -1392,7 +1410,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
         captured: Default::default(),
         escaping: Default::default(),
         is_unit: true,
-        pos,
+        pos: unit_pos,
         id: Default::default(),
         class_id: Default::default(),
     };
@@ -1416,7 +1434,7 @@ pub fn parse_program(input: &mut Lexer) -> Result<Program, ParseError>
 
 pub fn parse_str(src: &str) -> Result<Program, ParseError>
 {
-    let mut input = Lexer::new(&src, "src");
+    let mut input = Lexer::new(&src, "");
     parse_program(&mut input)
 }
 
@@ -1440,14 +1458,14 @@ mod tests
     fn parse_ok(src: &str)
     {
         dbg!(src);
-        let mut input = Lexer::new(&src, "src");
+        let mut input = Lexer::new(&src, "");
         parse_program(&mut input).unwrap();
     }
 
     fn parse_fails(src: &str)
     {
         dbg!(src);
-        let mut input = Lexer::new(&src, "src");
+        let mut input = Lexer::new(&src, "");
         assert!(parse_program(&mut input).is_err());
     }
 
@@ -1482,11 +1500,11 @@ mod tests
     #[test]
     fn imports()
     {
-        parse_ok("from ./datetime import DateTime;");
-        parse_ok("from ./graphics import Vec3, Matrix;");
-        parse_ok("from ./csv import parse_csv;");
-        parse_ok("from ./foo/bar/bif import a, b, c;");
-        parse_ok("from audio import audio_open_device;");
+        parse_ok("from ./examples/datetime import DateTime;");
+        //parse_ok("from ./graphics import Vec3, Matrix;");
+        //parse_ok("from ./csv import parse_csv;");
+        //parse_ok("from ./foo/bar/bif import a, b, c;");
+        //parse_ok("from audio import audio_open_device;");
     }
 
     #[test]

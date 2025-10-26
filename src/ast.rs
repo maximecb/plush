@@ -400,8 +400,11 @@ pub const LAST_RESERVED_ID: usize = 0xFF;
 #[derive(Default, Clone, Debug)]
 pub struct Import
 {
-    // Path to the imported unit
-    pub path: String,
+    // Path as given in the import directive
+    pub import_path: String,
+
+    // Full path to the imported unit
+    pub full_path: String,
 
     // Imported symbols
     pub symbols: Vec<String>,
@@ -410,7 +413,7 @@ pub struct Import
 #[derive(Default, Clone, Debug)]
 pub struct Unit
 {
-    // List of imports
+    // List of import directives
     pub imports: Vec<Import>,
 
     // Classes declared in this unit
