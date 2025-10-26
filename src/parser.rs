@@ -1292,6 +1292,58 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
     let mut funs = HashMap::default();
     let mut stmts = Vec::default();
 
+    // Parse imports, which must be at the top of the unit
+    loop
+    {
+        input.eat_ws()?;
+        let pos = input.get_pos();
+
+        if !input.match_keyword("import")? {
+            break;
+        }
+
+        let mut path = String::new();
+
+        input.eat_ws()?;
+        if input.match_token("./")? {
+            path += "./";
+        }
+
+        // Parse path elements
+        loop {
+            let ident = input.parse_ident()?;
+            path += &ident;
+
+            if input.match_token("{")? {
+                break;
+            }
+
+            input.expect_token("/")?;
+        }
+
+        let mut symbols = Vec::new();
+
+        // Parse imported symbols
+        loop {
+            input.eat_ws()?;
+            symbols.push(input.parse_ident()?);
+
+            if input.match_token("}")? {
+                break;
+            }
+
+            input.expect_token(",")?;
+        }
+
+        let import = Import { path, symbols };
+        imports.push(import);
+    }
+
+
+
+
+
+
     loop
     {
         input.eat_ws()?;

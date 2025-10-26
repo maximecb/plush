@@ -401,10 +401,10 @@ pub const LAST_RESERVED_ID: usize = 0xFF;
 pub struct Import
 {
     // Path to the imported unit
-    path: String,
+    pub path: String,
 
     // Imported symbols
-    symbols: Vec<String>,
+    pub symbols: Vec<String>,
 }
 
 #[derive(Default, Clone, Debug)]
