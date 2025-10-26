@@ -406,6 +406,9 @@ pub struct Unit
     // Classes declared in this unit
     pub classes: HashMap<String, ClassId>,
 
+    // Functions declared in this unit
+    pub funs: HashMap<String, FunId>,
+
     // Unit-level (top level) function
     pub unit_fn: FunId,
 }

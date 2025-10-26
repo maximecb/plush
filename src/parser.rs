@@ -1288,6 +1288,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
     let pos = input.get_pos();
 
     let mut classes = HashMap::default();
+    let mut funs = HashMap::default();
     let mut stmts = Vec::default();
 
     loop
@@ -1309,7 +1310,17 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
             continue;
         }
 
-        stmts.push(parse_stmt(input, prog)?);
+        let stmt = parse_stmt(input, prog)?;
+
+        // If this is a function declaration, add it to the
+        // list of functions declared in this unit
+        if let Stmt::Let { init_expr, var_name, .. } = stmt.stmt.as_ref() {
+            if let Expr::Fun { fun_id, .. } = init_expr.expr.as_ref() {
+                funs.insert(var_name.clone(), *fun_id);
+            }
+        }
+
+        stmts.push(stmt);
     }
 
     let body = StmtBox::new(
@@ -1333,6 +1344,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
 
     Ok(Unit {
         classes,
+        funs,
         unit_fn: prog.reg_fun(unit_fn)
     })
 }

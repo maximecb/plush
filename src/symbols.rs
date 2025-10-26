@@ -562,11 +562,6 @@ impl ExprBox
                     captured.push(decl.clone());
                 }
 
-
-
-
-
-
                 // Put the child function back in place
                 *prog.funs.get_mut(fun_id).unwrap() = child_fun;
             }
