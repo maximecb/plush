@@ -165,10 +165,23 @@ impl Program
         env.define("AudioNeeded", Decl::Class { id: AUDIO_NEEDED_ID });
         env.define("AudioData", Decl::Class { id: AUDIO_DATA_ID });
 
+        // For each unit in the program
+        let unit_paths: Vec<String> = self.units.keys().cloned().collect();
+        for full_path in unit_paths {
+            let mut unit = std::mem::take(self.units.get_mut(&full_path).unwrap());
+            unit.resolve_syms(self, &mut env)?;
+            *self.units.get_mut(&full_path).unwrap() = unit;
+        }
+
+
+
         // Process the unit function
         let mut main_unit = std::mem::take(&mut self.main_unit);
         main_unit.resolve_syms(self, &mut env)?;
         self.main_unit = main_unit;
+
+
+
 
         Ok(())
     }
@@ -178,6 +191,17 @@ impl Unit
 {
     fn resolve_syms(&mut self, prog: &mut Program, env: &mut Env) -> Result<(), ParseError>
     {
+
+        // For each imported unit
+        for import in &self.imports {
+
+            // TODO:
+
+
+        }
+
+
+
         // Create definitions for the classes in this unit
         for (name, id) in &self.classes {
             env.define(name, Decl::Class { id: *id });

@@ -1332,6 +1332,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<Unit, ParseEr
         let base_path = std::path::PathBuf::from(unit_path);
         let mut full_path = base_path.join(&import_path);
         full_path.set_extension("psh");
+        let full_path = std::fs::canonicalize(full_path).unwrap();
 
         // Parse list of imported symbols
         let mut symbols = Vec::new();
