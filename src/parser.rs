@@ -1330,9 +1330,10 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
             import_path += "/";
         }
 
-        // Compute the full path of the imported unit
+        // Assemble the full path of the imported unit
         let unit_path = unit_pos.get_src_name();
-        let base_path = std::path::PathBuf::from(unit_path);
+        let mut base_path = std::path::PathBuf::from(unit_path);
+        base_path.pop();
         let mut full_path = base_path.join(&import_path);
         full_path.set_extension("psh");
         let full_path = std::fs::canonicalize(full_path).unwrap();
