@@ -17,16 +17,17 @@ The Plush language supports:
 - A simple frame buffer API for graphics and animations
 - A simple audio output API
 - An extensible set of host functions defined in `src/host.rs`
+- Importing code from other source files
 
 Caveats and limitations:
-- The language is still very much incomplete
-  - You may run into bugs or missing features
 - Lack of error messages or good error handling
   - You may have to look at the source code to figure things out
   - We could use your help in improving error messages
 - Copying garbage collector planned but not yet implemented
   - Currently relying on alloc-until-you-crash technology (TM)
-- Imports, support for multiple source files planned but not yet implemented
+- May be missing functionality you're used to in other programming languages
+  - For example, not as many `String` methods as Python or JS
+  - This is an area where you can potentially contribute
 
 ## Getting Started
 
@@ -151,6 +152,23 @@ class Point {
 
 let p = Point(10, 20);
 $println(p.to_s()); // (10, 20)
+```
+
+### Imports
+
+Plush supports an `import` directive with a syntax similar to Python's. This makes it possible to import code from other files.
+There are a few restrictions. For now, only relative local imports are supported. That is, you can import from other source files,
+but Plush does not yet have a standard library to speak of. You also need to place all import directives at the beginning of the file.
+Lastly, you can import functions and classes, but you can't import global variables from other units.
+
+Example usage:
+
+```plush
+from ./datetime import DateTime;
+from ./font import Font, render_text;
+
+let date = DateTime();
+render_text("Hello world");
 ```
 
 ## Built-in Functions and Methods
