@@ -14,7 +14,7 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: Set up Node.js
       uses: actions/setup-node@v5
@@ -31,9 +31,21 @@ jobs:
           echo "Error: package.json not found in plush.tmbundle"
           exit 1
         fi
+
+        # Get new version number
+        OLD_VERSION=$(jq -r '.version' package.json)
+        echo "Current version: $OLD_VERSION"
+
+        # Update package version number
         npm version patch --no-git-tag-version
+
+        # Get new version number
         NEW_VERSION=$(jq -r '.version' package.json)
         echo "New version: $NEW_VERSION"
+
+        # Create a commit that updates the version number
+        git config --global user.name "VSIX extension update workflow"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
         git add package.json
         if [ -f package-lock.json ]; then
           git add package-lock.json
@@ -43,7 +55,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
 
-    - name: Package .vsix
+    - name: Build .vsix package
       run: cd plush.tmbundle && vsce package
 
     - name: Extract version and set tag
