@@ -438,7 +438,7 @@ impl ExprBox
                 }
             }
 
-            Expr::Ref { .. } => panic!("unresolved ref"),
+            Expr::Ref { .. } => {}
 
             Expr::Index { base, index } => {
                 base.resolve_syms(prog, fun, env)?;

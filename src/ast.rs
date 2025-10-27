@@ -448,6 +448,9 @@ pub struct Program
     // prune unreferenced classes (remove dead code)
     pub classes: HashMap<ClassId, Class>,
 
+    // Unit function initialization order
+    pub init_order: Vec<FunId>,
+
     // Number of global variable slots
     pub num_globals: usize,
 
@@ -464,6 +467,7 @@ impl Program
             units: Default::default(),
             funs: Default::default(),
             classes: Default::default(),
+            init_order: Default::default(),
             num_globals: Default::default(),
             main_fn: Default::default(),
         };

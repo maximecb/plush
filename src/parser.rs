@@ -1424,7 +1424,11 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         class_id: Default::default(),
     };
 
+    // Register the unit function in the initialization order
+    // Imported units get initialized before the importer
     let unit_fn_id = prog.reg_fun(unit_fn);
+    prog.init_order.push(unit_fn_id);
+
     let unit = Unit {
         imports,
         classes,
@@ -1440,9 +1444,47 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
 
 pub fn parse_program(input: &mut Lexer) -> Result<Program, ParseError>
 {
+    let main_pos = input.get_pos();
     let mut prog = Program::new();
     let main_fn = parse_unit(input, &mut prog)?;
     prog.main_fn = main_fn;
+
+    // The main unit function should be last in the initialization order
+    assert!(prog.init_order.pop().unwrap() == main_fn);
+
+    let mut init_stmts = Vec::new();
+
+    // For each unit in the initialization order
+    for fun_id in &prog.init_order {
+        // Reference to this unit function
+        let callee_expr = ExprBox::new(
+            Expr::Ref {
+                name: prog.funs[fun_id].name.clone(),
+                decl: crate::symbols::Decl::Fun { id: *fun_id },
+            },
+            main_pos
+        );
+
+        // Call to the unit function
+        let call_expr = ExprBox::new(
+            Expr::Call {
+                callee: callee_expr,
+                args: vec![]
+            },
+            main_pos
+        );
+
+        init_stmts.push(StmtBox::new(
+            Stmt::Expr(call_expr),
+            main_pos
+        ));
+    }
+
+    // Prepend the initialization code to the main unit function's body
+    let main_fn = prog.funs.get_mut(&main_fn).unwrap();
+    if let Stmt::Block(stmts) = main_fn.body.stmt.as_mut() {
+        stmts.splice(0..0, init_stmts.iter().cloned());
+    }
 
     Ok(prog)
 }
