@@ -1395,7 +1395,7 @@ impl Actor
                     let b = match v0 {
                         Value::True => Value::False,
                         Value::False => Value::True,
-                        _ => panic!()
+                        _ => panic!("unsupported type in logical not {:?}", v0)
                     };
 
                     push!(b);
