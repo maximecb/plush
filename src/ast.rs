@@ -77,7 +77,9 @@ pub enum Expr
 
     Ident(String),
 
-    // Reference to a variable/function declaration
+    HostConst(String),
+
+    // Resolved reference to a named entity
     Ref {
         name: String,
         decl: Decl,

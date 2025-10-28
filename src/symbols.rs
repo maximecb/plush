@@ -438,6 +438,10 @@ impl ExprBox
                 }
             }
 
+            Expr::HostConst(name) => {
+                *self.expr = crate::host::get_host_const(&name, fun, prog);
+            }
+
             Expr::Ref { .. } => {}
 
             Expr::Index { base, index } => {

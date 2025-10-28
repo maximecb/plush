@@ -4,8 +4,7 @@ use std::thread;
 use std::time::Duration;
 use crate::alloc::Alloc;
 use crate::vm::{Value, VM, Actor};
-use crate::ast::Expr;
-use crate::audio::{audio_open_output, audio_write_samples, audio_open_input, audio_read_samples};
+use crate::ast::{Expr, Function, Program};
 
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
@@ -90,10 +89,20 @@ impl HostFn
 /// Get a host constant by name
 /// Returns an AST expression node for the constant,
 /// because we want host constants to be resolved early
-pub fn get_host_const(name: &str) -> Expr
+pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
 {
     use FnPtr::*;
     use crate::window::*;
+    use crate::audio::*;
+
+    // This constant is only true inside the main unit
+    if name == "MAIN_UNIT" {
+        if fun.id == prog.main_fn {
+            return Expr::True;
+        } else {
+            return Expr::False;
+        }
+    }
 
     static TIME_CURRENT_MS: HostFn = HostFn { name: "time_current_ms", f: Fn0_1(time_current_ms) };
     static CMD_NUM_ARGS: HostFn = HostFn { name: "cmd_num_args", f: Fn0_1(cmd_num_args) };

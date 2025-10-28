@@ -143,10 +143,9 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
     if ch == '$' {
         input.eat_ch();
         let name = input.parse_ident()?;
-        let expr = crate::host::get_host_const(&name);
 
         return ExprBox::new_ok(
-            expr,
+            Expr::HostConst(name),
             pos
         );
     }

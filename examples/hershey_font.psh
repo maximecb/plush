@@ -280,12 +280,16 @@ fun mul(x,y) {
     return (x * y).floor();
 }
 
-fun utf8_advance(c) {
-    return [1,  1,  1,  1, 1, 1, 1, 1,
-           (1),(1),(1),(1),2, 2, 3, 4][c>>4];
+fun utf8_advance(char_byte) {
+    return [1, 1, 1, 1, 1, 1, 1, 1, (1),(1),(1),(1), 2, 2, 3, 4][char_byte >> 4];
 }
 
 class Font {
+    // Create a simplex font instance
+    simplex(pixel, weight, color, monospace) {
+        //return Font(simplex, pixel, weight, color, monospace);
+    }
+
     init(self, descr, pixel, weight, color, monospace) {
         assert(descr instanceof Array);
         assert(pixel instanceof Int64);
@@ -304,7 +308,7 @@ class Font {
         self.width = Array.with_size(96, 0);
         self.glyph = Array.with_size(96, 0);
 
-        for(let var i=0; i<96; ++i) {
+        for (let var i=0; i<96; ++i) {
             self.width[i] = mul(descr[i][0], self.scale);
         }
     }
@@ -337,9 +341,9 @@ class Font {
                 let pts = self.descr[n][1];
                 self.glyph[n] = down_sample(
                   self.render_glyph(0,
-                  AA_MUL*self.ascent,
-                  AA_MUL*(wid+2),
-                  AA_MUL*self.leading,
+                  AA_MUL * self.ascent,
+                  AA_MUL * (wid+2),
+                  AA_MUL * self.leading,
                   pts, self.color)
                 );
             }
@@ -373,6 +377,11 @@ class Font {
         return x;
     }
 }
+
+// Only run the font demo code if this is the main unit
+// Don't run if this unit was imported from another unit
+if ($MAIN_UNIT == false)
+  return;
 
 // Create a frame buffer and window
 let frame_buffer = Image(WIDTH, HEIGHT);
