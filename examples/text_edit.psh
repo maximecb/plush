@@ -1,11 +1,11 @@
 from ./image import Image, rgb;
 from ./monogram_font import Font;
 
-let FRAME_WIDTH = 800;
-let FRAME_HEIGHT = 600;
+let FRAME_WIDTH = 1000;
+let FRAME_HEIGHT = 800;
 
-let NUM_COLS = 40;
-let NUM_ROWS = 18;
+let NUM_COLS = 70;
+let NUM_ROWS = 35;
 
 let COLOR_WHITE = rgb(255, 255, 255);
 let COLOR_C64_BLUE = rgb(9, 64, 221);
@@ -22,26 +22,57 @@ let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Text Editor", 0);
 
 let font = Font(2, COLOR_WHITE);
 
-
-
-
-
-
-
-
-
 fun redraw()
 {
     frame_buffer.clear(COLOR_C64_BLUE);
 
-    font.draw_char(frame_buffer, 0, 0, '▯');
+    let start_time = $time_current_ms();
+
+    for (let var i = 0; i < NUM_ROWS; ++i)
+    {
+        let line = lines[i];
+
+        for (let var j = 0; j < line.len && j < NUM_COLS; ++j)
+        {
+            let ch = line[j];
+            font.draw_char(frame_buffer, 8 + j * font.char_w, 2 + i * font.char_h, ch);
+        }
+    }
 
 
 
 
-
+    let end_time = $time_current_ms();
+    let redraw_time = end_time - start_time;
+    $println('Redraw time: ' + redraw_time.to_s() + 'ms');
 
     $window_draw_frame(window, frame_buffer.bytes);
+}
+
+// Name of the file to open, nil if not set
+let file_name = $cmd_get_arg(1);
+
+if (file_name != nil) {
+    let file_data = $read_file_utf8(file_name);
+    $println(file_data.len);
+
+    let var line = [];
+
+    for (let var i = 0; i < file_data.len; ++i)
+    {
+        let ch = file_data.char_at(i);
+        if (ch == nil || ch == '\r') {
+            continue;
+        }
+
+        if (ch == '\n') {
+            lines.push(line);
+            line = [];
+            continue;
+        }
+
+        line.push(ch);
+    }
 }
 
 // Draw a first frame, which will cause the window to appear
