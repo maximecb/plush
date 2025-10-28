@@ -7,8 +7,9 @@ let AA_MUL = 2;	// subpixels for antialiasing
 
 // --- Glyph Vectors ---
 
-let LEADING = 40;
+// Character width and height
 let ASCENT  = 30;
+let LEADING = 40;
 
 // Character Data from https://paulbourke.net/dataformats/hershey/
 // - from ' ' to '~', in ascii order (0x20 to 0x7E)
@@ -306,17 +307,19 @@ class Font {
         assert(monospace instanceof Int64);
 
         self.descr = descr;
-        self.scale = pixel/40.0;
+        self.scale = pixel / 40.0;
         self.weight = weight;
         self.color = color;
         self.monospace = monospace;
 
-        self.ascent = mul(ASCENT, self.scale);
+        // Character width and height
         self.leading = mul(LEADING, self.scale);
+        self.ascent = mul(ASCENT, self.scale);
+
         self.width = Array.with_size(96, 0);
         self.glyph = Array.with_size(96, 0);
 
-        for (let var i=0; i<96; ++i) {
+        for (let var i = 0; i < 96; ++i) {
             self.width[i] = mul(descr[i][0], self.scale);
         }
     }
@@ -327,7 +330,7 @@ class Font {
         let i = Image(width+w, height+w);
         let var ox = -1;
         let var oy = -1;
-        for(let var j=0; j < pts.len; j = j+2) {
+        for(let var j = 0; j < pts.len; j = j+2) {
             let draw = (pts[j] != -1 || pts[j+1] != -1);
             let nx = (draw ? x + mul(AA_MUL*self.scale,pts[j])   : -1);
             let ny = (draw ? y - mul(AA_MUL*self.scale,pts[j+1]) : -1);
@@ -363,25 +366,26 @@ class Font {
         return x+wid;
     }
 
-    draw_string(self, buffer, ix, y, s) {
+    draw_string(self, buffer, ix, y, str) {
         let var x = ix;
         let var i = 0;
         if (self.monospace == 0) {
-            while(i < s.len) {
-                let c = s.byte_at(i);
+            while (i < str.len) {
+                let c = str.byte_at(i);
                 x = self.draw_char(buffer, x, y, c);
                 i = i + utf8_advance(c);
             }
         } else {
-            while(i < s.len) {
-                let c = s.byte_at(i);
+            while (i < str.len) {
+                let c = str.byte_at(i);
                 let w = self.draw_char(0, 0, 0, c);
-                let a = (self.monospace-w)>>1;
+                let a = (self.monospace - w)>>1;
                 self.draw_char(buffer, x+a, y, c);
                 x = x + self.monospace;
                 i = i + utf8_advance(c);
             }
         }
+
         return x;
     }
 }

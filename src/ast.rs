@@ -411,6 +411,9 @@ pub struct Import
     // Imported symbols
     pub symbols: Vec<String>,
 
+    // Import all symbols
+    pub import_all: bool,
+
     // Source position
     pub pos: SrcPos,
 }

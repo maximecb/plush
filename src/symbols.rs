@@ -197,6 +197,19 @@ impl Unit
         for import in &self.imports {
             let unit = &prog.units[&import.full_path];
 
+            // If we should import all available symbols
+            if import.import_all {
+                // If the unit defines this function
+                for (symbol, fun_id) in &unit.funs {
+                    env.define(symbol, Decl::Fun { id: *fun_id });
+                }
+
+                // If the unit defines this class
+                for (symbol, class_id) in &unit.classes {
+                    env.define(symbol, Decl::Class { id: *class_id });
+                }
+            }
+
             // For each imported symbol
             for symbol in &import.symbols {
                 // If the unit defines this function

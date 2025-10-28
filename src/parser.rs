@@ -1337,24 +1337,34 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         full_path.set_extension("psh");
         let full_path = std::fs::canonicalize(full_path).unwrap();
 
-        // Parse list of imported symbols
         let mut symbols = Vec::new();
-        loop {
-            input.eat_ws()?;
-            symbols.push(input.parse_ident()?);
+        let mut import_all = false;
 
-            // End of import directive
-            if input.match_token(";")? {
-                break;
+        // Check if we should import all available symbols
+        input.eat_ws()?;
+        if input.match_token("*")? {
+            import_all = true;
+            input.expect_token(";")?;
+        } else {
+            // Parse list of imported symbols
+            loop {
+                input.eat_ws()?;
+                symbols.push(input.parse_ident()?);
+
+                // End of import directive
+                if input.match_token(";")? {
+                    break;
+                }
+
+                input.expect_token(",")?;
             }
-
-            input.expect_token(",")?;
         }
 
         let import = Import {
             import_path,
             full_path: full_path.display().to_string(),
             symbols,
+            import_all,
             pos,
         };
         imports.push(import);
