@@ -558,6 +558,39 @@ impl ExprBox
                         }
                     }
 
+                    // If this is a call to a method of a class
+                    Expr::Member { base, field } => {
+                        if let Expr::Ref { decl: Decl::Class { id }, name } = base.expr.as_ref() {
+                            // Try to lookup the class
+                            match prog.classes.get(id) {
+                                // If this is a core class with no definition
+                                None => {},
+
+                                Some(class) => {
+                                    let fun_id = match class.methods.get(field) {
+                                        Some(fun) => fun,
+                                        None => {
+                                            return ParseError::with_pos(
+                                                &format!("method `{}` not found on class `{}`", field, name),
+                                                &callee.pos
+                                            );
+                                        }
+                                    };
+
+                                    if args.len() != prog.funs[fun_id].params.len() {
+                                        return ParseError::with_pos(
+                                            &format!("argument mismatch in call to class method `{}`", field),
+                                            &callee.pos
+                                        );
+                                    }
+
+                                    // Replace the callee to make this a direct call to the function
+                                    *callee.expr.as_mut() = Expr::Ref { decl: Decl::Fun { id: *fun_id }, name: field.clone() };
+                                }
+                            }
+                        }
+                    }
+
                     _ => {}
                 }
 

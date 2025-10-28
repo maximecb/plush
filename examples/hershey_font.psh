@@ -240,8 +240,11 @@ fun get_a(p) { return (p >> 24) & 0xFF; }
 fun get_r(p) { return (p >> 16) & 0xFF; }
 fun get_g(p) { return (p >>  8) & 0xFF; }
 fun get_b(p) { return (p >>  0) & 0xFF; }
-fun rgba(r,g,b,a) {
+fun rgba(r, g, b, a) {
     return (a << 24) | (r << 16) | (g << 8) | b;
+}
+fun rgb(r, g, b) {
+    return (0xFF << 24) | (r << 16) | (g << 8) | b;
 }
 
 fun down_sample(hi) {
@@ -287,7 +290,7 @@ fun utf8_advance(char_byte) {
 class Font {
     // Create a simplex font instance
     simplex(pixel, weight, color, monospace) {
-        //return Font(simplex, pixel, weight, color, monospace);
+        return Font(simplex, pixel, weight, color, monospace);
     }
 
     init(self, descr, pixel, weight, color, monospace) {
@@ -332,12 +335,12 @@ class Font {
         return i;
     }
 
-    draw_char(self, dst, x, y, c) {
-        let n = (32 <= c && c <= 126 ? c-32 : 127-32);
+    draw_char(self, dst, x, y, ch) {
+        let n = (32 <= ch && ch <= 126 ? ch-32 : 127-32);
         let wid = self.width[n];
 
-        if(dst != 0) {
-            if(self.glyph[n] == 0) {
+        if (dst != 0) {
+            if (self.glyph[n] == 0) {
                 let pts = self.descr[n][1];
                 self.glyph[n] = down_sample(
                   self.render_glyph(0,
@@ -358,7 +361,7 @@ class Font {
     draw_string(self, buffer, ix, y, s) {
         let var x = ix;
         let var i = 0;
-        if(self.monospace == 0) {
+        if (self.monospace == 0) {
             while(i < s.len) {
                 let c = s.byte_at(i);
                 x = self.draw_char(buffer, x, y, c);
