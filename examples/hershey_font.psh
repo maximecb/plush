@@ -1,5 +1,7 @@
 // Hershey Text Example for Plush
 
+from ./image import *;
+
 let WIDTH  = 640;
 let HEIGHT = 480;
 let CYAN   = 0xFF_60_FF_D0;
@@ -155,83 +157,6 @@ let simplex = [
 [20, [2,0,2,28,18,28,18,0,2,0] ], // tofu
 ];
 
-// --- Blitting Infra ---
-
-class Image
-{
-    init(self, width, height)
-    {
-        assert(width instanceof Int64);
-        assert(height instanceof Int64);
-
-        self.width = width;
-        self.height = height;
-        self.bytes = ByteArray.with_size(4 * width * height);
-    }
-
-    clear(self, color)
-    {
-        self.bytes.fill_u32(0, self.width * self.height, color);
-    }
-
-    // The color is specified as an u32 value in RGBA32 format
-    get_pixel(self, x, y)
-    {
-        let idx = y * self.width + x;
-        return(self.bytes.read_u32(idx));
-    }
-
-    set_pixel(self, x, y, color)
-    {
-        let idx = y * self.width + x;
-        self.bytes.write_u32(idx, color);
-    }
-
-    // Copy a source image into this image at a given position
-    blit(self, src_img, dst_x, dst_y)
-    {
-        self.bytes.blit_bgra32(
-            self.width,
-            self.height,
-            src_img.bytes,
-            src_img.width,
-            src_img.height,
-            dst_x,
-            dst_y
-        );
-    }
-
-    // Bresenham
-    draw_line(self, x0, y0, x1, y1, color) {
-        let sx = (x0 < x1 ? 1 : -1);
-        let sy = (y0 < y1 ? 1 : -1);
-        let dx = (x1 - x0).abs();
-        let dy = (y1 - y0).abs();
-
-        let var err = dx - dy;
-        let var x = x0;
-        let var y = y0;
-
-        loop {
-            self.set_pixel(x, y, color);
-            if (x == x1 && y == y1) {
-                return;
-            }
-
-            let e2 = 2 * err;
-            if (e2 > -dy) {
-                err = err - dy;
-                x = x + sx;
-            }
-
-            if (e2 < dx) {
-                err = err + dx;
-                y = y + sy;
-            }
-        }
-    }
-}
-
 // --- Graphics Functions ---
 
 fun draw_thick_line(buffer, x0, y0, x1, y1, w, c) {
@@ -240,17 +165,6 @@ fun draw_thick_line(buffer, x0, y0, x1, y1, w, c) {
             buffer.draw_line(x0+ax, y0+ay, x1+ax, y1+ay, c);
         }
     }
-}
-
-fun get_a(p) { return (p >> 24) & 0xFF; }
-fun get_r(p) { return (p >> 16) & 0xFF; }
-fun get_g(p) { return (p >>  8) & 0xFF; }
-fun get_b(p) { return (p >>  0) & 0xFF; }
-fun rgba(r, g, b, a) {
-    return (a << 24) | (r << 16) | (g << 8) | b;
-}
-fun rgb(r, g, b) {
-    return (0xFF << 24) | (r << 16) | (g << 8) | b;
 }
 
 fun down_sample(hi) {
