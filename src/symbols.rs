@@ -54,6 +54,9 @@ struct Scope
 struct Env
 {
     scopes: Vec<Scope>,
+
+    // Next global variable slot index to assign
+    next_global_idx: usize,
 }
 
 impl Env
@@ -88,27 +91,31 @@ impl Env
     {
         let num_scopes = self.scopes.len();
         let top_scope = &mut self.scopes[num_scopes - 1];
-        assert!(top_scope.decls.get(name).is_none());
 
         let decl = if fun.is_unit {
+            let global_idx = self.next_global_idx as u32;
+            self.next_global_idx += 1;
+
             Decl::Global {
-                idx: top_scope.next_idx as u32,
+                idx: global_idx,
                 //src_fun: fun.id,
                 mutable,
             }
         } else {
+            let local_idx = top_scope.next_idx as u32;
+            top_scope.next_idx += 1;
+            if top_scope.next_idx > fun.num_locals {
+                fun.num_locals = top_scope.next_idx;
+            }
+
             Decl::Local {
-                idx: top_scope.next_idx as u32,
+                idx: local_idx,
                 src_fun: fun.id,
                 mutable,
             }
         };
 
-        top_scope.next_idx += 1;
-        if top_scope.next_idx > fun.num_locals {
-            fun.num_locals = top_scope.next_idx;
-        }
-
+        assert!(top_scope.decls.get(name).is_none());
         top_scope.decls.insert(name.to_string(), decl.clone());
         decl
     }
@@ -173,6 +180,9 @@ impl Program
             *self.units.get_mut(&full_path).unwrap() = unit;
         }
 
+        // Set the number of globals
+        self.num_globals = env.next_global_idx;
+
         Ok(())
     }
 }
@@ -216,9 +226,6 @@ impl Unit
         // Process the unit function
         let mut unit_fn = std::mem::take(prog.funs.get_mut(&self.unit_fn).unwrap());
         unit_fn.resolve_syms(prog, env)?;
-
-        // Update the number of globals
-        prog.num_globals += unit_fn.num_locals;
 
         // Move the unit function back on the program
         *prog.funs.get_mut(&self.unit_fn).unwrap() = unit_fn;
