@@ -1,4 +1,5 @@
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
+use crate::vm::Value;
 
 pub struct Alloc
 {
@@ -61,10 +62,15 @@ impl Alloc
     }
 
     // Allocate an immutable string
-    pub fn str_const(&mut self, s: String) -> *const String
+    pub fn str(&mut self, s: String) -> *const String
     {
         let s_ptr = self.alloc(s);
         s_ptr as *const String
+    }
+
+    pub fn str_val(&mut self, s: String) -> Value
+    {
+        Value::String(self.str(s))
     }
 }
 

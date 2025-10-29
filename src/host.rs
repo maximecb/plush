@@ -203,8 +203,7 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Value
         return Value::Nil;
     }
 
-    let str_obj = actor.alloc.str_const(args[idx].clone());
-    Value::String(str_obj)
+    actor.alloc.str_val(args[idx].clone())
 }
 
 /// Print a value to stdout
@@ -241,8 +240,7 @@ fn readln(actor: &mut Actor) -> Value
 
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => {
-            let str_obj = actor.alloc.str_const(line);
-            Value::String(str_obj)
+            actor.alloc.str_val(line)
         }
 
         Err(_) => Value::Nil
@@ -362,8 +360,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Value
         Ok(s) => s
     };
 
-    let s_obj = actor.alloc.str_const(s);
-    Value::String(s_obj)
+    actor.alloc.str_val(s)
 }
 
 /// Writes the contents of a ByteArray to a file

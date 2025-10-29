@@ -8,17 +8,17 @@ fn identity_method(actor: &mut Actor, self_val: Value) -> Value
 
 fn true_to_s(actor: &mut Actor, _v: Value) -> Value
 {
-    Value::String(actor.alloc.str_const("true".to_string()))
+    actor.alloc.str_val("true".to_string())
 }
 
 fn false_to_s(actor: &mut Actor, _v: Value) -> Value
 {
-    Value::String(actor.alloc.str_const("false".to_string()))
+    actor.alloc.str_val("false".to_string())
 }
 
 fn nil_to_s(actor: &mut Actor, _v: Value) -> Value
 {
-    Value::String(actor.alloc.str_const("nil".to_string()))
+    actor.alloc.str_val("nil".to_string())
 }
 
 fn int64_abs(actor: &mut Actor, v: Value) -> Value
@@ -37,7 +37,7 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_i64();
     let s = format!("{}", v);
-    Value::String(actor.alloc.str_const(s))
+    actor.alloc.str_val(s)
 }
 
 fn int64_min(actor: &mut Actor, v: Value, other: Value) -> Value
@@ -118,7 +118,7 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_f64();
     let s = format!("{}", v);
-    Value::String(actor.alloc.str_const(s))
+    actor.alloc.str_val(s)
 }
 
 fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Value
@@ -126,7 +126,7 @@ fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Valu
     let num = v.unwrap_f64();
     let decimals = decimals.unwrap_usize();
     let s = format!("{:.*}", decimals, num);
-    Value::String(actor.alloc.str_const(s))
+    actor.alloc.str_val(s)
 }
 
 fn float64_min(actor: &mut Actor, v: Value, other: Value) -> Value
@@ -175,8 +175,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
     let mut s = String::new();
     s.push(ch);
 
-    let str_obj = actor.alloc.str_const(s);
-    Value::String(str_obj)
+    actor.alloc.str_val(s)
 }
 
 /// Get the UTF-8 byte at the given index
@@ -212,8 +211,7 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Value
         Some(ch) => ch,
     };
 
-    let str_obj = actor.alloc.str_const(ch.to_string());
-    Value::String(str_obj)
+    actor.alloc.str_val(ch.to_string())
 }
 
 /// Try to parse the string as an integer with the given radix
@@ -233,8 +231,7 @@ fn string_trim(actor: &mut Actor, s: Value) -> Value
 {
     let s = s.unwrap_rust_str();
     let s = s.trim().to_string();
-    let str_obj = actor.alloc.str_const(s);
-    Value::String(str_obj)
+    actor.alloc.str_val(s)
 }
 
 pub fn init_runtime(prog: &mut Program)

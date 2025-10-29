@@ -223,7 +223,7 @@ mod tests
         let mut src_alloc = Alloc::new();
         let mut dst_alloc = Alloc::new();
         let mut dst_map = HashMap::new();
-        let s1 = Value::String(src_alloc.str_const("foo".to_string()));
+        let s1 = src_alloc.str_val("foo".to_string());
         let s2 = deepcopy(s1, &mut dst_alloc, &mut dst_map);
         assert!(s1 == s2);
     }

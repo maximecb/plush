@@ -240,7 +240,7 @@ pub enum Value
     Int64(i64),
     Float64(f64),
 
-    // String constant
+    // Immutable string
     String(*const String),
 
     HostFn(&'static HostFn),
@@ -769,7 +769,7 @@ impl Actor
     {
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
-        Value::String(self.alloc.str_const(str_const.to_string()))
+        self.alloc.str_val(str_const.to_string())
     }
 
     /// Call a host function
@@ -1124,7 +1124,7 @@ impl Actor
                         (Value::String(s1), Value::String(s2)) => {
                             let s1 = unsafe { &*s1 };
                             let s2 = unsafe { &*s2 };
-                            Value::String(self.alloc.str_const(s1.to_owned() + s2))
+                            self.alloc.str_val(s1.to_owned() + s2)
                         }
 
                         _ => panic!("unsupported types in add")
