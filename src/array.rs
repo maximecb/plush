@@ -36,11 +36,6 @@ impl Array
     {
         self.elems[idx] = val;
     }
-
-    pub fn remove(&mut self, idx: usize) -> Value
-    {
-        self.elems.remove(idx)
-    }
 }
 
 pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_val: Value) -> Value
@@ -65,5 +60,11 @@ pub fn array_pop(actor: &mut Actor, mut array: Value) -> Value
 pub fn array_remove(actor: &mut Actor, mut array: Value, idx: Value) -> Value
 {
     let idx = idx.unwrap_usize();
-    array.unwrap_arr().remove(idx)
+    array.unwrap_arr().elems.remove(idx)
+}
+
+pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, val: Value)
+{
+    let idx = idx.unwrap_usize();
+    array.unwrap_arr().elems.insert(idx, val)
 }

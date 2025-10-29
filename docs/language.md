@@ -207,6 +207,7 @@ render_text("Hello world");
     -   `push(value)`: Adds a value to the end of the array.
     -   `pop()`: Removes and returns the last value from the array.
     -   `remove(idx)`: Removes and returns the element at the given index.
+    -   `insert(idx, val)`: Insert a new element at the given index, shifting elements from that index to the right.
 -   **ByteArray**
     -   `with_size(size)`: Creates a new `ByteArray` of the given size.
     -   `resize(new_size)`: Resizes the `ByteArray`. If the new size is larger, the new bytes are filled with zeros.
