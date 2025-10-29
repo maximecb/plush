@@ -292,16 +292,16 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             Some(msg)
         }
 
-        /*
         Event::TextInput { window_id, text, .. } => {
-            // For each UTF-8 byte of input
-            for ch in text.bytes() {
-                if let ExitReason::Exit(val) = window_call_textinput(vm, window_id, ch) {
-                    return ExitReason::Exit(val);
-                }
-            }
+            let msg = actor.alloc_obj(UIEVENT_ID);
+            actor.set_field(msg, "window_id", Value::from(0));
+            let event_type = actor.intern_str("TEXT_INPUT");
+            actor.set_field(msg, "kind", event_type);
+            let text_val = Value::String(actor.alloc.str_const(text));
+            actor.set_field(msg, "text", text_val);
+
+            Some(msg)
         }
-        */
 
         _ => None
     }
