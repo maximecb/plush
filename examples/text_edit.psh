@@ -67,7 +67,10 @@ fun blink_timer()
 }
 
 // Name of the file to open, nil if not set
-let file_name = $cmd_get_arg(1);
+let var file_name = $cmd_get_arg(1);
+if (file_name == nil) {
+    file_name = 'README.md';
+}
 
 if (file_name != nil) {
     let file_data = $read_file_utf8(file_name);
@@ -124,10 +127,6 @@ loop {
     }
 
     if (msg.kind == 'KEY_DOWN') {
-        if (msg.key >= 'A' && msg.key <= 'Z') {
-            continue;
-        }
-
         if (msg.key == 'LEFT') {
             if (cursor_col > 0) {
                 --cursor_col;
@@ -162,6 +161,15 @@ loop {
                 lines[cursor_row].remove(cursor_col);
             }
         }
+
+        if (msg.key == 'RETURN' && cursor_col == 0) {
+            lines.insert(cursor_row, []);
+            ++cursor_row;
+        }
+
+        //if (msg.key >= 'A' && msg.key <= 'Z') {
+        //    continue;
+        //}
     }
 
     if (msg.kind == 'TEXT_INPUT') {
@@ -174,18 +182,13 @@ loop {
 
             $println(ch);
 
-
-
+            if (cursor_row < lines.len) {
+                let line = lines[cursor_row];
+                line.insert(cursor_col, ch);
+                ++cursor_col;
+            }
         }
     }
-
-
-
-
-
-
-
-
 
     redraw();
 }
