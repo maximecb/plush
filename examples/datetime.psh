@@ -23,6 +23,7 @@ class DateTime
 
         // Calculate date components
         let var days = (adjusted_secs / secs_in_day).floor();
+        self.days_since_epoch = days;
         let var year = 1970;
         let var days_in_year = 365;
         while (days >= days_in_year) {
@@ -77,26 +78,13 @@ class DateTime
             pad_zero(self.day)
         );
     }
+
+    weekday_s(self) {
+        let day_idx = (self.days_since_epoch + 4) % 7;
+        let weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        return weekdays[day_idx];
+    }
 }
-
-fun main() {
-    let current_time_ms = $time_current_ms();
-    let utc_offset = -4; // Example: EDT
-
-    $println("Current timestamp (ms): " + current_time_ms.to_s());
-
-    let datetime = DateTime(current_time_ms, utc_offset);
-
-    $println("Parsed Date/Time (UTC" + utc_offset.to_s() + "):");
-    $println("  Year: " + datetime.year.to_s());
-    $println("  Month: " + datetime.month.to_s());
-    $println("  Day: " + datetime.day.to_s());
-    $println("  Hour: " + datetime.hour.to_s());
-    $println("  Minute: " + datetime.minute.to_s());
-    $println("  Second: " + datetime.second.to_s());
-}
-
-main();
 
 fun test() {
     $println("\nRunning tests...");
@@ -112,6 +100,19 @@ fun test() {
         }
     }
 
+    let current_time_ms = $time_current_ms();
+    let utc_offset = -4; // Example: EDT
+    let datetime = DateTime(current_time_ms, utc_offset);
+
+    $println("Current timestamp (ms): " + current_time_ms.to_s());
+    $println("Parsed Date/Time (UTC" + utc_offset.to_s() + "):");
+    $println("  Year: " + datetime.year.to_s());
+    $println("  Month: " + datetime.month.to_s());
+    $println("  Day: " + datetime.day.to_s());
+    $println("  Hour: " + datetime.hour.to_s());
+    $println("  Minute: " + datetime.minute.to_s());
+    $println("  Second: " + datetime.second.to_s());
+
     // Test case 1: Unix epoch zero
     let dt1 = DateTime(0, 0);
     assert_equal(dt1.to_s(), "1970-01-01 00:00:00", "Unix epoch zero");
@@ -121,6 +122,7 @@ fun test() {
     // 2023-10-26 10:00:00 UTC is 1698314400000 ms
     let dt2 = DateTime(1698314400000, 0);
     assert_equal(dt2.to_s(), "2023-10-26 10:00:00", "A known date");
+    assert_equal(dt2.weekday_s(), "Thursday", "Day of week for a known date");
 
     // Test case 3: Another known date with offset
     // 2023-10-26 10:00:00 UTC is 2023-10-26 06:00:00 EDT (UTC-4)
@@ -133,4 +135,6 @@ fun test() {
     assert_equal(dt4.to_s(), "2020-02-29 12:00:00", "A leap year");
 }
 
-test();
+if ($MAIN_UNIT) {
+    test();
+}
