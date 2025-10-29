@@ -11,11 +11,12 @@ let COLOR_WHITE = rgb(255, 255, 255);
 let COLOR_C64_BLUE = rgb(9, 64, 221);
 
 // Lines of text in the editor
-let lines = [];
+let var lines = [[]];
 
-// Cursor position
-let cursor_row = 0;
-let cursor_col = 0;
+// Cursor position and state
+let var cursor_row = 0;
+let var cursor_col = 0;
+let var cursor_on = true;
 
 let frame_buffer = Image(FRAME_WIDTH, FRAME_HEIGHT);
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Text Editor", 0);
@@ -24,6 +25,10 @@ let font = Font(2, COLOR_WHITE);
 
 fun redraw()
 {
+    // Functions to compute x/y coordinates for a character
+    fun char_x(col) { return 8 + col * font.char_w; }
+    fun char_y(row) { return 2 + row * font.char_h; }
+
     frame_buffer.clear(COLOR_C64_BLUE);
 
     let start_time = $time_current_ms();
@@ -35,18 +40,30 @@ fun redraw()
         for (let var j = 0; j < line.len && j < NUM_COLS; ++j)
         {
             let ch = line[j];
-            font.draw_char(frame_buffer, 8 + j * font.char_w, 2 + i * font.char_h, ch);
+            font.draw_char(frame_buffer, char_x(j), char_y(i), ch);
         }
     }
 
-
-
+    if (cursor_on) {
+        font.draw_char(frame_buffer, char_x(cursor_col), char_y(cursor_row), '_');
+    }
 
     let end_time = $time_current_ms();
     let redraw_time = end_time - start_time;
     $println('Redraw time: ' + redraw_time.to_s() + 'ms');
 
     $window_draw_frame(window, frame_buffer.bytes);
+}
+
+fun blink_timer()
+{
+    let var cursor_state = false;
+
+    loop {
+        $actor_sleep(400);
+        cursor_state = !cursor_state;
+        $actor_send($actor_parent(), cursor_state? 'CURSOR_ON':'CURSOR_OFF');
+    }
 }
 
 // Name of the file to open, nil if not set
@@ -56,6 +73,7 @@ if (file_name != nil) {
     let file_data = $read_file_utf8(file_name);
     $println(file_data.len);
 
+    lines = [];
     let var line = [];
 
     for (let var i = 0; i < file_data.len; ++i)
@@ -78,24 +96,71 @@ if (file_name != nil) {
 // Draw a first frame, which will cause the window to appear
 redraw();
 
+// Spawn an actor to send us back cursor blinking events
+//$actor_spawn(blink_timer);
+
 loop {
     let msg = $actor_recv();
+
+    if (msg == 'CURSOR_ON') {
+        cursor_on = true;
+        redraw();
+        continue;
+    }
+
+    if (msg == 'CURSOR_OFF') {
+        cursor_on = false;
+        redraw();
+        continue;
+    }
 
     if (msg.kind == 'CLOSE_WINDOW') {
         break;
     }
 
+    // Don't redraw on these events
+    if (msg.kind == 'MOUSE_MOVE' || msg.kind == 'KEY_UP') {
+        continue;
+    }
+
     if (msg.kind == 'KEY_DOWN') {
-
-        if (msg.key >= 'A' && msg.key == 'Z') {
-
-
+        if (msg.key == 'LEFT') {
+            if (cursor_col > 0) {
+                --cursor_col;
+            }
         }
 
+        if (msg.key == 'RIGHT') {
+            if (cursor_col < lines[cursor_row].len) {
+                ++cursor_col;
+            }
+        }
 
+        if (msg.key == 'DOWN') {
+            if (cursor_row < lines.len) {
+                ++cursor_row;
+                let row_len = (cursor_row < lines.len)? lines[cursor_row].len:0;
+                cursor_col = cursor_col.min(row_len);
+            }
+        }
 
-
+        if (msg.key == 'UP') {
+            if (cursor_row > 0) {
+                --cursor_row;
+                let row_len = (cursor_row < lines.len)? lines[cursor_row].len:0;
+                cursor_col = cursor_col.min(row_len);
+            }
+        }
     }
+
+    //if (event.kind == TEXT_INPUT) {
+    //}
+
+
+
+
+
+
 
     redraw();
 }
