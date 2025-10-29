@@ -16,11 +16,10 @@ impl Hash for Value
         use Value::*;
         match self {
             String(ptr) => {
-                // TODO: we could do an actual string hash here
-                // to deduplicate identical strings, but we also
-                // need proper string value eq
-                let addr = *ptr as usize;
-                addr.hash(state);
+                // Hash the string
+                // This will deduplicate identical strings
+                let s: &str = unsafe { &**ptr };
+                s.hash(state);
             },
 
             Closure(ptr) => {
@@ -139,7 +138,7 @@ pub fn deepcopy(
                 Value::ByteArray(dst_alloc.alloc(new_arr))
             }
 
-            _ => panic!("copy unimplemented for type {:?}", val)
+            _ => panic!("deepcopy unimplemented for type {:?}", val)
         };
 
         // Insert the new mapping into the translation map
@@ -155,12 +154,14 @@ pub fn remap(dst_map: HashMap<Value, Value>)
     macro_rules! remap_val {
         ($val: expr) => {
             if ($val.is_heap()) {
-                *$val = *dst_map.get($val).unwrap();
+                let new_val = dst_map.get($val);
+                assert!(new_val.is_some(), "could not remap val: {:?}", $val);
+                *$val = *new_val.unwrap();
             }
         }
     }
 
-    // For each heap object translated
+    // For each already translated heap object
     for (_, val) in dst_map.iter() {
         match val {
             Value::String(_) => {}

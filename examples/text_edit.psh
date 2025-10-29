@@ -45,7 +45,7 @@ fun redraw()
     }
 
     if (cursor_on) {
-        font.draw_char(frame_buffer, char_x(cursor_col), char_y(cursor_row), '_');
+        font.draw_char(frame_buffer, char_x(cursor_col), char_y(cursor_row), '＿');
     }
 
     let end_time = $time_current_ms();
@@ -100,7 +100,7 @@ if (file_name != nil) {
 redraw();
 
 // Spawn an actor to send us back cursor blinking events
-//$actor_spawn(blink_timer);
+$actor_spawn(blink_timer);
 
 loop {
     let msg = $actor_recv();
@@ -159,6 +159,12 @@ loop {
             if (cursor_col > 0) {
                 --cursor_col;
                 lines[cursor_row].remove(cursor_col);
+            }
+
+            // TODO: we need to be able to concat the current line with the previous
+            if (cursor_col == 0 && cursor_row > 0 && lines[cursor_row].len == 0) {
+                lines.remove(cursor_row);
+                --cursor_row;
             }
         }
 
