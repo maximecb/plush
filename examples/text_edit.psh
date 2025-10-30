@@ -2,10 +2,10 @@ from ./image import Image, rgb;
 from ./monogram_font import Font;
 
 let FRAME_WIDTH = 1000;
-let FRAME_HEIGHT = 800;
+let FRAME_HEIGHT = 700;
 
 let NUM_COLS = 70;
-let NUM_ROWS = 35;
+let NUM_ROWS = 29;
 
 let COLOR_WHITE = rgb(255, 255, 255);
 let COLOR_C64_BLUE = rgb(9, 64, 221);
@@ -18,6 +18,10 @@ let var cursor_row = 0;
 let var cursor_col = 0;
 let var cursor_on = true;
 
+// Top left corner position of the viewport
+let var top_row = 0;
+let var top_col = 0;
+
 let frame_buffer = Image(FRAME_WIDTH, FRAME_HEIGHT);
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Text Editor", 0);
 
@@ -25,6 +29,20 @@ let font = Font(2, COLOR_WHITE);
 
 fun redraw()
 {
+    if (cursor_col >= top_col + NUM_COLS) {
+        top_col = cursor_col - NUM_COLS + 1;
+    }
+    if (cursor_col < top_col) {
+        top_col = cursor_col;
+    }
+
+    if (cursor_row >= top_row + NUM_ROWS) {
+        top_row = cursor_row - NUM_ROWS + 1;
+    }
+    if (cursor_row < top_row) {
+        top_row = cursor_row;
+    }
+
     // Functions to compute x/y coordinates for a character
     fun char_x(col) { return 8 + col * font.char_w; }
     fun char_y(row) { return 2 + row * font.char_h; }
@@ -33,19 +51,35 @@ fun redraw()
 
     let start_time = $time_current_ms();
 
+    // For each row to draw
     for (let var i = 0; i < NUM_ROWS; ++i)
     {
-        let line = lines[i];
+        if (top_row + i >= lines.len) {
+            break;
+        }
 
-        for (let var j = 0; j < line.len && j < NUM_COLS; ++j)
+        // Get the current line for this row
+        let line = lines[top_row + i];
+
+        // For each column to draw
+        for (let var j = 0; j < NUM_COLS; ++j)
         {
-            let ch = line[j];
+            if (top_col + j >= line.len) {
+                break;
+            }
+
+            let ch = line[top_col + j];
             font.draw_char(frame_buffer, char_x(j), char_y(i), ch);
         }
     }
 
     if (cursor_on) {
-        font.draw_char(frame_buffer, char_x(cursor_col), char_y(cursor_row), '＿');
+        font.draw_char(
+            frame_buffer,
+            char_x(cursor_col - top_col),
+            char_y(cursor_row - top_row),
+            '＿'
+        );
     }
 
     let end_time = $time_current_ms();
