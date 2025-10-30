@@ -68,3 +68,9 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, val: Value)
     let idx = idx.unwrap_usize();
     array.unwrap_arr().elems.insert(idx, val)
 }
+
+pub fn array_append(_actor: &mut Actor, mut self_array: Value, mut other_array: Value)
+{
+    let other_elems = other_array.unwrap_arr().elems.clone();
+    self_array.unwrap_arr().elems.extend(other_elems);
+}
