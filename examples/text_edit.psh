@@ -66,6 +66,83 @@ fun blink_timer()
     }
 }
 
+// Key down handler
+fun key_down(key)
+{
+    if (key == 'LEFT') {
+        if (cursor_col > 0) {
+            --cursor_col;
+        }
+
+        redraw();
+        return;
+    }
+
+    if (key == 'RIGHT') {
+        if (cursor_col < lines[cursor_row].len) {
+            ++cursor_col;
+        }
+
+        redraw();
+        return;
+    }
+
+    if (key == 'DOWN') {
+        if (cursor_row < lines.len) {
+            ++cursor_row;
+            let row_len = (cursor_row < lines.len)? lines[cursor_row].len:0;
+            cursor_col = cursor_col.min(row_len);
+        }
+
+        redraw();
+        return;
+    }
+
+    if (key == 'UP') {
+        if (cursor_row > 0) {
+            --cursor_row;
+            let row_len = (cursor_row < lines.len)? lines[cursor_row].len:0;
+            cursor_col = cursor_col.min(row_len);
+        }
+
+        redraw();
+        return;
+    }
+
+    if (key == 'BACKSPACE') {
+        if (cursor_col > 0) {
+            --cursor_col;
+            lines[cursor_row].remove(cursor_col);
+        } else if (cursor_col == 0 && cursor_row > 0) {
+            cursor_col = lines[cursor_row - 1].len;
+            lines[cursor_row - 1].append(lines[cursor_row]);
+            lines.remove(cursor_row);
+            --cursor_row;
+        }
+
+        redraw();
+        return;
+    }
+
+    if (key == 'RETURN') {
+        let cur_line = lines[cursor_row];
+        let new_line = [];
+
+        for (let var i = cursor_col; i < cur_line.len; ++i)
+            new_line.push(cur_line[i]);
+
+        while (cur_line.len > cursor_col)
+            cur_line.pop();
+
+        ++cursor_row;
+        cursor_col = 0;
+        lines.insert(cursor_row, new_line);
+
+        redraw();
+        return;
+    }
+}
+
 // Name of the file to open, nil if not set
 let var file_name = $cmd_get_arg(1);
 if (file_name == nil) {
@@ -121,60 +198,9 @@ loop {
         break;
     }
 
-    // Don't redraw on these events
-    if (msg.kind == 'MOUSE_MOVE' || msg.kind == 'KEY_UP') {
-        continue;
-    }
-
     if (msg.kind == 'KEY_DOWN') {
-        if (msg.key == 'LEFT') {
-            if (cursor_col > 0) {
-                --cursor_col;
-            }
-        }
-
-        if (msg.key == 'RIGHT') {
-            if (cursor_col < lines[cursor_row].len) {
-                ++cursor_col;
-            }
-        }
-
-        if (msg.key == 'DOWN') {
-            if (cursor_row < lines.len) {
-                ++cursor_row;
-                let row_len = (cursor_row < lines.len)? lines[cursor_row].len:0;
-                cursor_col = cursor_col.min(row_len);
-            }
-        }
-
-        if (msg.key == 'UP') {
-            if (cursor_row > 0) {
-                --cursor_row;
-                let row_len = (cursor_row < lines.len)? lines[cursor_row].len:0;
-                cursor_col = cursor_col.min(row_len);
-            }
-        }
-
-        if (msg.key == 'BACKSPACE') {
-            if (cursor_col > 0) {
-                --cursor_col;
-                lines[cursor_row].remove(cursor_col);
-            } else if (cursor_col == 0 && cursor_row > 0) {
-                cursor_col = lines[cursor_row - 1].len;
-                lines[cursor_row - 1].append(lines[cursor_row]);
-                lines.remove(cursor_row);
-                --cursor_row;
-            }
-        }
-
-        if (msg.key == 'RETURN' && cursor_col == 0) {
-            lines.insert(cursor_row, []);
-            ++cursor_row;
-        }
-
-        //if (msg.key >= 'A' && msg.key <= 'Z') {
-        //    continue;
-        //}
+        key_down(msg.key);
+        continue;
     }
 
     if (msg.kind == 'TEXT_INPUT') {
@@ -193,7 +219,8 @@ loop {
                 ++cursor_col;
             }
         }
-    }
 
-    redraw();
+        redraw();
+        continue;
+    }
 }
