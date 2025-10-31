@@ -95,8 +95,8 @@ You can also search the codebase for TODO or FIXME notes:
 grep -IRi "todo" .
 ```
 
-In general, smaller pull requests are easier to review and have a much higher chance of getting merged than large
-pull requests. If you would like to add a complex feature or make significant refactorings the design of Plush, I
+In general, smaller pull requests are easier to review and easier to iterate on. If you would like to add
+a complex feature or make significant refactorings the design of Plush, I
 recommend opening an issue or starting a discussion about your proposed changes first.
 
 Please keep in mind that one of the core principles of Plush is to minimize dependencies to keep the VM easy
