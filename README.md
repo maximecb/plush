@@ -96,12 +96,11 @@ grep -IRi "todo" .
 ```
 
 In general, smaller pull requests are easier to review and have a much higher chance of getting merged than large
-pull requests. If you would like to add a new, complex feature or refactor the design of Plush, I recommend opening
-an issue or starting a discussion about your proposed changes first.
+pull requests. If you would like to add a complex feature or make significant refactorings the design of Plush, I
+recommend opening an issue or starting a discussion about your proposed changes first.
 
-Also please keep in mind that one of the core principles of Plush is to minimize dependencies to keep the VM easy
+Please keep in mind that one of the core principles of Plush is to minimize dependencies to keep the VM easy
 to install and easy to port. Opening a PR that adds dependencies to multiple new packages and libraries is
-unlikely to get merged. If you believe you have a valid argument in favor of doing so, please open an issue to
-share your point of view.
+unlikely to get merged.
 
 If you think that Plush is cool, you can support my work via [GitHub Sponsors](https://github.com/sponsors/maximecb) :heart:
