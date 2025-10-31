@@ -1,10 +1,16 @@
 # The Plush Programming Language
 
+<p align="center">
+    <img src="media/city.png" height=180>&nbsp;
+    <img src="media/mondrian.png" height=180>&nbsp;
+    <img src="media/spectrum.png" height=180>
+</p>
+
 Plush is an experimental toy programming language and virtual machine for fun and teaching purposes.
 It follows a minimalistic design philosphy and draws inspiration from JavaScript, Lox, Lua, Python and Rust.
 Plush supports actor-based parallelism and is designed such that there is no global VM lock.
 The language has straightforward semantics and is built around a simple stack-based interpreter. The codebase is well-commented, has very few depencencies, and good cross-platform support. It has been tested on Linux, Mac and Windows.
-Please do note however that this project is very much a fun side-project and a work in progress. You're likely to run into bugs and
+Please do note however that this project is very much a fun side-project and a work in progress. You could run into bugs and
 missing features.
 
 To get a feel for what Plush code looks like, have a look at the programs in the [/examples](/examples) directory. For a detailed guide to the Plush language, please see the [Plush Language Guide](docs/language.md).
