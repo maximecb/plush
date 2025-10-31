@@ -1187,7 +1187,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 / v1),
-                        _ => panic!("modulo with non-integer types")
+                        _ => panic!("integer division with non-integer types")
                     };
 
                     push!(r);
@@ -1200,7 +1200,10 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 % v1),
-                        _ => panic!("modulo with non-integer types")
+                        (Float64(v0), Float64(v1)) => Float64(v0 % v1),
+                        (Float64(v0), Int64(v1)) => Float64(v0 % v1 as f64),
+                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 % v1),
+                        _ => panic!("modulo with unsupported types")
                     };
 
                     push!(r);
