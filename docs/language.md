@@ -177,6 +177,8 @@ render_text("Hello world");
 
 -   **Int64**
     -   `abs()`: Get the absolute value of this number.
+    -   `min(other)`: Returns the minimum of this number and `other`.
+    -   `max(other)`: Returns the maximum of this number and `other`.
     -   `to_f()`: Converts the integer to a 64-bit float.
     -   `to_s()`: Converts the integer to a string.
 -   **Float64**
@@ -192,10 +194,12 @@ render_text("Hello world");
     -   `pow(exp)`: Raise the value to the given power.
     -   `exp()`: Returns e raised to the power of the number.
     -   `ln()`: Returns the natural logarithm of the number.
-    -   `to_s()`: Returns a string representation of the float.
-    -   `format_decimals(n)`: Produce a string representation with a given number of decimals.
     -   `min(other)`: Returns the minimum of this number and `other`.
     -   `max(other)`: Returns the maximum of this number and `other`.
+    -   `clip(min, max)`: Restrict the value of if it's outside the range defined by `min` and `max`.
+    -   `to_s()`: Returns a string representation of the float.
+    -   `format_decimals(n)`: Produce a string representation with a given number of decimals.
+
 -   **String**
     -   `from_codepoint(int_val)`: Get a single-character string representing the given unicode codepoint value.
     -   `byte_at(byte_idx)`: Get the UTF-8 byte at the given byte index.

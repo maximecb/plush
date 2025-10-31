@@ -150,15 +150,7 @@ class SawOsc
 
     update(self, freq)
     {
-        self.phase = self.phase + SAMPLE_TIME * freq;
-
-        // FIXME: ideally this needs fmod
-        while (self.phase > 1.0) {
-            self.phase =- 1.0;
-        }
-
-        //let cyclePos = self.phase % 1;
-
+        self.phase = (self.phase + SAMPLE_TIME * freq) % 1.0;
         return self.minVal + self.phase * (self.maxVal - self.minVal);
     }
 }
@@ -278,7 +270,7 @@ class ADSR
             self.value = 0.0;
         }
 
-        return self.value.max(0.0).min(1.0);
+        return self.value.clip(0.0, 1.0);
     }
 }
 

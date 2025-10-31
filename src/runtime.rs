@@ -27,19 +27,6 @@ fn int64_abs(actor: &mut Actor, v: Value) -> Value
     Value::Int64(if v > 0 { v } else { -v })
 }
 
-fn int64_to_f(actor: &mut Actor, v: Value) -> Value
-{
-    let v = v.unwrap_i64();
-    Value::Float64(v as f64)
-}
-
-fn int64_to_s(actor: &mut Actor, v: Value) -> Value
-{
-    let v = v.unwrap_i64();
-    let s = format!("{}", v);
-    actor.alloc.str_val(s)
-}
-
 fn int64_min(actor: &mut Actor, v: Value, other: Value) -> Value
 {
     let v = v.unwrap_i64();
@@ -52,6 +39,19 @@ fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Value
     let v = v.unwrap_i64();
     let other = other.unwrap_i64();
     Value::Int64(v.max(other))
+}
+
+fn int64_to_f(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_i64();
+    Value::Float64(v as f64)
+}
+
+fn int64_to_s(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_i64();
+    let s = format!("{}", v);
+    actor.alloc.str_val(s)
 }
 
 fn float64_abs(actor: &mut Actor, v: Value) -> Value
@@ -114,21 +114,6 @@ fn float64_sqrt(actor: &mut Actor, v: Value) -> Value
     Value::Float64(v.sqrt())
 }
 
-fn float64_to_s(actor: &mut Actor, v: Value) -> Value
-{
-    let v = v.unwrap_f64();
-    let s = format!("{}", v);
-    actor.alloc.str_val(s)
-}
-
-fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Value
-{
-    let num = v.unwrap_f64();
-    let decimals = decimals.unwrap_usize();
-    let s = format!("{:.*}", decimals, num);
-    actor.alloc.str_val(s)
-}
-
 fn float64_min(actor: &mut Actor, v: Value, other: Value) -> Value
 {
     let v = v.unwrap_f64();
@@ -141,6 +126,14 @@ fn float64_max(actor: &mut Actor, v: Value, other: Value) -> Value
     let v = v.unwrap_f64();
     let other = other.unwrap_f64();
     Value::Float64(v.max(other))
+}
+
+fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    let min = min.unwrap_f64();
+    let max = max.unwrap_f64();
+    Value::Float64(v.clamp(min, max))
 }
 
 fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> Value
@@ -160,6 +153,21 @@ fn float64_ln(actor: &mut Actor, v: Value) -> Value
 {
     let v = v.unwrap_f64();
     Value::Float64(v.ln())
+}
+
+fn float64_to_s(actor: &mut Actor, v: Value) -> Value
+{
+    let v = v.unwrap_f64();
+    let s = format!("{}", v);
+    actor.alloc.str_val(s)
+}
+
+fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Value
+{
+    let num = v.unwrap_f64();
+    let decimals = decimals.unwrap_usize();
+    let s = format!("{:.*}", decimals, num);
+    actor.alloc.str_val(s)
 }
 
 /// Create a single-character string from a codepoint integer value
@@ -295,10 +303,10 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static NIL_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(nil_to_s) };
 
     static INT64_ABS: HostFn = HostFn { name: "abs", f: Fn1_1(int64_abs) };
-    static INT64_TO_F: HostFn = HostFn { name: "to_f", f: Fn1_1(int64_to_f) };
-    static INT64_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(int64_to_s) };
     static INT64_MIN: HostFn = HostFn { name: "min", f: Fn2_1(int64_min) };
     static INT64_MAX: HostFn = HostFn { name: "max", f: Fn2_1(int64_max) };
+    static INT64_TO_F: HostFn = HostFn { name: "to_f", f: Fn1_1(int64_to_f) };
+    static INT64_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(int64_to_s) };
 
     static FLOAT64_ABS: HostFn = HostFn { name: "abs", f: Fn1_1(float64_abs) };
     static FLOAT64_CEIL: HostFn = HostFn { name: "ceil", f: Fn1_1(float64_ceil) };
@@ -309,14 +317,15 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static FLOAT64_TAN: HostFn = HostFn { name: "tan", f: Fn1_1(float64_tan) };
     static FLOAT64_ATAN: HostFn = HostFn { name: "atan", f: Fn1_1(float64_atan) };
     static FLOAT64_SQRT: HostFn = HostFn { name: "sqrt", f: Fn1_1(float64_sqrt) };
-    static FLOAT64_TO_F: HostFn = HostFn { name: "to_f", f: Fn1_1(identity_method) };
-    static FLOAT64_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(float64_to_s) };
-    static FLOAT64_FORMAT_DECIMALS: HostFn = HostFn { name: "format_decimals", f: Fn2_1(float64_format_decimals) };
     static FLOAT64_MIN: HostFn = HostFn { name: "min", f: Fn2_1(float64_min) };
     static FLOAT64_MAX: HostFn = HostFn { name: "max", f: Fn2_1(float64_max) };
+    static FLOAT64_CLIP: HostFn = HostFn { name: "clip", f: Fn3_1(float64_clip) };
     static FLOAT64_POW: HostFn = HostFn { name: "pow", f: Fn2_1(float64_pow) };
     static FLOAT64_EXP: HostFn = HostFn { name: "exp", f: Fn1_1(float64_exp) };
     static FLOAT64_LN: HostFn = HostFn { name: "ln", f: Fn1_1(float64_ln) };
+    static FLOAT64_TO_F: HostFn = HostFn { name: "to_f", f: Fn1_1(identity_method) };
+    static FLOAT64_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(float64_to_s) };
+    static FLOAT64_FORMAT_DECIMALS: HostFn = HostFn { name: "format_decimals", f: Fn2_1(float64_format_decimals) };
 
     static STRING_FROM_CODEPOINT: HostFn = HostFn { name: "from_codepoint", f: Fn2_1(string_from_codepoint) };
     static STRING_BYTE_AT: HostFn = HostFn { name: "byte_at", f: Fn2_1(string_byte_at) };
@@ -348,10 +357,10 @@ pub fn get_method(val: Value, method_name: &str) -> Value
 
     let f = match (val, method_name) {
         (Value::Int64(_), "abs") => &INT64_ABS,
-        (Value::Int64(_), "to_f") => &INT64_TO_F,
-        (Value::Int64(_), "to_s") => &INT64_TO_S,
         (Value::Int64(_), "min") => &INT64_MIN,
         (Value::Int64(_), "max") => &INT64_MAX,
+        (Value::Int64(_), "to_f") => &INT64_TO_F,
+        (Value::Int64(_), "to_s") => &INT64_TO_S,
 
         (Value::Float64(_), "abs") => &FLOAT64_ABS,
         (Value::Float64(_), "ceil") => &FLOAT64_CEIL,
@@ -362,14 +371,15 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Float64(_), "tan") => &FLOAT64_TAN,
         (Value::Float64(_), "atan") => &FLOAT64_ATAN,
         (Value::Float64(_), "sqrt") => &FLOAT64_SQRT,
-        (Value::Float64(_), "to_f") => &FLOAT64_TO_F,
-        (Value::Float64(_), "to_s") => &FLOAT64_TO_S,
-        (Value::Float64(_), "format_decimals") => &FLOAT64_FORMAT_DECIMALS,
         (Value::Float64(_), "min") => &FLOAT64_MIN,
         (Value::Float64(_), "max") => &FLOAT64_MAX,
+        (Value::Float64(_), "clip") => &FLOAT64_CLIP,
         (Value::Float64(_), "pow") => &FLOAT64_POW,
         (Value::Float64(_), "exp") => &FLOAT64_EXP,
         (Value::Float64(_), "ln") => &FLOAT64_LN,
+        (Value::Float64(_), "to_f") => &FLOAT64_TO_F,
+        (Value::Float64(_), "to_s") => &FLOAT64_TO_S,
+        (Value::Float64(_), "format_decimals") => &FLOAT64_FORMAT_DECIMALS,
 
         (Value::Class(STRING_ID), "from_codepoint") => &STRING_FROM_CODEPOINT,
         (Value::String(_), "byte_at") => &STRING_BYTE_AT,
