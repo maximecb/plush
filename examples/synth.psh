@@ -1,5 +1,8 @@
 from ./random import *;
 
+let SAMPLE_RATE = 44100;
+let SAMPLE_TIME = 1.0 / SAMPLE_RATE;
+
 // Map from note names to frequencies
 // For every MIDI note number
 let note_freqs = {
@@ -132,3 +135,195 @@ let note_freqs = {
     "F#9": 11839.82, // 126
     "G9": 12543.85   // 127
 };
+
+// Sawtooth wave oscillator
+class SawOsc
+{
+    init(self)
+    {
+        // Current time position
+        self.phase = 0;
+
+        self.minVal = -1.0;
+        self.maxVal = 1.0;
+    }
+
+    update(self, freq)
+    {
+        self.phase = self.phase + SAMPLE_TIME * freq;
+
+        // FIXME: ideally this needs fmod
+        while (self.phase > 1.0) {
+            self.phase =- 1.0;
+        }
+
+        //let cyclePos = self.phase % 1;
+
+        return self.minVal + self.phase * (self.maxVal - self.minVal);
+    }
+}
+
+// Basic IIR, 2-pole, resonant Low Pass Filter (LPF)
+class Filter
+{
+    init(self)
+    {
+        self.s0 = 0;
+        self.s1 = 0;
+    }
+
+    update(self, s, cutoff, resonance)
+    {
+        //assert (!isNaN(s), 'NaN value fed in TwoPoleFilter');
+
+        // Out of bound values can produce NaNs
+        let cut = cutoff.min(1.0);
+        let reso = resonance.max(0.0);
+
+        let c = (0.5).pow((1 - cut) / 0.125);
+        let r = (0.5).pow((reso + 0.125) / 0.125);
+        let mrc = 1 - r * c;
+
+        let v0 = self.s0;
+        let v1 = self.s1;
+
+        // Apply the filter to the sample
+        self.v0 = (mrc * v0) - (c * v1) + (c * s);
+        self.v1 = (mrc * v1) + (c * v0);
+
+        return self.v1;
+    }
+}
+
+// ADSR envelope generator
+class ADSR
+{
+    init(self, attack_time, decay_time, sustain_level, release_time)
+    {
+        self.attack_time = attack_time;
+        self.decay_time = decay_time;
+        self.sustain_level = sustain_level;
+        self.release_time = release_time;
+
+        self.state = "idle";
+        self.value = 0.0;
+        self.time_in_state = 0.0;
+    }
+
+    trigger(self)
+    {
+        self.state = "attack";
+        self.time_in_state = 0.0;
+    }
+
+    release(self)
+    {
+        self.state = "release";
+        self.time_in_state = 0.0;
+    }
+
+    update(self)
+    {
+        self.time_in_state = self.time_in_state + SAMPLE_TIME;
+
+        if (self.state == "attack")
+        {
+            if (self.time_in_state >= self.attack_time)
+            {
+                self.state = "decay";
+                self.time_in_state = 0.0;
+                self.value = 1.0;
+            }
+            else
+            {
+                self.value = self.time_in_state / self.attack_time;
+            }
+        }
+        else if (self.state == "decay")
+        {
+            if (self.time_in_state >= self.decay_time)
+            {
+                self.state = "sustain";
+                self.time_in_state = 0.0;
+                self.value = self.sustain_level;
+            }
+            else
+            {
+                let decay_amount = 1.0 - self.sustain_level;
+                self.value = 1.0 - (self.time_in_state / self.decay_time) * decay_amount;
+            }
+        }
+        else if (self.state == "sustain")
+        {
+            // In sustain, the value remains constant
+            self.value = self.sustain_level;
+        }
+        else if (self.state == "release")
+        {
+            if (self.time_in_state >= self.release_time)
+            {
+                self.state = "idle";
+                self.time_in_state = 0.0;
+                self.value = 0.0;
+            }
+            else
+            {
+                // The value at the start of the release is the sustain level
+                let release_start_value = self.sustain_level;
+                self.value = release_start_value - (self.time_in_state / self.release_time) * release_start_value;
+            }
+        }
+        else // idle
+        {
+            self.value = 0.0;
+        }
+
+        return self.value.max(0.0).min(1.0);
+    }
+}
+
+
+
+
+
+let o1 = SawOsc();
+let o2 = SawOsc();
+let o3 = SawOsc();
+let o4 = SawOsc();
+let f = Filter();
+let env = ADSR(0.01, 0.1, 0.5, 0.4);
+
+
+fun gen_sample()
+{
+    let v0 = o1.update(300);
+    let v1 = o2.update(300);
+    let v2 = o3.update(300);
+    let v4 = o4.update(300);
+
+
+    let e = env.update();
+
+
+    let s = v0 + v1 + v2 + v4;
+
+    let s2 = f.update(s, 0.8, 0.2);
+
+
+
+}
+
+
+
+let t0 = $time_current_ms();
+
+for (let var i = 0; i < 1024; ++i)
+{
+    gen_sample();
+
+
+}
+
+let t1 = $time_current_ms();
+let dt = t1 - t0;
+$println(dt);
