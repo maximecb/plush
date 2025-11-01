@@ -1,5 +1,8 @@
 from ./random import *;
 
+let FRAME_WIDTH = 600;
+let FRAME_HEIGHT = 400;
+
 let SAMPLE_RATE = 44100;
 let SAMPLE_TIME = 1.0 / SAMPLE_RATE;
 
@@ -155,6 +158,29 @@ class SawOsc
     }
 }
 
+// Sine wave oscillator
+class SineOsc
+{
+    init(self)
+    {
+        // Current time position
+        self.phase = 0;
+
+        self.minVal = -1.0;
+        self.maxVal = 1.0;
+    }
+
+    update(self, freq)
+    {
+        self.phase = (self.phase + SAMPLE_TIME * freq) % 1.0;
+
+        let v = (2.0 * 3.141592 * self.phase).sin();
+        let normVal = (v + 1) / 2;
+
+        return self.minVal + normVal * (self.maxVal - self.minVal);
+    }
+}
+
 // Basic IIR, 2-pole, resonant Low Pass Filter (LPF)
 class Filter
 {
@@ -278,16 +304,15 @@ class ADSR
 
 
 
-let o1 = SawOsc();
-let o2 = SawOsc();
-let o3 = SawOsc();
-let o4 = SawOsc();
-let f = Filter();
-let env = ADSR(0.01, 0.1, 0.5, 0.4);
 
 
+/*
 fun gen_sample()
 {
+    let l0 = lfo0.update(300);
+    let l1 = lfo1.update(300);
+    let l2 = lfo2.update(300);
+
     let v0 = o1.update(300);
     let v1 = o2.update(300);
     let v2 = o3.update(300);
@@ -306,16 +331,70 @@ fun gen_sample()
 }
 
 
+*/
 
-let t0 = $time_current_ms();
-
-for (let var i = 0; i < 1024; ++i)
+class Synth
 {
-    gen_sample();
+    init(self)
+    {
+        self.o0 = SawOsc();
+        self.filter = Filter();
+        self.env0 = ADSR(0.01, 0.1, 0.5, 0.4);
+
+        self.lfo0 = SineOsc();
+    }
+
+    gen_samples(self, num_samples, buffer)
+    {
 
 
+    }
 }
 
-let t1 = $time_current_ms();
-let dt = t1 - t0;
-$println(dt);
+// Actor responsible for generating sound
+fun audio_actor()
+{
+    let audio_dev = $audio_open_output(SAMPLE_RATE, 1);
+
+    let var synth = Synth();
+
+    let buffer = ByteArray.with_size(1024 * 4);
+
+    loop {
+        let msg = $actor_recv();
+
+        // The audio driver needs more samples
+        if (msg instanceof AudioNeeded) {
+            let t0 = $time_current_ms();
+
+            synth.gen_samples(msg.num_samples, buffer);
+            $audio_write_samples(audio_dev, buffer);
+
+            let t1 = $time_current_ms();
+            let dt = t1 - t0;
+            let avail_ms = (1000 * msg.num_samples / SAMPLE_RATE).floor();
+            $println(dt.to_s() + 'ms (/' + avail_ms.to_s() + ')');
+        }
+    }
+}
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Random Synth Generator", 0);
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+$window_draw_frame(window, frame_buffer);
+
+let synth_actor = $actor_spawn(audio_actor);
+
+// Main event loop
+loop {
+    let msg = $actor_recv();
+
+    if (!(msg instanceof UIEvent))
+        continue;
+
+    if (msg.kind == 'CLOSE_WINDOW' || msg.key == 'ESCAPE') {
+        break;
+    }
+
+    //draw_visualization(frame_buffer);
+    $window_draw_frame(window, frame_buffer);
+}
