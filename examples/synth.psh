@@ -304,7 +304,7 @@ class Synth
     {
         self.lfo0 = SineOsc();
         self.osc0 = SawOsc();
-        self.env0 = ADSR(0.01, 0.1, 0.5, 0.4);
+        self.env0 = ADSR(0.01, 0.15, 0.1, 0.4);
         self.filter = Filter();
 
         self.freq = 0;
@@ -313,7 +313,7 @@ class Synth
     note_on(self, freq)
     {
         self.freq = freq;
-        self.env.trigger();
+        self.env0.trigger();
     }
 
     note_off(self)
@@ -321,7 +321,7 @@ class Synth
         self.env0.release();
     }
 
-    gen_samples(self, num_samples, buffer)
+    gen_sample(self)
     {
         //let l0 = lfo0.update(300);
         //let l1 = lfo1.update(300);
@@ -330,7 +330,12 @@ class Synth
 
         let env0 = self.env0.update();
 
-        return osc0 * env0;
+        let s = osc0 * env0;
+
+        //let s = self.filter.update(osc0, env0, 0.1);
+        //let s = self.filter.update(osc0, 0.5, 0.1);
+
+        return s;
     }
 }
 
@@ -342,17 +347,64 @@ fun audio_actor()
 
     let var synth = Synth();
 
+
+
+    let tempo_bpm = 120;
+    let beats_per_bar = 4;
+    let steps_per_bar = 16;
+    let bars_per_min = tempo_bpm / beats_per_bar;
+    let bars_per_sec = bars_per_min / 60;
+    let steps_per_sec = steps_per_bar * bars_per_sec;
+    let samples_per_step = (SAMPLE_RATE / steps_per_sec).floor();
+    $println('steps per sec: ' + steps_per_sec.to_s());
+    $println('samples per step: ' + samples_per_step.to_s());
+
+    let notes = [
+        'C3', nil, nil, nil,
+        'C3', nil, nil, nil,
+        'C3', nil, nil, nil,
+        'C3', nil, nil, nil,
+    ];
+
     // Index of the next sample to be generated
     let var sample_idx = 0;
+
+    // Next note inde
+    let var next_note_idx = 0;
+
+
+
+
 
     loop {
         let msg = $actor_recv();
 
         // The audio driver needs more samples
         if (msg instanceof AudioNeeded) {
+            // If it's time to trigger the current note
+            if (sample_idx >= next_note_idx * samples_per_step) {
+                let note = notes[next_note_idx % notes.len];
+
+                if (note != nil) {
+                    let note_freq = note_freqs[note];
+                    synth.note_on(note_freq);
+                }
+
+                // Move to the next note
+                ++next_note_idx;
+            }
+
+
+
+
             let t0 = $time_current_ms();
 
-            synth.gen_samples(msg.num_samples, buffer);
+            // For each sample to be generated
+            for (let var i = 0; i < msg.num_samples; ++i) {
+                let s = synth.gen_sample();
+                buffer.write_f32(i, s);
+            }
+
             $audio_write_samples(audio_dev, buffer);
 
             let t1 = $time_current_ms();
