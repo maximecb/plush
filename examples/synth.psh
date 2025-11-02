@@ -179,38 +179,6 @@ class SineOsc
     }
 }
 
-// Basic IIR, 2-pole, resonant Low Pass Filter (LPF)
-class Filter
-{
-    init(self)
-    {
-        self.s0 = 0.0;
-        self.s1 = 0.0;
-    }
-
-    update(self, s, cutoff, resonance)
-    {
-        //assert (!isNaN(s), 'NaN value fed in TwoPoleFilter');
-
-        // Out of bound values can produce NaNs
-        let cut = cutoff.min(1.0);
-        let reso = resonance.max(0.0);
-
-        let c = (0.5).pow((1 - cut) / 0.125);
-        let r = (0.5).pow((reso + 0.125) / 0.125);
-        let mrc = 1 - r * c;
-
-        let v0 = self.s0;
-        let v1 = self.s1;
-
-        // Apply the filter to the sample
-        self.v0 = (mrc * v0) - (c * v1) + (c * s);
-        self.v1 = (mrc * v1) + (c * v0);
-
-        return self.v1;
-    }
-}
-
 // ADSR envelope generator
 class ADSR
 {
@@ -298,6 +266,41 @@ class ADSR
     }
 }
 
+// Basic IIR, 2-pole, resonant Low Pass Filter (LPF)
+class Filter
+{
+    init(self)
+    {
+        self.s0 = 0.0;
+        self.s1 = 0.0;
+    }
+
+    update(self, s, cutoff, resonance)
+    {
+        //assert (!isNaN(s), 'NaN value fed in TwoPoleFilter');
+
+        // Out of bound values can produce NaNs
+        let cut = cutoff.min(1.0);
+        let reso = resonance.max(0.0);
+
+        let c = (0.5).pow((1 - cut) / 0.125);
+        let r = (0.5).pow((reso + 0.125) / 0.125);
+        let mrc = 1 - r * c;
+
+        let var v0 = self.s0;
+        let var v1 = self.s1;
+
+        // Apply the filter to the sample
+        v0 = (mrc * v0) - (c * v1) + (c * s);
+        v1 = (mrc * v1) + (c * v0);
+
+        self.s0 = v0;
+        self.s1 = v1;
+
+        return v1;
+    }
+}
+
 class Synth
 {
     init(self)
@@ -330,10 +333,8 @@ class Synth
 
         let env0 = self.env0.update();
 
-        let s = osc0 * env0;
-
         //let s = self.filter.update(osc0, env0, 0.1);
-        //let s = self.filter.update(osc0, 0.5, 0.1);
+        let s = self.filter.update(osc0 * env0, env0, 0.1);
 
         return s;
     }
