@@ -340,6 +340,42 @@ class Synth
     }
 }
 
+// Takes a sequence of notes and returns a list of events
+// samples_per_step: number of audio samples per sequencer step
+fun notes_to_events(sequence, samples_per_step)
+{
+    let events = [];
+
+    for (let var i = 0; i < sequence.len; ++i) {
+        let note_name = sequence[i];
+        let duration_steps = 1;
+        let duration_samples = duration_steps * samples_per_step;
+
+        if (note_name != nil) {
+            let freq = note_freqs[note_name];
+            events.push({
+                type: "note_on",
+                sample_idx: i * samples_per_step,
+                freq: freq,
+            });
+
+            // Add a note_off event. Let's make the note last for nearly the full duration.
+            // A short silence between notes can make them more distinct.
+            let note_duration_samples = (duration_samples * 0.95).floor();
+
+            events.push({
+                type: "note_off",
+                sample_idx: i * samples_per_step + note_duration_samples,
+                freq: freq, // freq might be useful to turn off a specific note if we have polyphony
+            });
+        }
+    }
+
+    // TODO: sort events by sample_idx if we want to support polyphony correctly
+
+    return events;
+}
+
 // Actor responsible for generating sound
 fun audio_actor()
 {
@@ -347,8 +383,6 @@ fun audio_actor()
     let buffer = ByteArray.with_size(1024 * 4);
 
     let var synth = Synth();
-
-
 
     let tempo_bpm = 120;
     let beats_per_bar = 4;
@@ -360,48 +394,41 @@ fun audio_actor()
     $println('steps per sec: ' + steps_per_sec.to_s());
     $println('samples per step: ' + samples_per_step.to_s());
 
-    let notes = [
-        'C3', nil, nil, nil,
-        'C3', nil, nil, nil,
-        'C3', nil, nil, nil,
-        'C3', nil, nil, nil,
+    let sequence = [
+        'C3', 'E3', 'G3', 'B3',
+        'C4', 'B3', 'G3', 'E3',
     ];
+
+    let events = notes_to_events(sequence, samples_per_step);
+    let var next_event_idx = 0;
 
     // Index of the next sample to be generated
     let var sample_idx = 0;
-
-    // Next note inde
-    let var next_note_idx = 0;
-
-
-
-
 
     loop {
         let msg = $actor_recv();
 
         // The audio driver needs more samples
         if (msg instanceof AudioNeeded) {
-            // If it's time to trigger the current note
-            if (sample_idx >= next_note_idx * samples_per_step) {
-                let note = notes[next_note_idx % notes.len];
-
-                if (note != nil) {
-                    let note_freq = note_freqs[note];
-                    synth.note_on(note_freq);
-                }
-
-                // Move to the next note
-                ++next_note_idx;
-            }
-
-
-
-
             let t0 = $time_current_ms();
 
             // For each sample to be generated
             for (let var i = 0; i < msg.num_samples; ++i) {
+                let current_sample_pos = sample_idx + i;
+
+                // Process all events at the current sample position
+                while (next_event_idx < events.len && events[next_event_idx].sample_idx == current_sample_pos) {
+                    let event = events[next_event_idx];
+
+                    if (event.type == "note_on") {
+                        synth.note_on(event.freq);
+                    } else if (event.type == "note_off") {
+                        synth.note_off();
+                    }
+
+                    ++next_event_idx;
+                }
+
                 let s = synth.gen_sample();
                 buffer.write_f32(i, s);
             }
