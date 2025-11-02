@@ -307,12 +307,20 @@ class Synth
     {
         self.lfo0 = SineOsc();
         self.osc0 = SawOsc();
+        self.osc1 = SawOsc();
+        self.detune1 = rand_float(0.97, 1.03);
+
+        if (rand_float(0.0, 1.0) < 0.25) {
+            self.detune1 = self.detune1 * 2.0;
+        } else if (rand_float(0.0, 1.0) < 0.25) {
+            self.detune1 = self.detune1 * 0.5;
+        }
 
         self.env0 = ADSR(
             rand_float(0.001, 0.02),
-            rand_float(0.02, 0.30),
-            rand_float(0.10, 0.50),
-            rand_float(0.10, 0.50),
+            rand_float(0.02, 0.40),
+            rand_float(0.05, 0.60),
+            rand_float(0.05, 0.60),
         );
 
         self.filter = Filter();
@@ -338,12 +346,14 @@ class Synth
         //let l1 = lfo1.update(300);
 
         let osc0 = self.osc0.update(self.freq);
+        let osc1 = self.osc1.update(self.freq) * self.detune1;
+        let s = osc0 + osc1;
 
         let env0 = self.env0.update();
 
-        let s = self.filter.update(osc0 * env0, env0, self.reso);
+        let sf = self.filter.update(s * env0, env0, self.reso);
 
-        return s;
+        return sf;
     }
 }
 
@@ -402,8 +412,8 @@ fun audio_actor()
     $println('samples per step: ' + samples_per_step.to_s());
 
     let sequence = [
-        'C2', 'C2', 'G2', 'C2', 'C2', 'C2', 'G2', 'C2',
-        'C2', 'C2', 'G2', 'C2', 'D#2', 'D#2', 'G#2', 'G#2',
+        'C2', 'D#2', 'G2', 'C2', 'D#2', 'G2', 'C2', 'D#2',
+        'G2', 'C2', 'D#2', 'G2', 'C2', 'D#2', 'G2', 'C2',
     ];
 
     let events = notes_to_events(sequence, samples_per_step);
