@@ -395,6 +395,7 @@ impl PartialEq for Value
         use Value::*;
 
         match (self, other) {
+            (Undef, Undef) => true,
             (Nil, Nil) => true,
             (True, True) => true,
             (False, False) => true,
@@ -1622,7 +1623,7 @@ impl Actor
 
                             if val == Value::Undef {
                                 panic!("object field not initialized");
-                            };
+                            }
 
                             val
                         },
@@ -2473,6 +2474,14 @@ mod tests
         eval_eq("class Foo { init(s, a) { s.x = a; } } let o = Foo(7); return o.x;", Value::Int64(7));
         eval_eq("class Foo { init(s, a, b) { s.x = a; s.y = b; } } let o = Foo(5, 3); return o.x - o.y;", Value::Int64(2));
         eval_eq("class C { init(s) { s.c = 0; } inc(s) { ++s.c; } } let o = C(); o.inc(); return o.c;", Value::Int64(1));
+    }
+
+    #[test]
+    #[should_panic]
+    fn get_undef_field()
+    {
+        // The field x exists on the class but is not initialized
+        eval("class F { g(s) { s.x = 3; } } let o = F(); o.x;");
     }
 
     #[test]
