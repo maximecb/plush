@@ -222,7 +222,7 @@ fn print(actor: &mut Actor, v: Value)
         Value::False => print!("false"),
         Value::Nil => print!("nil"),
 
-        _ => todo!()
+        _ => print!("{:?}", v)
     }
 }
 
