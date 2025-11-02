@@ -395,8 +395,8 @@ fun audio_actor()
     $println('samples per step: ' + samples_per_step.to_s());
 
     let sequence = [
-        'C3', 'E3', 'G3', 'B3',
-        'C4', 'B3', 'G3', 'E3',
+        'C2', 'C2', 'G2', 'C2', 'C2', 'C2', 'G2', 'C2',
+        'C2', 'C2', 'G2', 'C2', 'D#2', 'D#2', 'G#2', 'G#2',
     ];
 
     let events = notes_to_events(sequence, samples_per_step);
@@ -412,25 +412,46 @@ fun audio_actor()
         if (msg instanceof AudioNeeded) {
             let t0 = $time_current_ms();
 
-            // For each sample to be generated
-            for (let var i = 0; i < msg.num_samples; ++i) {
-                let current_sample_pos = sample_idx + i;
+            let num_samples_to_gen = msg.num_samples;
+            let var buffer_idx = 0;
 
-                // Process all events at the current sample position
-                while (next_event_idx < events.len && events[next_event_idx].sample_idx == current_sample_pos) {
-                    let event = events[next_event_idx];
-
-                    if (event.type == "note_on") {
-                        synth.note_on(event.freq);
-                    } else if (event.type == "note_off") {
-                        synth.note_off();
+            while (buffer_idx < num_samples_to_gen) {
+                // If no more events, just fill the buffer
+                if (next_event_idx >= events.len) {
+                    while (buffer_idx < num_samples_to_gen) {
+                        buffer.write_f32(buffer_idx, synth.gen_sample());
+                        ++buffer_idx;
                     }
-
-                    ++next_event_idx;
+                    break;
                 }
 
-                let s = synth.gen_sample();
-                buffer.write_f32(i, s);
+                let next_event = events[next_event_idx];
+                let next_event_abs_pos = next_event.sample_idx;
+
+                // Position of the next event, relative to the start of the audio driver buffer
+                let next_event_buf_pos = next_event_abs_pos - sample_idx;
+
+                // Number of samples to render until the next event
+                let samples_to_render = (next_event_buf_pos - buffer_idx).max(0).min(num_samples_to_gen - buffer_idx);
+
+                // Render audio until the next event
+                for (let var i = 0; i < samples_to_render; ++i) {
+                    buffer.write_f32(buffer_idx, synth.gen_sample());
+                    ++buffer_idx;
+                }
+
+                // If we've reached an event that is within this buffer, process it
+                if (buffer_idx >= next_event_buf_pos) {
+                    while (next_event_idx < events.len && events[next_event_idx].sample_idx == next_event_abs_pos) {
+                        let event = events[next_event_idx];
+                        if (event.type == "note_on") {
+                            synth.note_on(event.freq);
+                        } else if (event.type == "note_off") {
+                            synth.note_off();
+                        }
+                        ++next_event_idx;
+                    }
+                }
             }
 
             $audio_write_samples(audio_dev, buffer);
