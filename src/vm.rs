@@ -1622,7 +1622,7 @@ impl Actor
                             };
 
                             if val == Value::Undef {
-                                panic!("object field not initialized");
+                                panic!("object field not initialized `{}`", field_name);
                             }
 
                             val

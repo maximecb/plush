@@ -338,10 +338,12 @@ class Synth
 fun audio_actor()
 {
     let audio_dev = $audio_open_output(SAMPLE_RATE, 1);
+    let buffer = ByteArray.with_size(1024 * 4);
 
     let var synth = Synth();
 
-    let buffer = ByteArray.with_size(1024 * 4);
+    // Index of the next sample to be generated
+    let var sample_idx = 0;
 
     loop {
         let msg = $actor_recv();
@@ -357,6 +359,8 @@ fun audio_actor()
             let dt = t1 - t0;
             let avail_ms = (1000 * msg.num_samples / SAMPLE_RATE).floor();
             $println(dt.to_s() + 'ms (/' + avail_ms.to_s() + ')');
+
+            sample_idx = sample_idx + msg.num_samples;
         }
     }
 }
@@ -374,7 +378,7 @@ loop {
     if (!(msg instanceof UIEvent))
         continue;
 
-    if (msg.kind == 'CLOSE_WINDOW' || msg.key == 'ESCAPE') {
+    if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
         break;
     }
 
