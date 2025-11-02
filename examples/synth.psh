@@ -306,9 +306,15 @@ class Synth
     init(self)
     {
         self.lfo0 = SineOsc();
+        self.lfo0_freq = rand_float(0.20, 0.60);
+        self.lfo0.minVal = 0.90;
+        self.lfo0.maxVal = 1.10;
+
         self.osc0 = SawOsc();
         self.osc1 = SawOsc();
+        self.osc2 = SineOsc();
         self.detune1 = rand_float(0.97, 1.03);
+        self.detune2 = 0.5 * rand_float(0.97, 1.03);
 
         if (rand_float(0.0, 1.0) < 0.25) {
             self.detune1 = self.detune1 * 2.0;
@@ -323,9 +329,23 @@ class Synth
             rand_float(0.05, 0.60),
         );
 
-        self.filter = Filter();
-        self.reso = rand_float(0.00, 0.20);
+        self.env1 = ADSR(
+            rand_float(0.001, 0.02),
+            rand_float(0.02, 0.40),
+            rand_float(0.05, 0.60),
+            rand_float(0.05, 0.60),
+        );
 
+        self.filter = Filter();
+        self.cutoff = rand_float(0.60, 1.00);
+        self.reso = rand_float(0.00, 0.30);
+
+        self.drive = 1.0;
+        if (rand_float(0.0, 1.0) < 0.25) {
+            self.drive = rand_float(1.1, 6.0);
+        }
+
+        // Frequency of current note
         self.freq = 0;
     }
 
@@ -342,18 +362,27 @@ class Synth
 
     gen_sample(self)
     {
-        //let l0 = lfo0.update(300);
-        //let l1 = lfo1.update(300);
+        let lfo0 = self.lfo0.update(self.lfo0_freq);
 
         let osc0 = self.osc0.update(self.freq);
         let osc1 = self.osc1.update(self.freq) * self.detune1;
+        //let osc2 = self.osc2.update(self.freq) * self.detune2;
+        //let s = osc0 + osc1 + osc2;
         let s = osc0 + osc1;
 
         let env0 = self.env0.update();
+        //let env1 = self.env0.update();
 
-        let sf = self.filter.update(s * env0, env0, self.reso);
+        let filtered_s = self.filter.update(
+            s * env0,
+            self.cutoff * env0 * lfo0,
+            self.reso,
+        );
 
-        return sf;
+        // Apply distortion
+        let distorted_s = (filtered_s * self.drive).clip(-1.0, 1.0);
+
+        return distorted_s;
     }
 }
 
