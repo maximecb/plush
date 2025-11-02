@@ -196,7 +196,7 @@ pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val
     ba.fill(idx, num, val);
 }
 
-pub fn ba_read_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
+pub fn ba_load_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
@@ -204,7 +204,7 @@ pub fn ba_read_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
     Value::from(val)
 }
 
-pub fn ba_write_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
+pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
@@ -212,7 +212,7 @@ pub fn ba_write_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
     ba.write(idx, val);
 }
 
-pub fn ba_read_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
+pub fn ba_load_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
@@ -220,7 +220,7 @@ pub fn ba_read_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
     Value::from(val as f64)
 }
 
-pub fn ba_write_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
+pub fn ba_store_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();

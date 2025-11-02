@@ -226,12 +226,12 @@ fun fft(real_parts, imag_parts, inverse) {
     let var j = 0;
     while (i < n) {
         if (j > i) {
-            let temp_re = real_parts.read_f32(i);
-            real_parts.write_f32(i, real_parts.read_f32(j));
-            real_parts.write_f32(j, temp_re);
-            let temp_im = imag_parts.read_f32(i);
-            imag_parts.write_f32(i, imag_parts.read_f32(j));
-            imag_parts.write_f32(j, temp_im);
+            let temp_re = real_parts.load_f32(i);
+            real_parts.store_f32(i, real_parts.load_f32(j));
+            real_parts.store_f32(j, temp_re);
+            let temp_im = imag_parts.load_f32(i);
+            imag_parts.store_f32(i, imag_parts.load_f32(j));
+            imag_parts.store_f32(j, temp_im);
         }
         let var m = n _/ 2;
         while (m >= 1 && j >= m) {
@@ -255,16 +255,16 @@ fun fft(real_parts, imag_parts, inverse) {
             let var w_im = 0.0;
             let var j = 0;
             while (j < len _/ 2) {
-                let u_re = real_parts.read_f32(i + j);
-                let u_im = imag_parts.read_f32(i + j);
-                let x_half_re = real_parts.read_f32(i + j + len _/ 2);
-                let x_half_im = imag_parts.read_f32(i + j + len _/ 2);
+                let u_re = real_parts.load_f32(i + j);
+                let u_im = imag_parts.load_f32(i + j);
+                let x_half_re = real_parts.load_f32(i + j + len _/ 2);
+                let x_half_im = imag_parts.load_f32(i + j + len _/ 2);
                 let v_re = x_half_re * w_re - x_half_im * w_im;
                 let v_im = x_half_re * w_im + x_half_im * w_re;
-                real_parts.write_f32(i + j, u_re + v_re);
-                imag_parts.write_f32(i + j, u_im + v_im);
-                real_parts.write_f32(i + j + len _/ 2, u_re - v_re);
-                imag_parts.write_f32(i + j + len _/ 2, u_im - v_im);
+                real_parts.store_f32(i + j, u_re + v_re);
+                imag_parts.store_f32(i + j, u_im + v_im);
+                real_parts.store_f32(i + j + len _/ 2, u_re - v_re);
+                imag_parts.store_f32(i + j + len _/ 2, u_im - v_im);
                 let next_w_re = w_re * wlen_re - w_im * wlen_im;
                 let next_w_im = w_re * wlen_im + w_im * wlen_re;
                 w_re = next_w_re;
@@ -277,8 +277,8 @@ fun fft(real_parts, imag_parts, inverse) {
     }
     if (inverse) {
         for (let var k = 0; k < n; ++k) {
-            real_parts.write_f32(k, real_parts.read_f32(k) / n);
-            imag_parts.write_f32(k, imag_parts.read_f32(k) / n);
+            real_parts.store_f32(k, real_parts.load_f32(k) / n);
+            imag_parts.store_f32(k, imag_parts.load_f32(k) / n);
         }
     }
 }
@@ -287,7 +287,7 @@ fun hanning_window(buffer) {
     let n = buffer.len _/ 4;
     for (let var i = 0; i < n; ++i) {
         let multiplier = 0.5 * (1.0 - (2.0 * PI * i / (n - 1)).cos());
-        buffer.write_f32(i, buffer.read_f32(i) * multiplier);
+        buffer.store_f32(i, buffer.load_f32(i) * multiplier);
     }
 }
 
@@ -327,8 +327,8 @@ fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sam
         if (start_bin > max_bin) continue;
         for (let var bin = start_bin; bin <= end_bin; ++bin) {
             if (bin > max_bin) break;
-            let re = real_parts.read_f32(bin);
-            let im = imag_parts.read_f32(bin);
+            let re = real_parts.load_f32(bin);
+            let im = imag_parts.load_f32(bin);
             let magnitude = (re * re + im * im).sqrt();
             let var weight = 0.0;
             if (bin >= start_bin && bin <= center_bin) {
@@ -610,7 +610,7 @@ fun beep_actor() {
                     }
                 }
 
-                samples.write_f32(i, sample_val);
+                samples.store_f32(i, sample_val);
             }
 
             $audio_write_samples(audio_out_id, samples);
@@ -660,7 +660,7 @@ fun main() {
                     let dy = y - cy;
                     if (dx*dx + dy*dy < radius*radius) {
                         let pixel_idx = (y * WINDOW_WIDTH + x);
-                        frame_buffer.write_u32(pixel_idx, rgb32(255, 0, 0));
+                        frame_buffer.store_u32(pixel_idx, rgb32(255, 0, 0));
                     }
                 }
             }

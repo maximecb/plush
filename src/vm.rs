@@ -2448,8 +2448,8 @@ mod tests
     {
         eval("let a = ByteArray.new();");
         eval("let a = ByteArray.with_size(1024); assert(a.len == 1024);");
-        eval("let a = ByteArray.with_size(32); a.write_u32(0, 0xFF_FF_FF_FF);");
-        eval("let a = ByteArray.with_size(32); a.write_u32(0, 0xFF_00_00_00); assert(a[0] == 0 && a[3] == 255);");
+        eval("let a = ByteArray.with_size(32); a.store_u32(0, 0xFF_FF_FF_FF);");
+        eval("let a = ByteArray.with_size(32); a.store_u32(0, 0xFF_00_00_00); assert(a[0] == 0 && a[3] == 255);");
         eval("let a = ByteArray.with_size(32); a[11] = 77; assert(a[11] == 77);");
     }
 

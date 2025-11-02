@@ -217,10 +217,10 @@ render_text("Hello world");
     -   `with_size(size)`: Creates a new `ByteArray` of the given size.
     -   `resize(new_size)`: Resizes the `ByteArray`. If the new size is larger, the new bytes are filled with zeros.
     -   `fill_u32(start_index, count, value)`: Fills a portion of the `ByteArray` with a repeated 32-bit unsigned integer value.
-    -   `read_u32(index)`: Reads a 32-bit unsigned integer from the `ByteArray` at the given index.
-    -   `write_u32(index, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given index.
-    -   `read_f32(index)`: Reads a 32-bit float from the `ByteArray` at the given index.
-    -   `write_f32(index, value)`: Writes a 32-bit float to the `ByteArray` at the given index.
+    -   `load_u32(index)`: Reads a 32-bit unsigned integer from the `ByteArray` at the given index.
+    -   `store_u32(index, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given index.
+    -   `load_f32(index)`: Reads a 32-bit float from the `ByteArray` at the given index.
+    -   `store_f32(index, value)`: Writes a 32-bit float to the `ByteArray` at the given index.
     -   `memcpy(dst_idx, src_bytes, src_idx, len)`: Copies a block of memory from a source `ByteArray` to this one.
     -   `zero_fill()`: Overwrite the contents of the `ByteArray` with zeros.
     -   `blit_bgra32(dst_width, dst_height, src, src_width, src_height, dst_x, dst_y)`: Copies a rectangular region from a source `ByteArray` into this `ByteArray` at a specified position, with alpha blending. This method assumes that both the source and destination buffers contain pixel data in the BGRA32 format.
@@ -321,10 +321,10 @@ Here are some of the common operations used to manipulate image data stored in a
     ```plush
     let frame_buffer = ByteArray.with_size(width * height * 4);
     ```
-*   **Setting a single pixel:** The `write_u32` method can be used to set the color of a single pixel at a given `(x, y)` coordinate.
+*   **Setting a single pixel:** The `store_u32` method can be used to set the color of a single pixel at a given `(x, y)` coordinate.
     ```plush
     let index = y * width + x;
-    frame_buffer.write_u32(index, color);
+    frame_buffer.store_u32(index, color);
     ```
 *   **Filling a rectangle:** The `fill_u32` method is an efficient way to fill a rectangular area with a single color.
     ```plush
