@@ -307,8 +307,16 @@ class Synth
     {
         self.lfo0 = SineOsc();
         self.osc0 = SawOsc();
-        self.env0 = ADSR(0.01, 0.15, 0.1, 0.4);
+
+        self.env0 = ADSR(
+            0.01,
+            rand_float(0.02, 0.30),
+            rand_float(0.10, 0.50),
+            rand_float(0.10, 0.50),
+        );
+
         self.filter = Filter();
+        self.reso = rand_float(0.00, 0.20);
 
         self.freq = 0;
     }
@@ -333,8 +341,7 @@ class Synth
 
         let env0 = self.env0.update();
 
-        //let s = self.filter.update(osc0, env0, 0.1);
-        let s = self.filter.update(osc0 * env0, env0, 0.1);
+        let s = self.filter.update(osc0 * env0, env0, self.reso);
 
         return s;
     }
