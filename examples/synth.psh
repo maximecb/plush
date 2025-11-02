@@ -309,7 +309,7 @@ class Synth
         self.osc0 = SawOsc();
 
         self.env0 = ADSR(
-            0.01,
+            rand_float(0.001, 0.02),
             rand_float(0.02, 0.30),
             rand_float(0.10, 0.50),
             rand_float(0.10, 0.50),
@@ -407,6 +407,8 @@ fun audio_actor()
     ];
 
     let events = notes_to_events(sequence, samples_per_step);
+
+    // Index of the next event to be triggered
     let var next_event_idx = 0;
 
     // Index of the next sample to be generated
@@ -414,6 +416,19 @@ fun audio_actor()
 
     loop {
         let msg = $actor_recv();
+
+        if (msg == 'REPLAY') {
+            next_event_idx = 0;
+            sample_idx = 0;
+            continue;
+        }
+
+        if (msg == 'NEW_SYNTH') {
+            synth = Synth();
+            next_event_idx = 0;
+            sample_idx = 0;
+            continue;
+        }
 
         // The audio driver needs more samples
         if (msg instanceof AudioNeeded) {
@@ -486,8 +501,22 @@ loop {
     if (!(msg instanceof UIEvent))
         continue;
 
-    if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+    if (msg.kind == 'CLOSE_WINDOW') {
         break;
+    }
+
+    if (msg.kind == 'KEY_DOWN') {
+        if (msg.key == 'ESCAPE') {
+            break;
+        }
+
+        if (msg.key == 'LEFT') {
+            $actor_send(synth_actor, 'REPLAY');
+        }
+
+        if (msg.key == 'RIGHT') {
+            $actor_send(synth_actor, 'NEW_SYNTH');
+        }
     }
 
     //draw_visualization(frame_buffer);
