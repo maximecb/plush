@@ -206,6 +206,7 @@ render_text("Hello world");
     -   `char_at(byte_idx)`: Get a string for the single character at the given byte index. Returns `nil` if invalid.
     -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
     -   `trim()`: Produce a new string without whitespace at the beginning or end.
+    -   `split(sep)`: Given a separator string, split a string into an array of parts.
 -   **Array**
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
     -   `push(value)`: Adds a value to the end of the array.

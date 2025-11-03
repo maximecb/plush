@@ -242,6 +242,20 @@ fn string_trim(actor: &mut Actor, s: Value) -> Value
     actor.alloc.str_val(s)
 }
 
+/// Split a string by a separator and return an array of strings
+fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Value
+{
+    let s = s.unwrap_rust_str();
+    let sep = sep.unwrap_rust_str();
+
+    let parts: Vec<Value> = s.split(sep).map(|part| {
+        actor.alloc.str_val(part.to_string())
+    }).collect();
+
+    let arr = crate::array::Array { elems: parts };
+    Value::Array(actor.alloc.alloc(arr))
+}
+
 pub fn init_runtime(prog: &mut Program)
 {
     /*
@@ -332,6 +346,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static STRING_CHAR_AT: HostFn = HostFn { name: "char_at", f: Fn2_1(string_char_at) };
     static STRING_PARSE_INT: HostFn = HostFn { name: "parse_int", f: Fn2_1(string_parse_int) };
     static STRING_TRIM: HostFn = HostFn { name: "trim", f: Fn1_1(string_trim) };
+    static STRING_SPLIT: HostFn = HostFn { name: "split", f: Fn2_1(string_split) };
     static STRING_TO_S: HostFn = HostFn { name: "to_s", f: Fn1_1(identity_method) };
 
     static ARRAY_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn3_1(array_with_size) };
@@ -388,6 +403,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::String(_), "char_at") => &STRING_CHAR_AT,
         (Value::String(_), "parse_int") => &STRING_PARSE_INT,
         (Value::String(_), "trim") => &STRING_TRIM,
+        (Value::String(_), "split") => &STRING_SPLIT,
         (Value::String(_), "to_s") => &STRING_TO_S,
 
         (Value::Class(ARRAY_ID), "with_size") => &ARRAY_WITH_SIZE,
