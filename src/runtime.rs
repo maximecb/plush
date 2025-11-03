@@ -346,6 +346,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static BA_FILL_U32: HostFn = HostFn { name: "fill_u32", f: Fn4_0(ba_fill_u32) };
     static BA_READ_U32: HostFn = HostFn { name: "load_u32", f: Fn2_1(ba_load_u32) };
     static BA_WRITE_U32: HostFn = HostFn { name: "store_u32", f: Fn3_0(ba_store_u32) };
+    static BA_READ_U16: HostFn = HostFn { name: "load_u16", f: Fn2_1(ba_load_u16) };
+    static BA_WRITE_U16: HostFn = HostFn { name: "store_u16", f: Fn3_0(ba_store_u16) };
     static BA_READ_F32: HostFn = HostFn { name: "load_f32", f: Fn2_1(ba_load_f32) };
     static BA_WRITE_F32: HostFn = HostFn { name: "store_f32", f: Fn3_0(ba_store_f32) };
     static BA_MEMCPY: HostFn = HostFn { name: "memcpy", f: Fn5_0(ba_memcpy) };
@@ -400,6 +402,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::ByteArray(_), "fill_u32") => &BA_FILL_U32,
         (Value::ByteArray(_), "load_u32") => &BA_READ_U32,
         (Value::ByteArray(_), "store_u32") => &BA_WRITE_U32,
+        (Value::ByteArray(_), "load_u16") => &BA_READ_U16,
+        (Value::ByteArray(_), "store_u16") => &BA_WRITE_U16,
         (Value::ByteArray(_), "load_f32") => &BA_READ_F32,
         (Value::ByteArray(_), "store_f32") => &BA_WRITE_F32,
         (Value::ByteArray(_), "memcpy") => &BA_MEMCPY,

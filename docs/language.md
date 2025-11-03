@@ -219,6 +219,8 @@ render_text("Hello world");
     -   `fill_u32(start_index, count, value)`: Fills a portion of the `ByteArray` with a repeated 32-bit unsigned integer value.
     -   `load_u32(index)`: Reads a 32-bit unsigned integer from the `ByteArray` at the given index.
     -   `store_u32(index, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given index.
+    -   `load_u16(index)`: Reads a 16-bit unsigned integer from the `ByteArray` at the given index.
+    -   `store_u16(index, value)`: Writes a 16-bit unsigned integer to the `ByteArray` at the given index.
     -   `load_f32(index)`: Reads a 32-bit float from the `ByteArray` at the given index.
     -   `store_f32(index, value)`: Writes a 32-bit float to the `ByteArray` at the given index.
     -   `memcpy(dst_idx, src_bytes, src_idx, len)`: Copies a block of memory from a source `ByteArray` to this one.

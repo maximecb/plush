@@ -49,8 +49,8 @@ impl ByteArray
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
 
-    /// Read a value at the given index
-    pub fn read<T>(&mut self, idx: usize) -> T where T: Copy
+    /// Load a value at the given index
+    pub fn load<T>(&mut self, idx: usize) -> T where T: Copy
     {
         assert!((idx + 1) * size_of::<T>() <= self.bytes.len());
 
@@ -61,8 +61,8 @@ impl ByteArray
         }
     }
 
-    /// Write a value at the given index
-    pub fn write<T>(&mut self, idx: usize, val: T) where T: Copy
+    /// Store a value at the given index
+    pub fn store<T>(&mut self, idx: usize, val: T) where T: Copy
     {
         assert!((idx + 1) * size_of::<T>() <= self.bytes.len());
 
@@ -200,7 +200,7 @@ pub fn ba_load_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
-    let val: u32 = ba.read(idx);
+    let val: u32 = ba.load(idx);
     Value::from(val)
 }
 
@@ -209,14 +209,30 @@ pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val = val.unwrap_u32();
-    ba.write(idx, val);
+    ba.store(idx, val);
+}
+
+pub fn ba_load_u16(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
+{
+    let ba = ba.unwrap_ba();
+    let idx = idx.unwrap_usize();
+    let val: u16 = ba.load(idx);
+    Value::from(val as i64)
+}
+
+pub fn ba_store_u16(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
+{
+    let ba = ba.unwrap_ba();
+    let idx = idx.unwrap_usize();
+    let val = val.unwrap_i64();
+    ba.store(idx, val as u16);
 }
 
 pub fn ba_load_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
-    let val: f32 = ba.read(idx);
+    let val: f32 = ba.load(idx);
     Value::from(val as f64)
 }
 
@@ -225,7 +241,7 @@ pub fn ba_store_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value)
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val = val.unwrap_f64();
-    ba.write(idx, val as f32);
+    ba.store(idx, val as f32);
 }
 
 pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value)
