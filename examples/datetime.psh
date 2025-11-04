@@ -7,23 +7,33 @@ fun pad_zero(n) {
     return n.to_s();
 }
 
+// Helper function to check for leap years
+fun is_leap(year) {
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
 class DateTime
 {
-    init(self, timestamp_ms, utc_offset_hours) {
-        // Helper function to check for leap years
-        fun is_leap(year) {
-            return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-        }
+    init(self, year, month, day, hour, minute, second, utc_offset_minutes) {
+        self.year = year;
+        self.month = month;
+        self.day = day;
+        self.hour = hour;
+        self.minute = minute;
+        self.second = second;
+        self.utc_offset_minutes = utc_offset_minutes;
+    }
 
+    parse_timestamp(timestamp_ms, utc_offset_hours) {
+        let utc_offset_minutes = (utc_offset_hours * 60).to_f().floor();
         let secs_in_day = 86400;
         let timestamp_secs = (timestamp_ms / 1000).floor();
 
         // Apply UTC offset
-        let adjusted_secs = timestamp_secs + utc_offset_hours * 3600;
+        let adjusted_secs = timestamp_secs + utc_offset_minutes * 60;
 
         // Calculate date components
         let var days = (adjusted_secs / secs_in_day).floor();
-        self.days_since_epoch = days;
         let var year = 1970;
         let var days_in_year = 365;
         while (days >= days_in_year) {
@@ -51,22 +61,64 @@ class DateTime
         let minute = ((secs_today % 3600) / 60).floor();
         let second = secs_today % 60;
 
-        self.year = year;
-        self.month = month;
-        self.day = day;
-        self.hour = hour;
-        self.minute = minute;
-        self.second = second;
+        return DateTime(year, month, day, hour, minute, second, utc_offset_minutes);
+    }
+
+    parse_iso8601(date_str) {
+        // e.g. 2025-11-04T01:32:42+00:00
+        let parts = date_str.split("T");
+        let date_part = parts[0];
+        let time_part = parts[1];
+
+        let date_comps = date_part.split("-");
+        let year = date_comps[0].parse_int(10);
+        let month = date_comps[1].parse_int(10);
+        let day = date_comps[2].parse_int(10);
+
+        let var sign = 1;
+        let var offset_parts = time_part.split("+");
+        if (offset_parts.len == 1) {
+            offset_parts = time_part.split("-");
+            sign = -1;
+        }
+
+        let time_comps_str = offset_parts[0];
+        let offset_str = offset_parts[1];
+
+        let time_comps = time_comps_str.split(":");
+        let hour = time_comps[0].parse_int(10);
+        let minute = time_comps[1].parse_int(10);
+        let second = time_comps[2].parse_int(10);
+
+        let offset_comps = offset_str.split(":");
+        let offset_h = offset_comps[0].parse_int(10);
+        let offset_m = offset_comps[1].parse_int(10);
+        let utc_offset_minutes = sign * (offset_h * 60 + offset_m);
+
+        return DateTime(year, month, day, hour, minute, second, utc_offset_minutes);
     }
 
     to_s(self) {
+        let var sign = "+";
+        let var offset_mins = self.utc_offset_minutes;
+        if (offset_mins < 0) {
+            sign = "-";
+            offset_mins = -offset_mins;
+        }
+
+        let offset_h = (offset_mins / 60).floor();
+        let offset_m = offset_mins % 60;
+
         return (
             self.year.to_s() + "-" +
             pad_zero(self.month) + "-" +
-            pad_zero(self.day) + " " +
+            pad_zero(self.day) + "T" +
             pad_zero(self.hour) + ":" +
             pad_zero(self.minute) + ":" +
-            pad_zero(self.second)
+            pad_zero(self.second) +
+            sign +
+            pad_zero(offset_h) + ":" +
+            pad_zero(offset_m)
         );
     }
 
@@ -80,7 +132,17 @@ class DateTime
     }
 
     weekday_s(self) {
-        let day_idx = (self.days_since_epoch + 4) % 7;
+        let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+        let var y = self.year;
+        let m = self.month;
+        let d = self.day;
+
+        if (m < 3) {
+            y = y - 1;
+        }
+
+        let day_idx = (y + (y/4).floor() - (y/100).floor() + (y/400).floor() + t[m-1] + d) % 7;
+
         let weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
         return weekdays[day_idx];
     }
@@ -116,10 +178,10 @@ fun test() {
 
     let current_time_ms = $time_current_ms();
     let utc_offset = -4; // Example: EDT
-    let datetime = DateTime(current_time_ms, utc_offset);
+    let datetime = DateTime.parse_timestamp(current_time_ms, utc_offset);
 
     $println("Current timestamp (ms): " + current_time_ms.to_s());
-    $println("Parsed Date/Time (UTC" + utc_offset.to_s() + "):");
+    $println("Parsed Date/Time (UTC" + utc_offset.to_s() + "): ");
     $println("  Year: " + datetime.year.to_s());
     $println("  Month: " + datetime.month.to_s());
     $println("  Day: " + datetime.day.to_s());
@@ -129,25 +191,52 @@ fun test() {
     $println("  Part of day: " + datetime.part_of_day());
 
     // Test case 1: Unix epoch zero
-    let dt1 = DateTime(0, 0);
-    assert_equal(dt1.to_s(), "1970-01-01 00:00:00", "Unix epoch zero");
+    let dt1 = DateTime.parse_timestamp(0, 0);
+    assert_equal(dt1.to_s(), "1970-01-01T00:00:00+00:00", "Unix epoch zero");
     assert_equal(dt1.date_s(), "1970-01-01", "Unix epoch zero date");
+    assert_equal(dt1.weekday_s(), "Thursday", "Unix epoch weekday");
 
     // Test case 2: A known date
     // 2023-10-26 10:00:00 UTC is 1698314400000 ms
-    let dt2 = DateTime(1698314400000, 0);
-    assert_equal(dt2.to_s(), "2023-10-26 10:00:00", "A known date");
+    let dt2 = DateTime.parse_timestamp(1698314400000, 0);
+    assert_equal(dt2.to_s(), "2023-10-26T10:00:00+00:00", "A known date");
     assert_equal(dt2.weekday_s(), "Thursday", "Day of week for a known date");
 
     // Test case 3: Another known date with offset
     // 2023-10-26 10:00:00 UTC is 2023-10-26 06:00:00 EDT (UTC-4)
-    let dt3 = DateTime(1698314400000, -4);
-    assert_equal(dt3.to_s(), "2023-10-26 06:00:00", "A known date with offset");
+    let dt3 = DateTime.parse_timestamp(1698314400000, -4);
+    assert_equal(dt3.to_s(), "2023-10-26T06:00:00-04:00", "A known date with offset");
+    assert_equal(dt3.weekday_s(), "Thursday", "Day of week for a known date with offset");
 
     // Test case 4: A leap year
     // 2020-02-29 12:00:00 UTC is 1582977600000 ms
-    let dt4 = DateTime(1582977600000, 0);
-    assert_equal(dt4.to_s(), "2020-02-29 12:00:00", "A leap year");
+    let dt4 = DateTime.parse_timestamp(1582977600000, 0);
+    assert_equal(dt4.to_s(), "2020-02-29T12:00:00+00:00", "A leap year");
+    assert_equal(dt4.weekday_s(), "Saturday", "Leap year weekday");
+
+    // Test case 5: ISO 8601 parsing
+    let dt5 = DateTime.parse_iso8601("2025-11-04T01:32:42+00:00");
+    assert_equal(dt5.year, 2025, "ISO parse year");
+    assert_equal(dt5.month, 11, "ISO parse month");
+    assert_equal(dt5.day, 4, "ISO parse day");
+    assert_equal(dt5.hour, 1, "ISO parse hour");
+    assert_equal(dt5.minute, 32, "ISO parse minute");
+    assert_equal(dt5.second, 42, "ISO parse second");
+    assert_equal(dt5.to_s(), "2025-11-04T01:32:42+00:00", "ISO parse to_s");
+    assert_equal(dt5.weekday_s(), "Tuesday", "ISO parse weekday");
+
+    // Test case 6: Fractional offset
+    // 2023-10-26 10:00:00 UTC is 1698314400000 ms
+    // With +5:30 offset, it should be 2023-10-26 15:30:00
+    let dt6 = DateTime.parse_timestamp(1698314400000, 5.5);
+    assert_equal(dt6.to_s(), "2023-10-26T15:30:00+05:30", "Fractional offset");
+    assert_equal(dt6.weekday_s(), "Thursday", "Fractional offset weekday");
+
+    // Test case 7: ISO 8601 parsing with offset
+    let dt7 = DateTime.parse_iso8601("2023-10-26T15:30:00+05:30");
+    assert_equal(dt7.utc_offset_minutes, 330, "ISO parse offset minutes");
+    assert_equal(dt7.to_s(), "2023-10-26T15:30:00+05:30", "ISO roundtrip");
+    assert_equal(dt7.weekday_s(), "Thursday", "ISO offset parse weekday");
 }
 
 if ($MAIN_UNIT) {
