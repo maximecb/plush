@@ -255,19 +255,14 @@ fn is_safe_path(file_path: &str) -> bool
     use std::path::PathBuf;
     use std::fs::canonicalize;
 
-    // Extra paranoid check
-    if file_path.contains("..") {
-        println!("file path contains parent operator");
-        return false;
-    }
-
     let file_path = file_path.trim();
     let mut file_path = PathBuf::from(file_path);
 
-    // Reject absolute paths, accept relative paths only
-    if !file_path.is_relative() {
-        println!("file path is not relative");
-        return false;
+    // Reject extensions associated with executable files
+    if let Some(ext) = file_path.extension() {
+        if ext == "exe" || ext == "bat" || ext == "cmd" || ext == "com" || ext == "sh" {
+            return false;
+        }
     }
 
     // If this is a file that does not exist yet,
@@ -283,17 +278,6 @@ fn is_safe_path(file_path: &str) -> bool
     let file_path = canonicalize(&file_path).unwrap();
     //println!("Canonical path: {:?}", file_path);
 
-    // Get the current working directory
-    let cwd = std::env::current_dir().unwrap();
-    let cwd = canonicalize(&cwd).unwrap();
-    //println!("Canonical cwd: {:?}", cwd);
-
-    // For now, only allow access to paths inside the CWD
-    if !file_path.starts_with(cwd) {
-        println!("path not in CWD");
-        return false;
-    }
-
     // Don't allow access to the current executable
     let current_exe = std::env::current_exe().unwrap();
     let current_exe = canonicalize(&current_exe).unwrap();
@@ -302,20 +286,11 @@ fn is_safe_path(file_path: &str) -> bool
         return false;
     }
 
-    // Reject extensions associated with executable files
-    let ext = match file_path.extension() {
-        Some(ext) => ext.to_str().unwrap(),
-        None => ""
-    };
-    if ext == "exe" || ext == "bat" || ext == "cmd" || ext == "com" || ext == "sh" {
-        return false;
-    }
-
     // On Unix/Linux platforms, deny access to files marked as executable
     #[cfg(unix)]
     if !file_path.is_dir() {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(file_path).unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
         let permissions = metadata.permissions();
         let mode = permissions.mode();
         if (mode & 0o111) != 0 {
@@ -324,7 +299,37 @@ fn is_safe_path(file_path: &str) -> bool
         }
     }
 
-    true
+    // Get the current working directory
+    let cwd = std::env::current_dir().unwrap();
+    let cwd = canonicalize(&cwd).unwrap();
+    //println!("Canonical cwd: {:?}", cwd);
+
+    // If the file path is inside the current working directory, allow access
+    if file_path.starts_with(cwd) {
+        return true;
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod tests
+{
+    use crate::host::is_safe_path;
+
+    #[test]
+    fn safe_path()
+    {
+        assert!(!is_safe_path("/"));
+        assert!(!is_safe_path("/root"));
+        assert!(!is_safe_path("/home/user"));
+        assert!(!is_safe_path(".."));
+        assert!(!is_safe_path("run_me.sh"));
+        assert!(!is_safe_path("run_me.exe"));
+
+        assert!(is_safe_path("foo.txt"));
+        assert!(is_safe_path("docs/language.md"));
+    }
 }
 
 /// Read the contents of an entire file into a ByteArray object
