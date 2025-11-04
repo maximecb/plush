@@ -1803,7 +1803,10 @@ impl Actor
                     match self_val {
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
-                            let fun_id = self.get_method(obj.class_id, &method_name).unwrap();
+                            let fun_id = match self.get_method(obj.class_id, &method_name) {
+                                None => panic!("call to method `{}`, not found on class", method_name),
+                                Some(fun_id) => fun_id,
+                            };
 
                             let this_pc = pc - 1;
                             let fun_entry = call_fun!(Value::Fun(fun_id), argc + 1);
