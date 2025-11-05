@@ -309,6 +309,36 @@ fn is_safe_path(file_path: &str) -> bool
         return true;
     }
 
+    // Parse the rest arguments
+    let rest_args = crate::parse_args(std::env::args().collect()).rest;
+
+    // For each rest argument supplied on the command-line
+    for arg in rest_args {
+
+        let arg_path = PathBuf::from(arg);
+
+        // If this is not a valid path, ignore it
+        if !arg_path.exists() {
+            continue;
+        }
+
+        let arg_path = canonicalize(&arg_path).unwrap();
+
+        // We can allow access to files in directories
+        // explicitly specified on the command-line
+        if arg_path.is_dir() {
+            if file_path.starts_with(&arg_path) {
+                return true;
+            }
+        }
+
+        // We can allow access to files explicitly
+        // specified on the command-line
+        if arg_path.is_file() && file_path == arg_path {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -322,10 +352,16 @@ mod tests
     {
         assert!(!is_safe_path("/"));
         assert!(!is_safe_path("/root"));
+        assert!(!is_safe_path("/usr/bin"));
         assert!(!is_safe_path("/home/user"));
         assert!(!is_safe_path(".."));
         assert!(!is_safe_path("run_me.sh"));
         assert!(!is_safe_path("run_me.exe"));
+
+        if let Some(home_path) = std::env::home_dir() {
+            let home_path = home_path.to_str().unwrap();
+            assert!(!is_safe_path(home_path));
+        }
 
         assert!(is_safe_path("foo.txt"));
         assert!(is_safe_path("docs/language.md"));

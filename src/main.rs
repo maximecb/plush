@@ -35,7 +35,7 @@ pub static REST_ARGS: Mutex<Vec<String>> = Mutex::new(vec![]);
 
 /// Command-line options
 #[derive(Default, Debug, Clone)]
-struct Options
+pub struct Options
 {
     // Parse/validate/compile the input, but don't execute it
     no_exec: bool,
@@ -50,11 +50,12 @@ struct Options
     rest: Vec<String>,
 }
 
+// Parse the command-line arguments
 // TODO: parse permissions
 // --allow <permissions>
 // --deny <permissions>
 // --allow-all
-fn parse_args(args: Vec<String>) -> Options
+pub fn parse_args(args: Vec<String>) -> Options
 {
     let mut opts = Options::default();
 
