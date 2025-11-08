@@ -1419,8 +1419,13 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         unit_pos
     );
 
+    let mut name = input.get_src_name();
+    if name == "" {
+        name = "eval_str".into()
+    }
+
     let unit_fn = Function {
-        name: input.get_src_name(),
+        name,
         params: Default::default(),
         var_arg: false,
         body,

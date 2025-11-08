@@ -903,11 +903,11 @@ impl Actor
             ($b: expr) => { push!(if $b { True } else { False }) }
         }
 
-        /// Set up a new frame for a function call
+        // Set up a new frame for a function call
         macro_rules! call_fun {
             ($fun: expr, $argc: expr) => {{
                 if $argc as usize > self.stack.len() - bp {
-                    panic!();
+                    error!("not enough call arguments on stack");
                 }
 
                 let fun_id = match $fun {
@@ -917,7 +917,7 @@ impl Actor
                         self.call_host(f, $argc.into());
                         continue;
                     }
-                    _ => panic!("call to non-function {:?}", $fun)
+                    _ => error!("call to non-function value: `{:?}`", $fun)
                 };
 
                 // Get a compiled address for this function
@@ -926,7 +926,7 @@ impl Actor
                 if $argc as usize != fun_entry.num_params {
                     let vm = self.vm.lock().unwrap();
                     let fun = &vm.prog.funs[&fun_id];
-                    panic!(
+                    error!(
                         "incorrect argument count in call to function \"{}\", defined at {}, received {} arguments, expected {}",
                         fun.name,
                         fun.pos,
@@ -953,10 +953,54 @@ impl Actor
             }}
         }
 
+        // Handle a runtime error
+        // Print debug information including a stack trace
+        // and terminate the execution
+        macro_rules! error {
+            ($insn_name: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
+                eprintln!();
+
+                if $insn_name != "" {
+                    eprintln!("Runtime error while executing `{}` instruction:", $insn_name);
+                }
+
+                // Print the error message to standard error
+                eprintln!($format_str $(, $arg)*);
+                eprintln!();
+                eprintln!("Stack trace:");
+
+                // For each stack frame, from top to bottom
+                for frame in self.frames.iter().rev() {
+                    let fun_id = match frame.fun {
+                        Value::Fun(id) => id,
+                        Value::Closure(clos) => unsafe { (*clos).fun_id },
+                        _ => panic!("non-function on stack")
+                    };
+
+                    // Get the name of the function and its source position
+                    let vm = self.vm.lock().unwrap();
+                    let fun = &vm.prog.funs[&fun_id];
+                    let fun_name = fun.name.clone();
+                    let fun_pos = fun.pos;
+                    drop(vm);
+
+                    eprintln!("{}", fun_name);
+                    eprintln!("  defined at {}", fun_pos);
+                }
+
+                // End program execution
+                panic!();
+            }};
+
+            ($format_str:literal $(, $arg:expr)* $(,)?) => {
+                error!("", $format_str $(, $arg)*)
+            };
+        }
+
         loop
         {
             if pc >= self.insns.len() {
-                panic!("pc out of bounds");
+                error!("pc out of bounds");
             }
 
             let insn = self.insns[pc];
@@ -967,7 +1011,7 @@ impl Actor
                 Insn::nop => {},
 
                 Insn::panic { pos } => {
-                    panic!("panic at: {}", pos);
+                    error!("explicit panic at: {}", pos);
                 }
 
                 Insn::push { val } => {
@@ -1002,7 +1046,7 @@ impl Actor
                     let idx = idx as usize;
 
                     if idx >= argc {
-                        panic!(
+                        error!(
                             "invalid index in get_arg, idx={}, argc={}, stack depth: {}",
                             idx,
                             argc,
@@ -1021,7 +1065,7 @@ impl Actor
                     let idx = idx as usize;
 
                     if bp + idx >= self.stack.len() {
-                        panic!("invalid index {} in get_local", idx);
+                        error!("invalid index {} in get_local", idx);
                     }
 
                     push!(self.stack[bp + idx]);
@@ -1032,7 +1076,7 @@ impl Actor
                     let val = pop!();
 
                     if bp + idx >= self.stack.len() {
-                        panic!("invalid index in set_local");
+                        error!("invalid index in set_local");
                     }
 
                     self.stack[bp + idx] = val;
@@ -1042,13 +1086,13 @@ impl Actor
                     let idx = idx as usize;
 
                     if idx >= self.globals.len() {
-                        panic!("invalid index {} in get_global", idx);
+                        error!("get_global", "invalid global index {}", idx);
                     }
 
                     let val = self.globals[idx];
 
                     if val == Value::Undef {
-                        panic!("accessing uninitialized global");
+                        error!("get_global", "attempting to read uninitialized global");
                     }
 
                     push!(val);
@@ -1059,7 +1103,7 @@ impl Actor
                     let val = pop!();
 
                     if idx >= self.globals.len() {
-                        panic!("invalid index {} in get_global", idx);
+                        error!("set_global", "invalid global index {}", idx);
                     }
 
                     self.globals[idx] = val;
@@ -1081,7 +1125,7 @@ impl Actor
                             self.alloc.str_val(s1.to_owned() + s2)
                         }
 
-                        _ => panic!("unsupported types in add")
+                        _ => error!("add", "unsupported operand types")
                     };
 
                     push!(r);
@@ -1096,7 +1140,7 @@ impl Actor
                         (Float64(v0), Float64(v1)) => Float64(v0 - v1),
                         (Int64(v0), Float64(v1)) => Float64(v0 as f64 - v1),
                         (Float64(v0), Int64(v1)) => Float64(v0 - v1 as f64),
-                        _ => panic!("unsupported types in sub")
+                        _ => error!("sub", "unsupported operand types")
                     };
 
                     push!(r);
@@ -1111,7 +1155,7 @@ impl Actor
                         (Float64(v0), Float64(v1)) => Float64(v0 * v1),
                         (Int64(v0), Float64(v1)) => Float64(v0 as f64 * v1),
                         (Float64(v0), Int64(v1)) => Float64(v0 * v1 as f64),
-                        _ => panic!("unsupported types in mul")
+                        _ => error!("mul", "unsupported operand types")
                     };
 
                     push!(r);
@@ -1127,7 +1171,7 @@ impl Actor
                         (Float64(v0), Float64(v1)) => Float64(v0 / v1),
                         (Float64(v0), Int64(v1)) => Float64(v0 / v1 as f64),
                         (Int64(v0), Float64(v1)) => Float64(v0 as f64 / v1),
-                        _ => panic!("div with unsupported types")
+                        _ => error!("div", "unsupported operand types")
                     };
 
                     push!(r);
@@ -1141,7 +1185,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 / v1),
-                        _ => panic!("integer division with non-integer types")
+                        _ => error!("div_int", "integer division with non-integer types")
                     };
 
                     push!(r);
@@ -1157,7 +1201,7 @@ impl Actor
                         (Float64(v0), Float64(v1)) => Float64(v0 % v1),
                         (Float64(v0), Int64(v1)) => Float64(v0 % v1 as f64),
                         (Int64(v0), Float64(v1)) => Float64(v0 as f64 % v1),
-                        _ => panic!("modulo with unsupported types")
+                        _ => error!("modulo", "modulo with unsupported types")
                     };
 
                     push!(r);
@@ -1169,7 +1213,7 @@ impl Actor
                         match top_val {
                             Int64(v0) => *v0 += val,
                             Float64(v0) => *v0 += val as f64,
-                            _ => panic!("unsupported types in add_i64")
+                            _ => error!("add_i64", "unsupported operand type")
                         }
                     } else {
                         panic!();
@@ -1258,7 +1302,7 @@ impl Actor
                             s1 < s2
                         }
 
-                        _ => panic!("unsupported types in less-than")
+                        _ => error!("lt", "unsupported types in less-than")
                     };
 
                     push_bool!(b);
@@ -1281,7 +1325,7 @@ impl Actor
                             s1 <= s2
                         }
 
-                        _ => panic!("unsupported types in less-than-or-equal")
+                        _ => error!("le", "unsupported types in less-than-or-equal")
                     };
 
                     push_bool!(b);
@@ -1304,7 +1348,7 @@ impl Actor
                             s1 > s2
                         }
 
-                        _ => panic!("unsupported types in greather-than")
+                        _ => error!("gt", "unsupported types in greather-than")
                     };
 
                     push_bool!(b);
@@ -1327,7 +1371,7 @@ impl Actor
                             s1 >= s2
                         }
 
-                        _ => panic!("unsupported types in greater-than-or-equal")
+                        _ => error!("ge", "unsupported types in greater-than-or-equal")
                     };
 
                     push_bool!(b);
@@ -1352,7 +1396,7 @@ impl Actor
                     let b = match v0 {
                         Value::True => Value::False,
                         Value::False => Value::True,
-                        _ => panic!("unsupported type in logical not {:?}", v0)
+                        _ => error!("not", "unsupported type in logical not {:?}", v0)
                     };
 
                     push!(b);
@@ -1757,7 +1801,7 @@ impl Actor
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
                             let fun_id = match self.get_method(obj.class_id, &method_name) {
-                                None => panic!("call to method `{}`, not found on class", method_name),
+                                None => error!("call to method `{}`, not found on class", method_name),
                                 Some(fun_id) => fun_id,
                             };
 
@@ -1820,7 +1864,7 @@ impl Actor
 
                 Insn::ret => {
                     if self.stack.len() <= bp {
-                        panic!("ret with no return value on stack");
+                        error!("ret", "no return value on stack");
                     }
 
                     let ret_val = pop!();
@@ -1849,7 +1893,7 @@ impl Actor
                 }
 
                 #[allow(unreachable_patterns)]
-                _ => panic!("unknown opcode {:?}", insn)
+                _ => error!("unknown opcode {:?}", insn)
             }
         }
     }
