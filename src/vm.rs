@@ -794,51 +794,25 @@ impl Actor
 
         match host_fn.f
         {
-            FnPtr::Fn0_0(fun) => {
-                fun(self);
-                push!(Value::Nil);
-            }
-
-            FnPtr::Fn0_1(fun) => {
+            FnPtr::Fn0(fun) => {
                 let v = fun(self);
                 push!(v);
             }
 
-            FnPtr::Fn1_0(fun) => {
-                let a0 = pop!();
-                fun(self, a0);
-                push!(Value::Nil);
-            }
-
-            FnPtr::Fn1_1(fun) => {
+            FnPtr::Fn1(fun) => {
                 let a0 = pop!();
                 let v = fun(self, a0);
                 push!(v);
             }
 
-            FnPtr::Fn2_0(fun) => {
-                let a1 = pop!();
-                let a0 = pop!();
-                fun(self, a0, a1);
-                push!(Value::Nil);
-            }
-
-            FnPtr::Fn2_1(fun) => {
+            FnPtr::Fn2(fun) => {
                 let a1 = pop!();
                 let a0 = pop!();
                 let v = fun(self, a0, a1);
                 push!(v);
             }
 
-            FnPtr::Fn3_0(fun) => {
-                let a2 = pop!();
-                let a1 = pop!();
-                let a0 = pop!();
-                fun(self, a0, a1, a2);
-                push!(Value::Nil);
-            }
-
-            FnPtr::Fn3_1(fun) => {
+            FnPtr::Fn3(fun) => {
                 let a2 = pop!();
                 let a1 = pop!();
                 let a0 = pop!();
@@ -846,16 +820,7 @@ impl Actor
                 push!(v);
             }
 
-            FnPtr::Fn4_0(fun) => {
-                let a3 = pop!();
-                let a2 = pop!();
-                let a1 = pop!();
-                let a0 = pop!();
-                fun(self, a0, a1, a2, a3);
-                push!(Value::Nil);
-            }
-
-            FnPtr::Fn4_1(fun) => {
+            FnPtr::Fn4(fun) => {
                 let a3 = pop!();
                 let a2 = pop!();
                 let a1 = pop!();
@@ -864,17 +829,7 @@ impl Actor
                 push!(v);
             }
 
-            FnPtr::Fn5_0(fun) => {
-                let a4 = pop!();
-                let a3 = pop!();
-                let a2 = pop!();
-                let a1 = pop!();
-                let a0 = pop!();
-                fun(self, a0, a1, a2, a3, a4);
-                push!(Value::Nil);
-            }
-
-            FnPtr::Fn5_1(fun) => {
+            FnPtr::Fn5(fun) => {
                 let a4 = pop!();
                 let a3 = pop!();
                 let a2 = pop!();
@@ -884,7 +839,7 @@ impl Actor
                 push!(v);
             }
 
-            FnPtr::Fn8_0(fun) => {
+            FnPtr::Fn8(fun) => {
                 let a7 = pop!();
                 let a6 = pop!();
                 let a5 = pop!();
@@ -893,8 +848,8 @@ impl Actor
                 let a2 = pop!();
                 let a1 = pop!();
                 let a0 = pop!();
-                fun(self, a0, a1, a2, a3, a4, a5, a6, a7);
-                push!(Value::Nil);
+                let v = fun(self, a0, a1, a2, a3, a4, a5, a6, a7);
+                push!(v);
             }
         }
     }

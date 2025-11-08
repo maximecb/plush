@@ -12,25 +12,13 @@ use crate::ast::{Expr, Function, Program};
 #[derive(Copy, Clone, Debug)]
 pub enum FnPtr
 {
-    Fn0_0(fn(actor: &mut Actor)),
-    Fn0_1(fn(actor: &mut Actor) -> Value),
-
-    Fn1_0(fn(actor: &mut Actor, a0: Value)),
-    Fn1_1(fn(actor: &mut Actor, a0: Value) -> Value),
-
-    Fn2_0(fn(actor: &mut Actor, a0: Value, a1: Value)),
-    Fn2_1(fn(actor: &mut Actor, a0: Value, a1: Value) -> Value),
-
-    Fn3_0(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value)),
-    Fn3_1(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value) -> Value),
-
-    Fn4_0(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value)),
-    Fn4_1(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> Value),
-
-    Fn5_0(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value)),
-    Fn5_1(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> Value),
-
-    Fn8_0(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value, a7: Value)),
+    Fn0(fn(actor: &mut Actor) -> Value),
+    Fn1(fn(actor: &mut Actor, a0: Value) -> Value),
+    Fn2(fn(actor: &mut Actor, a0: Value, a1: Value) -> Value),
+    Fn3(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value) -> Value),
+    Fn4(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> Value),
+    Fn5(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> Value),
+    Fn8(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value, a7: Value) -> Value),
 }
 
 // This struct is needed in part because Rust doesn't allow direct
@@ -49,39 +37,13 @@ impl HostFn
     {
         use FnPtr::*;
         match self.f {
-            Fn0_0(_) => 0,
-            Fn0_1(_) => 0,
-            Fn1_0(_) => 1,
-            Fn1_1(_) => 1,
-            Fn2_0(_) => 2,
-            Fn2_1(_) => 2,
-            Fn3_0(_) => 3,
-            Fn3_1(_) => 3,
-            Fn4_0(_) => 4,
-            Fn4_1(_) => 4,
-            Fn5_0(_) => 5,
-            Fn5_1(_) => 5,
-            Fn8_0(_) => 8,
-        }
-    }
-
-    pub fn has_ret(&self) -> bool
-    {
-        use FnPtr::*;
-        match self.f {
-            Fn0_0(_) => false,
-            Fn0_1(_) => true,
-            Fn1_0(_) => false,
-            Fn1_1(_) => true,
-            Fn2_0(_) => false,
-            Fn2_1(_) => true,
-            Fn3_0(_) => false,
-            Fn3_1(_) => true,
-            Fn4_0(_) => false,
-            Fn4_1(_) => true,
-            Fn5_0(_) => false,
-            Fn5_1(_) => true,
-            Fn8_0(_) => false,
+            Fn0(_) => 0,
+            Fn1(_) => 1,
+            Fn2(_) => 2,
+            Fn3(_) => 3,
+            Fn4(_) => 4,
+            Fn5(_) => 5,
+            Fn8(_) => 8,
         }
     }
 }
@@ -104,30 +66,30 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
         }
     }
 
-    static TIME_CURRENT_MS: HostFn = HostFn { name: "time_current_ms", f: Fn0_1(time_current_ms) };
-    static CMD_NUM_ARGS: HostFn = HostFn { name: "cmd_num_args", f: Fn0_1(cmd_num_args) };
-    static CMD_GET_ARG: HostFn = HostFn { name: "cmd_get_arg", f: Fn1_1(cmd_get_arg) };
-    static PRINT: HostFn = HostFn { name: "print", f: Fn1_0(print) };
-    static PRINTLN: HostFn = HostFn { name: "println", f: Fn1_0(println) };
-    static READLN: HostFn = HostFn { name: "readln", f: Fn0_1(readln) };
-    static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1_1(read_file) };
-    static READ_FILE_UTF8: HostFn = HostFn { name: "read_file", f: Fn1_1(read_file_utf8) };
-    static WRITE_FILE: HostFn = HostFn { name: "write_file", f: Fn2_1(write_file) };
-    static ACTOR_ID: HostFn = HostFn { name: "actor_id", f: Fn0_1(actor_id) };
-    static ACTOR_PARENT: HostFn = HostFn { name: "actor_parent", f: Fn0_1(actor_parent) };
-    static ACTOR_SLEEP: HostFn = HostFn { name: "actor_sleep", f: Fn1_0(actor_sleep) };
-    static ACTOR_SPAWN: HostFn = HostFn { name: "actor_spawn", f: Fn1_1(actor_spawn) };
-    static ACTOR_JOIN: HostFn = HostFn { name: "actor_join", f: Fn1_1(actor_join) };
-    static ACTOR_SEND: HostFn = HostFn { name: "actor_send", f: Fn2_1(actor_send) };
-    static ACTOR_RECV: HostFn = HostFn { name: "actor_recv", f: Fn0_1(actor_recv) };
-    static ACTOR_POLL: HostFn = HostFn { name: "actor_poll", f: Fn0_1(actor_poll) };
-    static WINDOW_CREATE: HostFn = HostFn { name: "window_create", f: Fn4_1(window_create) };
-    static WINDOW_DRAW_FRAME: HostFn = HostFn { name: "window_draw_frame", f: Fn2_0(window_draw_frame) };
-    static AUDIO_OPEN_OUTPUT: HostFn = HostFn { name: "audio_open_output", f: Fn2_1(audio_open_output) };
-    static AUDIO_WRITE_SAMPLES: HostFn = HostFn { name: "audio_write_samples", f: Fn2_0(audio_write_samples) };
-    static AUDIO_OPEN_INPUT: HostFn = HostFn { name: "audio_open_input", f: Fn2_1(audio_open_input) };
-    static AUDIO_READ_SAMPLES: HostFn = HostFn { name: "audio_read_samples", f: Fn4_0(audio_read_samples) };
-    static EXIT: HostFn = HostFn { name: "exit", f: Fn1_0(exit) };
+    static TIME_CURRENT_MS: HostFn = HostFn { name: "time_current_ms", f: Fn0(time_current_ms) };
+    static CMD_NUM_ARGS: HostFn = HostFn { name: "cmd_num_args", f: Fn0(cmd_num_args) };
+    static CMD_GET_ARG: HostFn = HostFn { name: "cmd_get_arg", f: Fn1(cmd_get_arg) };
+    static PRINT: HostFn = HostFn { name: "print", f: Fn1(print) };
+    static PRINTLN: HostFn = HostFn { name: "println", f: Fn1(println) };
+    static READLN: HostFn = HostFn { name: "readln", f: Fn0(readln) };
+    static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1(read_file) };
+    static READ_FILE_UTF8: HostFn = HostFn { name: "read_file", f: Fn1(read_file_utf8) };
+    static WRITE_FILE: HostFn = HostFn { name: "write_file", f: Fn2(write_file) };
+    static ACTOR_ID: HostFn = HostFn { name: "actor_id", f: Fn0(actor_id) };
+    static ACTOR_PARENT: HostFn = HostFn { name: "actor_parent", f: Fn0(actor_parent) };
+    static ACTOR_SLEEP: HostFn = HostFn { name: "actor_sleep", f: Fn1(actor_sleep) };
+    static ACTOR_SPAWN: HostFn = HostFn { name: "actor_spawn", f: Fn1(actor_spawn) };
+    static ACTOR_JOIN: HostFn = HostFn { name: "actor_join", f: Fn1(actor_join) };
+    static ACTOR_SEND: HostFn = HostFn { name: "actor_send", f: Fn2(actor_send) };
+    static ACTOR_RECV: HostFn = HostFn { name: "actor_recv", f: Fn0(actor_recv) };
+    static ACTOR_POLL: HostFn = HostFn { name: "actor_poll", f: Fn0(actor_poll) };
+    static WINDOW_CREATE: HostFn = HostFn { name: "window_create", f: Fn4(window_create) };
+    static WINDOW_DRAW_FRAME: HostFn = HostFn { name: "window_draw_frame", f: Fn2(window_draw_frame) };
+    static AUDIO_OPEN_OUTPUT: HostFn = HostFn { name: "audio_open_output", f: Fn2(audio_open_output) };
+    static AUDIO_WRITE_SAMPLES: HostFn = HostFn { name: "audio_write_samples", f: Fn2(audio_write_samples) };
+    static AUDIO_OPEN_INPUT: HostFn = HostFn { name: "audio_open_input", f: Fn2(audio_open_input) };
+    static AUDIO_READ_SAMPLES: HostFn = HostFn { name: "audio_read_samples", f: Fn4(audio_read_samples) };
+    static EXIT: HostFn = HostFn { name: "exit", f: Fn1(exit) };
 
     let fn_ref = match name
     {
@@ -207,7 +169,7 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Value
 }
 
 /// Print a value to stdout
-fn print(actor: &mut Actor, v: Value)
+fn print(actor: &mut Actor, v: Value) -> Value
 {
     match v {
         Value::String(_) => {
@@ -224,13 +186,16 @@ fn print(actor: &mut Actor, v: Value)
 
         _ => print!("{:?}", v)
     }
+
+    Value::Nil
 }
 
 /// Print a value to stdout, followed by a newline
-fn println(actor: &mut Actor, v: Value)
+fn println(actor: &mut Actor, v: Value) -> Value
 {
     print(actor, v);
     println!();
+    Value::Nil
 }
 
 /// Read one line of input from stdin
@@ -437,10 +402,11 @@ fn actor_parent(actor: &mut Actor) -> Value
 }
 
 /// Make the current actor sleep
-fn actor_sleep(actor: &mut Actor, msecs: Value)
+fn actor_sleep(actor: &mut Actor, msecs: Value) -> Value
 {
     let msecs = msecs.unwrap_u64();
     thread::sleep(Duration::from_millis(msecs));
+    Value::Nil
 }
 
 /// Spawn a new actor
@@ -492,7 +458,7 @@ fn actor_poll(actor: &mut Actor) -> Value
 }
 
 /// End program execution
-fn exit(thread: &mut Actor, val: Value)
+fn exit(thread: &mut Actor, val: Value) -> Value
 {
     let val = (val.unwrap_i64() & 0xFF) as i32;
     std::process::exit(val);

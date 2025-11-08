@@ -143,7 +143,7 @@ pub fn window_draw_frame(
     actor: &mut Actor,
     window_id: Value,
     frame: Value,
-)
+) -> Value
 {
     if actor.actor_id != 0 {
         panic!("window functions should only be called from the main actor");
@@ -196,6 +196,8 @@ pub fn window_draw_frame(
 
     // Update the screen with any rendering performed since the previous call
     window.canvas.present();
+
+    Value::Nil
 }
 
 /// Poll for UI events

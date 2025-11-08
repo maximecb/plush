@@ -158,7 +158,7 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
 
 /// Write samples to an audio device
 /// The samples must be a ByteArray containing float32 values
-pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value)
+pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) -> Value
 {
     let device_id = device_id.unwrap_usize();
 
@@ -187,6 +187,8 @@ pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value)
 
     // Notify the audio thread that samples are available
     cvar.notify_one();
+
+    Value::Nil
 }
 
 // --- Audio Input ---
@@ -335,7 +337,7 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
 }
 
 /// Read samples from an audio input device into an existing ByteArray
-pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value)
+pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> Value
 {
     let device_id = device_id.unwrap_usize();
     let num_samples_to_read = num_samples.unwrap_usize();
@@ -380,4 +382,6 @@ pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Valu
     }
 
     state.in_queue.drain(0..num_samples_to_read);
+
+    Value::Nil
 }

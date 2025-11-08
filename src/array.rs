@@ -47,9 +47,10 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_v
     Value::Array(actor.alloc.alloc(arr))
 }
 
-pub fn array_push(actor: &mut Actor, mut array: Value, val: Value)
+pub fn array_push(actor: &mut Actor, mut array: Value, val: Value) -> Value
 {
     array.unwrap_arr().push(val);
+    Value::Nil
 }
 
 pub fn array_pop(actor: &mut Actor, mut array: Value) -> Value
@@ -63,14 +64,16 @@ pub fn array_remove(actor: &mut Actor, mut array: Value, idx: Value) -> Value
     array.unwrap_arr().elems.remove(idx)
 }
 
-pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, val: Value)
+pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, val: Value) -> Value
 {
     let idx = idx.unwrap_usize();
-    array.unwrap_arr().elems.insert(idx, val)
+    array.unwrap_arr().elems.insert(idx, val);
+    Value::Nil
 }
 
-pub fn array_append(_actor: &mut Actor, mut self_array: Value, mut other_array: Value)
+pub fn array_append(_actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> Value
 {
     let other_elems = other_array.unwrap_arr().elems.clone();
     self_array.unwrap_arr().elems.extend(other_elems);
+    Value::Nil
 }
