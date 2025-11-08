@@ -83,7 +83,7 @@ pub fn window_create(
     height: Value,
     title: Value,
     flags: Value
-) -> Value
+) -> Result<Value, String>
 {
     if actor.actor_id != 0 {
         panic!("window functions should only be called from the main actor");
@@ -130,7 +130,7 @@ pub fn window_create(
     *global_window = Some(window);
 
     // TODO: return unique window id
-    Value::from(0)
+    Ok(Value::from(0))
 }
 
 // Needed because of the SDL2 crate's insane lifetime
@@ -143,7 +143,7 @@ pub fn window_draw_frame(
     actor: &mut Actor,
     window_id: Value,
     frame: Value,
-) -> Value
+) -> Result<Value, String>
 {
     if actor.actor_id != 0 {
         panic!("window functions should only be called from the main actor");
@@ -197,7 +197,7 @@ pub fn window_draw_frame(
     // Update the screen with any rendering performed since the previous call
     window.canvas.present();
 
-    Value::Nil
+    Ok(Value::Nil)
 }
 
 /// Poll for UI events

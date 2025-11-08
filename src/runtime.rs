@@ -1,177 +1,177 @@
 use crate::ast::*;
 use crate::vm::{Value, Actor};
 
-fn identity_method(actor: &mut Actor, self_val: Value) -> Value
+fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
 {
-    self_val
+    Ok(self_val)
 }
 
-fn true_to_s(actor: &mut Actor, _v: Value) -> Value
+fn true_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
 {
-    actor.alloc.str_val("true".to_string())
+    Ok(actor.alloc.str_val("true".to_string()))
 }
 
-fn false_to_s(actor: &mut Actor, _v: Value) -> Value
+fn false_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
 {
-    actor.alloc.str_val("false".to_string())
+    Ok(actor.alloc.str_val("false".to_string()))
 }
 
-fn nil_to_s(actor: &mut Actor, _v: Value) -> Value
+fn nil_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
 {
-    actor.alloc.str_val("nil".to_string())
+    Ok(actor.alloc.str_val("nil".to_string()))
 }
 
-fn int64_abs(actor: &mut Actor, v: Value) -> Value
-{
-    let v = v.unwrap_i64();
-    Value::Int64(if v > 0 { v } else { -v })
-}
-
-fn int64_min(actor: &mut Actor, v: Value, other: Value) -> Value
+fn int64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_i64();
-    let other = other.unwrap_i64();
-    Value::Int64(v.min(other))
+    Ok(Value::Int64(if v > 0 { v } else { -v }))
 }
 
-fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Value
+fn int64_min(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
     let v = v.unwrap_i64();
     let other = other.unwrap_i64();
-    Value::Int64(v.max(other))
+    Ok(Value::Int64(v.min(other)))
 }
 
-fn int64_to_f(actor: &mut Actor, v: Value) -> Value
+fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
     let v = v.unwrap_i64();
-    Value::Float64(v as f64)
+    let other = other.unwrap_i64();
+    Ok(Value::Int64(v.max(other)))
 }
 
-fn int64_to_s(actor: &mut Actor, v: Value) -> Value
+fn int64_to_f(actor: &mut Actor, v: Value) -> Result<Value, String>
+{
+    let v = v.unwrap_i64();
+    Ok(Value::Float64(v as f64))
+}
+
+fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_i64();
     let s = format!("{}", v);
-    actor.alloc.str_val(s)
+    Ok(actor.alloc.str_val(s))
 }
 
-fn float64_abs(actor: &mut Actor, v: Value) -> Value
+fn float64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
-    Value::Float64(if v > 0.0 { v } else { -v })
+    Ok(Value::Float64(if v > 0.0 { v } else { -v }))
 }
 
-fn float64_ceil(actor: &mut Actor, v: Value) -> Value
+fn float64_ceil(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     // TODO: check that float value fits in integer range
     let v = v.unwrap_f64();
     let int_val = v.ceil() as i64;
-    Value::Int64(int_val)
+    Ok(Value::Int64(int_val))
 }
 
-fn float64_floor(actor: &mut Actor, v: Value) -> Value
+fn float64_floor(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     // TODO: check that float value fits in integer range
     let v = v.unwrap_f64();
     let int_val = v.floor() as i64;
-    Value::Int64(int_val)
+    Ok(Value::Int64(int_val))
 }
 
-fn float64_trunc(actor: &mut Actor, v: Value) -> Value
+fn float64_trunc(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     // TODO: check that float value fits in integer range
     let v = v.unwrap_f64();
     let int_val = v.trunc() as i64;
-    Value::Int64(int_val)
+    Ok(Value::Int64(int_val))
 }
 
-fn float64_sin(actor: &mut Actor, v: Value) -> Value
+fn float64_sin(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
-    Value::Float64(v.sin())
+    Ok(Value::Float64(v.sin()))
 }
 
-fn float64_cos(actor: &mut Actor, v: Value) -> Value
+fn float64_cos(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
-    Value::Float64(v.cos())
+    Ok(Value::Float64(v.cos()))
 }
 
-fn float64_tan(actor: &mut Actor, v: Value) -> Value
+fn float64_tan(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
-    Value::Float64(v.tan())
+    Ok(Value::Float64(v.tan()))
 }
 
-fn float64_atan(actor: &mut Actor, v: Value) -> Value
+fn float64_atan(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
-    Value::Float64(v.atan())
+    Ok(Value::Float64(v.atan()))
 }
 
-fn float64_sqrt(actor: &mut Actor, v: Value) -> Value
+fn float64_sqrt(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
-    Value::Float64(v.sqrt())
+    Ok(Value::Float64(v.sqrt()))
 }
 
-fn float64_min(actor: &mut Actor, v: Value, other: Value) -> Value
-{
-    let v = v.unwrap_f64();
-    let other = other.unwrap_f64();
-    Value::Float64(v.min(other))
-}
-
-fn float64_max(actor: &mut Actor, v: Value, other: Value) -> Value
+fn float64_min(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
     let other = other.unwrap_f64();
-    Value::Float64(v.max(other))
+    Ok(Value::Float64(v.min(other)))
 }
 
-fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> Value
+fn float64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
+{
+    let v = v.unwrap_f64();
+    let other = other.unwrap_f64();
+    Ok(Value::Float64(v.max(other)))
+}
+
+fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
     let min = min.unwrap_f64();
     let max = max.unwrap_f64();
-    Value::Float64(v.clamp(min, max))
+    Ok(Value::Float64(v.clamp(min, max)))
 }
 
-fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> Value
+fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
     let exponent = exponent.unwrap_f64();
-    Value::Float64(v.powf(exponent))
+    Ok(Value::Float64(v.powf(exponent)))
 }
 
-fn float64_exp(actor: &mut Actor, v: Value) -> Value
+fn float64_exp(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
-    Value::Float64(v.exp())
+    Ok(Value::Float64(v.exp()))
 }
 
-fn float64_ln(actor: &mut Actor, v: Value) -> Value
+fn float64_ln(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
-    Value::Float64(v.ln())
+    Ok(Value::Float64(v.ln()))
 }
 
-fn float64_to_s(actor: &mut Actor, v: Value) -> Value
+fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
     let s = format!("{}", v);
-    actor.alloc.str_val(s)
+    Ok(actor.alloc.str_val(s))
 }
 
-fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Value
+fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Result<Value, String>
 {
     let num = v.unwrap_f64();
     let decimals = decimals.unwrap_usize();
     let s = format!("{:.*}", decimals, num);
-    actor.alloc.str_val(s)
+    Ok(actor.alloc.str_val(s))
 }
 
 /// Create a single-character string from a codepoint integer value
-fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> Value
+fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> Result<Value, String>
 {
     // TODO: eventually we can add caching for this,
     // at least for ASCII character values, we can
@@ -183,67 +183,67 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
     let mut s = String::new();
     s.push(ch);
 
-    actor.alloc.str_val(s)
+    Ok(actor.alloc.str_val(s))
 }
 
 /// Get the UTF-8 byte at the given index
-fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Value
+fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Result<Value, String>
 {
     let s = s.unwrap_rust_str();
     let idx = idx.unwrap_usize();
     let byte = s.as_bytes().get(idx).unwrap();
-    Value::from(*byte)
+    Ok(Value::from(*byte))
 }
 
 /// Get a string containing the single character at the given byte index
 /// Returns nil if not a valid character boundary or character
-fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Value
+fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value, String>
 {
     let s = s.unwrap_rust_str();
     let byte_idx = byte_idx.unwrap_usize();
 
     if byte_idx >= s.len() {
-        panic!("invalid string byte index");
+        return Err("string byte index out of bounds".into());
     }
 
     // Indexing in the middle of a character
     if !s.is_char_boundary(byte_idx) {
-        return Value::Nil;
+        return Ok(Value::Nil);
     }
 
     let ch = s[byte_idx..].chars().next();
 
     let ch = match ch {
         // Not a valid character
-        None => return Value::Nil,
+        None => return Ok(Value::Nil),
         Some(ch) => ch,
     };
 
-    actor.alloc.str_val(ch.to_string())
+    Ok(actor.alloc.str_val(ch.to_string()))
 }
 
 /// Try to parse the string as an integer with the given radix
-fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Value
+fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Result<Value, String>
 {
     let s = s.unwrap_rust_str();
     let radix = radix.unwrap_u32();
 
     match i64::from_str_radix(s, radix) {
-        Ok(int_val) => Value::from(int_val),
-        Err(_) => Value::Nil,
+        Ok(int_val) => Ok(Value::from(int_val)),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
 /// Trim whitespace
-fn string_trim(actor: &mut Actor, s: Value) -> Value
+fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
     let s = s.unwrap_rust_str();
     let s = s.trim().to_string();
-    actor.alloc.str_val(s)
+    Ok(actor.alloc.str_val(s))
 }
 
 /// Split a string by a separator and return an array of strings
-fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Value
+fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Result<Value, String>
 {
     let s = s.unwrap_rust_str();
     let sep = sep.unwrap_rust_str();
@@ -253,7 +253,7 @@ fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Value
     }).collect();
 
     let arr = crate::array::Array { elems: parts };
-    Value::Array(actor.alloc.alloc(arr))
+    Ok(Value::Array(actor.alloc.alloc(arr)))
 }
 
 pub fn init_runtime(prog: &mut Program)
@@ -297,11 +297,11 @@ pub fn init_runtime(prog: &mut Program)
     prog.reg_class(audio_needed);
 }
 
-fn dict_has(actor: &mut Actor, mut d: Value, key: Value) -> Value
+fn dict_has(actor: &mut Actor, mut d: Value, key: Value) -> Result<Value, String>
 {
     let d = d.unwrap_dict();
     let key = key.unwrap_rust_str();
-    Value::from(d.has(key))
+    Ok(Value::from(d.has(key)))
 }
 
 /// Get the method associated with a core value

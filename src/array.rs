@@ -38,42 +38,42 @@ impl Array
     }
 }
 
-pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_val: Value) -> Value
+pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_val: Value) -> Result<Value, String>
 {
     let num_elems = num_elems.unwrap_usize();
     let mut elems = Vec::with_capacity(num_elems);
     elems.resize(num_elems, fill_val);
     let arr = Array { elems };
-    Value::Array(actor.alloc.alloc(arr))
+    Ok(Value::Array(actor.alloc.alloc(arr)))
 }
 
-pub fn array_push(actor: &mut Actor, mut array: Value, val: Value) -> Value
+pub fn array_push(actor: &mut Actor, mut array: Value, val: Value) -> Result<Value, String>
 {
     array.unwrap_arr().push(val);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
-pub fn array_pop(actor: &mut Actor, mut array: Value) -> Value
+pub fn array_pop(actor: &mut Actor, mut array: Value) -> Result<Value, String>
 {
-    array.unwrap_arr().pop()
+    Ok(array.unwrap_arr().pop())
 }
 
-pub fn array_remove(actor: &mut Actor, mut array: Value, idx: Value) -> Value
+pub fn array_remove(actor: &mut Actor, mut array: Value, idx: Value) -> Result<Value, String>
 {
     let idx = idx.unwrap_usize();
-    array.unwrap_arr().elems.remove(idx)
+    Ok(array.unwrap_arr().elems.remove(idx))
 }
 
-pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, val: Value) -> Value
+pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, val: Value) -> Result<Value, String>
 {
     let idx = idx.unwrap_usize();
     array.unwrap_arr().elems.insert(idx, val);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
-pub fn array_append(_actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> Value
+pub fn array_append(_actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> Result<Value, String>
 {
     let other_elems = other_array.unwrap_arr().elems.clone();
     self_array.unwrap_arr().elems.extend(other_elems);
-    Value::Nil
+    Ok(Value::Nil)
 }

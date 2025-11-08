@@ -1,4 +1,4 @@
-use std::mem::transmute;
+use std::mem::{transmute, size_of};
 use crate::vm::{Value, Actor};
 use crate::alloc::Alloc;
 use crate::host::HostFn;
@@ -170,85 +170,85 @@ fn blit_bgra32(
 }
 
 /// Create a new ByteArray instance
-pub fn ba_new(actor: &mut Actor, _self: Value) -> Value
+pub fn ba_new(actor: &mut Actor, _self: Value) -> Result<Value, String>
 {
     let ba = ByteArray::default();
     let new_arr = actor.alloc.alloc(ba);
-    Value::ByteArray(new_arr)
+    Ok(Value::ByteArray(new_arr))
 }
 
 /// Create a new ByteArray instance
-pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Value
+pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result<Value, String>
 {
     let num_bytes = num_bytes.unwrap_usize();
     let mut bytes = Vec::with_capacity(num_bytes);
     bytes.resize(num_bytes, 0);
     let ba = ByteArray { bytes };
-    Value::ByteArray(actor.alloc.alloc(ba))
+    Ok(Value::ByteArray(actor.alloc.alloc(ba)))
 }
 
-pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value) -> Value
+pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let num = num.unwrap_usize();
     let val = val.unwrap_u32();
     ba.fill(idx, num, val);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
-pub fn ba_load_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
+pub fn ba_load_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val: u32 = ba.load(idx);
-    Value::from(val)
+    Ok(Value::from(val))
 }
 
-pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Value
+pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val = val.unwrap_u32();
     ba.store(idx, val);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
-pub fn ba_load_u16(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
+pub fn ba_load_u16(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val: u16 = ba.load(idx);
-    Value::from(val as i64)
+    Ok(Value::from(val as i64))
 }
 
-pub fn ba_store_u16(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Value
+pub fn ba_store_u16(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val = val.unwrap_i64();
     ba.store(idx, val as u16);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
-pub fn ba_load_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Value
+pub fn ba_load_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val: f32 = ba.load(idx);
-    Value::from(val as f64)
+    Ok(Value::from(val as f64))
 }
 
-pub fn ba_store_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Value
+pub fn ba_store_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = idx.unwrap_usize();
     let val = val.unwrap_f64();
     ba.store(idx, val as f32);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
-pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> Value
+pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> Result<Value, String>
 {
     let dst = dst.unwrap_ba();
 
@@ -261,22 +261,22 @@ pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, 
     let dst_idx = dst_idx.unwrap_usize();
     let num_bytes = num_bytes.unwrap_usize();
     dst.memcpy(dst_idx, src, src_idx, num_bytes);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
-pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value) -> Value
+pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     ba.bytes.fill(0);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
-pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Value
+pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let new_size = new_size.unwrap_usize();
     ba.resize(new_size);
-    Value::Nil
+    Ok(Value::Nil)
 }
 
 pub fn ba_blit_bgra32(
@@ -289,7 +289,7 @@ pub fn ba_blit_bgra32(
     src_height: Value,
     dst_x: Value,
     dst_y: Value,
-) -> Value
+) -> Result<Value, String>
 {
     let dst = dst.unwrap_ba();
     let dst_width = dst_width.unwrap_usize();
@@ -313,5 +313,5 @@ pub fn ba_blit_bgra32(
         dst_y,
     );
 
-    Value::Nil
+    Ok(Value::Nil)
 }

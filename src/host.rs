@@ -12,13 +12,13 @@ use crate::ast::{Expr, Function, Program};
 #[derive(Copy, Clone, Debug)]
 pub enum FnPtr
 {
-    Fn0(fn(actor: &mut Actor) -> Value),
-    Fn1(fn(actor: &mut Actor, a0: Value) -> Value),
-    Fn2(fn(actor: &mut Actor, a0: Value, a1: Value) -> Value),
-    Fn3(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value) -> Value),
-    Fn4(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> Value),
-    Fn5(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> Value),
-    Fn8(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value, a7: Value) -> Value),
+    Fn0(fn(actor: &mut Actor) -> Result<Value, String>),
+    Fn1(fn(actor: &mut Actor, a0: Value) -> Result<Value, String>),
+    Fn2(fn(actor: &mut Actor, a0: Value, a1: Value) -> Result<Value, String>),
+    Fn3(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value) -> Result<Value, String>),
+    Fn4(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> Result<Value, String>),
+    Fn5(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> Result<Value, String>),
+    Fn8(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value, a7: Value) -> Result<Value, String>),
 }
 
 // This struct is needed in part because Rust doesn't allow direct
@@ -140,36 +140,36 @@ pub fn get_time_ms() -> u64
 }
 
 /// Get the current time stamp in milliseconds since the unix epoch
-pub fn time_current_ms(actor: &mut Actor) -> Value
+pub fn time_current_ms(actor: &mut Actor) -> Result<Value, String>
 {
-    Value::from(get_time_ms())
+    Ok(Value::from(get_time_ms()))
 }
 
 /// Get the number of command-line arguments
-pub fn cmd_num_args(actor: &mut Actor) -> Value
+pub fn cmd_num_args(actor: &mut Actor) -> Result<Value, String>
 {
     let num_args = crate::REST_ARGS.lock().unwrap().len();
-    Value::from(num_args)
+    Ok(Value::from(num_args))
 }
 
 /// Get a command-line argument string by index
 /// Note: if we allocate just one object then we can be
 /// guaranteed that object won't be GC'd while this function runs
-pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Value
+pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
 {
     let idx = idx.unwrap_usize();
 
     let args = crate::REST_ARGS.lock().unwrap();
 
     if idx >= args.len() {
-        return Value::Nil;
+        return Ok(Value::Nil);
     }
 
-    actor.alloc.str_val(args[idx].clone())
+    Ok(actor.alloc.str_val(args[idx].clone()))
 }
 
 /// Print a value to stdout
-fn print(actor: &mut Actor, v: Value) -> Value
+fn print(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     match v {
         Value::String(_) => {
@@ -187,28 +187,28 @@ fn print(actor: &mut Actor, v: Value) -> Value
         _ => print!("{:?}", v)
     }
 
-    Value::Nil
+    Ok(Value::Nil)
 }
 
 /// Print a value to stdout, followed by a newline
-fn println(actor: &mut Actor, v: Value) -> Value
+fn println(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    print(actor, v);
+    print(actor, v)?;
     println!();
-    Value::Nil
+    Ok(Value::Nil)
 }
 
 /// Read one line of input from stdin
-fn readln(actor: &mut Actor) -> Value
+fn readln(actor: &mut Actor) -> Result<Value, String>
 {
     let mut line = String::new();
 
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => {
-            actor.alloc.str_val(line)
+            Ok(actor.alloc.str_val(line))
         }
 
-        Err(_) => Value::Nil
+        Err(_) => Ok(Value::Nil)
     }
 }
 
@@ -334,131 +334,131 @@ mod tests
 }
 
 /// Read the contents of an entire file into a ByteArray object
-fn read_file(actor: &mut Actor, file_path: Value) -> Value
+fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 {
     let file_path = file_path.unwrap_rust_str();
 
     if !is_safe_path(&file_path) {
-        panic!("requested file path breaks sandboxing rules");
+        return Err(format!("requested file path breaks sandboxing rules: {}", file_path));
     }
 
     let bytes: Vec<u8> = match std::fs::read(file_path) {
-        Err(_) => return Value::Nil,
+        Err(_) => return Ok(Value::Nil),
         Ok(bytes) => bytes
     };
 
     let ba = crate::bytearray::ByteArray::new(bytes);
     let ba_obj = actor.alloc.alloc(ba);
-    Value::ByteArray(ba_obj)
+    Ok(Value::ByteArray(ba_obj))
 }
 
 /// Read the contents of an entire file encoded as valid UTF-8
-fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Value
+fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 {
     let file_path = file_path.unwrap_rust_str();
 
     if !is_safe_path(&file_path) {
-        panic!("requested file path breaks sandboxing rules");
+        return Err(format!("requested file path breaks sandboxing rules: {}", file_path));
     }
 
     let s: String = match std::fs::read_to_string(file_path) {
-        Err(_) => return Value::Nil,
+        Err(_) => return Ok(Value::Nil),
         Ok(s) => s
     };
 
-    actor.alloc.str_val(s)
+    Ok(actor.alloc.str_val(s))
 }
 
 /// Writes the contents of a ByteArray to a file
-fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Value
+fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<Value, String>
 {
     let file_path = file_path.unwrap_rust_str();
     let bytes = bytes.unwrap_ba();
     let bytes = unsafe { bytes.get_slice(0, bytes.num_bytes()) };
 
     if !is_safe_path(&file_path) {
-        panic!("requested file path breaks sandboxing rules");
+        return Err(format!("requested file path breaks sandboxing rules: {}", file_path));
     }
 
     match std::fs::write(file_path, &bytes) {
-        Err(_) => Value::False,
-        Ok(_) => Value::True
+        Err(_) => Ok(Value::False),
+        Ok(_) => Ok(Value::True)
     }
 }
 
 /// Get the id of the current actor
-fn actor_id(actor: &mut Actor) -> Value
+fn actor_id(actor: &mut Actor) -> Result<Value, String>
 {
-    Value::from(actor.actor_id)
+    Ok(Value::from(actor.actor_id))
 }
 
 /// Get the id of the parent actor
-fn actor_parent(actor: &mut Actor) -> Value
+fn actor_parent(actor: &mut Actor) -> Result<Value, String>
 {
-    match actor.parent_id {
+    Ok(match actor.parent_id {
         Some(actor_id) => Value::from(actor_id),
         None => Value::Nil,
-    }
+    })
 }
 
 /// Make the current actor sleep
-fn actor_sleep(actor: &mut Actor, msecs: Value) -> Value
+fn actor_sleep(actor: &mut Actor, msecs: Value) -> Result<Value, String>
 {
     let msecs = msecs.unwrap_u64();
     thread::sleep(Duration::from_millis(msecs));
-    Value::Nil
+    Ok(Value::Nil)
 }
 
 /// Spawn a new actor
 /// Takes a function to call as argument
 /// Returns an actor id
-fn actor_spawn(actor: &mut Actor, fun: Value) -> Value
+fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
 {
     let actor_id = VM::new_actor(actor, fun, vec![]);
-    Value::from(actor_id)
+    Ok(Value::from(actor_id))
 }
 
 /// Wait for a thread to terminate, produce the return value
-fn actor_join(actor: &mut Actor, actor_id: Value) -> Value
+fn actor_join(actor: &mut Actor, actor_id: Value) -> Result<Value, String>
 {
     let id = actor_id.unwrap_u64();
-    VM::join_actor(&actor.vm, id)
+    Ok(VM::join_actor(&actor.vm, id))
 }
 
 /// Send a message to an actor
 /// This will return false in case of failure
-fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Value
+fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Result<Value, String>
 {
     let actor_id = actor_id.unwrap_u64();
 
     let res = actor.send(actor_id, msg);
 
     if res.is_ok() {
-        Value::True
+        Ok(Value::True)
     } else {
-        Value::False
+        Ok(Value::False)
     }
 }
 
 /// Receive a message from the current actor's queue
 /// This will block until a message is available
-fn actor_recv(actor: &mut Actor) -> Value
+fn actor_recv(actor: &mut Actor) -> Result<Value, String>
 {
-    actor.recv()
+    Ok(actor.recv())
 }
 
 /// Receive a message from the current actor's queue
 /// This will block until a message is available
-fn actor_poll(actor: &mut Actor) -> Value
+fn actor_poll(actor: &mut Actor) -> Result<Value, String>
 {
-    match actor.try_recv() {
+    Ok(match actor.try_recv() {
         Some(msg_val) => msg_val,
         None => Value::Nil,
-    }
+    })
 }
 
 /// End program execution
-fn exit(thread: &mut Actor, val: Value) -> Value
+fn exit(thread: &mut Actor, val: Value) -> Result<Value, String>
 {
     let val = (val.unwrap_i64() & 0xFF) as i32;
     std::process::exit(val);

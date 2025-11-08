@@ -792,32 +792,28 @@ impl Actor
             );
         }
 
-        match host_fn.f
+        let result = match host_fn.f
         {
             FnPtr::Fn0(fun) => {
-                let v = fun(self);
-                push!(v);
+                fun(self)
             }
 
             FnPtr::Fn1(fun) => {
                 let a0 = pop!();
-                let v = fun(self, a0);
-                push!(v);
+                fun(self, a0)
             }
 
             FnPtr::Fn2(fun) => {
                 let a1 = pop!();
                 let a0 = pop!();
-                let v = fun(self, a0, a1);
-                push!(v);
+                fun(self, a0, a1)
             }
 
             FnPtr::Fn3(fun) => {
                 let a2 = pop!();
                 let a1 = pop!();
                 let a0 = pop!();
-                let v = fun(self, a0, a1, a2);
-                push!(v);
+                fun(self, a0, a1, a2)
             }
 
             FnPtr::Fn4(fun) => {
@@ -825,8 +821,7 @@ impl Actor
                 let a2 = pop!();
                 let a1 = pop!();
                 let a0 = pop!();
-                let v = fun(self, a0, a1, a2, a3);
-                push!(v);
+                fun(self, a0, a1, a2, a3)
             }
 
             FnPtr::Fn5(fun) => {
@@ -835,8 +830,7 @@ impl Actor
                 let a2 = pop!();
                 let a1 = pop!();
                 let a0 = pop!();
-                let v = fun(self, a0, a1, a2, a3, a4);
-                push!(v);
+                fun(self, a0, a1, a2, a3, a4)
             }
 
             FnPtr::Fn8(fun) => {
@@ -848,9 +842,13 @@ impl Actor
                 let a2 = pop!();
                 let a1 = pop!();
                 let a0 = pop!();
-                let v = fun(self, a0, a1, a2, a3, a4, a5, a6, a7);
-                push!(v);
+                fun(self, a0, a1, a2, a3, a4, a5, a6, a7)
             }
+        };
+
+        match result {
+            Ok(v) => push!(v),
+            Err(e) => panic!("error during call to host function `{}`: {}", host_fn.name, e),
         }
     }
 

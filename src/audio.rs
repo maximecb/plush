@@ -102,7 +102,7 @@ unsafe impl Send for OutputState {}
 static AUDIO_OUT_PAIR: (Mutex<Option<OutputState>>, Condvar) = (Mutex::new(None), Condvar::new());
 
 /// Open an audio output device
-pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Value
+pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Result<Value, String>
 {
     {
         let (lock, _) = &AUDIO_OUT_PAIR;
@@ -153,12 +153,12 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     });
 
     // For now just assume device id zero
-    Value::from(0)
+    Ok(Value::from(0))
 }
 
 /// Write samples to an audio device
 /// The samples must be a ByteArray containing float32 values
-pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) -> Value
+pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) -> Result<Value, String>
 {
     let device_id = device_id.unwrap_usize();
 
@@ -188,7 +188,7 @@ pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) 
     // Notify the audio thread that samples are available
     cvar.notify_one();
 
-    Value::Nil
+    Ok(Value::Nil)
 }
 
 // --- Audio Input ---
@@ -284,7 +284,7 @@ unsafe impl Send for InputState {}
 static AUDIO_IN_PAIR: (Mutex<Option<InputState>>, Condvar) = (Mutex::new(None), Condvar::new());
 
 /// Open an audio input device
-pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Value
+pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Result<Value, String>
 {
     {
         let (lock, _) = &AUDIO_IN_PAIR;
@@ -333,11 +333,11 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
     });
 
     // For now just assume device id zero
-    Value::from(0)
+    Ok(Value::from(0))
 }
 
 /// Read samples from an audio input device into an existing ByteArray
-pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> Value
+pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> Result<Value, String>
 {
     let device_id = device_id.unwrap_usize();
     let num_samples_to_read = num_samples.unwrap_usize();
@@ -383,5 +383,5 @@ pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Valu
 
     state.in_queue.drain(0..num_samples_to_read);
 
-    Value::Nil
+    Ok(Value::Nil)
 }
