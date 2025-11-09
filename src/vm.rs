@@ -1216,7 +1216,7 @@ impl Actor
                             _ => error!("add_i64", "unsupported operand type")
                         }
                     } else {
-                        panic!();
+                        error!("add_i64", "stack is empty");
                     }
                 }
 
@@ -1227,7 +1227,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 | v1),
-                        _ => panic!()
+                        _ => error!("bit_or", "unsupported operand types")
                     };
 
                     push!(r);
@@ -1240,7 +1240,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 & v1),
-                        _ => panic!("bitwise AND with non-integer values")
+                        _ => error!("bit_and", "bitwise AND with non-integer values")
                     };
 
                     push!(r);
@@ -1253,7 +1253,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 ^ v1),
-                        _ => panic!()
+                        _ => error!("bit_xor", "unsupported operand types")
                     };
 
                     push!(r);
@@ -1266,7 +1266,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 << v1),
-                        _ => panic!()
+                        _ => error!("lshift", "unsupported operand types")
                     };
 
                     push!(r);
@@ -1279,7 +1279,7 @@ impl Actor
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 >> v1),
-                        _ => panic!()
+                        _ => error!("rshift", "unsupported operand types")
                     };
 
                     push!(r);
@@ -1419,7 +1419,7 @@ impl Actor
                             let clos = unsafe { &mut *clos };
                             clos.slots[idx as usize] = val;
                         }
-                        _ => panic!()
+                        _ => error!("clos_set", "expected closure")
                     }
                 }
 
@@ -1432,11 +1432,11 @@ impl Actor
                             let clos = unsafe { &**clos };
                             clos.slots[idx as usize]
                         }
-                        _ => panic!()
+                        _ => error!("clos_get", "not a closure")
                     };
 
                     if val == Value::Undef {
-                        panic!("executing uninitialized closure");
+                        error!("clos_get", "executing uninitialized closure");
                     }
 
                     push!(val);
@@ -1449,7 +1449,7 @@ impl Actor
 
                     match cell {
                         Value::Cell(p_cell) => unsafe { *p_cell = val },
-                        _ => panic!()
+                        _ => error!("cell_set", "expected cell")
                     };
                 }
 
@@ -1459,7 +1459,7 @@ impl Actor
 
                     let val = match cell {
                         Value::Cell(p_cell) => unsafe { *p_cell },
-                        _ => panic!("invalid cell in cell_get")
+                        _ => error!("cell_get", "invalid cell in cell_get")
                     };
 
                     push!(val);
@@ -1503,7 +1503,7 @@ impl Actor
                             dict.set(field_name, val);
                         }
 
-                        _ => panic!()
+                        _ => error!("set_field", "set_field on non-object/dict value")
                     }
                 }
 
@@ -1580,21 +1580,21 @@ impl Actor
                         Value::Array(p) => {
                             match field_name.as_str() {
                                 "len" => obj.unwrap_arr().elems.len().into(),
-                                _ => panic!()
+                                _ => error!("get_field", "field not found on array")
                             }
                         }
 
                         Value::ByteArray(p) => {
                             match field_name.as_str() {
                                 "len" => obj.unwrap_ba().num_bytes().into(),
-                                _ => panic!()
+                                _ => error!("get_field", "field not found on bytearray")
                             }
                         }
 
                         Value::String(p) => {
                             match field_name.as_str() {
                                 "len" => obj.unwrap_rust_str().len().into(),
-                                _ => panic!()
+                                _ => error!("get_field", "field not found on string")
                             }
                         }
 
@@ -1619,7 +1619,7 @@ impl Actor
                             };
 
                             if val == Value::Undef {
-                                panic!("object field not initialized `{}`", field_name);
+                                error!("get_field", "object field not initialized `{}`", field_name);
                             }
 
                             val
@@ -1630,7 +1630,7 @@ impl Actor
                             dict.get(field_name)
                         }
 
-                        _ => panic!("get_field on non-object value {:?}", obj)
+                        _ => error!("get_field", "get_field on non-object value {:?}", obj)
                     };
 
                     push!(val);
@@ -1645,7 +1645,7 @@ impl Actor
                             let arr = unsafe { &mut *p };
                             let idx = idx.unwrap_i64();
                             if idx < 0 {
-                                panic!("negative array index in get_index");
+                                error!("get_index", "negative array index in get_index");
                             }
                             arr.get(idx as usize)
                         }
@@ -1654,7 +1654,7 @@ impl Actor
                             let ba = unsafe { &mut *p };
                             let idx = idx.unwrap_i64();
                             if idx < 0 {
-                                panic!("negative array index in get_index");
+                                error!("get_index", "negative array index in get_index");
                             }
                             Value::from(ba.get(idx as usize))
                         }
@@ -1665,7 +1665,7 @@ impl Actor
                             dict.get(key)
                         }
 
-                        _ => panic!("expected array type in get_index")
+                        _ => error!("get_index", "expected array or dict type in get_index")
                     };
 
                     push!(val);
@@ -1681,7 +1681,7 @@ impl Actor
                             let arr = unsafe { &mut *p };
                             let idx = idx.unwrap_i64();
                             if idx < 0 {
-                                panic!("negative array index in set_index");
+                                error!("set_index", "negative array index in set_index");
                             }
                             arr.set(idx as usize, val);
                         }
@@ -1690,7 +1690,7 @@ impl Actor
                             let ba = unsafe { &mut *p };
                             let idx = idx.unwrap_i64();
                             if idx < 0 {
-                                panic!("negative array index in set_index");
+                                error!("set_index", "negative array index in set_index");
                             }
                             let b = val.unwrap_u8();
                             ba.set(idx as usize, b);
@@ -1702,7 +1702,7 @@ impl Actor
                             dict.set(key, val);
                         }
 
-                        _ => panic!("expected array type")
+                        _ => error!("set_index", "expected array or dict type")
                     };
                 }
 
@@ -1734,7 +1734,7 @@ impl Actor
                     match v {
                         Value::True => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
                         Value::False => {}
-                        _ => panic!("if_true instruction only accepts boolean values")
+                        _ => error!("if_true", "if_true instruction only accepts boolean values")
                     }
                 }
 
@@ -1745,7 +1745,7 @@ impl Actor
                     match v {
                         Value::False => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
                         Value::True => {}
-                        _ => panic!("if_false instruction only accepts boolean values")
+                        _ => error!("if_false", "if_false instruction only accepts boolean values")
                     }
                 }
 
