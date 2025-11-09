@@ -429,7 +429,7 @@ fun training_actor(detection_actor_id) {
     let var positive_examples_count = 0;
     let var negative_examples_count = 0;
 
-    for (let var training_itr = 1;; ++training_itr) {
+    for (let var training_itr = 1;;) {
         let msg = $actor_poll();
         if (msg != nil) {
             training_data.push(msg);
@@ -441,44 +441,47 @@ fun training_actor(detection_actor_id) {
             $println("Positive samples: " + positive_examples_count.to_s() + ", negative samples: " + negative_examples_count.to_s());
         }
 
-        if (training_data.len > 0) {
-            // Create a perturbed clone
-            let perturbed_rnn = rnn.clone();
-            perturbed_rnn.perturb(PERTURBATION_AMOUNT);
-
-            // Pick a random sample
-            let idx = rand_int(0, training_data.len - 1);
-            let sample = training_data[idx];
-            let frames = sample[0];
-            let label = sample[1];
-
-            // Calculate loss for both models on the same sample
-            let current_loss = calculate_loss(rnn, frames, label);
-            let perturbed_loss = calculate_loss(perturbed_rnn, frames, label);
-
-            if (perturbed_loss < current_loss) {
-                rnn = perturbed_rnn;
-                best_loss = perturbed_loss;
-            }
-
-            if (iteration_count % 20 == 0) {
-                 $println(
-                    "Itr#" + training_itr.to_s() +
-                    ", loss: " + best_loss.format_decimals(9) +
-                    ", pos: " +
-                    positive_examples_count.to_s() +
-                    ", neg: " +
-                    negative_examples_count.to_s()
-                );
-            }
-
-            iteration_count = iteration_count + 1;
-            if (iteration_count % 100 == 0) {
-                $actor_send(detection_actor_id, rnn);
-            }
+        if (training_data.len == 0) {
+            $actor_sleep(1);
+            continue;
         }
 
-        $actor_sleep(1);
+        // Create a perturbed clone
+        let perturbed_rnn = rnn.clone();
+        perturbed_rnn.perturb(PERTURBATION_AMOUNT);
+
+        // Pick a random sample
+        let idx = rand_int(0, training_data.len - 1);
+        let sample = training_data[idx];
+        let frames = sample[0];
+        let label = sample[1];
+
+        // Calculate loss for both models on the same sample
+        let current_loss = calculate_loss(rnn, frames, label);
+        let perturbed_loss = calculate_loss(perturbed_rnn, frames, label);
+
+        if (perturbed_loss < current_loss) {
+            rnn = perturbed_rnn;
+            best_loss = perturbed_loss;
+        }
+
+        if (iteration_count % 20 == 0) {
+                $println(
+                "Itr#" + training_itr.to_s() +
+                ", loss: " + best_loss.format_decimals(1) +
+                ", pos: " +
+                positive_examples_count.to_s() +
+                ", neg: " +
+                negative_examples_count.to_s()
+            );
+        }
+
+        iteration_count = iteration_count + 1;
+        if (iteration_count % 100 == 0) {
+            $actor_send(detection_actor_id, rnn);
+        }
+
+        ++training_itr;
     }
 }
 
