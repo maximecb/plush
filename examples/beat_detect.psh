@@ -1,0 +1,604 @@
+// Constants
+let SAMPLE_RATE = 44100;
+let NUM_CHANNELS = 1;
+let WINDOW_WIDTH = 400;
+let WINDOW_HEIGHT = 300;
+let FFT_SIZE = 1024; // Must be a power of 2
+let NUM_MEL_BINS = 32;
+let PI = 3.141592653589793;
+
+let MIN_FREQ = 300.0;
+let MAX_FREQ = 3500.0;
+
+let MAX_FRAMES = 64;
+let HIDDEN_SIZE = 32;
+let INPUT_SIZE = NUM_MEL_BINS;
+let OUTPUT_SIZE = 1;
+let PERTURBATION_AMOUNT = 0.01;
+let DETECTION_THRESHOLD = 0.92;
+let NOISE_MAGNITUDE = 0.12;
+let MAX_ZERO_FRAMES_TO_ADD = 10;
+
+// Helper function to convert RGB values to a 32-bit color
+fun rgb32(r, g, b) {
+    // The alpha channel is set to 0xFF (fully opaque)
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// --- Pseudo-Random Number Generator (LCG) ---
+let var lcg_seed = 1;
+
+fun rand_init(seed) {
+    lcg_seed = seed & 0x7FFFFFFF;
+}
+
+// Returns a pseudo-random float in the range [-1.0, 1.0].
+fun rand_float() {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return ((lcg_seed.to_f() / 0x7FFFFFFF.to_f()) - 0.5) * 2.0;
+}
+
+fun random_matrix(rows, cols) {
+    let m = Array.with_size(rows, nil);
+    for (let var r = 0; r < rows; ++r) {
+        let row = Array.with_size(cols, 0.0);
+        for (let var c = 0; c < cols; ++c) {
+            row[c] = rand_float();
+        }
+        m[r] = row;
+    }
+    return m;
+}
+
+fun random_vector(size) {
+    let v = Array.with_size(size, 0.0);
+    for (let var i = 0; i < size; ++i) {
+        v[i] = rand_float();
+    }
+    return v;
+}
+
+// --- Matrix/Vector Math ---
+fun mat_vec_mult(m, v) {
+    let rows = m.len;
+    let cols = m[0].len;
+    assert(cols == v.len);
+    let result = Array.with_size(rows, 0.0);
+    for (let var r = 0; r < rows; ++r) {
+        let var sum = 0.0;
+        for (let var c = 0; c < cols; ++c) {
+            sum = sum + m[r][c] * v[c];
+        }
+        result[r] = sum;
+    }
+    return result;
+}
+
+fun vec_add(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] + v2[i];
+    }
+    return result;
+}
+
+fun vec_sub(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] - v2[i];
+    }
+    return result;
+}
+
+fun vec_elem_mult(v1, v2) {
+    assert(v1.len == v2.len);
+    let result = Array.with_size(v1.len, 0.0);
+    for (let var i = 0; i < v1.len; ++i) {
+        result[i] = v1[i] * v2[i];
+    }
+    return result;
+}
+
+fun vec_outer_prod(v1, v2) {
+    let m = Array.with_size(v1.len, nil);
+    for (let var r = 0; r < v1.len; ++r) {
+        let row = Array.with_size(v2.len, 0.0);
+        for (let var c = 0; c < v2.len; ++c) {
+            row[c] = v1[r] * v2[c];
+        }
+        m[r] = row;
+    }
+    return m;
+}
+
+fun mat_transpose(m) {
+    let rows = m.len;
+    let cols = m[0].len;
+    let t = Array.with_size(cols, nil);
+    for (let var c = 0; c < cols; ++c) {
+        let row = Array.with_size(rows, 0.0);
+        for (let var r = 0; r < rows; ++r) {
+            row[r] = m[r][c];
+        }
+        t[c] = row;
+    }
+    return t;
+}
+
+fun mat_update(m, grad, learning_rate) {
+    let rows = m.len;
+    let cols = m[0].len;
+    for (let var r = 0; r < rows; ++r) {
+        for (let var c = 0; c < cols; ++c) {
+            m[r][c] = m[r][c] - learning_rate * grad[r][c];
+        }
+    }
+}
+
+fun vec_update(v, grad, learning_rate) {
+    for (let var i = 0; i < v.len; ++i) {
+        v[i] = v[i] - learning_rate * grad[i];
+    }
+}
+
+// --- Activation Functions ---
+fun relu(v) {
+    let result = Array.with_size(v.len, 0.0);
+    for (let var i = 0; i < v.len; ++i) {
+        result[i] = v[i].max(0.0);
+    }
+    return result;
+}
+
+fun sigmoid(v) {
+    let result = Array.with_size(v.len, 0.0);
+    for (let var i = 0; i < v.len; ++i) {
+        result[i] = 1.0 / (1.0 + (-v[i]).exp());
+    }
+    return result;
+}
+
+fun deepcopy_matrix(m) {
+    let rows = m.len;
+    let cols = m[0].len;
+    let new_m = Array.with_size(rows, nil);
+    for (let var r = 0; r < rows; ++r) {
+        let row = Array.with_size(cols, 0.0);
+        for (let var c = 0; c < cols; ++c) {
+            row[c] = m[r][c];
+        }
+        new_m[r] = row;
+    }
+    return new_m;
+}
+
+fun deepcopy_vector(v) {
+    let new_v = Array.with_size(v.len, 0.0);
+    for (let var i = 0; i < v.len; ++i) {
+        new_v[i] = v[i];
+    }
+    return new_v;
+}
+
+fun perturb_matrix(m, amount) {
+    let rows = m.len;
+    let cols = m[0].len;
+    for (let var r = 0; r < rows; ++r) {
+        for (let var c = 0; c < cols; ++c) {
+            m[r][c] = m[r][c] + rand_float() * amount;
+        }
+    }
+}
+
+fun perturb_vector(v, amount) {
+    for (let var i = 0; i < v.len; ++i) {
+        v[i] = v[i] + rand_float() * amount;
+    }
+}
+
+// --- RNN Definition ---
+class RNN {
+    init(self, input_size, hidden_size, output_size) {
+        // Layer 1: (input + hidden) -> hidden
+        self.W1 = random_matrix(hidden_size, input_size + hidden_size);
+        self.b1 = random_vector(hidden_size);
+
+        // Layer 2: hidden -> hidden
+        self.W2 = random_matrix(hidden_size, hidden_size);
+        self.b2 = random_vector(hidden_size);
+
+        // Output Layer: hidden -> output
+        self.W_out = random_matrix(output_size, hidden_size);
+        self.b_out = random_vector(output_size);
+    }
+
+    forward(self, x, prev_hidden_state) {
+        // Concatenate input and previous hidden state
+        let combined_input = Array.with_size(x.len + prev_hidden_state.len, 0.0);
+        for (let var i = 0; i < x.len; ++i) {
+            combined_input[i] = x[i];
+        }
+        for (let var i = 0; i < prev_hidden_state.len; ++i) {
+            combined_input[x.len + i] = prev_hidden_state[i];
+        }
+
+        // Layer 1
+        let z1 = vec_add(mat_vec_mult(self.W1, combined_input), self.b1);
+        let a1 = relu(z1);
+
+        // Layer 2
+        let z2 = vec_add(mat_vec_mult(self.W2, a1), self.b2);
+        let current_hidden_state = relu(z2);
+
+        // Output layer
+        let z_out = vec_add(mat_vec_mult(self.W_out, current_hidden_state), self.b_out);
+        let y_pred = sigmoid(z_out);
+
+        return [y_pred, current_hidden_state];
+    }
+
+    clone(self) {
+        let new_rnn = RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
+        new_rnn.W1 = deepcopy_matrix(self.W1);
+        new_rnn.b1 = deepcopy_vector(self.b1);
+        new_rnn.W2 = deepcopy_matrix(self.W2);
+        new_rnn.b2 = deepcopy_vector(self.b2);
+        new_rnn.W_out = deepcopy_matrix(self.W_out);
+        new_rnn.b_out = deepcopy_vector(self.b_out);
+        return new_rnn;
+    }
+
+    perturb(self, amount) {
+        perturb_matrix(self.W1, amount);
+        perturb_vector(self.b1, amount);
+        perturb_matrix(self.W2, amount);
+        perturb_vector(self.b2, amount);
+        perturb_matrix(self.W_out, amount);
+        perturb_vector(self.b_out, amount);
+    }
+}
+
+// Function to perform in-place iterative FFT (Cooley-Tukey)
+fun fft(real_parts, imag_parts, inverse) {
+    let n = real_parts.len _/ 4;
+    if (n == 0) {
+        return;
+    }
+    let var i = 0;
+    let var j = 0;
+    while (i < n) {
+        if (j > i) {
+            let temp_re = real_parts.load_f32(i);
+            real_parts.store_f32(i, real_parts.load_f32(j));
+            real_parts.store_f32(j, temp_re);
+            let temp_im = imag_parts.load_f32(i);
+            imag_parts.store_f32(i, imag_parts.load_f32(j));
+            imag_parts.store_f32(j, temp_im);
+        }
+        let var m = n _/ 2;
+        while (m >= 1 && j >= m) {
+            j = j - m;
+            m = m _/ 2;
+        }
+        j = j + m;
+        i = i + 1;
+    }
+    let var len = 2;
+    while (len <= n) {
+        let var ang = 2.0 * PI / len;
+        if (inverse) {
+            ang = -ang;
+        }
+        let wlen_re = ang.cos();
+        let wlen_im = ang.sin();
+        let var i = 0;
+        while (i < n) {
+            let var w_re = 1.0;
+            let var w_im = 0.0;
+            let var j = 0;
+            while (j < len _/ 2) {
+                let u_re = real_parts.load_f32(i + j);
+                let u_im = imag_parts.load_f32(i + j);
+                let x_half_re = real_parts.load_f32(i + j + len _/ 2);
+                let x_half_im = imag_parts.load_f32(i + j + len _/ 2);
+                let v_re = x_half_re * w_re - x_half_im * w_im;
+                let v_im = x_half_re * w_im + x_half_im * w_re;
+                real_parts.store_f32(i + j, u_re + v_re);
+                imag_parts.store_f32(i + j, u_im + v_im);
+                real_parts.store_f32(i + j + len _/ 2, u_re - v_re);
+                imag_parts.store_f32(i + j + len _/ 2, u_im - v_im);
+                let next_w_re = w_re * wlen_re - w_im * wlen_im;
+                let next_w_im = w_re * wlen_im + w_im * wlen_re;
+                w_re = next_w_re;
+                w_im = next_w_im;
+                j = j + 1;
+            }
+            i = i + len;
+        }
+        len = len * 2;
+    }
+    if (inverse) {
+        for (let var k = 0; k < n; ++k) {
+            real_parts.store_f32(k, real_parts.load_f32(k) / n);
+            imag_parts.store_f32(k, imag_parts.load_f32(k) / n);
+        }
+    }
+}
+
+fun hanning_window(buffer) {
+    let n = buffer.len _/ 4;
+    for (let var i = 0; i < n; ++i) {
+        let multiplier = 0.5 * (1.0 - (2.0 * PI * i / (n - 1)).cos());
+        buffer.store_f32(i, buffer.load_f32(i) * multiplier);
+    }
+}
+
+fun normalize_magnitudes(magnitudes) {
+    let var max_mag = 1e-9;
+    for (let var i = 0; i < magnitudes.len; ++i) {
+        if (magnitudes[i] > max_mag) {
+            max_mag = magnitudes[i];
+        }
+    }
+
+    // Don't amplify silence or near-silence
+    if (max_mag < 1.0) {
+        return magnitudes;
+    }
+
+    for (let var i = 0; i < magnitudes.len; ++i) {
+        magnitudes[i] = magnitudes[i] / max_mag;
+    }
+
+    return magnitudes;
+}
+
+fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sample_rate) {
+    let fft_bins = Array.with_size(num_bins + 2, 0);
+    for (let var i = 0; i < fft_bins.len; ++i) {
+        let freq = min_freq * (max_freq/min_freq).pow(i.to_f() / (num_bins + 1).to_f());
+        fft_bins[i] = (freq * fft_size / sample_rate).floor();
+    }
+    let magnitudes = Array.with_size(num_bins, 0.0);
+    for (let var band_idx = 0; band_idx < num_bins; ++band_idx) {
+        let var band_magnitude = 0.0;
+        let start_bin = fft_bins[band_idx];
+        let center_bin = fft_bins[band_idx + 1];
+        let end_bin = fft_bins[band_idx + 2];
+        let max_bin = (fft_size / 2) - 1;
+        if (start_bin > max_bin) continue;
+        for (let var bin = start_bin; bin <= end_bin; ++bin) {
+            if (bin > max_bin) break;
+            let re = real_parts.load_f32(bin);
+            let im = imag_parts.load_f32(bin);
+            let magnitude = (re * re + im * im).sqrt();
+            let var weight = 0.0;
+            if (bin >= start_bin && bin <= center_bin) {
+                if (center_bin - start_bin > 0) {
+                    weight = (bin - start_bin).to_f() / (center_bin - start_bin);
+                } else if (bin == center_bin) {
+                    weight = 1.0;
+                }
+            } else if (bin > center_bin && bin <= end_bin) {
+                if (end_bin - center_bin > 0) {
+                    weight = (end_bin - bin).to_f() / (end_bin - center_bin);
+                }
+            }
+            band_magnitude = band_magnitude + magnitude * weight;
+        }
+        magnitudes[band_idx] = band_magnitude;
+    }
+    return magnitudes;
+}
+
+fun rand_int(min, max) {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF; // Update seed
+    // Scale the integer lcg_seed (0 to 0x7FFFFFFF) to the range [min, max]
+    // (max - min + 1) is the size of the range
+    return min + (lcg_seed % (max - min + 1));
+}
+
+fun calculate_loss(rnn, frames, label) {
+    let var hidden_state = Array.with_size(HIDDEN_SIZE, 0.0);
+    let var last_y_pred = [0.0];
+
+    for (let var i = 0; i < frames.len; ++i) {
+        let frame = frames[i];
+        let result = rnn.forward(frame, hidden_state);
+        last_y_pred = result[0];
+        hidden_state = result[1];
+    }
+
+    let y_pred = last_y_pred;
+    let y_true = [label];
+
+    let p = y_pred[0].max(1e-9).min(1.0 - 1e-9);
+    let y = y_true[0];
+    let loss = -(y * p.ln() + (1.0 - y) * (1.0 - p).ln());
+    return loss;
+}
+
+fun training_actor(detection_actor_id) {
+    rand_init($time_current_ms());
+    let var rnn = RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
+    let var best_loss = 1e9;
+
+    let training_data = [];
+    let var iteration_count = 0;
+    let var positive_examples_count = 0;
+    let var negative_examples_count = 0;
+
+    for (let var training_itr = 1;; ++training_itr) {
+        let msg = $actor_poll();
+        if (msg != nil) {
+            training_data.push(msg);
+            if (msg[1] == 1.0) {
+                positive_examples_count = positive_examples_count + 1;
+            } else {
+                negative_examples_count = negative_examples_count + 1;
+            }
+            $println("Positive samples: " + positive_examples_count.to_s() + ", negative samples: " + negative_examples_count.to_s());
+        }
+
+        if (training_data.len > 0) {
+            // Create a perturbed clone
+            let perturbed_rnn = rnn.clone();
+            perturbed_rnn.perturb(PERTURBATION_AMOUNT);
+
+            // Pick a random sample
+            let idx = rand_int(0, training_data.len - 1);
+            let sample = training_data[idx];
+            let frames = sample[0];
+            let label = sample[1];
+
+            // Calculate loss for both models on the same sample
+            let current_loss = calculate_loss(rnn, frames, label);
+            let perturbed_loss = calculate_loss(perturbed_rnn, frames, label);
+
+            if (perturbed_loss < current_loss) {
+                rnn = perturbed_rnn;
+                best_loss = perturbed_loss;
+            }
+
+            if (iteration_count % 20 == 0) {
+                 $println(
+                    "Itr#" + training_itr.to_s() +
+                    ", loss: " + best_loss.format_decimals(9) +
+                    ", pos: " +
+                    positive_examples_count.to_s() +
+                    ", neg: " +
+                    negative_examples_count.to_s()
+                );
+            }
+
+            iteration_count = iteration_count + 1;
+            if (iteration_count % 100 == 0) {
+                $actor_send(detection_actor_id, rnn);
+            }
+        }
+
+        $actor_sleep(1);
+    }
+}
+
+fun detection_actor() {
+    let var current_rnn = nil;
+    let var hidden_state = Array.with_size(HIDDEN_SIZE, 0.0);
+
+    while (true) {
+        let msg = $actor_poll();
+
+        if (msg instanceof RNN) {
+            current_rnn = msg;
+            // Reset hidden state when a new model is received
+            hidden_state = Array.with_size(HIDDEN_SIZE, 0.0);
+            continue;
+        }
+
+        if (msg instanceof Array) { // This is a single frame of magnitudes
+            if (current_rnn != nil) {
+                let magnitudes = msg;
+                let result = current_rnn.forward(magnitudes, hidden_state);
+                let y_pred = result[0];
+                hidden_state = result[1];
+
+                if (y_pred[0] > DETECTION_THRESHOLD) {
+                    //$println("DETECTED: " + y_pred[0].format_decimals(1));
+                }
+            }
+        }
+    }
+}
+
+
+
+
+
+
+fun main() {
+    let detector_id = $actor_spawn(detection_actor);
+    let trainer_id = $actor_spawn(|| training_actor(detector_id));
+
+    let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Beat Detector", 0);
+    let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
+
+    let real_parts = ByteArray.with_size(FFT_SIZE * 4);
+    let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
+    imag_parts.zero_fill();
+
+    let frame_buffer = ByteArray.with_size(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
+
+    let var running = true;
+    let var recording = false;
+    let var recorded_frames = [];
+
+    while (running) {
+        $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
+        imag_parts.zero_fill();
+        hanning_window(real_parts);
+        fft(real_parts, imag_parts, false);
+        let var magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
+        magnitudes = normalize_magnitudes(magnitudes);
+        $actor_send(detector_id, magnitudes);
+
+        if (recording) {
+            recorded_frames.push(magnitudes);
+        }
+
+        frame_buffer.zero_fill();
+        if (recording) {
+            let cx = WINDOW_WIDTH - 30;
+            let cy = 30;
+            let radius = 20;
+            for (let var y = cy - radius; y < cy + radius; ++y) {
+                for (let var x = cx - radius; x < cx + radius; ++x) {
+                    let dx = x - cx;
+                    let dy = y - cy;
+                    if (dx*dx + dy*dy < radius*radius) {
+                        let pixel_idx = (y * WINDOW_WIDTH + x);
+                        frame_buffer.store_u32(pixel_idx, rgb32(255, 0, 0));
+                    }
+                }
+            }
+        }
+
+        $window_draw_frame(window_id, frame_buffer);
+
+        let event = $actor_poll();
+        if (event instanceof UIEvent) {
+            if (event.kind == "CLOSE_WINDOW") {
+                running = false;
+            }
+
+            if (event.kind == "KEY_DOWN") {
+                if (event.key == "SPACE") {
+                    recording = !recording;
+                    //$actor_send(beep_actor_id, recording);
+                    if (!recording && recorded_frames.len > 0) {
+                        $println("Recording stopped. Press P for positive, N for negative.");
+                    } else if (recording) {
+                        $println("Recording started...");
+                        recorded_frames = [];
+                    }
+                } else if (recorded_frames.len > 0) {
+                    if (event.key == "P") {
+                        $println("Saved as positive example.");
+                        $actor_send(trainer_id, [recorded_frames, 1.0]);
+                        recorded_frames = [];
+                        //recording = false; // Stop recording when labeled
+                    } else if (event.key == "N") {
+                        $println("Saved as negative example.");
+                        $actor_send(trainer_id, [recorded_frames, 0.0]);
+                        recorded_frames = [];
+                        recording = false; // Stop recording when labeled
+                        //$actor_send(beep_actor_id, recording);
+                    }
+                }
+            }
+        }
+    }
+}
+
+main();
