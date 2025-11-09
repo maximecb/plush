@@ -427,7 +427,7 @@ fun training_actor(detection_actor_id) {
     let training_data = [];
     let var iteration_count = 0;
 
-    for (let var training_itr = 1;;) {
+    loop {
         let msg = $actor_poll();
         if (msg != nil) {
             training_data.push(msg);
@@ -464,14 +464,14 @@ fun training_actor(detection_actor_id) {
 
         if (iteration_count % 50 == 0) {
             let loss_msg = (
-                "Itr#" + training_itr.to_s() +
+                "Itr#" + iteration_count.to_s() +
                 ", loss: " + best_loss.format_decimals(9) +
                 ", examples: " + training_data.len.to_s()
             );
             $actor_send($actor_parent(), loss_msg);
         }
 
-        ++training_itr;
+        ++iteration_count;
     }
 }
 
@@ -504,13 +504,44 @@ fun detection_actor() {
     }
 }
 
-fun main() {
-    let detector_id = $actor_spawn(detection_actor);
-    let trainer_id = $actor_spawn(|| training_actor(detector_id));
+fun playback_actor(output_device_id) {
+    let var buffer = nil;
 
+    while (true) {
+        let msg = $actor_poll();
+
+        if (msg instanceof ByteArray) {
+            buffer = msg;
+
+            // Add some silence at the end
+            buffer.resize(buffer.len + 4 * SAMPLE_RATE);
+        }
+
+        if (msg == 'STOP') {
+            buffer = nil;
+        }
+
+        if (buffer instanceof ByteArray) {
+            $audio_write_samples(output_device_id, buffer);
+
+            let num_samples = (buffer.len / 4).ceil();
+            let duration_ms = (1000 * num_samples / SAMPLE_RATE).ceil();
+            $actor_sleep(duration_ms + 200);
+
+        } else {
+            $actor_sleep(50);
+        }
+    }
+}
+
+fun main() {
     let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Beat Detector", 0);
     let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
     let output_device_id = $audio_open_output(SAMPLE_RATE, NUM_CHANNELS);
+
+    let detector_id = $actor_spawn(detection_actor);
+    let trainer_id = $actor_spawn(|| training_actor(detector_id));
+    let playback_actor_id = $actor_spawn(|| playback_actor(output_device_id));
 
     let real_parts = ByteArray.with_size(FFT_SIZE * 4);
     let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
@@ -582,9 +613,7 @@ fun main() {
                         $window_draw_frame(window_id, frame_buffer);
 
                         $println("Playing back recorded audio...");
-                        $audio_write_samples(output_device_id, recorded_audio_buffer);
-                        let duration_ms = (recorded_audio_buffer.len _/ 4) * (1000 _/ SAMPLE_RATE);
-                        $actor_sleep(duration_ms + 200);
+                        $actor_send(playback_actor_id, recorded_audio_buffer);
 
                         $println("Recording stopped. Enter number of beats:");
                         let line1 = $readln();
@@ -613,7 +642,9 @@ fun main() {
                                 recorded_frames = [];
                             }
                         }
+
                         recorded_audio_buffer = nil;
+                        $actor_send(playback_actor_id, 'STOP');
                     } else if (recording) {
                         $println("Recording started...");
                         recorded_frames = [];
