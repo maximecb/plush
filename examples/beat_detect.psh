@@ -419,6 +419,17 @@ fun calculate_loss(rnn, frames, label) {
     return loss;
 }
 
+fun evaluate_model(rnn, training_data) {
+    let var total_loss = 0.0;
+    for (let var i = 0; i < training_data.len; ++i) {
+        let sample = training_data[i];
+        let frames = sample[0];
+        let label = sample[1];
+        total_loss = total_loss + calculate_loss(rnn, frames, label);
+    }
+    return total_loss;
+}
+
 fun training_actor(detection_actor_id) {
     rand_init($time_current_ms());
     let var rnn = RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
@@ -427,50 +438,51 @@ fun training_actor(detection_actor_id) {
     let training_data = [];
     let var iteration_count = 0;
 
+    let var last_update = $time_current_ms();
+
     loop {
         let msg = $actor_poll();
+
         if (msg != nil) {
+            $println('GOT NEW EXAMPLE');
+
             training_data.push(msg);
+
+            $println('NUM EXAMPLES NOW: ' + training_data.len.to_s());
+
+            // Reset the best training loss
+            best_loss = nil;
         }
 
         if (training_data.len == 0) {
-            $actor_sleep(5);
+            $actor_sleep(50);
             continue;
-        }
-
-        // Pick a random sample
-        let idx = rand_int(0, training_data.len - 1);
-        let sample = training_data[idx];
-        let frames = sample[0];
-        let label = sample[1];
-
-        let current_loss = calculate_loss(rnn, frames, label);
-
-        // On the first run, initialize the loss for display
-        if (best_loss == nil) {
-            best_loss = current_loss;
         }
 
         // Create a perturbed clone and evaluate it
         let perturbed_rnn = rnn.clone();
         perturbed_rnn.perturb(PERTURBATION_AMOUNT);
-        let perturbed_loss = calculate_loss(perturbed_rnn, frames, label);
+        let perturbed_loss = evaluate_model(perturbed_rnn, training_data);
 
         // If the perturbed model is better or equal, adopt it
-        if (perturbed_loss <= current_loss) {
+        if (best_loss == nil || perturbed_loss <= best_loss) {
             rnn = perturbed_rnn;
             best_loss = perturbed_loss;
-        }
 
-        if (iteration_count % 50 == 0) {
-            let loss_msg = (
-                "Itr#" + iteration_count.to_s() +
-                ", loss: " + best_loss.format_decimals(9) +
-                ", examples: " + training_data.len.to_s()
-            );
-            $actor_send($actor_parent(), loss_msg);
+            if ($time_current_ms() - last_update > 1000) {
+                let loss_msg = (
+                    "Itr#" + iteration_count.to_s() +
+                    ", loss: " + best_loss.format_decimals(9) +
+                    ", examples: " + training_data.len.to_s()
+                );
 
-            $actor_send(detection_actor_id, rnn);
+                $println(loss_msg);
+
+                $actor_send($actor_parent(), loss_msg);
+
+                $actor_send(detection_actor_id, rnn);
+                last_update = $time_current_ms();
+            }
         }
 
         ++iteration_count;
@@ -557,45 +569,47 @@ fun main() {
     let var recorded_audio_buffer = nil;
 
     while (running) {
-        $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
+        let event = $actor_poll();
 
-        if (recording) {
-            let current_size = recorded_audio_buffer.len;
-            recorded_audio_buffer.resize(current_size + real_parts.len);
-            recorded_audio_buffer.memcpy(current_size, real_parts, 0, real_parts.len);
-        }
+        if (event == nil) {
+            $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
 
-        imag_parts.zero_fill();
-        hanning_window(real_parts);
-        fft(real_parts, imag_parts, false);
-        let var magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
-        magnitudes = normalize_magnitudes(magnitudes);
-        $actor_send(detector_id, magnitudes);
+            if (recording) {
+                let current_size = recorded_audio_buffer.len;
+                recorded_audio_buffer.resize(current_size + real_parts.len);
+                recorded_audio_buffer.memcpy(current_size, real_parts, 0, real_parts.len);
+            }
 
-        if (recording) {
-            recorded_frames.push(magnitudes);
-        }
+            imag_parts.zero_fill();
+            hanning_window(real_parts);
+            fft(real_parts, imag_parts, false);
+            let var magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
+            magnitudes = normalize_magnitudes(magnitudes);
+            $actor_send(detector_id, magnitudes);
 
-        frame_buffer.zero_fill();
-        if (recording) {
-            let cx = WINDOW_WIDTH - 30;
-            let cy = 30;
-            let radius = 20;
-            for (let var y = cy - radius; y < cy + radius; ++y) {
-                for (let var x = cx - radius; x < cx + radius; ++x) {
-                    let dx = x - cx;
-                    let dy = y - cy;
-                    if (dx*dx + dy*dy < radius*radius) {
-                        let pixel_idx = (y * WINDOW_WIDTH + x);
-                        frame_buffer.store_u32(pixel_idx, rgb32(255, 0, 0));
+            if (recording) {
+                recorded_frames.push(magnitudes);
+            }
+
+            frame_buffer.zero_fill();
+            if (recording) {
+                let cx = WINDOW_WIDTH - 30;
+                let cy = 30;
+                let radius = 20;
+                for (let var y = cy - radius; y < cy + radius; ++y) {
+                    for (let var x = cx - radius; x < cx + radius; ++x) {
+                        let dx = x - cx;
+                        let dy = y - cy;
+                        if (dx*dx + dy*dy < radius*radius) {
+                            let pixel_idx = (y * WINDOW_WIDTH + x);
+                            frame_buffer.store_u32(pixel_idx, rgb32(255, 0, 0));
+                        }
                     }
                 }
             }
+
+            $window_draw_frame(window_id, frame_buffer);
         }
-
-        $window_draw_frame(window_id, frame_buffer);
-
-        let event = $actor_poll();
 
         // Print messages on the main actor to avoir interrupting our console reads during tagging
         if (event instanceof String) {

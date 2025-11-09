@@ -261,6 +261,14 @@ impl AudioCallback for InputCB
         }
 
         let state = audio_state_lock.as_mut().unwrap();
+
+        // Clear the samples in the queue
+        // If the thread processing the input falls behind for some reason,
+        // we can't let samples infinitely accumulate in the queue, otherwise
+        // there is some risk that we will never catch up to the backlog
+        state.in_queue.clear();
+
+        // Write new samples to the input queue
         state.in_queue.extend_from_slice(input);
 
         // Send a message to the Plush actor that samples are available
