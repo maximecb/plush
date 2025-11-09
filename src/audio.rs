@@ -108,7 +108,7 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
         let (lock, _) = &AUDIO_OUT_PAIR;
         let audio_state = lock.lock().unwrap();
         if audio_state.is_some() {
-            panic!("audio output device already open");
+            return Err("audio output device already open".into());
         }
     }
 
@@ -116,11 +116,11 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     let num_channels = num_channels.unwrap_u32();
 
     if sample_rate != 44100 {
-        panic!("for now, only 44100Hz sample rate supported");
+        return Err("for now, only 44100Hz sample rate supported".into());
     }
 
     if num_channels > 1 {
-        panic!("for now, only one output channel supported");
+        return Err("for now, only one output channel supported".into());
     }
 
     let desired_spec = AudioSpecDesired {
@@ -163,19 +163,19 @@ pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) 
     let device_id = device_id.unwrap_usize();
 
     if device_id != 0 {
-        panic!("for now, only one audio output device is supported");
+        return Err("for now, only one audio output device is supported".into());
     }
 
     let (lock, cvar) = &AUDIO_OUT_PAIR;
     let mut audio_state = lock.lock().unwrap();
     if audio_state.is_none() {
-        panic!("audio output not open");
+        return Err("audio output not open".into());
     }
     let state = audio_state.as_mut().unwrap();
 
     let samples_ba = match samples {
         Value::ByteArray(p) => unsafe { &mut *p },
-        _ => panic!("expected a byte array of samples")
+        _ => return Err("expected a byte array of samples".into())
     };
 
     // The bytearray contains f32 samples

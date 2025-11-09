@@ -774,7 +774,7 @@ impl Actor
     }
 
     /// Call a host function
-    fn call_host(&mut self, host_fn: &HostFn, argc: usize)
+    fn call_host(&mut self, host_fn: &HostFn, argc: usize) -> Result<(), String>
     {
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }
@@ -785,11 +785,11 @@ impl Actor
         }
 
         if host_fn.num_params() != argc {
-            panic!(
+            return Err(format!(
                 "incorrect argument count for host function, got {}, expected {}",
                 argc,
                 host_fn.num_params()
-            );
+            ));
         }
 
         let result = match host_fn.f
@@ -847,8 +847,8 @@ impl Actor
         };
 
         match result {
-            Ok(v) => push!(v),
-            Err(e) => panic!("error during call to host function `{}`: {}", host_fn.name, e),
+            Ok(v) => { push!(v); Ok(()) },
+            Err(e) => Err(format!("error during call to host function `{}`: {}", host_fn.name, e)),
         }
     }
 
@@ -914,8 +914,11 @@ impl Actor
                     Value::Fun(id) => id,
                     Value::Closure(clos) => unsafe { (*clos).fun_id },
                     Value::HostFn(f) => {
-                        self.call_host(f, $argc.into());
-                        continue;
+                        match self.call_host(f, $argc.into()) {
+                            Err(msg) => error!("{}", msg),
+                            Ok(ret_val) => continue
+                        }
+                        //continue;
                     }
                     _ => error!("call to non-function value: `{:?}`", $fun)
                 };
