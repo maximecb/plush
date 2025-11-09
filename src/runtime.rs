@@ -433,7 +433,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::False, "to_s") => &FALSE_TO_S,
         (Value::Nil, "to_s") => &NIL_TO_S,
 
-        _ => panic!("unknown method {}", method_name)
+        // Method not defined on type
+        _ => return Value::Nil,
     };
 
     Value::HostFn(f)

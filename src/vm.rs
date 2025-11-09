@@ -1824,6 +1824,11 @@ impl Actor
 
                         _ => {
                             let fun = crate::runtime::get_method(self_val, &method_name);
+
+                            if fun == Value::Nil {
+                                error!("call to unknown method `{}`", method_name);
+                            }
+
                             call_fun!(fun, argc + 1);
                         }
                     };
