@@ -848,7 +848,7 @@ impl Actor
 
         match result {
             Ok(v) => { push!(v); Ok(()) },
-            Err(e) => Err(format!("error during call to host function `{}`: {}", host_fn.name, e)),
+            Err(e) => Err(format!("error during call to host function `{}`:\n{}", host_fn.name, e)),
         }
     }
 
