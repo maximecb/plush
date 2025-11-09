@@ -422,23 +422,15 @@ fun calculate_loss(rnn, frames, label) {
 fun training_actor(detection_actor_id) {
     rand_init($time_current_ms());
     let var rnn = RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
-    let var best_loss = -1.0;
+    let var best_loss = nil;
 
     let training_data = [];
     let var iteration_count = 0;
-    let var positive_examples_count = 0;
-    let var negative_examples_count = 0;
 
     for (let var training_itr = 1;;) {
         let msg = $actor_poll();
         if (msg != nil) {
             training_data.push(msg);
-            if (msg[1] > 0) {
-                positive_examples_count = positive_examples_count + 1;
-            } else {
-                negative_examples_count = negative_examples_count + 1;
-            }
-            $println("Positive samples: " + positive_examples_count.to_s() + ", negative samples: " + negative_examples_count.to_s());
         }
 
         if (training_data.len == 0) {
@@ -455,7 +447,7 @@ fun training_actor(detection_actor_id) {
         let current_loss = calculate_loss(rnn, frames, label);
 
         // On the first run, initialize the loss for display
-        if (best_loss < 0.0) {
+        if (best_loss == nil) {
             best_loss = current_loss;
         }
 
@@ -471,13 +463,10 @@ fun training_actor(detection_actor_id) {
         }
 
         if (iteration_count % 20 == 0) {
-                $println(
+            $println(
                 "Itr#" + training_itr.to_s() +
                 ", loss: " + best_loss.format_decimals(9) +
-                ", pos: " +
-                positive_examples_count.to_s() +
-                ", neg: " +
-                negative_examples_count.to_s()
+                ", examples: " + training_data.len.to_s()
             );
         }
 
