@@ -510,6 +510,7 @@ fun main() {
 
     let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Beat Detector", 0);
     let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
+    let output_device_id = $audio_open_output(SAMPLE_RATE, NUM_CHANNELS);
 
     let real_parts = ByteArray.with_size(FFT_SIZE * 4);
     let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
@@ -520,9 +521,17 @@ fun main() {
     let var running = true;
     let var recording = false;
     let var recorded_frames = [];
+    let var recorded_audio_buffer = nil;
 
     while (running) {
         $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
+
+        if (recording) {
+            let current_size = recorded_audio_buffer.len;
+            recorded_audio_buffer.resize(current_size + real_parts.len);
+            recorded_audio_buffer.memcpy(current_size, real_parts, 0, real_parts.len);
+        }
+
         imag_parts.zero_fill();
         hanning_window(real_parts);
         fft(real_parts, imag_parts, false);
@@ -572,6 +581,11 @@ fun main() {
                         frame_buffer.zero_fill();
                         $window_draw_frame(window_id, frame_buffer);
 
+                        $println("Playing back recorded audio...");
+                        $audio_write_samples(output_device_id, recorded_audio_buffer);
+                        let duration_ms = (recorded_audio_buffer.len _/ 4) * (1000 _/ SAMPLE_RATE);
+                        $actor_sleep(duration_ms + 200);
+
                         $println("Recording stopped. Enter number of beats:");
                         let line1 = $readln();
                         if (line1 == nil) {
@@ -599,9 +613,11 @@ fun main() {
                                 recorded_frames = [];
                             }
                         }
+                        recorded_audio_buffer = nil;
                     } else if (recording) {
                         $println("Recording started...");
                         recorded_frames = [];
+                        recorded_audio_buffer = ByteArray.with_size(0);
                     }
                 }
             }
