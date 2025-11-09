@@ -14,7 +14,7 @@ let MAX_FRAMES = 64;
 let HIDDEN_SIZE = 32;
 let INPUT_SIZE = NUM_MEL_BINS;
 let OUTPUT_SIZE = 1;
-let PERTURBATION_AMOUNT = 0.01;
+let PERTURBATION_AMOUNT = 0.05;
 let DETECTION_THRESHOLD = 0.92;
 let NOISE_MAGNITUDE = 0.12;
 let MAX_ZERO_FRAMES_TO_ADD = 10;
@@ -43,7 +43,7 @@ fun random_matrix(rows, cols) {
     for (let var r = 0; r < rows; ++r) {
         let row = Array.with_size(cols, 0.0);
         for (let var c = 0; c < cols; ++c) {
-            row[c] = rand_float();
+            row[c] = rand_float() * 0.1;
         }
         m[r] = row;
     }
@@ -53,7 +53,7 @@ fun random_matrix(rows, cols) {
 fun random_vector(size) {
     let v = Array.with_size(size, 0.0);
     for (let var i = 0; i < size; ++i) {
-        v[i] = rand_float();
+        v[i] = rand_float() * 0.1;
     }
     return v;
 }
@@ -187,14 +187,14 @@ fun perturb_matrix(m, amount) {
     let cols = m[0].len;
     for (let var r = 0; r < rows; ++r) {
         for (let var c = 0; c < cols; ++c) {
-            m[r][c] = m[r][c] + rand_float() * amount;
+            m[r][c] = (m[r][c] + rand_float() * amount).clip(-1.0, 1.0);
         }
     }
 }
 
 fun perturb_vector(v, amount) {
     for (let var i = 0; i < v.len; ++i) {
-        v[i] = v[i] + rand_float() * amount;
+        v[i] = (v[i] + rand_float() * amount).clip(-1.0, 1.0);
     }
 }
 
@@ -403,6 +403,8 @@ fun rand_int(min, max) {
 fun calculate_loss(rnn, frames, label) {
     let var hidden_state = Array.with_size(HIDDEN_SIZE, 0.0);
     let var detected_beats = 0;
+    let var last_trig = nil;
+    let var sum_spacing = 0;
 
     for (let var i = 0; i < frames.len; ++i) {
         let frame = frames[i];
@@ -412,10 +414,28 @@ fun calculate_loss(rnn, frames, label) {
 
         if (y_pred[0] > DETECTION_THRESHOLD) {
             detected_beats = detected_beats + 1;
+
+            if (last_trig != nil) {
+                let spacing = i - last_trig;
+                sum_spacing = sum_spacing + spacing;
+            }
+
+            last_trig = i;
         }
     }
 
-    let loss = (detected_beats.to_f() - label).abs();
+    // Add a loss component to encourage the beats to be spaced apart
+    let var spacing_loss = 0.0;
+    if (detected_beats > 2) {
+        let mean_spacing = sum_spacing / (detected_beats - 1);
+        let target_spacing = frames.len / (detected_beats + 1);
+
+        if (mean_spacing < target_spacing) {
+            spacing_loss = target_spacing / mean_spacing;
+        }
+    }
+
+    let loss = (detected_beats.to_f() - label).abs() + spacing_loss;
     return loss;
 }
 
@@ -454,7 +474,7 @@ fun training_actor(detection_actor_id) {
             best_loss = nil;
         }
 
-        if (training_data.len == 0) {
+        if (training_data.len < 10) {
             $actor_sleep(50);
             continue;
         }
