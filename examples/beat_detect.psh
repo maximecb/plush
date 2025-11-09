@@ -469,6 +469,8 @@ fun training_actor(detection_actor_id) {
                 ", examples: " + training_data.len.to_s()
             );
             $actor_send($actor_parent(), loss_msg);
+
+            $actor_send(detection_actor_id, rnn);
         }
 
         ++iteration_count;
@@ -497,7 +499,7 @@ fun detection_actor() {
                 hidden_state = result[1];
 
                 if (y_pred[0] > DETECTION_THRESHOLD) {
-                    //$println("DETECTED: " + y_pred[0].format_decimals(1));
+                    $actor_send($actor_parent(), "DETECTED: " + y_pred[0].format_decimals(1));
                 }
             }
         }
