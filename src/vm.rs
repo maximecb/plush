@@ -786,7 +786,8 @@ impl Actor
 
         if host_fn.num_params() != argc {
             return Err(format!(
-                "incorrect argument count for host function, got {}, expected {}",
+                "incorrect argument count for host function `{}`, got {}, expected {}",
+                host_fn.name,
                 argc,
                 host_fn.num_params()
             ));

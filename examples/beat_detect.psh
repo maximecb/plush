@@ -402,21 +402,20 @@ fun rand_int(min, max) {
 
 fun calculate_loss(rnn, frames, label) {
     let var hidden_state = Array.with_size(HIDDEN_SIZE, 0.0);
-    let var last_y_pred = [0.0];
+    let var detected_beats = 0;
 
     for (let var i = 0; i < frames.len; ++i) {
         let frame = frames[i];
         let result = rnn.forward(frame, hidden_state);
-        last_y_pred = result[0];
+        let y_pred = result[0];
         hidden_state = result[1];
+
+        if (y_pred[0] > DETECTION_THRESHOLD) {
+            detected_beats = detected_beats + 1;
+        }
     }
 
-    let y_pred = last_y_pred;
-    let y_true = [label];
-
-    let p = y_pred[0].max(1e-9).min(1.0 - 1e-9);
-    let y = y_true[0];
-    let loss = -(y * p.ln() + (1.0 - y) * (1.0 - p).ln());
+    let loss = (detected_beats.to_f() - label).abs();
     return loss;
 }
 
@@ -575,25 +574,37 @@ fun main() {
             if (event.kind == "KEY_DOWN") {
                 if (event.key == "SPACE") {
                     recording = !recording;
-                    //$actor_send(beep_actor_id, recording);
                     if (!recording && recorded_frames.len > 0) {
-                        $println("Recording stopped. Press P for positive, N for negative.");
+                        $println("Recording stopped. Enter number of beats:");
+                        let line1 = $readln();
+                        if (line1 == nil) {
+                            $println("Input cancelled. Sample discarded.");
+                            recorded_frames = [];
+                        } else {
+                            $println("Confirm number of beats:");
+                            let line2 = $readln();
+
+                            if (line2 == nil) {
+                                $println("Input cancelled. Sample discarded.");
+                                recorded_frames = [];
+                            } else if (line1 == line2) {
+                                let num_beats = line1.trim().parse_int(10);
+                                if (num_beats != nil) {
+                                    $println("Saved sample with " + num_beats.to_s() + " beats.");
+                                    $actor_send(trainer_id, [recorded_frames, num_beats.to_f()]);
+                                    recorded_frames = [];
+                                } else {
+                                    $println("Invalid integer input. Sample discarded.");
+                                    recorded_frames = [];
+                                }
+                            } else {
+                                $println("Inputs do not match. Sample discarded.");
+                                recorded_frames = [];
+                            }
+                        }
                     } else if (recording) {
                         $println("Recording started...");
                         recorded_frames = [];
-                    }
-                } else if (recorded_frames.len > 0) {
-                    if (event.key == "P") {
-                        $println("Saved as positive example.");
-                        $actor_send(trainer_id, [recorded_frames, 1.0]);
-                        recorded_frames = [];
-                        //recording = false; // Stop recording when labeled
-                    } else if (event.key == "N") {
-                        $println("Saved as negative example.");
-                        $actor_send(trainer_id, [recorded_frames, 0.0]);
-                        recorded_frames = [];
-                        recording = false; // Stop recording when labeled
-                        //$actor_send(beep_actor_id, recording);
                     }
                 }
             }
