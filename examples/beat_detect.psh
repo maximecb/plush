@@ -422,7 +422,7 @@ fun calculate_loss(rnn, frames, label) {
 fun training_actor(detection_actor_id) {
     rand_init($time_current_ms());
     let var rnn = RNN(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
-    let var best_loss = 1e9;
+    let var best_loss = -1.0;
 
     let training_data = [];
     let var iteration_count = 0;
@@ -433,7 +433,7 @@ fun training_actor(detection_actor_id) {
         let msg = $actor_poll();
         if (msg != nil) {
             training_data.push(msg);
-            if (msg[1] == 1.0) {
+            if (msg[1] > 0) {
                 positive_examples_count = positive_examples_count + 1;
             } else {
                 negative_examples_count = negative_examples_count + 1;
@@ -442,13 +442,9 @@ fun training_actor(detection_actor_id) {
         }
 
         if (training_data.len == 0) {
-            $actor_sleep(1);
+            $actor_sleep(5);
             continue;
         }
-
-        // Create a perturbed clone
-        let perturbed_rnn = rnn.clone();
-        perturbed_rnn.perturb(PERTURBATION_AMOUNT);
 
         // Pick a random sample
         let idx = rand_int(0, training_data.len - 1);
@@ -456,11 +452,20 @@ fun training_actor(detection_actor_id) {
         let frames = sample[0];
         let label = sample[1];
 
-        // Calculate loss for both models on the same sample
         let current_loss = calculate_loss(rnn, frames, label);
+
+        // On the first run, initialize the loss for display
+        if (best_loss < 0.0) {
+            best_loss = current_loss;
+        }
+
+        // Create a perturbed clone and evaluate it
+        let perturbed_rnn = rnn.clone();
+        perturbed_rnn.perturb(PERTURBATION_AMOUNT);
         let perturbed_loss = calculate_loss(perturbed_rnn, frames, label);
 
-        if (perturbed_loss < current_loss) {
+        // If the perturbed model is better or equal, adopt it
+        if (perturbed_loss <= current_loss) {
             rnn = perturbed_rnn;
             best_loss = perturbed_loss;
         }
@@ -468,17 +473,12 @@ fun training_actor(detection_actor_id) {
         if (iteration_count % 20 == 0) {
                 $println(
                 "Itr#" + training_itr.to_s() +
-                ", loss: " + best_loss.format_decimals(1) +
+                ", loss: " + best_loss.format_decimals(9) +
                 ", pos: " +
                 positive_examples_count.to_s() +
                 ", neg: " +
                 negative_examples_count.to_s()
             );
-        }
-
-        iteration_count = iteration_count + 1;
-        if (iteration_count % 100 == 0) {
-            $actor_send(detection_actor_id, rnn);
         }
 
         ++training_itr;
@@ -513,11 +513,6 @@ fun detection_actor() {
         }
     }
 }
-
-
-
-
-
 
 fun main() {
     let detector_id = $actor_spawn(detection_actor);
