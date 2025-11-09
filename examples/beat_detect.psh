@@ -462,12 +462,13 @@ fun training_actor(detection_actor_id) {
             best_loss = perturbed_loss;
         }
 
-        if (iteration_count % 20 == 0) {
-            $println(
+        if (iteration_count % 50 == 0) {
+            let loss_msg = (
                 "Itr#" + training_itr.to_s() +
                 ", loss: " + best_loss.format_decimals(9) +
                 ", examples: " + training_data.len.to_s()
             );
+            $actor_send($actor_parent(), loss_msg);
         }
 
         ++training_itr;
@@ -553,6 +554,12 @@ fun main() {
         $window_draw_frame(window_id, frame_buffer);
 
         let event = $actor_poll();
+
+        // Print messages on the main actor to avoir interrupting our console reads during tagging
+        if (event instanceof String) {
+            $println(event);
+        }
+
         if (event instanceof UIEvent) {
             if (event.kind == "CLOSE_WINDOW") {
                 running = false;
@@ -562,6 +569,9 @@ fun main() {
                 if (event.key == "SPACE") {
                     recording = !recording;
                     if (!recording && recorded_frames.len > 0) {
+                        frame_buffer.zero_fill();
+                        $window_draw_frame(window_id, frame_buffer);
+
                         $println("Recording stopped. Enter number of beats:");
                         let line1 = $readln();
                         if (line1 == nil) {
