@@ -414,6 +414,15 @@ fn actor_sleep(actor: &mut Actor, msecs: Value) -> Result<Value, String>
 /// Returns an actor id
 fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
 {
+    let fun_id = match fun {
+        Value::Closure(clos) => unsafe { (*clos).fun_id },
+        Value::Fun(fun_id) => fun_id,
+        _ => return Err("actor_spawn received non-function value".into())
+    };
+
+    // TODO: check the function argument count and report a helpful
+    // error message here
+
     let actor_id = VM::new_actor(actor, fun, vec![]);
     Ok(Value::from(actor_id))
 }

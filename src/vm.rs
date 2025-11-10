@@ -862,7 +862,7 @@ impl Actor
         let fun_id = match fun {
             Value::Closure(clos) => unsafe { (*clos).fun_id },
             Value::Fun(fun_id) => fun_id,
-            _ => panic!("expected function argument")
+            _ => panic!("invalid function passed to Actor::call")
         };
 
         // Get a compiled address for this function
@@ -870,7 +870,7 @@ impl Actor
         let mut pc = fun_entry.entry_pc;
 
         if args.len() != fun_entry.num_params {
-            panic!("incorrect argument count");
+            panic!("incorrect argument count for function passed to Actor::call");
         }
 
         // Push the arguments on the stack
@@ -971,7 +971,6 @@ impl Actor
                 // Print the error message to standard error
                 eprintln!($format_str $(, $arg)*);
                 eprintln!();
-                eprintln!("Stack trace:");
 
                 // For each stack frame, from top to bottom
                 for frame in self.frames.iter().rev() {
