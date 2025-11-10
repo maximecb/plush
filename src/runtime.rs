@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::vm::{Value, Actor};
+use crate::{error, unwrap_usize};
 
 fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
 {
@@ -165,7 +166,7 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Result<Value, String>
 {
     let num = v.unwrap_f64();
-    let decimals = decimals.unwrap_usize();
+    let decimals = unwrap_usize!(decimals);
     let s = format!("{:.*}", decimals, num);
     Ok(actor.alloc.str_val(s))
 }
@@ -190,7 +191,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
 fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Result<Value, String>
 {
     let s = s.unwrap_rust_str();
-    let idx = idx.unwrap_usize();
+    let idx = unwrap_usize!(idx);
     let byte = s.as_bytes().get(idx).unwrap();
     Ok(Value::from(*byte))
 }
@@ -200,7 +201,7 @@ fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Result<Value, Stri
 fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value, String>
 {
     let s = s.unwrap_rust_str();
-    let byte_idx = byte_idx.unwrap_usize();
+    let byte_idx = unwrap_usize!(byte_idx);
 
     if byte_idx >= s.len() {
         return Err("string byte index out of bounds".into());

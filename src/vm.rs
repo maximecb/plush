@@ -387,6 +387,48 @@ impl Value
     }
 }
 
+#[macro_export]
+macro_rules! error {
+    ($requester: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
+        return Err(
+            format!($format_str $(, $arg)*)
+        );
+    }}
+}
+
+#[macro_export]
+macro_rules! unwrap_i64 {
+    ($val: expr, $requester: literal) => {
+        match $val {
+            Value::Int64(v) => v,
+            _ => error!($requester, "expected int64 value but got {:?}", $val)
+        }
+    };
+
+    ($val: expr) => {
+        unwrap_i64!($val, "")
+    }
+}
+
+#[macro_export]
+macro_rules! unwrap_usize {
+    ($val: expr, $requester: literal) => {
+        match $val {
+            Value::Int64(v) => {
+                if (v < 0) {
+                    error!($requester, "expected non-negative integer but got {:?}", v)
+                }
+                v as usize
+            },
+            _ => error!($requester, "expected int64 value but got {:?}", $val)
+        }
+    };
+
+    ($val: expr) => {
+        unwrap_usize!($val, "")
+    }
+}
+
 // Implement PartialEq for Value
 impl PartialEq for Value
 {
@@ -1646,20 +1688,14 @@ impl Actor
                     let val = match arr {
                         Value::Array(p) => {
                             let arr = unsafe { &mut *p };
-                            let idx = idx.unwrap_i64();
-                            if idx < 0 {
-                                error!("get_index", "negative array index in get_index");
-                            }
-                            arr.get(idx as usize)
+                            let idx = unwrap_usize!(idx, "get_index");
+                            arr.get(idx)
                         }
 
                         Value::ByteArray(p) => {
                             let ba = unsafe { &mut *p };
-                            let idx = idx.unwrap_i64();
-                            if idx < 0 {
-                                error!("get_index", "negative array index in get_index");
-                            }
-                            Value::from(ba.get(idx as usize))
+                            let idx = unwrap_usize!(idx, "get_index");
+                            Value::from(ba.get(idx))
                         }
 
                         Value::Dict(p) => {
@@ -1682,21 +1718,15 @@ impl Actor
                     match arr {
                         Value::Array(p) => {
                             let arr = unsafe { &mut *p };
-                            let idx = idx.unwrap_i64();
-                            if idx < 0 {
-                                error!("set_index", "negative array index in set_index");
-                            }
-                            arr.set(idx as usize, val);
+                            let idx = unwrap_usize!(idx, "get_index");
+                            arr.set(idx, val);
                         }
 
                         Value::ByteArray(p) => {
                             let ba = unsafe { &mut *p };
-                            let idx = idx.unwrap_i64();
-                            if idx < 0 {
-                                error!("set_index", "negative array index in set_index");
-                            }
+                            let idx = unwrap_usize!(idx, "get_index");
                             let b = val.unwrap_u8();
-                            ba.set(idx as usize, b);
+                            ba.set(idx, b);
                         }
 
                         Value::Dict(p) => {
