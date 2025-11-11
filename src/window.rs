@@ -15,6 +15,7 @@ use std::time::Duration;
 use crate::vm::{VM, Value, Actor};
 use crate::bytearray::ByteArray;
 use crate::ast::UIEVENT_ID;
+use crate::{error, unwrap_usize, unwrap_str};
 
 // Global SDL state
 struct SdlState {
@@ -97,7 +98,7 @@ pub fn window_create(
 
     let width: u32 = width.unwrap_u32();
     let height: u32 = height.unwrap_u32();
-    let title_str = title.unwrap_rust_str();
+    let title_str = unwrap_str!(title);
 
     init_sdl_video();
     let mut sdl_state = SDL_STATE.lock().unwrap();

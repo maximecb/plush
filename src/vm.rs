@@ -346,13 +346,6 @@ impl Value
             _ => panic!("expected float64 value but got {:?}", self)
         }
     }
-    pub fn unwrap_rust_str(&self) -> &str
-    {
-        match self {
-            Value::String(p) => unsafe { &**p },
-            _ => panic!("expected string value but got {:?}", self)
-        }
-    }
 
     pub fn unwrap_obj(&mut self) -> &mut Object
     {
@@ -387,6 +380,7 @@ impl Value
     }
 }
 
+// This error macro is to be used inside host functions
 #[macro_export]
 macro_rules! error {
     ($requester: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
@@ -398,6 +392,7 @@ macro_rules! error {
 
 #[macro_export]
 macro_rules! unwrap_i64 {
+    // To be used inside the interpreter loop
     ($val: expr, $requester: literal) => {
         match $val {
             Value::Int64(v) => v,
@@ -405,6 +400,7 @@ macro_rules! unwrap_i64 {
         }
     };
 
+    // To be used by host functions
     ($val: expr) => {
         unwrap_i64!($val, "")
     }
@@ -412,6 +408,7 @@ macro_rules! unwrap_i64 {
 
 #[macro_export]
 macro_rules! unwrap_usize {
+    // To be used inside the interpreter loop
     ($val: expr, $requester: literal) => {
         match $val {
             Value::Int64(v) => {
@@ -424,8 +421,25 @@ macro_rules! unwrap_usize {
         }
     };
 
+    // To be used by host functions
     ($val: expr) => {
         unwrap_usize!($val, "")
+    }
+}
+
+#[macro_export]
+macro_rules! unwrap_str {
+    // To be used inside the interpreter loop
+    ($val: expr, $requester: literal) => {
+        match $val {
+            Value::String(p) => unsafe { &**p },
+            _ => error!($requester, "expected string value but got {:?}", $val)
+        }
+    };
+
+    // To be used by host functions
+    ($val: expr) => {
+        unwrap_str!($val, "")
     }
 }
 
@@ -1638,7 +1652,10 @@ impl Actor
 
                         Value::String(p) => {
                             match field_name.as_str() {
-                                "len" => obj.unwrap_rust_str().len().into(),
+                                "len" => {
+                                    let s = unsafe { &*p };
+                                    s.len().into()
+                                }
                                 _ => error!("get_field", "field not found on string")
                             }
                         }
@@ -1700,7 +1717,7 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            let key = idx.unwrap_rust_str();
+                            let key = unwrap_str!(idx);
                             dict.get(key)
                         }
 
@@ -1731,7 +1748,7 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            let key = idx.unwrap_rust_str();
+                            let key = unwrap_str!(idx);
                             dict.set(key, val);
                         }
 

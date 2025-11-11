@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::vm::{Value, Actor};
-use crate::{error, unwrap_usize};
+use crate::{error, unwrap_usize, unwrap_str};
 
 fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
 {
@@ -190,7 +190,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
 /// Get the UTF-8 byte at the given index
 fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Result<Value, String>
 {
-    let s = s.unwrap_rust_str();
+    let s = unwrap_str!(s);
     let idx = unwrap_usize!(idx);
     let byte = s.as_bytes().get(idx).unwrap();
     Ok(Value::from(*byte))
@@ -200,7 +200,7 @@ fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Result<Value, Stri
 /// Returns nil if not a valid character boundary or character
 fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value, String>
 {
-    let s = s.unwrap_rust_str();
+    let s = unwrap_str!(s);
     let byte_idx = unwrap_usize!(byte_idx);
 
     if byte_idx >= s.len() {
@@ -226,7 +226,7 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value,
 /// Try to parse the string as an integer with the given radix
 fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Result<Value, String>
 {
-    let s = s.unwrap_rust_str();
+    let s = unwrap_str!(s);
     let radix = radix.unwrap_u32();
 
     match i64::from_str_radix(s, radix) {
@@ -238,7 +238,7 @@ fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Result<Value, 
 /// Trim whitespace
 fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
-    let s = s.unwrap_rust_str();
+    let s = unwrap_str!(s);
     let s = s.trim().to_string();
     Ok(actor.alloc.str_val(s))
 }
@@ -246,8 +246,8 @@ fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 /// Split a string by a separator and return an array of strings
 fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Result<Value, String>
 {
-    let s = s.unwrap_rust_str();
-    let sep = sep.unwrap_rust_str();
+    let s = unwrap_str!(s);
+    let sep = unwrap_str!(sep);
 
     let parts: Vec<Value> = s.split(sep).map(|part| {
         actor.alloc.str_val(part.to_string())
@@ -301,7 +301,7 @@ pub fn init_runtime(prog: &mut Program)
 fn dict_has(actor: &mut Actor, mut d: Value, key: Value) -> Result<Value, String>
 {
     let d = d.unwrap_dict();
-    let key = key.unwrap_rust_str();
+    let key = unwrap_str!(key);
     Ok(Value::from(d.has(key)))
 }
 

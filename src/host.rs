@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::alloc::Alloc;
 use crate::vm::{Value, VM, Actor};
 use crate::ast::{Expr, Function, Program};
+use crate::{error, unwrap_usize, unwrap_str};
 
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
@@ -173,7 +174,7 @@ fn print(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     match v {
         Value::String(_) => {
-            let rust_str = v.unwrap_rust_str();
+            let rust_str = unwrap_str!(v);
             print!("{}", rust_str);
         }
 
@@ -336,7 +337,7 @@ mod tests
 /// Read the contents of an entire file into a ByteArray object
 fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 {
-    let file_path = file_path.unwrap_rust_str();
+    let file_path = unwrap_str!(file_path);
 
     if !is_safe_path(&file_path) {
         return Err(format!("requested file path breaks sandboxing rules: {}", file_path));
@@ -355,7 +356,7 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 /// Read the contents of an entire file encoded as valid UTF-8
 fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 {
-    let file_path = file_path.unwrap_rust_str();
+    let file_path = unwrap_str!(file_path);
 
     if !is_safe_path(&file_path) {
         return Err(format!("requested file path breaks sandboxing rules: {}", file_path));
@@ -372,7 +373,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 /// Writes the contents of a ByteArray to a file
 fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<Value, String>
 {
-    let file_path = file_path.unwrap_rust_str();
+    let file_path = unwrap_str!(file_path);
     let bytes = bytes.unwrap_ba();
     let bytes = unsafe { bytes.get_slice(0, bytes.num_bytes()) };
 
