@@ -1,5 +1,6 @@
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
-use crate::vm::Value;
+use crate::vm::{Value, Object};
+use crate::ast::ClassId;
 
 pub struct Alloc
 {
@@ -12,7 +13,7 @@ impl Alloc
 {
     pub fn new() -> Self
     {
-        let mem_size = 128 * 1024 * 1024;
+        let mem_size = 256 * 1024 * 1024;
         let layout = Layout::from_size_align(mem_size, 8).unwrap();
 
         let mem_block = unsafe { alloc_zeroed(layout) };
@@ -45,6 +46,31 @@ impl Alloc
         unsafe {
             self.mem_block.add(obj_pos)
         }
+    }
+
+    // Allocate a variable-sized table of elements of a given type
+    pub fn alloc_table<T>(&mut self, num_elems: usize) -> *mut [T]
+    {
+        let num_bytes = num_elems * std::mem::size_of::<T>();
+        let bytes = self.alloc_bytes(num_bytes);
+        let p = bytes as *mut T;
+
+        std::ptr::slice_from_raw_parts_mut(p, num_elems)
+    }
+
+    // Allocate a new object with a given number of slots
+    pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Value
+    {
+        // Allocate the slots for the object
+        let slots = self.alloc_table::<Value>(num_slots);
+
+        // Create the Object struct
+        let obj = Object::new(class_id, slots);
+
+        // Allocate the Object struct itself
+        let obj_ptr = self.alloc(obj);
+
+        Value::Object(obj_ptr)
     }
 
     // Allocate a new object of a given type

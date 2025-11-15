@@ -43,11 +43,12 @@ impl OutputCB
 
         // Create the AudioNeeded object
         let obj = {
-            let mut obj = Object::new(AUDIO_NEEDED_ID, 3);
-            obj.slots[0] = Value::from(num_samples);
-            obj.slots[1] = Value::from(self.num_channels);
-            obj.slots[2] = Value::from(0); // device_id 0
-            Value::Object(msg_alloc.alloc(obj))
+            let mut obj_val = msg_alloc.new_object(AUDIO_NEEDED_ID, 3);
+            let obj = obj_val.unwrap_obj();
+            obj.set(0, Value::from(num_samples));
+            obj.set(1, Value::from(self.num_channels));
+            obj.set(2, Value::from(0)); // device_id 0
+            obj_val
         };
 
         // Get the VM and send the message
@@ -227,10 +228,11 @@ impl InputCB
 
         // Create the AudioData object
         let obj = {
-            let mut obj = Object::new(AUDIO_DATA_ID, 2);
-            obj.slots[0] = Value::from(device_id);
-            obj.slots[1] = Value::from(num_samples);
-            Value::Object(msg_alloc.alloc(obj))
+            let mut obj_val = msg_alloc.new_object(AUDIO_DATA_ID, 2);
+            let obj = obj_val.unwrap_obj();
+            obj.set(0, Value::from(device_id));
+            obj.set(1, Value::from(num_samples));
+            obj_val
         };
 
         // Get the VM and send the message

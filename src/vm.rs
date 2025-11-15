@@ -182,17 +182,34 @@ pub struct Closure
 pub struct Object
 {
     pub class_id: ClassId,
-    pub slots: Vec<Value>,
+    slots: *mut [Value],
 }
 
 impl Object
 {
-    pub fn new(class_id: ClassId, num_slots: usize) -> Self
+    pub fn new(class_id: ClassId, slots: *mut [Value]) -> Self
     {
         Object {
             class_id,
-            slots: vec![Value::Undef; num_slots]
+            slots,
         }
+    }
+
+    pub fn num_slots(&self) -> usize
+    {
+        unsafe { (&*self.slots).len() }
+    }
+
+    // Get the value associated with a given field
+    pub fn get(&self, idx: usize) -> Value
+    {
+        unsafe { (*self.slots)[idx] }
+    }
+
+    // Set the value of a given field
+    pub fn set(&mut self, idx: usize, val: Value)
+    {
+        unsafe { (*self.slots)[idx] = val }
     }
 }
 
@@ -803,8 +820,7 @@ impl Actor
     pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
     {
         let num_slots = self.get_num_slots(class_id);
-        let obj = Object::new(class_id, num_slots);
-        Value::Object(self.alloc.alloc(obj))
+        self.alloc.new_object(class_id, num_slots)
     }
 
     /// Set the value of an object field
@@ -814,7 +830,7 @@ impl Actor
             Value::Object(p) => {
                 let obj = unsafe { &mut *p };
                 let slot_idx = self.get_slot_idx(obj.class_id, field_name);
-                obj.slots[slot_idx] = val;
+                obj.set(slot_idx, val);
             },
             _ => panic!()
         }
@@ -1541,7 +1557,7 @@ impl Actor
                             let obj = unsafe { &mut *p };
 
                             if class_id == obj.class_id {
-                                obj.slots[slot_idx as usize] = val;
+                                obj.set(slot_idx as usize, val);
                             } else {
                                 let slot_idx = self.get_slot_idx(obj.class_id, field_name);
                                 let class_id = obj.class_id;
@@ -1553,7 +1569,7 @@ impl Actor
                                     slot_idx: slot_idx as u32,
                                 };
 
-                                obj.slots[slot_idx] = val;
+                                obj.set(slot_idx, val);
                             }
                         },
 
@@ -1570,8 +1586,7 @@ impl Actor
                 // the constructor for the given class
                 Insn::new { class_id, argc } => {
                     let num_slots = self.get_num_slots(class_id);
-                    let obj = Object::new(class_id, num_slots);
-                    let obj_val = Value::Object(self.alloc.alloc(obj));
+                    let obj_val = self.alloc.new_object(class_id, num_slots);
 
                     // If a constructor method is present
                     let init_fun = self.get_method(class_id, "init");
@@ -1600,8 +1615,7 @@ impl Actor
 
                 Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
                     // Allocate the object
-                    let obj = Object::new(class_id, num_slots as usize);
-                    let obj_val = Value::Object(self.alloc.alloc(obj));
+                    let obj_val = self.alloc.new_object(class_id, num_slots as usize);
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object
@@ -1665,7 +1679,7 @@ impl Actor
 
                             // If the class id doesn't match the cache, update it
                             let val = if class_id == obj.class_id {
-                                obj.slots[slot_idx as usize]
+                                obj.get(slot_idx as usize)
                             } else {
                                 let slot_idx = self.get_slot_idx(obj.class_id, field_name);
                                 let class_id = obj.class_id;
@@ -1677,7 +1691,7 @@ impl Actor
                                     slot_idx: slot_idx as u32,
                                 };
 
-                                obj.slots[slot_idx]
+                                obj.get(slot_idx as usize)
                             };
 
                             if val == Value::Undef {
