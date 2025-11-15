@@ -47,7 +47,7 @@ impl OutputCB
             obj.slots[0] = Value::from(num_samples);
             obj.slots[1] = Value::from(self.num_channels);
             obj.slots[2] = Value::from(0); // device_id 0
-            Value::Object(msg_alloc.alloc(obj))
+            msg_alloc.alloc(obj, Value::Object, std::iter::empty())
         };
 
         // Get the VM and send the message
@@ -230,7 +230,7 @@ impl InputCB
             let mut obj = Object::new(AUDIO_DATA_ID, 2);
             obj.slots[0] = Value::from(device_id);
             obj.slots[1] = Value::from(num_samples);
-            Value::Object(msg_alloc.alloc(obj))
+            msg_alloc.alloc(obj, Value::Object, std::iter::empty())
         };
 
         // Get the VM and send the message

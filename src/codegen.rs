@@ -2,7 +2,7 @@ use std::cmp::max;
 use crate::ast::*;
 use crate::lexer::ParseError;
 use crate::symbols::Decl;
-use crate::vm::{Insn, Value};
+use crate::vm::{Actor, Insn, Value};
 use crate::alloc::Alloc;
 
 /// Compiled function object
@@ -50,7 +50,7 @@ impl Function
     pub fn gen_code(
         &self,
         code: &mut Vec<Insn>,
-        alloc: &mut Alloc
+        alloc: &mut Actor
     ) -> Result<CompiledFun, ParseError>
     {
         // Entry address of the compiled function
@@ -98,7 +98,7 @@ impl StmtBox
         break_idxs: &mut Vec<usize>,
         cont_idxs: &mut Vec<usize>,
         code: &mut Vec<Insn>,
-        alloc: &mut Alloc,
+        alloc: &mut Actor,
     ) -> Result<(), ParseError>
     {
         match self.stmt.as_ref() {
@@ -290,8 +290,8 @@ impl StmtBox
                     };
 
                     // Allocate a mutable closure cell for this variable
-                    let p_cell = alloc.alloc(Value::Nil);
-                    code.push(Insn::push { val: Value::Cell(p_cell) });
+                    let p_cell = alloc.alloc(Value::Nil, Value::Cell);
+                    code.push(Insn::push { val: p_cell });
                     code.push(Insn::set_local { idx: local_idx });
                 }
 
@@ -314,7 +314,7 @@ impl ExprBox
         &self,
         fun: &Function,
         code: &mut Vec<Insn>,
-        alloc: &mut Alloc,
+        alloc: &mut Actor,
     ) -> Result<(), ParseError>
     {
         match self.expr.as_ref() {
@@ -331,8 +331,8 @@ impl ExprBox
 
             Expr::ByteArray(bytes) => {
                 let ba = crate::bytearray::ByteArray::new(bytes.clone());
-                let p_ba = alloc.alloc(ba);
-                code.push(Insn::push { val: Value::ByteArray(p_ba) });
+                let p_ba = alloc.alloc(ba, Value::ByteArray);
+                code.push(Insn::push { val: p_ba });
                 code.push(Insn::ba_clone);
             }
 
@@ -366,7 +366,7 @@ impl ExprBox
 
             Expr::Member { base, field } => {
                 base.gen_code(fun, code, alloc)?;
-                let field = alloc.str(field.clone());
+                let field = alloc.static_str(field.clone());
                 code.push(Insn::get_field {
                     field,
                     class_id: Default::default(),
@@ -445,7 +445,7 @@ impl ExprBox
                             arg.gen_code(fun, code, alloc)?;
                         }
 
-                        let name = alloc.str(field.clone());
+                        let name = alloc.static_str(field.clone());
                         code.push(Insn::call_method { name, argc });
                     }
 
@@ -510,7 +510,7 @@ fn gen_arr_expr(
     exprs: &Vec<ExprBox>,
     fun: &Function,
     code: &mut Vec<Insn>,
-    alloc: &mut Alloc,
+    alloc: &mut Actor,
 ) -> Result<(), ParseError>
 {
     code.push(Insn::arr_new { capacity: exprs.len() as u32 });
@@ -529,7 +529,7 @@ fn gen_dict_expr(
     pairs: &Vec<(String, ExprBox)>,
     fun: &Function,
     code: &mut Vec<Insn>,
-    alloc: &mut Alloc,
+    alloc: &mut Actor,
 ) -> Result<(), ParseError>
 {
     code.push(Insn::dict_new);
@@ -540,7 +540,7 @@ fn gen_dict_expr(
 
         expr.gen_code(fun, code, alloc)?;
 
-        let field_name = alloc.str(name.clone());
+        let field_name = alloc.static_str(name.clone());
 
         code.push(Insn::set_field {
             field: field_name,
@@ -558,7 +558,7 @@ fn gen_bin_op(
     rhs: &ExprBox,
     fun: &Function,
     code: &mut Vec<Insn>,
-    alloc: &mut Alloc,
+    alloc: &mut Actor,
 ) -> Result<(), ParseError>
 {
     use BinOp::*;
@@ -762,7 +762,7 @@ fn gen_assign(
     rhs: &ExprBox,
     fun: &Function,
     code: &mut Vec<Insn>,
-    alloc: &mut Alloc,
+    alloc: &mut Actor,
     need_value: bool,
 ) -> Result<(), ParseError>
 {
@@ -782,7 +782,7 @@ fn gen_assign(
         }
 
         Expr::Member { base, field } => {
-            let field = alloc.str(field.to_string());
+            let field = alloc.static_str(field.to_string());
 
             if need_value {
                 rhs.gen_code(fun, code, alloc)?;

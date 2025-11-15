@@ -173,8 +173,8 @@ fn blit_bgra32(
 pub fn ba_new(actor: &mut Actor, _self: Value) -> Result<Value, String>
 {
     let ba = ByteArray::default();
-    let new_arr = actor.alloc.alloc(ba);
-    Ok(Value::ByteArray(new_arr))
+    let new_arr = actor.alloc(ba, Value::ByteArray);
+    Ok(new_arr)
 }
 
 /// Create a new ByteArray instance
@@ -184,7 +184,7 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result
     let mut bytes = Vec::with_capacity(num_bytes);
     bytes.resize(num_bytes, 0);
     let ba = ByteArray { bytes };
-    Ok(Value::ByteArray(actor.alloc.alloc(ba)))
+    Ok(actor.alloc(ba, Value::ByteArray))
 }
 
 pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value) -> Result<Value, String>

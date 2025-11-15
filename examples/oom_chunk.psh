@@ -1,0 +1,48 @@
+// Demonstration script: allocate ~X bytes per call, called N times.
+// With the current bump allocator (no GC), this will eventually panic
+// with "allocator out of memory" once allocations exceed ~128MB.
+
+class Dummy {}
+
+// Rough per-iteration header footprint on the VM bump heap:
+//   {} (Dict ~24B) + [] (Array ~24B) + ByteArray.with_size(0) (~24B)
+//   + Dummy() (Object ~32B) + i.to_s() (String ~24B)
+// ≈ 128 bytes per loop iteration.
+let PER_ITER_BYTES = 128;
+
+fun alloc_bytes(total_bytes)
+{
+    let iters = total_bytes _/ PER_ITER_BYTES; // integer division
+
+    for (let var i = 0; i < iters; ++i)
+    {
+        // Allocate five distinct heap objects; results are discarded
+        // after each expression statement, but memory is not reclaimed
+        // without a GC.
+        {};
+        [];
+        ByteArray.with_size(0);
+        Dummy();
+        i.to_s();
+    }
+}
+
+if (!$MAIN_UNIT) {
+    return;
+}
+
+// Configure per-call allocation X and number of calls N.
+// Choose values such that X * N > 128MB to trigger OOM today.
+let MB = 1024 * 1024;
+let X = 8 * MB;  // ~8MB per call (approximate on bump heap)
+let N = 20;      // 20 calls → ~160MB total (approx) → OOM without GC
+
+for (let var k = 0; k < N; ++k) {
+    $println("alloc_bytes chunk " + k.to_s());
+    alloc_bytes(X);
+}
+
+// If a precise GC is added, each alloc_bytes() call's temporaries
+// become unreachable at function return and can be reclaimed, so
+// this script should no longer OOM.
+

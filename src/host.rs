@@ -166,7 +166,7 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
         return Ok(Value::Nil);
     }
 
-    Ok(actor.alloc.str_val(args[idx].clone()))
+    Ok(actor.str_val(args[idx].clone()))
 }
 
 /// Print a value to stdout
@@ -206,7 +206,7 @@ fn readln(actor: &mut Actor) -> Result<Value, String>
 
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => {
-            Ok(actor.alloc.str_val(line))
+            Ok(actor.str_val(line))
         }
 
         Err(_) => Ok(Value::Nil)
@@ -349,8 +349,8 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
     };
 
     let ba = crate::bytearray::ByteArray::new(bytes);
-    let ba_obj = actor.alloc.alloc(ba);
-    Ok(Value::ByteArray(ba_obj))
+    let ba_obj = actor.alloc(ba, Value::ByteArray);
+    Ok(ba_obj)
 }
 
 /// Read the contents of an entire file encoded as valid UTF-8
@@ -367,7 +367,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
         Ok(s) => s
     };
 
-    Ok(actor.alloc.str_val(s))
+    Ok(actor.str_val(s))
 }
 
 /// Writes the contents of a ByteArray to a file
