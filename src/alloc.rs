@@ -1,4 +1,4 @@
-use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
+use std::{alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout}, f32::consts::E};
 use crate::vm::Value;
 
 pub struct Alloc
@@ -6,6 +6,11 @@ pub struct Alloc
     mem_block: *mut u8,
     mem_size: usize,
     next_idx: usize,
+    is_message_alloc: bool,
+}
+
+fn pointer_as_string(ptr: *mut String) -> Value {
+    Value::String(ptr as *const String)
 }
 
 impl Alloc
@@ -24,7 +29,14 @@ impl Alloc
             mem_block,
             mem_size,
             next_idx: 0,
+            is_message_alloc: false,
         }
+    }
+
+    pub fn new_message() -> Self {
+        let mut alloc = Self::new();
+        alloc.is_message_alloc = true;
+        alloc
     }
 
     // Allocate a block of a given size
@@ -48,7 +60,7 @@ impl Alloc
     }
 
     // Allocate a new object of a given type
-    pub fn alloc<T>(&mut self, obj: T) -> *mut T
+    pub fn alloc<T>(&mut self, obj: T, value_wrapper: fn(*mut T) -> Value, roots: impl Iterator<Item = Value>) -> Value
     {
         let num_bytes = std::mem::size_of::<T>();
         let bytes = self.alloc_bytes(num_bytes);
@@ -58,19 +70,13 @@ impl Alloc
         // on what's currently at that location
         unsafe { std::ptr::write(p, obj) };
 
-        p
+        value_wrapper(p)
     }
 
-    // Allocate an immutable string
-    pub fn str(&mut self, s: String) -> *const String
-    {
-        let s_ptr = self.alloc(s);
-        s_ptr as *const String
-    }
 
-    pub fn str_val(&mut self, s: String) -> Value
+    pub fn str_val(&mut self, s: String, roots: impl Iterator<Item = Value>) -> Value
     {
-        Value::String(self.str(s))
+        self.alloc(s, pointer_as_string, roots)
     }
 }
 
