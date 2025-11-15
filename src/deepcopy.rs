@@ -89,8 +89,7 @@ pub fn deepcopy(
 
         let new_val = match val {
             Value::String(p) => {
-                let new_str = dst_alloc.alloc(unsafe { (*p).clone() });
-                Value::String(new_str)
+                dst_alloc.str_val(unsafe { (*p).clone() }, std::iter::empty())
             }
 
             Value::Closure(p) => {
@@ -100,7 +99,7 @@ pub fn deepcopy(
                     push_val!(val);
                 }
 
-                Value::Closure(dst_alloc.alloc(new_clos))
+                dst_alloc.alloc(new_clos, Value::Closure, std::iter::empty())
             }
 
             Value::Dict(p) => {
@@ -110,7 +109,7 @@ pub fn deepcopy(
                     push_val!(val);
                 }
 
-                Value::Dict(dst_alloc.alloc(new_obj))
+                dst_alloc.alloc(new_obj, Value::Dict, std::iter::empty())
             }
 
             Value::Object(p) => {
@@ -121,7 +120,7 @@ pub fn deepcopy(
                     push_val!(&val);
                 }
 
-                Value::Object(dst_alloc.alloc(new_obj))
+                dst_alloc.alloc(new_obj, Value::Object, std::iter::empty())
             }
 
             Value::Array(p) => {
@@ -131,12 +130,12 @@ pub fn deepcopy(
                     push_val!(val);
                 }
 
-                Value::Array(dst_alloc.alloc(new_arr))
+                dst_alloc.alloc(new_arr, Value::Array, std::iter::empty())
             }
 
             Value::ByteArray(p) => {
                 let new_arr = unsafe { (*p).clone() };
-                Value::ByteArray(dst_alloc.alloc(new_arr))
+                dst_alloc.alloc(new_arr, Value::ByteArray, std::iter::empty())
             }
 
             _ => panic!("deepcopy unimplemented for type {:?}", val)
@@ -226,7 +225,7 @@ mod tests
         let mut src_alloc = Alloc::new();
         let mut dst_alloc = Alloc::new();
         let mut dst_map = HashMap::new();
-        let s1 = src_alloc.str_val("foo".to_string());
+        let s1 = src_alloc.str_val("foo".to_string(), std::iter::empty());
         let s2 = deepcopy(s1, &mut dst_alloc, &mut dst_map);
         assert!(s1 == s2);
     }

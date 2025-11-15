@@ -25,7 +25,8 @@ extern crate sdl2;
 use std::env;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
-use crate::vm::{VM, Value};
+use crate::alloc::Alloc;
+use crate::vm::{Actor, Value, VM};
 use crate::utils::{thousands_sep};
 use crate::ast::Program;
 use crate::parser::{parse_file, parse_str};
@@ -164,7 +165,13 @@ fn main()
         // Generate code for all the functions to test
         // that this works correctly
         let mut code = vec![];
-        let mut alloc = crate::alloc::Alloc::new();
+        let main_fn = prog.main_fn;
+
+        // TODO: maybe figure out a way to avoid creating a new Actor instance
+        let vm = VM::new(prog.clone());
+        let msg_alloc = Arc::new(Mutex::new(Alloc::new_message()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut alloc = Actor::new(0, None, vm, msg_alloc, rx, vec![]);
         for (fun_id, fun) in prog.funs {
             fun.gen_code(&mut code, &mut alloc).unwrap();
         }

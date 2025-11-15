@@ -380,6 +380,14 @@ impl Value
         }
     }
 
+    pub fn unwrap_str(&self) -> &String
+    {
+        match self {
+            Value::String(p) => unsafe { &**p },
+            _ => panic!("expected string value but got {:?}", self)
+        }
+    }
+
     pub fn unwrap_ba(&mut self) -> &mut ByteArray
     {
         match self {
@@ -648,6 +656,18 @@ impl Actor
         }
     }
 
+     pub fn alloc<T>(&mut self, obj: T, value_wrapper: fn(*mut T) -> Value) -> Value {
+         self.alloc.alloc(obj, value_wrapper, std::iter::empty())
+     }
+
+     pub fn str_val(&mut self, s: String) -> Value {
+         self.alloc.str_val(s, std::iter::empty())
+     }
+
+     pub fn static_str(&mut self, s: String) -> *const String {
+         self.str_val(s).unwrap_str()
+     }
+
     /// Receive a message from the message queue
     /// This will block until a message is available
     pub fn recv(&mut self) -> Value
@@ -747,10 +767,19 @@ impl Actor
         }
 
         // Borrow the function from the VM and compile it
-        let vm = self.vm.lock().unwrap();
-        let fun = &vm.prog.funs[&fun_id];
-        let entry = fun.gen_code(&mut self.insns, &mut self.alloc).unwrap();
+        let mut vm = self.vm.lock().unwrap();
+        let funs = std::mem::take(&mut vm.prog.funs);
+        drop(vm);
+
+        let fun = &funs[&fun_id];
+        let mut instrs = std::mem::take(&mut self.insns);
+        let entry = fun.gen_code(&mut instrs, self).unwrap();
+
+        self.insns = instrs;
         self.funs.insert(fun_id, entry);
+
+        let mut vm = self.vm.lock().unwrap();
+        *(&mut vm.prog.funs) = funs;
 
         // Return the compiled function entry
         entry
@@ -820,7 +849,8 @@ impl Actor
     pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
     {
         let num_slots = self.get_num_slots(class_id);
-        self.alloc.new_object(class_id, num_slots)
+        let obj = Object::new(class_id, num_slots);
+        self.new_object(obj, Value::Object)
     }
 
     /// Set the value of an object field
@@ -842,7 +872,7 @@ impl Actor
     {
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
-        self.alloc.str_val(str_const.to_string())
+        self.str_val(str_const.to_string())
     }
 
     /// Call a host function
@@ -1197,7 +1227,7 @@ impl Actor
                         (Value::String(s1), Value::String(s2)) => {
                             let s1 = unsafe { &*s1 };
                             let s2 = unsafe { &*s2 };
-                            self.alloc.str_val(s1.to_owned() + s2)
+                            self.str_val(s1.to_owned() + s2)
                         }
 
                         _ => error!("add", "unsupported operand types")
@@ -1480,8 +1510,8 @@ impl Actor
                 // Create a new closure
                 Insn::clos_new { fun_id, num_slots } => {
                     let clos = Closure { fun_id, slots: vec![Undef; num_slots as usize] };
-                    let clos_val = self.alloc.alloc(clos);
-                    push!(Value::Closure(clos_val));
+                    let clos_val = self.alloc(clos, Value::Closure);
+                    push!(clos_val);
                 }
 
                 // Set a closure slot
@@ -1542,8 +1572,8 @@ impl Actor
 
                 // Create new empty dictionary
                 Insn::dict_new => {
-                    let new_obj = self.alloc.alloc(Dict::default());
-                    push!(Value::Dict(new_obj))
+                    let new_obj = self.alloc(Dict::default(), Value::Dict);
+                    push!(new_obj)
                 }
 
                 // Set object field
@@ -1586,7 +1616,8 @@ impl Actor
                 // the constructor for the given class
                 Insn::new { class_id, argc } => {
                     let num_slots = self.get_num_slots(class_id);
-                    let obj_val = self.alloc.new_object(class_id, num_slots);
+                    let obj = Object::new(class_id, num_slots);
+                    let obj_val = self.new_object(obj, Value::Object);
 
                     // If a constructor method is present
                     let init_fun = self.get_method(class_id, "init");
@@ -1615,7 +1646,8 @@ impl Actor
 
                 Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
                     // Allocate the object
-                    let obj_val = self.alloc.new_object(class_id, num_slots as usize);
+                    let obj = Object::new(class_id, num_slots as usize);
+                    let obj_val = self.new_object(obj, Value::Object);
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object
@@ -1772,8 +1804,8 @@ impl Actor
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
-                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity));
-                    push!(Value::Array(new_arr))
+                    let new_arr = self.alloc(Array::with_capacity(capacity), Value::Array);
+                    push!(new_arr)
                 }
 
                 // Append an element at the end of an array
@@ -1787,8 +1819,8 @@ impl Actor
                 Insn::ba_clone => {
                     let mut val = pop!();
                     let ba = val.unwrap_ba();
-                    let p_clone = self.alloc.alloc(ba.clone());
-                    push!(Value::ByteArray(p_clone));
+                    let p_clone = self.alloc(ba.clone(), Value::ByteArray);
+                    push!(p_clone);
                 }
 
                 // Jump if true
@@ -2035,7 +2067,7 @@ impl VM
         let (queue_tx, queue_rx) = mpsc::channel::<Message>();
 
         // Create an allocator to send messages to the actor
-        let mut msg_alloc = Alloc::new();
+        let mut msg_alloc = Alloc::new_message();
 
         // Hash map for remapping copied values
         let mut dst_map = HashMap::new();
@@ -2106,7 +2138,7 @@ impl VM
         let (queue_tx, queue_rx) = mpsc::channel::<Message>();
 
         // Create an allocator to send messages to the actor
-        let msg_alloc = Arc::new(Mutex::new(Alloc::new()));
+        let msg_alloc = Arc::new(Mutex::new(Alloc::new_message()));
 
         // Info needed to send the actor a message
         let actor_tx = ActorTx {
