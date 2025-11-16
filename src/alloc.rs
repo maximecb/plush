@@ -13,8 +13,12 @@ impl Alloc
 {
     pub fn new() -> Self
     {
-        let mem_size = 256 * 1024 * 1024;
-        let layout = Layout::from_size_align(mem_size, 8).unwrap();
+        Self::with_size(256 * 1024 * 1025)
+    }
+
+    pub fn with_size(mem_size_bytes: usize) -> Self
+    {
+        let layout = Layout::from_size_align(mem_size_bytes, 8).unwrap();
 
         let mem_block = unsafe { alloc_zeroed(layout) };
         if mem_block.is_null() {
@@ -23,9 +27,15 @@ impl Alloc
 
         Self {
             mem_block,
-            mem_size,
+            mem_size: mem_size_bytes,
             next_idx: 0,
         }
+    }
+
+    pub fn bytes_free(&self) -> usize
+    {
+        assert!(self.next_idx <= self.mem_size);
+        self.mem_size - self.next_idx
     }
 
     // Allocate a block of a given size
