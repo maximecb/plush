@@ -7,13 +7,14 @@ pub struct Alloc
     mem_block: *mut u8,
     mem_size: usize,
     next_idx: usize,
+    layout: Layout,
 }
 
 impl Alloc
 {
     pub fn new() -> Self
     {
-        Self::with_size(256 * 1024 * 1025)
+        Self::with_size(256 * 1024 * 1024)
     }
 
     pub fn with_size(mem_size_bytes: usize) -> Self
@@ -29,6 +30,7 @@ impl Alloc
             mem_block,
             mem_size: mem_size_bytes,
             next_idx: 0,
+            layout,
         }
     }
 
@@ -68,6 +70,20 @@ impl Alloc
         std::ptr::slice_from_raw_parts_mut(p, num_elems)
     }
 
+    // Allocate a new object of a given type
+    pub fn alloc<T>(&mut self, obj: T) -> *mut T
+    {
+        let num_bytes = std::mem::size_of::<T>();
+        let bytes = self.alloc_bytes(num_bytes);
+        let p = bytes as *mut T;
+
+        // Write object at location without calling drop
+        // on what's currently at that location
+        unsafe { std::ptr::write(p, obj) };
+
+        p
+    }
+
     // Allocate a new object with a given number of slots
     pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Value
     {
@@ -83,20 +99,6 @@ impl Alloc
         Value::Object(obj_ptr)
     }
 
-    // Allocate a new object of a given type
-    pub fn alloc<T>(&mut self, obj: T) -> *mut T
-    {
-        let num_bytes = std::mem::size_of::<T>();
-        let bytes = self.alloc_bytes(num_bytes);
-        let p = bytes as *mut T;
-
-        // Write object at location without calling drop
-        // on what's currently at that location
-        unsafe { std::ptr::write(p, obj) };
-
-        p
-    }
-
     // Allocate an immutable string
     pub fn str(&mut self, s: String) -> *const String
     {
@@ -107,6 +109,22 @@ impl Alloc
     pub fn str_val(&mut self, s: String) -> Value
     {
         Value::String(self.str(s))
+    }
+}
+
+impl Drop for Alloc
+{
+    fn drop(&mut self)
+    {
+        //println!("dropping alloc");
+
+        // In debug mode, fill the allocator's memory with 0xFE when dropping so that
+        // we can find out quickly if any memory did not get copied in a GC cycle
+        #[cfg(debug_assertions)]
+        unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.mem_size) }
+
+        // Deallocate the memory block
+        unsafe { dealloc(self.mem_block, self.layout) };
     }
 }
 
