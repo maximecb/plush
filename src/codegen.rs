@@ -290,8 +290,8 @@ impl StmtBox
                     };
 
                     // Allocate a mutable closure cell for this variable
-                    let p_cell = alloc.alloc(Value::Nil, Value::Cell);
-                    code.push(Insn::push { val: p_cell });
+                    let p_cell = alloc.alloc(Value::Nil);
+                    code.push(Insn::push { val: Value::Cell(p_cell) });
                     code.push(Insn::set_local { idx: local_idx });
                 }
 
@@ -331,8 +331,8 @@ impl ExprBox
 
             Expr::ByteArray(bytes) => {
                 let ba = crate::bytearray::ByteArray::new(bytes.clone());
-                let p_ba = alloc.alloc(ba, Value::ByteArray);
-                code.push(Insn::push { val: p_ba });
+                let p_ba = alloc.alloc(ba);
+                code.push(Insn::push { val: Value::ByteArray(p_ba) });
                 code.push(Insn::ba_clone);
             }
 

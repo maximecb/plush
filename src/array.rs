@@ -44,7 +44,7 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_v
     let mut elems = Vec::with_capacity(num_elems);
     elems.resize(num_elems, fill_val);
     let arr = Array { elems };
-    Ok(actor.alloc(arr, Value::Array))
+    Ok(Value::Array(actor.alloc(arr)))
 }
 
 pub fn array_push(actor: &mut Actor, mut array: Value, val: Value) -> Result<Value, String>

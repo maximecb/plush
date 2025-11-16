@@ -1,7 +1,7 @@
 use sdl2::audio::{AudioCallback, AudioSpecDesired, AudioDevice};
 use std::sync::{Arc, Weak, Mutex, Condvar};
 use std::collections::HashMap;
-use crate::vm::{Value, VM, Actor, Object, Message};
+use crate::vm::{Actor, Message, MsgAlloc, Object, Value, VM};
 use crate::alloc::Alloc;
 use crate::ast::{AUDIO_NEEDED_ID, AUDIO_DATA_ID};
 use crate::window::with_sdl_context;
@@ -25,7 +25,7 @@ struct OutputCB
     vm: Arc<Mutex<VM>>,
 
     // Message allocator for the parent actor
-    msg_alloc: Weak<Mutex<Alloc>>,
+    msg_alloc: MsgAlloc,
 }
 
 impl OutputCB
@@ -33,17 +33,12 @@ impl OutputCB
     /// Request more samples from the parent actor
     fn request_samples(&self, num_samples: usize)
     {
-        // We'll use the message allocator of the parent thread
-        let alloc_rc = self.msg_alloc.upgrade();
-        if alloc_rc.is_none() {
-            return; // Parent actor is terminated
-        }
-        let alloc_rc = alloc_rc.unwrap();
-        let mut msg_alloc = alloc_rc.lock().unwrap();
-
         // Create the AudioNeeded object
         let obj = {
-            let mut obj_val = msg_alloc.new_object(AUDIO_NEEDED_ID, 3);
+            let mut obj_val = match self.msg_alloc.new_object(AUDIO_NEEDED_ID, 3) {
+                Ok(obj_val) => obj_val,
+                Err(_) => return, // This means that the parent actor is no longer available
+            };
             let obj = obj_val.unwrap_obj();
             obj.set(0, Value::from(num_samples));
             obj.set(1, Value::from(self.num_channels));
@@ -140,7 +135,7 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
             buf_size: spec.samples as usize,
             actor_id: actor.actor_id,
             vm: actor.vm.clone(),
-            msg_alloc: Arc::downgrade(&actor.msg_alloc),
+            msg_alloc: actor.msg_alloc(),
         }
     }).unwrap();
 
@@ -228,7 +223,10 @@ impl InputCB
 
         // Create the AudioData object
         let obj = {
-            let mut obj_val = msg_alloc.new_object(AUDIO_DATA_ID, 2);
+            let mut obj_val = match msg_alloc.new_object(AUDIO_DATA_ID, 2) {
+                Ok(obj_val) => obj_val,
+                Err(err) => return, // This means that the parent actor is terminated
+            };
             let obj = obj_val.unwrap_obj();
             obj.set(0, Value::from(device_id));
             obj.set(1, Value::from(num_samples));

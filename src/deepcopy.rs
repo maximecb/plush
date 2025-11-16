@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::mem;
 use crate::alloc::Alloc;
-use crate::vm::{Value, Closure, Object};
+use crate::vm::{Closure, MsgAlloc, Object, Value};
 
 /// Custom Hash implementation for Value
 impl Hash for Value
@@ -54,12 +54,12 @@ impl Hash for Value
 
 pub fn deepcopy(
     src_val: Value,
-    dst_alloc: &mut Alloc,
+    dst_alloc: &MsgAlloc,
     dst_map: &mut HashMap<Value, Value>,
-) -> Value
+) -> Result<Value, ()>
 {
     if !src_val.is_heap() {
-        return src_val;
+        return Ok(src_val);
     }
 
     // Stack of values to visit
@@ -89,7 +89,7 @@ pub fn deepcopy(
 
         let new_val = match val {
             Value::String(p) => {
-                dst_alloc.str_val(unsafe { (*p).clone() }, std::iter::empty())
+                dst_alloc.str_val(unsafe { (*p).clone() })?
             }
 
             Value::Closure(p) => {
@@ -99,7 +99,7 @@ pub fn deepcopy(
                     push_val!(val);
                 }
 
-                dst_alloc.alloc(new_clos, Value::Closure, std::iter::empty())
+                Value::Closure(dst_alloc.alloc(new_clos)?)
             }
 
             Value::Dict(p) => {
@@ -109,7 +109,7 @@ pub fn deepcopy(
                     push_val!(val);
                 }
 
-                dst_alloc.alloc(new_obj, Value::Dict, std::iter::empty())
+                Value::Dict(dst_alloc.alloc(new_obj)?)
             }
 
             Value::Object(p) => {
@@ -120,7 +120,7 @@ pub fn deepcopy(
                     push_val!(&val);
                 }
 
-                dst_alloc.alloc(new_obj, Value::Object, std::iter::empty())
+                Value::Object(dst_alloc.alloc(new_obj)?)
             }
 
             Value::Array(p) => {
@@ -130,12 +130,12 @@ pub fn deepcopy(
                     push_val!(val);
                 }
 
-                dst_alloc.alloc(new_arr, Value::Array, std::iter::empty())
+                Value::Array(dst_alloc.alloc(new_arr)?)
             }
 
             Value::ByteArray(p) => {
                 let new_arr = unsafe { (*p).clone() };
-                dst_alloc.alloc(new_arr, Value::ByteArray, std::iter::empty())
+                Value::ByteArray(dst_alloc.alloc(new_arr)?)
             }
 
             _ => panic!("deepcopy unimplemented for type {:?}", val)
@@ -145,7 +145,7 @@ pub fn deepcopy(
         dst_map.insert(val, new_val);
     }
 
-    *dst_map.get(&src_val).unwrap()
+    Ok(*dst_map.get(&src_val).unwrap())
 }
 
 /// Remap internal references to copied values
@@ -208,14 +208,21 @@ pub fn remap(dst_map: HashMap<Value, Value>)
 #[cfg(test)]
 mod tests
 {
+    use std::sync::{Arc, Condvar, Mutex};
+
     use super::*;
+
+
 
     fn copy_int()
     {
-        let mut dst_alloc = Alloc::new();
+        let gc_cond = Arc::new(Condvar::new());
+        let dst_alloc = Arc::new(Mutex::new(Alloc::new()));
+        let mut msg_alloc = MsgAlloc::new(Arc::downgrade(&dst_alloc), gc_cond);
+
         let mut dst_map = HashMap::new();
         let v1 = Value::Int64(1337);
-        let v2 = deepcopy(v1, &mut dst_alloc, &mut dst_map);
+        let v2 = deepcopy(v1, &mut msg_alloc, &mut dst_map).unwrap();
         assert!(v1 == v2);
     }
 
@@ -223,10 +230,12 @@ mod tests
     fn copy_string()
     {
         let mut src_alloc = Alloc::new();
-        let mut dst_alloc = Alloc::new();
+        let gc_cond = Arc::new(Condvar::new());
+        let dst_alloc = Arc::new(Mutex::new(Alloc::new()));
+        let mut msg_alloc = MsgAlloc::new(Arc::downgrade(&dst_alloc), gc_cond);
         let mut dst_map = HashMap::new();
-        let s1 = src_alloc.str_val("foo".to_string(), std::iter::empty());
-        let s2 = deepcopy(s1, &mut dst_alloc, &mut dst_map);
+        let s1 = src_alloc.str_val("foo".to_string()).unwrap();
+        let s2 = deepcopy(s1, &mut msg_alloc, &mut dst_map).unwrap();
         assert!(s1 == s2);
     }
 }

@@ -24,7 +24,7 @@ mod exec_tests;
 extern crate sdl2;
 use std::env;
 use std::process::exit;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use crate::alloc::Alloc;
 use crate::vm::{Actor, Value, VM};
 use crate::utils::{thousands_sep};
@@ -171,7 +171,8 @@ fn main()
         let vm = VM::new(prog.clone());
         let msg_alloc = Arc::new(Mutex::new(Alloc::new_message()));
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut alloc = Actor::new(0, None, vm, msg_alloc, rx, vec![]);
+        let gc_cond = Arc::new(Condvar::new());
+        let mut alloc = Actor::new(0, None, vm, msg_alloc, rx, vec![], gc_cond);
         for (fun_id, fun) in prog.funs {
             fun.gen_code(&mut code, &mut alloc).unwrap();
         }

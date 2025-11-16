@@ -254,7 +254,7 @@ fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Result<Value, String
     }).collect();
 
     let arr = crate::array::Array { elems: parts };
-    Ok(actor.alloc(arr, Value::Array))
+    Ok(Value::Array(actor.alloc(arr)))
 }
 
 pub fn init_runtime(prog: &mut Program)

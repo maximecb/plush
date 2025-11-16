@@ -71,7 +71,7 @@ impl Alloc
     }
 
     // Allocate a new object with a given number of slots
-    pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Value
+    pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Result<Value, ()>
     {
         // Allocate the slots for the object
         let slots = self.alloc_table::<Value>(num_slots);
@@ -80,13 +80,13 @@ impl Alloc
         let obj = Object::new(class_id, slots);
 
         // Allocate the Object struct itself
-        let obj_ptr = self.alloc(obj);
+        let obj_ptr = self.alloc(obj)?;
 
-        Value::Object(obj_ptr)
+        Ok(Value::Object(obj_ptr))
     }
 
     // Allocate a new object of a given type
-    pub fn alloc<T>(&mut self, obj: T, value_wrapper: fn(*mut T) -> Value, roots: impl Iterator<Item = Value>) -> Value
+    pub fn alloc<T>(&mut self, obj: T) -> Result<*mut T, ()>
     {
         let num_bytes = std::mem::size_of::<T>();
         let bytes = self.alloc_bytes(num_bytes);
@@ -96,13 +96,13 @@ impl Alloc
         // on what's currently at that location
         unsafe { std::ptr::write(p, obj) };
 
-        value_wrapper(p)
+        Ok(p)
     }
 
 
-    pub fn str_val(&mut self, s: String, roots: impl Iterator<Item = Value>) -> Value
+    pub fn str_val(&mut self, s: String) -> Result<Value, ()>
     {
-        self.alloc(s, pointer_as_string, roots)
+        Ok(Value::String(self.alloc(s)?))
     }
 }
 

@@ -349,8 +349,8 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
     };
 
     let ba = crate::bytearray::ByteArray::new(bytes);
-    let ba_obj = actor.alloc(ba, Value::ByteArray);
-    Ok(ba_obj)
+    let ba_obj = actor.alloc(ba);
+    Ok(Value::ByteArray(ba_obj))
 }
 
 /// Read the contents of an entire file encoded as valid UTF-8
@@ -424,7 +424,7 @@ fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
     // TODO: check the function argument count and report a helpful
     // error message here
 
-    let actor_id = VM::new_actor(actor, fun, vec![]);
+    let actor_id = VM::new_actor(actor, fun, vec![]).map_err(|_| "actor_spawn failed to allocate")?;
     Ok(Value::from(actor_id))
 }
 

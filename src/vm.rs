@@ -1,6 +1,6 @@
 use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
-use std::sync::{Arc, Weak, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
@@ -626,6 +626,9 @@ pub struct Actor
 
     // Array of compiled instructions
     insns: Vec<Insn>,
+
+    // Condition variable for message garbage collection
+    gc_cond: Arc<Condvar>,
 }
 
 impl Actor
@@ -637,6 +640,7 @@ impl Actor
         msg_alloc: Arc<Mutex<Alloc>>,
         queue_rx: mpsc::Receiver<Message>,
         globals: Vec<Value>,
+        gc_cond: Arc<Condvar>,
     ) -> Self
     {
         Self {
@@ -653,15 +657,24 @@ impl Actor
             insns: Vec::default(),
             classes: HashMap::default(),
             funs: HashMap::default(),
+            gc_cond,
         }
     }
 
-     pub fn alloc<T>(&mut self, obj: T, value_wrapper: fn(*mut T) -> Value) -> Value {
-         self.alloc.alloc(obj, value_wrapper, std::iter::empty())
+     pub fn alloc<T>(&mut self, obj: T) -> *mut T {
+         self.alloc.alloc(obj).expect("TODO: GC")
      }
 
      pub fn str_val(&mut self, s: String) -> Value {
-         self.alloc.str_val(s, std::iter::empty())
+         self.alloc.str_val(s).expect("TODO: GC")
+     }
+
+     pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Value {
+         self.alloc.new_object(class_id, num_slots).expect("TODO: GC")
+     }
+
+     pub fn msg_alloc(&self) -> MsgAlloc {
+         MsgAlloc::new(Arc::downgrade(&self.msg_alloc), self.gc_cond.clone())
      }
 
      pub fn static_str(&mut self, s: String) -> *const String {
@@ -743,14 +756,9 @@ impl Actor
 
         let actor_tx = actor_tx.unwrap();
 
-        // Copy the message using the receiver's message allocator
-        // Note: locking can fail if the receiving thread panics
-        let alloc_rc = match actor_tx.msg_alloc.upgrade() {
-            Some(rc) => rc,
-            None => return Err(()),
-        };
+
         let mut dst_map = HashMap::new();
-        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map);
+        let msg = deepcopy(msg, &actor_tx.msg_alloc, &mut dst_map)?;
         remap(dst_map);
 
         match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
@@ -849,8 +857,7 @@ impl Actor
     pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
     {
         let num_slots = self.get_num_slots(class_id);
-        let obj = Object::new(class_id, num_slots);
-        self.new_object(obj, Value::Object)
+        self.new_object(class_id, num_slots)
     }
 
     /// Set the value of an object field
@@ -1510,8 +1517,8 @@ impl Actor
                 // Create a new closure
                 Insn::clos_new { fun_id, num_slots } => {
                     let clos = Closure { fun_id, slots: vec![Undef; num_slots as usize] };
-                    let clos_val = self.alloc(clos, Value::Closure);
-                    push!(clos_val);
+                    let clos_val = self.alloc(clos);
+                    push!(Value::Closure(clos_val));
                 }
 
                 // Set a closure slot
@@ -1572,8 +1579,8 @@ impl Actor
 
                 // Create new empty dictionary
                 Insn::dict_new => {
-                    let new_obj = self.alloc(Dict::default(), Value::Dict);
-                    push!(new_obj)
+                    let new_obj = self.alloc(Dict::default());
+                    push!(Value::Dict(new_obj))
                 }
 
                 // Set object field
@@ -1616,8 +1623,7 @@ impl Actor
                 // the constructor for the given class
                 Insn::new { class_id, argc } => {
                     let num_slots = self.get_num_slots(class_id);
-                    let obj = Object::new(class_id, num_slots);
-                    let obj_val = self.new_object(obj, Value::Object);
+                    let obj_val = self.new_object(class_id, num_slots);
 
                     // If a constructor method is present
                     let init_fun = self.get_method(class_id, "init");
@@ -1646,8 +1652,7 @@ impl Actor
 
                 Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
                     // Allocate the object
-                    let obj = Object::new(class_id, num_slots as usize);
-                    let obj_val = self.new_object(obj, Value::Object);
+                    let obj_val = self.new_object(class_id, num_slots as usize);
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object
@@ -1804,8 +1809,8 @@ impl Actor
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
-                    let new_arr = self.alloc(Array::with_capacity(capacity), Value::Array);
-                    push!(new_arr)
+                    let new_arr = self.alloc(Array::with_capacity(capacity));
+                    push!(Value::Array(new_arr))
                 }
 
                 // Append an element at the end of an array
@@ -1819,8 +1824,8 @@ impl Actor
                 Insn::ba_clone => {
                     let mut val = pop!();
                     let ba = val.unwrap_ba();
-                    let p_clone = self.alloc(ba.clone(), Value::ByteArray);
-                    push!(p_clone);
+                    let p_clone = self.alloc(ba.clone());
+                    push!(Value::ByteArray(p_clone));
                 }
 
                 // Jump if true
@@ -2001,10 +2006,40 @@ impl Actor
 }
 
 #[derive(Clone)]
+pub struct MsgAlloc {
+    msg_alloc: Weak<Mutex<Alloc>>,
+    gc_cond: Arc<Condvar>,
+}
+
+impl MsgAlloc {
+    pub fn new(msg_alloc: Weak<Mutex<Alloc>>, gc_cond: Arc<Condvar>) -> Self {
+        MsgAlloc { msg_alloc, gc_cond }
+    }
+
+    pub fn alloc<T>(&self, value: T) -> Result<*mut T, ()> {
+        let mut alloc = self.msg_alloc.upgrade().ok_or(())?;
+        let mut alloc = alloc.lock().unwrap();
+        alloc.alloc(value)
+    }
+
+    pub fn new_object(&self, id: ClassId, num_fields: usize) -> Result<Value, ()> {
+        let mut alloc = self.msg_alloc.upgrade().ok_or(())?;
+        let mut alloc = alloc.lock().unwrap();
+        alloc.new_object(id, num_fields)
+    }
+
+    pub fn str_val(&self, value: String) -> Result<Value, ()> {
+        let mut alloc = self.msg_alloc.upgrade().ok_or(())?;
+        let mut alloc = alloc.lock().unwrap();
+        alloc.str_val(value)
+    }
+}
+
+#[derive(Clone)]
 struct ActorTx
 {
     sender: mpsc::Sender<Message>,
-    msg_alloc: Weak<Mutex<Alloc>>,
+    msg_alloc: MsgAlloc,
 }
 
 pub struct VM
@@ -2054,7 +2089,7 @@ impl VM
     }
 
     // Create a new actor
-    pub fn new_actor(parent: &mut Actor, fun: Value, args: Vec<Value>) -> u64
+    pub fn new_actor(parent: &mut Actor, fun: Value, args: Vec<Value>) -> Result<u64, ()>
     {
         // Assign an actor id
         let mut vm_ref = parent.vm.lock().unwrap();
@@ -2067,30 +2102,29 @@ impl VM
         let (queue_tx, queue_rx) = mpsc::channel::<Message>();
 
         // Create an allocator to send messages to the actor
-        let mut msg_alloc = Alloc::new_message();
+        let raw_msg_alloc = Arc::new(Mutex::new(Alloc::new_message()));
+        let gc_cond = Arc::new(Condvar::new());
+        let mut msg_alloc = MsgAlloc::new(Arc::downgrade(&raw_msg_alloc), gc_cond.clone());
 
         // Hash map for remapping copied values
         let mut dst_map = HashMap::new();
 
         // We need to recursively copy the function/closure
         // using the actor's message allocator
-        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map);
+        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map)?;
 
         // Copy the global variables from the parent actor
         let mut globals = parent.globals.clone();
         for val in &mut globals {
-            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map);
+            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map)?;
         }
 
         remap(dst_map);
 
-        // Wrap the message allocator in a shared mutex
-        let msg_alloc = Arc::new(Mutex::new(msg_alloc));
-
         // Info needed to send the actor a message
         let actor_tx = ActorTx {
             sender: queue_tx,
-            msg_alloc: Arc::downgrade(&msg_alloc),
+            msg_alloc,
         };
 
         // Spawn a new thread for the actor
@@ -2100,9 +2134,10 @@ impl VM
                 actor_id,
                 Some(parent_id),
                 vm_mutex,
-                msg_alloc,
+                raw_msg_alloc,
                 queue_rx,
                 globals,
+                gc_cond
             );
             actor.call(fun, &args)
         });
@@ -2113,7 +2148,7 @@ impl VM
         vm_ref.actor_txs.insert(actor_id, actor_tx);
         drop(vm_ref);
 
-        actor_id
+        Ok(actor_id)
     }
 
     // Wait for an actor to produce a result and return it.
@@ -2138,12 +2173,14 @@ impl VM
         let (queue_tx, queue_rx) = mpsc::channel::<Message>();
 
         // Create an allocator to send messages to the actor
-        let msg_alloc = Arc::new(Mutex::new(Alloc::new_message()));
+        let raw_msg_alloc = Arc::new(Mutex::new(Alloc::new_message()));
+        let gc_cond = Arc::new(Condvar::new());
+        let msg_alloc = MsgAlloc::new(Arc::downgrade(&raw_msg_alloc), gc_cond.clone());
 
         // Info needed to send the actor a message
         let actor_tx = ActorTx {
             sender: queue_tx,
-            msg_alloc: Arc::downgrade(&msg_alloc),
+            msg_alloc,
         };
 
         // Assign an actor id
@@ -2165,9 +2202,10 @@ impl VM
             actor_id,
             None,
             vm_mutex,
-            msg_alloc,
+            raw_msg_alloc,
             queue_rx,
             globals,
+            gc_cond
         );
 
         actor.call(Value::Fun(fun_id), &args)
