@@ -34,6 +34,11 @@ impl Alloc
         }
     }
 
+    pub fn mem_size(&self) -> usize
+    {
+        self.mem_size
+    }
+
     pub fn bytes_free(&self) -> usize
     {
         assert!(self.next_idx <= self.mem_size);

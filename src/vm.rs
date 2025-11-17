@@ -845,6 +845,65 @@ impl Actor
         self.alloc.str_val(str_const.to_string())
     }
 
+    /// Ensure that at least num_bytes of free space are available in the allocator
+    /// If the memory is not available, perform GC
+    pub fn ensure_mem_avail(&mut self, num_bytes: usize)
+    {
+        if self.alloc.bytes_free() >= num_bytes {
+            return;
+        }
+
+        println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
+        let start_time = crate::host::get_time_ms();
+
+        // Create a new allocator to copy the data into
+        let mut new_alloc = Alloc::with_size(self.alloc.mem_size());
+
+        // Hash map for remapping copied values
+        let mut dst_map = HashMap::new();
+
+        // Copy the global variables
+        for val in &mut self.globals {
+            *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
+        }
+
+        println!("Stack size: {}", self.stack.len());
+
+        // Copy values on the stack
+        for val in &mut self.stack {
+            *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
+        }
+
+        // Copy closures in the stack frames
+        for frame in &mut self.frames {
+            frame.fun = deepcopy(frame.fun, &mut new_alloc, &mut dst_map);
+        }
+
+        println!("GC copied {} values", dst_map.len());
+        remap(dst_map);
+
+
+        // Note: we may want to run another GC cycle and expand the memory
+        // if too little memory is free
+        // Should have a target for something like 25% of memory free
+
+        // Note: we should also copy in data from the message
+        // allocator. This would need to be done by traversing
+        // the message queue?
+
+
+
+
+
+        // Drop and replace the old allocator
+        self.alloc = new_alloc;
+
+
+        let end_time = crate::host::get_time_ms();
+        let gc_time = end_time - start_time;
+        println!("GC time: {} ms", gc_time);
+    }
+
     /// Call a host function
     fn call_host(&mut self, host_fn: &HostFn, argc: usize) -> Result<(), String>
     {
@@ -1586,6 +1645,12 @@ impl Actor
                 // the constructor for the given class
                 Insn::new { class_id, argc } => {
                     let num_slots = self.get_num_slots(class_id);
+
+                    self.ensure_mem_avail(
+                        std::mem::size_of::<Object>() +
+                        std::mem::size_of::<Value>() * num_slots
+                    );
+
                     let obj_val = self.alloc.new_object(class_id, num_slots);
 
                     // If a constructor method is present
@@ -1614,8 +1679,15 @@ impl Actor
                 }
 
                 Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
+                    let num_slots = num_slots as usize;
+
+                    self.ensure_mem_avail(
+                        std::mem::size_of::<Object>() +
+                        std::mem::size_of::<Value>() * num_slots
+                    );
+
                     // Allocate the object
-                    let obj_val = self.alloc.new_object(class_id, num_slots as usize);
+                    let obj_val = self.alloc.new_object(class_id, num_slots);
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object
