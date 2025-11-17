@@ -2072,7 +2072,22 @@ impl VM
                 queue_rx,
                 globals,
             );
-            actor.call(fun, &args)
+
+            let ret_val = actor.call(fun, &args);
+
+            // TODO: a possible solution here would be to copy heap return
+            // values into our own message allocator, which will continue to
+            // live and won't be garbage collected since this actor is done
+            // executing
+
+            // Deny returning a heap-allocated value
+            // This is because the allocator owning this memory is about
+            // to die
+            if ret_val.is_heap() {
+                panic!("cannot return heap-allocated value from actor");
+            }
+
+            ret_val
         });
 
         // Store the join handles and queue endpoints on the VM
@@ -2090,11 +2105,12 @@ impl VM
         // Get the join handle, then release the VM lock
         let mut vm = vm.lock().unwrap();
         let mut handle = vm.threads.remove(&tid).unwrap();
+        vm.actor_txs.remove(&tid).unwrap();
         drop(vm);
 
         // Note: there is no need to copy data when joining,
         // because the actor sending the data is done running
-        handle.join().expect(&format!("could not actor thread with id {}", tid))
+        handle.join().expect(&format!("could not join thread with id {}", tid))
     }
 
     // Call a function in the main actor
