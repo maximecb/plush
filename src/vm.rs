@@ -182,17 +182,34 @@ pub struct Closure
 pub struct Object
 {
     pub class_id: ClassId,
-    pub slots: Vec<Value>,
+    slots: *mut [Value],
 }
 
 impl Object
 {
-    pub fn new(class_id: ClassId, num_slots: usize) -> Self
+    pub fn new(class_id: ClassId, slots: *mut [Value]) -> Self
     {
         Object {
             class_id,
-            slots: vec![Value::Undef; num_slots]
+            slots,
         }
+    }
+
+    pub fn num_slots(&self) -> usize
+    {
+        unsafe { (&*self.slots).len() }
+    }
+
+    // Get the value associated with a given field
+    pub fn get(&self, idx: usize) -> Value
+    {
+        unsafe { (*self.slots)[idx] }
+    }
+
+    // Set the value of a given field
+    pub fn set(&mut self, idx: usize, val: Value)
+    {
+        unsafe { (*self.slots)[idx] = val }
     }
 }
 
@@ -803,8 +820,7 @@ impl Actor
     pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
     {
         let num_slots = self.get_num_slots(class_id);
-        let obj = Object::new(class_id, num_slots);
-        Value::Object(self.alloc.alloc(obj))
+        self.alloc.new_object(class_id, num_slots)
     }
 
     /// Set the value of an object field
@@ -814,7 +830,7 @@ impl Actor
             Value::Object(p) => {
                 let obj = unsafe { &mut *p };
                 let slot_idx = self.get_slot_idx(obj.class_id, field_name);
-                obj.slots[slot_idx] = val;
+                obj.set(slot_idx, val);
             },
             _ => panic!()
         }
@@ -827,6 +843,65 @@ impl Actor
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
         self.alloc.str_val(str_const.to_string())
+    }
+
+    /// Ensure that at least num_bytes of free space are available in the allocator
+    /// If the memory is not available, perform GC
+    pub fn ensure_mem_avail(&mut self, num_bytes: usize)
+    {
+        if self.alloc.bytes_free() >= num_bytes {
+            return;
+        }
+
+        println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
+        let start_time = crate::host::get_time_ms();
+
+        // Create a new allocator to copy the data into
+        let mut new_alloc = Alloc::with_size(self.alloc.mem_size());
+
+        // Hash map for remapping copied values
+        let mut dst_map = HashMap::new();
+
+        // Copy the global variables
+        for val in &mut self.globals {
+            *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
+        }
+
+        println!("Stack size: {}", self.stack.len());
+
+        // Copy values on the stack
+        for val in &mut self.stack {
+            *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
+        }
+
+        // Copy closures in the stack frames
+        for frame in &mut self.frames {
+            frame.fun = deepcopy(frame.fun, &mut new_alloc, &mut dst_map);
+        }
+
+        println!("GC copied {} values", dst_map.len());
+        remap(dst_map);
+
+
+        // Note: we may want to run another GC cycle and expand the memory
+        // if too little memory is free
+        // Should have a target for something like 25% of memory free
+
+        // Note: we should also copy in data from the message
+        // allocator. This would need to be done by traversing
+        // the message queue?
+
+
+
+
+
+        // Drop and replace the old allocator
+        self.alloc = new_alloc;
+
+
+        let end_time = crate::host::get_time_ms();
+        let gc_time = end_time - start_time;
+        println!("GC time: {} ms", gc_time);
     }
 
     /// Call a host function
@@ -1065,6 +1140,7 @@ impl Actor
             let insn = self.insns[pc];
             pc += 1;
             //println!("executing {:?}", insn);
+            //println!("stack size: {}, executing {:?}", self.stack.len(), insn);
 
             match insn {
                 Insn::nop => {},
@@ -1541,7 +1617,7 @@ impl Actor
                             let obj = unsafe { &mut *p };
 
                             if class_id == obj.class_id {
-                                obj.slots[slot_idx as usize] = val;
+                                obj.set(slot_idx as usize, val);
                             } else {
                                 let slot_idx = self.get_slot_idx(obj.class_id, field_name);
                                 let class_id = obj.class_id;
@@ -1553,7 +1629,7 @@ impl Actor
                                     slot_idx: slot_idx as u32,
                                 };
 
-                                obj.slots[slot_idx] = val;
+                                obj.set(slot_idx, val);
                             }
                         },
 
@@ -1570,8 +1646,13 @@ impl Actor
                 // the constructor for the given class
                 Insn::new { class_id, argc } => {
                     let num_slots = self.get_num_slots(class_id);
-                    let obj = Object::new(class_id, num_slots);
-                    let obj_val = Value::Object(self.alloc.alloc(obj));
+
+                    self.ensure_mem_avail(
+                        std::mem::size_of::<Object>() +
+                        std::mem::size_of::<Value>() * num_slots
+                    );
+
+                    let obj_val = self.alloc.new_object(class_id, num_slots);
 
                     // If a constructor method is present
                     let init_fun = self.get_method(class_id, "init");
@@ -1599,9 +1680,15 @@ impl Actor
                 }
 
                 Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
+                    let num_slots = num_slots as usize;
+
+                    self.ensure_mem_avail(
+                        std::mem::size_of::<Object>() +
+                        std::mem::size_of::<Value>() * num_slots
+                    );
+
                     // Allocate the object
-                    let obj = Object::new(class_id, num_slots as usize);
-                    let obj_val = Value::Object(self.alloc.alloc(obj));
+                    let obj_val = self.alloc.new_object(class_id, num_slots);
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object
@@ -1665,7 +1752,7 @@ impl Actor
 
                             // If the class id doesn't match the cache, update it
                             let val = if class_id == obj.class_id {
-                                obj.slots[slot_idx as usize]
+                                obj.get(slot_idx as usize)
                             } else {
                                 let slot_idx = self.get_slot_idx(obj.class_id, field_name);
                                 let class_id = obj.class_id;
@@ -1677,7 +1764,7 @@ impl Actor
                                     slot_idx: slot_idx as u32,
                                 };
 
-                                obj.slots[slot_idx]
+                                obj.get(slot_idx as usize)
                             };
 
                             if val == Value::Undef {
@@ -2058,7 +2145,22 @@ impl VM
                 queue_rx,
                 globals,
             );
-            actor.call(fun, &args)
+
+            let ret_val = actor.call(fun, &args);
+
+            // TODO: a possible solution here would be to copy heap return
+            // values into our own message allocator, which will continue to
+            // live and won't be garbage collected since this actor is done
+            // executing
+
+            // Deny returning a heap-allocated value
+            // This is because the allocator owning this memory is about
+            // to die
+            if ret_val.is_heap() {
+                panic!("cannot return heap-allocated value from actor");
+            }
+
+            ret_val
         });
 
         // Store the join handles and queue endpoints on the VM
@@ -2076,11 +2178,12 @@ impl VM
         // Get the join handle, then release the VM lock
         let mut vm = vm.lock().unwrap();
         let mut handle = vm.threads.remove(&tid).unwrap();
+        vm.actor_txs.remove(&tid).unwrap();
         drop(vm);
 
         // Note: there is no need to copy data when joining,
         // because the actor sending the data is done running
-        handle.join().expect(&format!("could not actor thread with id {}", tid))
+        handle.join().expect(&format!("could not join thread with id {}", tid))
     }
 
     // Call a function in the main actor

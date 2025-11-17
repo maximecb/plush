@@ -116,8 +116,9 @@ pub fn deepcopy(
             Value::Object(p) => {
                 let new_obj = unsafe { (*p).clone() };
 
-                for val in &new_obj.slots {
-                    push_val!(val);
+                for i in 0..new_obj.num_slots() {
+                    let val = new_obj.get(i);
+                    push_val!(&val);
                 }
 
                 Value::Object(dst_alloc.alloc(new_obj))
@@ -182,8 +183,10 @@ pub fn remap(dst_map: HashMap<Value, Value>)
 
             Value::Object(p) => {
                 let obj = unsafe { &mut **p };
-                for val in &mut obj.slots {
-                    remap_val!(val);
+                for i in 0..obj.num_slots() {
+                    let mut val = obj.get(i);
+                    remap_val!(&mut val);
+                    obj.set(i, val);
                 }
             }
 

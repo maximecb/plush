@@ -223,6 +223,7 @@ impl StmtBox
 
                 // Evaluate the increment expression
                 incr_expr.gen_code(fun, code, alloc)?;
+                code.push(Insn::pop);
 
                 // Jump back to the loop test
                 code.push(Insn::jump { target_ofs: 0 });
