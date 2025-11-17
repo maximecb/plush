@@ -1140,6 +1140,7 @@ impl Actor
             let insn = self.insns[pc];
             pc += 1;
             //println!("executing {:?}", insn);
+            //println!("stack size: {}, executing {:?}", self.stack.len(), insn);
 
             match insn {
                 Insn::nop => {},
