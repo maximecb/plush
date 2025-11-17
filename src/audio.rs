@@ -116,8 +116,8 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     let sample_rate = sample_rate.unwrap_u32();
     let num_channels = num_channels.unwrap_u32();
 
-    if sample_rate != 44100 {
-        return Err("for now, only 44100Hz sample rate supported".into());
+    if sample_rate != 44100 && sample_rate != 8000 {
+        return Err("for now, only 44100Hz or 8000Hz sample rates supported".into());
     }
 
     if num_channels > 1 {

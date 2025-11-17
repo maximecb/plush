@@ -1,0 +1,31 @@
+fun main() {
+    let SAMPLE_RATE = 8000;
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+
+    let var t = 0;
+
+    fun gen_samples(num_samples) {
+        let samples = ByteArray.with_size(num_samples * 4);
+
+        for (let var i = 0; i < num_samples; ++i) {
+            let sample_val = (t*5&t>>7)|(t*3&t>>10);
+            // let sample_val = ((t<<1)^((t<<1)+(t>>7)&t>>12))|t>>(4-(1^7&(t>>19)))|t>>7;
+            samples.store_f32(i, (sample_val%256)/127 - 1.0);
+            t = (t+1) % 8000;
+        }
+
+        return samples;
+    }
+
+    loop {
+        let msg = $actor_recv();
+
+        if (msg instanceof AudioNeeded) {
+
+            let samples = gen_samples(msg.num_samples);
+            $audio_write_samples(dev, samples);
+        }
+    }
+}
+
+main();
