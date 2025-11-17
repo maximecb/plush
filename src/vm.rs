@@ -10,6 +10,7 @@ use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
 use crate::deepcopy::{deepcopy, remap};
 use crate::host::*;
+use crate::str::Str;
 
 /// Instruction opcodes
 /// Note: commonly used upcodes should be in the [0, 127] range (one byte)
@@ -121,8 +122,8 @@ pub enum Insn
     instanceof { class_id: ClassId },
 
     // Get/set field
-    get_field { field: *const String, class_id: ClassId, slot_idx: u32 },
-    set_field { field: *const String, class_id: ClassId, slot_idx: u32 },
+    get_field { field: *const Str, class_id: ClassId, slot_idx: u32 },
+    set_field { field: *const Str, class_id: ClassId, slot_idx: u32 },
 
     // Get/set indexed element
     get_index,
@@ -160,10 +161,10 @@ pub enum Insn
 
     // Call a method on an object
     // call_method (self, arg0, ..., argN)
-    call_method { name: *const String, argc: u8 },
+    call_method { name: *const Str, argc: u8 },
 
     // Call a method with a previously known pc
-    call_method_pc { name: *const String, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
+    call_method_pc { name: *const Str, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
 
     // Return
     ret,
@@ -258,7 +259,7 @@ pub enum Value
     Float64(f64),
 
     // Immutable string
-    String(*const String),
+    String(*const Str),
 
     HostFn(&'static HostFn),
     Fun(FunId),
@@ -449,7 +450,7 @@ macro_rules! unwrap_str {
     // To be used inside the interpreter loop
     ($val: expr, $requester: literal) => {
         match $val {
-            Value::String(p) => unsafe { &**p },
+            Value::String(p) => unsafe { (*p).as_str() },
             _ => error!($requester, "expected string value but got {:?}", $val)
         }
     };
@@ -475,7 +476,7 @@ impl PartialEq for Value
 
             // For strings, we do a structural equality comparison, so
             // that some strings can be interned (deduplicated)
-            (String(p1), String(p2))    => unsafe { **p1 == **p2 },
+            (String(p1), String(p2))    => unsafe { (**p1).as_str() == (**p2).as_str() },
 
             // For int & float, we may need type conversions
             (Float64(a), Int64(b))      => *a == *b as f64,
@@ -842,7 +843,7 @@ impl Actor
     {
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
-        self.alloc.str_val(str_const.to_string())
+        self.alloc.str_val(str_const)
     }
 
     /// Ensure that at least num_bytes of free space are available in the allocator
@@ -1257,7 +1258,8 @@ impl Actor
                         (Value::String(s1), Value::String(s2)) => {
                             let s1 = unsafe { &*s1 };
                             let s2 = unsafe { &*s2 };
-                            self.alloc.str_val(s1.to_owned() + s2)
+                            // TODO: avoid extra allocation
+                            self.alloc.str_val(&(s1.as_str().to_owned() + s2.as_str()))
                         }
 
                         _ => error!("add", "unsupported operand types")
@@ -1432,8 +1434,8 @@ impl Actor
                         (Int64(v0), Float64(v1)) => (v0 as f64) < v1,
 
                         (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
+                            let s1 = unsafe { (*s1).as_str() };
+                            let s2 = unsafe { (*s2).as_str() };
                             s1 < s2
                         }
 
@@ -1455,8 +1457,8 @@ impl Actor
                         (Int64(v0), Float64(v1)) => (v0 as f64) <= v1,
 
                         (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
+                            let s1 = unsafe { (*s1).as_str() };
+                            let s2 = unsafe { (*s2).as_str() };
                             s1 <= s2
                         }
 
@@ -1478,8 +1480,8 @@ impl Actor
                         (Int64(v0), Float64(v1)) => (v0 as f64) > v1,
 
                         (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
+                            let s1 = unsafe { (*s1).as_str() };
+                            let s2 = unsafe { (*s2).as_str() };
                             s1 > s2
                         }
 
@@ -1501,8 +1503,8 @@ impl Actor
                         (Int64(v0), Float64(v1)) => (v0 as f64) >= v1,
 
                         (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
+                            let s1 = unsafe { (*s1).as_str() };
+                            let s2 = unsafe { (*s2).as_str() };
                             s1 >= s2
                         }
 
@@ -1619,7 +1621,7 @@ impl Actor
                             if class_id == obj.class_id {
                                 obj.set(slot_idx as usize, val);
                             } else {
-                                let slot_idx = self.get_slot_idx(obj.class_id, field_name);
+                                let slot_idx = self.get_slot_idx(obj.class_id, field_name.as_str());
                                 let class_id = obj.class_id;
 
                                 // Update the cache
@@ -1635,7 +1637,7 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            dict.set(field_name, val);
+                            dict.set(field_name.as_str(), val);
                         }
 
                         _ => error!("set_field", "set_field on non-object/dict value")
@@ -1740,7 +1742,7 @@ impl Actor
                         Value::String(p) => {
                             match field_name.as_str() {
                                 "len" => {
-                                    let s = unsafe { &*p };
+                                    let s = unsafe { (*p).as_str() };
                                     s.len().into()
                                 }
                                 _ => error!("get_field", "field not found on string")
@@ -1754,7 +1756,7 @@ impl Actor
                             let val = if class_id == obj.class_id {
                                 obj.get(slot_idx as usize)
                             } else {
-                                let slot_idx = self.get_slot_idx(obj.class_id, field_name);
+                                let slot_idx = self.get_slot_idx(obj.class_id, field_name.as_str());
                                 let class_id = obj.class_id;
 
                                 // Update the cache
@@ -1768,7 +1770,7 @@ impl Actor
                             };
 
                             if val == Value::Undef {
-                                error!("get_field", "object field not initialized `{}`", field_name);
+                                error!("get_field", "object field not initialized `{}`", field_name.as_str());
                             }
 
                             val
@@ -1776,7 +1778,7 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            dict.get(field_name)
+                            dict.get(field_name.as_str())
                         }
 
                         _ => error!("get_field", "get_field on non-object value {:?}", obj)
@@ -1937,8 +1939,8 @@ impl Actor
                     match self_val {
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
-                            let fun_id = match self.get_method(obj.class_id, &method_name) {
-                                None => error!("call to method `{}`, not found on class", method_name),
+                            let fun_id = match self.get_method(obj.class_id, method_name.as_str()) {
+                                None => error!("call to method `{}`, not found on class", method_name.as_str()),
                                 Some(fun_id) => fun_id,
                             };
 
@@ -1957,10 +1959,10 @@ impl Actor
                         }
 
                         _ => {
-                            let fun = crate::runtime::get_method(self_val, &method_name);
+                            let fun = crate::runtime::get_method(self_val, method_name.as_str());
 
                             if fun == Value::Nil {
-                                error!("call to unknown method `{}`", method_name);
+                                error!("call to unknown method `{}`", method_name.as_str());
                             }
 
                             call_fun!(fun, argc + 1);

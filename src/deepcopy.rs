@@ -18,7 +18,7 @@ impl Hash for Value
             String(ptr) => {
                 // Hash the string
                 // This will deduplicate identical strings
-                let s: &str = unsafe { &**ptr };
+                let s: &str = unsafe { (**ptr).as_str() };
                 s.hash(state);
             },
 
@@ -89,8 +89,7 @@ pub fn deepcopy(
 
         let new_val = match val {
             Value::String(p) => {
-                let new_str = dst_alloc.alloc(unsafe { (*p).clone() });
-                Value::String(new_str)
+                dst_alloc.str_val(unsafe { (*p).as_str() })
             }
 
             Value::Closure(p) => {
@@ -226,7 +225,7 @@ mod tests
         let mut src_alloc = Alloc::new();
         let mut dst_alloc = Alloc::new();
         let mut dst_map = HashMap::new();
-        let s1 = src_alloc.str_val("foo".to_string());
+        let s1 = src_alloc.str_val("foo");
         let s2 = deepcopy(s1, &mut dst_alloc, &mut dst_map);
         assert!(s1 == s2);
     }
