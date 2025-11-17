@@ -1856,7 +1856,7 @@ impl Actor
                     let val = match obj {
                         Value::Array(p) => {
                             match field_name.as_str() {
-                                "len" => obj.unwrap_arr().elems.len().into(),
+                                "len" => obj.unwrap_arr().len().into(),
                                 _ => error!("get_field", "field not found on array")
                             }
                         }
@@ -1976,15 +1976,15 @@ impl Actor
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
-                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity)).unwrap();
-                    push!(Value::Array(new_arr))
+                    let new_arr = Array::with_capacity(capacity as usize, &mut self.alloc).unwrap();
+                    push!(Value::Array(self.alloc.alloc(new_arr).unwrap()))
                 }
 
                 // Append an element at the end of an array
                 Insn::arr_push => {
                     let val = pop!();
                     let mut arr = pop!();
-                    arr.unwrap_arr().push(val);
+                    arr.unwrap_arr().push(val, &mut self.alloc).unwrap();
                 }
 
                 // Clone a bytearray
