@@ -114,14 +114,17 @@ pub fn deepcopy(
             }
 
             Value::Object(p) => {
-                let new_obj = unsafe { (*p).clone() };
+                let obj = unsafe { &*p };
+                let mut new_obj = dst_alloc.new_object(obj.class_id, obj.num_slots());
+                let mut new_obj = new_obj.unwrap_obj();
 
-                for i in 0..new_obj.num_slots() {
-                    let val = new_obj.get(i);
+                for i in 0..obj.num_slots() {
+                    let val = obj.get(i);
+                    new_obj.set(i, val);
                     push_val!(&val);
                 }
 
-                Value::Object(dst_alloc.alloc(new_obj))
+                Value::Object(new_obj)
             }
 
             Value::Array(p) => {

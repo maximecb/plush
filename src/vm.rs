@@ -868,8 +868,6 @@ impl Actor
             *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
         }
 
-        println!("Stack size: {}", self.stack.len());
-
         // Copy values on the stack
         for val in &mut self.stack {
             *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
