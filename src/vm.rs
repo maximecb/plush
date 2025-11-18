@@ -107,7 +107,8 @@ pub enum Insn
     clos_set { idx: u32 },
     clos_get { idx: u32 },
 
-    // Mutable cell access
+    // Mutable cell operations
+    cell_new,
     cell_set,
     cell_get,
 
@@ -1575,6 +1576,12 @@ impl Actor
                     }
 
                     push!(val);
+                }
+
+                // Create a new mutable cell
+                Insn::cell_new => {
+                    let p_cell = self.alloc.alloc(Value::Nil);
+                    push!(Value::Cell(p_cell));
                 }
 
                 // Set the value stored in a mutable cell

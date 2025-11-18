@@ -291,8 +291,7 @@ impl StmtBox
                     };
 
                     // Allocate a mutable closure cell for this variable
-                    let p_cell = alloc.alloc(Value::Nil);
-                    code.push(Insn::push { val: Value::Cell(p_cell) });
+                    code.push(Insn::cell_new);
                     code.push(Insn::set_local { idx: local_idx });
                 }
 
