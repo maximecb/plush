@@ -156,7 +156,7 @@ pub fn remap(dst_map: HashMap<Value, Value>)
         ($val: expr) => {
             if ($val.is_heap()) {
                 let new_val = dst_map.get($val);
-                assert!(new_val.is_some(), "could not remap val: {:?}", $val);
+                assert!(new_val.is_some(), "remapped val not found in dst map: {:?}", $val);
                 *$val = *new_val.unwrap();
             }
         }

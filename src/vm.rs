@@ -880,17 +880,45 @@ impl Actor
             frame.fun = deepcopy(frame.fun, &mut new_alloc, &mut dst_map);
         }
 
+        // Copy heap values referenced in instructions
+        for insn in &mut self.insns {
+            match insn {
+                Insn::push { val } => {
+                    *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
+                }
+
+                // Instructions referencing name strings
+                Insn::get_field { field: s, .. } |
+                Insn::set_field { field: s, .. } |
+                Insn::call_method { name: s, .. } |
+                Insn::call_method_pc { name: s, .. } => {
+                    *s = match deepcopy(Value::String(*s), &mut new_alloc, &mut dst_map) {
+                        Value::String(s) => s,
+                        _ => panic!(),
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
         println!("GC copied {} values", dst_map.len());
         remap(dst_map);
 
 
-        // Note: we may want to run another GC cycle and expand the memory
+
+        // NOTE: we may want to run another GC cycle and expand the memory
         // if too little memory is free
         // Should have a target for something like 25% of memory free
 
-        // Note: we should also copy in data from the message
-        // allocator. This would need to be done by traversing
+
+
+        // NOTE: we should also copy in data from the message allocator.
+        // This would need to be done by traversing
         // the message queue?
+        // NOTE: if the copying fails because we don't have enough memory,
+        // we need to be able to safely restart copying the message queue,
+        // which is a bit tricky (put things back into the queue?)
 
 
 
