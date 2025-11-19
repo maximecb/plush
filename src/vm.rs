@@ -1986,6 +1986,10 @@ impl Actor
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
+                    self.gc_check(
+                        size_of::<Array>() + size_of::<Value>() * capacity as usize,
+                        &mut vec![],
+                    );
                     let new_arr = self.alloc.alloc(Array::with_capacity(capacity)).unwrap();
                     push!(Value::Array(new_arr))
                 }
