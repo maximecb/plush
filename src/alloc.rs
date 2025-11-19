@@ -15,7 +15,7 @@ impl Alloc
 {
     pub fn new() -> Self
     {
-        Self::with_size(128 * 1024 * 1024)
+        Self::with_size(64 * 1024 * 1024)
     }
 
     pub fn with_size(mem_size_bytes: usize) -> Self
@@ -56,7 +56,7 @@ impl Alloc
 
         // Bump the next allocation index
         let next_idx = obj_pos + size_bytes;
-        if next_idx >= self.mem_size {
+        if next_idx > self.mem_size {
             return Err(())
         }
         self.next_idx = next_idx;
