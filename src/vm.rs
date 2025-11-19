@@ -733,7 +733,7 @@ impl Actor
         };
         let mut dst_map = HashMap::new();
         let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map).unwrap();
-        remap(dst_map);
+        remap(&mut dst_map);
 
         match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
             Ok(_) => Ok(()),
@@ -851,6 +851,67 @@ impl Actor
     /// allocator. If the memory is not available, perform GC.
     pub fn gc_check(&mut self, num_bytes: usize, extra_roots: &mut [&mut Value])
     {
+        fn try_copy(
+            actor: &mut Actor,
+            dst_alloc: &mut Alloc,
+            dst_map: &mut HashMap<Value, Value>,
+            extra_roots: &mut [&mut Value],
+        ) -> Result<(), ()>
+        {
+            // Copy the global variables
+            for val in &mut actor.globals {
+                deepcopy(*val, dst_alloc, dst_map)?;
+            }
+
+            // Copy values on the stack
+            for val in &mut actor.stack {
+                deepcopy(*val, dst_alloc, dst_map)?;
+            }
+
+            // Copy closures in the stack frames
+            for frame in &mut actor.frames {
+                deepcopy(frame.fun, dst_alloc, dst_map)?;
+            }
+
+            // Copy heap values referenced in instructions
+            for insn in &mut actor.insns {
+                match insn {
+                    Insn::push { val } => {
+                        deepcopy(*val, dst_alloc, dst_map)?;
+                    }
+
+                    // Instructions referencing name strings
+                    Insn::get_field { field: s, .. } |
+                    Insn::set_field { field: s, .. } |
+                    Insn::call_method { name: s, .. } |
+                    Insn::call_method_pc { name: s, .. } => {
+                        deepcopy(Value::String(*s), dst_alloc, dst_map)?;
+                    }
+
+                    _ => {}
+                }
+            }
+
+            // Copy extra roots supplied by the user
+            for val in extra_roots {
+                deepcopy(**val, dst_alloc, dst_map)?;
+            }
+
+            println!("GC copied {} values", dst_map.len());
+            remap(dst_map);
+
+            Ok(())
+        }
+
+        fn get_new_val(val: Value, dst_map: &HashMap<Value, Value>) -> Value
+        {
+            if !val.is_heap() {
+                return val;
+            }
+
+            *dst_map.get(&val).unwrap()
+        }
+
         if self.alloc.bytes_free() >= num_bytes {
             return;
         }
@@ -860,68 +921,79 @@ impl Actor
 
         let mut new_mem_size = self.alloc.mem_size();
 
+        // Hash map for remapping copied values
+        let mut dst_map = HashMap::<Value, Value>::new();
+
         loop {
             // Create a new allocator to copy the data into
-            let mut new_alloc = Alloc::with_size(new_mem_size);
+            let mut dst_alloc = Alloc::with_size(new_mem_size);
 
-            // Hash map for remapping copied values
-            let mut dst_map = HashMap::new();
+            // Clear the value map
+            dst_map.clear();
 
-            // Copy the global variables
-            for val in &mut self.globals {
-                *val = deepcopy(*val, &mut new_alloc, &mut dst_map).unwrap();
+            // Try to copy all objects into the new allocator
+            if try_copy(self, &mut dst_alloc, &mut dst_map, extra_roots).is_err() {
+                // If the copying fails, increase the heap size and try again
+                new_mem_size = (new_mem_size * 5) / 4;
+                println!("Increasing heap size to {} bytes", new_mem_size);
+                continue;
             }
 
-            // Copy values on the stack
-            for val in &mut self.stack {
-                *val = deepcopy(*val, &mut new_alloc, &mut dst_map).unwrap();
-            }
 
-            // Copy closures in the stack frames
-            for frame in &mut self.frames {
-                frame.fun = deepcopy(frame.fun, &mut new_alloc, &mut dst_map).unwrap();
-            }
+            // NOTE: we may want to run another GC cycle and expand the memory
+            // if too little memory is free
+            // Should have a target for something like 25% of memory free
 
-            // Copy heap values referenced in instructions
-            for insn in &mut self.insns {
-                match insn {
-                    Insn::push { val } => {
-                        *val = deepcopy(*val, &mut new_alloc, &mut dst_map).unwrap();
-                    }
 
-                    // Instructions referencing name strings
-                    Insn::get_field { field: s, .. } |
-                    Insn::set_field { field: s, .. } |
-                    Insn::call_method { name: s, .. } |
-                    Insn::call_method_pc { name: s, .. } => {
-                        *s = match deepcopy(Value::String(*s), &mut new_alloc, &mut dst_map).unwrap() {
-                            Value::String(s) => s,
-                            _ => panic!(),
-                        }
-                    }
-
-                    _ => {}
-                }
-            }
-
-            // Copy extra roots supplied by the user
-            for val in extra_roots {
-                **val = deepcopy(**val, &mut new_alloc, &mut dst_map).unwrap();
-            }
-
-            println!("GC copied {} values", dst_map.len());
-            remap(dst_map);
 
             // Copying successful
             // Drop and replace the old allocator
-            self.alloc = new_alloc;
+            self.alloc = dst_alloc;
             break;
         }
 
+        // Remap the global variables
+        for val in &mut self.globals {
+            *val = get_new_val(*val, &dst_map);
+        }
 
-        // NOTE: we may want to run another GC cycle and expand the memory
-        // if too little memory is free
-        // Should have a target for something like 25% of memory free
+        // Remap values on the stack
+        for val in &mut self.stack {
+            *val = get_new_val(*val, &dst_map);
+        }
+
+        // Remap closures in the stack frames
+        for frame in &mut self.frames {
+            frame.fun = get_new_val(frame.fun, &dst_map);
+        }
+
+        // Remap heap values referenced in instructions
+        for insn in &mut self.insns {
+            match insn {
+                Insn::push { val } => {
+                    *val = get_new_val(*val, &dst_map);
+                }
+
+                // Instructions referencing name strings
+                Insn::get_field { field: s, .. } |
+                Insn::set_field { field: s, .. } |
+                Insn::call_method { name: s, .. } |
+                Insn::call_method_pc { name: s, .. } => {
+                    match get_new_val(Value::String(*s), &dst_map) {
+                        Value::String(new_s) => *s = new_s,
+                        _ => panic!(),
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        // Remap extra roots supplied by the user
+        for val in extra_roots {
+            **val = get_new_val(**val, &dst_map);
+        }
+
 
 
 
@@ -931,6 +1003,8 @@ impl Actor
         // NOTE: if the copying fails because we don't have enough memory,
         // we need to be able to safely restart copying the message queue,
         // which is a bit tricky (put things back into the queue?)
+
+
 
 
 
@@ -2177,7 +2251,7 @@ impl VM
             *val = deepcopy(*val, &mut msg_alloc, &mut dst_map).unwrap();
         }
 
-        remap(dst_map);
+        remap(&mut dst_map);
 
         // Wrap the message allocator in a shared mutex
         let msg_alloc = Arc::new(Mutex::new(msg_alloc));

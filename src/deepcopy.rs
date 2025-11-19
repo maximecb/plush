@@ -153,7 +153,7 @@ pub fn deepcopy(
 }
 
 /// Remap internal references to copied values
-pub fn remap(dst_map: HashMap<Value, Value>)
+pub fn remap(dst_map: &mut HashMap<Value, Value>)
 {
     macro_rules! remap_val {
         ($val: expr) => {
