@@ -326,7 +326,7 @@ impl ExprBox
             Expr::HostFn(f) => code.push(Insn::push { val: Value::HostFn(*f) }),
 
             Expr::String(s) => {
-                code.push(Insn::push { val: alloc.str_val(s.clone()) });
+                code.push(Insn::push { val: alloc.str_val(&s) });
             }
 
             Expr::ByteArray(bytes) => {
@@ -366,7 +366,7 @@ impl ExprBox
 
             Expr::Member { base, field } => {
                 base.gen_code(fun, code, alloc)?;
-                let field = alloc.str(field.clone());
+                let field = alloc.str(&field);
                 code.push(Insn::get_field {
                     field,
                     class_id: Default::default(),
@@ -445,7 +445,7 @@ impl ExprBox
                             arg.gen_code(fun, code, alloc)?;
                         }
 
-                        let name = alloc.str(field.clone());
+                        let name = alloc.str(&field);
                         code.push(Insn::call_method { name, argc });
                     }
 
@@ -540,7 +540,7 @@ fn gen_dict_expr(
 
         expr.gen_code(fun, code, alloc)?;
 
-        let field_name = alloc.str(name.clone());
+        let field_name = alloc.str(&name);
 
         code.push(Insn::set_field {
             field: field_name,
@@ -782,7 +782,7 @@ fn gen_assign(
         }
 
         Expr::Member { base, field } => {
-            let field = alloc.str(field.to_string());
+            let field = alloc.str(&field);
 
             if need_value {
                 rhs.gen_code(fun, code, alloc)?;

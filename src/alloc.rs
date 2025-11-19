@@ -1,4 +1,5 @@
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
+use crate::str::Str;
 use crate::vm::{Value, Object};
 use crate::ast::ClassId;
 
@@ -46,7 +47,7 @@ impl Alloc
     }
 
     // Allocate a block of a given size
-    pub fn alloc_bytes(&mut self, size_bytes: usize) -> *mut u8
+    fn alloc_bytes(&mut self, size_bytes: usize) -> *mut u8
     {
         let align_bytes = 8;
 
@@ -104,14 +105,23 @@ impl Alloc
         Value::Object(obj_ptr)
     }
 
-    // Allocate an immutable string
-    pub fn str(&mut self, s: String) -> *const String
+    pub fn str(&mut self, s: &str) -> *const Str
     {
-        let s_ptr = self.alloc(s);
-        s_ptr as *const String
+        let bytes = self.alloc_bytes(s.len());
+        let p = bytes as *mut u8;
+
+        // Write string bytes at location without calling drop
+        // on what's currently at that location
+        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), p, s.len()) };
+        let raw_str = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, s.len()))
+        };
+        let raw_str_ptr = raw_str as *const str;
+        let str = self.alloc(Str::new(raw_str_ptr));
+        str
     }
 
-    pub fn str_val(&mut self, s: String) -> Value
+    pub fn str_val(&mut self, s: &str) -> Value
     {
         Value::String(self.str(s))
     }

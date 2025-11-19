@@ -300,7 +300,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             actor.set_field(msg, "window_id", Value::from(0));
             let kind = actor.intern_str("TEXT_INPUT");
             actor.set_field(msg, "kind", kind);
-            let text = actor.alloc.str_val(text);
+            let text = actor.alloc.str_val(&text);
             actor.set_field(msg, "text", text);
 
             Some(msg)
