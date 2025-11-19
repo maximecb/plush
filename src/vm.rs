@@ -939,12 +939,15 @@ impl Actor
                 continue;
             }
 
-
-            // NOTE: we may want to run another GC cycle and expand the memory
-            // if too little memory is free
-            // Should have a target for something like 25% of memory free
-
-
+            // If there is not enough free memory after copying
+            let min_free_bytes = std::cmp::max(self.alloc.mem_size() / 5, num_bytes);
+            let bytes_free = dst_alloc.bytes_free();
+            if bytes_free < min_free_bytes  {
+                // Increase the heap size and try again
+                new_mem_size = (new_mem_size * 5) / 4;
+                println!("{} bytes free, increasing heap size to {} bytes", bytes_free, new_mem_size);
+                continue;
+            }
 
             // Copying successful
             // Drop and replace the old allocator
