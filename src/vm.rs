@@ -732,7 +732,7 @@ impl Actor
             None => return Err(()),
         };
         let mut dst_map = HashMap::new();
-        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map);
+        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map).unwrap();
         remap(dst_map);
 
         match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
@@ -822,7 +822,7 @@ impl Actor
     pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
     {
         let num_slots = self.get_num_slots(class_id);
-        self.alloc.new_object(class_id, num_slots)
+        self.alloc.new_object(class_id, num_slots).unwrap()
     }
 
     /// Set the value of an object field
@@ -844,7 +844,7 @@ impl Actor
     {
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
-        self.alloc.str_val(str_const)
+        self.alloc.str_val(str_const).unwrap()
     }
 
     /// Ensure that at least num_bytes of free space are available in the
@@ -858,57 +858,65 @@ impl Actor
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
         let start_time = crate::host::get_time_ms();
 
-        // Create a new allocator to copy the data into
-        let mut new_alloc = Alloc::with_size(self.alloc.mem_size());
+        let mut new_mem_size = self.alloc.mem_size();
 
-        // Hash map for remapping copied values
-        let mut dst_map = HashMap::new();
+        loop {
+            // Create a new allocator to copy the data into
+            let mut new_alloc = Alloc::with_size(new_mem_size);
 
-        // Copy the global variables
-        for val in &mut self.globals {
-            *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
-        }
+            // Hash map for remapping copied values
+            let mut dst_map = HashMap::new();
 
-        // Copy values on the stack
-        for val in &mut self.stack {
-            *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
-        }
-
-        // Copy closures in the stack frames
-        for frame in &mut self.frames {
-            frame.fun = deepcopy(frame.fun, &mut new_alloc, &mut dst_map);
-        }
-
-        // Copy heap values referenced in instructions
-        for insn in &mut self.insns {
-            match insn {
-                Insn::push { val } => {
-                    *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
-                }
-
-                // Instructions referencing name strings
-                Insn::get_field { field: s, .. } |
-                Insn::set_field { field: s, .. } |
-                Insn::call_method { name: s, .. } |
-                Insn::call_method_pc { name: s, .. } => {
-                    *s = match deepcopy(Value::String(*s), &mut new_alloc, &mut dst_map) {
-                        Value::String(s) => s,
-                        _ => panic!(),
-                    }
-                }
-
-                _ => {}
+            // Copy the global variables
+            for val in &mut self.globals {
+                *val = deepcopy(*val, &mut new_alloc, &mut dst_map).unwrap();
             }
+
+            // Copy values on the stack
+            for val in &mut self.stack {
+                *val = deepcopy(*val, &mut new_alloc, &mut dst_map).unwrap();
+            }
+
+            // Copy closures in the stack frames
+            for frame in &mut self.frames {
+                frame.fun = deepcopy(frame.fun, &mut new_alloc, &mut dst_map).unwrap();
+            }
+
+            // Copy heap values referenced in instructions
+            for insn in &mut self.insns {
+                match insn {
+                    Insn::push { val } => {
+                        *val = deepcopy(*val, &mut new_alloc, &mut dst_map).unwrap();
+                    }
+
+                    // Instructions referencing name strings
+                    Insn::get_field { field: s, .. } |
+                    Insn::set_field { field: s, .. } |
+                    Insn::call_method { name: s, .. } |
+                    Insn::call_method_pc { name: s, .. } => {
+                        *s = match deepcopy(Value::String(*s), &mut new_alloc, &mut dst_map).unwrap() {
+                            Value::String(s) => s,
+                            _ => panic!(),
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+
+            // Copy extra roots supplied by the user
+            for val in extra_roots {
+                **val = deepcopy(**val, &mut new_alloc, &mut dst_map).unwrap();
+            }
+
+            println!("GC copied {} values", dst_map.len());
+            remap(dst_map);
+
+            // Copying successful
+            // Drop and replace the old allocator
+            self.alloc = new_alloc;
+            break;
         }
-
-        // Copy extra roots supplied by the user
-        for val in extra_roots {
-            **val = deepcopy(**val, &mut new_alloc, &mut dst_map);
-        }
-
-        println!("GC copied {} values", dst_map.len());
-        remap(dst_map);
-
 
 
         // NOTE: we may want to run another GC cycle and expand the memory
@@ -926,10 +934,6 @@ impl Actor
 
 
 
-
-
-        // Drop and replace the old allocator
-        self.alloc = new_alloc;
 
 
         let end_time = crate::host::get_time_ms();
@@ -1299,7 +1303,7 @@ impl Actor
 
                             let s0 = unwrap_str!(v0);
                             let s1 = unwrap_str!(v1);
-                            self.alloc.str_val(&(s0.to_owned() + s1))
+                            self.alloc.str_val(&(s0.to_owned() + s1)).unwrap()
                         }
 
                         _ => error!("add", "unsupported operand types")
@@ -1582,7 +1586,7 @@ impl Actor
                 // Create a new closure
                 Insn::clos_new { fun_id, num_slots } => {
                     let clos = Closure { fun_id, slots: vec![Undef; num_slots as usize] };
-                    let clos_val = self.alloc.alloc(clos);
+                    let clos_val = self.alloc.alloc(clos).unwrap();
                     push!(Value::Closure(clos_val));
                 }
 
@@ -1621,7 +1625,7 @@ impl Actor
 
                 // Create a new mutable cell
                 Insn::cell_new => {
-                    let p_cell = self.alloc.alloc(Value::Nil);
+                    let p_cell = self.alloc.alloc(Value::Nil).unwrap();
                     push!(Value::Cell(p_cell));
                 }
 
@@ -1650,7 +1654,7 @@ impl Actor
 
                 // Create new empty dictionary
                 Insn::dict_new => {
-                    let new_obj = self.alloc.alloc(Dict::default());
+                    let new_obj = self.alloc.alloc(Dict::default()).unwrap();
                     push!(Value::Dict(new_obj))
                 }
 
@@ -1701,7 +1705,7 @@ impl Actor
                         &mut vec![],
                     );
 
-                    let obj_val = self.alloc.new_object(class_id, num_slots);
+                    let obj_val = self.alloc.new_object(class_id, num_slots).unwrap();
 
                     // If a constructor method is present
                     let init_fun = self.get_method(class_id, "init");
@@ -1738,7 +1742,7 @@ impl Actor
                     );
 
                     // Allocate the object
-                    let obj_val = self.alloc.new_object(class_id, num_slots);
+                    let obj_val = self.alloc.new_object(class_id, num_slots).unwrap();
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object
@@ -1895,7 +1899,7 @@ impl Actor
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
-                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity));
+                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity)).unwrap();
                     push!(Value::Array(new_arr))
                 }
 
@@ -1910,7 +1914,7 @@ impl Actor
                 Insn::ba_clone => {
                     let mut val = pop!();
                     let ba = val.unwrap_ba();
-                    let p_clone = self.alloc.alloc(ba.clone());
+                    let p_clone = self.alloc.alloc(ba.clone()).unwrap();
                     push!(Value::ByteArray(p_clone));
                 }
 
@@ -2165,12 +2169,12 @@ impl VM
 
         // We need to recursively copy the function/closure
         // using the actor's message allocator
-        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map);
+        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map).unwrap();
 
         // Copy the global variables from the parent actor
         let mut globals = parent.globals.clone();
         for val in &mut globals {
-            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map);
+            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map).unwrap();
         }
 
         remap(dst_map);
