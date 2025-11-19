@@ -118,6 +118,7 @@ impl Alloc
         };
         let raw_str_ptr = raw_str as *const str;
         let str = self.alloc(Str::new(raw_str_ptr));
+
         str
     }
 

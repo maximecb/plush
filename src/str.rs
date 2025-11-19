@@ -9,4 +9,8 @@ impl Str {
     pub fn as_str(&self) -> &str {
         unsafe { &*self.0 }
     }
+
+    pub fn len(&self) -> usize {
+        unsafe { &*self.0 }.len()
+    }
 }

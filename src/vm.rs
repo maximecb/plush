@@ -847,9 +847,9 @@ impl Actor
         self.alloc.str_val(str_const)
     }
 
-    /// Ensure that at least num_bytes of free space are available in the allocator
-    /// If the memory is not available, perform GC
-    pub fn ensure_mem_avail(&mut self, num_bytes: usize)
+    /// Ensure that at least num_bytes of free space are available in the
+    /// allocator. If the memory is not available, perform GC.
+    pub fn gc_check(&mut self, num_bytes: usize, extra_roots: &mut [&mut Value])
     {
         if self.alloc.bytes_free() >= num_bytes {
             return;
@@ -899,6 +899,11 @@ impl Actor
 
                 _ => {}
             }
+        }
+
+        // Copy extra roots supplied by the user
+        for val in extra_roots {
+            **val = deepcopy(**val, &mut new_alloc, &mut dst_map);
         }
 
         println!("GC copied {} values", dst_map.len());
@@ -1273,8 +1278,8 @@ impl Actor
                 }
 
                 Insn::add => {
-                    let v1 = pop!();
-                    let v0 = pop!();
+                    let mut v1 = pop!();
+                    let mut v0 = pop!();
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 + v1),
@@ -1282,11 +1287,19 @@ impl Actor
                         (Int64(v0), Float64(v1)) => Float64(v0 as f64 + v1),
                         (Float64(v0), Int64(v1)) => Float64(v0 + v1 as f64),
 
-                        (Value::String(s1), Value::String(s2)) => {
+                        (Value::String(s0), Value::String(s1)) => {
+                            let s0 = unsafe { &*s0 };
                             let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
-                            // TODO: avoid extra allocation
-                            self.alloc.str_val(&(s1.as_str().to_owned() + s2.as_str()))
+
+                            self.gc_check(
+                                std::mem::size_of::<Str>() +
+                                s0.len() + s1.len(),
+                                &mut [&mut v0, &mut v1],
+                            );
+
+                            let s0 = unwrap_str!(v0);
+                            let s1 = unwrap_str!(v1);
+                            self.alloc.str_val(&(s0.to_owned() + s1))
                         }
 
                         _ => error!("add", "unsupported operand types")
@@ -1682,9 +1695,10 @@ impl Actor
                 Insn::new { class_id, argc } => {
                     let num_slots = self.get_num_slots(class_id);
 
-                    self.ensure_mem_avail(
+                    self.gc_check(
                         std::mem::size_of::<Object>() +
-                        std::mem::size_of::<Value>() * num_slots
+                        std::mem::size_of::<Value>() * num_slots,
+                        &mut vec![],
                     );
 
                     let obj_val = self.alloc.new_object(class_id, num_slots);
@@ -1717,9 +1731,10 @@ impl Actor
                 Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
                     let num_slots = num_slots as usize;
 
-                    self.ensure_mem_avail(
+                    self.gc_check(
                         std::mem::size_of::<Object>() +
-                        std::mem::size_of::<Value>() * num_slots
+                        std::mem::size_of::<Value>() * num_slots,
+                        &mut vec![],
                     );
 
                     // Allocate the object
