@@ -1,3 +1,4 @@
+use crate::array::Array;
 use crate::ast::*;
 use crate::vm::{Value, Actor};
 use crate::{error, unwrap_usize, unwrap_str};
@@ -248,13 +249,16 @@ fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Result<Value, String
 {
     let s = unwrap_str!(s);
     let sep = unwrap_str!(sep);
+    let str_parts = s.split(sep);
+    let size = str_parts.size_hint().0;
 
-    let parts: Vec<Value> = s.split(sep).map(|part| {
-        actor.alloc.str_val(&part.to_string()).unwrap()
-    }).collect();
+    let mut array = Array::with_capacity(size, &mut actor.alloc).unwrap();
 
-    let arr = crate::array::Array { elems: parts };
-    Ok(Value::Array(actor.alloc.alloc(arr).unwrap()))
+    for part in str_parts {
+        array.push(actor.alloc.str_val(part).unwrap(), &mut actor.alloc).unwrap();
+    }
+
+    Ok(Value::Array(actor.alloc.alloc(array).unwrap()))
 }
 
 pub fn init_runtime(prog: &mut Program)

@@ -1866,7 +1866,7 @@ impl Actor
                     let val = match obj {
                         Value::Array(p) => {
                             match field_name.as_str() {
-                                "len" => obj.unwrap_arr().elems.len().into(),
+                                "len" => obj.unwrap_arr().len().into(),
                                 _ => error!("get_field", "field not found on array")
                             }
                         }
@@ -1998,7 +1998,7 @@ impl Actor
                 Insn::arr_push => {
                     let val = pop!();
                     let mut arr = pop!();
-                    arr.unwrap_arr().push(val);
+                    arr.unwrap_arr().push(val, &mut self.alloc).unwrap();
                 }
 
                 // Clone a bytearray

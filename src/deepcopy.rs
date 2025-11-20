@@ -127,9 +127,9 @@ pub fn deepcopy(
             }
 
             Value::Array(p) => {
-                let new_arr = unsafe { (*p).clone() };
+                let new_arr = unsafe { (*p).clone(dst_alloc).unwrap() };
 
-                for val in &new_arr.elems {
+                for val in new_arr.items() {
                     push_val!(val);
                 }
 
@@ -195,7 +195,7 @@ pub fn remap(dst_map: &mut HashMap<Value, Value>)
 
             Value::Array(p) => {
                 let arr = unsafe { &mut **p };
-                for val in &mut arr.elems {
+                for val in arr.items_mut() {
                     remap_val!(val);
                 }
             }
