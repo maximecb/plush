@@ -12,6 +12,7 @@ impl Array
 {
     pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Result<Self, ()>
     {
+        let capacity = std::cmp::max(capacity, 1);
         let table = alloc.alloc_table(capacity)?;
         Ok(Array { elems: table, len: 0 })
     }
@@ -19,46 +20,51 @@ impl Array
     pub fn clone(&self, alloc: &mut Alloc) -> Result<Self, ()>
     {
         let table = alloc.alloc_table(self.len)?;
-        let mut arr = Array { elems: table, len: self.len };
-        arr.items_mut().copy_from_slice(self.items());
-        Ok(arr)
+        let mut new_arr = Array { elems: table, len: self.len };
+        new_arr.items_mut().copy_from_slice(self.items());
+        Ok(new_arr)
     }
 
     pub fn items(&self) -> &[Value] {
-        unsafe { &(*self.elems)[..self.len] }
+        let elems = unsafe { &*self.elems };
+        &elems[..self.len]
     }
 
     pub fn items_mut(&mut self) -> &mut [Value] {
-        unsafe { &mut (*self.elems)[..self.len] }
+        let elems = unsafe { &mut *self.elems };
+        &mut elems[..self.len]
     }
 
     pub fn push(&mut self, val: Value, alloc: &mut Alloc) -> Result<(), ()>
     {
+        let elems = self.items_mut();
+
+        // If we are at capacity
         if self.len == self.elems.len() {
-            let new_len = self.len * 2 + 1;
-            let new_elems = alloc.alloc_table(new_len)?;
-            unsafe {
-                (&mut *new_elems)[..self.len].copy_from_slice(&(*self.elems)[..self.len]);
-                self.elems = new_elems;
-            }
+            let new_len = self.len * 2;
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len)? };
+            new_elems[..self.len].copy_from_slice(self.items());
+            self.elems = new_elems;
         }
+
         unsafe {
             (&mut *self.elems)[self.len] = val;
             self.len += 1;
         }
+
         Ok(())
     }
 
     pub fn insert(&mut self, idx: usize, val: Value, alloc: &mut Alloc) -> Result<(), ()>
     {
+        // If we are at capacity
         if self.len == self.elems.len() {
-            let new_len = self.len * 2 + 1;
-            let new_elems = alloc.alloc_table(new_len)?;
-            unsafe {
-                (&mut *new_elems).copy_from_slice(&(*self.elems)[..self.len]);
-                self.elems = new_elems;
-            }
+            let new_len = self.len * 2;
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len)? };
+            new_elems[..self.len].copy_from_slice(self.items());
+            self.elems = new_elems;
         }
+
         unsafe {
             (&mut *self.elems).copy_within(idx..self.len, idx + 1);
             (&mut *self.elems)[idx] = val;
@@ -84,20 +90,22 @@ impl Array
     }
 
     pub fn extend(&mut self, other: &Array, alloc: &mut Alloc) -> Result<(), ()> {
-        let other_elems = other.elems;
+        let other_elems = other.items();
+        let cur_len = self.len();
+
         if self.len + other_elems.len() > self.elems.len() {
             let new_len = self.len + other_elems.len();
-            let new_elems = alloc.alloc_table(new_len)?;
-            unsafe {
-                (&mut *new_elems)[..self.len].copy_from_slice(&(*self.elems)[..self.len]);
-                (&mut *new_elems)[self.len..].copy_from_slice(&(*other_elems)[..other_elems.len()]);
-                self.elems = new_elems;
-            }
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len)? };
+
+            let elems = self.items();
+            new_elems[..cur_len].copy_from_slice(elems);
+            new_elems[cur_len..].copy_from_slice(other_elems);
+            self.elems = new_elems;
         } else {
-            unsafe {
-                (&mut *self.elems)[self.len..].copy_from_slice(&(*other_elems)[..other_elems.len()]);
-            }
+            let mut elems = self.items_mut();
+            elems[cur_len..].copy_from_slice(other.items());
         }
+
         self.len += other_elems.len();
 
         Ok(())

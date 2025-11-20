@@ -1986,12 +1986,15 @@ impl Actor
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
+                    let capacity = capacity as usize;
+
                     self.gc_check(
-                        size_of::<Array>() + size_of::<Value>() * capacity as usize,
+                        size_of::<Array>() + size_of::<Value>() * capacity,
                         &mut vec![],
                     );
-                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity)).unwrap();
-                    push!(Value::Array(new_arr))
+
+                    let new_arr = Array::with_capacity(capacity, &mut self.alloc).unwrap();
+                    push!(Value::Array(self.alloc.alloc(new_arr).unwrap()))
                 }
 
                 // Append an element at the end of an array
