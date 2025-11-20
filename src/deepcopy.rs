@@ -127,7 +127,8 @@ pub fn deepcopy(
             }
 
             Value::Array(p) => {
-                let new_arr = unsafe { (*p).clone(dst_alloc).unwrap() };
+                let arr = unsafe { &*p };
+                let new_arr = arr.clone(dst_alloc)?;
 
                 for val in new_arr.items() {
                     push_val!(val);

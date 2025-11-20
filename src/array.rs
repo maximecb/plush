@@ -4,8 +4,8 @@ use crate::host::HostFn;
 
 pub struct Array
 {
-    pub elems: *mut [Value],
-    pub len: usize,
+    elems: *mut [Value],
+    len: usize,
 }
 
 impl Array
@@ -25,6 +25,26 @@ impl Array
         Ok(new_arr)
     }
 
+    pub fn len(&self) -> usize
+    {
+        self.len
+    }
+
+    pub fn capacity(&self) -> usize
+    {
+        self.elems.len()
+    }
+
+    pub fn get(&self, idx: usize) -> Value
+    {
+        unsafe { (*self.elems) [idx] }
+    }
+
+    pub fn set(&mut self, idx: usize, val: Value)
+    {
+        unsafe { (*self.elems) [idx] = val };
+    }
+
     pub fn items(&self) -> &[Value] {
         let elems = unsafe { &*self.elems };
         &elems[..self.len]
@@ -37,6 +57,8 @@ impl Array
 
     pub fn push(&mut self, val: Value, alloc: &mut Alloc) -> Result<(), ()>
     {
+        assert!(self.len <= self.elems.len());
+
         let elems = self.items_mut();
 
         // If we are at capacity
@@ -120,20 +142,6 @@ impl Array
         self.len -= 1;
         unsafe { (*self.elems) [self.len] }
     }
-
-    pub fn get(&self, idx: usize) -> Value
-    {
-        unsafe { (*self.elems) [idx] }
-    }
-
-    pub fn set(&mut self, idx: usize, val: Value)
-    {
-        unsafe { (*self.elems) [idx] = val };
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
 }
 
 pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_val: Value) -> Result<Value, String>
@@ -145,9 +153,19 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_v
     Ok(Value::Array(actor.alloc.alloc(arr).unwrap()))
 }
 
-pub fn array_push(actor: &mut Actor, mut array: Value, val: Value) -> Result<Value, String>
+pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result<Value, String>
 {
-    array.unwrap_arr().push(val, &mut actor.alloc).unwrap();
+    let arr = array.unwrap_arr();
+
+    if arr.len() == arr.capacity() {
+        actor.gc_check(
+            size_of::<Array>() + size_of::<Value>() * arr.capacity() * 2,
+            &mut [&mut array, &mut val]
+        )
+    }
+
+    let arr = array.unwrap_arr();
+    arr.push(val, &mut actor.alloc).unwrap();
     Ok(Value::Nil)
 }
 
