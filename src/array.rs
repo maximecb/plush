@@ -19,7 +19,8 @@ impl Array
 
     pub fn clone(&self, alloc: &mut Alloc) -> Result<Self, ()>
     {
-        let table = alloc.alloc_table(self.len)?;
+        let capacity = std::cmp::max(self.len, 1);
+        let table = alloc.alloc_table(capacity)?;
         let mut new_arr = Array { elems: table, len: self.len };
         new_arr.items_mut().copy_from_slice(self.items());
         Ok(new_arr)
