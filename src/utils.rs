@@ -1,5 +1,5 @@
 /// Produce a string with comma separator for thousands for an integer
-pub fn thousands_sep(n: u64) -> String
+pub fn thousands_sep<T: ToString>(n: T) -> String
 {
     let num_chars: Vec<char> = n.to_string().chars().rev().collect();
 

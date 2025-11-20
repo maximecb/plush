@@ -2,6 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
+use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
@@ -897,7 +898,12 @@ impl Actor
                 deepcopy(**val, dst_alloc, dst_map)?;
             }
 
-            println!("GC copied {} values", dst_map.len());
+            println!(
+                "GC copied {} values, {} bytes free",
+                thousands_sep(dst_map.len()),
+                thousands_sep(dst_alloc.bytes_free()),
+            );
+
             remap(dst_map);
 
             Ok(())
@@ -912,7 +918,8 @@ impl Actor
             *dst_map.get(&val).unwrap()
         }
 
-        if self.alloc.bytes_free() >= num_bytes {
+        // Add some extra bytes for alignment
+        if self.alloc.bytes_free() >= (num_bytes + 16) {
             return;
         }
 
@@ -945,7 +952,10 @@ impl Actor
             if bytes_free < min_free_bytes  {
                 // Increase the heap size and try again
                 new_mem_size = (new_mem_size * 5) / 4;
-                println!("{} bytes free, increasing heap size to {} bytes", bytes_free, new_mem_size);
+                println!(
+                    "Increasing heap size to {} bytes",
+                    thousands_sep(new_mem_size),
+                );
                 continue;
             }
 
@@ -1976,8 +1986,12 @@ impl Actor
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
-                    let new_arr = Array::with_capacity(capacity as usize, &mut self.alloc).unwrap();
-                    push!(Value::Array(self.alloc.alloc(new_arr).unwrap()))
+                    self.gc_check(
+                        size_of::<Array>() + size_of::<Value>() * capacity as usize,
+                        &mut vec![],
+                    );
+                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity)).unwrap();
+                    push!(Value::Array(new_arr))
                 }
 
                 // Append an element at the end of an array
