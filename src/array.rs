@@ -145,9 +145,15 @@ impl Array
     }
 }
 
-pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, fill_val: Value) -> Result<Value, String>
+pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fill_val: Value) -> Result<Value, String>
 {
     let num_elems = num_elems.unwrap_usize();
+
+    actor.gc_check(
+        size_of::<Array>() + size_of::<Value>() * num_elems,
+        &mut [&mut fill_val]
+    );
+
     let mut elems = actor.alloc.alloc_table(num_elems).unwrap();
     unsafe { (&mut *elems).fill(fill_val); }
     let arr = Array { elems, len: num_elems };

@@ -941,8 +941,11 @@ impl Actor
             // Try to copy all objects into the new allocator
             if try_copy(self, &mut dst_alloc, &mut dst_map, extra_roots).is_err() {
                 // If the copying fails, increase the heap size and try again
-                new_mem_size = (new_mem_size * 5) / 4;
-                println!("Increasing heap size to {} bytes", new_mem_size);
+                new_mem_size = (new_mem_size * 3) / 2;
+                println!(
+                    "Increasing heap size to {} bytes",
+                    thousands_sep(new_mem_size),
+                );
                 continue;
             }
 
@@ -951,7 +954,7 @@ impl Actor
             let bytes_free = dst_alloc.bytes_free();
             if bytes_free < min_free_bytes  {
                 // Increase the heap size and try again
-                new_mem_size = (new_mem_size * 5) / 4;
+                new_mem_size = (new_mem_size * 3) / 2;
                 println!(
                     "Increasing heap size to {} bytes",
                     thousands_sep(new_mem_size),
