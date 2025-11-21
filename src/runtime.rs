@@ -53,6 +53,8 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_i64();
     let s = format!("{}", v);
+
+    actor.gc_check(32, &mut []);
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
@@ -161,6 +163,7 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
     let s = format!("{}", v);
+    actor.gc_check(1024, &mut []);
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
@@ -169,6 +172,7 @@ fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Resu
     let num = v.unwrap_f64();
     let decimals = unwrap_usize!(decimals);
     let s = format!("{:.*}", decimals, num);
+    actor.gc_check(std::cmp::max(1024, decimals), &mut []);
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
