@@ -15,7 +15,7 @@ impl Alloc
 {
     pub fn new() -> Self
     {
-        Self::with_size(32 * 1024 * 1024)
+        Self::with_size(16 * 1024 * 1024)
     }
 
     pub fn with_size(mem_size_bytes: usize) -> Self

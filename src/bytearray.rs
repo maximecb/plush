@@ -170,17 +170,15 @@ fn blit_bgra32(
 }
 
 /// Create a new ByteArray instance
-pub fn ba_new(actor: &mut Actor, _self: Value) -> Result<Value, String>
-{
-    let ba = ByteArray::default();
-    let new_arr = actor.alloc.alloc(ba).unwrap();
-    Ok(Value::ByteArray(new_arr))
-}
-
-/// Create a new ByteArray instance
 pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result<Value, String>
 {
     let num_bytes = num_bytes.unwrap_usize();
+
+    actor.gc_check(
+        size_of::<ByteArray>() + num_bytes,
+        &mut []
+    );
+
     let mut bytes = Vec::with_capacity(num_bytes);
     bytes.resize(num_bytes, 0);
     let ba = ByteArray { bytes };

@@ -1792,7 +1792,7 @@ impl Actor
                     self.gc_check(
                         std::mem::size_of::<Object>() +
                         std::mem::size_of::<Value>() * num_slots,
-                        &mut vec![],
+                        &mut [],
                     );
 
                     let obj_val = self.alloc.new_object(class_id, num_slots).unwrap();
@@ -1828,7 +1828,7 @@ impl Actor
                     self.gc_check(
                         std::mem::size_of::<Object>() +
                         std::mem::size_of::<Value>() * num_slots,
-                        &mut vec![],
+                        &mut [],
                     );
 
                     // Allocate the object
@@ -1993,7 +1993,7 @@ impl Actor
 
                     self.gc_check(
                         size_of::<Array>() + size_of::<Value>() * capacity,
-                        &mut vec![],
+                        &mut [],
                     );
 
                     let new_arr = Array::with_capacity(capacity, &mut self.alloc).unwrap();
@@ -2755,7 +2755,7 @@ mod tests
     #[test]
     fn bytearray()
     {
-        eval("let a = ByteArray.new();");
+        eval("let a = ByteArray.with_size(0);");
         eval("let a = ByteArray.with_size(1024); assert(a.len == 1024);");
         eval("let a = ByteArray.with_size(32); a.store_u32(0, 0xFF_FF_FF_FF);");
         eval("let a = ByteArray.with_size(32); a.store_u32(0, 0xFF_00_00_00); assert(a[0] == 0 && a[3] == 255);");

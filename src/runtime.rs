@@ -365,7 +365,6 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static ARRAY_INSERT: HostFn = HostFn { name: "insert", f: Fn3(array_insert) };
     static ARRAY_APPEND: HostFn = HostFn { name: "append", f: Fn2(array_append) };
 
-    static BA_NEW: HostFn = HostFn { name: "new", f: Fn1(ba_new) };
     static BA_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn2(ba_with_size) };
     static BA_FILL_U32: HostFn = HostFn { name: "fill_u32", f: Fn4(ba_fill_u32) };
     static BA_READ_U32: HostFn = HostFn { name: "load_u32", f: Fn2(ba_load_u32) };
@@ -422,7 +421,6 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Array(_), "insert") => &ARRAY_INSERT,
         (Value::Array(_), "append") => &ARRAY_APPEND,
 
-        (Value::Class(BYTEARRAY_ID), "new") => &BA_NEW,
         (Value::Class(BYTEARRAY_ID), "with_size") => &BA_WITH_SIZE,
         (Value::ByteArray(_), "fill_u32") => &BA_FILL_U32,
         (Value::ByteArray(_), "load_u32") => &BA_READ_U32,

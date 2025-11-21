@@ -166,7 +166,8 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
         return Ok(Value::Nil);
     }
 
-    Ok(actor.alloc.str_val(&args[idx]).unwrap())
+    let arg_str = &args[idx];
+    Ok(actor.alloc.str_val(arg_str).unwrap())
 }
 
 /// Print a value to stdout
