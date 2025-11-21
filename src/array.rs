@@ -112,7 +112,7 @@ impl Array
         removed
     }
 
-    pub fn extend(&mut self, other: &Array, alloc: &mut Alloc) -> Result<(), ()> {
+    pub fn append(&mut self, other: &Array, alloc: &mut Alloc) -> Result<(), ()> {
         let other_elems = other.items();
         let cur_len = self.len();
 
@@ -206,7 +206,19 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val
 
 pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> Result<Value, String>
 {
-    let other_elems = other_array.unwrap_arr();
-    self_array.unwrap_arr().extend(other_elems, &mut actor.alloc).unwrap();
+    let a0 = self_array.unwrap_arr();
+    let a1 = other_array.unwrap_arr();
+    let new_len = a0.len() + a1.len();
+
+    if a0.len() + a1.len() > a0.capacity() {
+        actor.gc_check(
+            size_of::<Value>() * new_len,
+            &mut [&mut self_array, &mut other_array]
+        )
+    }
+
+    let a0 = self_array.unwrap_arr();
+    let a1 = other_array.unwrap_arr();
+    a0.append(a1, &mut actor.alloc).unwrap();
     Ok(Value::Nil)
 }
