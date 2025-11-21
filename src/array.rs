@@ -187,10 +187,20 @@ pub fn array_remove(actor: &mut Actor, mut array: Value, idx: Value) -> Result<V
     Ok(array.unwrap_arr().remove(idx))
 }
 
-pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, val: Value) -> Result<Value, String>
+pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val: Value) -> Result<Value, String>
 {
+    let arr = array.unwrap_arr();
+
+    if arr.len() == arr.capacity() {
+        actor.gc_check(
+            size_of::<Array>() + size_of::<Value>() * arr.capacity() * 2,
+            &mut [&mut array, &mut idx, &mut val]
+        )
+    }
+
+    let arr = array.unwrap_arr();
     let idx = idx.unwrap_usize();
-    array.unwrap_arr().insert(idx, val, &mut actor.alloc).unwrap();
+    arr.insert(idx, val, &mut actor.alloc).unwrap();
     Ok(Value::Nil)
 }
 
