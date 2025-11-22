@@ -848,9 +848,8 @@ impl Actor
         self.alloc.str_val(str_const).unwrap()
     }
 
-    /// Ensure that at least num_bytes of free space are available in the
-    /// allocator. If the memory is not available, perform GC.
-    pub fn gc_check(&mut self, num_bytes: usize, extra_roots: &mut [&mut Value])
+    /// Perform a garbage collection cycle
+    pub fn gc_collect(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
     {
         fn try_copy(
             actor: &mut Actor,
@@ -918,11 +917,6 @@ impl Actor
             *dst_map.get(&val).unwrap()
         }
 
-        // Add some extra bytes for alignment
-        if self.alloc.bytes_free() >= (num_bytes + 16) {
-            return;
-        }
-
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
         let start_time = crate::host::get_time_ms();
 
@@ -950,7 +944,7 @@ impl Actor
             }
 
             // If there is not enough free memory after copying
-            let min_free_bytes = std::cmp::max(self.alloc.mem_size() / 5, num_bytes);
+            let min_free_bytes = std::cmp::max(self.alloc.mem_size() / 5, bytes_needed);
             let bytes_free = dst_alloc.bytes_free();
             if bytes_free < min_free_bytes  {
                 // Increase the heap size and try again
@@ -1010,25 +1004,23 @@ impl Actor
             **val = get_new_val(**val, &dst_map);
         }
 
-
-
-
-        // NOTE: we should also copy in data from the message allocator.
-        // This would need to be done by traversing
-        // the message queue?
-        // NOTE: if the copying fails because we don't have enough memory,
-        // we need to be able to safely restart copying the message queue,
-        // which is a bit tricky (put things back into the queue?)
-
-
-
-
-
-
-
         let end_time = crate::host::get_time_ms();
         let gc_time = end_time - start_time;
         println!("GC time: {} ms", gc_time);
+    }
+
+    /// Ensure that at least bytes_needed of free space are available in the
+    /// allocator. If the memory is not available, perform GC.
+    pub fn gc_check(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
+    {
+        // Add some extra bytes for alignment
+        let bytes_needed = bytes_needed + 16;
+
+        if self.alloc.bytes_free() >= bytes_needed {
+            return;
+        }
+
+        self.gc_collect(bytes_needed, extra_roots);
     }
 
     /// Call a host function
