@@ -1675,7 +1675,15 @@ impl Actor
 
                 // Create a new closure
                 Insn::clos_new { fun_id, num_slots } => {
-                    let clos = Closure { fun_id, slots: vec![Undef; num_slots as usize] };
+                    let num_slots = num_slots as usize;
+
+                     self.gc_check(
+                        std::mem::size_of::<Closure>() +
+                        std::mem::size_of::<Value>() * num_slots,
+                        &mut [],
+                    );
+
+                    let clos = Closure { fun_id, slots: vec![Undef; num_slots] };
                     let clos_val = self.alloc.alloc(clos).unwrap();
                     push!(Value::Closure(clos_val));
                 }
