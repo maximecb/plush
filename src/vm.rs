@@ -914,7 +914,8 @@ impl Actor
                 return val;
             }
 
-            *dst_map.get(&val).unwrap()
+            let new_val = *dst_map.get(&val).unwrap();
+            new_val
         }
 
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
@@ -922,43 +923,41 @@ impl Actor
 
         let mut new_mem_size = self.alloc.mem_size();
 
+        // Create a new allocator to copy the data into
+        let mut dst_alloc = Alloc::with_size(new_mem_size);
+
         // Hash map for remapping copied values
         let mut dst_map = HashMap::<Value, Value>::new();
 
         loop {
-            // Create a new allocator to copy the data into
-            let mut dst_alloc = Alloc::with_size(new_mem_size);
-
             // Clear the value map
             dst_map.clear();
 
             // Try to copy all objects into the new allocator
-            if try_copy(self, &mut dst_alloc, &mut dst_map, extra_roots).is_err() {
-                // If the copying fails, increase the heap size and try again
-                new_mem_size = (new_mem_size * 3) / 2;
-                println!(
-                    "Increasing heap size to {} bytes",
-                    thousands_sep(new_mem_size),
-                );
-                continue;
-            }
+            let copy_fail = try_copy(self, &mut dst_alloc, &mut dst_map, extra_roots).is_err();
 
             // If there is not enough free memory after copying
             let min_free_bytes = std::cmp::max(self.alloc.mem_size() / 5, bytes_needed);
             let bytes_free = dst_alloc.bytes_free();
-            if bytes_free < min_free_bytes  {
-                // Increase the heap size and try again
+            let not_enough_space = bytes_free < min_free_bytes;
+
+            // If we could not copy all the data or there is not enough free space
+            // Increase the target heap size
+            if copy_fail || not_enough_space {
                 new_mem_size = (new_mem_size * 3) / 2;
                 println!(
                     "Increasing heap size to {} bytes",
                     thousands_sep(new_mem_size),
                 );
+
+                // Recreate the target allocator
+                dst_alloc = Alloc::with_size(new_mem_size);
+
+                // Try again
                 continue;
             }
 
             // Copying successful
-            // Drop and replace the old allocator
-            self.alloc = dst_alloc;
             break;
         }
 
@@ -1003,6 +1002,11 @@ impl Actor
         for val in extra_roots {
             **val = get_new_val(**val, &dst_map);
         }
+
+        // Drop and replace the old allocator
+        // Note that we can only do this after remapping the values,
+        // because we access string data while hashing string values
+        self.alloc = dst_alloc;
 
         let end_time = crate::host::get_time_ms();
         let gc_time = end_time - start_time;
