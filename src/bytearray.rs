@@ -23,6 +23,11 @@ impl ByteArray
         self.bytes.len()
     }
 
+    pub fn capacity(&self) -> usize
+    {
+        self.bytes.capacity()
+    }
+
     pub fn get(&self, idx: usize) -> u8
     {
         self.bytes[idx]
@@ -31,6 +36,11 @@ impl ByteArray
     pub fn set(&mut self, idx: usize, val: u8)
     {
         self.bytes[idx] = val;
+    }
+
+    pub fn resize(&mut self, new_size: usize)
+    {
+        self.bytes.resize(new_size, 0);
     }
 
     pub unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
@@ -90,11 +100,6 @@ impl ByteArray
         let src_slice = unsafe { src.get_slice::<u8>(src_idx, num_bytes) };
         let dst_slice = unsafe { self.get_slice_mut::<u8>(dst_idx, num_bytes) };
         dst_slice.copy_from_slice(src_slice);
-    }
-
-    pub fn resize(&mut self, new_size: usize)
-    {
-        self.bytes.resize(new_size, 0);
     }
 }
 
@@ -186,6 +191,14 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result
     Ok(Value::ByteArray(p_ba))
 }
 
+pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let new_size = new_size.unwrap_usize();
+    ba.resize(new_size);
+    Ok(Value::Nil)
+}
+
 pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
@@ -267,14 +280,6 @@ pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     ba.bytes.fill(0);
-    Ok(Value::Nil)
-}
-
-pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Value, String>
-{
-    let ba = ba.unwrap_ba();
-    let new_size = new_size.unwrap_usize();
-    ba.resize(new_size);
     Ok(Value::Nil)
 }
 
