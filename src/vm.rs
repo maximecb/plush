@@ -843,6 +843,12 @@ impl Actor
     pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
     {
         let num_slots = self.get_num_slots(class_id);
+
+        self.gc_check(
+            size_of::<Object>() + size_of::<Value>() * num_slots,
+            &mut []
+        );
+
         self.alloc.new_object(class_id, num_slots).unwrap()
     }
 
@@ -863,6 +869,11 @@ impl Actor
     /// or present as a constant in the program
     pub fn intern_str(&mut self, str_const: &str) -> Value
     {
+        self.gc_check(
+            size_of::<Str>() + str_const.len(),
+            &mut []
+        );
+
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
         self.alloc.str_val(str_const).unwrap()
@@ -1743,6 +1754,11 @@ impl Actor
 
                 // Create a new mutable cell
                 Insn::cell_new => {
+                     self.gc_check(
+                        std::mem::size_of::<Value>(),
+                        &mut [],
+                    );
+
                     let p_cell = self.alloc.alloc(Value::Nil).unwrap();
                     push!(Value::Cell(p_cell));
                 }
