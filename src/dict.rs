@@ -34,18 +34,11 @@ impl Dict {
         let hash = hasher.finish();
         let mut pos = usize::try_from(hash).unwrap_or(usize::MAX);
 
-        loop {
-            match &table[pos % len] {
-                Some(ref val) => {
-                    if val.0.as_str() != key {
-                        pos += 1;
-                        continue;
-                    }
-                }
-                None => ()
+        while let Some(v) = table[pos % len] {
+            if v.0.as_str() == key {
+                break;
             }
-
-            break;
+            pos += 1;
         }
 
         &mut table[pos % len]
