@@ -2,6 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
+use crate::dict::Dict;
 use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
@@ -174,34 +175,47 @@ pub enum Insn
     ret,
 }
 
-#[derive(Clone, Default)]
-pub struct Dict
+#[derive(Clone)]
+pub struct Closure
 {
-    pub hash: HashMap<String, Value>,
+    pub fun_id: FunId,
+
+    // Captured variable slots
+    pub slots: Vec<Value>,
 }
 
-impl Dict
+#[derive(Clone)]
+pub struct Object
 {
-    // Set the value associated with a given field
-    fn set(&mut self, field_name: &str, new_val: Value)
-    {
-        self.hash.insert(field_name.to_string(), new_val);
-    }
+    pub class_id: ClassId,
+    slots: *mut [Value],
+}
 
-    // Get the value associated with a given field
-    fn get(&mut self, field_name: &str) -> Value
+impl Object
+{
+    pub fn new(class_id: ClassId, slots: *mut [Value]) -> Self
     {
-        if let Some(val) = self.hash.get(field_name) {
-            *val
-        } else {
-            panic!("key `{}` not found in dict", field_name);
+        Object {
+            class_id,
+            slots,
         }
     }
 
-    // Check if the dictionary has a given key
-    pub fn has(&mut self, field_name: &str) -> bool
+    pub fn num_slots(&self) -> usize
     {
-        self.hash.contains_key(field_name)
+        unsafe { (&*self.slots).len() }
+    }
+
+    // Get the value associated with a given field
+    pub fn get(&self, idx: usize) -> Value
+    {
+        unsafe { (*self.slots)[idx] }
+    }
+
+    // Set the value of a given field
+    pub fn set(&mut self, idx: usize, val: Value)
+    {
+        unsafe { (*self.slots)[idx] = val }
     }
 }
 

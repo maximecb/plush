@@ -23,6 +23,7 @@ mod window;
 mod audio;
 mod exec_tests;
 mod str;
+mod dict;
 
 extern crate sdl2;
 use std::env;
