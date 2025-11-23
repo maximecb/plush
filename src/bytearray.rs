@@ -3,7 +3,6 @@ use crate::vm::{Value, Actor};
 use crate::alloc::Alloc;
 use crate::host::HostFn;
 
-#[derive(Clone)]
 pub struct ByteArray
 {
     bytes: *mut [u8],
@@ -17,6 +16,20 @@ impl ByteArray
         let bytes = alloc.alloc_table(num_bytes)?;
         let ba = ByteArray { bytes, len: num_bytes };
         Ok(ba)
+    }
+
+    pub fn clone(&self, alloc: &mut Alloc) -> Result<Self, ()>
+    {
+        let bytes = alloc.alloc_table(self.len)?;
+        let mut new_ba = ByteArray { bytes, len: self.len };
+
+        unsafe {
+            let src_slice: &[u8] = self.get_slice(0, self.len);
+            let dst_slice: &mut [u8] = new_ba.get_slice_mut(0, self.len);
+            dst_slice.copy_from_slice(src_slice);
+        }
+
+        Ok(new_ba)
     }
 
     pub fn num_bytes(&self) -> usize

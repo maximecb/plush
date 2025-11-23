@@ -2015,7 +2015,15 @@ impl Actor
                 Insn::ba_clone => {
                     let mut val = pop!();
                     let ba = val.unwrap_ba();
-                    let p_clone = self.alloc.alloc(ba.clone()).unwrap();
+
+                    self.gc_check(
+                        size_of::<ByteArray>() + ba.num_bytes(),
+                        &mut [&mut val],
+                    );
+
+                    let ba = val.unwrap_ba();
+                    let ba_clone = ba.clone(&mut self.alloc).unwrap();
+                    let p_clone = self.alloc.alloc(ba_clone).unwrap();
                     push!(Value::ByteArray(p_clone));
                 }
 

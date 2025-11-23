@@ -138,8 +138,9 @@ pub fn deepcopy(
             }
 
             Value::ByteArray(p) => {
-                let new_arr = unsafe { (*p).clone() };
-                Value::ByteArray(dst_alloc.alloc(new_arr)?)
+                let ba = unsafe { &*p };
+                let new_ba = ba.clone(dst_alloc)?;
+                Value::ByteArray(dst_alloc.alloc(new_ba)?)
             }
 
             _ => panic!("deepcopy unimplemented for type {:?}", val)
