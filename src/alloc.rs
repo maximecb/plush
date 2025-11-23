@@ -103,7 +103,22 @@ impl Alloc
         Ok(p)
     }
 
-    pub fn str(&mut self, s: &str) -> Result<*const Str, ()>
+    // Allocate a new object with a given number of slots
+    pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Result<Value, ()>
+    {
+        // Allocate the slots for the object
+        let slots = self.alloc_table::<Value>(num_slots)?;
+
+        // Create the Object struct
+        let obj = Object::new(class_id, slots);
+
+        // Allocate the Object struct itself
+        let obj_ptr = self.alloc(obj)?;
+
+        Ok(Value::Object(obj_ptr))
+    }
+
+    pub fn raw_str(&mut self, s: &str) -> Result<Str, ()>
     {
         let bytes = self.alloc_bytes(s.len())?;
         let p = bytes as *mut u8;
@@ -114,9 +129,13 @@ impl Alloc
         let raw_str = unsafe {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, s.len()))
         };
-        let raw_str_ptr = raw_str as *const str;
+        Ok(Str::new(raw_str as *const str))
+    }
 
-        let p_str = self.alloc(Str::new(raw_str_ptr))?;
+    pub fn str(&mut self, s: &str) -> Result<*const Str, ()>
+    {
+        let inner = self.raw_str(s)?;
+        let p_str = self.alloc(inner)?;
         Ok(p_str)
     }
 

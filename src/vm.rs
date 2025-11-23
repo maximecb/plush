@@ -1767,7 +1767,8 @@ impl Actor
 
                 // Create new empty dictionary
                 Insn::dict_new => {
-                    let new_obj = self.alloc.alloc(Dict::default()).unwrap();
+                    let dict = Dict::with_capacity(0, &mut self.alloc).unwrap();
+                    let new_obj = self.alloc.alloc(dict).unwrap();
                     push!(Value::Dict(new_obj))
                 }
 
@@ -1800,7 +1801,7 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            dict.set(field_name.as_str(), val);
+                            dict.set(field_name.as_str(), val, &mut self.alloc).unwrap();
                         }
 
                         _ => error!("set_field", "set_field on non-object/dict value")
@@ -2003,7 +2004,7 @@ impl Actor
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
                             let key = unwrap_str!(idx);
-                            dict.set(key, val);
+                            dict.set(key, val, &mut self.alloc).unwrap();
                         }
 
                         _ => error!("set_index", "expected array or dict type")
