@@ -944,7 +944,11 @@ impl Actor
             // If we could not copy all the data or there is not enough free space
             // Increase the target heap size
             if copy_fail || not_enough_space {
-                new_mem_size = (new_mem_size * 3) / 2;
+                new_mem_size = std::cmp::max(
+                    (new_mem_size * 3) / 2,
+                    new_mem_size + bytes_needed,
+                );
+
                 println!(
                     "Increasing heap size to {} bytes",
                     thousands_sep(new_mem_size),
