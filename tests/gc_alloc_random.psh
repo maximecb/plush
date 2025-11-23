@@ -1,14 +1,13 @@
-// LCG parameters (from glibc)
-let var seed = 0;
-let A = 1103515245;
-let C = 12345;
-let M = 2147483648; // 2^31
+// LCG parameters
+let var seed = 1;
 
-// Function to generate the next random number
-fun next_rand() {
-    seed = (A * seed + C) % M;
-    // Return a value in [0, 100]
-    return (seed _/ (M _/ 101));
+// Function to generate a random integer in the range [min, max]
+fun rand_int(min, max) {
+    seed = (1103515245 * seed + 12345) & 0x7FFFFFFF;   // keep only 31 bits
+
+    // Don't use the low bits
+    let range = max - min + 1;
+    return min + (((seed >> 8) * range) >> 23);
 }
 
 class Foo
@@ -24,17 +23,21 @@ class Foo
 
 for (let var i = 0; i < 6_000_000; ++i)
 {
-    let r = next_rand();
+    let r = rand_int(1, 4);
 
-    if (r < 25) {
+    if (r == 1) {
         let o = Foo(r);
-    } else if (r < 50) {
-        let s = "string_" + r.to_s();
-    } else if (r < 75) {
+    } else if (r == 2) {
+        let s = "string_" + r.to_s() + r.to_f().to_s();
+    } else if (r == 3) {
         let a = [i, r, 0, 0, 0, 9, 1, 2];
     } else {
-        let ba = ByteArray.with_size(next_rand() % 10);
+        let ba = ByteArray.with_size(rand_int(0, 9));
     }
+
+    // TODO: closures
+
+    // TODO: dicts
 }
 
 $println("done");

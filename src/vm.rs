@@ -2029,10 +2029,11 @@ impl Actor
                 }
 
                 // Append an element at the end of an array
+                // This instruction is used to construct array literals
                 Insn::arr_push => {
                     let val = pop!();
-                    let mut arr = pop!();
-                    arr.unwrap_arr().push(val, &mut self.alloc).unwrap();
+                    let mut array = pop!();
+                    crate::array::array_push(self, array, val).unwrap();
                 }
 
                 // Clone a bytearray
