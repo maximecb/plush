@@ -685,24 +685,35 @@ impl Actor
     {
         use crate::window::poll_ui_msg;
 
-        if self.actor_id != 0 {
-            return match self.queue_rx.try_recv() {
-                Ok(msg) => Some(msg.msg),
-                _ => None,
+        // Actor 0 (the main actor) needs to poll for UI events
+        if self.actor_id == 0 {
+            let ui_msg = poll_ui_msg(self);
+            if let Some(msg) = ui_msg {
+                return Some(msg);
             }
         }
 
-        // Actor 0 (the main actor) needs to poll for UI events
-        let ui_msg = poll_ui_msg(self);
-        if let Some(msg) = ui_msg {
-            return Some(msg);
-        }
 
         // Block on the message queue for up to 8ms
         match self.queue_rx.try_recv() {
             Ok(msg) => Some(msg.msg),
             _ => None,
         }
+
+
+        /*
+        // Lock on the message allocator
+        // Senders cannot send us messages while we hold the lock
+        // If we can get the lock, it also means senders are done
+        let msg_alloc = self.msg_alloc.lock().unwrap();
+
+
+        todo!();
+
+        */
+
+
+
     }
 
     /// Send a message to another actor
@@ -2211,7 +2222,7 @@ impl Actor
 #[derive(Clone)]
 struct ActorTx
 {
-    sender: mpsc::Sender<Message>,
+    sender: mpsc::SyncSender<Message>,
     msg_alloc: Weak<Mutex<Alloc>>,
 }
 
@@ -2272,7 +2283,7 @@ impl VM
         drop(vm_ref);
 
         // Create a message queue for the actor
-        let (queue_tx, queue_rx) = mpsc::channel::<Message>();
+        let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
 
         // Create an allocator to send messages to the actor
         let mut msg_alloc = Alloc::new();
@@ -2359,7 +2370,7 @@ impl VM
         let vm_mutex = vm.clone();
 
         // Create a message queue for the actor
-        let (queue_tx, queue_rx) = mpsc::channel::<Message>();
+        let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
 
         // Create an allocator to send messages to the actor
         let msg_alloc = Arc::new(Mutex::new(Alloc::new()));
