@@ -123,7 +123,7 @@ pub fn deepcopy(
             }
 
             Value::Dict(p) => {
-                let new_obj = unsafe { (*p).clone() };
+                let new_obj = unsafe { (*p).clone(dst_alloc)? };
 
                 for val in new_obj.values() {
                     push_val!(val);
