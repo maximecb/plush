@@ -657,6 +657,12 @@ impl Actor
     {
         use crate::window::poll_ui_msg;
 
+        // Call try_recv first to give the message allocator GC
+        // a chance to run before we block and wait for a message
+        if let Some(msg) = self.try_recv() {
+            return msg;
+        }
+
         if self.actor_id != 0 {
             let msg = self.queue_rx.recv().unwrap();
             return msg.msg;
@@ -685,6 +691,12 @@ impl Actor
     {
         use crate::window::poll_ui_msg;
 
+        // Lock on the message allocator
+        // Senders cannot send us messages while we hold the lock
+        // If we can get the lock, it also means senders are done
+        let alloc_rc = self.msg_alloc.clone();
+        let mut msg_alloc = alloc_rc.lock().unwrap();
+
         // Actor 0 (the main actor) needs to poll for UI events
         if self.actor_id == 0 {
             let ui_msg = poll_ui_msg(self);
@@ -693,27 +705,24 @@ impl Actor
             }
         }
 
-
         // Block on the message queue for up to 8ms
-        match self.queue_rx.try_recv() {
-            Ok(msg) => Some(msg.msg),
-            _ => None,
+        if let Ok(msg) = self.queue_rx.try_recv() {
+            return Some(msg.msg);
         }
 
+        // If the message allocator is full
+        if msg_alloc.bytes_free() < msg_alloc.mem_size() / 4 {
+            // Perform a GC pass to copy messages into the main allocator
+            self.gc_collect(0, &mut []);
 
-        /*
-        // Lock on the message allocator
-        // Senders cannot send us messages while we hold the lock
-        // If we can get the lock, it also means senders are done
-        let msg_alloc = self.msg_alloc.lock().unwrap();
+            println!("Performing message allocator GC");
 
+            // Clear the contents of the message allocator
+            *msg_alloc = Alloc::with_size(msg_alloc.mem_size());
+        }
 
-        todo!();
-
-        */
-
-
-
+        // No message received
+        None
     }
 
     /// Send a message to another actor
