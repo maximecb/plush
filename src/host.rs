@@ -338,6 +338,8 @@ mod tests
 /// Read the contents of an entire file into a ByteArray object
 fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 {
+    use crate::bytearray::ByteArray;
+
     let file_path = unwrap_str!(file_path);
 
     if !is_safe_path(&file_path) {
@@ -349,7 +351,13 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
         Ok(bytes) => bytes
     };
 
-    let ba = crate::bytearray::ByteArray::new(bytes);
+    actor.gc_check(
+        std::mem::size_of::<ByteArray>() + bytes.len(),
+        &mut [],
+    );
+
+    let mut ba = ByteArray::with_size(bytes.len(), &mut actor.alloc).unwrap();
+    unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
     let ba_obj = actor.alloc.alloc(ba).unwrap();
     Ok(Value::ByteArray(ba_obj))
 }

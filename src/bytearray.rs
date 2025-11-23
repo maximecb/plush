@@ -3,58 +3,54 @@ use crate::vm::{Value, Actor};
 use crate::alloc::Alloc;
 use crate::host::HostFn;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ByteArray
 {
-    bytes: Vec<u8>,
+    bytes: *mut [u8],
+    len: usize,
 }
 
 impl ByteArray
 {
-    pub fn new(bytes: Vec<u8>) -> Self
+    pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Result<Self, ()>
     {
-        Self {
-            bytes
-        }
+        let bytes = alloc.alloc_table(num_bytes)?;
+        let ba = ByteArray { bytes, len: num_bytes };
+        Ok(ba)
     }
 
     pub fn num_bytes(&self) -> usize
     {
-        self.bytes.len()
+        self.len
     }
 
     pub fn capacity(&self) -> usize
     {
-        self.bytes.capacity()
+        self.bytes.len()
     }
 
     pub fn get(&self, idx: usize) -> u8
     {
-        self.bytes[idx]
+        unsafe { (*self.bytes)[idx] }
     }
 
     pub fn set(&mut self, idx: usize, val: u8)
     {
-        self.bytes[idx] = val;
-    }
-
-    pub fn resize(&mut self, new_size: usize)
-    {
-        self.bytes.resize(new_size, 0);
+        unsafe { (*self.bytes)[idx] = val };
     }
 
     pub unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
     {
-        assert!((idx + num_elems) * size_of::<T>() <= self.bytes.len());
-        let buf_ptr = self.bytes.as_ptr();
-        let elem_ptr = transmute::<*const u8 , *mut T>(buf_ptr).add(idx);
+        assert!((idx + num_elems) * size_of::<T>() <= self.len);
+        let buf_ptr = (*self.bytes).as_ptr();
+        let elem_ptr = transmute::<*const u8 , *const T>(buf_ptr).add(idx);
         std::slice::from_raw_parts(elem_ptr, num_elems as usize)
     }
 
     pub unsafe fn get_slice_mut<T>(&mut self, idx: usize, num_elems: usize) -> &'static mut [T]
     {
-        assert!((idx + num_elems) * size_of::<T>() <= self.bytes.len());
-        let buf_ptr = self.bytes.as_mut_ptr();
+        assert!((idx + num_elems) * size_of::<T>() <= self.len);
+        let buf_ptr = (*self.bytes).as_mut_ptr();
         let elem_ptr = transmute::<*mut u8 , *mut T>(buf_ptr).add(idx);
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
@@ -62,10 +58,10 @@ impl ByteArray
     /// Load a value at the given index
     pub fn load<T>(&mut self, idx: usize) -> T where T: Copy
     {
-        assert!((idx + 1) * size_of::<T>() <= self.bytes.len());
+        assert!((idx + 1) * size_of::<T>() <= self.len);
 
         unsafe {
-            let buf_ptr = self.bytes.as_ptr();
+            let buf_ptr = (*self.bytes).as_ptr();
             let val_ptr = transmute::<*const u8 , *const T>(buf_ptr).add(idx);
             std::ptr::read(val_ptr)
         }
@@ -74,10 +70,10 @@ impl ByteArray
     /// Store a value at the given index
     pub fn store<T>(&mut self, idx: usize, val: T) where T: Copy
     {
-        assert!((idx + 1) * size_of::<T>() <= self.bytes.len());
+        assert!((idx + 1) * size_of::<T>() <= self.len);
 
         unsafe {
-            let buf_ptr = self.bytes.as_mut_ptr();
+            let buf_ptr = (*self.bytes).as_mut_ptr();
             let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr).add(idx);
             std::ptr::write(val_ptr, val);
         }
@@ -184,18 +180,45 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result
         &mut []
     );
 
-    let mut bytes = Vec::with_capacity(num_bytes);
-    bytes.resize(num_bytes, 0);
-    let ba = ByteArray { bytes };
+    let ba = ByteArray::with_size(num_bytes, &mut actor.alloc).unwrap();
     let p_ba = actor.alloc.alloc(ba).unwrap();
     Ok(Value::ByteArray(p_ba))
 }
 
 pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Value, String>
 {
-    let ba = ba.unwrap_ba();
     let new_size = new_size.unwrap_usize();
-    ba.resize(new_size);
+
+    // Get the current capacity without a mutable borrow
+    let capacity = ba.unwrap_ba().capacity();
+
+    if new_size > capacity {
+        actor.gc_check(
+            new_size,
+            &mut [&mut ba]
+        );
+        let ba_mut = ba.unwrap_ba();
+
+        let old_len = ba_mut.len;
+        let new_bytes = actor.alloc.alloc_table(new_size).unwrap();
+        let copy_len = std::cmp::min(old_len, new_size);
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (*ba_mut.bytes).as_ptr(),
+                (*new_bytes).as_mut_ptr(),
+                copy_len
+            );
+        }
+
+        ba_mut.bytes = new_bytes;
+        ba_mut.len = new_size;
+    }
+    else {
+        let ba_mut = ba.unwrap_ba();
+        ba_mut.len = new_size;
+    }
+
     Ok(Value::Nil)
 }
 
@@ -279,7 +302,8 @@ pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, 
 pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
-    ba.bytes.fill(0);
+    let slice = unsafe { ba.get_slice_mut(0, ba.len) };
+    slice.fill(0u8);
     Ok(Value::Nil)
 }
 

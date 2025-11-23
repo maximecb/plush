@@ -330,7 +330,9 @@ impl ExprBox
             }
 
             Expr::ByteArray(bytes) => {
-                let ba = crate::bytearray::ByteArray::new(bytes.clone());
+                use crate::bytearray::ByteArray;
+                let mut ba = ByteArray::with_size(bytes.len(), alloc).unwrap();
+                unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
                 let p_ba = alloc.alloc(ba).unwrap();
                 code.push(Insn::push { val: Value::ByteArray(p_ba) });
                 code.push(Insn::ba_clone);
