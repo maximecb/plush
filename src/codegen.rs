@@ -291,8 +291,7 @@ impl StmtBox
                     };
 
                     // Allocate a mutable closure cell for this variable
-                    let p_cell = alloc.alloc(Value::Nil);
-                    code.push(Insn::push { val: Value::Cell(p_cell) });
+                    code.push(Insn::cell_new);
                     code.push(Insn::set_local { idx: local_idx });
                 }
 
@@ -327,12 +326,14 @@ impl ExprBox
             Expr::HostFn(f) => code.push(Insn::push { val: Value::HostFn(*f) }),
 
             Expr::String(s) => {
-                code.push(Insn::push { val: alloc.str_val(s.clone()) });
+                code.push(Insn::push { val: alloc.str_val(&s).unwrap() });
             }
 
             Expr::ByteArray(bytes) => {
-                let ba = crate::bytearray::ByteArray::new(bytes.clone());
-                let p_ba = alloc.alloc(ba);
+                use crate::bytearray::ByteArray;
+                let mut ba = ByteArray::with_size(bytes.len(), alloc).unwrap();
+                unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
+                let p_ba = alloc.alloc(ba).unwrap();
                 code.push(Insn::push { val: Value::ByteArray(p_ba) });
                 code.push(Insn::ba_clone);
             }
@@ -367,7 +368,7 @@ impl ExprBox
 
             Expr::Member { base, field } => {
                 base.gen_code(fun, code, alloc)?;
-                let field = alloc.str(field.clone());
+                let field = alloc.str(&field).unwrap();
                 code.push(Insn::get_field {
                     field,
                     class_id: Default::default(),
@@ -446,7 +447,7 @@ impl ExprBox
                             arg.gen_code(fun, code, alloc)?;
                         }
 
-                        let name = alloc.str(field.clone());
+                        let name = alloc.str(&field).unwrap();
                         code.push(Insn::call_method { name, argc });
                     }
 
@@ -541,7 +542,7 @@ fn gen_dict_expr(
 
         expr.gen_code(fun, code, alloc)?;
 
-        let field_name = alloc.str(name.clone());
+        let field_name = alloc.str(&name).unwrap();
 
         code.push(Insn::set_field {
             field: field_name,
@@ -783,7 +784,7 @@ fn gen_assign(
         }
 
         Expr::Member { base, field } => {
-            let field = alloc.str(field.to_string());
+            let field = alloc.str(&field).unwrap();
 
             if need_value {
                 rhs.gen_code(fun, code, alloc)?;

@@ -1,3 +1,4 @@
+use crate::array::Array;
 use crate::ast::*;
 use crate::vm::{Value, Actor};
 use crate::{error, unwrap_usize, unwrap_str};
@@ -9,17 +10,17 @@ fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
 
 fn true_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
 {
-    Ok(actor.alloc.str_val("true".to_string()))
+    Ok(actor.intern_str("true"))
 }
 
 fn false_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
 {
-    Ok(actor.alloc.str_val("false".to_string()))
+    Ok(actor.intern_str("false"))
 }
 
 fn nil_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
 {
-    Ok(actor.alloc.str_val("nil".to_string()))
+    Ok(actor.intern_str("nil"))
 }
 
 fn int64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
@@ -52,7 +53,9 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_i64();
     let s = format!("{}", v);
-    Ok(actor.alloc.str_val(s))
+
+    actor.gc_check(32, &mut []);
+    Ok(actor.alloc.str_val(&s).unwrap())
 }
 
 fn float64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
@@ -160,7 +163,8 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
     let s = format!("{}", v);
-    Ok(actor.alloc.str_val(s))
+    actor.gc_check(1024, &mut []);
+    Ok(actor.alloc.str_val(&s).unwrap())
 }
 
 fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Result<Value, String>
@@ -168,7 +172,8 @@ fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Resu
     let num = v.unwrap_f64();
     let decimals = unwrap_usize!(decimals);
     let s = format!("{:.*}", decimals, num);
-    Ok(actor.alloc.str_val(s))
+    actor.gc_check(std::cmp::max(1024, decimals), &mut []);
+    Ok(actor.alloc.str_val(&s).unwrap())
 }
 
 /// Create a single-character string from a codepoint integer value
@@ -184,7 +189,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
     let mut s = String::new();
     s.push(ch);
 
-    Ok(actor.alloc.str_val(s))
+    Ok(actor.alloc.str_val(&s).unwrap())
 }
 
 /// Get the UTF-8 byte at the given index
@@ -220,7 +225,7 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value,
         Some(ch) => ch,
     };
 
-    Ok(actor.alloc.str_val(ch.to_string()))
+    Ok(actor.alloc.str_val(&ch.to_string()).unwrap())
 }
 
 /// Try to parse the string as an integer with the given radix
@@ -240,7 +245,7 @@ fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(s);
     let s = s.trim().to_string();
-    Ok(actor.alloc.str_val(s))
+    Ok(actor.alloc.str_val(&s).unwrap())
 }
 
 /// Split a string by a separator and return an array of strings
@@ -248,13 +253,16 @@ fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Result<Value, String
 {
     let s = unwrap_str!(s);
     let sep = unwrap_str!(sep);
+    let str_parts = s.split(sep);
+    let size = str_parts.size_hint().0;
 
-    let parts: Vec<Value> = s.split(sep).map(|part| {
-        actor.alloc.str_val(part.to_string())
-    }).collect();
+    let mut array = Array::with_capacity(size, &mut actor.alloc).unwrap();
 
-    let arr = crate::array::Array { elems: parts };
-    Ok(Value::Array(actor.alloc.alloc(arr)))
+    for part in str_parts {
+        array.push(actor.alloc.str_val(part).unwrap(), &mut actor.alloc).unwrap();
+    }
+
+    Ok(Value::Array(actor.alloc.alloc(array).unwrap()))
 }
 
 pub fn init_runtime(prog: &mut Program)
@@ -357,7 +365,6 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static ARRAY_INSERT: HostFn = HostFn { name: "insert", f: Fn3(array_insert) };
     static ARRAY_APPEND: HostFn = HostFn { name: "append", f: Fn2(array_append) };
 
-    static BA_NEW: HostFn = HostFn { name: "new", f: Fn1(ba_new) };
     static BA_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn2(ba_with_size) };
     static BA_FILL_U32: HostFn = HostFn { name: "fill_u32", f: Fn4(ba_fill_u32) };
     static BA_READ_U32: HostFn = HostFn { name: "load_u32", f: Fn2(ba_load_u32) };
@@ -414,7 +421,6 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Array(_), "insert") => &ARRAY_INSERT,
         (Value::Array(_), "append") => &ARRAY_APPEND,
 
-        (Value::Class(BYTEARRAY_ID), "new") => &BA_NEW,
         (Value::Class(BYTEARRAY_ID), "with_size") => &BA_WITH_SIZE,
         (Value::ByteArray(_), "fill_u32") => &BA_FILL_U32,
         (Value::ByteArray(_), "load_u32") => &BA_READ_U32,

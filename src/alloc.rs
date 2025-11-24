@@ -1,4 +1,5 @@
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
+use crate::str::Str;
 use crate::vm::{Value, Object};
 use crate::ast::ClassId;
 
@@ -14,7 +15,7 @@ impl Alloc
 {
     pub fn new() -> Self
     {
-        Self::with_size(256 * 1024 * 1024)
+        Self::with_size(16 * 1024 * 1024)
     }
 
     pub fn with_size(mem_size_bytes: usize) -> Self
@@ -46,7 +47,7 @@ impl Alloc
     }
 
     // Allocate a block of a given size
-    pub fn alloc_bytes(&mut self, size_bytes: usize) -> *mut u8
+    fn alloc_bytes(&mut self, size_bytes: usize) -> Result<*mut u8, ()>
     {
         let align_bytes = 8;
 
@@ -55,65 +56,73 @@ impl Alloc
 
         // Bump the next allocation index
         let next_idx = obj_pos + size_bytes;
-        if next_idx >= self.mem_size {
-            panic!("allocator out of memory");
+        if next_idx > self.mem_size {
+            return Err(())
         }
         self.next_idx = next_idx;
 
-        unsafe {
-            self.mem_block.add(obj_pos)
-        }
+        Ok(unsafe { self.mem_block.add(obj_pos) })
     }
 
     // Allocate a variable-sized table of elements of a given type
-    pub fn alloc_table<T>(&mut self, num_elems: usize) -> *mut [T]
+    pub fn alloc_table<T>(&mut self, num_elems: usize) -> Result<*mut [T], ()>
     {
         let num_bytes = num_elems * std::mem::size_of::<T>();
-        let bytes = self.alloc_bytes(num_bytes);
+        let bytes = self.alloc_bytes(num_bytes)?;
         let p = bytes as *mut T;
 
-        std::ptr::slice_from_raw_parts_mut(p, num_elems)
+        Ok(std::ptr::slice_from_raw_parts_mut(p, num_elems))
     }
 
     // Allocate a new object of a given type
-    pub fn alloc<T>(&mut self, obj: T) -> *mut T
+    pub fn alloc<T>(&mut self, obj: T) -> Result<*mut T, ()>
     {
         let num_bytes = std::mem::size_of::<T>();
-        let bytes = self.alloc_bytes(num_bytes);
+        let bytes = self.alloc_bytes(num_bytes)?;
         let p = bytes as *mut T;
 
         // Write object at location without calling drop
         // on what's currently at that location
         unsafe { std::ptr::write(p, obj) };
 
-        p
+        Ok(p)
     }
 
     // Allocate a new object with a given number of slots
-    pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Value
+    pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Result<Value, ()>
     {
         // Allocate the slots for the object
-        let slots = self.alloc_table::<Value>(num_slots);
+        let slots = self.alloc_table::<Value>(num_slots)?;
 
         // Create the Object struct
         let obj = Object::new(class_id, slots);
 
         // Allocate the Object struct itself
-        let obj_ptr = self.alloc(obj);
+        let obj_ptr = self.alloc(obj)?;
 
-        Value::Object(obj_ptr)
+        Ok(Value::Object(obj_ptr))
     }
 
-    // Allocate an immutable string
-    pub fn str(&mut self, s: String) -> *const String
+    pub fn str(&mut self, s: &str) -> Result<*const Str, ()>
     {
-        let s_ptr = self.alloc(s);
-        s_ptr as *const String
+        let bytes = self.alloc_bytes(s.len())?;
+        let p = bytes as *mut u8;
+
+        // Write string bytes at location without calling drop
+        // on what's currently at that location
+        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), p, s.len()) };
+        let raw_str = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, s.len()))
+        };
+        let raw_str_ptr = raw_str as *const str;
+
+        let p_str = self.alloc(Str::new(raw_str_ptr))?;
+        Ok(p_str)
     }
 
-    pub fn str_val(&mut self, s: String) -> Value
+    pub fn str_val(&mut self, s: &str) -> Result<Value, ()>
     {
-        Value::String(self.str(s))
+        Ok(Value::String(self.str(s)?))
     }
 }
 

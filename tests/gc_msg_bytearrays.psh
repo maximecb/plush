@@ -1,0 +1,30 @@
+let ba = ByteArray.with_size(16384);
+ba[ba.len - 1] = 255;
+
+fun actor()
+{
+    loop {
+        let msg = $actor_recv();
+
+        if (msg == nil) {
+            break;
+        }
+
+        assert(msg instanceof ByteArray);
+        assert(msg.len == ba.len);
+
+        $actor_send($actor_parent(), msg);
+    }
+}
+
+let aid = $actor_spawn(actor);
+let var msg = ba;
+
+for (let var i = 0; i < 4000; ++i)
+{
+    $actor_send(aid, msg);
+    msg = $actor_recv();
+    assert(msg instanceof ByteArray);
+    assert(msg.len == ba.len);
+    assert(msg[msg.len - 1] == 255);
+}

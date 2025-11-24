@@ -2,6 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
+use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
@@ -10,6 +11,7 @@ use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
 use crate::deepcopy::{deepcopy, remap};
 use crate::host::*;
+use crate::str::Str;
 
 /// Instruction opcodes
 /// Note: commonly used upcodes should be in the [0, 127] range (one byte)
@@ -107,7 +109,8 @@ pub enum Insn
     clos_set { idx: u32 },
     clos_get { idx: u32 },
 
-    // Mutable cell access
+    // Mutable cell operations
+    cell_new,
     cell_set,
     cell_get,
 
@@ -121,8 +124,8 @@ pub enum Insn
     instanceof { class_id: ClassId },
 
     // Get/set field
-    get_field { field: *const String, class_id: ClassId, slot_idx: u32 },
-    set_field { field: *const String, class_id: ClassId, slot_idx: u32 },
+    get_field { field: *const Str, class_id: ClassId, slot_idx: u32 },
+    set_field { field: *const Str, class_id: ClassId, slot_idx: u32 },
 
     // Get/set indexed element
     get_index,
@@ -160,10 +163,10 @@ pub enum Insn
 
     // Call a method on an object
     // call_method (self, arg0, ..., argN)
-    call_method { name: *const String, argc: u8 },
+    call_method { name: *const Str, argc: u8 },
 
     // Call a method with a previously known pc
-    call_method_pc { name: *const String, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
+    call_method_pc { name: *const Str, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
 
     // Return
     ret,
@@ -258,7 +261,7 @@ pub enum Value
     Float64(f64),
 
     // Immutable string
-    String(*const String),
+    String(*const Str),
 
     HostFn(&'static HostFn),
     Fun(FunId),
@@ -449,7 +452,7 @@ macro_rules! unwrap_str {
     // To be used inside the interpreter loop
     ($val: expr, $requester: literal) => {
         match $val {
-            Value::String(p) => unsafe { &**p },
+            Value::String(p) => unsafe { (*p).as_str() },
             _ => error!($requester, "expected string value but got {:?}", $val)
         }
     };
@@ -475,7 +478,7 @@ impl PartialEq for Value
 
             // For strings, we do a structural equality comparison, so
             // that some strings can be interned (deduplicated)
-            (String(p1), String(p2))    => unsafe { **p1 == **p2 },
+            (String(p1), String(p2))    => unsafe { (**p1).as_str() == (**p2).as_str() },
 
             // For int & float, we may need type conversions
             (Float64(a), Int64(b))      => *a == *b as f64,
@@ -654,6 +657,12 @@ impl Actor
     {
         use crate::window::poll_ui_msg;
 
+        // Call try_recv first to give the message allocator GC
+        // a chance to run before we block and wait for a message
+        if let Some(msg) = self.try_recv() {
+            return msg;
+        }
+
         if self.actor_id != 0 {
             let msg = self.queue_rx.recv().unwrap();
             return msg.msg;
@@ -682,24 +691,38 @@ impl Actor
     {
         use crate::window::poll_ui_msg;
 
-        if self.actor_id != 0 {
-            return match self.queue_rx.try_recv() {
-                Ok(msg) => Some(msg.msg),
-                _ => None,
+        // Lock on the message allocator
+        // Senders cannot send us messages while we hold the lock
+        // If we can get the lock, it also means senders are done
+        let alloc_rc = self.msg_alloc.clone();
+        let mut msg_alloc = alloc_rc.lock().unwrap();
+
+        // Actor 0 (the main actor) needs to poll for UI events
+        if self.actor_id == 0 {
+            let ui_msg = poll_ui_msg(self);
+            if let Some(msg) = ui_msg {
+                return Some(msg);
             }
         }
 
-        // Actor 0 (the main actor) needs to poll for UI events
-        let ui_msg = poll_ui_msg(self);
-        if let Some(msg) = ui_msg {
-            return Some(msg);
+        // Block on the message queue for up to 8ms
+        if let Ok(msg) = self.queue_rx.try_recv() {
+            return Some(msg.msg);
         }
 
-        // Block on the message queue for up to 8ms
-        match self.queue_rx.try_recv() {
-            Ok(msg) => Some(msg.msg),
-            _ => None,
+        // If the message allocator is full
+        if msg_alloc.bytes_free() < msg_alloc.mem_size() / 4 {
+            // Perform a GC pass to copy messages into the main allocator
+            self.gc_collect(0, &mut []);
+
+            println!("Performing message allocator GC");
+
+            // Clear the contents of the message allocator
+            *msg_alloc = Alloc::with_size(msg_alloc.mem_size());
         }
+
+        // No message received
+        None
     }
 
     /// Send a message to another actor
@@ -730,8 +753,8 @@ impl Actor
             None => return Err(()),
         };
         let mut dst_map = HashMap::new();
-        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map);
-        remap(dst_map);
+        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map).unwrap();
+        remap(&mut dst_map);
 
         match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
             Ok(_) => Ok(()),
@@ -820,7 +843,13 @@ impl Actor
     pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
     {
         let num_slots = self.get_num_slots(class_id);
-        self.alloc.new_object(class_id, num_slots)
+
+        self.gc_check(
+            size_of::<Object>() + size_of::<Value>() * num_slots,
+            &mut []
+        );
+
+        self.alloc.new_object(class_id, num_slots).unwrap()
     }
 
     /// Set the value of an object field
@@ -840,68 +869,197 @@ impl Actor
     /// or present as a constant in the program
     pub fn intern_str(&mut self, str_const: &str) -> Value
     {
+        self.gc_check(
+            size_of::<Str>() + str_const.len(),
+            &mut []
+        );
+
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
-        self.alloc.str_val(str_const.to_string())
+        self.alloc.str_val(str_const).unwrap()
     }
 
-    /// Ensure that at least num_bytes of free space are available in the allocator
-    /// If the memory is not available, perform GC
-    pub fn ensure_mem_avail(&mut self, num_bytes: usize)
+    /// Perform a garbage collection cycle
+    pub fn gc_collect(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
     {
-        if self.alloc.bytes_free() >= num_bytes {
-            return;
+        fn try_copy(
+            actor: &mut Actor,
+            dst_alloc: &mut Alloc,
+            dst_map: &mut HashMap<Value, Value>,
+            extra_roots: &mut [&mut Value],
+        ) -> Result<(), ()>
+        {
+            // Copy the global variables
+            for val in &mut actor.globals {
+                deepcopy(*val, dst_alloc, dst_map)?;
+            }
+
+            // Copy values on the stack
+            for val in &mut actor.stack {
+                deepcopy(*val, dst_alloc, dst_map)?;
+            }
+
+            // Copy closures in the stack frames
+            for frame in &mut actor.frames {
+                deepcopy(frame.fun, dst_alloc, dst_map)?;
+            }
+
+            // Copy heap values referenced in instructions
+            for insn in &mut actor.insns {
+                match insn {
+                    Insn::push { val } => {
+                        deepcopy(*val, dst_alloc, dst_map)?;
+                    }
+
+                    // Instructions referencing name strings
+                    Insn::get_field { field: s, .. } |
+                    Insn::set_field { field: s, .. } |
+                    Insn::call_method { name: s, .. } |
+                    Insn::call_method_pc { name: s, .. } => {
+                        deepcopy(Value::String(*s), dst_alloc, dst_map)?;
+                    }
+
+                    _ => {}
+                }
+            }
+
+            // Copy extra roots supplied by the user
+            for val in extra_roots {
+                deepcopy(**val, dst_alloc, dst_map)?;
+            }
+
+            println!(
+                "GC copied {} values, {} bytes free",
+                thousands_sep(dst_map.len()),
+                thousands_sep(dst_alloc.bytes_free()),
+            );
+
+            remap(dst_map);
+
+            Ok(())
+        }
+
+        fn get_new_val(val: Value, dst_map: &HashMap<Value, Value>) -> Value
+        {
+            if !val.is_heap() {
+                return val;
+            }
+
+            let new_val = *dst_map.get(&val).unwrap();
+            new_val
         }
 
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
         let start_time = crate::host::get_time_ms();
 
+        let mut new_mem_size = self.alloc.mem_size();
+
         // Create a new allocator to copy the data into
-        let mut new_alloc = Alloc::with_size(self.alloc.mem_size());
+        let mut dst_alloc = Alloc::with_size(new_mem_size);
 
         // Hash map for remapping copied values
-        let mut dst_map = HashMap::new();
+        let mut dst_map = HashMap::<Value, Value>::new();
 
-        // Copy the global variables
+        loop {
+            // Clear the value map
+            dst_map.clear();
+
+            // Try to copy all objects into the new allocator
+            let copy_fail = try_copy(self, &mut dst_alloc, &mut dst_map, extra_roots).is_err();
+
+            // If there is not enough free memory after copying
+            let min_free_bytes = std::cmp::max(self.alloc.mem_size() / 5, bytes_needed);
+            let bytes_free = dst_alloc.bytes_free();
+            let not_enough_space = bytes_free < min_free_bytes;
+
+            // If we could not copy all the data or there is not enough free space
+            // Increase the target heap size
+            if copy_fail || not_enough_space {
+                new_mem_size = std::cmp::max(
+                    (new_mem_size * 3) / 2,
+                    new_mem_size + bytes_needed,
+                );
+
+                println!(
+                    "Increasing heap size to {} bytes",
+                    thousands_sep(new_mem_size),
+                );
+
+                // Recreate the target allocator
+                dst_alloc = Alloc::with_size(new_mem_size);
+
+                // Try again
+                continue;
+            }
+
+            // Copying successful
+            break;
+        }
+
+        // Remap the global variables
         for val in &mut self.globals {
-            *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
+            *val = get_new_val(*val, &dst_map);
         }
 
-        println!("Stack size: {}", self.stack.len());
-
-        // Copy values on the stack
+        // Remap values on the stack
         for val in &mut self.stack {
-            *val = deepcopy(*val, &mut new_alloc, &mut dst_map);
+            *val = get_new_val(*val, &dst_map);
         }
 
-        // Copy closures in the stack frames
+        // Remap closures in the stack frames
         for frame in &mut self.frames {
-            frame.fun = deepcopy(frame.fun, &mut new_alloc, &mut dst_map);
+            frame.fun = get_new_val(frame.fun, &dst_map);
         }
 
-        println!("GC copied {} values", dst_map.len());
-        remap(dst_map);
+        // Remap heap values referenced in instructions
+        for insn in &mut self.insns {
+            match insn {
+                Insn::push { val } => {
+                    *val = get_new_val(*val, &dst_map);
+                }
 
+                // Instructions referencing name strings
+                Insn::get_field { field: s, .. } |
+                Insn::set_field { field: s, .. } |
+                Insn::call_method { name: s, .. } |
+                Insn::call_method_pc { name: s, .. } => {
+                    match get_new_val(Value::String(*s), &dst_map) {
+                        Value::String(new_s) => *s = new_s,
+                        _ => panic!(),
+                    }
+                }
 
-        // Note: we may want to run another GC cycle and expand the memory
-        // if too little memory is free
-        // Should have a target for something like 25% of memory free
+                _ => {}
+            }
+        }
 
-        // Note: we should also copy in data from the message
-        // allocator. This would need to be done by traversing
-        // the message queue?
-
-
-
-
+        // Remap extra roots supplied by the user
+        for val in extra_roots {
+            **val = get_new_val(**val, &dst_map);
+        }
 
         // Drop and replace the old allocator
-        self.alloc = new_alloc;
-
+        // Note that we can only do this after remapping the values,
+        // because we access string data while hashing string values
+        self.alloc = dst_alloc;
 
         let end_time = crate::host::get_time_ms();
         let gc_time = end_time - start_time;
         println!("GC time: {} ms", gc_time);
+    }
+
+    /// Ensure that at least bytes_needed of free space are available in the
+    /// allocator. If the memory is not available, perform GC.
+    pub fn gc_check(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
+    {
+        // Add some extra bytes for alignment
+        let bytes_needed = bytes_needed + 16;
+
+        if self.alloc.bytes_free() >= bytes_needed {
+            return;
+        }
+
+        self.gc_collect(bytes_needed, extra_roots);
     }
 
     /// Call a host function
@@ -1245,8 +1403,8 @@ impl Actor
                 }
 
                 Insn::add => {
-                    let v1 = pop!();
-                    let v0 = pop!();
+                    let mut v1 = pop!();
+                    let mut v0 = pop!();
 
                     let r = match (v0, v1) {
                         (Int64(v0), Int64(v1)) => Int64(v0 + v1),
@@ -1254,10 +1412,19 @@ impl Actor
                         (Int64(v0), Float64(v1)) => Float64(v0 as f64 + v1),
                         (Float64(v0), Int64(v1)) => Float64(v0 + v1 as f64),
 
-                        (Value::String(s1), Value::String(s2)) => {
+                        (Value::String(s0), Value::String(s1)) => {
+                            let s0 = unsafe { &*s0 };
                             let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
-                            self.alloc.str_val(s1.to_owned() + s2)
+
+                            self.gc_check(
+                                std::mem::size_of::<Str>() +
+                                s0.len() + s1.len(),
+                                &mut [&mut v0, &mut v1],
+                            );
+
+                            let s0 = unwrap_str!(v0);
+                            let s1 = unwrap_str!(v1);
+                            self.alloc.str_val(&(s0.to_owned() + s1)).unwrap()
                         }
 
                         _ => error!("add", "unsupported operand types")
@@ -1432,8 +1599,8 @@ impl Actor
                         (Int64(v0), Float64(v1)) => (v0 as f64) < v1,
 
                         (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
+                            let s1 = unsafe { (*s1).as_str() };
+                            let s2 = unsafe { (*s2).as_str() };
                             s1 < s2
                         }
 
@@ -1455,8 +1622,8 @@ impl Actor
                         (Int64(v0), Float64(v1)) => (v0 as f64) <= v1,
 
                         (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
+                            let s1 = unsafe { (*s1).as_str() };
+                            let s2 = unsafe { (*s2).as_str() };
                             s1 <= s2
                         }
 
@@ -1478,8 +1645,8 @@ impl Actor
                         (Int64(v0), Float64(v1)) => (v0 as f64) > v1,
 
                         (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
+                            let s1 = unsafe { (*s1).as_str() };
+                            let s2 = unsafe { (*s2).as_str() };
                             s1 > s2
                         }
 
@@ -1501,8 +1668,8 @@ impl Actor
                         (Int64(v0), Float64(v1)) => (v0 as f64) >= v1,
 
                         (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { &*s1 };
-                            let s2 = unsafe { &*s2 };
+                            let s1 = unsafe { (*s1).as_str() };
+                            let s2 = unsafe { (*s2).as_str() };
                             s1 >= s2
                         }
 
@@ -1539,8 +1706,16 @@ impl Actor
 
                 // Create a new closure
                 Insn::clos_new { fun_id, num_slots } => {
-                    let clos = Closure { fun_id, slots: vec![Undef; num_slots as usize] };
-                    let clos_val = self.alloc.alloc(clos);
+                    let num_slots = num_slots as usize;
+
+                     self.gc_check(
+                        std::mem::size_of::<Closure>() +
+                        std::mem::size_of::<Value>() * num_slots,
+                        &mut [],
+                    );
+
+                    let clos = Closure { fun_id, slots: vec![Undef; num_slots] };
+                    let clos_val = self.alloc.alloc(clos).unwrap();
                     push!(Value::Closure(clos_val));
                 }
 
@@ -1577,6 +1752,17 @@ impl Actor
                     push!(val);
                 }
 
+                // Create a new mutable cell
+                Insn::cell_new => {
+                     self.gc_check(
+                        std::mem::size_of::<Value>(),
+                        &mut [],
+                    );
+
+                    let p_cell = self.alloc.alloc(Value::Nil).unwrap();
+                    push!(Value::Cell(p_cell));
+                }
+
                 // Set the value stored in a mutable cell
                 Insn::cell_set => {
                     let cell = pop!();
@@ -1602,7 +1788,7 @@ impl Actor
 
                 // Create new empty dictionary
                 Insn::dict_new => {
-                    let new_obj = self.alloc.alloc(Dict::default());
+                    let new_obj = self.alloc.alloc(Dict::default()).unwrap();
                     push!(Value::Dict(new_obj))
                 }
 
@@ -1619,7 +1805,7 @@ impl Actor
                             if class_id == obj.class_id {
                                 obj.set(slot_idx as usize, val);
                             } else {
-                                let slot_idx = self.get_slot_idx(obj.class_id, field_name);
+                                let slot_idx = self.get_slot_idx(obj.class_id, field_name.as_str());
                                 let class_id = obj.class_id;
 
                                 // Update the cache
@@ -1635,7 +1821,7 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            dict.set(field_name, val);
+                            dict.set(field_name.as_str(), val);
                         }
 
                         _ => error!("set_field", "set_field on non-object/dict value")
@@ -1647,12 +1833,13 @@ impl Actor
                 Insn::new { class_id, argc } => {
                     let num_slots = self.get_num_slots(class_id);
 
-                    self.ensure_mem_avail(
+                    self.gc_check(
                         std::mem::size_of::<Object>() +
-                        std::mem::size_of::<Value>() * num_slots
+                        std::mem::size_of::<Value>() * num_slots,
+                        &mut [],
                     );
 
-                    let obj_val = self.alloc.new_object(class_id, num_slots);
+                    let obj_val = self.alloc.new_object(class_id, num_slots).unwrap();
 
                     // If a constructor method is present
                     let init_fun = self.get_method(class_id, "init");
@@ -1682,13 +1869,14 @@ impl Actor
                 Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
                     let num_slots = num_slots as usize;
 
-                    self.ensure_mem_avail(
+                    self.gc_check(
                         std::mem::size_of::<Object>() +
-                        std::mem::size_of::<Value>() * num_slots
+                        std::mem::size_of::<Value>() * num_slots,
+                        &mut [],
                     );
 
                     // Allocate the object
-                    let obj_val = self.alloc.new_object(class_id, num_slots);
+                    let obj_val = self.alloc.new_object(class_id, num_slots).unwrap();
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object
@@ -1725,7 +1913,7 @@ impl Actor
                     let val = match obj {
                         Value::Array(p) => {
                             match field_name.as_str() {
-                                "len" => obj.unwrap_arr().elems.len().into(),
+                                "len" => obj.unwrap_arr().len().into(),
                                 _ => error!("get_field", "field not found on array")
                             }
                         }
@@ -1740,7 +1928,7 @@ impl Actor
                         Value::String(p) => {
                             match field_name.as_str() {
                                 "len" => {
-                                    let s = unsafe { &*p };
+                                    let s = unsafe { (*p).as_str() };
                                     s.len().into()
                                 }
                                 _ => error!("get_field", "field not found on string")
@@ -1754,7 +1942,7 @@ impl Actor
                             let val = if class_id == obj.class_id {
                                 obj.get(slot_idx as usize)
                             } else {
-                                let slot_idx = self.get_slot_idx(obj.class_id, field_name);
+                                let slot_idx = self.get_slot_idx(obj.class_id, field_name.as_str());
                                 let class_id = obj.class_id;
 
                                 // Update the cache
@@ -1768,7 +1956,7 @@ impl Actor
                             };
 
                             if val == Value::Undef {
-                                error!("get_field", "object field not initialized `{}`", field_name);
+                                error!("get_field", "object field not initialized `{}`", field_name.as_str());
                             }
 
                             val
@@ -1776,7 +1964,7 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            dict.get(field_name)
+                            dict.get(field_name.as_str())
                         }
 
                         _ => error!("get_field", "get_field on non-object value {:?}", obj)
@@ -1845,22 +2033,38 @@ impl Actor
 
                 // Create new empty array
                 Insn::arr_new { capacity } => {
-                    let new_arr = self.alloc.alloc(Array::with_capacity(capacity));
-                    push!(Value::Array(new_arr))
+                    let capacity = capacity as usize;
+
+                    self.gc_check(
+                        size_of::<Array>() + size_of::<Value>() * capacity,
+                        &mut [],
+                    );
+
+                    let new_arr = Array::with_capacity(capacity, &mut self.alloc).unwrap();
+                    push!(Value::Array(self.alloc.alloc(new_arr).unwrap()))
                 }
 
                 // Append an element at the end of an array
+                // This instruction is used to construct array literals
                 Insn::arr_push => {
                     let val = pop!();
-                    let mut arr = pop!();
-                    arr.unwrap_arr().push(val);
+                    let mut array = pop!();
+                    crate::array::array_push(self, array, val).unwrap();
                 }
 
                 // Clone a bytearray
                 Insn::ba_clone => {
                     let mut val = pop!();
                     let ba = val.unwrap_ba();
-                    let p_clone = self.alloc.alloc(ba.clone());
+
+                    self.gc_check(
+                        size_of::<ByteArray>() + ba.num_bytes(),
+                        &mut [&mut val],
+                    );
+
+                    let ba = val.unwrap_ba();
+                    let ba_clone = ba.clone(&mut self.alloc).unwrap();
+                    let p_clone = self.alloc.alloc(ba_clone).unwrap();
                     push!(Value::ByteArray(p_clone));
                 }
 
@@ -1937,8 +2141,8 @@ impl Actor
                     match self_val {
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
-                            let fun_id = match self.get_method(obj.class_id, &method_name) {
-                                None => error!("call to method `{}`, not found on class", method_name),
+                            let fun_id = match self.get_method(obj.class_id, method_name.as_str()) {
+                                None => error!("call to method `{}`, not found on class", method_name.as_str()),
                                 Some(fun_id) => fun_id,
                             };
 
@@ -1957,10 +2161,10 @@ impl Actor
                         }
 
                         _ => {
-                            let fun = crate::runtime::get_method(self_val, &method_name);
+                            let fun = crate::runtime::get_method(self_val, method_name.as_str());
 
                             if fun == Value::Nil {
-                                error!("call to unknown method `{}`", method_name);
+                                error!("call to unknown method `{}`", method_name.as_str());
                             }
 
                             call_fun!(fun, argc + 1);
@@ -2044,7 +2248,7 @@ impl Actor
 #[derive(Clone)]
 struct ActorTx
 {
-    sender: mpsc::Sender<Message>,
+    sender: mpsc::SyncSender<Message>,
     msg_alloc: Weak<Mutex<Alloc>>,
 }
 
@@ -2105,7 +2309,7 @@ impl VM
         drop(vm_ref);
 
         // Create a message queue for the actor
-        let (queue_tx, queue_rx) = mpsc::channel::<Message>();
+        let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
 
         // Create an allocator to send messages to the actor
         let mut msg_alloc = Alloc::new();
@@ -2115,15 +2319,15 @@ impl VM
 
         // We need to recursively copy the function/closure
         // using the actor's message allocator
-        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map);
+        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map).unwrap();
 
         // Copy the global variables from the parent actor
         let mut globals = parent.globals.clone();
         for val in &mut globals {
-            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map);
+            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map).unwrap();
         }
 
-        remap(dst_map);
+        remap(&mut dst_map);
 
         // Wrap the message allocator in a shared mutex
         let msg_alloc = Arc::new(Mutex::new(msg_alloc));
@@ -2192,7 +2396,7 @@ impl VM
         let vm_mutex = vm.clone();
 
         // Create a message queue for the actor
-        let (queue_tx, queue_rx) = mpsc::channel::<Message>();
+        let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
 
         // Create an allocator to send messages to the actor
         let msg_alloc = Arc::new(Mutex::new(Alloc::new()));
@@ -2604,7 +2808,7 @@ mod tests
     #[test]
     fn bytearray()
     {
-        eval("let a = ByteArray.new();");
+        eval("let a = ByteArray.with_size(0);");
         eval("let a = ByteArray.with_size(1024); assert(a.len == 1024);");
         eval("let a = ByteArray.with_size(32); a.store_u32(0, 0xFF_FF_FF_FF);");
         eval("let a = ByteArray.with_size(32); a.store_u32(0, 0xFF_00_00_00); assert(a[0] == 0 && a[3] == 255);");
