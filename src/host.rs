@@ -6,6 +6,7 @@ use crate::alloc::Alloc;
 use crate::vm::{Value, VM, Actor};
 use crate::ast::{Expr, Function, Program};
 use crate::{error, unwrap_usize, unwrap_str};
+use crate::str::Str;
 
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
@@ -167,6 +168,12 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
     }
 
     let arg_str = &args[idx];
+
+    actor.gc_check(
+        std::mem::size_of::<Str>() + arg_str.len(),
+        &mut [],
+    );
+
     Ok(actor.alloc.str_val(arg_str).unwrap())
 }
 
@@ -207,6 +214,11 @@ fn readln(actor: &mut Actor) -> Result<Value, String>
 
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => {
+            actor.gc_check(
+                std::mem::size_of::<Str>() + line.len(),
+                &mut [],
+            );
+
             Ok(actor.alloc.str_val(&line).unwrap())
         }
 
@@ -375,6 +387,11 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
         Err(_) => return Ok(Value::Nil),
         Ok(s) => s
     };
+
+    actor.gc_check(
+        std::mem::size_of::<Str>() + s.len(),
+        &mut [],
+    );
 
     Ok(actor.alloc.str_val(&s).unwrap())
 }
