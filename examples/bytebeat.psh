@@ -1,11 +1,18 @@
-// ByteBeat: http://viznut.fi/texts-en/bytebeat_deep_analysis.html
-
-// precedences taken from https://en.wikipedia.org/wiki/Operators_in_C_and_C%2B%2B#Expression_evaluation_order
+// Partial ByteBeat imp: http://viznut.fi/texts-en/bytebeat_deep_analysis.html
+//
+// at the moment, literals must be decimal
+//
+// thus far, only the following operators are supported; precedences taken
+// from https://en.wikipedia.org/wiki/Operators_in_C_and_C%2B%2B#Expression_evaluation_order
 
 let ops = ["*","&","|",">>","<<", "^", "-", "+", "/", "%"];
 let prc = [5, 11, 13, 7, 7, 12, 6, 6, 5, 5];
 
+// cargo run examples/bytebeat.psh ["bytebeat expr"] [seconds]
+
 //------------------------------------------------------------------------------
+// AST
+
 class Xpr {
     init(self, op, l, r) {
         self.op = op;
@@ -65,6 +72,7 @@ class Lit {
 }
 
 //------------------------------------------------------------------------------
+// Parsing (quick and dirty)
 
 fun toktype(c) {
     if (48 <= c && c <= 57) { return 0; }
@@ -158,12 +166,13 @@ fun texpr(pc) {
 // let sample_val = ((t<<1)^((t<<1)+(t>>7)&t>>12))|t>>(4-(1^7&(t>>19)))|t>>7;
 
 //------------------------------------------------------------------------------
+// Playback
 
 fun main() {
     let SAMPLE_RATE = 8000;
     let dev = $audio_open_output(SAMPLE_RATE, 1);
 
-    let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "(t*5&t>>7)");
+    let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "t*(t>>9|t>>13)&16");
     let d = ($cmd_num_args() > 2 ? $cmd_get_arg(2) : "x").parse_int(10);
 
     let bb = texpr(ParseCtx(s));
