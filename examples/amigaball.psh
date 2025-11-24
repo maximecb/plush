@@ -136,6 +136,9 @@ fun mat4_rotx(theta)
     result[2][1] = sint;
     result[2][2] = cost;
 
+    // Fourth row
+    result[3][3] = 1.0;
+
     return result;
 }
 
@@ -158,6 +161,9 @@ fun mat4_roty(theta)
     // Third row
     result[2][0] = -sint;
     result[2][2] = cost;
+
+    // Fourth row
+    result[3][3] = 1.0;
 
     return result;
 }
@@ -421,88 +427,6 @@ class RenderData {
         }
     }
 
-    // Sort the triangles by depth so that they can be rendered back to front
-    sort_triangles(self) {
-        let num_triangles = self.indices.len _/ 3;
-        if (num_triangles == 0) {
-            return;
-        }
-
-        // Create an array to store the original order of triangles
-        let triangle_order = Array.with_size(num_triangles, 0);
-        for (let var i = 0; i < num_triangles; ++i) {
-            triangle_order[i] = i;
-        }
-
-        // Calculate the depth of each triangle
-        let depths = Array.with_size(num_triangles, 0.0);
-        for (let var i = 0; i < num_triangles; ++i) {
-            let v0 = self.vertices[self.indices[i*3]];
-            let v1 = self.vertices[self.indices[i*3+1]];
-            let v2 = self.vertices[self.indices[i*3+2]];
-
-            // Centroid Z
-            //depths[i] = (v0.z + v1.z + v2.z) / 3;
-
-            // Minimum Z
-            depths[i] = v0.z.max(v1.z).max(v2.z);
-        }
-
-        // Partition function for quicksort, operating on triangle_order
-        fun partition(low, high) {
-            let pivot_depth = depths[triangle_order[high]];
-            let var i = low - 1;
-
-            for (let var j = low; j < high; ++j) {
-                // Sort back to front (larger Z is further away)
-                if (depths[triangle_order[j]] > pivot_depth) {
-                    i = i + 1;
-
-                    // Swap triangle_order elements
-                    let temp_order = triangle_order[i];
-                    triangle_order[i] = triangle_order[j];
-                    triangle_order[j] = temp_order;
-                }
-            }
-
-            // Swap the pivot element in triangle_order
-            let i1 = i + 1;
-            let temp_order = triangle_order[i1];
-            triangle_order[i1] = triangle_order[high];
-            triangle_order[high] = temp_order;
-
-            return i1;
-        }
-
-        // Quicksort implementation, operating on triangle_order
-        fun quicksort(low, high) {
-            if (low < high) {
-                let pi = partition(low, high);
-                quicksort(low, pi - 1);
-                quicksort(pi + 1, high);
-            }
-        }
-
-        quicksort(0, num_triangles - 1);
-
-        // Rearrange self.indices, self.colors, and self.normals based on the sorted triangle_order
-        let new_indices = Array.with_size(num_triangles * 3, 0);
-        let new_colors = Array.with_size(num_triangles, 0);
-        let new_normals = Array.with_size(num_triangles, 0); // New: for normals
-
-        for (let var k = 0; k < num_triangles; ++k) {
-            let original_triangle_idx = triangle_order[k];
-            new_colors[k] = self.colors[original_triangle_idx];
-            new_indices[k*3] = self.indices[original_triangle_idx*3];
-            new_indices[k*3+1] = self.indices[original_triangle_idx*3+1];
-            new_indices[k*3+2] = self.indices[original_triangle_idx*3+2];
-            new_normals[k] = self.normals[original_triangle_idx]; // New: copy normal
-        }
-        self.indices = new_indices;
-        self.colors = new_colors;
-        self.normals = new_normals; // New: assign new normals array
-    }
-
     // Sort the triangles by depth using a bucket sort
     sort_triangles_bucket(self, num_bins) {
         let num_triangles = self.indices.len _/ 3;
@@ -599,11 +523,6 @@ class RenderData {
     }
 }
 
-
-
-
-
-
 fun generate_amiga_ball(data, radius, stacks, sectors) {
     let base_idx = data.vertices.len;
 
@@ -684,7 +603,7 @@ for (let var i = 0; i < scene_data.vertices.len; ++i) {
 // Camera setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
 let camera = Camera(
-    Vec3(0.0, 0.0, 4.0),
+    Vec3(0.0, 0.0, 8.0),
     Vec3(0, 0, 0),
     70.0,   // fov
     1.0,    // near
@@ -718,9 +637,9 @@ loop {
     //let mat_rot = mat4_mul(mat_rot_x, mat_rot_y);
     let mat_rot = mat_rot_y;
 
-    let mat_vp = mat4_mul(mat_proj, mat_view);
-    //let mat_mvp = mat4_mul(mat_vp, mat_rot);
-    let mat_mvp = mat_vp;
+    // Transformation chain: model -> view -> projection
+    let mat_mv = mat4_mul(mat_view, mat_rot);
+    let mat_mvp = mat4_mul(mat_proj, mat_mv);
 
     // --- Render Ball ---
     let transform_start = $time_current_ms();
