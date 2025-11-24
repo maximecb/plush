@@ -71,6 +71,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
     static TIME_CURRENT_MS: HostFn = HostFn { name: "time_current_ms", f: Fn0(time_current_ms) };
     static CMD_NUM_ARGS: HostFn = HostFn { name: "cmd_num_args", f: Fn0(cmd_num_args) };
     static CMD_GET_ARG: HostFn = HostFn { name: "cmd_get_arg", f: Fn1(cmd_get_arg) };
+    static CMD_GET_ARG_OR: HostFn = HostFn { name: "cmd_get_arg_or", f: Fn2(cmd_get_arg_or) };
     static PRINT: HostFn = HostFn { name: "print", f: Fn1(print) };
     static PRINTLN: HostFn = HostFn { name: "println", f: Fn1(println) };
     static READLN: HostFn = HostFn { name: "readln", f: Fn0(readln) };
@@ -99,6 +100,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
 
         "cmd_num_args" => &CMD_NUM_ARGS,
         "cmd_get_arg" => &CMD_GET_ARG,
+        "cmd_get_arg_or" => &CMD_GET_ARG_OR,
 
         "print" => &PRINT,
         "println" => &PRINTLN,
@@ -155,16 +157,14 @@ pub fn cmd_num_args(actor: &mut Actor) -> Result<Value, String>
 }
 
 /// Get a command-line argument string by index
-/// Note: if we allocate just one object then we can be
-/// guaranteed that object won't be GC'd while this function runs
-pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
+pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<Value, String>
 {
     let idx = idx.unwrap_usize();
 
     let args = crate::REST_ARGS.lock().unwrap();
 
     if idx >= args.len() {
-        return Ok(Value::Nil);
+        return Ok(default);
     }
 
     let arg_str = &args[idx];
@@ -175,6 +175,12 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
     );
 
     Ok(actor.alloc.str_val(arg_str).unwrap())
+}
+
+/// Get a command-line argument string by index
+pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
+{
+    cmd_get_arg_or(actor, idx, Value::Nil)
 }
 
 /// Print a value to stdout
