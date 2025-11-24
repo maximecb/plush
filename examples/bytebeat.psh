@@ -1,3 +1,8 @@
+// precedences taken from https://en.wikipedia.org/wiki/Operators_in_C_and_C%2B%2B#Expression_evaluation_order
+
+let ops = ["*","&","|",">>","<<", "^", "-", "+"];
+let prc = [5, 11, 13, 7, 7, 12, 6, 6];
+
 //------------------------------------------------------------------------------
 class Xpr {
     init(self, op, l, r) {
@@ -16,6 +21,12 @@ class Xpr {
             return self.l.eval(t) >> self.r.eval(t);
         } else if (self.op == "<<") {
             return self.l.eval(t) << self.r.eval(t);
+        } else if (self.op == "^") {
+            return self.l.eval(t) ^ self.r.eval(t);
+        } else if (self.op == "+") {
+            return self.l.eval(t) + self.r.eval(t);
+        } else if (self.op == "-") {
+            return self.l.eval(t) - self.r.eval(t);
         }
         return 0;
     }
@@ -46,9 +57,6 @@ class Lit {
         return self.v.to_s();
     }
 }
-
-let bb = Xpr("|",Xpr("&",Xpr("*",Var(),Lit(5)),Xpr(">>",Var(),Lit(7))),
-                 Xpr("&",Xpr("*",Var(),Lit(3)),Xpr(">>",Var(),Lit(10))));
 
 //------------------------------------------------------------------------------
 
@@ -95,14 +103,10 @@ class ParseCtx {
             } else {
                 return self;
             }
+            if (t == 2) { return self; } // parens are always single
         }
     }
 }
-
-// precedences taken from https://en.wikipedia.org/wiki/Operators_in_C_and_C%2B%2B#Expression_evaluation_order
-
-let ops = ["*","&","|",">>","<<"];
-let prc = [5, 11, 13, 7, 7];
 
 fun getprc(o) {
     for(let var i = 0; i < ops.len; ++i) {
@@ -144,7 +148,8 @@ fun texpr(pc) {
     return expr(pc.lex(), 100);
 }
 
-let bb2 = texpr(ParseCtx("(t*5&t>>7)|(t*3&t>>10)"));
+// let bb2 = texpr(ParseCtx("(t*5&t>>7)|(t*3&t>>10)"));
+// let sample_val = ((t<<1)^((t<<1)+(t>>7)&t>>12))|t>>(4-(1^7&(t>>19)))|t>>7;
 
 //------------------------------------------------------------------------------
 
@@ -152,30 +157,32 @@ fun main() {
     let SAMPLE_RATE = 8000;
     let dev = $audio_open_output(SAMPLE_RATE, 1);
 
+    let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "(t*5&t>>7)");
+    let d = ($cmd_num_args() > 2 ? $cmd_get_arg(2) : "x").parse_int(10);
+
+    let bb = texpr(ParseCtx(s));
+    let end_time = $time_current_ms() + (d==nil ? 5 : d)*1000;
+
     let var t = 0;
 
-    fun gen_samples(num_samples) {
+    fun gen_samples(bb, num_samples) {
         let samples = ByteArray.with_size(num_samples * 4);
 
         for (let var i = 0; i < num_samples; ++i) {
-            let sample_val = bb2.eval(t);
-            // let sample_val = ((t<<1)^((t<<1)+(t>>7)&t>>12))|t>>(4-(1^7&(t>>19)))|t>>7;
-            samples.store_f32(i, (sample_val%256)/127 - 1.0);
+            samples.store_f32(i, (bb.eval(t)%256)/127 - 1.0);
             t = (t+1) % 8000;
         }
 
         return samples;
     }
 
-    let s = ($cmd_num_args() > 1 ? $cmd_get_arg(1) : "x").parse_int(10);
-    let end_time = $time_current_ms() + (s==nil ? 5 : s)*1000;
+    $println(bb.to_s());
 
     loop {
         let msg = $actor_recv();
 
         if (msg instanceof AudioNeeded) {
-            let samples = gen_samples(msg.num_samples);
-            $audio_write_samples(dev, samples);
+            $audio_write_samples(dev, gen_samples(bb, msg.num_samples));
         }
         if ($time_current_ms() > end_time) {
             break;
