@@ -40,13 +40,28 @@ impl Alloc
         self.mem_size
     }
 
+    pub fn bytes_used(&self) -> usize
+    {
+        self.next_idx
+    }
+
     pub fn bytes_free(&self) -> usize
     {
         assert!(self.next_idx <= self.mem_size);
         self.mem_size - self.next_idx
     }
 
-    // Allocate a block of a given size
+    /// Shrink the available memory to a smaller size
+    /// This is primarily used to test the GC
+    pub fn shrink_to(&mut self, new_size: usize)
+    {
+        assert!(self.next_idx <= new_size);
+        self.mem_size = new_size;
+
+        // TODO: try to realloc to a smaller size?
+    }
+
+    /// Allocate a block of a given size
     fn alloc_bytes(&mut self, size_bytes: usize) -> Result<*mut u8, ()>
     {
         let align_bytes = 8;
@@ -64,7 +79,7 @@ impl Alloc
         Ok(unsafe { self.mem_block.add(obj_pos) })
     }
 
-    // Allocate a variable-sized table of elements of a given type
+    /// Allocate a variable-sized table of elements of a given type
     pub fn alloc_table<T>(&mut self, num_elems: usize) -> Result<*mut [T], ()>
     {
         let num_bytes = num_elems * std::mem::size_of::<T>();
@@ -74,7 +89,7 @@ impl Alloc
         Ok(std::ptr::slice_from_raw_parts_mut(p, num_elems))
     }
 
-    // Allocate a new object of a given type
+    /// Allocate a new object of a given type
     pub fn alloc<T>(&mut self, obj: T) -> Result<*mut T, ()>
     {
         let num_bytes = std::mem::size_of::<T>();
@@ -88,7 +103,7 @@ impl Alloc
         Ok(p)
     }
 
-    // Allocate a new object with a given number of slots
+    /// Allocate a new object with a given number of slots
     pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Result<Value, ()>
     {
         // Allocate the slots for the object

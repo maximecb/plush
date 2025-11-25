@@ -78,6 +78,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
     static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1(read_file) };
     static READ_FILE_UTF8: HostFn = HostFn { name: "read_file", f: Fn1(read_file_utf8) };
     static WRITE_FILE: HostFn = HostFn { name: "write_file", f: Fn2(write_file) };
+    static VM_SHRINK_HEAP: HostFn = HostFn { name: "vm_shrink_heap", f: Fn1(vm_shrink_heap) };
     static ACTOR_ID: HostFn = HostFn { name: "actor_id", f: Fn0(actor_id) };
     static ACTOR_PARENT: HostFn = HostFn { name: "actor_parent", f: Fn0(actor_parent) };
     static ACTOR_SLEEP: HostFn = HostFn { name: "actor_sleep", f: Fn1(actor_sleep) };
@@ -109,6 +110,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
         "read_file_utf8" => &READ_FILE_UTF8,
         "write_file" => &WRITE_FILE,
 
+        "vm_shrink_heap" => &VM_SHRINK_HEAP,
         "actor_id" => &ACTOR_ID,
         "actor_parent" => &ACTOR_PARENT,
         "actor_sleep" => &ACTOR_SLEEP,
@@ -417,6 +419,20 @@ fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<V
         Err(_) => Ok(Value::False),
         Ok(_) => Ok(Value::True)
     }
+}
+
+/// Shrink the heap to a smaller size
+fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> Result<Value, String>
+{
+    let new_size = unwrap_usize!(new_size);
+
+    if actor.alloc.bytes_used() > new_size {
+        return Err("requested heap size is smaller than bytes currently allocated".into());
+    }
+
+    actor.alloc.shrink_to(new_size);
+
+    Ok(Value::Nil)
 }
 
 /// Get the id of the current actor
