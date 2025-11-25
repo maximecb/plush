@@ -255,15 +255,25 @@ fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 }
 
 /// Split a string by a separator and return an array of strings
-fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Result<Value, String>
+fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value, String>
 {
-    let s = unwrap_str!(s);
+    let s = unwrap_str!(input);
     let sep = unwrap_str!(sep);
-    let str_parts = s.split(sep);
-    let size = str_parts.size_hint().0;
 
-    let mut array = Array::with_capacity(size, &mut actor.alloc).unwrap();
+    let str_parts: Vec<&str> = s.split(sep).collect();
+    let num_strs = str_parts.len();
+    let total_str_len: usize = str_parts.iter().map(|s| s.len()).sum();
 
+    // We need to keep the input string alive because we're
+    // relying on string slices for the string parts
+    actor.gc_check(
+        (size_of::<Array>() + num_strs * size_of::<Value>()) +
+        (size_of::<Str>() + 32) * num_strs +
+        total_str_len,
+        &mut [&mut input]
+    );
+
+    let mut array = Array::with_capacity(num_strs, &mut actor.alloc).unwrap();
     for part in str_parts {
         array.push(actor.alloc.str_val(part).unwrap(), &mut actor.alloc).unwrap();
     }
