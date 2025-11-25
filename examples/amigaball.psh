@@ -545,7 +545,9 @@ class RenderData {
     }
 }
 
-fun generate_amiga_ball(data, radius, stacks, sectors) {
+fun generate_amiga_ball(radius, stacks, sectors) {
+    let data = RenderData();
+
     let base_idx = data.vertices.len;
 
     // Generate vertices
@@ -608,13 +610,53 @@ fun generate_amiga_ball(data, radius, stacks, sectors) {
             data.normals.push(n1.add(n3).add(n2).normalize());
         }
     }
+
+    return data;
+}
+
+// Generate a grid along the XZ axes
+fun generate_grid(size, spacing) {
+    let data = RenderData();
+
+    // Generate all unique vertices for the grid
+    for (let var j = 0; j <= size; ++j) {
+        for (let var i = 0; i <= size; ++i) {
+            let x = i * spacing;
+            let z = j * spacing;
+            data.vertices.push(Vec3(x, 0, z));
+        }
+    }
+
+    let num_verts_per_row = size + 1;
+
+    // Indices for lines along Z-axis
+    for (let var i = 0; i <= size; ++i) {
+        for (let var j = 0; j < size; ++j) {
+            let idx0 = j * num_verts_per_row + i;
+            let idx1 = (j + 1) * num_verts_per_row + i;
+            data.indices.push(idx0);
+            data.indices.push(idx1);
+        }
+    }
+
+    // Indices for lines along X-axis
+    for (let var j = 0; j <= size; ++j) {
+        for (let var i = 0; i < size; ++i) {
+            let idx0 = j * num_verts_per_row + i;
+            let idx1 = j * num_verts_per_row + i + 1;
+            data.indices.push(idx0);
+            data.indices.push(idx1);
+        }
+    }
+
+    return data;
 }
 
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Amiga Ball", 0);
 let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
-let scene_data = RenderData();
-generate_amiga_ball(scene_data, 1.5, 16, 32);
+let ball_data = generate_amiga_ball(1.5, 16, 32);
+let grid_data = generate_grid(10, 0.1);
 
 // Camera setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
@@ -659,25 +701,25 @@ loop {
 
     // --- Render Ball ---
     let transform_start = $time_current_ms();
-    let scene_data = scene_data.transform(mat_mvp);
+    let ball_data = ball_data.transform(mat_mvp);
     let transform_time = $time_current_ms() - transform_start;
 
     let sort_start = $time_current_ms();
-    scene_data.sort_triangles_bucket(4096);
+    ball_data.sort_triangles_bucket(4096);
     let sort_time = $time_current_ms() - sort_start;
 
     let raster_start = $time_current_ms();
-    for (let var i = 0; i < scene_data.indices.len; i = i + 3) {
-        let v0 = scene_data.vertices[scene_data.indices[i]];
-        let v1 = scene_data.vertices[scene_data.indices[i+1]];
-        let v2 = scene_data.vertices[scene_data.indices[i+2]];
+    for (let var i = 0; i < ball_data.indices.len; i = i + 3) {
+        let v0 = ball_data.vertices[ball_data.indices[i]];
+        let v1 = ball_data.vertices[ball_data.indices[i+1]];
+        let v2 = ball_data.vertices[ball_data.indices[i+2]];
 
         // Backface culling: check winding order in screen space.
         // This calculates the signed area of the 2D triangle.
         // If the area is negative, it's front-facing (clockwise winding).
         if ((v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y) < 0) {
-            let triangle_normal = scene_data.normals[i _/ 3]; // Get the normal for this triangle
-            let base_color = scene_data.colors[i _/ 3];
+            let triangle_normal = ball_data.normals[i _/ 3]; // Get the normal for this triangle
+            let base_color = ball_data.colors[i _/ 3];
 
             // Calculate diffuse component (clamped to 0)
             let diffuse_intensity = (0.0).max(triangle_normal.dot(LIGHT_DIRECTION));
@@ -700,7 +742,7 @@ loop {
     let raster_time = $time_current_ms() - raster_start;
 
     $println(
-        "triangles: " + scene_data.colors.len.to_s() +
+        "triangles: " + ball_data.colors.len.to_s() +
         ", transform: " + transform_time.to_s() +
         "ms, sort: " + sort_time.to_s() +
         "ms, rasterize: " + raster_time.to_s() + "ms"
