@@ -100,6 +100,16 @@ fun mat4_mul_vec(i, m) {
     return o;
 }
 
+// Transform a 3D vector (like a normal) using a 4x4 transformation matrix,
+// ignoring translation and perspective components.
+fun mat4_mul_vec_no_translation(i, m) {
+    let o = Vec3(0, 0, 0);
+    o.x   = i.x * m[0][0] + i.y * m[0][1] + i.z * m[0][2];
+    o.y   = i.x * m[1][0] + i.y * m[1][1] + i.z * m[1][2];
+    o.z   = i.x * m[2][0] + i.y * m[2][1] + i.z * m[2][2];
+    return o.normalize(); // Re-normalize after transformation
+}
+
 // Multiplies two 4x4 matrices
 fun mat4_mul(a, b) {
     let result = [];
@@ -416,6 +426,10 @@ class RenderData {
     }
 
     transform(self, mat) {
+        let new_render_data = RenderData();
+        new_render_data.indices = self.indices;
+        new_render_data.colors = self.colors;
+
         for (let var i = 0; i < self.vertices.len; ++i) {
             let v = mat4_mul_vec(self.vertices[i], mat);
 
@@ -423,8 +437,16 @@ class RenderData {
             v.x = (v.x + 1) * 0.5 * FRAME_WIDTH;
             v.y = (1 - v.y) * 0.5 * FRAME_HEIGHT;
 
-            self.vertices[i] = v;
+            new_render_data.vertices.push(v);
         }
+
+        // Transform normals as well, but without translation or perspective division
+        for (let var i = 0; i < self.normals.len; ++i) {
+            let n = mat4_mul_vec_no_translation(self.normals[i], mat);
+            new_render_data.normals.push(n);
+        }
+
+        return new_render_data;
     }
 
     // Sort the triangles by depth using a bucket sort
@@ -594,16 +616,10 @@ let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 let scene_data = RenderData();
 generate_amiga_ball(scene_data, 1.5, 16, 32);
 
-// Keep a copy of the untransformed vertices
-let orig_vertices = [];
-for (let var i = 0; i < scene_data.vertices.len; ++i) {
-    orig_vertices.push(scene_data.vertices[i].clone());
-}
-
 // Camera setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
 let camera = Camera(
-    Vec3(0.0, 0.0, 8.0),
+    Vec3(0.0, 1.5, 4.0),
     Vec3(0, 0, 0),
     70.0,   // fov
     1.0,    // near
@@ -643,11 +659,7 @@ loop {
 
     // --- Render Ball ---
     let transform_start = $time_current_ms();
-    scene_data.vertices = [];
-    for (let var i = 0; i < orig_vertices.len; ++i) {
-        scene_data.vertices.push(orig_vertices[i].clone());
-    }
-    scene_data.transform(mat_mvp);
+    let scene_data = scene_data.transform(mat_mvp);
     let transform_time = $time_current_ms() - transform_start;
 
     let sort_start = $time_current_ms();
