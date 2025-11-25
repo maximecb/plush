@@ -1,6 +1,8 @@
+use std::mem::size_of;
 use crate::array::Array;
 use crate::ast::*;
 use crate::vm::{Value, Actor};
+use crate::str::Str;
 use crate::{error, unwrap_usize, unwrap_str};
 
 fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
@@ -189,6 +191,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
     let mut s = String::new();
     s.push(ch);
 
+    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
@@ -225,7 +228,9 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value,
         Some(ch) => ch,
     };
 
-    Ok(actor.alloc.str_val(&ch.to_string()).unwrap())
+    let ch_s = ch.to_string();
+    actor.gc_check(size_of::<Str>() + ch_s.len(), &mut []);
+    Ok(actor.alloc.str_val(&ch_s).unwrap())
 }
 
 /// Try to parse the string as an integer with the given radix
@@ -245,6 +250,7 @@ fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(s);
     let s = s.trim().to_string();
+    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
