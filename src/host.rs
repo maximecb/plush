@@ -6,6 +6,7 @@ use crate::alloc::Alloc;
 use crate::vm::{Value, VM, Actor};
 use crate::ast::{Expr, Function, Program};
 use crate::{error, unwrap_usize, unwrap_str};
+use crate::str::Str;
 
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
@@ -70,12 +71,14 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
     static TIME_CURRENT_MS: HostFn = HostFn { name: "time_current_ms", f: Fn0(time_current_ms) };
     static CMD_NUM_ARGS: HostFn = HostFn { name: "cmd_num_args", f: Fn0(cmd_num_args) };
     static CMD_GET_ARG: HostFn = HostFn { name: "cmd_get_arg", f: Fn1(cmd_get_arg) };
+    static CMD_GET_ARG_OR: HostFn = HostFn { name: "cmd_get_arg_or", f: Fn2(cmd_get_arg_or) };
     static PRINT: HostFn = HostFn { name: "print", f: Fn1(print) };
     static PRINTLN: HostFn = HostFn { name: "println", f: Fn1(println) };
     static READLN: HostFn = HostFn { name: "readln", f: Fn0(readln) };
     static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1(read_file) };
     static READ_FILE_UTF8: HostFn = HostFn { name: "read_file", f: Fn1(read_file_utf8) };
     static WRITE_FILE: HostFn = HostFn { name: "write_file", f: Fn2(write_file) };
+    static VM_SHRINK_HEAP: HostFn = HostFn { name: "vm_shrink_heap", f: Fn1(vm_shrink_heap) };
     static ACTOR_ID: HostFn = HostFn { name: "actor_id", f: Fn0(actor_id) };
     static ACTOR_PARENT: HostFn = HostFn { name: "actor_parent", f: Fn0(actor_parent) };
     static ACTOR_SLEEP: HostFn = HostFn { name: "actor_sleep", f: Fn1(actor_sleep) };
@@ -98,6 +101,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
 
         "cmd_num_args" => &CMD_NUM_ARGS,
         "cmd_get_arg" => &CMD_GET_ARG,
+        "cmd_get_arg_or" => &CMD_GET_ARG_OR,
 
         "print" => &PRINT,
         "println" => &PRINTLN,
@@ -106,6 +110,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
         "read_file_utf8" => &READ_FILE_UTF8,
         "write_file" => &WRITE_FILE,
 
+        "vm_shrink_heap" => &VM_SHRINK_HEAP,
         "actor_id" => &ACTOR_ID,
         "actor_parent" => &ACTOR_PARENT,
         "actor_sleep" => &ACTOR_SLEEP,
@@ -154,20 +159,30 @@ pub fn cmd_num_args(actor: &mut Actor) -> Result<Value, String>
 }
 
 /// Get a command-line argument string by index
-/// Note: if we allocate just one object then we can be
-/// guaranteed that object won't be GC'd while this function runs
-pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
+pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<Value, String>
 {
     let idx = idx.unwrap_usize();
 
     let args = crate::REST_ARGS.lock().unwrap();
 
     if idx >= args.len() {
-        return Ok(Value::Nil);
+        return Ok(default);
     }
 
     let arg_str = &args[idx];
+
+    actor.gc_check(
+        std::mem::size_of::<Str>() + arg_str.len(),
+        &mut [],
+    );
+
     Ok(actor.alloc.str_val(arg_str).unwrap())
+}
+
+/// Get a command-line argument string by index
+pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
+{
+    cmd_get_arg_or(actor, idx, Value::Nil)
 }
 
 /// Print a value to stdout
@@ -207,6 +222,11 @@ fn readln(actor: &mut Actor) -> Result<Value, String>
 
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => {
+            actor.gc_check(
+                std::mem::size_of::<Str>() + line.len(),
+                &mut [],
+            );
+
             Ok(actor.alloc.str_val(&line).unwrap())
         }
 
@@ -376,6 +396,11 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
         Ok(s) => s
     };
 
+    actor.gc_check(
+        std::mem::size_of::<Str>() + s.len(),
+        &mut [],
+    );
+
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
@@ -394,6 +419,20 @@ fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<V
         Err(_) => Ok(Value::False),
         Ok(_) => Ok(Value::True)
     }
+}
+
+/// Shrink the heap to a smaller size
+fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> Result<Value, String>
+{
+    let new_size = unwrap_usize!(new_size);
+
+    if actor.alloc.bytes_used() > new_size {
+        return Err("requested heap size is smaller than bytes currently allocated".into());
+    }
+
+    actor.alloc.shrink_to(new_size);
+
+    Ok(Value::Nil)
 }
 
 /// Get the id of the current actor

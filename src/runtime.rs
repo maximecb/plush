@@ -1,6 +1,8 @@
+use std::mem::size_of;
 use crate::array::Array;
 use crate::ast::*;
 use crate::vm::{Value, Actor};
+use crate::str::Str;
 use crate::{error, unwrap_usize, unwrap_str};
 
 fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
@@ -189,6 +191,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
     let mut s = String::new();
     s.push(ch);
 
+    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
@@ -225,7 +228,9 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value,
         Some(ch) => ch,
     };
 
-    Ok(actor.alloc.str_val(&ch.to_string()).unwrap())
+    let ch_s = ch.to_string();
+    actor.gc_check(size_of::<Str>() + ch_s.len(), &mut []);
+    Ok(actor.alloc.str_val(&ch_s).unwrap())
 }
 
 /// Try to parse the string as an integer with the given radix
@@ -245,19 +250,30 @@ fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(s);
     let s = s.trim().to_string();
+    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
 /// Split a string by a separator and return an array of strings
-fn string_split(actor: &mut Actor, s: Value, sep: Value) -> Result<Value, String>
+fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value, String>
 {
-    let s = unwrap_str!(s);
+    let s = unwrap_str!(input);
     let sep = unwrap_str!(sep);
-    let str_parts = s.split(sep);
-    let size = str_parts.size_hint().0;
 
-    let mut array = Array::with_capacity(size, &mut actor.alloc).unwrap();
+    let str_parts: Vec<&str> = s.split(sep).collect();
+    let num_strs = str_parts.len();
+    let total_str_len: usize = str_parts.iter().map(|s| s.len()).sum();
 
+    // We need to keep the input string alive because we're
+    // relying on string slices for the string parts
+    actor.gc_check(
+        (size_of::<Array>() + num_strs * size_of::<Value>()) +
+        (size_of::<Str>() + 32) * num_strs +
+        total_str_len,
+        &mut [&mut input]
+    );
+
+    let mut array = Array::with_capacity(num_strs, &mut actor.alloc).unwrap();
     for part in str_parts {
         array.push(actor.alloc.str_val(part).unwrap(), &mut actor.alloc).unwrap();
     }
