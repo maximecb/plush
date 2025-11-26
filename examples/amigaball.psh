@@ -514,6 +514,25 @@ class RenderData {
         return self;
     }
 
+    append(self, other) {
+        let vertex_offset = self.vertices.len;
+
+        // Append vertices using Array.append
+        self.vertices.append(other.vertices);
+
+        // Append indices with offset
+        let num_other_verts = other.indices.len;
+        for (let var i = 0; i < num_other_verts; ++i) {
+            self.indices.push(other.indices[i] + vertex_offset);
+        }
+
+        // Append colors using Array.append
+        self.colors.append(other.colors);
+
+        // Append normals using Array.append
+        self.normals.append(other.normals);
+    }
+
     // Sort the triangles by depth using a bucket sort
     sort_triangles_bucket(self, num_bins) {
         let num_triangles = self.indices.len _/ 3;
@@ -721,11 +740,9 @@ let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Amiga Ball", 0);
 let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
 let var ball_data = generate_amiga_ball(0.5, 16, 32);
-let var grid_data = generate_grid(16, 0.2);
-
-
-//grid_data = grid_data.transform(mat4_rotx(-PI/2));
-
+let grid_data = generate_grid(16, 0.2);
+let wall1 = grid_data.transform(mat4_rotx(-PI/2));
+grid_data.append(wall1);
 
 
 ball_data = ball_data.transform(mat4_trans(1.6, 0.5, 1.6));
@@ -736,8 +753,8 @@ ball_data = ball_data.transform(mat4_trans(1.6, 0.5, 1.6));
 // Camera setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
 let camera = Camera(
-    Vec3(0.0, 1.5, 4.0),
-    Vec3(1.6, 0, 1.6),
+    Vec3(1.6, 3, 5),
+    Vec3(1.6, 1, 1.6),
     70.0,   // fov
     1.0,    // near
     30.0    // far
