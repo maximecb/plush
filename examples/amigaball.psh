@@ -178,6 +178,23 @@ fun mat4_roty(theta)
     return result;
 }
 
+// Matrix for a translation
+fun mat4_trans(x, y, z) {
+    let m = [];
+    mat4_init(m); // Initialize with zeros
+
+    m[0][0] = 1.0;
+    m[1][1] = 1.0;
+    m[2][2] = 1.0;
+    m[3][3] = 1.0;
+
+    m[0][3] = x;
+    m[1][3] = y;
+    m[2][3] = z;
+
+    return m;
+}
+
 // --- Color Conversion (HSL to RGB) ---
 
 fun hue2rgb(p, q, t)
@@ -474,11 +491,6 @@ class RenderData {
 
         for (let var i = 0; i < self.vertices.len; ++i) {
             let v = mat4_mul_vec(self.vertices[i], mat);
-
-            // We need to invert Y to match screen coordinates
-            v.x = (v.x + 1) * 0.5 * FRAME_WIDTH;
-            v.y = (1 - v.y) * 0.5 * FRAME_HEIGHT;
-
             new_render_data.vertices.push(v);
         }
 
@@ -489,6 +501,17 @@ class RenderData {
         }
 
         return new_render_data;
+    }
+
+    to_screen(self) {
+        for (let var i = 0; i < self.vertices.len; ++i) {
+            let v = self.vertices[i];
+            // We need to invert Y to match screen coordinates
+            v.x = (v.x + 1) * 0.5 * FRAME_WIDTH;
+            v.y = (1 - v.y) * 0.5 * FRAME_HEIGHT;
+        }
+
+        return self;
     }
 
     // Sort the triangles by depth using a bucket sort
@@ -697,8 +720,15 @@ fun generate_grid(size, spacing) {
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Amiga Ball", 0);
 let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
-let ball_data = generate_amiga_ball(0.5, 16, 32);
-let grid_data = generate_grid(16, 0.15);
+let var ball_data = generate_amiga_ball(0.5, 16, 32);
+let var grid_data = generate_grid(16, 0.2);
+
+
+//grid_data = grid_data.transform(mat4_rotx(-PI/2));
+
+
+
+ball_data = ball_data.transform(mat4_trans(1.6, 0.5, 1.6));
 
 
 
@@ -707,7 +737,7 @@ let grid_data = generate_grid(16, 0.15);
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
 let camera = Camera(
     Vec3(0.0, 1.5, 4.0),
-    Vec3(0, 0, 0),
+    Vec3(1.6, 0, 1.6),
     70.0,   // fov
     1.0,    // near
     30.0    // far
@@ -726,7 +756,7 @@ loop {
         }
     }
 
-    image.fill(0xFF_20_20_20);
+    image.fill(0xFF_25_25_25);
 
     // --- Animation Update ---
     anim_time = anim_time + 0.02;
@@ -747,8 +777,8 @@ loop {
 
     // Render scene
     let transform_start = $time_current_ms();
-    let ball_data = ball_data.transform(mat_mvp);
-    let grid_data = grid_data.transform(mat_mvp);
+    let ball_data = ball_data.transform(mat_mvp).to_screen();
+    let grid_data = grid_data.transform(mat_mvp).to_screen();
     let transform_time = $time_current_ms() - transform_start;
 
     let sort_start = $time_current_ms();
@@ -756,6 +786,16 @@ loop {
     let sort_time = $time_current_ms() - sort_start;
 
     let raster_start = $time_current_ms();
+
+    // Draw the grid
+    let grid_color = 0xFF_80_00_80; // Purple color for the grid
+    for (let var i = 0; i < grid_data.indices.len; i = i + 2) {
+        let v0 = grid_data.vertices[grid_data.indices[i]];
+        let v1 = grid_data.vertices[grid_data.indices[i+1]];
+        rasterize_line(v0, v1, grid_color, image);
+    }
+
+    // Draw the sphere
     for (let var i = 0; i < ball_data.indices.len; i = i + 3) {
         let v0 = ball_data.vertices[ball_data.indices[i]];
         let v1 = ball_data.vertices[ball_data.indices[i+1]];
@@ -785,14 +825,6 @@ loop {
 
             rasterize_triangle(v0, v1, v2, shaded_color, image);
         }
-    }
-
-    // Draw the grid
-    let grid_color = 0xFF_80_80_80; // Gray color for the grid
-    for (let var i = 0; i < grid_data.indices.len; i = i + 2) {
-        let v0 = grid_data.vertices[grid_data.indices[i]];
-        let v1 = grid_data.vertices[grid_data.indices[i+1]];
-        rasterize_line(v0, v1, grid_color, image);
     }
 
     let raster_time = $time_current_ms() - raster_start;
