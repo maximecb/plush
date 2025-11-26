@@ -407,6 +407,48 @@ fun rasterize_triangle(v0, v1, v2, color, image) {
     }
 }
 
+fun rasterize_line(v0, v1, color, image) {
+    let var x0 = v0.x.floor();
+    let var y0 = v0.y.floor();
+    let var x1 = v1.x.floor();
+    let var y1 = v1.y.floor();
+
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+
+    let var sx = 1;
+    if (x0 > x1) {
+        sx = -1;
+    }
+
+    let var sy = 1;
+    if (y0 > y1) {
+        sy = -1;
+    }
+
+    let var err = dx + dy;
+
+    loop {
+        if (x0 >= 0 && x0 < FRAME_WIDTH && y0 >= 0 && y0 < FRAME_HEIGHT) {
+            image.bytes.store_u32(y0 * FRAME_WIDTH + x0, color);
+        }
+
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+
+        let e2 = 2 * err;
+        if (e2 >= dy) {
+            err = err + dy;
+            x0 = x0 + sx;
+        }
+        if (e2 <= dx) {
+            err = err + dx;
+            y0 = y0 + sy;
+        }
+    }
+}
+
 // --- Procedural Data Generation ---
 
 let var lcg_seed = 1;
@@ -655,8 +697,11 @@ fun generate_grid(size, spacing) {
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Amiga Ball", 0);
 let image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 
-let ball_data = generate_amiga_ball(1.5, 16, 32);
-let grid_data = generate_grid(10, 0.1);
+let ball_data = generate_amiga_ball(0.5, 16, 32);
+let grid_data = generate_grid(16, 0.15);
+
+
+
 
 // Camera setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
@@ -690,14 +735,15 @@ loop {
     let mat_view = camera.view_matrix();
 
     // Add rotation to the ball
-    let mat_rot_y = mat4_roty(anim_time);
+    //let mat_rot_y = mat4_roty(anim_time);
     //let mat_rot_x = mat4_rotx(anim_time * 0.5);
     //let mat_rot = mat4_mul(mat_rot_x, mat_rot_y);
-    let mat_rot = mat_rot_y;
+    //let mat_rot = mat_rot_y;
 
     // Transformation chain: model -> view -> projection
-    let mat_mv = mat4_mul(mat_view, mat_rot);
-    let mat_mvp = mat4_mul(mat_proj, mat_mv);
+    //let mat_mv = mat4_mul(mat_view, mat_rot);
+    //let mat_mvp = mat4_mul(mat_proj, mat_mv);
+    let mat_mvp = mat4_mul(mat_proj, mat_view);
 
     // Render scene
     let transform_start = $time_current_ms();
@@ -740,6 +786,15 @@ loop {
             rasterize_triangle(v0, v1, v2, shaded_color, image);
         }
     }
+
+    // Draw the grid
+    let grid_color = 0xFF_80_80_80; // Gray color for the grid
+    for (let var i = 0; i < grid_data.indices.len; i = i + 2) {
+        let v0 = grid_data.vertices[grid_data.indices[i]];
+        let v1 = grid_data.vertices[grid_data.indices[i+1]];
+        rasterize_line(v0, v1, grid_color, image);
+    }
+
     let raster_time = $time_current_ms() - raster_start;
 
     $println(
