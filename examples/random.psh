@@ -11,18 +11,26 @@ fun rand_init(seed) {
     lcg_seed = seed & 0x7FFFFFFF;
 }
 
-// Returns a random integer in the range [0, max_val).
-fun rand_int(max_val) {
+// Returns a random integer in the range [min_val, max_val).
+fun rand_int(min_val, max_val) {
     // These LCG parameters are from the POSIX C standard.
     lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
-    return lcg_seed % max_val;
+    // Use the higher 15 bits (discarding the lowest 16 bits)
+    // Lower bits are known to be less random.
+    let shifted_seed = lcg_seed >> 16;
+    let range_size = max_val - min_val;
+    return min_val + (shifted_seed % range_size);
 }
 
 // Returns a random float in the range [min_val, max_val).
 fun rand_float(min_val, max_val) {
-    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
-    // We divide by the maximum possible seed value to get a float between 0 and 1.
-    let t = lcg_seed.to_f() / 0x7FFFFFFF.to_f();
+    // We use 2^15 as the denominator for scaling, matching the 15 bits
+    // used by rand_int for its random value.
+    let RAND_FLOAT_DENOMINATOR = (1 << 15);
+    // Generate a random integer in the range [0, RAND_FLOAT_DENOMINATOR).
+    let random_int_for_float = rand_int(0, RAND_FLOAT_DENOMINATOR);
+    // Scale it to a float between 0.0 and 1.0.
+    let t = random_int_for_float.to_f() / RAND_FLOAT_DENOMINATOR.to_f();
     return min_val + t * (max_val - min_val);
 }
 
@@ -35,7 +43,7 @@ if (!$MAIN_UNIT) {
 
 $println("--- 10 Random Integers (0-99) ---");
 for (let var i = 0; i < 10; ++i) {
-    $println(rand_int(100));
+    $println(rand_int(0, 100));
 }
 
 $println("\n--- 5 Random Floats (10.0-20.0) ---");
@@ -45,19 +53,18 @@ for (let var i = 0; i < 5; ++i) {
 
 $println("\n--- 5 Random Integers in a specific range (50-74) ---");
 for (let var i = 0; i < 5; ++i) {
-    // To get a number in a range [min, max), use: min + rand_int(max - min)
-    let random_in_range = 50 + rand_int(25); // 25 is the size of the range (75 - 50)
-    $println(random_in_range);
+    // To get a number in a range [min, max), use: rand_int(min, max)
+    $println(rand_int(50, 75));
 }
 
 // --- Reseeding the generator ---
 $println("\n--- Reseeding with a fixed seed (42) ---");
 rand_init(42);
-$println(rand_int(100));
-$println(rand_int(100));
+$println(rand_int(0, 100));
+$println(rand_int(0, 100));
 
 $println("\n--- Reseeding with the same fixed seed (42) ---");
 // This will produce the exact same sequence as before.
 rand_init(42);
-$println(rand_int(100));
-$println(rand_int(100));
+$println(rand_int(0, 100));
+$println(rand_int(0, 100));
