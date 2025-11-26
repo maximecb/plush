@@ -715,12 +715,6 @@ let wall2 = grid_data.transform(mat4_rotz(-PI/2));
 grid_data.append(wall1);
 //grid_data.append(wall2);
 
-
-ball_data = ball_data.transform(mat4_trans(1.6, 0.5, 1.6));
-
-
-
-
 // Camera setup
 let aspect = FRAME_WIDTH.to_f() / FRAME_HEIGHT.to_f();
 let camera = Camera(
@@ -732,7 +726,11 @@ let camera = Camera(
 );
 
 let mat_proj = camera.projection_matrix(aspect);
-let var anim_time = 0.0;
+
+let var ball_pos = Vec3(1.6, 2, 1.6);
+let var ball_vel = Vec3(0.03, 0.0, 0.01);
+let var ball_rot = Vec3(0, 0, 0);
+let var ball_rot_vel = Vec3(0.01, 0.02, 0.03);
 
 // Main animation loop
 loop {
@@ -747,78 +745,85 @@ loop {
     image.fill(0xFF_25_25_25);
 
     // --- Animation Update ---
-    anim_time = anim_time + 0.02;
 
-    // --- Camera Matrix Calculation ---
+    // Apply gravity
+    ball_vel.y = ball_vel.y - 0.005;
+
+    // Update ball position
+    ball_pos = ball_pos.add(ball_vel);
+
+    // Update ball rotation
+    ball_rot = ball_rot.add(ball_rot_vel);
+
+    let ball_radius = 0.5;
+    let grid_size = 16 * 0.2;
+
+    // Bounce off the floor
+    if (ball_pos.y < ball_radius) {
+        ball_pos.y = ball_radius;
+        ball_vel.y = -ball_vel.y;
+    }
+
+    // Bounce off the walls
+    if (ball_pos.x < ball_radius || ball_pos.x > grid_size - ball_radius) {
+        ball_vel.x = -ball_vel.x;
+    }
+    if (ball_pos.z < ball_radius || ball_pos.z > grid_size - ball_radius) {
+        ball_vel.z = -ball_vel.z;
+    }
+
+    // --- Matrix Calculation ---
     let mat_view = camera.view_matrix();
 
-    // Add rotation to the ball
-    //let mat_rot_y = mat4_roty(anim_time);
-    //let mat_rot_x = mat4_rotx(anim_time * 0.5);
-    //let mat_rot = mat4_mul(mat_rot_x, mat_rot_y);
-    //let mat_rot = mat_rot_y;
+    // Create the ball's model matrix
+    let mat_rot_x = mat4_rotx(ball_rot.x);
+    let mat_rot_y = mat4_roty(ball_rot.y);
+    let mat_rot_z = mat4_rotz(ball_rot.z);
+    let mat_rot = mat4_mul(mat4_mul(mat_rot_x, mat_rot_y), mat_rot_z);
+    let mat_trans = mat4_trans(ball_pos.x, ball_pos.y, ball_pos.z);
+    let mat_model_ball = mat4_mul(mat_trans, mat_rot);
 
     // Transformation chain: model -> view -> projection
-    //let mat_mv = mat4_mul(mat_view, mat_rot);
-    //let mat_mvp = mat4_mul(mat_proj, mat_mv);
-    let mat_mvp = mat4_mul(mat_proj, mat_view);
+    let mat_mvp_ball = mat4_mul(mat_proj, mat4_mul(mat_view, mat_model_ball));
+    let mat_mvp_grid = mat4_mul(mat_proj, mat_view);
 
     // Render scene
     let transform_start = $time_current_ms();
-    let ball_data = ball_data.transform(mat_mvp).to_screen();
-    let grid_data = grid_data.transform(mat_mvp).to_screen();
+    let transformed_ball_data = ball_data.transform(mat_mvp_ball).to_screen();
+    let transformed_grid_data = grid_data.transform(mat_mvp_grid).to_screen();
     let transform_time = $time_current_ms() - transform_start;
 
     let sort_start = $time_current_ms();
-    ball_data.sort_triangles_bucket(4096);
+    transformed_ball_data.sort_triangles_bucket(4096);
     let sort_time = $time_current_ms() - sort_start;
 
     let raster_start = $time_current_ms();
 
     // Draw the grid
     let grid_color = 0xFF_80_00_80; // Purple color for the grid
-    for (let var i = 0; i < grid_data.indices.len; i = i + 2) {
-        let v0 = grid_data.vertices[grid_data.indices[i]];
-        let v1 = grid_data.vertices[grid_data.indices[i+1]];
+    for (let var i = 0; i < transformed_grid_data.indices.len; i = i + 2) {
+        let v0 = transformed_grid_data.vertices[transformed_grid_data.indices[i]];
+        let v1 = transformed_grid_data.vertices[transformed_grid_data.indices[i+1]];
         rasterize_line(v0, v1, grid_color, image);
     }
 
     // Draw the sphere
-    for (let var i = 0; i < ball_data.indices.len; i = i + 3) {
-        let v0 = ball_data.vertices[ball_data.indices[i]];
-        let v1 = ball_data.vertices[ball_data.indices[i+1]];
-        let v2 = ball_data.vertices[ball_data.indices[i+2]];
+    for (let var i = 0; i < transformed_ball_data.indices.len; i = i + 3) {
+        let v0 = transformed_ball_data.vertices[transformed_ball_data.indices[i]];
+        let v1 = transformed_ball_data.vertices[transformed_ball_data.indices[i+1]];
+        let v2 = transformed_ball_data.vertices[transformed_ball_data.indices[i+2]];
 
         // Backface culling: check winding order in screen space.
-        // This calculates the signed area of the 2D triangle.
-        // If the area is negative, it's front-facing (clockwise winding).
         if ((v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y) < 0) {
-            let triangle_normal = ball_data.normals[i _/ 3]; // Get the normal for this triangle
-            let base_color = ball_data.colors[i _/ 3];
-
-            // Calculate diffuse component (clamped to 0)
-            let diffuse_intensity = (0.0).max(triangle_normal.dot(LIGHT_DIRECTION));
-
-            // Apply lighting
-            let var final_intensity = AMBIENT_LIGHT + diffuse_intensity;
-            // Clamp final_intensity to 1.0 to prevent over-brightening
-            final_intensity = final_intensity.min(1.0);
-
-            // Extract color components and apply intensity
-            let r = ((base_color >> 16) & 0xFF).to_f() * final_intensity;
-            let g = ((base_color >> 8) & 0xFF).to_f() * final_intensity;
-            let b = (base_color & 0xFF).to_f() * final_intensity;
-
-            let shaded_color = 0xFF000000 | (r.floor() << 16) | (g.floor() << 8) | b.floor();
-
-            rasterize_triangle(v0, v1, v2, shaded_color, image);
+            let base_color = transformed_ball_data.colors[i _/ 3];
+            rasterize_triangle(v0, v1, v2, base_color, image);
         }
     }
 
     let raster_time = $time_current_ms() - raster_start;
 
     $println(
-        "triangles: " + ball_data.colors.len.to_s() +
+        "triangles: " + transformed_ball_data.colors.len.to_s() +
         ", transform: " + transform_time.to_s() +
         "ms, sort: " + sort_time.to_s() +
         "ms, rasterize: " + raster_time.to_s() + "ms"
