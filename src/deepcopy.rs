@@ -203,14 +203,6 @@ pub fn remap(dst_map: &mut HashMap<Value, Value>)
                 }
             }
 
-
-            Value::Dict(p) => {
-                let dict = unsafe { &mut **p };
-                for val in dict.hash.values_mut() {
-                    remap_val!(val);
-                }
-            }
-
             Value::Array(p) => {
                 let arr = unsafe { &mut **p };
                 for val in arr.items_mut() {

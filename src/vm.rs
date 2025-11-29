@@ -175,50 +175,6 @@ pub enum Insn
     ret,
 }
 
-#[derive(Clone)]
-pub struct Closure
-{
-    pub fun_id: FunId,
-
-    // Captured variable slots
-    pub slots: Vec<Value>,
-}
-
-#[derive(Clone)]
-pub struct Object
-{
-    pub class_id: ClassId,
-    slots: *mut [Value],
-}
-
-impl Object
-{
-    pub fn new(class_id: ClassId, slots: *mut [Value]) -> Self
-    {
-        Object {
-            class_id,
-            slots,
-        }
-    }
-
-    pub fn num_slots(&self) -> usize
-    {
-        unsafe { (&*self.slots).len() }
-    }
-
-    // Get the value associated with a given field
-    pub fn get(&self, idx: usize) -> Value
-    {
-        unsafe { (*self.slots)[idx] }
-    }
-
-    // Set the value of a given field
-    pub fn set(&mut self, idx: usize, val: Value)
-    {
-        unsafe { (*self.slots)[idx] = val }
-    }
-}
-
 #[derive(Copy, Clone, Debug)]
 pub enum Value
 {
