@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::mem;
 use crate::alloc::Alloc;
-use crate::vm::{Value, Closure, Object};
+use crate::object::Object;
+use crate::vm::{Value, Closure};
 
 /// Custom Hash implementation for Value
 impl Hash for Value
@@ -114,7 +115,7 @@ pub fn deepcopy(
 
             Value::Object(p) => {
                 let obj = unsafe { &*p };
-                let mut new_obj = dst_alloc.new_object(obj.class_id, obj.num_slots())?;
+                let mut new_obj = Object::new(obj.class_id, obj.num_slots(), dst_alloc)?;
                 let mut new_obj = new_obj.unwrap_obj();
 
                 for i in 0..obj.num_slots() {

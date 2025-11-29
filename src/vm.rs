@@ -6,6 +6,7 @@ use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
+use crate::object::Object;
 use crate::array::Array;
 use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
@@ -179,41 +180,6 @@ pub struct Closure
 
     // Captured variable slots
     pub slots: Vec<Value>,
-}
-
-#[derive(Clone)]
-pub struct Object
-{
-    pub class_id: ClassId,
-    slots: *mut [Value],
-}
-
-impl Object
-{
-    pub fn new(class_id: ClassId, slots: *mut [Value]) -> Self
-    {
-        Object {
-            class_id,
-            slots,
-        }
-    }
-
-    pub fn num_slots(&self) -> usize
-    {
-        unsafe { (&*self.slots).len() }
-    }
-
-    // Get the value associated with a given field
-    pub fn get(&self, idx: usize) -> Value
-    {
-        unsafe { (*self.slots)[idx] }
-    }
-
-    // Set the value of a given field
-    pub fn set(&mut self, idx: usize, val: Value)
-    {
-        unsafe { (*self.slots)[idx] = val }
-    }
 }
 
 #[derive(Clone, Default)]
@@ -849,7 +815,7 @@ impl Actor
             &mut []
         );
 
-        self.alloc.new_object(class_id, num_slots).unwrap()
+        Object::new(class_id, num_slots, &mut self.alloc).unwrap()
     }
 
     /// Set the value of an object field
@@ -1839,7 +1805,7 @@ impl Actor
                         &mut [],
                     );
 
-                    let obj_val = self.alloc.new_object(class_id, num_slots).unwrap();
+                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc).unwrap();
 
                     // If a constructor method is present
                     let init_fun = self.get_method(class_id, "init");
@@ -1876,7 +1842,7 @@ impl Actor
                     );
 
                     // Allocate the object
-                    let obj_val = self.alloc.new_object(class_id, num_slots).unwrap();
+                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc).unwrap();
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object

@@ -1,6 +1,6 @@
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use crate::str::Str;
-use crate::vm::{Value, Object};
+use crate::vm::Value;
 use crate::ast::ClassId;
 
 pub struct Alloc
@@ -101,21 +101,6 @@ impl Alloc
         unsafe { std::ptr::write(p, obj) };
 
         Ok(p)
-    }
-
-    /// Allocate a new object with a given number of slots
-    pub fn new_object(&mut self, class_id: ClassId, num_slots: usize) -> Result<Value, ()>
-    {
-        // Allocate the slots for the object
-        let slots = self.alloc_table::<Value>(num_slots)?;
-
-        // Create the Object struct
-        let obj = Object::new(class_id, slots);
-
-        // Allocate the Object struct itself
-        let obj_ptr = self.alloc(obj)?;
-
-        Ok(Value::Object(obj_ptr))
     }
 
     pub fn str(&mut self, s: &str) -> Result<*const Str, ()>

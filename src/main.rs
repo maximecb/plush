@@ -12,6 +12,7 @@ mod symbols;
 mod codegen;
 mod vm;
 mod alloc;
+mod object;
 mod array;
 mod bytearray;
 mod runtime;

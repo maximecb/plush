@@ -1,7 +1,8 @@
 use sdl2::audio::{AudioCallback, AudioSpecDesired, AudioDevice};
 use std::sync::{Arc, Weak, Mutex, Condvar};
 use std::collections::HashMap;
-use crate::vm::{Value, VM, Actor, Object, Message};
+use crate::vm::{Value, VM, Actor, Message};
+use crate::object::Object;
 use crate::alloc::Alloc;
 use crate::ast::{AUDIO_NEEDED_ID, AUDIO_DATA_ID};
 use crate::window::with_sdl_context;
@@ -43,7 +44,7 @@ impl OutputCB
 
         // Create the AudioNeeded object
         let obj = {
-            let mut obj_val = msg_alloc.new_object(AUDIO_NEEDED_ID, 3).unwrap();
+            let mut obj_val = Object::new(AUDIO_NEEDED_ID, 3, &mut msg_alloc).unwrap();
             let obj = obj_val.unwrap_obj();
             obj.set(0, Value::from(num_samples));
             obj.set(1, Value::from(self.num_channels));
@@ -228,7 +229,7 @@ impl InputCB
 
         // Create the AudioData object
         let obj = {
-            let mut obj_val = msg_alloc.new_object(AUDIO_DATA_ID, 2).unwrap();
+            let mut obj_val = Object::new(AUDIO_DATA_ID, 2, &mut msg_alloc).unwrap();
             let obj = obj_val.unwrap_obj();
             obj.set(0, Value::from(device_id));
             obj.set(1, Value::from(num_samples));
