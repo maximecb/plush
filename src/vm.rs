@@ -1746,7 +1746,6 @@ impl Actor
                     let mut obj = pop!();
                     let mut field_name = unsafe { &*field };
 
-
                     match obj {
                         Value::Object(p) => {
                             let obj = unsafe { &mut *p };
@@ -1770,11 +1769,11 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            let allocation_size = dict.will_allocate(field_name.as_str());
                             let mut field_name_val = Value::String(field);
+                            let alloc_size = dict.will_allocate(field_name.as_str());
 
                             self.gc_check(
-                                allocation_size,
+                                alloc_size,
                                 &mut [&mut obj, &mut val, &mut field_name_val]
                             );
 
@@ -1962,9 +1961,9 @@ impl Actor
                 }
 
                 Insn::set_index => {
-                    let val = pop!();
-                    let idx = pop!();
-                    let arr = pop!();
+                    let mut val = pop!();
+                    let mut idx = pop!();
+                    let mut arr = pop!();
 
                     match arr {
                         Value::Array(p) => {
@@ -1982,6 +1981,15 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
+                            let key = unwrap_str!(idx);
+
+                            let alloc_size = dict.will_allocate(key);
+                            self.gc_check(
+                                alloc_size,
+                                &mut [&mut arr, &mut idx, &mut val],
+                            );
+
+                            let dict = arr.unwrap_dict();
                             let key = unwrap_str!(idx);
                             dict.set(key, val, &mut self.alloc).unwrap();
                         }
