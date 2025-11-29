@@ -3,7 +3,7 @@
 <p align="center">
     <img src="media/city.png" height=180>&nbsp;
     <img src="media/mondrian.png" height=180>&nbsp;
-    <img src="media/spectrum.png" height=180>
+    <img src="media/amigaball.png" height=180>
 </p>
 
 Plush is a toy programming language and virtual machine for fun, teaching and creative programming.
