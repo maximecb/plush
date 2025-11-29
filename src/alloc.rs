@@ -1,5 +1,4 @@
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
-use crate::object::Object;
 use crate::str::Str;
 use crate::vm::Value;
 use crate::ast::ClassId;
@@ -104,7 +103,7 @@ impl Alloc
         Ok(p)
     }
 
-    fn raw_str(&mut self, s: &str) -> Result<Str, ()>
+    pub fn str(&mut self, s: &str) -> Result<*const Str, ()>
     {
         let bytes = self.alloc_bytes(s.len())?;
         let p = bytes as *mut u8;
@@ -115,13 +114,9 @@ impl Alloc
         let raw_str = unsafe {
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, s.len()))
         };
-        Ok(Str::new(raw_str as *const str))
-    }
+        let raw_str_ptr = raw_str as *const str;
 
-    pub fn str(&mut self, s: &str) -> Result<*const Str, ()>
-    {
-        let inner = self.raw_str(s)?;
-        let p_str = self.alloc(inner)?;
+        let p_str = self.alloc(Str::new(raw_str_ptr))?;
         Ok(p_str)
     }
 

@@ -3,50 +3,58 @@ use std::{collections::HashMap, hash::{DefaultHasher, Hash, Hasher}, ops::Deref}
 use crate::{alloc::Alloc, str::Str, vm::Value};
 
 #[derive(Clone, Copy)]
-struct TableSlot(Option<(*const Str, Value)>);
+struct TableSlot {
+    key: *const Str,
+    val: Value
+}
 
 impl TableSlot {
     fn new(key: *const Str, val: Value) -> Self {
-        Self(Some((key, val)))
+        Self{ key, val }
     }
 
     fn key_as_str(&self) -> Option<&str> {
-        match self.0.as_ref() {
-            Some(s) => Some((unsafe { &*s.0 }).as_str()),
-            None => None
+        if self.key.is_null() {
+            None
+        } else {
+            Some(unsafe { &*self.key }.as_str())
         }
     }
 
     fn value(&self) -> Option<&Value> {
-        match self.0.as_ref() {
-            Some(s) => Some(&s.1),
-            None => None
+        if self.key.is_null() {
+            None
+        } else {
+            Some(&self.val)
         }
     }
 
     fn value_mut(&mut self) -> Option<&mut Value> {
-        match self.0.as_mut() {
-            Some(s) => Some(&mut s.1),
-            None => None
+        if self.key.is_null() {
+            None
+        } else {
+            Some(&mut self.val)
         }
     }
 
     fn key_value(&self) -> Option<(&str, &Value)> {
-        match self.0.as_ref() {
-            Some(s) => Some(((unsafe { &*s.0 }).as_str(), &s.1)),
-            None => None
+        if self.key.is_null() {
+            None
+        } else {
+            Some((unsafe { &*self.key }.as_str(), &self.val))
         }
     }
 
     fn key_value_mut(&mut self) -> Option<(&mut *const Str, &mut Value)> {
-        match self.0.as_mut() {
-            Some(s) => Some(((&mut s.0), &mut s.1)),
-            None => None
+        if self.key.is_null() {
+            None
+        } else {
+            Some((&mut self.key, &mut self.val))
         }
     }
 
     fn is_occupied(&self) -> bool {
-        self.0.is_some()
+        !self.key.is_null()
     }
 }
 
@@ -60,7 +68,6 @@ const THRESHOLD: usize = 75;
 impl Dict {
     fn empty_zeroed_table(capacity: usize, alloc: &mut Alloc) -> Result<*mut [TableSlot], ()> {
         let table = alloc.alloc_table(capacity)?;
-        unsafe { &mut *table }.fill(TableSlot(None));
         Ok(table)
     }
 
