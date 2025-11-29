@@ -13,6 +13,7 @@ mod codegen;
 mod vm;
 mod alloc;
 mod object;
+mod closure;
 mod array;
 mod bytearray;
 mod runtime;

@@ -7,6 +7,7 @@ use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::Alloc;
 use crate::object::Object;
+use crate::closure::Closure;
 use crate::array::Array;
 use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
@@ -173,15 +174,6 @@ pub enum Insn
     ret,
 }
 
-#[derive(Clone)]
-pub struct Closure
-{
-    pub fun_id: FunId,
-
-    // Captured variable slots
-    pub slots: Vec<Value>,
-}
-
 #[derive(Clone, Default)]
 pub struct Dict
 {
@@ -338,6 +330,14 @@ impl Value
         match self {
             Value::Object(p) => unsafe { &mut **p },
             _ => panic!("expected object value but got {:?}", self)
+        }
+    }
+
+    pub fn unwrap_clos(&mut self) -> &mut Closure
+    {
+        match self {
+            Value::Closure(p) => unsafe { &mut **p },
+            _ => panic!("expected closure value but got {:?}", self)
         }
     }
 
@@ -1680,9 +1680,8 @@ impl Actor
                         &mut [],
                     );
 
-                    let clos = Closure { fun_id, slots: vec![Undef; num_slots] };
-                    let clos_val = self.alloc.alloc(clos).unwrap();
-                    push!(Value::Closure(clos_val));
+                    let clos = Closure::new(fun_id, num_slots, &mut self.alloc).unwrap();
+                    push!(clos);
                 }
 
                 // Set a closure slot
@@ -1693,7 +1692,7 @@ impl Actor
                     match clos {
                         Value::Closure(clos) => {
                             let clos = unsafe { &mut *clos };
-                            clos.slots[idx as usize] = val;
+                            clos.set(idx as usize, val);
                         }
                         _ => error!("clos_set", "expected closure")
                     }
@@ -1706,7 +1705,7 @@ impl Actor
                     let val = match fun {
                         Value::Closure(clos) => {
                             let clos = unsafe { &**clos };
-                            clos.slots[idx as usize]
+                            clos.get(idx as usize)
                         }
                         _ => error!("clos_get", "not a closure")
                     };

@@ -3,7 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::mem;
 use crate::alloc::Alloc;
 use crate::object::Object;
-use crate::vm::{Value, Closure};
+use crate::closure::Closure;
+use crate::vm::Value;
 
 /// Custom Hash implementation for Value
 impl Hash for Value
@@ -94,23 +95,17 @@ pub fn deepcopy(
             }
 
             Value::Closure(p) => {
-                let new_clos = unsafe { (*p).clone() };
+                let clos = unsafe { &*p };
+                let mut new_clos = Closure::new(clos.fun_id, clos.num_slots(), dst_alloc)?;
+                let mut new_clos = new_clos.unwrap_clos();
 
-                for val in &new_clos.slots {
-                    push_val!(val);
+                for i in 0..clos.num_slots() {
+                    let val = clos.get(i);
+                    new_clos.set(i, val);
+                    push_val!(&val);
                 }
 
-                Value::Closure(dst_alloc.alloc(new_clos)?)
-            }
-
-            Value::Dict(p) => {
-                let new_obj = unsafe { (*p).clone() };
-
-                for val in new_obj.hash.values() {
-                    push_val!(val);
-                }
-
-                Value::Dict(dst_alloc.alloc(new_obj)?)
+                Value::Closure(new_clos)
             }
 
             Value::Object(p) => {
@@ -125,6 +120,16 @@ pub fn deepcopy(
                 }
 
                 Value::Object(new_obj)
+            }
+
+            Value::Dict(p) => {
+                let new_obj = unsafe { (*p).clone() };
+
+                for val in new_obj.hash.values() {
+                    push_val!(val);
+                }
+
+                Value::Dict(dst_alloc.alloc(new_obj)?)
             }
 
             Value::Array(p) => {
@@ -175,15 +180,10 @@ pub fn remap(dst_map: &mut HashMap<Value, Value>)
 
             Value::Closure(p) => {
                 let clos = unsafe { &mut **p };
-                for slot_val in &mut clos.slots {
-                    remap_val!(slot_val);
-                }
-            }
-
-            Value::Dict(p) => {
-                let dict = unsafe { &mut **p };
-                for val in dict.hash.values_mut() {
-                    remap_val!(val);
+                for i in 0..clos.num_slots() {
+                    let mut val = clos.get(i);
+                    remap_val!(&mut val);
+                    clos.set(i, val);
                 }
             }
 
@@ -193,6 +193,14 @@ pub fn remap(dst_map: &mut HashMap<Value, Value>)
                     let mut val = obj.get(i);
                     remap_val!(&mut val);
                     obj.set(i, val);
+                }
+            }
+
+
+            Value::Dict(p) => {
+                let dict = unsafe { &mut **p };
+                for val in dict.hash.values_mut() {
+                    remap_val!(val);
                 }
             }
 

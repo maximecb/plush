@@ -1,28 +1,28 @@
-use crate::ast::ClassId;
+use crate::ast::FunId;
 use crate::vm::Value;
 use crate::alloc::Alloc;
 
-pub struct Object
+pub struct Closure
 {
-    pub class_id: ClassId,
+    pub fun_id: FunId,
     slots: *mut [Value],
 }
 
-impl Object
+impl Closure
 {
-    /// Allocate a new object with a given number of slots
-    pub fn new(class_id: ClassId, num_slots: usize, alloc: &mut Alloc) -> Result<Value, ()>
+    /// Allocate a new closure with a given number of slots
+    pub fn new(fun_id: FunId, num_slots: usize, alloc: &mut Alloc) -> Result<Value, ()>
     {
-        // Allocate the slots for the object
+        // Allocate the slots for the closure
         let slots = alloc.alloc_table::<Value>(num_slots)?;
 
-        // Create the Object struct
-        let obj = Object { class_id, slots };
+        // Create the closure struct
+        let obj = Closure { fun_id, slots };
 
         // Allocate the Object struct itself
         let obj_ptr = alloc.alloc(obj)?;
 
-        Ok(Value::Object(obj_ptr))
+        Ok(Value::Closure(obj_ptr))
     }
 
     pub fn num_slots(&self) -> usize
@@ -30,13 +30,13 @@ impl Object
         unsafe { (&*self.slots).len() }
     }
 
-    // Get the value associated with a given field
+    // Get the given closure slot value
     pub fn get(&self, idx: usize) -> Value
     {
         unsafe { (*self.slots)[idx] }
     }
 
-    // Set the value of a given field
+    // Set the value of a given closure slot
     pub fn set(&mut self, idx: usize, val: Value)
     {
         unsafe { (*self.slots)[idx] = val }
