@@ -29,14 +29,6 @@ impl TableSlot {
         }
     }
 
-    fn value_mut(&mut self) -> Option<&mut Value> {
-        if self.key.is_null() {
-            None
-        } else {
-            Some(&mut self.val)
-        }
-    }
-
     fn key_value(&self) -> Option<(&str, &Value)> {
         if self.key.is_null() {
             None
