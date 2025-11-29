@@ -3,16 +3,16 @@ use std::{collections::HashMap, hash::{DefaultHasher, Hash, Hasher}, ops::Deref}
 use crate::{alloc::Alloc, str::Str, vm::Value};
 
 #[derive(Clone, Copy)]
-struct TableSlot(Option<(Str, Value)>);
+struct TableSlot(Option<(*const Str, Value)>);
 
 impl TableSlot {
-    fn new(key: Str, val: Value) -> Self {
+    fn new(key: *const Str, val: Value) -> Self {
         Self(Some((key, val)))
     }
 
-    fn key(&self) -> Option<&str> {
+    fn key_as_str(&self) -> Option<&str> {
         match self.0.as_ref() {
-            Some(s) => Some(s.0.as_str()),
+            Some(s) => Some((unsafe { &*s.0 }).as_str()),
             None => None
         }
     }
@@ -33,7 +33,14 @@ impl TableSlot {
 
     fn key_value(&self) -> Option<(&str, &Value)> {
         match self.0.as_ref() {
-            Some(s) => Some((s.0.as_str(), &s.1)),
+            Some(s) => Some(((unsafe { &*s.0 }).as_str(), &s.1)),
+            None => None
+        }
+    }
+
+    fn key_value_mut(&mut self) -> Option<(&mut *const Str, &mut Value)> {
+        match self.0.as_mut() {
+            Some(s) => Some(((&mut s.0), &mut s.1)),
             None => None
         }
     }
@@ -53,9 +60,7 @@ const THRESHOLD: usize = 75;
 impl Dict {
     fn empty_zeroed_table(capacity: usize, alloc: &mut Alloc) -> Result<*mut [TableSlot], ()> {
         let table = alloc.alloc_table(capacity)?;
-        for elem in unsafe { &mut *table } {
-            *elem = TableSlot(None);
-        }
+        unsafe { &mut *table }.fill(TableSlot(None));
         Ok(table)
     }
 
@@ -68,13 +73,13 @@ impl Dict {
 
     pub fn clone(&self, alloc: &mut Alloc) -> Result<Self, ()>
     {
-        let capacity = std::cmp::max(self.len, 1);
-        let table = alloc.alloc_table(capacity)?;
-        let mut new_arr = Dict { table, len: self.len };
+        let capacity = std::cmp::max(self.capacity(), 1);
+        let table = Self::empty_zeroed_table(capacity, alloc)?;
+        let mut new_dict = Dict { table, len: self.len };
         let table = unsafe { &mut *table };
         let self_table = unsafe { &*self.table };
         table.copy_from_slice(self_table);
-        Ok(new_arr)
+        Ok(new_dict)
     }
 
     // get slot is the heart of the dict implementation, as it's used for both
@@ -90,7 +95,7 @@ impl Dict {
         let mut pos = usize::try_from(hash).unwrap_or(usize::MAX);
 
         // have to module by len so that it's always inside the table
-        while let Some(slot_key) = table[pos % len].key() {
+        while let Some(slot_key) = table[pos % len].key_as_str() {
             // we found an occupied slot for the given key (the key already existed in the dict)
             if slot_key == key {
                 break;
@@ -100,7 +105,6 @@ impl Dict {
         }
 
         &mut table[pos % len]
-
     }
 
     // Double the size of the internal backing table. This allocates a whole new backing table
@@ -120,15 +124,49 @@ impl Dict {
         Ok(())
     }
 
+    pub fn capacity(&self) -> usize {
+        self.table.len()
+    }
+
+    fn will_allocate_on_set(&self) -> bool {
+        let table = unsafe { &*self.table };
+
+        table.len() == 0 || self.len * 100 / table.len() > THRESHOLD
+    }
+
+    pub const fn size_of_slot() -> usize {
+        size_of::<TableSlot>()
+    }
+
+    pub fn will_allocate(&self, field_name: &str) -> usize {
+        let mut res = 0;
+        res += field_name.len();
+
+        if self.will_allocate_on_set() {
+            let table = unsafe { &*self.table };
+
+            for elem in table {
+                if let Some(key) = elem.key_as_str() {
+                    res += key.len();
+                    res += size_of::<Str>();
+                }
+            }
+
+            res += self.capacity() * Dict::size_of_slot() * 2;
+        }
+
+
+        res
+    }
+
     // Set the value associated with a given key
     pub fn set(&mut self, field_name: &str, new_val: Value, alloc: &mut Alloc) -> Result<(), ()> {
-        let table = unsafe { &*self.table };
-        if table.len() == 0 || self.len * 100 / table.len() > THRESHOLD {
+        if self.will_allocate_on_set() {
             self.double_size(alloc)?;
         }
 
         let slot = self.get_slot(field_name);
-        let key = alloc.raw_str(field_name)?;
+        let key = alloc.str(field_name)?;
         *slot = TableSlot::new(key, new_val);
         self.len += 1;
 
@@ -141,14 +179,9 @@ impl Dict {
         *(self.get_slot(field_name).value().unwrap_or(&Value::Nil))
     }
 
-    pub fn values(&self) -> impl Iterator<Item = &Value> {
-        let table = unsafe { &*self.table };
-        table.iter().filter_map(|e| e.value())
-    }
-
-    pub fn values_mut(&self) -> impl Iterator<Item = &mut Value> {
+    pub fn key_values_mut(&self) -> impl Iterator<Item = (&mut *const Str, &mut Value)> {
         let table = unsafe { &mut *self.table };
-        table.iter_mut().filter_map(|e| e.value_mut())
+        table.iter_mut().filter_map(|e| e.key_value_mut())
     }
 
     pub fn has(&mut self, field_name: &str) -> bool {

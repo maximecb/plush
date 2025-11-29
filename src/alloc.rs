@@ -104,7 +104,7 @@ impl Alloc
         Ok(p)
     }
 
-    pub fn raw_str(&mut self, s: &str) -> Result<Str, ()>
+    fn raw_str(&mut self, s: &str) -> Result<Str, ()>
     {
         let bytes = self.alloc_bytes(s.len())?;
         let p = bytes as *mut u8;

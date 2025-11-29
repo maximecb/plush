@@ -334,6 +334,14 @@ impl Value
             _ => panic!("expected dict value but got {:?}", self)
         }
     }
+
+    pub fn unwrap_str(&mut self) -> &Str
+    {
+        match self {
+            Value::String(p) => unsafe { &**p },
+            _ => panic!("expected dict value but got {:?}", self)
+        }
+    }
 }
 
 // This error macro is to be used inside host functions
@@ -1723,16 +1731,21 @@ impl Actor
 
                 // Create new empty dictionary
                 Insn::dict_new => {
+                    self.gc_check(
+                        size_of::<Dict>() + Dict::size_of_slot(),
+                        &mut []
+                    );
                     let dict = Dict::with_capacity(0, &mut self.alloc).unwrap();
                     let new_obj = self.alloc.alloc(dict).unwrap();
                     push!(Value::Dict(new_obj))
                 }
 
                 // Set object field
-                Insn::set_field { field, class_id, slot_idx } => {
-                    let val = pop!();
+                Insn::set_field { mut field, class_id, slot_idx } => {
+                    let mut val = pop!();
                     let mut obj = pop!();
-                    let field_name = unsafe { &*field };
+                    let mut field_name = unsafe { &*field };
+
 
                     match obj {
                         Value::Object(p) => {
@@ -1757,6 +1770,16 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
+                            let allocation_size = dict.will_allocate(field_name.as_str());
+                            let mut field_name_val = Value::String(field);
+
+                            self.gc_check(
+                                allocation_size,
+                                &mut [&mut obj, &mut val, &mut field_name_val]
+                            );
+
+                            field_name = field_name_val.unwrap_str();
+                            let dict = obj.unwrap_dict();
                             dict.set(field_name.as_str(), val, &mut self.alloc).unwrap();
                         }
 
