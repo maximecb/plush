@@ -123,9 +123,10 @@ pub fn deepcopy(
             }
 
             Value::Dict(p) => {
-                let new_obj = unsafe { (*p).clone() };
+                let new_obj = unsafe { (*p).clone(dst_alloc)? };
 
-                for val in new_obj.hash.values() {
+                for (key, val) in new_obj.key_values_mut() {
+                    push_val!(&Value::String(*key));
                     push_val!(val);
                 }
 
@@ -187,20 +188,22 @@ pub fn remap(dst_map: &mut HashMap<Value, Value>)
                 }
             }
 
+            Value::Dict(p) => {
+                let dict = unsafe { &mut **p };
+                for (key, val) in dict.key_values_mut() {
+                    remap_val!(val);
+                    let mut key_val = Value::String(*key);
+                    remap_val!(&mut key_val);
+                    *key = key_val.unwrap_str();
+                }
+            }
+
             Value::Object(p) => {
                 let obj = unsafe { &mut **p };
                 for i in 0..obj.num_slots() {
                     let mut val = obj.get(i);
                     remap_val!(&mut val);
                     obj.set(i, val);
-                }
-            }
-
-
-            Value::Dict(p) => {
-                let dict = unsafe { &mut **p };
-                for val in dict.hash.values_mut() {
-                    remap_val!(val);
                 }
             }
 

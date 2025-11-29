@@ -2,6 +2,7 @@ use std::collections::{HashSet, HashMap};
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
+use crate::dict::Dict;
 use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
@@ -174,37 +175,6 @@ pub enum Insn
     ret,
 }
 
-#[derive(Clone, Default)]
-pub struct Dict
-{
-    pub hash: HashMap<String, Value>,
-}
-
-impl Dict
-{
-    // Set the value associated with a given field
-    fn set(&mut self, field_name: &str, new_val: Value)
-    {
-        self.hash.insert(field_name.to_string(), new_val);
-    }
-
-    // Get the value associated with a given field
-    fn get(&mut self, field_name: &str) -> Value
-    {
-        if let Some(val) = self.hash.get(field_name) {
-            *val
-        } else {
-            panic!("key `{}` not found in dict", field_name);
-        }
-    }
-
-    // Check if the dictionary has a given key
-    pub fn has(&mut self, field_name: &str) -> bool
-    {
-        self.hash.contains_key(field_name)
-    }
-}
-
 #[derive(Copy, Clone, Debug)]
 pub enum Value
 {
@@ -361,6 +331,14 @@ impl Value
     {
         match self {
             Value::Dict(p) => unsafe { &mut **p },
+            _ => panic!("expected dict value but got {:?}", self)
+        }
+    }
+
+    pub fn unwrap_str(&mut self) -> &Str
+    {
+        match self {
+            Value::String(p) => unsafe { &**p },
             _ => panic!("expected dict value but got {:?}", self)
         }
     }
@@ -1753,15 +1731,21 @@ impl Actor
 
                 // Create new empty dictionary
                 Insn::dict_new => {
-                    let new_obj = self.alloc.alloc(Dict::default()).unwrap();
+                    self.gc_check(
+                        size_of::<Dict>() + Dict::size_of_slot(),
+                        &mut []
+                    );
+                    let dict = Dict::with_capacity(0, &mut self.alloc).unwrap();
+                    let new_obj = self.alloc.alloc(dict).unwrap();
                     push!(Value::Dict(new_obj))
                 }
 
                 // Set object field
-                Insn::set_field { field, class_id, slot_idx } => {
-                    let val = pop!();
+                Insn::set_field { mut field, class_id, slot_idx } => {
+                    let mut val = pop!();
                     let mut obj = pop!();
-                    let field_name = unsafe { &*field };
+                    let mut field_name = unsafe { &*field };
+
 
                     match obj {
                         Value::Object(p) => {
@@ -1786,7 +1770,17 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            dict.set(field_name.as_str(), val);
+                            let allocation_size = dict.will_allocate(field_name.as_str());
+                            let mut field_name_val = Value::String(field);
+
+                            self.gc_check(
+                                allocation_size,
+                                &mut [&mut obj, &mut val, &mut field_name_val]
+                            );
+
+                            field_name = field_name_val.unwrap_str();
+                            let dict = obj.unwrap_dict();
+                            dict.set(field_name.as_str(), val, &mut self.alloc).unwrap();
                         }
 
                         _ => error!("set_field", "set_field on non-object/dict value")
@@ -1989,7 +1983,7 @@ impl Actor
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
                             let key = unwrap_str!(idx);
-                            dict.set(key, val);
+                            dict.set(key, val, &mut self.alloc).unwrap();
                         }
 
                         _ => error!("set_index", "expected array or dict type")
