@@ -422,7 +422,7 @@ impl PartialEq for Value
 
             // For strings, we do a structural equality comparison, so
             // that some strings can be interned (deduplicated)
-            (String(p1), String(p2))    => unsafe { (**p1).as_str() == (**p2).as_str() },
+            (String(p1), String(p2))    => p1 == p2 || unsafe { (**p1).as_str() == (**p2).as_str() },
 
             // For int & float, we may need type conversions
             (Float64(a), Int64(b))      => *a == *b as f64,
