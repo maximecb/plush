@@ -114,7 +114,6 @@ impl Dict {
 
         self.table = new_table;
 
-        // FIXME: don't reallocate all the key strings when expanding
         for entry in old_table {
             if let Some((key, val)) = entry.key_value() {
                 self.set(*key, *val, alloc).unwrap();
@@ -139,29 +138,11 @@ impl Dict {
     }
 
     pub fn will_allocate(&self, field_name: &str) -> usize {
-        let mut res = 0;
-        res += size_of::<Str>();
-        res += field_name.len();
-        res += 16;
-
         if self.will_allocate_on_set() {
-            let table = unsafe { &*self.table };
-
-            // Table allocation overhead
-            res += 64;
-
-            for elem in table {
-                if let Some(key) = elem.key_as_str() {
-                    res += size_of::<Str>();
-                    res += key.len();
-                    res += 16;
-                }
-            }
-
-            res += self.capacity() * Dict::size_of_slot() * 2;
+            return self.capacity() * Dict::size_of_slot() * 2 + 64;
         }
 
-        res
+        0
     }
 
     // Set the value associated with a given key
