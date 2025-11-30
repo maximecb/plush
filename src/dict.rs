@@ -29,11 +29,11 @@ impl TableSlot {
         }
     }
 
-    fn key_value(&self) -> Option<(&str, &Value)> {
+    fn key_value(&self) -> Option<(&*const Str, &Value)> {
         if self.key.is_null() {
             None
         } else {
-            Some((unsafe { &*self.key }.as_str(), &self.val))
+            Some((&self.key , &self.val))
         }
     }
 
@@ -117,7 +117,7 @@ impl Dict {
         // FIXME: don't reallocate all the key strings when expanding
         for entry in old_table {
             if let Some((key, val)) = entry.key_value() {
-                self.set(key, *val, alloc).unwrap();
+                self.set(*key, *val, alloc).unwrap();
             }
         }
 
@@ -165,14 +165,14 @@ impl Dict {
     }
 
     // Set the value associated with a given key
-    pub fn set(&mut self, field_name: &str, new_val: Value, alloc: &mut Alloc) -> Result<(), ()> {
+    pub fn set(&mut self, field_name: *const Str, new_val: Value, alloc: &mut Alloc) -> Result<(), ()> {
         if self.will_allocate_on_set() {
             self.double_size(alloc)?;
         }
 
-        let slot = self.get_slot(field_name);
-        let key = alloc.str(field_name)?;
-        *slot = TableSlot::new(key, new_val);
+        let key = unsafe { &*field_name }.as_str();
+        let slot = self.get_slot(key);
+        *slot = TableSlot::new(field_name, new_val);
         self.len += 1;
 
         Ok(())

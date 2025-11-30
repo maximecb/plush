@@ -1779,7 +1779,7 @@ impl Actor
 
                             field_name = field_name_val.unwrap_str();
                             let dict = obj.unwrap_dict();
-                            dict.set(field_name.as_str(), val, &mut self.alloc).unwrap();
+                            dict.set(field_name, val, &mut self.alloc).unwrap();
                         }
 
                         _ => error!("set_field", "set_field on non-object/dict value")
@@ -1990,7 +1990,7 @@ impl Actor
                             );
 
                             let dict = arr.unwrap_dict();
-                            let key = unwrap_str!(idx);
+                            let key = idx.unwrap_str();
                             dict.set(key, val, &mut self.alloc).unwrap();
                         }
 
