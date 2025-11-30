@@ -1922,7 +1922,12 @@ impl Actor
 
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
-                            dict.get(field_name.as_str())
+                            let key = field_name.as_str();
+
+                            match dict.get(key) {
+                                Some(v) => v,
+                                None => error!("get_field", "key '{}' not found in dict", key)
+                            }
                         }
 
                         _ => error!("get_field", "get_field on non-object value {:?}", obj)
@@ -1951,7 +1956,11 @@ impl Actor
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
                             let key = unwrap_str!(idx);
-                            dict.get(key)
+
+                            match dict.get(key) {
+                                Some(v) => v,
+                                None => error!("get_index", "key '{}' not found in dict", key)
+                            }
                         }
 
                         _ => error!("get_index", "expected array or dict type in get_index")
@@ -2757,6 +2766,13 @@ mod tests
         eval_eq("let o = { 'foo bar': 5 }; return o['foo bar'];", Value::Int64(5));
         eval_eq("let o = { x:5 }; o['x'] = 3; return o.x;", Value::Int64(3));
         eval_eq("let o = { x:5 }; return o.has('x');", Value::True);
+    }
+
+    #[test]
+    #[should_panic]
+    fn dict_missing_key()
+    {
+        eval("let v = {}.x;");
     }
 
     #[test]

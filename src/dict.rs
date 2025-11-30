@@ -161,8 +161,8 @@ impl Dict {
     }
 
     // Get the value associated with a given field
-    pub fn get(&mut self, field_name: &str) -> Value {
-        *(self.get_slot(field_name).value().unwrap_or(&Value::Nil))
+    pub fn get(&mut self, field_name: &str) -> Option<Value> {
+        (self.get_slot(field_name).value()).copied()
     }
 
     pub fn key_values_mut(&self) -> impl Iterator<Item = (&mut *const Str, &mut Value)> {
