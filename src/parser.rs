@@ -1293,7 +1293,8 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
         // Parse a method declaration
         let pos = input.get_pos();
         let method_name = input.parse_ident()?;
-        let fun_id = parse_function(input, prog, method_name.clone(), pos)?;
+        let fun_name = format!("{}.{}", class_name, method_name);
+        let fun_id = parse_function(input, prog, fun_name, pos)?;
 
         if method_name == "init" && prog.funs[&fun_id].params.len() == 0 {
             return input.parse_error("the init method must have a `self` parameter");
