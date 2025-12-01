@@ -654,41 +654,59 @@ struct OpInfo
     op_str: &'static str,
     prec: usize,
     op: BinOp,
-    rtl: bool,
+    assign: bool,
 }
 
 /// Binary operators and their precedence level
 /// Lower numbers mean higher precedence
 /// https://en.cppreference.com/w/c/language/operator_precedence
-const BIN_OPS: [OpInfo; 20] = [
-    OpInfo { op_str: "*", prec: 3, op: BinOp::Mul, rtl: false },
-    OpInfo { op_str: "/", prec: 3, op: BinOp::Div, rtl: false },
-    OpInfo { op_str: "_/", prec: 3, op: BinOp::IntDiv, rtl: false },
-    OpInfo { op_str: "%", prec: 3, op: BinOp::Mod, rtl: false },
-    OpInfo { op_str: "+", prec: 4, op: BinOp::Add, rtl: false },
-    OpInfo { op_str: "-", prec: 4, op: BinOp::Sub, rtl: false },
+/// Note that operators that share some prefix (e.g. &, &&) must be ordered
+/// with the longer operator first.
+const BIN_OPS: [OpInfo; 31] = [
+    // Arithmetic assignment operators
+    OpInfo { op_str: "*=",  prec: 3, op: BinOp::Mul, assign: true },
+    OpInfo { op_str: "/=",  prec: 3, op: BinOp::Div, assign: true },
+    OpInfo { op_str: "_/=", prec: 3, op: BinOp::IntDiv, assign: true },
+    OpInfo { op_str: "%=",  prec: 3, op: BinOp::Mod, assign: true },
+    OpInfo { op_str: "+=",  prec: 4, op: BinOp::Add, assign: true },
+    OpInfo { op_str: "-=",  prec: 4, op: BinOp::Sub, assign: true },
 
-    OpInfo { op_str: "<<", prec: 5, op: BinOp::LShift, rtl: false },
-    OpInfo { op_str: ">>", prec: 5, op: BinOp::RShift, rtl: false },
+    OpInfo { op_str: "<<=", prec: 5, op: BinOp::LShift, assign: true },
+    OpInfo { op_str: ">>=", prec: 5, op: BinOp::RShift, assign: true },
 
-    OpInfo { op_str: "<=", prec: 6, op: BinOp::Le, rtl: false },
-    OpInfo { op_str: "<" , prec: 6, op: BinOp::Lt, rtl: false },
-    OpInfo { op_str: ">=", prec: 6, op: BinOp::Ge, rtl: false },
-    OpInfo { op_str: ">" , prec: 6, op: BinOp::Gt, rtl: false },
-    OpInfo { op_str: "==", prec: 7, op: BinOp::Eq, rtl: false },
-    OpInfo { op_str: "!=", prec: 7, op: BinOp::Ne, rtl: false },
+    OpInfo { op_str: "&=", prec: 8, op: BinOp::BitAnd, assign: true },
+    OpInfo { op_str: "^=", prec: 9, op: BinOp::BitXor, assign: true },
+    OpInfo { op_str: "|=", prec: 10, op: BinOp::BitOr, assign: true },
+
+    // Arithmetic operators
+    OpInfo { op_str: "*", prec: 3, op: BinOp::Mul, assign: false },
+    OpInfo { op_str: "/", prec: 3, op: BinOp::Div, assign: false },
+    OpInfo { op_str: "_/", prec: 3, op: BinOp::IntDiv, assign: false },
+    OpInfo { op_str: "%", prec: 3, op: BinOp::Mod, assign: false },
+    OpInfo { op_str: "+", prec: 4, op: BinOp::Add, assign: false },
+    OpInfo { op_str: "-", prec: 4, op: BinOp::Sub, assign: false },
+
+    OpInfo { op_str: "<<", prec: 5, op: BinOp::LShift, assign: false },
+    OpInfo { op_str: ">>", prec: 5, op: BinOp::RShift, assign: false },
+
+    OpInfo { op_str: "<=", prec: 6, op: BinOp::Le, assign: false },
+    OpInfo { op_str: "<" , prec: 6, op: BinOp::Lt, assign: false },
+    OpInfo { op_str: ">=", prec: 6, op: BinOp::Ge, assign: false },
+    OpInfo { op_str: ">" , prec: 6, op: BinOp::Gt, assign: false },
+    OpInfo { op_str: "==", prec: 7, op: BinOp::Eq, assign: false },
+    OpInfo { op_str: "!=", prec: 7, op: BinOp::Ne, assign: false },
 
     // Logical AND, logical OR
     // We place these before bitwise ops because they are longer tokens
-    OpInfo { op_str: "&&", prec: 11, op: BinOp::And, rtl: false },
-    OpInfo { op_str: "||", prec: 12, op: BinOp::Or, rtl: false },
+    OpInfo { op_str: "&&", prec: 11, op: BinOp::And, assign: false },
+    OpInfo { op_str: "||", prec: 12, op: BinOp::Or, assign: false },
 
-    OpInfo { op_str: "&", prec: 8, op: BinOp::BitAnd, rtl: false },
-    OpInfo { op_str: "^", prec: 9, op: BinOp::BitXor, rtl: false },
-    OpInfo { op_str: "|", prec: 10, op: BinOp::BitOr, rtl: false },
+    OpInfo { op_str: "&", prec: 8, op: BinOp::BitAnd, assign: false },
+    OpInfo { op_str: "^", prec: 9, op: BinOp::BitXor, assign: false },
+    OpInfo { op_str: "|", prec: 10, op: BinOp::BitOr, assign: false },
 
     // Assignment operator, evaluates right to left
-    OpInfo { op_str: "=", prec: 14, op: BinOp::Assign, rtl: true },
+    OpInfo { op_str: "=", prec: 14, op: BinOp::Assign, assign: true },
 ];
 
 /// Precedence level of the ternary operator (a? b:c)
@@ -786,23 +804,43 @@ fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         }
         let new_op = new_op.unwrap();
 
-        // If this operator evaluates right-to-left,
-        // e.g. an assignment operator
-        if new_op.rtl == true {
+        // If the operator is some kind of assignment operator (=, +=, etc.)
+        if new_op.assign == true {
+            // Assignment operators evaluates right-to-left.
             // Recursively parse the rhs expression,
             // forcing it to be evaluated before the lhs
             let rhs = parse_expr(input, prog)?;
             let lhs = expr_stack.pop().unwrap();
 
             let pos = lhs.pos.clone();
-            let bin_expr = Expr::Binary {
-                op: new_op.op,
-                lhs,
-                rhs,
-            };
-            expr_stack.push(ExprBox::new(bin_expr, pos));
 
-            break;
+            // Arithmetic assignment operators (e.g. +=, -=)
+            // They are transformed into normal assignment operations like so:
+            //  `x += y` => `x = x + y`
+            if new_op.op != BinOp::Assign {
+                let pure_op = new_op.op; // The pure operator (e.g. BinOp::Add for +=)
+                let bin_expr = Expr::Binary {
+                    op: pure_op,
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                };
+                let assign_expr = Expr::Binary {
+                    op: BinOp::Assign,
+                    lhs,
+                    rhs: ExprBox::new(bin_expr, rhs.pos.clone()),
+                };
+                expr_stack.push(ExprBox::new(assign_expr, pos));
+                break;
+
+            } else {
+                let bin_expr = Expr::Binary {
+                    op: new_op.op,
+                    lhs,
+                    rhs,
+                };
+                expr_stack.push(ExprBox::new(bin_expr, pos));
+                break;
+            }
         }
 
         // Evaluate the operators with lower precedence than
