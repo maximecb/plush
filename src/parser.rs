@@ -662,7 +662,23 @@ struct OpInfo
 /// https://en.cppreference.com/w/c/language/operator_precedence
 /// Note that operators that share some prefix (e.g. &, &&) must be ordered
 /// with the longer operator first.
-const BIN_OPS: [OpInfo; 20] = [
+const BIN_OPS: [OpInfo; 31] = [
+    // Arithmetic assignment operators
+    OpInfo { op_str: "*=",  prec: 3, op: BinOp::Mul, assign: true },
+    OpInfo { op_str: "/=",  prec: 3, op: BinOp::Div, assign: true },
+    OpInfo { op_str: "_/=", prec: 3, op: BinOp::IntDiv, assign: true },
+    OpInfo { op_str: "%=",  prec: 3, op: BinOp::Mod, assign: true },
+    OpInfo { op_str: "+=",  prec: 4, op: BinOp::Add, assign: true },
+    OpInfo { op_str: "-=",  prec: 4, op: BinOp::Sub, assign: true },
+
+    OpInfo { op_str: "<<=", prec: 5, op: BinOp::LShift, assign: true },
+    OpInfo { op_str: ">>=", prec: 5, op: BinOp::RShift, assign: true },
+
+    OpInfo { op_str: "&=", prec: 8, op: BinOp::BitAnd, assign: true },
+    OpInfo { op_str: "^=", prec: 9, op: BinOp::BitXor, assign: true },
+    OpInfo { op_str: "|=", prec: 10, op: BinOp::BitOr, assign: true },
+
+    // Arithmetic operators
     OpInfo { op_str: "*", prec: 3, op: BinOp::Mul, assign: false },
     OpInfo { op_str: "/", prec: 3, op: BinOp::Div, assign: false },
     OpInfo { op_str: "_/", prec: 3, op: BinOp::IntDiv, assign: false },
@@ -688,6 +704,7 @@ const BIN_OPS: [OpInfo; 20] = [
     OpInfo { op_str: "&", prec: 8, op: BinOp::BitAnd, assign: false },
     OpInfo { op_str: "^", prec: 9, op: BinOp::BitXor, assign: false },
     OpInfo { op_str: "|", prec: 10, op: BinOp::BitOr, assign: false },
+
     // Assignment operator, evaluates right to left
     OpInfo { op_str: "=", prec: 14, op: BinOp::Assign, assign: true },
 ];
@@ -787,7 +804,7 @@ fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         }
         let new_op = new_op.unwrap();
 
-        // If the operator is some kind of assignment operator (=, +=, etc.
+        // If the operator is some kind of assignment operator (=, +=, etc.)
         if new_op.assign == true {
             // Assignment operators evaluates right-to-left.
             // Recursively parse the rhs expression,
@@ -796,14 +813,34 @@ fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
             let lhs = expr_stack.pop().unwrap();
 
             let pos = lhs.pos.clone();
-            let bin_expr = Expr::Binary {
-                op: new_op.op,
-                lhs,
-                rhs,
-            };
-            expr_stack.push(ExprBox::new(bin_expr, pos));
 
-            break;
+            // Arithmetic assignment operators (e.g. +=, -=)
+            // They are transformed into normal assignment operations like so:
+            //  `x += y` => `x = x + y`
+            if new_op.op != BinOp::Assign {
+                let pure_op = new_op.op; // The pure operator (e.g. BinOp::Add for +=)
+                let bin_expr = Expr::Binary {
+                    op: pure_op,
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                };
+                let assign_expr = Expr::Binary {
+                    op: BinOp::Assign,
+                    lhs,
+                    rhs: ExprBox::new(bin_expr, rhs.pos.clone()),
+                };
+                expr_stack.push(ExprBox::new(assign_expr, pos));
+                break;
+
+            } else {
+                let bin_expr = Expr::Binary {
+                    op: new_op.op,
+                    lhs,
+                    rhs,
+                };
+                expr_stack.push(ExprBox::new(bin_expr, pos));
+                break;
+            }
         }
 
         // Evaluate the operators with lower precedence than
