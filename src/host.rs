@@ -426,6 +426,10 @@ fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> Result<Value, String>
 {
     let new_size = unwrap_usize!(new_size);
 
+    if new_size > actor.alloc.mem_size() {
+        return Err("requested heap size is larger than the current heap size".into());
+    }
+
     if actor.alloc.bytes_used() > new_size {
         return Err("requested heap size is smaller than bytes currently allocated".into());
     }

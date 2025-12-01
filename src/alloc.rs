@@ -55,6 +55,7 @@ impl Alloc
     /// This is primarily used to test the GC
     pub fn shrink_to(&mut self, new_size: usize)
     {
+        assert!(new_size <= self.mem_size);
         assert!(self.next_idx <= new_size);
         self.mem_size = new_size;
 
