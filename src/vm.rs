@@ -15,6 +15,7 @@ use crate::codegen::CompiledFun;
 use crate::deepcopy::{deepcopy, remap};
 use crate::host::*;
 use crate::str::Str;
+use rustc_hash::FxHashMap as HashMapDefault;
 
 /// Instruction opcodes
 /// Note: commonly used upcodes should be in the [0, 127] range (one byte)
@@ -688,7 +689,7 @@ impl Actor
             Some(rc) => rc,
             None => return Err(()),
         };
-        let mut dst_map = HashMap::new();
+        let mut dst_map = HashMapDefault::default();
         let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map).unwrap();
         remap(&mut dst_map);
 
@@ -827,7 +828,7 @@ impl Actor
         fn try_copy(
             actor: &mut Actor,
             dst_alloc: &mut Alloc,
-            dst_map: &mut HashMap<Value, Value>,
+            dst_map: &mut HashMapDefault<Value, Value>,
             extra_roots: &mut [&mut Value],
         ) -> Result<(), ()>
         {
@@ -881,7 +882,7 @@ impl Actor
             Ok(())
         }
 
-        fn get_new_val(val: Value, dst_map: &HashMap<Value, Value>) -> Value
+        fn get_new_val(val: Value, dst_map: &HashMapDefault<Value, Value>) -> Value
         {
             if !val.is_heap() {
                 return val;
@@ -900,7 +901,7 @@ impl Actor
         let mut dst_alloc = Alloc::with_size(new_mem_size);
 
         // Hash map for remapping copied values
-        let mut dst_map = HashMap::<Value, Value>::new();
+        let mut dst_map = HashMapDefault::<Value, Value>::default();
 
         loop {
             // Clear the value map
@@ -2301,7 +2302,7 @@ impl VM
         let mut msg_alloc = Alloc::new();
 
         // Hash map for remapping copied values
-        let mut dst_map = HashMap::new();
+        let mut dst_map = HashMapDefault::default();
 
         // We need to recursively copy the function/closure
         // using the actor's message allocator
