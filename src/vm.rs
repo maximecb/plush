@@ -239,14 +239,6 @@ impl Value
         }
     }
 
-    pub fn unwrap_usize(&self) -> usize
-    {
-        match self {
-            Int64(v) => (*v).try_into().unwrap(),
-            _ => panic!("expected int64 value but got {:?}", self)
-        }
-    }
-
     pub fn unwrap_u64(&self) -> u64
     {
         match self {

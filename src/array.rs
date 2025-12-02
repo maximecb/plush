@@ -1,6 +1,7 @@
 use crate::vm::{Value, Actor};
 use crate::alloc::Alloc;
 use crate::host::HostFn;
+use crate::{error, unwrap_usize};
 
 pub struct Array
 {
@@ -147,7 +148,7 @@ impl Array
 
 pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fill_val: Value) -> Result<Value, String>
 {
-    let num_elems = num_elems.unwrap_usize();
+    let num_elems = unwrap_usize!(num_elems);
 
     actor.gc_check(
         size_of::<Array>() + size_of::<Value>() * num_elems,
@@ -183,7 +184,7 @@ pub fn array_pop(actor: &mut Actor, mut array: Value) -> Result<Value, String>
 
 pub fn array_remove(actor: &mut Actor, mut array: Value, idx: Value) -> Result<Value, String>
 {
-    let idx = idx.unwrap_usize();
+    let idx = unwrap_usize!(idx);
     Ok(array.unwrap_arr().remove(idx))
 }
 
@@ -199,7 +200,7 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val
     }
 
     let arr = array.unwrap_arr();
-    let idx = idx.unwrap_usize();
+    let idx = unwrap_usize!(idx);
     arr.insert(idx, val, &mut actor.alloc).unwrap();
     Ok(Value::Nil)
 }

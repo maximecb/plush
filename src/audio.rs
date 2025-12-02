@@ -7,6 +7,7 @@ use crate::alloc::Alloc;
 use crate::ast::{AUDIO_NEEDED_ID, AUDIO_DATA_ID};
 use crate::window::with_sdl_context;
 use crate::bytearray::ByteArray;
+use crate::{error, unwrap_usize};
 
 // --- Audio Output ---
 
@@ -162,7 +163,7 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
 /// The samples must be a ByteArray containing float32 values
 pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) -> Result<Value, String>
 {
-    let device_id = device_id.unwrap_usize();
+    let device_id = unwrap_usize!(device_id);
 
     if device_id != 0 {
         return Err("for now, only one audio output device is supported".into());
@@ -350,9 +351,9 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
 /// Read samples from an audio input device into an existing ByteArray
 pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> Result<Value, String>
 {
-    let device_id = device_id.unwrap_usize();
-    let num_samples_to_read = num_samples.unwrap_usize();
-    let dst_idx_f32 = dst_idx.unwrap_usize();
+    let device_id = unwrap_usize!(device_id);
+    let num_samples_to_read = unwrap_usize!(num_samples);
+    let dst_idx_f32 = unwrap_usize!(dst_idx);
 
     if device_id != 0 {
         panic!("for now, only one audio input device is supported");

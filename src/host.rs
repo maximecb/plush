@@ -161,7 +161,7 @@ pub fn cmd_num_args(actor: &mut Actor) -> Result<Value, String>
 /// Get a command-line argument string by index
 pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<Value, String>
 {
-    let idx = idx.unwrap_usize();
+    let idx = unwrap_usize!(idx);
 
     let args = crate::REST_ARGS.lock().unwrap();
 

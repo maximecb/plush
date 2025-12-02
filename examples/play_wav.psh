@@ -1,0 +1,61 @@
+fun main() {
+    let wav_data = $read_file("examples/sample_nono.wav");
+    if (wav_data == nil) {
+        $println("Error: could not read wav file");
+        return;
+    }
+
+    // Parse WAV header
+    // Ref: http://soundfile.sapp.org/doc/WaveFormat/
+    let num_channels = wav_data.load_u16(11);
+    let sample_rate = wav_data.load_u32(6);
+    let bits_per_sample = wav_data.load_u16(17);
+
+    // For now, assume PCM format and that the data chunk starts at offset 44
+    // A proper implementation would search for the "data" chunk
+    let data_offset = 44;
+    let data_size = wav_data.len - data_offset;
+
+    if (bits_per_sample != 16) {
+        $println("Error: unsupported bits per sample. Only 16-bit WAV files are supported.");
+        return;
+    }
+
+    // Convert 16-bit signed PCM to 32-bit float
+    let num_samples = data_size _/ (bits_per_sample _/ 8);
+    let float_samples = ByteArray.with_size(num_samples * 4);
+
+    for (let var i = 0; i < num_samples; ++i) {
+        let sample_offset = data_offset _/ 2 + i;
+        let pcm_sample_u16 = wav_data.load_u16(sample_offset);
+
+        // Convert u16 to i16
+        let var pcm_sample_i16 = 0;
+        if (pcm_sample_u16 > 32767) {
+            pcm_sample_i16 = pcm_sample_u16 - 65536;
+        } else {
+            pcm_sample_i16 = pcm_sample_u16;
+        }
+
+        let float_sample = pcm_sample_i16.to_f() / 32768.0;
+        float_samples.store_f32(i, float_sample);
+    }
+
+    // Open audio device
+    let dev = $audio_open_output(sample_rate, num_channels);
+    if (dev == nil) {
+        $println("Error: could not open audio device");
+        return;
+    }
+
+    $println("Playing audio...");
+    $audio_write_samples(dev, float_samples);
+
+    // Wait for the audio to finish playing.
+    // A simple approximation: duration = num_samples / sample_rate
+    let duration_ms = (num_samples.to_f() / sample_rate.to_f() * 1000.0).floor();
+    $actor_sleep(duration_ms + 100);
+    $println("Playback finished.");
+}
+
+main();
