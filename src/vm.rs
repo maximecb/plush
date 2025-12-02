@@ -1212,7 +1212,7 @@ impl Actor
                 eprintln!();
 
                 // For each stack frame, from top to bottom
-                for frame in self.frames.iter().rev() {
+                for frame in self.frames.clone().into_iter().rev() {
                     let fun_id = match frame.fun {
                         Value::Fun(id) => id,
                         Value::Closure(clos) => unsafe { (*clos).fun_id },
@@ -1224,7 +1224,15 @@ impl Actor
                     let fun = &vm.prog.funs[&fun_id];
                     let fun_name = fun.name.clone();
                     let fun_pos = fun.pos;
-                    drop(vm);
+                    let fun_class_id = fun.class_id;
+
+                    // If this is a method, prepend the class name
+                    let fun_name = if fun_class_id != ClassId::default() {
+                        let class_name = &vm.prog.classes[&fun_class_id].name;
+                        format!("{}.{}", class_name, fun_name)
+                    } else {
+                        fun_name
+                    };
 
                     eprintln!("{}", fun_name);
                     eprintln!("  defined at {}", fun_pos);
