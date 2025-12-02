@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::hash::{Hash, Hasher};
 use std::mem;
 use std::collections::hash_map::Entry;
@@ -6,7 +6,6 @@ use crate::alloc::Alloc;
 use crate::object::Object;
 use crate::closure::Closure;
 use crate::vm::Value;
-use rustc_hash::FxHashMap as HashMapDefault;
 
 /// Custom Hash implementation for Value
 impl Hash for Value
@@ -59,7 +58,7 @@ impl Hash for Value
 pub fn deepcopy(
     src_val: Value,
     dst_alloc: &mut Alloc,
-    dst_map: &mut HashMapDefault<Value, Value>,
+    dst_map: &mut HashMap<Value, Value>,
 ) -> Result<Value, ()>
 {
     if !src_val.is_heap() {
@@ -167,7 +166,7 @@ pub fn deepcopy(
 }
 
 /// Remap internal references to copied values
-pub fn remap(dst_map: &mut HashMapDefault<Value, Value>)
+pub fn remap(dst_map: &mut HashMap<Value, Value>)
 {
     macro_rules! remap_val {
         ($val: expr) => {
@@ -236,7 +235,7 @@ mod tests
     fn copy_int()
     {
         let mut dst_alloc = Alloc::new();
-        let mut dst_map = HashMapDefault::default();
+        let mut dst_map = HashMap::default();
         let v1 = Value::Int64(1337);
         let v2 = deepcopy(v1, &mut dst_alloc, &mut dst_map).unwrap();
         assert!(v1 == v2);
@@ -247,7 +246,7 @@ mod tests
     {
         let mut src_alloc = Alloc::new();
         let mut dst_alloc = Alloc::new();
-        let mut dst_map = HashMapDefault::default();
+        let mut dst_map = HashMap::default();
         let s1 = src_alloc.str_val("foo").unwrap();
         let s2 = deepcopy(s1, &mut dst_alloc, &mut dst_map).unwrap();
         assert!(s1 == s2);
