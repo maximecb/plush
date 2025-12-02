@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::mem;
+use std::collections::hash_map::Entry;
 use crate::alloc::Alloc;
 use crate::object::Object;
 use crate::closure::Closure;
@@ -81,8 +82,11 @@ pub fn deepcopy(
     while stack.len() > 0 {
         let val = stack.pop().unwrap();
 
+        // Search dst map for existing mapping entry
+        let dst_map_entry = dst_map.entry(val);
+
         // If this value has already been remapped, skip it
-        if dst_map.contains_key(&val) {
+        if let Entry::Occupied(_) = dst_map_entry {
             continue;
         }
 
@@ -154,7 +158,7 @@ pub fn deepcopy(
         };
 
         // Insert the new mapping into the translation map
-        dst_map.insert(val, new_val);
+        dst_map_entry.or_insert(new_val);
     }
 
     let new_val = *dst_map.get(&src_val).unwrap();
