@@ -2132,7 +2132,11 @@ impl Actor
                         Value::Object(p) => {
                             let obj = unsafe { &*p };
                             let fun_id = match self.get_method(obj.class_id, method_name.as_str()) {
-                                None => error!("call to method `{}`, not found on class", method_name.as_str()),
+                                None => error!(
+                                    "call to method `{}`, not found on class `{}`",
+                                    method_name.as_str(),
+                                    self.get_class_name(obj.class_id)
+                                ),
                                 Some(fun_id) => fun_id,
                             };
 
