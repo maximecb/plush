@@ -753,6 +753,12 @@ impl Actor
         ret
     }
 
+    /// Get the class name for a given class
+    pub fn get_class_name(&mut self, class_id: ClassId) -> String
+    {
+        self.with_class(class_id, |c| c.name.clone())
+    }
+
     /// Get the number of slots for a given class
     pub fn get_num_slots(&mut self, class_id: ClassId) -> usize
     {
