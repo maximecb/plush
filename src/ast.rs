@@ -1,5 +1,5 @@
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt;
-use std::collections::{HashMap, HashSet};
 use crate::lexer::SrcPos;
 use crate::symbols::Decl;
 use crate::host::HostFn;

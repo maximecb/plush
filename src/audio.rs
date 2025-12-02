@@ -1,6 +1,6 @@
+use rustc_hash::FxHashMap as HashMap;
 use sdl2::audio::{AudioCallback, AudioSpecDesired, AudioDevice};
 use std::sync::{Arc, Weak, Mutex, Condvar};
-use std::collections::HashMap;
 use crate::vm::{Value, VM, Actor, Message};
 use crate::object::Object;
 use crate::alloc::Alloc;
