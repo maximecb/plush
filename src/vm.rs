@@ -658,7 +658,7 @@ impl Actor
             println!("Performing message allocator GC");
 
             // Clear the contents of the message allocator
-            *msg_alloc = Alloc::with_size(msg_alloc.mem_size());
+            msg_alloc.clear();
         }
 
         // No message received

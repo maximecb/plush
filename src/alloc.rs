@@ -51,6 +51,17 @@ impl Alloc
         self.mem_size - self.next_idx
     }
 
+    /// Clear/erase all allocations
+    pub fn clear(&mut self)
+    {
+        self.next_idx = 0;
+
+        // In debug mode, fill the allocator's memory with 0xFE when dropping so that
+        // we can find out quickly if any memory did not get copied in a GC cycle
+        #[cfg(debug_assertions)]
+        unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.mem_size) }
+    }
+
     /// Shrink the available memory to a smaller size
     /// This is primarily used to test the GC
     pub fn shrink_to(&mut self, new_size: usize)
@@ -137,7 +148,6 @@ impl Drop for Alloc
         // we can find out quickly if any memory did not get copied in a GC cycle
         #[cfg(debug_assertions)]
         unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.mem_size) }
-
         // Deallocate the memory block
         unsafe { dealloc(self.mem_block, self.layout) };
     }
