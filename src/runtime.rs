@@ -60,6 +60,16 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
+fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result<Value, String>
+{
+    let v = v.unwrap_i64();
+    let digits = unwrap_usize!(digits);
+    let s = format!("{:0width$X}", v, width = digits);
+
+    actor.gc_check(32 + digits, &mut []);
+    Ok(actor.alloc.str_val(&s).unwrap())
+}
+
 fn float64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
@@ -346,6 +356,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static INT64_MAX: HostFn = HostFn { name: "max", f: Fn2(int64_max) };
     static INT64_TO_F: HostFn = HostFn { name: "to_f", f: Fn1(int64_to_f) };
     static INT64_TO_S: HostFn = HostFn { name: "to_s", f: Fn1(int64_to_s) };
+    static INT64_TO_HEX: HostFn = HostFn { name: "to_hex", f: Fn2(int64_to_hex) };
 
     static FLOAT64_ABS: HostFn = HostFn { name: "abs", f: Fn1(float64_abs) };
     static FLOAT64_CEIL: HostFn = HostFn { name: "ceil", f: Fn1(float64_ceil) };
@@ -402,6 +413,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Int64(_), "max") => &INT64_MAX,
         (Value::Int64(_), "to_f") => &INT64_TO_F,
         (Value::Int64(_), "to_s") => &INT64_TO_S,
+        (Value::Int64(_), "to_hex") => &INT64_TO_HEX,
 
         (Value::Float64(_), "abs") => &FLOAT64_ABS,
         (Value::Float64(_), "ceil") => &FLOAT64_CEIL,

@@ -180,6 +180,7 @@ render_text("Hello world");
     -   `max(other)`: Returns the maximum of this number and `other`.
     -   `to_f()`: Converts the integer to a 64-bit float.
     -   `to_s()`: Converts the integer to a string.
+    -   `to_hex(digits)`: Get a zero-padded and capitalized hexadecimal string representation of this integer.`
 -   **Float64**
     -   `abs()`: Get the absolute value of this number.
     -   `ceil()`: Returns the smallest integer greater than or equal to the float.
