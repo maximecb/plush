@@ -56,9 +56,7 @@ impl Alloc
     {
         self.next_idx = 0;
 
-        // In debug mode, fill the allocator's memory with 0xFE when clearing so that
-        // we can find out quickly if any memory did not get copied in a GC cycle
-        #[cfg(debug_assertions)]
+        // Zome objects rely on uninitialized memory being zero
         unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.mem_size) }
     }
 
@@ -142,3 +140,18 @@ impl Alloc
 // This is needed for the message allocator
 unsafe impl Send for Alloc {}
 unsafe impl Sync for Alloc {}
+
+impl Drop for Alloc
+{
+    fn drop(&mut self)
+    {
+        //println!("dropping alloc");
+
+        // In debug mode, fill the allocator's memory with 0xFE when dropping so that
+        // we can find out quickly if any memory did not get copied in a GC cycle
+        #[cfg(debug_assertions)]
+        unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.mem_size) }
+        // Deallocate the memory block
+        unsafe { dealloc(self.mem_block, self.layout) };
+    }
+}
