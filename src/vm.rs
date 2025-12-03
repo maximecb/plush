@@ -537,6 +537,9 @@ pub struct Actor
     // Message queue receiver endpoint
     queue_rx: mpsc::Receiver<Message>,
 
+    // Hash map used for garbage collection
+    dst_map: HashMap::<Value, Value>,
+
     // Cache of actor ids to message queue endpoints
     actor_map: HashMap<u64, ActorTx>,
 
@@ -578,6 +581,7 @@ impl Actor
             msg_alloc,
             queue_rx,
             globals,
+            dst_map: HashMap::default(),
             actor_map: HashMap::default(),
             stack: Vec::default(),
             frames: Vec::default(),
@@ -827,30 +831,29 @@ impl Actor
         fn try_copy(
             actor: &mut Actor,
             dst_alloc: &mut Alloc,
-            dst_map: &mut HashMap<Value, Value>,
             extra_roots: &mut [&mut Value],
         ) -> Result<(), ()>
         {
             // Copy the global variables
             for val in &mut actor.globals {
-                deepcopy(*val, dst_alloc, dst_map)?;
+                deepcopy(*val, dst_alloc, &mut actor.dst_map)?;
             }
 
             // Copy values on the stack
             for val in &mut actor.stack {
-                deepcopy(*val, dst_alloc, dst_map)?;
+                deepcopy(*val, dst_alloc, &mut actor.dst_map)?;
             }
 
             // Copy closures in the stack frames
             for frame in &mut actor.frames {
-                deepcopy(frame.fun, dst_alloc, dst_map)?;
+                deepcopy(frame.fun, dst_alloc, &mut actor.dst_map)?;
             }
 
             // Copy heap values referenced in instructions
             for insn in &mut actor.insns {
                 match insn {
                     Insn::push { val } => {
-                        deepcopy(*val, dst_alloc, dst_map)?;
+                        deepcopy(*val, dst_alloc, &mut actor.dst_map)?;
                     }
 
                     // Instructions referencing name strings
@@ -858,7 +861,7 @@ impl Actor
                     Insn::set_field { field: s, .. } |
                     Insn::call_method { name: s, .. } |
                     Insn::call_method_pc { name: s, .. } => {
-                        deepcopy(Value::String(*s), dst_alloc, dst_map)?;
+                        deepcopy(Value::String(*s), dst_alloc, &mut actor.dst_map)?;
                     }
 
                     _ => {}
@@ -867,16 +870,16 @@ impl Actor
 
             // Copy extra roots supplied by the user
             for val in extra_roots {
-                deepcopy(**val, dst_alloc, dst_map)?;
+                deepcopy(**val, dst_alloc, &mut actor.dst_map)?;
             }
 
             println!(
                 "GC copied {} values, {} bytes free",
-                thousands_sep(dst_map.len()),
+                thousands_sep(actor.dst_map.len()),
                 thousands_sep(dst_alloc.bytes_free()),
             );
 
-            remap(dst_map);
+            remap(&mut actor.dst_map);
 
             Ok(())
         }
@@ -899,15 +902,12 @@ impl Actor
         // Create a new allocator to copy the data into
         let mut dst_alloc = Alloc::with_size(new_mem_size);
 
-        // Hash map for remapping copied values
-        let mut dst_map = HashMap::<Value, Value>::default();
-
         loop {
             // Clear the value map
-            dst_map.clear();
+            self.dst_map.clear();
 
             // Try to copy all objects into the new allocator
-            let copy_fail = try_copy(self, &mut dst_alloc, &mut dst_map, extra_roots).is_err();
+            let copy_fail = try_copy(self, &mut dst_alloc, extra_roots).is_err();
 
             // If there is not enough free memory after copying
             let min_free_bytes = std::cmp::max(self.alloc.mem_size() / 5, bytes_needed);
@@ -940,24 +940,24 @@ impl Actor
 
         // Remap the global variables
         for val in &mut self.globals {
-            *val = get_new_val(*val, &dst_map);
+            *val = get_new_val(*val, &self.dst_map);
         }
 
         // Remap values on the stack
         for val in &mut self.stack {
-            *val = get_new_val(*val, &dst_map);
+            *val = get_new_val(*val, &self.dst_map);
         }
 
         // Remap closures in the stack frames
         for frame in &mut self.frames {
-            frame.fun = get_new_val(frame.fun, &dst_map);
+            frame.fun = get_new_val(frame.fun, &self.dst_map);
         }
 
         // Remap heap values referenced in instructions
         for insn in &mut self.insns {
             match insn {
                 Insn::push { val } => {
-                    *val = get_new_val(*val, &dst_map);
+                    *val = get_new_val(*val, &self.dst_map);
                 }
 
                 // Instructions referencing name strings
@@ -965,7 +965,7 @@ impl Actor
                 Insn::set_field { field: s, .. } |
                 Insn::call_method { name: s, .. } |
                 Insn::call_method_pc { name: s, .. } => {
-                    match get_new_val(Value::String(*s), &dst_map) {
+                    match get_new_val(Value::String(*s), &self.dst_map) {
                         Value::String(new_s) => *s = new_s,
                         _ => panic!(),
                     }
@@ -977,7 +977,7 @@ impl Actor
 
         // Remap extra roots supplied by the user
         for val in extra_roots {
-            **val = get_new_val(**val, &dst_map);
+            **val = get_new_val(**val, &self.dst_map);
         }
 
         // Drop and replace the old allocator
