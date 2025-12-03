@@ -54,10 +54,12 @@ impl Alloc
     /// Clear/erase all allocations
     pub fn clear(&mut self)
     {
-        self.next_idx = 0;
+        // Clear the memory up to the next allocation index
+        // Some objects rely on uninitialized memory being zero
+        unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.next_idx) }
 
-        // Zome objects rely on uninitialized memory being zero
-        unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.mem_size) }
+        // Reset the next allocation index
+        self.next_idx = 0;
     }
 
     /// Shrink the available memory to a smaller size

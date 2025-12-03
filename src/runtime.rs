@@ -270,6 +270,10 @@ fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value
     let s = unwrap_str!(input);
     let sep = unwrap_str!(sep);
 
+    // Copy the input in case we have to trigger GC
+    let s = s.to_owned();
+
+    // Split the string into tokens
     let str_parts: Vec<&str> = s.split(sep).collect();
     let num_strs = str_parts.len();
     let total_str_len: usize = str_parts.iter().map(|s| s.len()).sum();
@@ -280,7 +284,7 @@ fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value
         (size_of::<Array>() + num_strs * size_of::<Value>()) +
         (size_of::<Str>() + 32) * num_strs +
         total_str_len,
-        &mut [&mut input]
+        &mut []
     );
 
     let mut array = Array::with_capacity(num_strs, &mut actor.alloc).unwrap();

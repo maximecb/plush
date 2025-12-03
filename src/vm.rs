@@ -983,7 +983,7 @@ impl Actor
         // Drop and replace the old allocator
         // Note that we can only do this after remapping the values,
         // because we access string data while hashing string values
-        //self.alloc.clear();
+        self.alloc.clear();
         self.alloc = dst_alloc;
 
         let end_time = crate::host::get_time_ms();
