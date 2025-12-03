@@ -1,9 +1,9 @@
 #![cfg(test)]
 
+use rustc_hash::FxHashSet as HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::process::Command;
-use std::collections::HashSet;
 
 fn test_file(file_path: &str, no_exec: bool)
 {

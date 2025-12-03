@@ -1,4 +1,4 @@
-use std::collections::{HashSet, HashMap};
+use rustc_hash::FxHashMap as HashMap;
 use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
@@ -688,7 +688,7 @@ impl Actor
             Some(rc) => rc,
             None => return Err(()),
         };
-        let mut dst_map = HashMap::new();
+        let mut dst_map = HashMap::default();
         let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map).unwrap();
         remap(&mut dst_map);
 
@@ -900,7 +900,7 @@ impl Actor
         let mut dst_alloc = Alloc::with_size(new_mem_size);
 
         // Hash map for remapping copied values
-        let mut dst_map = HashMap::<Value, Value>::new();
+        let mut dst_map = HashMap::<Value, Value>::default();
 
         loop {
             // Clear the value map
@@ -2301,7 +2301,7 @@ impl VM
         let mut msg_alloc = Alloc::new();
 
         // Hash map for remapping copied values
-        let mut dst_map = HashMap::new();
+        let mut dst_map = HashMap::default();
 
         // We need to recursively copy the function/closure
         // using the actor's message allocator

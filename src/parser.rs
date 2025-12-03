@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::io;
 use std::io::Read;
 use std::cmp::max;
@@ -1276,7 +1276,7 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
     let class_name = input.parse_ident()?;
     input.expect_token("{")?;
 
-    let mut methods = HashMap::new();
+    let mut methods = HashMap::default();
 
     loop
     {

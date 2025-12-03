@@ -1,6 +1,6 @@
+use rustc_hash::FxHashMap as HashMap;
 use std::fs;
 use std::fmt;
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Default)]
