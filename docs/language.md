@@ -8,17 +8,14 @@ The Plush language has:
 - Dynamic typing
 - Classes and objects
 - Closures/lambdas
-- Separate `Float64` and `Int64` types
 - Dynamic arrays aka vectors/lists
-- Immutable UTF-8 strings
 - Dictionaries with JSON-like syntax
 - A native byte array type
 - A simple frame buffer API for graphics and animations
 - A simple audio output API
-- An extensible set of host functions defined in `src/host.rs`
-- The ability to importing code from other source files
 - Memory safe, actor-based parallelism
 - A copying garbage-collector that runs independently for each actor
+- No global VM lock
 
 Caveats and limitations:
 - Error messages and error handling need improvement
@@ -42,6 +39,20 @@ can be found in the [`examples/`](/examples) directory. These examples are avail
 
 ## Language Basics
 
+### Data Types
+
+Plush is a dynamically typed language and supports the following data types:
+
+-   **Int64**: 64-bit signed integers (e.g., `10`, `-5`).
+-   **Float64**: 64-bit floating-point numbers (e.g., `3.14`, `-0.5`).
+-   **String**: Immutable UTF-8 encoded strings (e.g., `"hello"`, `'world'`).
+-   **Bool**: The constants `true` or `false`.
+-   **Nil**: The constant `nil` represents the absence of a value.
+-   **Array**: Ordered collections of values (e.g., `[1, 2, 3]`).
+-   **ByteArray**: Raw, mutable byte buffers.
+-   **Object**: Instances of classes.
+-   **Dictionaries**: Hash maps with string keys, like JS/Python/JSON (e.g., `{a:1, b: 2}`)
+
 ### Variables
 
 Variables are declared using the `let` keyword. By default, variables are immutable. To declare a mutable variable, use `let var`.
@@ -59,20 +70,6 @@ for (let var i = 0; i < 10; ++i)
     $println(i);
 ```
 
-### Data Types
-
-Plush is a dynamically typed language and supports the following data types:
-
--   **Int64**: 64-bit signed integers (e.g., `10`, `-5`).
--   **Float64**: 64-bit floating-point numbers (e.g., `3.14`, `-0.5`).
--   **String**: Immutable UTF-8 encoded strings (e.g., `"hello"`, `'world'`).
--   **Bool**: The constants `true` or `false`.
--   **Nil**: The constant `nil` represents the absence of a value.
--   **Array**: Ordered collections of values (e.g., `[1, 2, 3]`).
--   **ByteArray**: Raw, mutable byte buffers.
--   **Object**: Instances of classes.
--   **Dictionaries**: Hash maps with string keys, like JS/Python/JSON (e.g., `{a:1, b: 2}`)
-
 ### Operators
 
 Plush supports a range of arithmetic, comparison, and logical operators:
@@ -85,18 +82,6 @@ The `_/` operator performs integer division, that is, truncated division which o
 an integer output, whereas the division operator `/` yields a floating-point value as output.
 
 Note that unlike in JavaScript, the `==` operator performs reference equality for objects and arrays, not structural equality.
-
-### Arrays
-
-The syntax for array literals is similar to that of JavaScript, e.g.
-
-```
-let a = [0, 1, 2, 3, 4];
-```
-
-Array elements an be accessed using the indexing operator with square brackets, e.g. `a[0] = 1`.
-ByteArrays can also be indexed using square brackets to read and write individual bytes.
-The length of arrays and ByteArrays is accessed via the `.len` field.
 
 ### Control Flow
 
@@ -132,6 +117,18 @@ fun add(a, b) {
 let result = add(5, 10);
 $println(result); // 15
 ```
+
+### Arrays
+
+The syntax for array literals is similar to that of JavaScript, e.g.
+
+```
+let a = [0, 1, 2, 3, 4];
+```
+
+Array elements an be accessed using the indexing operator with square brackets, e.g. `a[0] = 1`.
+ByteArrays can also be indexed using square brackets to read and write individual bytes.
+The length of arrays and ByteArrays is accessed via the `.len` field.
 
 ### Classes
 
@@ -267,7 +264,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 
 ## Concurrency with Actors
 
-Plush supports actor-based concurrency, which allows you to write parallel programs that are safe and easy to reason about. Actors are independent processes that communicate by sending and receiving messages.
+Plush supports actor-based concurrency, which allows you to write parallel programs that are safe and easy to reason about. Actors are independent processes that communicate by sending and receiving messages. A parent actor can spawn a child actor using the `$actor_spawn(f)` host function. This function takes a function as argument to be executed in the new actor. Actors work like isolated process and can only communicate through message passing. When an actor spawns a child, the child gets a copy of the parent's global variables.
 
 ```plush
 fun worker() {
