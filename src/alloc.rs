@@ -56,7 +56,7 @@ impl Alloc
     {
         // Clear the memory up to the next allocation index
         // Some objects rely on uninitialized memory being zero
-        unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.next_idx) }
+        unsafe { std::ptr::write_bytes(self.mem_block, 0, self.next_idx) }
 
         // Reset the next allocation index
         self.next_idx = 0;
@@ -147,8 +147,6 @@ impl Drop for Alloc
 {
     fn drop(&mut self)
     {
-        //println!("dropping alloc");
-
         // In debug mode, fill the allocator's memory with 0xFE when dropping so that
         // we can find out quickly if any memory did not get copied in a GC cycle
         #[cfg(debug_assertions)]

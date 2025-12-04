@@ -537,6 +537,9 @@ pub struct Actor
     // Message queue receiver endpoint
     queue_rx: mpsc::Receiver<Message>,
 
+    // Spare allocator used as to-space for copying GC
+    to_space: Option<Alloc>,
+
     // Hash map used for garbage collection
     dst_map: HashMap::<Value, Value>,
 
@@ -581,6 +584,7 @@ impl Actor
             msg_alloc,
             queue_rx,
             globals,
+            to_space: None,
             dst_map: HashMap::default(),
             actor_map: HashMap::default(),
             stack: Vec::default(),
@@ -899,8 +903,17 @@ impl Actor
 
         let mut new_mem_size = self.alloc.mem_size();
 
-        // Create a new allocator to copy the data into
-        let mut dst_alloc = Alloc::with_size(new_mem_size);
+        // Get a new allocator to copy the data into
+        let mut dst_alloc = if self.to_space.is_some() {
+            let alloc = self.to_space.take().unwrap();
+            if alloc.mem_size() >= new_mem_size {
+                alloc
+            } else {
+                Alloc::with_size(new_mem_size)
+            }
+        } else {
+            Alloc::with_size(new_mem_size)
+        };
 
         loop {
             // Clear the value map
@@ -980,11 +993,10 @@ impl Actor
             **val = get_new_val(**val, &self.dst_map);
         }
 
-        // Drop and replace the old allocator
-        // Note that we can only do this after remapping the values,
-        // because we access string data while hashing string values
-        self.alloc.clear();
-        self.alloc = dst_alloc;
+        // Swap the old and new allocators
+        std::mem::swap(&mut self.alloc, &mut dst_alloc);
+        dst_alloc.clear();
+        self.to_space = Some(dst_alloc);
 
         let end_time = crate::host::get_time_ms();
         let gc_time = end_time - start_time;
