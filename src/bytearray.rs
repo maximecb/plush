@@ -43,16 +43,6 @@ impl ByteArray
         self.bytes.len()
     }
 
-    pub fn get(&self, idx: usize) -> u8
-    {
-        unsafe { (*self.bytes)[idx] }
-    }
-
-    pub fn set(&mut self, idx: usize, val: u8)
-    {
-        unsafe { (*self.bytes)[idx] = val };
-    }
-
     pub unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
     {
         assert!((idx + num_elems) * size_of::<T>() <= self.len);
@@ -69,8 +59,33 @@ impl ByteArray
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
 
-    /// Load a value at the given index
-    pub fn load<T>(&mut self, idx: usize) -> T where T: Copy
+
+    /// Load a value at the given byte index
+    pub fn load<T>(&mut self, byte_idx: usize) -> T where T: Copy
+    {
+        assert!(byte_idx + size_of::<T>() <= self.len);
+
+        unsafe {
+            let buf_ptr = (*self.bytes).as_ptr();
+            let val_ptr = transmute::<*const u8 , *const T>(buf_ptr.add(byte_idx));
+            std::ptr::read_unaligned(val_ptr)
+        }
+    }
+
+    /// Store a value at the given byte index
+    pub fn store<T>(&mut self, byte_idx: usize, val: T) where T: Copy
+    {
+        assert!(byte_idx + size_of::<T>() <= self.len);
+
+        unsafe {
+            let buf_ptr = (*self.bytes).as_mut_ptr();
+            let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(byte_idx));
+            std::ptr::write_unaligned(val_ptr, val);
+        }
+    }
+
+    /// Read a value at the given index (aligned read)
+    pub fn get<T>(&mut self, idx: usize) -> T where T: Copy
     {
         assert!((idx + 1) * size_of::<T>() <= self.len);
 
@@ -81,8 +96,8 @@ impl ByteArray
         }
     }
 
-    /// Store a value at the given index
-    pub fn store<T>(&mut self, idx: usize, val: T) where T: Copy
+    /// Write a value at the given index (aligned write)
+    pub fn set<T>(&mut self, idx: usize, val: T) where T: Copy
     {
         assert!((idx + 1) * size_of::<T>() <= self.len);
 
@@ -236,64 +251,88 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Va
     Ok(Value::Nil)
 }
 
-pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value) -> Result<Value, String>
+pub fn ba_load_u32(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
-    let idx = unwrap_usize!(idx);
-    let num = unwrap_usize!(num);
-    let val = val.unwrap_u32();
-    ba.fill(idx, num, val);
-    Ok(Value::Nil)
-}
-
-pub fn ba_load_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
-{
-    let ba = ba.unwrap_ba();
-    let idx = unwrap_usize!(idx);
-    let val: u32 = ba.load(idx);
+    let byte_idx = unwrap_usize!(byte_idx);
+    let val: u32 = ba.load(byte_idx);
     Ok(Value::from(val))
 }
 
-pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let byte_idx = unwrap_usize!(byte_idx);
+    let val = val.unwrap_u32();
+    ba.store(byte_idx, val);
+    Ok(Value::Nil)
+}
+
+pub fn ba_load_u16(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let byte_idx = unwrap_usize!(byte_idx);
+    let val: u16 = ba.load(byte_idx);
+    Ok(Value::from(val as i64))
+}
+
+pub fn ba_store_u16(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let byte_idx = unwrap_usize!(byte_idx);
+    let val = val.unwrap_i64();
+    ba.store(byte_idx, val as u16);
+    Ok(Value::Nil)
+}
+
+pub fn ba_load_f32(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let byte_idx = unwrap_usize!(byte_idx);
+    let val: f32 = ba.load(byte_idx);
+    Ok(Value::from(val as f64))
+}
+
+pub fn ba_store_f32(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let byte_idx = unwrap_usize!(byte_idx);
+    let val = val.unwrap_f64();
+    ba.store(byte_idx, val as f32);
+    Ok(Value::Nil)
+}
+
+pub fn ba_get_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let idx = unwrap_usize!(idx);
+    let val: u32 = ba.get(idx);
+    Ok(Value::from(val))
+}
+
+pub fn ba_set_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = unwrap_usize!(idx);
     let val = val.unwrap_u32();
-    ba.store(idx, val);
+    ba.set(idx, val);
     Ok(Value::Nil)
 }
 
-pub fn ba_load_u16(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
+pub fn ba_get_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = unwrap_usize!(idx);
-    let val: u16 = ba.load(idx);
-    Ok(Value::from(val as i64))
-}
-
-pub fn ba_store_u16(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
-{
-    let ba = ba.unwrap_ba();
-    let idx = unwrap_usize!(idx);
-    let val = val.unwrap_i64();
-    ba.store(idx, val as u16);
-    Ok(Value::Nil)
-}
-
-pub fn ba_load_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
-{
-    let ba = ba.unwrap_ba();
-    let idx = unwrap_usize!(idx);
-    let val: f32 = ba.load(idx);
+    let val: f32 = ba.get(idx);
     Ok(Value::from(val as f64))
 }
 
-pub fn ba_store_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_set_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = ba.unwrap_ba();
     let idx = unwrap_usize!(idx);
     let val = val.unwrap_f64();
-    ba.store(idx, val as f32);
+    ba.set(idx, val as f32);
     Ok(Value::Nil)
 }
 
@@ -318,6 +357,16 @@ pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
     let ba = ba.unwrap_ba();
     let slice = unsafe { ba.get_slice_mut(0, ba.len) };
     slice.fill(0u8);
+    Ok(Value::Nil)
+}
+
+pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let idx = unwrap_usize!(idx);
+    let num = unwrap_usize!(num);
+    let val = val.unwrap_u32();
+    ba.fill(idx, num, val);
     Ok(Value::Nil)
 }
 

@@ -397,16 +397,20 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static ARRAY_APPEND: HostFn = HostFn { name: "append", f: Fn2(array_append) };
 
     static BA_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn2(ba_with_size) };
-    static BA_FILL_U32: HostFn = HostFn { name: "fill_u32", f: Fn4(ba_fill_u32) };
     static BA_READ_U32: HostFn = HostFn { name: "load_u32", f: Fn2(ba_load_u32) };
     static BA_WRITE_U32: HostFn = HostFn { name: "store_u32", f: Fn3(ba_store_u32) };
     static BA_READ_U16: HostFn = HostFn { name: "load_u16", f: Fn2(ba_load_u16) };
     static BA_WRITE_U16: HostFn = HostFn { name: "store_u16", f: Fn3(ba_store_u16) };
     static BA_READ_F32: HostFn = HostFn { name: "load_f32", f: Fn2(ba_load_f32) };
     static BA_WRITE_F32: HostFn = HostFn { name: "store_f32", f: Fn3(ba_store_f32) };
+    static BA_GET_U32: HostFn = HostFn { name: "get_u32", f: Fn2(ba_get_u32) };
+    static BA_SET_U32: HostFn = HostFn { name: "set_u32", f: Fn3(ba_set_u32) };
+    static BA_GET_F32: HostFn = HostFn { name: "get_f32", f: Fn2(ba_get_f32) };
+    static BA_SET_F32: HostFn = HostFn { name: "set_f32", f: Fn3(ba_set_f32) };
     static BA_MEMCPY: HostFn = HostFn { name: "memcpy", f: Fn5(ba_memcpy) };
     static BA_RESIZE: HostFn = HostFn { name: "resize", f: Fn2(ba_resize) };
     static BA_ZERO_FILL: HostFn = HostFn { name: "zero_fill", f: Fn1(ba_zero_fill) };
+    static BA_FILL_U32: HostFn = HostFn { name: "fill_u32", f: Fn4(ba_fill_u32) };
     static BA_BLIT_BGRA32: HostFn = HostFn { name: "blit_bgra32", f: Fn8(ba_blit_bgra32) };
 
     static DICT_HAS: HostFn = HostFn { name: "has", f: Fn2(dict_has) };
@@ -454,16 +458,20 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::Array(_), "append") => &ARRAY_APPEND,
 
         (Value::Class(BYTEARRAY_ID), "with_size") => &BA_WITH_SIZE,
-        (Value::ByteArray(_), "fill_u32") => &BA_FILL_U32,
         (Value::ByteArray(_), "load_u32") => &BA_READ_U32,
         (Value::ByteArray(_), "store_u32") => &BA_WRITE_U32,
         (Value::ByteArray(_), "load_u16") => &BA_READ_U16,
         (Value::ByteArray(_), "store_u16") => &BA_WRITE_U16,
         (Value::ByteArray(_), "load_f32") => &BA_READ_F32,
         (Value::ByteArray(_), "store_f32") => &BA_WRITE_F32,
+        (Value::ByteArray(_), "get_u32") => &BA_GET_U32,
+        (Value::ByteArray(_), "set_u32") => &BA_SET_U32,
+        (Value::ByteArray(_), "get_f32") => &BA_GET_F32,
+        (Value::ByteArray(_), "set_f32") => &BA_SET_F32,
         (Value::ByteArray(_), "memcpy") => &BA_MEMCPY,
         (Value::ByteArray(_), "resize") => &BA_RESIZE,
         (Value::ByteArray(_), "zero_fill") => &BA_ZERO_FILL,
+        (Value::ByteArray(_), "fill_u32") => &BA_FILL_U32,
         (Value::ByteArray(_), "blit_bgra32") => &BA_BLIT_BGRA32,
 
         (Value::Dict(_), "has") => &DICT_HAS,

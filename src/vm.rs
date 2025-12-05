@@ -1969,7 +1969,7 @@ impl Actor
                         Value::ByteArray(p) => {
                             let ba = unsafe { &mut *p };
                             let idx = unwrap_usize!(idx, "get_index");
-                            Value::from(ba.get(idx))
+                            Value::from(ba.get::<u8>(idx))
                         }
 
                         Value::Dict(p) => {
@@ -2004,7 +2004,7 @@ impl Actor
                             let ba = unsafe { &mut *p };
                             let idx = unwrap_usize!(idx, "get_index");
                             let b = val.unwrap_u8();
-                            ba.set(idx, b);
+                            ba.set::<u8>(idx, b);
                         }
 
                         Value::Dict(p) => {
