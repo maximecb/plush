@@ -46,23 +46,29 @@ class WavFile
             return nil;
         }
 
+        let var chunk_offset = 36;
+        let var chunk_size = nil;
 
+        loop {
+            let chunk_id = wav_data.load_u32(chunk_offset);
+            chunk_size = wav_data.load_u32(chunk_offset + 4);
 
+            // If we found the data chunk, with ChunkId "data"
+            if (chunk_id == 0x61746164) {
+                break;
+            }
 
-
-
+            // Move to the next chunk
+            chunk_offset += 8 + chunk_size;
+        }
 
         // For now, assume PCM format and that the data chunk starts at offset 44
         // A proper implementation would search for the "data" chunk
-        let data_offset = 44;
-        let data_size = wav_data.len - data_offset;
+        let data_offset = chunk_offset + 8;
 
         // Convert 16-bit signed PCM to 32-bit float
-        let num_samples = data_size _/ (bits_per_sample _/ 8);
+        let num_samples = chunk_size _/ (bits_per_sample _/ 8);
         let float_samples = ByteArray.with_size(num_samples * 4);
-
-
-
 
         for (let var i = 0; i < num_samples; ++i) {
             let sample_offset = data_offset + 2 * i;
