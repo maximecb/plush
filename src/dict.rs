@@ -65,7 +65,7 @@ impl Dict {
 
     pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Result<Self, ()>
     {
-        let capacity = std::cmp::max(capacity, 1);
+        let capacity = std::cmp::max(capacity, 2);
         let table = Self::empty_zeroed_table(capacity, alloc)?;
         Ok(Dict { table, len: 0 })
     }
@@ -93,12 +93,13 @@ impl Dict {
         let hash = hasher.finish();
         let mut pos = usize::try_from(hash).unwrap_or(usize::MAX);
 
-        // have to module by len so that it's always inside the table
+        // Have to modulo by len so that it's always inside the table
         while let Some(slot_key) = table[pos % len].key_as_str() {
             // we found an occupied slot for the given key (the key already existed in the dict)
             if slot_key == key {
                 break;
             }
+
             // linear probing on occupied slot
             pos += 1;
         }
@@ -110,6 +111,7 @@ impl Dict {
     // and rehashes all entries into it
     fn double_size(&mut self, alloc: &mut Alloc) -> Result<(), ()> {
         let old_table = unsafe { &* self.table };
+
         let new_table = Self::empty_zeroed_table((old_table.len() + 1) * 2, alloc)?;
 
         self.table = new_table;
@@ -127,12 +129,6 @@ impl Dict {
         self.table.len()
     }
 
-    fn will_allocate_on_set(&self) -> bool {
-        let table = unsafe { &*self.table };
-
-        table.len() == 0 || self.len * 100 / table.len() > THRESHOLD
-    }
-
     pub const fn size_of_slot() -> usize {
         size_of::<TableSlot>()
     }
@@ -143,6 +139,16 @@ impl Dict {
         }
 
         0
+    }
+
+    fn will_allocate_on_set(&self) -> bool {
+        let table = unsafe { &*self.table };
+
+        // Note: we must never end up in a situation where there are no
+        // free slots after an element is added, because the get_slot method
+        // relies on there always being at least one free slot.
+        (self.len + 1 == table.len()) ||
+        (100 * self.len / table.len() > THRESHOLD)
     }
 
     // Set the value associated with a given key
@@ -157,7 +163,6 @@ impl Dict {
         self.len += 1;
 
         Ok(())
-
     }
 
     // Get the value associated with a given field

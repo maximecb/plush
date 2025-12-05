@@ -1751,7 +1751,7 @@ impl Actor
                 // Create new empty dictionary
                 Insn::dict_new => {
                     self.gc_check(
-                        size_of::<Dict>() + Dict::size_of_slot(),
+                        size_of::<Dict>() + 2 * Dict::size_of_slot(),
                         &mut []
                     );
                     let dict = Dict::with_capacity(0, &mut self.alloc).unwrap();
