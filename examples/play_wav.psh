@@ -18,28 +18,54 @@ class WavFile
             return nil;
         }
 
+        // Offset 0 should be the string RIFF
+        if (wav_data.load_u32(0) != 0x46464952) {
+            $println("Error: invalid ChunkID for file, not a wave file");
+            return nil;
+        }
+
+        // Offset 8 should be the string WAVE
+        if (wav_data.load_u32(8) != 0x45564157) {
+            $println("Error: invalid format, not a wave file");
+            return nil;
+        }
+
+        if (wav_data.load_u16(20) != 1) {
+            $println("Error: only PCM audio format is supported");
+            return nil;
+        }
+
         // Parse WAV header
         // Ref: http://soundfile.sapp.org/doc/WaveFormat/
-        let num_channels = wav_data.load_u16(11);
-        let sample_rate = wav_data.get_u32(6);
-        let bits_per_sample = wav_data.load_u16(17);
-
-        // For now, assume PCM format and that the data chunk starts at offset 44
-        // A proper implementation would search for the "data" chunk
-        let data_offset = 44;
-        let data_size = wav_data.len - data_offset;
+        let num_channels = wav_data.load_u16(22);
+        let sample_rate = wav_data.load_u32(24);
+        let bits_per_sample = wav_data.load_u16(34);
 
         if (bits_per_sample != 16) {
             $println("Error: unsupported bits per sample. Only 16-bit WAV files are supported.");
             return nil;
         }
 
+
+
+
+
+
+
+        // For now, assume PCM format and that the data chunk starts at offset 44
+        // A proper implementation would search for the "data" chunk
+        let data_offset = 44;
+        let data_size = wav_data.len - data_offset;
+
         // Convert 16-bit signed PCM to 32-bit float
         let num_samples = data_size _/ (bits_per_sample _/ 8);
         let float_samples = ByteArray.with_size(num_samples * 4);
 
+
+
+
         for (let var i = 0; i < num_samples; ++i) {
-            let sample_offset = data_offset _/ 2 + i;
+            let sample_offset = data_offset + 2 * i;
             let pcm_sample_u16 = wav_data.load_u16(sample_offset);
 
             // Convert u16 to i16
