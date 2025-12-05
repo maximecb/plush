@@ -33,14 +33,14 @@ fun fft(real_parts, imag_parts, inverse) {
     while (i < n) {
         if (j > i) {
             // Swap real parts
-            let temp_re = real_parts.load_f32(i);
-            real_parts.store_f32(i, real_parts.load_f32(j));
-            real_parts.store_f32(j, temp_re);
+            let temp_re = real_parts.get_f32(i);
+            real_parts.set_f32(i, real_parts.get_f32(j));
+            real_parts.set_f32(j, temp_re);
 
             // Swap imaginary parts
-            let temp_im = imag_parts.load_f32(i);
-            imag_parts.store_f32(i, imag_parts.load_f32(j));
-            imag_parts.store_f32(j, temp_im);
+            let temp_im = imag_parts.get_f32(i);
+            imag_parts.set_f32(i, imag_parts.get_f32(j));
+            imag_parts.set_f32(j, temp_im);
         }
         let var m = n _/ 2;
         while (m >= 1 && j >= m) {
@@ -67,19 +67,19 @@ fun fft(real_parts, imag_parts, inverse) {
             let var w_im = 0.0;
             let var j = 0;
             while (j < len _/ 2) {
-                let u_re = real_parts.load_f32(i + j);
-                let u_im = imag_parts.load_f32(i + j);
+                let u_re = real_parts.get_f32(i + j);
+                let u_im = imag_parts.get_f32(i + j);
 
-                let x_half_re = real_parts.load_f32(i + j + len _/ 2);
-                let x_half_im = imag_parts.load_f32(i + j + len _/ 2);
+                let x_half_re = real_parts.get_f32(i + j + len _/ 2);
+                let x_half_im = imag_parts.get_f32(i + j + len _/ 2);
                 let v_re = x_half_re * w_re - x_half_im * w_im;
                 let v_im = x_half_re * w_im + x_half_im * w_re;
 
-                real_parts.store_f32(i + j, u_re + v_re);
-                imag_parts.store_f32(i + j, u_im + v_im);
+                real_parts.set_f32(i + j, u_re + v_re);
+                imag_parts.set_f32(i + j, u_im + v_im);
 
-                real_parts.store_f32(i + j + len _/ 2, u_re - v_re);
-                imag_parts.store_f32(i + j + len _/ 2, u_im - v_im);
+                real_parts.set_f32(i + j + len _/ 2, u_re - v_re);
+                imag_parts.set_f32(i + j + len _/ 2, u_im - v_im);
 
                 let next_w_re = w_re * wlen_re - w_im * wlen_im;
                 let next_w_im = w_re * wlen_im + w_im * wlen_re;
@@ -95,8 +95,8 @@ fun fft(real_parts, imag_parts, inverse) {
 
     if (inverse) {
         for (let var k = 0; k < n; ++k) {
-            real_parts.store_f32(k, real_parts.load_f32(k) / n);
-            imag_parts.store_f32(k, imag_parts.load_f32(k) / n);
+            real_parts.set_f32(k, real_parts.get_f32(k) / n);
+            imag_parts.set_f32(k, imag_parts.get_f32(k) / n);
         }
     }
 }
@@ -106,7 +106,7 @@ fun hanning_window(buffer) {
     let n = buffer.len _/ 4;
     for (let var i = 0; i < n; ++i) {
         let multiplier = 0.5 * (1.0 - (2.0 * PI * i / (n - 1)).cos());
-        buffer.store_f32(i, buffer.load_f32(i) * multiplier);
+        buffer.set_f32(i, buffer.get_f32(i) * multiplier);
     }
 }
 
@@ -131,8 +131,8 @@ fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sam
         for (let var bin = start_bin; bin <= end_bin; ++bin) {
             if (bin > max_bin) break;
 
-            let re = real_parts.load_f32(bin);
-            let im = imag_parts.load_f32(bin);
+            let re = real_parts.get_f32(bin);
+            let im = imag_parts.get_f32(bin);
             let magnitude = (re * re + im * im).sqrt();
 
             let var weight = 0.0;
@@ -208,7 +208,7 @@ fun main() {
                     for (let var j = segment_y; j < segment_y + BAR_SEGMENT_HEIGHT; ++j) {
                         if (j >= y_start_drawing && j < WINDOW_HEIGHT) {
                             let pixel_idx = (j * WINDOW_WIDTH + (x_draw + i));
-                            frame_buffer.store_u32(pixel_idx, color);
+                            frame_buffer.set_u32(pixel_idx, color);
                         }
                     }
                 }

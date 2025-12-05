@@ -15,13 +15,13 @@ fun fft(real_parts, imag_parts, inverse) {
     while (i < n) {
         if (j > i) {
             // Swap real parts
-            let temp_re = real_parts.load_f32(i);
-            real_parts.store_f32(i, real_parts.load_f32(j));
+            let temp_re = real_parts.get_f32(i);
+            real_parts.store_f32(i, real_parts.get_f32(j));
             real_parts.store_f32(j, temp_re);
 
             // Swap imaginary parts
-            let temp_im = imag_parts.load_f32(i);
-            imag_parts.store_f32(i, imag_parts.load_f32(j));
+            let temp_im = imag_parts.get_f32(i);
+            imag_parts.store_f32(i, imag_parts.get_f32(j));
             imag_parts.store_f32(j, temp_im);
         }
         let var m = n _/ 2;
@@ -50,12 +50,12 @@ fun fft(real_parts, imag_parts, inverse) {
             let var w_im = 0.0;
             let var j = 0;
             while (j < len _/ 2) {
-                let u_re = real_parts.load_f32(i + j);
-                let u_im = imag_parts.load_f32(i + j);
+                let u_re = real_parts.get_f32(i + j);
+                let u_im = imag_parts.get_f32(i + j);
 
                 // v = x[i + j + len / 2] * w
-                let x_half_re = real_parts.load_f32(i + j + len _/ 2);
-                let x_half_im = imag_parts.load_f32(i + j + len _/ 2);
+                let x_half_re = real_parts.get_f32(i + j + len _/ 2);
+                let x_half_im = imag_parts.get_f32(i + j + len _/ 2);
                 let v_re = x_half_re * w_re - x_half_im * w_im;
                 let v_im = x_half_re * w_im + x_half_im * w_re;
 
@@ -83,8 +83,8 @@ fun fft(real_parts, imag_parts, inverse) {
     // Apply 1/N factor for inverse FFT
     if (inverse) {
         for (let var k = 0; k < n; ++k) {
-            real_parts.store_f32(k, real_parts.load_f32(k) / n);
-            imag_parts.store_f32(k, imag_parts.load_f32(k) / n);
+            real_parts.store_f32(k, real_parts.get_f32(k) / n);
+            imag_parts.store_f32(k, imag_parts.get_f32(k) / n);
         }
     }
 }
@@ -118,8 +118,8 @@ fun main() {
     // Optional: Print first few FFT results (magnitude)
     $println("First 20 FFT magnitudes:");
     for (let var i = 0; i < 20; ++i) {
-        let re = real_parts.load_f32(i);
-        let im = imag_parts.load_f32(i);
+        let re = real_parts.get_f32(i);
+        let im = imag_parts.get_f32(i);
         let magnitude = (re * re + im * im).sqrt();
         $println("  " + i.to_s() + ": " + magnitude.format_decimals(4));
     }
@@ -139,7 +139,7 @@ fun main() {
     // Optional: Print first few IFFT results (real part)
     $println("First 20 IFFT real parts:");
     for (let var i = 0; i < 20; ++i) {
-        $println("  " + i.to_f().to_s() + ": " + real_parts.load_f32(i).format_decimals(4));
+        $println("  " + i.to_f().to_s() + ": " + real_parts.get_f32(i).format_decimals(4));
     }
     */
 }

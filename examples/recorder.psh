@@ -65,7 +65,7 @@ class WavePlot {
 
         // Update magnitude_buckets
         for (let var i = 0; i < num_new_samples; i = i + 1) {
-            let sample = new_samples.load_f32(i);
+            let sample = new_samples.get_f32(i);
             let abs_sample = sample.abs();
 
             // Increment magnitude bucket
@@ -185,7 +185,7 @@ class WavePlot {
             // Determine the max sample value for this column
             let var max_sample = 0.0;
             for (let var k = start_idx; k < end_idx; ++k)
-                max_sample = max_sample.max(self.audio_data.load_f32(k));
+                max_sample = max_sample.max(self.audio_data.get_f32(k));
 
             // Compute the Y coordinate in the frame buffer for this sample
             let norm_v = (max_sample / self.max_sample_range).min(1.0).max(-1.0);
@@ -195,7 +195,7 @@ class WavePlot {
             let mid_y = self.height _/ 2;
             let end_y = (j - mid_y).abs();
             for (let var k = mid_y - end_y; k < mid_y + end_y; ++k) {
-                frame_buffer.store_u32(k * self.width + i, self.color);
+                frame_buffer.set_u32(k * self.width + i, self.color);
             }
         }
     }
@@ -206,8 +206,8 @@ fun reverse_samples(ba) {
     let reversed_ba = ByteArray.with_size(len);
     let num_floats = len _/ 4;
     for (let var i = 0; i < num_floats; i = i + 1) {
-        let val = ba.load_f32(i);
-        reversed_ba.store_f32(num_floats - 1 - i, val);
+        let val = ba.get_f32(i);
+        reversed_ba.set_f32(num_floats - 1 - i, val);
     }
     return reversed_ba;
 }
