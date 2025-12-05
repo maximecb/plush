@@ -59,7 +59,6 @@ impl ByteArray
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
 
-
     /// Load a value at the given byte index
     pub fn load<T>(&mut self, byte_idx: usize) -> T where T: Copy
     {

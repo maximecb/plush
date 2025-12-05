@@ -185,7 +185,7 @@ pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) 
     // We need to iterate and read f32 values
     let num_samples = samples_ba.num_bytes() / std::mem::size_of::<f32>();
     for i in 0..num_samples {
-        state.out_queue.push(samples_ba.load::<f32>(i));
+        state.out_queue.push(samples_ba.get::<f32>(i));
     }
 
     // Notify the audio thread that samples are available

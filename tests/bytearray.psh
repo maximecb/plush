@@ -52,12 +52,10 @@ b5_src.set_u32(0, 0xCAFEBABE);
 
 let b5_dst = ByteArray.with_size(4);
 b5_dst.memcpy(0, b5_src, 0, 4);
-
 assert(b5_dst[0] == 0xBE);
 assert(b5_dst[1] == 0xBA);
 assert(b5_dst[2] == 0xFE);
 assert(b5_dst[3] == 0xCA);
-
 
 // Test resize
 let b6 = ByteArray.with_size(10);
@@ -75,5 +73,13 @@ for (let var i = 10; i < 20; ++i) {
 // Resize to a smaller size
 b6.resize(5);
 assert(b6.len == 5);
+
+// Aligned vs unaligned f32 access
+{
+    let ba = ByteArray.with_size(8);
+    ba.set_f32(1, 0.625);
+    assert(ba.get_f32(1) == 0.625);
+    assert(ba.load_f32(4) == 0.625);
+}
 
 $println("ByteArray tests passed!");
