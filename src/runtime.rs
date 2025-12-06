@@ -264,6 +264,15 @@ fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
     Ok(actor.alloc.str_val(&s).unwrap())
 }
 
+/// Uppercase a String
+fn string_upcase(actor: &mut Actor, s: Value) -> Result<Value, String>
+{
+    let s = unwrap_str!(s);
+    let s = s.to_uppercase();
+    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
+    Ok(actor.alloc.str_val(&s).unwrap())
+}
+
 /// Split a string by a separator and return an array of strings
 fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value, String>
 {
@@ -386,6 +395,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static STRING_CHAR_AT: HostFn = HostFn { name: "char_at", f: Fn2(string_char_at) };
     static STRING_PARSE_INT: HostFn = HostFn { name: "parse_int", f: Fn2(string_parse_int) };
     static STRING_TRIM: HostFn = HostFn { name: "trim", f: Fn1(string_trim) };
+    static STRING_UPCASE: HostFn = HostFn { name: "trim", f: Fn1(string_upcase) };
     static STRING_SPLIT: HostFn = HostFn { name: "split", f: Fn2(string_split) };
     static STRING_TO_S: HostFn = HostFn { name: "to_s", f: Fn1(identity_method) };
 
@@ -447,6 +457,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::String(_), "char_at") => &STRING_CHAR_AT,
         (Value::String(_), "parse_int") => &STRING_PARSE_INT,
         (Value::String(_), "trim") => &STRING_TRIM,
+        (Value::String(_), "upcase") => &STRING_UPCASE,
         (Value::String(_), "split") => &STRING_SPLIT,
         (Value::String(_), "to_s") => &STRING_TO_S,
 
