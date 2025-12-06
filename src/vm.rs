@@ -239,14 +239,6 @@ impl Value
         }
     }
 
-    pub fn unwrap_u64(&self) -> u64
-    {
-        match self {
-            Int64(v) => (*v).try_into().unwrap(),
-            _ => panic!("expected int64 value but got {:?}", self)
-        }
-    }
-
     pub fn unwrap_u32(&self) -> u32
     {
         match self {
@@ -351,6 +343,27 @@ macro_rules! unwrap_i64 {
     // To be used by host functions
     ($val: expr) => {
         unwrap_i64!($val, "")
+    }
+}
+
+#[macro_export]
+macro_rules! unwrap_u64 {
+    // To be used inside the interpreter loop
+    ($val: expr, $requester: literal) => {
+        match $val {
+            Value::Int64(v) => {
+                if (v < 0) {
+                    error!($requester, "expected non-negative integer but got {:?}", v)
+                }
+                v as u64
+            },
+            _ => error!($requester, "expected int64 value but got {:?}", $val)
+        }
+    };
+
+    // To be used by host functions
+    ($val: expr) => {
+        unwrap_u64!($val, "")
     }
 }
 

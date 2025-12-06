@@ -3,7 +3,7 @@ use crate::array::Array;
 use crate::ast::*;
 use crate::vm::{Value, Actor};
 use crate::str::Str;
-use crate::{error, unwrap_i64, unwrap_usize, unwrap_str};
+use crate::*;
 
 fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
 {

@@ -2,7 +2,7 @@ use std::mem::{transmute, size_of};
 use crate::vm::{Value, Actor};
 use crate::alloc::Alloc;
 use crate::host::HostFn;
-use crate::{error, unwrap_i64, unwrap_usize};
+use crate::*;
 
 pub struct ByteArray
 {

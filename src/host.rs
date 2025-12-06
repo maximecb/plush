@@ -5,8 +5,8 @@ use std::time::Duration;
 use crate::alloc::Alloc;
 use crate::vm::{Value, VM, Actor};
 use crate::ast::{Expr, Function, Program};
-use crate::{error, unwrap_i64, unwrap_usize, unwrap_str};
 use crate::str::Str;
+use crate::*;
 
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
@@ -466,7 +466,7 @@ fn actor_parent(actor: &mut Actor) -> Result<Value, String>
 /// Make the current actor sleep
 fn actor_sleep(actor: &mut Actor, msecs: Value) -> Result<Value, String>
 {
-    let msecs = msecs.unwrap_u64();
+    let msecs = unwrap_u64!(msecs);
     thread::sleep(Duration::from_millis(msecs));
     Ok(Value::Nil)
 }
@@ -492,7 +492,7 @@ fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
 /// Wait for a thread to terminate, produce the return value
 fn actor_join(actor: &mut Actor, actor_id: Value) -> Result<Value, String>
 {
-    let id = actor_id.unwrap_u64();
+    let id = unwrap_u64!(actor_id);
     Ok(VM::join_actor(&actor.vm, id))
 }
 
@@ -500,8 +500,7 @@ fn actor_join(actor: &mut Actor, actor_id: Value) -> Result<Value, String>
 /// This will return false in case of failure
 fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Result<Value, String>
 {
-    let actor_id = actor_id.unwrap_u64();
-
+    let actor_id = unwrap_u64!(actor_id);
     let res = actor.send(actor_id, msg);
 
     if res.is_ok() {
