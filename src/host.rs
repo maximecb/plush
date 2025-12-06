@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::alloc::Alloc;
 use crate::vm::{Value, VM, Actor};
 use crate::ast::{Expr, Function, Program};
-use crate::{error, unwrap_usize, unwrap_str};
+use crate::{error, unwrap_i64, unwrap_usize, unwrap_str};
 use crate::str::Str;
 
 /// Host function signature
@@ -531,6 +531,6 @@ fn actor_poll(actor: &mut Actor) -> Result<Value, String>
 /// End program execution
 fn exit(thread: &mut Actor, val: Value) -> Result<Value, String>
 {
-    let val = (val.unwrap_i64() & 0xFF) as i32;
+    let val = (unwrap_i64!(val) & 0xFF) as i32;
     std::process::exit(val);
 }

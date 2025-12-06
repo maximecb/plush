@@ -271,14 +271,6 @@ impl Value
         }
     }
 
-    pub fn unwrap_i64(&self) -> i64
-    {
-        match self {
-            Int64(v) => *v,
-            _ => panic!("expected int64 value but got {:?}", self)
-        }
-    }
-
     pub fn unwrap_f64(&self) -> f64
     {
         match self {

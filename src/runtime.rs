@@ -3,7 +3,7 @@ use crate::array::Array;
 use crate::ast::*;
 use crate::vm::{Value, Actor};
 use crate::str::Str;
-use crate::{error, unwrap_usize, unwrap_str};
+use crate::{error, unwrap_i64, unwrap_usize, unwrap_str};
 
 fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
 {
@@ -27,33 +27,33 @@ fn nil_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
 
 fn int64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_i64();
+    let v = unwrap_i64!(v);
     Ok(Value::Int64(if v > 0 { v } else { -v }))
 }
 
 fn int64_min(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_i64();
-    let other = other.unwrap_i64();
+    let v = unwrap_i64!(v);
+    let other = unwrap_i64!(other);
     Ok(Value::Int64(v.min(other)))
 }
 
 fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_i64();
-    let other = other.unwrap_i64();
+    let v = unwrap_i64!(v);
+    let other = unwrap_i64!(other);
     Ok(Value::Int64(v.max(other)))
 }
 
 fn int64_to_f(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_i64();
+    let v = unwrap_i64!(v);
     Ok(Value::Float64(v as f64))
 }
 
 fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_i64();
+    let v = unwrap_i64!(v);
     let s = format!("{}", v);
 
     actor.gc_check(32, &mut []);
@@ -62,7 +62,7 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 
 fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_i64();
+    let v = unwrap_i64!(v);
     let digits = unwrap_usize!(digits);
     let s = format!("{:0width$X}", v, width = digits);
 
