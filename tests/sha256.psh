@@ -1,0 +1,160 @@
+// SHA-256 implementation in Plush
+// Based on the FIPS 180-4 standard.
+
+// 32-bit mask
+let M32 = 0xFFFFFFFF;
+
+// Initial hash values for SHA-256
+let H = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+];
+
+// Round constants for SHA-256
+let K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+fun rotr32(x, n) {
+    return ((x >> n) | (x << (32-n))) & M32;
+}
+
+fun shr32(x, n) {
+    return (x >> n);
+}
+
+fun load_u32_be(ba, idx) {
+    return ((ba[idx] << 24) | (ba[idx+1] << 16) | (ba[idx+2] << 8) | ba[idx+3]);
+}
+
+fun store_u32_be(ba, idx, val) {
+    ba[idx+0] = (val >> 24) & 0xFF;
+    ba[idx+1] = (val >> 16) & 0xFF;
+    ba[idx+2] = (val >> 8) & 0xFF;
+    ba[idx+3] = val & 0xFF;
+}
+
+fun sha256(msg_str) {
+    let msg_len = msg_str.len;
+    let msg_bytes = ByteArray.with_size(msg_len);
+    for (let var i = 0; i < msg_len; ++i) {
+        msg_bytes[i] = msg_str.byte_at(i);
+    }
+
+    let orig_len_bits = msg_len * 8;
+
+    let var num_zeros = (55 - msg_len) % 64;
+    if (num_zeros < 0) {
+        num_zeros = num_zeros + 64;
+    }
+
+    let padded_len = msg_len + 1 + num_zeros + 8;
+    let padded_msg = ByteArray.with_size(padded_len);
+
+    for (let var i = 0; i < msg_len; ++i) {
+        padded_msg[i] = msg_bytes[i];
+    }
+
+    padded_msg[msg_len] = 0x80;
+
+    store_u32_be(padded_msg, padded_len - 8, 0);
+    store_u32_be(padded_msg, padded_len - 4, orig_len_bits);
+
+    let h = Array.with_size(8, 0);
+    for (let var i=0; i<8; ++i) {
+        h[i] = H[i];
+    }
+
+    for (let var chunk_idx = 0; chunk_idx < padded_len; chunk_idx = chunk_idx + 64)
+    {
+        let w = Array.with_size(64, 0);
+        for (let var i=0; i<16; ++i) {
+            w[i] = load_u32_be(padded_msg, chunk_idx + i * 4);
+        }
+
+        for (let var i=16; i<64; ++i) {
+            let s0 = rotr32(w[i-15], 7) ^ rotr32(w[i-15], 18) ^ shr32(w[i-15], 3);
+            let s1 = rotr32(w[i-2], 17) ^ rotr32(w[i-2], 19) ^ shr32(w[i-2], 10);
+            w[i] = (w[i-16] + s0 + w[i-7] + s1) & M32;
+        }
+
+        let var a = h[0];
+        let var b = h[1];
+        let var c = h[2];
+        let var d = h[3];
+        let var e = h[4];
+        let var f = h[5];
+        let var g = h[6];
+        let var h_ = h[7];
+
+        for (let var i=0; i<64; ++i) {
+            let S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            let ch = (e & f) ^ ((e ^ M32) & g);
+            let temp1 = (h_ + S1 + ch + K[i] + w[i]) & M32;
+            let S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = (S0 + maj) & M32;
+
+            h_ = g;
+            g = f;
+            f = e;
+            e = (d + temp1) & M32;
+            d = c;
+            c = b;
+            b = a;
+            a = (temp1 + temp2) & M32;
+        }
+
+        h[0] = (h[0] + a) & M32;
+        h[1] = (h[1] + b) & M32;
+        h[2] = (h[2] + c) & M32;
+        h[3] = (h[3] + d) & M32;
+        h[4] = (h[4] + e) & M32;
+        h[5] = (h[5] + f) & M32;
+        h[6] = (h[6] + g) & M32;
+        h[7] = (h[7] + h_) & M32;
+    }
+
+    let hash_bytes = ByteArray.with_size(32);
+    for (let var i=0; i<8; ++i) {
+        store_u32_be(hash_bytes, i*4, h[i]);
+    }
+    return hash_bytes;
+}
+
+fun bytes_to_hex_str(bytes) {
+    let var s = "";
+    for (let var i = 0; i < bytes.len; ++i) {
+        s = s + bytes[i].to_hex(2);
+    }
+    return s;
+}
+
+$println("Running SHA-256 tests...");
+
+let empty_hash = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855";
+assert(bytes_to_hex_str(sha256("")) == empty_hash);
+$println("Test with empty string passed.");
+
+let abc_hash = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+assert(bytes_to_hex_str(sha256("abc")) == abc_hash);
+$println("Test with 'abc' passed.");
+
+let long_str = "The quick brown fox jumps over the lazy dog";
+let long_hash = "D7A8FBB307D7809469CA9ABCB0082E4F8D5651E46D3CDB762D02D0BF37C9E592";
+assert(bytes_to_hex_str(sha256(long_str)) == long_hash);
+$println("Test with long string passed.");
+
+let long_str_2 = "The quick brown fox jumps over the lazy dog.";
+let long_hash_2 = "EF537F25C895BFA782526529A9B63D97AA631564D5D789C2B765448C8635FB6C";
+assert(bytes_to_hex_str(sha256(long_str_2)) == long_hash_2);
+$println("Test with long string ending in a period passed.");
+
+$println("All SHA-256 tests passed!");
