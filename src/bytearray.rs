@@ -262,7 +262,7 @@ pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Valu
 {
     let ba = ba.unwrap_ba();
     let byte_idx = unwrap_usize!(byte_idx);
-    let val = val.unwrap_u32();
+    let val = unwrap_u32!(val);
     ba.store(byte_idx, val);
     Ok(Value::Nil)
 }
@@ -313,7 +313,7 @@ pub fn ba_set_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> R
 {
     let ba = ba.unwrap_ba();
     let idx = unwrap_usize!(idx);
-    let val = val.unwrap_u32();
+    let val = unwrap_u32!(val);
     ba.set(idx, val);
     Ok(Value::Nil)
 }
@@ -364,7 +364,7 @@ pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val
     let ba = ba.unwrap_ba();
     let idx = unwrap_usize!(idx);
     let num = unwrap_usize!(num);
-    let val = val.unwrap_u32();
+    let val = unwrap_u32!(val);
     ba.fill(idx, num, val);
     Ok(Value::Nil)
 }

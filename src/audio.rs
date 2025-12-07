@@ -7,7 +7,7 @@ use crate::alloc::Alloc;
 use crate::ast::{AUDIO_NEEDED_ID, AUDIO_DATA_ID};
 use crate::window::with_sdl_context;
 use crate::bytearray::ByteArray;
-use crate::{error, unwrap_usize};
+use crate::*;
 
 // --- Audio Output ---
 
@@ -115,8 +115,8 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
         }
     }
 
-    let sample_rate = sample_rate.unwrap_u32();
-    let num_channels = num_channels.unwrap_u32();
+    let sample_rate = unwrap_u32!(sample_rate);
+    let num_channels = unwrap_u32!(num_channels);
 
     if sample_rate != 44100 && sample_rate != 8000 {
         return Err("for now, only 44100Hz or 8000Hz sample rates supported".into());
@@ -306,8 +306,8 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
         }
     }
 
-    let sample_rate = sample_rate.unwrap_u32();
-    let num_channels = num_channels.unwrap_u32();
+    let sample_rate = unwrap_u32!(sample_rate);
+    let num_channels = unwrap_u32!(num_channels);
 
     if sample_rate != 44100 {
         panic!("for now, only 44100Hz sample rate supported");

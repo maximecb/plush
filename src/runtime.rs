@@ -195,7 +195,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
     // at least for ASCII character values, we can
     // easily intern those strings
 
-    let codepoint = codepoint.unwrap_u32();
+    let codepoint = unwrap_u32!(codepoint);
     let ch = char::from_u32(codepoint).expect("Invalid Unicode codepoint");
 
     let mut s = String::new();
@@ -247,7 +247,7 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value,
 fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(s);
-    let radix = radix.unwrap_u32();
+    let radix = unwrap_u32!(radix);
 
     match i64::from_str_radix(s, radix) {
         Ok(int_val) => Ok(Value::from(int_val)),

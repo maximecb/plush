@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::vm::{VM, Value, Actor};
 use crate::bytearray::ByteArray;
 use crate::ast::UIEVENT_ID;
-use crate::{error, unwrap_usize, unwrap_str};
+use crate::*;
 
 // Global SDL state
 struct SdlState {
@@ -96,8 +96,8 @@ pub fn window_create(
     }
     drop(window);
 
-    let width: u32 = width.unwrap_u32();
-    let height: u32 = height.unwrap_u32();
+    let width: u32 = unwrap_u32!(width);
+    let height: u32 = unwrap_u32!(height);
     let title_str = unwrap_str!(title);
 
     init_sdl_video();
@@ -150,7 +150,7 @@ pub fn window_draw_frame(
         panic!("window functions should only be called from the main actor");
     }
 
-    let window_id = window_id.unwrap_u32();
+    let window_id = unwrap_u32!(window_id);
     let frame = match frame {
         Value::ByteArray(p) => unsafe { &*p }
         _ => panic!()
