@@ -202,6 +202,7 @@ render_text("Hello world");
     -   `byte_at(byte_idx)`: Get the UTF-8 byte at the given byte index.
     -   `char_at(byte_idx)`: Get a string for the single character at the given byte index. Returns `nil` if invalid.
     -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
+    -   `parse_float()`: Try to parse the entire string as a float. Returns `nil` on failure.
     -   `trim()`: Produce a new string without whitespace at the beginning or end.
     -   `upper()`: Produce a new string as the uppercase version of the string.
     -   `split(sep)`: Given a separator string, split a string into an array of parts.
