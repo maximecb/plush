@@ -255,6 +255,17 @@ fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Result<Value, 
     }
 }
 
+/// Try to parse the string as a float
+fn string_parse_float(actor: &mut Actor, s: Value) -> Result<Value, String>
+{
+    let s = unwrap_str!(s);
+
+    match s.parse::<f64>() {
+        Ok(float_val) => Ok(Value::from(float_val)),
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
 /// Trim whitespace
 fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
@@ -403,6 +414,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static STRING_BYTE_AT: HostFn = HostFn { name: "byte_at", f: Fn2(string_byte_at) };
     static STRING_CHAR_AT: HostFn = HostFn { name: "char_at", f: Fn2(string_char_at) };
     static STRING_PARSE_INT: HostFn = HostFn { name: "parse_int", f: Fn2(string_parse_int) };
+    static STRING_PARSE_FLOAT: HostFn = HostFn { name: "parse_float", f: Fn1(string_parse_float) };
     static STRING_TRIM: HostFn = HostFn { name: "trim", f: Fn1(string_trim) };
     static STRING_UPPER: HostFn = HostFn { name: "upper", f: Fn1(string_upper) };
     static STRING_LOWER: HostFn = HostFn { name: "lower", f: Fn1(string_lower) };
@@ -466,6 +478,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::String(_), "byte_at") => &STRING_BYTE_AT,
         (Value::String(_), "char_at") => &STRING_CHAR_AT,
         (Value::String(_), "parse_int") => &STRING_PARSE_INT,
+        (Value::String(_), "parse_float") => &STRING_PARSE_FLOAT,
         (Value::String(_), "trim") => &STRING_TRIM,
         (Value::String(_), "upper") => &STRING_UPPER,
         (Value::String(_), "lower") => &STRING_LOWER,
