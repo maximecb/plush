@@ -439,6 +439,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static BA_SET_U32: HostFn = HostFn { name: "set_u32", f: Fn3(ba_set_u32) };
     static BA_GET_F32: HostFn = HostFn { name: "get_f32", f: Fn2(ba_get_f32) };
     static BA_SET_F32: HostFn = HostFn { name: "set_f32", f: Fn3(ba_set_f32) };
+    static BA_NUM_U32: HostFn = HostFn { name: "num_u32", f: Fn1(ba_num_u32) };
     static BA_MEMCPY: HostFn = HostFn { name: "memcpy", f: Fn5(ba_memcpy) };
     static BA_RESIZE: HostFn = HostFn { name: "resize", f: Fn2(ba_resize) };
     static BA_ZERO_FILL: HostFn = HostFn { name: "zero_fill", f: Fn1(ba_zero_fill) };
@@ -503,6 +504,8 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Value::ByteArray(_), "set_u32") => &BA_SET_U32,
         (Value::ByteArray(_), "get_f32") => &BA_GET_F32,
         (Value::ByteArray(_), "set_f32") => &BA_SET_F32,
+        (Value::ByteArray(_), "num_u32") => &BA_NUM_U32,
+        (Value::ByteArray(_), "num_f32") => &BA_NUM_U32,
         (Value::ByteArray(_), "memcpy") => &BA_MEMCPY,
         (Value::ByteArray(_), "resize") => &BA_RESIZE,
         (Value::ByteArray(_), "zero_fill") => &BA_ZERO_FILL,

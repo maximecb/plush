@@ -335,6 +335,18 @@ pub fn ba_set_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> R
     Ok(Value::Nil)
 }
 
+pub fn ba_num_u32(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
+{
+    let ba = ba.unwrap_ba();
+    let len = ba.len;
+
+    if len % 4 != 0 {
+        return Err("expected ByteArray size to be divisible by 4".into());
+    }
+
+    Ok(Value::from(len / 4))
+}
+
 pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> Result<Value, String>
 {
     let dst = dst.unwrap_ba();
