@@ -60,7 +60,7 @@ class WavePlot {
         self.audio_data.memcpy(old_size, new_samples, 0, new_samples.len);
 
         // Update num_samples
-        let num_new_samples = new_samples.len _/ 4;
+        let num_new_samples = new_samples.num_f32();
         self.num_samples = self.num_samples + num_new_samples;
 
         // Update magnitude_buckets
@@ -204,7 +204,7 @@ class WavePlot {
 fun reverse_samples(ba) {
     let len = ba.len;
     let reversed_ba = ByteArray.with_size(len);
-    let num_floats = len _/ 4;
+    let num_floats = ba.num_f32();
     for (let var i = 0; i < num_floats; i = i + 1) {
         let val = ba.get_f32(i);
         reversed_ba.set_f32(num_floats - 1 - i, val);
@@ -231,7 +231,7 @@ fun playback_actor()
             silent_chunk.zero_fill();
 
             if (playing) {
-                let total_samples = samples_to_play.len _/ 4;
+                let total_samples = samples_to_play.num_f32();
                 let samples_available = total_samples - play_pos;
                 let num_samples_to_send = num_samples_needed.min(samples_available);
 
