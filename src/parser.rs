@@ -1314,6 +1314,8 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
     let class_id = prog.reg_class(Class {
         name: class_name.clone(),
         parent_name,
+        ancestors: Vec::default(),
+        subclassed: false,
         fields: HashMap::default(),
         methods: methods.clone(),
         pos,

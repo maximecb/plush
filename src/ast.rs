@@ -324,12 +324,19 @@ impl Function
 #[derive(Default, Clone, Debug)]
 pub struct Class
 {
+    // Class name
     pub name: String,
 
     // Name of the parent class
     pub parent_name: Option<String>,
 
-    // TODO: list of ancestors
+    // List of parent/ancestor classes
+    // Immediate parent listed first
+    pub ancestors: Vec<ClassId>,
+
+    // Flag to indicate this class has subclasses
+    // This is used to accelerate instanceof checks
+    pub subclassed: bool,
 
     // Map of field names to slot indices
     pub fields: HashMap<String, usize>,
