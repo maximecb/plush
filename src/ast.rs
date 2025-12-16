@@ -330,13 +330,12 @@ pub struct Class
     // Name of the parent class
     pub parent_name: Option<String>,
 
-    // List of parent/ancestor classes
-    // Immediate parent listed first
-    pub ancestors: Vec<ClassId>,
+    // Parent class id
+    pub parent_id: ClassId,
 
     // Flag to indicate this class has subclasses
     // This is used to accelerate instanceof checks
-    pub subclassed: bool,
+    pub has_children: bool,
 
     // Map of field names to slot indices
     pub fields: HashMap<String, usize>,
