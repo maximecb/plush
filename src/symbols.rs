@@ -365,7 +365,20 @@ impl StmtBox
 
             // Class declaration
             Stmt::ClassDecl { class_id } => {
-                let class = prog.classes.get(class_id).unwrap();
+                let class = prog.classes.get_mut(class_id).unwrap();
+
+                // If this class has a parent, try to resolve its class id
+                if let Some(class_name) = &class.parent_name {
+                    if let Some(Decl::Class { id, .. }) = env.lookup(class_name) {
+                        class.parent_id = id;
+                    } else {
+                        return ParseError::with_pos(
+                            &format!("could not resolve parent class name `{}`", class_name),
+                            &self.pos
+                        );
+                    }
+                }
+
                 let method_ids: Vec<FunId> = class.methods.values().copied().collect();
 
                 for fun_id in method_ids {
