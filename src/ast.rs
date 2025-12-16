@@ -326,6 +326,11 @@ pub struct Class
 {
     pub name: String,
 
+    // Name of the parent class
+    pub parent_name: Option<String>,
+
+    // TODO: list of ancestors
+
     // Map of field names to slot indices
     pub fields: HashMap<String, usize>,
 

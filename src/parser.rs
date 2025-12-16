@@ -1274,6 +1274,15 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
 {
     input.eat_ws()?;
     let class_name = input.parse_ident()?;
+
+    // Parse the parent class name if present
+    let parent_name = if input.match_keyword("extends")? {
+        input.eat_ws()?;
+        Some(input.parse_ident()?)
+    } else {
+        None
+    };
+
     input.expect_token("{")?;
 
     let mut methods = HashMap::default();
@@ -1304,6 +1313,7 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
 
     let class_id = prog.reg_class(Class {
         name: class_name.clone(),
+        parent_name,
         fields: HashMap::default(),
         methods: methods.clone(),
         pos,
@@ -1846,6 +1856,7 @@ mod tests
     fn classes()
     {
         parse_ok("class Foo {}");
+        parse_ok("class Foo extends Bar {}");
         parse_ok("let x = 1; class Foo {} let y = 2;");
         parse_ok("class Foo { init(self) {} }");
         parse_ok("class Foo { init(self) { self.x = 1; } }");
