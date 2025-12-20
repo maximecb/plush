@@ -184,47 +184,90 @@ impl Program
         // Set the number of globals
         self.num_globals = env.next_global_idx;
 
+        // Recursively process the inheritance chain for a given class
+        fn process(
+            class_id: ClassId,
+            classes: &mut HashMap<ClassId, Class>,
+            processed: &mut HashSet<ClassId>,
+            lineage: &mut HashSet<ClassId>,
+        ) -> Result<(), ParseError>
+        {
+            // If we run into an inheritance loop
+            if lineage.contains(&class_id) {
+                return ParseError::with_pos(
+                    &format!(
+                        "class symbol `{}` is part of an inheritance loop",
+                        classes[&class_id].name
+                    ),
+                    &classes[&class_id].pos
+                );
+            }
 
+            let parent_id = classes[&class_id].parent_id;
 
+            // If the parent has not yet been processed
+            if parent_id != ClassId::default() && !processed.contains(&parent_id) {
+                // Process the parent class first
+                lineage.insert(class_id);
+                process(parent_id, classes, processed, lineage)?;
+            }
 
-        // Note: we need to make sure that there's no cycle
-        // Might be simpler to do a DFS from each class?
-        // We can keep track of which classes have already been processed
+            // Clone the methods and fields of the parent
+            let mut parent_methods = classes[&parent_id].methods.clone();
+            let mut parent_fields = classes[&parent_id].fields.clone();
 
+            let mut class = classes.get_mut(&class_id).unwrap();
+
+            // Extend the set of parent methods
+            parent_methods.extend(class.methods.clone());
+            class.methods = parent_methods;
+
+            // Extend the set of parent fields
+            let num_parent_fields = parent_fields.len();
+            for (field_name, field_idx) in &class.fields {
+                if parent_fields.contains_key(field_name) {
+                    continue;
+                }
+
+                parent_fields.insert(
+                    field_name.to_string(),
+                    field_idx + num_parent_fields
+                );
+            }
+
+            // Mark this class as processed
+            processed.insert(class_id);
+
+            Ok(())
+        }
+
+        // Set of classes that have been processed
         let mut processed = HashSet::<ClassId>::default();
 
+        // For each class id
+        let classes: Vec<ClassId> = self.classes.keys().cloned().collect();
+        for class_id in classes{
+            // If this class has already been processed, skip it
+            if processed.contains(&class_id) {
+                continue;
+            }
 
+            let class = &self.classes[&class_id];
 
-
-
-
-        /*
-        // Set of classes to be processed
-        let mut classes: HashSet<ClassId> = self.classes.keys().cloned().collect();
-
-        // Until we've processed all classes for inheritance
-        for class_id in &classes.clone() {
-
-            let class = &self.classes[class_id];
-
-            // If a class has no parent, skip it
+            // If a class has no parent, nothing to do
             if class.parent_id == ClassId::default() {
-                classes.remove(class_id);
+                processed.insert(class_id);
                 continue;
             }
 
-            // Wait until the parent of this class has been processed
-            if classes.contains(&class.parent_id) {
-                continue;
-            }
+            // Process this class and its ancestors
+            process(
+                class_id,
+                &mut self.classes,
+                &mut processed,
+                &mut HashSet::default(),
+            )?;
         }
-        */
-
-
-
-
-
-
 
         Ok(())
     }
