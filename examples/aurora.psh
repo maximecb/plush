@@ -1,0 +1,139 @@
+// Mandelbrot Set Explorer
+
+// This example builds on mandelbrot.psh.
+// Differences:
+// - Uses a different palette with green aurora borealis colors
+// - Renders the set concurrently using actors
+//
+// Each actor is given a (logical) portion of the image.
+// For each pixel it calculates the color to render and
+// sends a message to the main actor with the index and
+// the color to paint, both packed in a single Integer.
+
+let WIDTH = 640;
+let HEIGHT = 480;
+
+// The region of the complex plane to render
+let RE_START = -2.0;
+let RE_END = 1.0;
+let IM_START = -1.125;
+let IM_END = 1.125;
+
+let MAX_ITER = 60;
+let NTHREADS = 16;
+
+// Distribute rows to hand to actors
+fun calc_boundaries() {
+    let chunk_size = HEIGHT _/ NTHREADS;
+    let rem = HEIGHT % NTHREADS;
+    let var limit = 0;
+
+    let boundaries = [];
+    for (let var i=0; i<NTHREADS; ++i) {
+        limit += (chunk_size + ((i < rem) ? 1 : 0));
+        boundaries.push(limit);
+    }
+
+    return boundaries;
+}
+
+// Helper function to convert RGB values to a 32-bit color
+fun rgb32(r, g, b) {
+    return 0xFF_00_00_00 | (r << 16) | (g << 8) | b;
+}
+
+// Create a simple green aurora borealis color palette.
+// Go from rgb(21, 53, 72) to rgb(153, 233, 180) in 7 steps.
+let palette = [];
+for (let var i = 0; i < 7; ++i) {
+    palette.push(rgb32(21+i*22, 53+i*30, 72+i*18));
+}
+
+// Check if a point is in the Mandelbrot set in max_iter steps
+fun fugue(c_re, c_im, max_iter) {
+    let var z_re = 0.0;
+    let var z_im = 0.0;
+    let var iter = 0;
+
+    while (z_re * z_re + z_im * z_im <= 4.0 && iter < max_iter) {
+        let z_re_new = z_re * z_re - z_im * z_im + c_re;
+        z_im = 2.0 * z_re * z_im + c_im;
+        z_re = z_re_new;
+        iter = iter + 1;
+    }
+
+    return iter;
+}
+
+// Colorize buffer points from..to
+fun colorizer(from, to) {
+    for (let var y = from; y < to; ++y) {
+        for (let var x = 0; x < WIDTH; ++x) {
+            let c_re = RE_START + (x / WIDTH) * (RE_END - RE_START);
+            let c_im = IM_START + (y / HEIGHT) * (IM_END - IM_START);
+
+            let iter = fugue(c_re, c_im, MAX_ITER);
+
+            // Set the pixel color based on the number of iterations
+            let color = (iter == MAX_ITER) ? rgb32(0, 0, 0) : palette[iter % 7];
+
+            // send a single integer message to the main actor,
+            // packing the color and the index of the frame buffer.
+            let idx = (y * WIDTH + x) << 32;
+            $actor_send(0, idx + color);
+        }
+    }
+    // actor is done
+    $actor_send(0, 0);
+}
+
+// Color pixels in parallel
+let start_time = $time_current_ms();
+
+let boundaries = calc_boundaries();
+let var start = 0;
+for (let var i = 0; i < boundaries.len; ++i) {
+    // ignore the id of the actor...
+    $actor_spawn(|| colorizer(start, boundaries[i]));
+    start = boundaries[i];
+}
+
+let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
+
+// Main actor - loop until all actors are done
+let var completed = 0;
+loop {
+    let msg = $actor_recv();
+
+    if (msg == 0) {
+        if (++completed == NTHREADS) {
+            break;
+        }
+    }
+    let color = msg & 0x00000000_FFFFFFFF;
+    let idx = msg >> 32;
+    frame_buffer.set_u32(idx, color);
+}
+
+// print render time
+let render_time = $time_current_ms() - start_time;
+$println("Mandelbrot render time: " + render_time.to_s() + "ms");
+
+// --- Window and Event Loop ---
+let window = $window_create(WIDTH, HEIGHT, "Mandelbrot Set", 0);
+$window_draw_frame(window, frame_buffer);
+
+loop {
+    let msg = $actor_recv();
+
+    if (!(msg instanceof UIEvent)) {
+        continue;
+    }
+    if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+        break;
+    }
+    $window_draw_frame(window, frame_buffer);
+}
+
+// well, this helps a bit in Vim...
+// vim: set syn=cpp:
