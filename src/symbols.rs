@@ -99,7 +99,6 @@ impl Env
 
             Decl::Global {
                 idx: global_idx,
-                //src_fun: fun.id,
                 mutable,
             }
         } else {
@@ -160,6 +159,7 @@ impl Program
     pub fn resolve_syms(&mut self) -> Result<(), ParseError>
     {
         let mut env = Env::default();
+        env.next_global_idx = self.num_globals;
         env.push_scope();
 
         // Register core classes
@@ -196,7 +196,7 @@ impl Program
             if lineage.contains(&class_id) {
                 return ParseError::with_pos(
                     &format!(
-                        "class symbol `{}` is part of an inheritance loop",
+                        "class symbol `{}` is part of a circular inheritance loop",
                         classes[&class_id].name
                     ),
                     &classes[&class_id].pos
@@ -438,9 +438,11 @@ impl StmtBox
             Stmt::Let { mutable, var_name, init_expr, decl } => {
                 init_expr.resolve_syms(prog, fun, env)?;
 
-                // Functions have already been pre-declared
                 match init_expr.expr.as_ref() {
+                    // Functions have already been pre-declared
                     Expr::Fun { .. } => {}
+
+                    // Variable declaration
                     _ => {
                         if env.has_local(var_name) {
                             return ParseError::with_pos(
@@ -449,8 +451,13 @@ impl StmtBox
                             );
                         }
 
-                        let new_decl = env.define_local(var_name, *mutable, fun);
-                        *decl = Some(new_decl)
+                        // If there is already a declaration associated with this variable,
+                        // this is the case for immutable globals
+                        if let Some(decl) = decl.as_mut() {
+                            env.define(var_name, *decl);
+                        } else {
+                            *decl = Some(env.define_local(var_name, *mutable, fun));
+                        }
                     }
                 }
             }

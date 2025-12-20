@@ -441,6 +441,9 @@ pub struct Unit
     // Functions declared in this unit
     pub funs: HashMap<String, FunId>,
 
+    // Top-level immutable globals declared in this unit
+    pub globals: HashMap<String, usize>,
+
     // Unit-level (top level) function
     pub unit_fn: FunId,
 }
