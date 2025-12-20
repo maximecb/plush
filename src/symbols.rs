@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::FxHashSet as HashSet;
 use crate::lexer::{ParseError, SrcPos};
 use crate::ast::*;
 
@@ -182,6 +183,48 @@ impl Program
 
         // Set the number of globals
         self.num_globals = env.next_global_idx;
+
+
+
+
+        // Note: we need to make sure that there's no cycle
+        // Might be simpler to do a DFS from each class?
+        // We can keep track of which classes have already been processed
+
+        let mut processed = HashSet::<ClassId>::default();
+
+
+
+
+
+
+        /*
+        // Set of classes to be processed
+        let mut classes: HashSet<ClassId> = self.classes.keys().cloned().collect();
+
+        // Until we've processed all classes for inheritance
+        for class_id in &classes.clone() {
+
+            let class = &self.classes[class_id];
+
+            // If a class has no parent, skip it
+            if class.parent_id == ClassId::default() {
+                classes.remove(class_id);
+                continue;
+            }
+
+            // Wait until the parent of this class has been processed
+            if classes.contains(&class.parent_id) {
+                continue;
+            }
+        }
+        */
+
+
+
+
+
+
 
         Ok(())
     }
