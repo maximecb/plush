@@ -6,7 +6,7 @@ Plush is an experimental toy programming language and virtual machine inspired b
 
 The Plush language has:
 - Dynamic typing
-- Classes and objects
+- Classes, objects, inheritance
 - Closures/lambdas
 - Dynamic arrays aka vectors/lists
 - Dictionaries with JSON-like syntax
