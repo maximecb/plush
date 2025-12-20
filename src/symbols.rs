@@ -205,8 +205,13 @@ impl Program
 
             let parent_id = classes[&class_id].parent_id;
 
+            // If this class has no parent, nothing to do
+            if parent_id == ClassId::default() {
+                return Ok(());
+            }
+
             // If the parent has not yet been processed
-            if parent_id != ClassId::default() && !processed.contains(&parent_id) {
+            if !processed.contains(&parent_id) {
                 // Process the parent class first
                 lineage.insert(class_id);
                 process(parent_id, classes, processed, lineage)?;
@@ -220,20 +225,21 @@ impl Program
 
             // Extend the set of parent methods
             parent_methods.extend(class.methods.clone());
-            class.methods = parent_methods;
 
             // Extend the set of parent fields
-            let num_parent_fields = parent_fields.len();
-            for (field_name, field_idx) in &class.fields {
+            for (field_name, _) in &class.fields {
                 if parent_fields.contains_key(field_name) {
                     continue;
                 }
 
                 parent_fields.insert(
                     field_name.to_string(),
-                    field_idx + num_parent_fields
+                    parent_fields.len()
                 );
             }
+
+            class.methods = parent_methods;
+            class.fields = parent_fields;
 
             // Mark this class as processed
             processed.insert(class_id);
