@@ -57,7 +57,7 @@ struct Env
     scopes: Vec<Scope>,
 
     // Next global variable slot index to assign
-    next_global_idx: usize,
+    next_global_idx: u32,
 }
 
 impl Env
@@ -291,14 +291,16 @@ impl Unit
 
             // If we should import all available symbols
             if import.import_all {
-                // If the unit defines this function
                 for (symbol, fun_id) in &unit.funs {
                     env.define(symbol, Decl::Fun { id: *fun_id });
                 }
 
-                // If the unit defines this class
                 for (symbol, class_id) in &unit.classes {
                     env.define(symbol, Decl::Class { id: *class_id });
+                }
+
+                for (symbol, global_idx) in &unit.consts {
+                    env.define(symbol, Decl::Global { idx: *global_idx, mutable: false });
                 }
             }
 
@@ -313,6 +315,12 @@ impl Unit
                 // If the unit defines this class
                 if let Some(class_id) = unit.classes.get(symbol) {
                     env.define(symbol, Decl::Class { id: *class_id });
+                    continue;
+                }
+
+                // If the unit defines this immutable constant
+                if let Some(global_idx) = unit.consts.get(symbol) {
+                    env.define(symbol, Decl::Global { idx: *global_idx, mutable: false });
                     continue;
                 }
 

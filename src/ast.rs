@@ -442,7 +442,7 @@ pub struct Unit
     pub funs: HashMap<String, FunId>,
 
     // Top-level immutable globals declared in this unit
-    pub globals: HashMap<String, usize>,
+    pub consts: HashMap<String, u32>,
 
     // Unit-level (top level) function
     pub unit_fn: FunId,
@@ -471,7 +471,7 @@ pub struct Program
     pub init_order: Vec<FunId>,
 
     // Number of global variable slots
-    pub num_globals: usize,
+    pub num_globals: u32,
 
     // Top-level unit function
     pub main_fn: FunId,

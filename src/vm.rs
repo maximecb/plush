@@ -2435,7 +2435,7 @@ impl VM
         vm_ref.actor_txs.insert(actor_id, actor_tx);
 
         // Initialize the global slots
-        let globals = vec![Value::Undef; vm_ref.prog.num_globals];
+        let globals = vec![Value::Undef; vm_ref.prog.num_globals as usize];
 
         drop(vm_ref);
 

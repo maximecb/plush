@@ -1342,7 +1342,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
     let mut imports = Vec::default();
     let mut classes = HashMap::default();
     let mut funs = HashMap::default();
-    let mut globals = HashMap::default();
+    let mut consts = HashMap::default();
     let mut stmts = Vec::default();
 
     // Parse imports, which must be at the top of the unit
@@ -1457,16 +1457,15 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
             if let Expr::Fun { fun_id, .. } = init_expr.expr.as_ref() {
                 funs.insert(var_name.clone(), *fun_id);
             }
-
             // If this is an immutable global (potentially exportable)
-            if *mutable == false {
+            else if *mutable == false {
                 // Assign a global index for the global variable
                 // We do this now so this is accessible during symbol resolution
                 let global_idx = prog.num_globals;
                 prog.num_globals += 1;
-                globals.insert(var_name.clone(), global_idx);
+                consts.insert(var_name.clone(), global_idx);
                 *decl = Some(crate::symbols::Decl::Global {
-                    idx: global_idx.try_into().unwrap(),
+                    idx: global_idx,
                     mutable: false,
                 });
             }
@@ -1508,7 +1507,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         imports,
         classes,
         funs,
-        globals,
+        consts,
         unit_fn: unit_fn_id,
     };
 
