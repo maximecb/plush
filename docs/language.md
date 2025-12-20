@@ -30,7 +30,7 @@ Caveats and limitations:
 To run a Plush script, you can use the `cargo run` command, followed by the path to the script. For example:
 
 ```sh
-cargo run examples/helloworld.psh
+cargo run examples/amigaball.psh
 ```
 
 This will execute the `helloworld.psh` script and print "Hello, World!" to the console. More example programs
