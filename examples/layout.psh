@@ -121,6 +121,61 @@ class Row extends UINode
     }
 }
 
+// Column of elements
+class Column extends UINode
+{
+    init(self)
+    {
+        UINode.init(self);
+    }
+
+    compute_size(self)
+    {
+        let var width = 0;
+        let var height = 0;
+        let var prev_margin = 0;
+
+        for (let var i = 0; i < self.children.len; ++i)
+        {
+            let child = self.children[i];
+            child.compute_size();
+            width = width.max(child.width + 2 * child.margin);
+
+            let margin = child.margin.max(prev_margin);
+            height += margin + child.height;
+            prev_margin = child.margin;
+        }
+
+        height += prev_margin;
+        self.width = width;
+        self.height = height;
+    }
+
+    compute_pos(self)
+    {
+        assert(self.x instanceof Int64);
+        assert(self.y instanceof Int64);
+
+        let var prev_margin = 0;
+        let var cur_y = self.y;
+
+        for (let var i = 0; i < self.children.len; ++i)
+        {
+            let child = self.children[i];
+
+            let margin = child.margin.max(prev_margin);
+            cur_y += margin;
+
+            child.y = cur_y;
+            child.x = self.x + (self.width - child.width) _/ 2;
+            child.compute_pos();
+
+            cur_y += child.height;
+            prev_margin = child.margin;
+        }
+    }
+}
+
 // Node that centers a single child node
 class Center extends UINode
 {
@@ -140,34 +195,40 @@ class Center extends UINode
         child.x = self.x + (self.width - child.width) _/ 2;
         child.y = self.y + (self.height - child.height) _/ 2;
         child.compute_pos();
-
-        $println(child.x);
-        $println(child.y);
     }
 }
 
 
 
 
-let fb = Image(600, 400);
+let fb = Image(550, 300);
 let window = $window_create(fb.width, fb.height, "Layout Engine Test", 0);
 
-let row = Row();
-row.bgcolor = rgb(50, 50, 50);
-
-let center = Center(row);
+let col = Column();
+let center = Center(col);
 center.width = fb.width;
 center.height = fb.height;
 center.x = 0;
 center.y = 0;
 center.bgcolor = COLOR_BLACK;
 
-for (let var i = 0; i < 16; ++i)
+// For each row
+for (let var j = 0; j < 4; ++j)
 {
-    let box = Box(24, 24);
-    box.bgcolor = COLOR_GREY;
-    box.margin = 6;
-    row.add_child(box);
+    let row = Row();
+    row.bgcolor = rgb(50, 50, 50);
+    row.margin = 2;
+
+    // For each cell
+    for (let var i = 0; i < 16; ++i)
+    {
+        let box = Box(24, 24);
+        box.bgcolor = COLOR_GREY;
+        box.margin = 6;
+        row.add_child(box);
+    }
+
+    col.add_child(row);
 }
 
 center.compute_size();
