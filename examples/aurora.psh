@@ -56,8 +56,24 @@ fun fugue(c_re, c_im, max_iter) {
     return iter;
 }
 
+// --- Pseudo-Random Number Generator (LCG) ---
+let var lcg_seed = 1;
+fun rand_init(seed) {
+    lcg_seed = seed & 0x7FFFFFFF;
+}
+
+fun rand_int(max_val) {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lcg_seed % max_val;
+}
+
+fun rand_star(color) {
+    return rand_int(809) == 0 ? rgb32(255, 255, 255) : color;
+}
+
 // Colorize buffer points from..to
 fun colorizer(from, to) {
+    rand_init($actor_id() + $time_current_ms());
     let color_array = ByteArray.with_size(WIDTH*4*(to-from));
     let var idx = 0;
     for (let var y = from; y < to; ++y) {
@@ -69,7 +85,7 @@ fun colorizer(from, to) {
 
             // Set the pixel color based on the number of iterations
             let color = (iter == MAX_ITER) ? rgb32(5, 15, 50) : palette[iter % (MAX_ITER _/ 10)];
-            color_array.set_u32(idx, color);
+            color_array.set_u32(idx, rand_star(color));
             ++idx;
         }
     }
