@@ -2,13 +2,13 @@
 
 // This example builds on mandelbrot.psh.
 // Differences:
-// - Uses a different palette with green aurora borealis colors
+// - Uses a different palette with aurora borealis colors
 // - Renders the set concurrently using actors
 //
-// Each actor is given a (logical) portion of the image.
-// For each pixel it calculates the color to render and
-// sends a message to the main actor with the index and
-// the color to paint, both packed in a single Integer.
+// Each actor is given a set of rows and calculates the
+// corresponding array of colors, sending it back to the
+// main thread/actor where they are $memcpy'd onto the
+// final image.
 
 let WIDTH = 640;
 let HEIGHT = 480;
@@ -28,9 +28,8 @@ fun rgb32(r, g, b) {
 }
 
 // Create an aurora borealis color palette.
-// Interpolate from (1, 239, 172) to (95, 42, 132),
-// but not for every iteration. A fifth of MAX_ITER
-// is purely empirical - 
+// Interpolate from (1, 239, 172) to (95, 42, 132) in
+// only a few steps - MAX_ITER / 10 is empirical.
 let palette = [];
 for (let var i = 0; i < MAX_ITER _/ 10; ++i) {
     let t = i / ( MAX_ITER _/ 10);
@@ -57,6 +56,7 @@ fun fugue(c_re, c_im, max_iter) {
 }
 
 // --- Pseudo-Random Number Generator (LCG) ---
+// @see also: examples/random.psh
 let var lcg_seed = 1;
 fun rand_init(seed) {
     lcg_seed = seed & 0x7FFFFFFF;
@@ -67,6 +67,7 @@ fun rand_int(max_val) {
     return lcg_seed % max_val;
 }
 
+// Every once in a while, generate a white dot
 fun rand_star(color) {
     return rand_int(809) == 0 ? rgb32(255, 255, 255) : color;
 }
@@ -98,7 +99,7 @@ let start_time = $time_current_ms();
 // Distribute rows and hand them to actors
 let var to = 0;
 let actor_boundaries = {};
-for (let var i=0; i<NTHREADS; ++i) {
+for (let var i = 0; i < NTHREADS; ++i) {
     let from = to;
     to += (HEIGHT _/ NTHREADS + ((i < HEIGHT % NTHREADS) ? 1 : 0));
     let actor_id = $actor_spawn(|| colorizer(from, to));
@@ -117,12 +118,13 @@ loop {
 
     let from = actor_boundaries[actor_id];
     frame_buffer.memcpy(from * WIDTH * 4, colors, 0, colors.len);
+
     if (++completed == NTHREADS) {
         break;
     }
 }
 
-// print render time
+// Print render time
 let render_time = $time_current_ms() - start_time;
 $println("Mandelbrot render time: " + render_time.to_s() + "ms");
 
