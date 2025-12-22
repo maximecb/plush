@@ -27,11 +27,17 @@ fun rgb32(r, g, b) {
     return 0xFF_00_00_00 | (r << 16) | (g << 8) | b;
 }
 
-// Create a simple green aurora borealis color palette.
-// Go from rgb(21, 53, 72) to rgb(153, 233, 180) in 7 steps.
+// Create an aurora borealis color palette.
+// Interpolate from (1, 239, 172) to (95, 42, 132),
+// but not for every iteration. A fifth of MAX_ITER
+// is purely empirical - 
 let palette = [];
-for (let var i = 0; i < 7; ++i) {
-    palette.push(rgb32(21+i*22, 53+i*30, 72+i*18));
+for (let var i = 0; i < MAX_ITER _/ 5; ++i) {
+    let t = i / ( MAX_ITER _/ 5);
+    let r = (  1 + ( 95 -   1) * t).floor();
+    let g = (239 + ( 42 - 239) * t).floor();
+    let b = (172 + (132 - 172) * t).floor();
+    palette.push(rgb32(r, g, b));
 }
 
 // Check if a point is in the Mandelbrot set in max_iter steps
@@ -62,7 +68,7 @@ fun colorizer(from, to) {
             let iter = fugue(c_re, c_im, MAX_ITER);
 
             // Set the pixel color based on the number of iterations
-            let color = (iter == MAX_ITER) ? rgb32(0, 0, 0) : palette[iter % 7];
+            let color = (iter == MAX_ITER) ? rgb32(5, 15, 50) : palette[iter % (MAX_ITER _/ 5)];
             color_array.set_u32(idx, color);
             ++idx;
         }
@@ -83,6 +89,7 @@ for (let var i=0; i<NTHREADS; ++i) {
     actor_boundaries[actor_id.to_s()] = from;
 }
 
+// Final image as a ByteArray
 let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 
 // Main actor - loop until all actors are done
