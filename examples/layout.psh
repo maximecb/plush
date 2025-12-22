@@ -1,0 +1,193 @@
+from ./image import *;
+
+class UINode
+{
+    init(self)
+    {
+        // Position and size to be calculated
+        self.x = nil;
+        self.y = nil;
+        self.width = nil;
+        self.height = nil;
+
+        // Margin in pixels
+        self.margin = 0;
+
+        // Background color
+        self.bgcolor = nil;
+
+        // TODO: border color?
+
+        self.children = [];
+    }
+
+    add_child(self, node)
+    {
+        self.children.push(node);
+    }
+
+    compute_size(self)
+    {
+        for (let var i = 0; i < self.children.len; ++i)
+        {
+            self.children[i].compute_size();
+        }
+    }
+
+    compute_pos(self)
+    {
+    }
+
+    redraw(self, fb)
+    {
+        assert(self.x != nil && self.y != nil);
+
+        if (self.bgcolor != nil) {
+            assert(self.bgcolor instanceof Int64);
+            fb.fill_rect(self.x, self.y, self.width, self.height, self.bgcolor);
+        }
+
+        // Draw the children on top of this node
+        for (let var i = 0; i < self.children.len; ++i)
+        {
+            self.children[i].redraw(fb);
+        }
+    }
+}
+
+// Box with a fixed size
+class Box extends UINode
+{
+    init(self, width, height)
+    {
+        UINode.init(self);
+        self.width = width;
+        self.height = height;
+    }
+}
+
+// Row of elements
+class Row extends UINode
+{
+    init(self)
+    {
+        UINode.init(self);
+    }
+
+    compute_size(self)
+    {
+        let var height = 0;
+        let var width = 0;
+        let var prev_margin = 0;
+
+        for (let var i = 0; i < self.children.len; ++i)
+        {
+            let child = self.children[i];
+            child.compute_size();
+            height = height.max(child.height + 2 * child.margin);
+
+            let margin = child.margin.max(prev_margin);
+            width += margin + child.width;
+            prev_margin = child.margin;
+        }
+
+        width += prev_margin;
+        self.width = width;
+        self.height = height;
+    }
+
+    compute_pos(self)
+    {
+        assert(self.x instanceof Int64);
+        assert(self.y instanceof Int64);
+
+        let var prev_margin = 0;
+        let var cur_x = self.x;
+
+        for (let var i = 0; i < self.children.len; ++i)
+        {
+            let child = self.children[i];
+
+            let margin = child.margin.max(prev_margin);
+            cur_x += margin;
+
+            child.x = cur_x;
+            child.y = self.y + (self.height - child.height) _/ 2;
+            child.compute_pos();
+
+            cur_x += child.width;
+            prev_margin = child.margin;
+        }
+    }
+}
+
+// Node that centers a single child node
+class Center extends UINode
+{
+    init(self, child)
+    {
+        UINode.init(self);
+        self.children.push(child);
+    }
+
+    compute_pos(self)
+    {
+        assert(self.x instanceof Int64);
+        assert(self.y instanceof Int64);
+        assert(self.children.len == 1);
+
+        let child = self.children[0];
+        child.x = self.x + (self.width - child.width) _/ 2;
+        child.y = self.y + (self.height - child.height) _/ 2;
+        child.compute_pos();
+
+        $println(child.x);
+        $println(child.y);
+    }
+}
+
+
+
+
+let fb = Image(600, 400);
+let window = $window_create(fb.width, fb.height, "Layout Engine Test", 0);
+
+let row = Row();
+row.bgcolor = rgb(50, 50, 50);
+
+let center = Center(row);
+center.width = fb.width;
+center.height = fb.height;
+center.x = 0;
+center.y = 0;
+center.bgcolor = COLOR_BLACK;
+
+for (let var i = 0; i < 16; ++i)
+{
+    let box = Box(24, 24);
+    box.bgcolor = COLOR_GREY;
+    box.margin = 6;
+    row.add_child(box);
+}
+
+center.compute_size();
+center.compute_pos();
+center.redraw(fb);
+$window_draw_frame(window, fb.bytes);
+
+
+
+
+
+loop
+{
+    let msg = $actor_recv();
+    if (msg instanceof UIEvent) {
+        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+            break;
+        }
+    }
+
+
+
+}

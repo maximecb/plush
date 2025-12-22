@@ -98,6 +98,48 @@ class Image
         }
     }
 
-    // TODO:
-    //fill_circle() {}
+    // Draw a filled rectangle
+    fill_rect(self, x, y, w, h, color)
+    {
+        let var rx = x;
+        let var ry = y;
+        let var rw = w;
+        let var rh = h;
+
+        // Clipping
+        if (rx < 0) { rw = rw + rx; rx = 0; }
+        if (ry < 0) { rh = rh + ry; ry = 0; }
+        if (rx + rw > self.width) { rw = self.width - rx; }
+        if (ry + rh > self.height) { rh = self.height - ry; }
+
+        if (rw <= 0 || rh <= 0) { return; }
+
+        for (let var j = 0; j < rh; ++j) {
+            let idx = (ry + j) * self.width + rx;
+            self.bytes.fill_u32(idx, rw, color);
+        }
+    }
+
+    // Draw a filled circle
+    fill_circle(self, x0, y0, r, color)
+    {
+        let var x = 0;
+        let var y = r;
+        let var d = 3 - 2 * r;
+
+        while (y >= x) {
+            self.fill_rect(x0 - y, y0 + x, 2 * y + 1, 1, color);
+            self.fill_rect(x0 - y, y0 - x, 2 * y + 1, 1, color);
+            self.fill_rect(x0 - x, y0 + y, 2 * x + 1, 1, color);
+            self.fill_rect(x0 - x, y0 - y, 2 * x + 1, 1, color);
+
+            x = x + 1;
+            if (d > 0) {
+                y = y - 1;
+                d = d + 4 * (x - y) + 10;
+            } else {
+                d = d + 4 * x + 6;
+            }
+        }
+    }
 }

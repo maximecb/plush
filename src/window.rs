@@ -143,7 +143,7 @@ unsafe fn make_static<T>(t: &T) -> &'static T {
 pub fn window_draw_frame(
     actor: &mut Actor,
     window_id: Value,
-    frame: Value,
+    mut frame: Value,
 ) -> Result<Value, String>
 {
     if actor.actor_id != 0 {
@@ -151,10 +151,7 @@ pub fn window_draw_frame(
     }
 
     let window_id = unwrap_u32!(window_id);
-    let frame = match frame {
-        Value::ByteArray(p) => unsafe { &*p }
-        _ => panic!()
-    };
+    let frame = frame.unwrap_ba();
 
     assert!(window_id == 0);
     let mut window_lock = WINDOW.lock().unwrap();
