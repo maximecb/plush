@@ -53,16 +53,22 @@ class UINode
             self.children[i].redraw(fb);
         }
     }
-}
 
-// Box with a fixed size
-class Box extends UINode
-{
-    init(self, width, height)
+    onclick(self, x, y)
     {
-        UINode.init(self);
-        self.width = width;
-        self.height = height;
+        for (let var i = 0; i < self.children.len; ++i)
+        {
+            let child = self.children[i];
+
+            let on_child = (
+                x >= child.x && x <= child.x + child.width &&
+                y >= child.y && y <= child.y + child.height
+            );
+
+            if (on_child) {
+                child.onclick(x, y);
+            }
+        }
     }
 }
 
@@ -198,8 +204,32 @@ class Center extends UINode
     }
 }
 
+// Box with a fixed size
+class Box extends UINode
+{
+    init(self, width, height)
+    {
+        UINode.init(self);
+        self.width = width;
+        self.height = height;
+    }
+}
 
+class Cell extends Box
+{
+    init(self, width, height)
+    {
+        Box.init(self, width, height);
+        self.bgcolor = COLOR_GREY;
+        self.on = false;
+    }
 
+    onclick(self, x, y)
+    {
+        self.on = !self.on;
+        self.bgcolor = self.on? COLOR_WHITE:COLOR_GREY;
+    }
+}
 
 let fb = Image(550, 300);
 let window = $window_create(fb.width, fb.height, "Layout Engine Test", 0);
@@ -222,33 +252,40 @@ for (let var j = 0; j < 4; ++j)
     // For each cell
     for (let var i = 0; i < 16; ++i)
     {
-        let box = Box(24, 24);
-        box.bgcolor = COLOR_GREY;
-        box.margin = 6;
-        row.add_child(box);
+        let cell = Cell(24, 24);
+        cell.margin = 6;
+        row.add_child(cell);
     }
 
     col.add_child(row);
 }
 
-center.compute_size();
-center.compute_pos();
-center.redraw(fb);
-$window_draw_frame(window, fb.bytes);
+fun redraw()
+{
+    let start_time = $time_current_ms();
+    center.compute_size();
+    center.compute_pos();
+    center.redraw(fb);
+    let dt = $time_current_ms() - start_time;
+    $println("Redraw time: " + dt.to_s() + "ms");
 
+    $window_draw_frame(window, fb.bytes);
+}
 
-
-
+redraw();
 
 loop
 {
     let msg = $actor_recv();
+
     if (msg instanceof UIEvent) {
         if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
             break;
         }
+
+        if (msg.kind == 'MOUSE_DOWN') {
+            center.onclick(msg.x, msg.y);
+            redraw();
+        }
     }
-
-
-
 }
