@@ -223,6 +223,10 @@ impl Program
 
             let mut class = classes.get_mut(&class_id).unwrap();
 
+            if lineage.len() > 0 {
+                class.has_children = true;
+            }
+
             // Extend the set of parent methods
             parent_methods.extend(class.methods.clone());
 
