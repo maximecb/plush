@@ -1,14 +1,14 @@
-// Mandelbrot Set Explorer
+// Mandelbrot Set Explorer II
 
 // This example builds on mandelbrot.psh.
 // Differences:
-// - Uses a different palette with green aurora borealis colors
+// - Uses a different palette with aurora borealis colors
 // - Renders the set concurrently using actors
 //
-// Each actor is given a (logical) portion of the image.
-// For each pixel it calculates the color to render and
-// sends a message to the main actor with the index and
-// the color to paint, both packed in a single Integer.
+// Each actor is given a set of rows and calculates the
+// corresponding array of colors, sending it back to the
+// main thread/actor where they are $memcpy'd onto the
+// final image.
 
 let WIDTH = 640;
 let HEIGHT = 480;
@@ -22,31 +22,21 @@ let IM_END = 1.125;
 let MAX_ITER = 60;
 let NTHREADS = 16;
 
-// Distribute rows to hand to actors
-fun calc_boundaries() {
-    let chunk_size = HEIGHT _/ NTHREADS;
-    let rem = HEIGHT % NTHREADS;
-    let var limit = 0;
-
-    let boundaries = [];
-    for (let var i=0; i<NTHREADS; ++i) {
-        limit += (chunk_size + ((i < rem) ? 1 : 0));
-        boundaries.push(limit);
-    }
-
-    return boundaries;
-}
-
 // Helper function to convert RGB values to a 32-bit color
 fun rgb32(r, g, b) {
     return 0xFF_00_00_00 | (r << 16) | (g << 8) | b;
 }
 
-// Create a simple green aurora borealis color palette.
-// Go from rgb(21, 53, 72) to rgb(153, 233, 180) in 7 steps.
+// Create an aurora borealis color palette.
+// Interpolate from (1, 239, 172) to (95, 42, 132) in
+// only a few steps - MAX_ITER / 10 is empirical.
 let palette = [];
-for (let var i = 0; i < 7; ++i) {
-    palette.push(rgb32(21+i*22, 53+i*30, 72+i*18));
+for (let var i = 0; i < MAX_ITER _/ 10; ++i) {
+    let t = i / ( MAX_ITER _/ 10);
+    let r = (  1 + ( 95 -   1) * t).floor();
+    let g = (239 + ( 42 - 239) * t).floor();
+    let b = (172 + (132 - 172) * t).floor();
+    palette.push(rgb32(r, g, b));
 }
 
 // Check if a point is in the Mandelbrot set in max_iter steps
@@ -65,8 +55,28 @@ fun fugue(c_re, c_im, max_iter) {
     return iter;
 }
 
+// --- Pseudo-Random Number Generator (LCG) ---
+// @see also: examples/random.psh
+let var lcg_seed = 1;
+fun rand_init(seed) {
+    lcg_seed = seed & 0x7FFFFFFF;
+}
+
+fun rand_int(max_val) {
+    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lcg_seed % max_val;
+}
+
+// Every once in a while, generate a white dot
+fun rand_star(color) {
+    return rand_int(809) == 0 ? rgb32(255, 255, 255) : color;
+}
+
 // Colorize buffer points from..to
 fun colorizer(from, to) {
+    rand_init($actor_id() + $time_current_ms());
+    let color_array = ByteArray.with_size(WIDTH*4*(to-from));
+    let var idx = 0;
     for (let var y = from; y < to; ++y) {
         for (let var x = 0; x < WIDTH; ++x) {
             let c_re = RE_START + (x / WIDTH) * (RE_END - RE_START);
@@ -75,47 +85,46 @@ fun colorizer(from, to) {
             let iter = fugue(c_re, c_im, MAX_ITER);
 
             // Set the pixel color based on the number of iterations
-            let color = (iter == MAX_ITER) ? rgb32(0, 0, 0) : palette[iter % 7];
-
-            // send a single integer message to the main actor,
-            // packing the color and the index of the frame buffer.
-            let idx = (y * WIDTH + x) << 32;
-            $actor_send(0, idx + color);
+            let color = (iter == MAX_ITER) ? rgb32(5, 15, 50) : palette[iter % (MAX_ITER _/ 10)];
+            color_array.set_u32(idx, rand_star(color));
+            ++idx;
         }
     }
-    // actor is done
-    $actor_send(0, 0);
+    $actor_send(0, [$actor_id(), color_array]);
 }
 
 // Color pixels in parallel
 let start_time = $time_current_ms();
 
-let boundaries = calc_boundaries();
-let var start = 0;
-for (let var i = 0; i < boundaries.len; ++i) {
-    // ignore the id of the actor...
-    $actor_spawn(|| colorizer(start, boundaries[i]));
-    start = boundaries[i];
+// Distribute rows and hand them to actors
+let var to = 0;
+let actor_boundaries = {};
+for (let var i = 0; i < NTHREADS; ++i) {
+    let from = to;
+    to += (HEIGHT _/ NTHREADS + ((i < HEIGHT % NTHREADS) ? 1 : 0));
+    let actor_id = $actor_spawn(|| colorizer(from, to));
+    actor_boundaries[actor_id.to_s()] = from;
 }
 
+// Final image as a ByteArray
 let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
 
 // Main actor - loop until all actors are done
 let var completed = 0;
 loop {
     let msg = $actor_recv();
+    let actor_id = msg[0].to_s();
+    let colors = msg[1];
 
-    if (msg == 0) {
-        if (++completed == NTHREADS) {
-            break;
-        }
+    let from = actor_boundaries[actor_id];
+    frame_buffer.memcpy(from * WIDTH * 4, colors, 0, colors.len);
+
+    if (++completed == NTHREADS) {
+        break;
     }
-    let color = msg & 0x00000000_FFFFFFFF;
-    let idx = msg >> 32;
-    frame_buffer.set_u32(idx, color);
 }
 
-// print render time
+// Print render time
 let render_time = $time_current_ms() - start_time;
 $println("Mandelbrot render time: " + render_time.to_s() + "ms");
 
