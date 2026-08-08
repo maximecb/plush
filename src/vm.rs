@@ -895,10 +895,12 @@ impl Actor
                 deepcopy(**val, dst_alloc, &mut actor.dst_map)?;
             }
 
+            let pct_free = 100 * dst_alloc.bytes_free() / dst_alloc.mem_size();
             println!(
-                "GC copied {} values, {} bytes free",
+                "GC copied {} values, {} bytes ({}% free)",
                 thousands_sep(actor.dst_map.len()),
-                thousands_sep(dst_alloc.bytes_free()),
+                thousands_sep(dst_alloc.bytes_used()),
+                pct_free
             );
 
             remap(&mut actor.dst_map);
