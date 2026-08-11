@@ -5,11 +5,15 @@ use crate::vm::Value;
 /// spawn, since each one owns a heap. Heaps grow as needed.
 pub const INIT_SIZE: usize = 4 * 1024 * 1024;
 
-/// Size of a message allocator. Messages are copied into a buffer that is
-/// cleared when it fills up rather than grown, so this also caps how large
-/// a single message can be. Committed pages that are never touched cost
-/// nothing, so this can afford to be much larger than a new heap.
-pub const MSG_SIZE: usize = 16 * 1024 * 1024;
+/// Initial size of a message allocator. These grow on demand, so this
+/// only has to cover ordinary message traffic.
+pub const MSG_INIT_SIZE: usize = 2 * 1024 * 1024;
+
+/// Address space reserved for a message allocator. A message allocator
+/// cannot be re-reserved while it holds messages, so it reserves enough
+/// up front to grow into. Reserving costs address space but no memory,
+/// and this is what bounds how large a single message can be.
+pub const MSG_RESERVE_SIZE: usize = 16 * 1024 * 1024 * 1024;
 
 pub struct Alloc
 {
@@ -24,6 +28,11 @@ pub struct Alloc
 
     // System page size
     page_size: usize,
+
+    // Whether allocation may commit more memory on demand. Message
+    // allocators do; heaps do not, because the collector decides when
+    // they grow.
+    growable: bool,
 
     next_idx: usize,
 }
@@ -67,28 +76,33 @@ impl Alloc
         Self::with_size(INIT_SIZE)
     }
 
-    /// Allocator for incoming messages. These are cleared when full
-    /// rather than grown, so they start out large enough to hold a
-    /// worthwhile message.
+    /// Allocator for incoming messages. These grow on demand as messages
+    /// are copied in, and are reset once the receiver has drained them.
     pub fn for_messages() -> Self
     {
-        Self::with_size(MSG_SIZE)
+        Self::with_reserve(MSG_INIT_SIZE, MSG_RESERVE_SIZE, true)
     }
 
     pub fn with_size(mem_size_bytes: usize) -> Self
     {
+        // Reserve twice the initial size, so that the heap has room to
+        // grow in place before the reservation has to be replaced
+        Self::with_reserve(mem_size_bytes, 2 * mem_size_bytes, false)
+    }
+
+    fn with_reserve(mem_size_bytes: usize, reserve_size: usize, growable: bool) -> Self
+    {
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
         assert!(page_size % 8 == 0);
 
-        // Reserve twice the initial size, so that the heap has room to
-        // grow in place before the reservation has to be replaced
-        let reserve_size = page_round_up(2 * mem_size_bytes, page_size);
+        let reserve_size = page_round_up(reserve_size, page_size);
 
         let mut alloc = Self {
             mem_block: reserve_range(reserve_size),
             reserve_size,
             mem_size: 0,
             page_size,
+            growable,
             next_idx: 0,
         };
 
@@ -223,11 +237,6 @@ impl Alloc
     }
 
     /// Allocate a block of a given size
-    ///
-    /// Callers are expected to have made room first: the mutator goes
-    /// through gc_check, and the GC sizes its to-space up front. Running
-    /// out here means one of those was wrong, so there is nothing useful
-    /// to do but abort.
     fn alloc_bytes(&mut self, size_bytes: usize) -> *mut u8
     {
         let align_bytes = 8;
@@ -237,14 +246,25 @@ impl Alloc
 
         // Bump the next allocation index
         let next_idx = obj_pos + size_bytes;
+
         if next_idx > self.mem_size {
-            panic!(
-                "allocator out of memory, could not allocate {} bytes ({} of {} used)",
-                size_bytes,
-                self.next_idx,
-                self.mem_size,
-            );
+            // Heaps do not grow here. Callers make room first: the mutator
+            // through gc_check, the collector by sizing its to-space up
+            // front. Growing instead of failing would let a heap expand
+            // silently rather than be collected.
+            if !self.growable {
+                panic!(
+                    "allocator out of memory, could not allocate {} bytes ({} of {} used)",
+                    size_bytes,
+                    self.next_idx,
+                    self.mem_size,
+                );
+            }
+
+            // Double, or jump straight to what a large allocation needs
+            self.grow(std::cmp::max(next_idx, self.mem_size * 2));
         }
+
         self.next_idx = next_idx;
 
         unsafe { self.mem_block.add(obj_pos) }

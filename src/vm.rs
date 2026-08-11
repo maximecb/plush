@@ -6,7 +6,17 @@ use crate::dict::Dict;
 use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
-use crate::alloc::{Alloc, INIT_SIZE};
+use crate::alloc::{Alloc, INIT_SIZE, MSG_INIT_SIZE};
+
+/// How many bytes of undrained messages a sender will let pile up in a
+/// receiver's message allocator before waiting for it to catch up.
+///
+/// This is backpressure, not a limit on message size: a message that is
+/// already being copied grows the buffer past this point if it needs to.
+/// It exists because the buffer is only reclaimed in one go, when the
+/// receiver has drained its queue, so without it a fast sender would grow
+/// the buffer without bound.
+const MSG_BACKLOG_LIMIT: usize = 64 * 1024 * 1024;
 use crate::object::Object;
 use crate::closure::Closure;
 use crate::array::Array;
@@ -738,7 +748,16 @@ impl Actor
                         return Some(self.take_msg(msg));
                     }
 
-                    Err(_) => msg_alloc.clear()
+                    Err(_) => {
+                        msg_alloc.clear();
+
+                        // Only give memory back after something genuinely
+                        // large came through. Shrinking is an mmap call, so
+                        // it must stay out of the steady state.
+                        if msg_alloc.mem_size() > 4 * MSG_BACKLOG_LIMIT {
+                            msg_alloc.shrink_to(MSG_INIT_SIZE);
+                        }
+                    }
                 }
             }
         }
@@ -774,16 +793,16 @@ impl Actor
             Some(rc) => rc,
             None => return Err(()),
         };
-        // Wait for room in the receiver's message buffer. The receiver
-        // resets it once it has copied every message out, so this makes
-        // progress as long as the receiver is still running. Give up
-        // eventually rather than spinning forever if it is not.
+        // Wait if too many undrained messages have piled up. The receiver
+        // resets the buffer once it has copied every message out, so this
+        // makes progress as long as it is still running. Give up eventually
+        // rather than spinning forever if it is not.
         let mut attempts = 0;
 
         let mut msg_alloc = loop {
             let msg_alloc = alloc_rc.lock().unwrap();
 
-            if msg_alloc.bytes_free() >= msg_alloc.mem_size() / 2 {
+            if msg_alloc.bytes_used() <= MSG_BACKLOG_LIMIT {
                 break msg_alloc;
             }
 
