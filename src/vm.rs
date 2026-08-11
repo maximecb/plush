@@ -517,6 +517,11 @@ pub struct Message
 
     // Message to be sent
     msg: Value,
+
+    // Number of bytes the message occupies in the receiver's message
+    // allocator. The receiver uses this to make room in its own heap
+    // before copying the message out.
+    size: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -561,6 +566,11 @@ pub struct Actor
     // Hash map used for garbage collection
     dst_map: HashMap::<Value, Value>,
 
+    // Hash map used when copying received messages. Kept separate from
+    // dst_map, which is sized for the whole heap and so would be costly
+    // to clear once per message.
+    msg_map: HashMap::<Value, Value>,
+
     // Cache of actor ids to message queue endpoints
     actor_map: HashMap<u64, ActorTx>,
 
@@ -589,6 +599,7 @@ impl Actor
         actor_id: u64,
         parent_id: Option<u64>,
         vm: Arc<Mutex<VM>>,
+        alloc: Alloc,
         msg_alloc: Arc<Mutex<Alloc>>,
         queue_rx: mpsc::Receiver<Message>,
         globals: Vec<Value>,
@@ -598,12 +609,13 @@ impl Actor
             actor_id,
             parent_id,
             vm,
-            alloc: Alloc::new(),
+            alloc,
             msg_alloc,
             queue_rx,
             globals,
             to_space: None,
             dst_map: HashMap::default(),
+            msg_map: HashMap::default(),
             actor_map: HashMap::default(),
             stack: Vec::default(),
             frames: Vec::default(),
@@ -613,26 +625,57 @@ impl Actor
         }
     }
 
+    /// Copy a received message out of the message allocator and into this
+    /// actor's own heap. Doing this on receipt means nothing the actor can
+    /// reach ever lives outside its own heap, so the message allocator is
+    /// a plain transfer buffer that the GC never has to look at.
+    fn take_msg(&mut self, msg: Message) -> Value
+    {
+        if !msg.msg.is_heap() {
+            return msg.msg;
+        }
+
+        // Make room for the copy first. The message is not reachable from
+        // any root yet, so a collection here does not need to know about
+        // it: it stays put in the message allocator until we copy it
+        // below. Allocation padding depends on the order objects are
+        // copied in, so allow for twice its size in the buffer.
+        self.gc_check(2 * msg.size, &mut []);
+
+        // Reuse a map kept at message size. A single large message can grow
+        // it, so replace it outright in that case to keep clearing cheap.
+        if self.msg_map.capacity() > 1024 {
+            self.msg_map = HashMap::default();
+        } else {
+            self.msg_map.clear();
+        }
+
+        let val = deepcopy(msg.msg, &mut self.alloc, &mut self.msg_map);
+        remap(&mut self.msg_map);
+        val
+    }
+
     /// Receive a message from the message queue
     /// This will block until a message is available
     pub fn recv(&mut self) -> Value
     {
         use crate::window::poll_ui_msg;
 
-        // Call try_recv first to give the message allocator GC
-        // a chance to run before we block and wait for a message
+        // Call try_recv first, so that a message that is already waiting
+        // is taken before we block
         if let Some(msg) = self.try_recv() {
             return msg;
         }
 
         if self.actor_id != 0 {
             let msg = self.queue_rx.recv().unwrap();
-            return msg.msg;
+            return self.take_msg(msg);
         }
 
         // Actor 0 (the main actor) may need to poll for UI events
         loop {
-            // Poll for UI messages
+            // Poll for UI messages. These are built directly in this
+            // actor's heap, so they need no copying.
             let ui_msg = poll_ui_msg(self);
             if let Some(msg) = ui_msg {
                 return msg;
@@ -642,7 +685,7 @@ impl Actor
             let msg = self.queue_rx.recv_timeout(Duration::from_millis(8));
 
             if let Ok(msg) = msg {
-                return msg.msg;
+                return self.take_msg(msg);
             }
         }
     }
@@ -653,12 +696,6 @@ impl Actor
     {
         use crate::window::poll_ui_msg;
 
-        // Lock on the message allocator
-        // Senders cannot send us messages while we hold the lock
-        // If we can get the lock, it also means senders are done
-        let alloc_rc = self.msg_alloc.clone();
-        let mut msg_alloc = alloc_rc.lock().unwrap();
-
         // Actor 0 (the main actor) needs to poll for UI events
         if self.actor_id == 0 {
             let ui_msg = poll_ui_msg(self);
@@ -667,20 +704,43 @@ impl Actor
             }
         }
 
-        // Block on the message queue for up to 8ms
+        // Take a message off the queue. This needs no lock on the message
+        // allocator: the sender published the message through the channel,
+        // and the buffer is only ever reset below, when the queue is known
+        // to be empty.
         if let Ok(msg) = self.queue_rx.try_recv() {
-            return Some(msg.msg);
+            return Some(self.take_msg(msg));
         }
 
-        // If the message allocator is full
-        if msg_alloc.bytes_free() < msg_alloc.mem_size() / 4 {
-            // Perform a GC pass to copy messages into the main allocator
-            self.gc_collect(0, &mut []);
+        // The queue is empty, and every message we received has already
+        // been copied into our own heap, so the buffer holds nothing but
+        // garbage and can simply be reset.
+        //
+        // Senders hold the buffer's lock across their channel send, so an
+        // empty queue while we hold that lock means nothing is in flight.
+        // We use try_lock rather than lock because a sender blocked on a
+        // full queue holds the lock, and only we can drain the queue to
+        // release it.
+        //
+        // We reset it every time the queue drains rather than waiting for it
+        // to fill up. Clearing only costs time proportional to what has been
+        // allocated since the last reset, so doing it often is cheap, and it
+        // keeps the buffer from filling while a sender is mid-flight.
+        let alloc_rc = self.msg_alloc.clone();
 
-            println!("Performing message allocator GC");
+        if let Ok(mut msg_alloc) = alloc_rc.try_lock() {
+            if msg_alloc.bytes_used() > 0 {
+                let queued = self.queue_rx.try_recv();
 
-            // Clear the contents of the message allocator
-            msg_alloc.clear();
+                match queued {
+                    Ok(msg) => {
+                        drop(msg_alloc);
+                        return Some(self.take_msg(msg));
+                    }
+
+                    Err(_) => msg_alloc.clear()
+                }
+            }
         }
 
         // No message received
@@ -714,11 +774,45 @@ impl Actor
             Some(rc) => rc,
             None => return Err(()),
         };
+        // Wait for room in the receiver's message buffer. The receiver
+        // resets it once it has copied every message out, so this makes
+        // progress as long as the receiver is still running. Give up
+        // eventually rather than spinning forever if it is not.
+        let mut attempts = 0;
+
+        let mut msg_alloc = loop {
+            let msg_alloc = alloc_rc.lock().unwrap();
+
+            if msg_alloc.bytes_free() >= msg_alloc.mem_size() / 2 {
+                break msg_alloc;
+            }
+
+            drop(msg_alloc);
+            attempts += 1;
+
+            if attempts > 1_000_000 {
+                return Err(());
+            }
+
+            std::thread::yield_now();
+        };
+
+        let bytes_before = msg_alloc.bytes_used();
+
         let mut dst_map = HashMap::default();
-        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map);
+        let msg = deepcopy(msg, &mut msg_alloc, &mut dst_map);
         remap(&mut dst_map);
 
-        match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
+        let size = msg_alloc.bytes_used() - bytes_before;
+
+        // Queue the message while still holding the message allocator
+        // lock. That way the receiver never observes an empty queue while
+        // a message is sitting unqueued in its buffer, which is what makes
+        // it safe for the receiver to reset the buffer.
+        let res = actor_tx.sender.send(Message { sender: self.actor_id, msg, size });
+        drop(msg_alloc);
+
+        match res {
             Ok(_) => Ok(()),
             Err(_) => Err(()),
         }
@@ -2322,22 +2416,37 @@ impl VM
         let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
 
         // Create an allocator to send messages to the actor
-        let mut msg_alloc = Alloc::for_messages();
+        let msg_alloc = Alloc::for_messages();
+
+        // Build the new actor's heap here and copy its function and
+        // globals directly into it. Routing them through the message
+        // allocator instead would cap them at its fixed size, and would
+        // leave the actor referencing memory outside its own heap.
+        let mut alloc = Alloc::new();
+        let max_copy_bytes = std::cmp::max(
+            2 * parent.alloc.bytes_used(),
+            INIT_SIZE,
+        );
+        alloc.grow_reserve(max_copy_bytes);
+        alloc.grow(max_copy_bytes);
 
         // Hash map for remapping copied values
         let mut dst_map = HashMap::default();
 
         // We need to recursively copy the function/closure
-        // using the actor's message allocator
-        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map);
+        let fun = deepcopy(fun, &mut alloc, &mut dst_map);
 
         // Copy the global variables from the parent actor
         let mut globals = parent.globals.clone();
         for val in &mut globals {
-            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map);
+            *val = deepcopy(*val, &mut alloc, &mut dst_map);
         }
 
         remap(&mut dst_map);
+
+        // Give the new heap room to run, but not the whole upper bound
+        let live_bytes = alloc.bytes_used();
+        alloc.shrink_to(std::cmp::max((live_bytes * 3) / 2, INIT_SIZE));
 
         // Wrap the message allocator in a shared mutex
         let msg_alloc = Arc::new(Mutex::new(msg_alloc));
@@ -2355,6 +2464,7 @@ impl VM
                 actor_id,
                 Some(parent_id),
                 vm_mutex,
+                alloc,
                 msg_alloc,
                 queue_rx,
                 globals,
@@ -2436,6 +2546,7 @@ impl VM
             actor_id,
             None,
             vm_mutex,
+            Alloc::new(),
             msg_alloc,
             queue_rx,
             globals,
@@ -2445,10 +2556,10 @@ impl VM
     }
 
     /// Send a message to an actor without copying it to its message allocator
-    pub fn send_nocopy(&self, actor_id: u64, msg: Value) -> Result<(), ()>
+    pub fn send_nocopy(&self, actor_id: u64, msg: Value, size: usize) -> Result<(), ()>
     {
         let actor_tx = self.actor_txs.get(&actor_id).ok_or(())?;
-        actor_tx.sender.send(Message { sender: 0, msg }).map_err(|_| ())
+        actor_tx.sender.send(Message { sender: 0, msg, size }).map_err(|_| ())
     }
 }
 

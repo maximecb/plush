@@ -44,6 +44,7 @@ impl OutputCB
         let mut msg_alloc = alloc_rc.lock().unwrap();
 
         // Create the AudioNeeded object
+        let bytes_before = msg_alloc.bytes_used();
         let obj = {
             let mut obj_val = Object::new(AUDIO_NEEDED_ID, 3, &mut msg_alloc);
             let obj = obj_val.unwrap_obj();
@@ -52,10 +53,11 @@ impl OutputCB
             obj.set(2, Value::from(0)); // device_id 0
             obj_val
         };
+        let size = msg_alloc.bytes_used() - bytes_before;
 
         // Get the VM and send the message
         let vm = self.vm.lock().unwrap();
-        let _ = vm.send_nocopy(self.actor_id, obj);
+        let _ = vm.send_nocopy(self.actor_id, obj, size);
     }
 }
 
@@ -229,6 +231,7 @@ impl InputCB
         let mut msg_alloc = alloc_rc.lock().unwrap();
 
         // Create the AudioData object
+        let bytes_before = msg_alloc.bytes_used();
         let obj = {
             let mut obj_val = Object::new(AUDIO_DATA_ID, 2, &mut msg_alloc);
             let obj = obj_val.unwrap_obj();
@@ -236,10 +239,11 @@ impl InputCB
             obj.set(1, Value::from(num_samples));
             obj_val
         };
+        let size = msg_alloc.bytes_used() - bytes_before;
 
         // Get the VM and send the message
         let vm = self.vm.lock().unwrap();
-        let _ = vm.send_nocopy(self.actor_id, obj);
+        let _ = vm.send_nocopy(self.actor_id, obj, size);
     }
 }
 
