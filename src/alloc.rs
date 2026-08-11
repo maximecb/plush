@@ -325,11 +325,6 @@ impl Drop for Alloc
 {
     fn drop(&mut self)
     {
-        // In debug mode, fill the allocator's memory with 0xFE when dropping so that
-        // we can find out quickly if any memory did not get copied in a GC cycle
-        #[cfg(debug_assertions)]
-        unsafe { std::ptr::write_bytes(self.mem_block, 0xFEu8, self.next_idx) }
-
         // Release the whole reserved range
         unsafe { libc::munmap(self.mem_block as *mut libc::c_void, self.reserve_size) };
     }
