@@ -45,7 +45,7 @@ impl OutputCB
 
         // Create the AudioNeeded object
         let obj = {
-            let mut obj_val = Object::new(AUDIO_NEEDED_ID, 3, &mut msg_alloc).unwrap();
+            let mut obj_val = Object::new(AUDIO_NEEDED_ID, 3, &mut msg_alloc);
             let obj = obj_val.unwrap_obj();
             obj.set(0, Value::from(num_samples));
             obj.set(1, Value::from(self.num_channels));
@@ -230,7 +230,7 @@ impl InputCB
 
         // Create the AudioData object
         let obj = {
-            let mut obj_val = Object::new(AUDIO_DATA_ID, 2, &mut msg_alloc).unwrap();
+            let mut obj_val = Object::new(AUDIO_DATA_ID, 2, &mut msg_alloc);
             let obj = obj_val.unwrap_obj();
             obj.set(0, Value::from(device_id));
             obj.set(1, Value::from(num_samples));

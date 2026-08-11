@@ -59,10 +59,10 @@ pub fn deepcopy(
     src_val: Value,
     dst_alloc: &mut Alloc,
     dst_map: &mut HashMap<Value, Value>,
-) -> Result<Value, ()>
+) -> Value
 {
     if !src_val.is_heap() {
-        return Ok(src_val);
+        return src_val;
     }
 
     // Stack of values to visit
@@ -95,12 +95,12 @@ pub fn deepcopy(
 
         let new_val = match val {
             Value::String(p) => {
-                dst_alloc.str_val(unsafe { (*p).as_str() })?
+                dst_alloc.str_val(unsafe { (*p).as_str() })
             }
 
             Value::Closure(p) => {
                 let clos = unsafe { &*p };
-                let mut new_clos = Closure::new(clos.fun_id, clos.num_slots(), dst_alloc)?;
+                let mut new_clos = Closure::new(clos.fun_id, clos.num_slots(), dst_alloc);
                 let mut new_clos = new_clos.unwrap_clos();
 
                 for i in 0..clos.num_slots() {
@@ -114,7 +114,7 @@ pub fn deepcopy(
 
             Value::Object(p) => {
                 let obj = unsafe { &*p };
-                let mut new_obj = Object::new(obj.class_id, obj.num_slots(), dst_alloc)?;
+                let mut new_obj = Object::new(obj.class_id, obj.num_slots(), dst_alloc);
                 let mut new_obj = new_obj.unwrap_obj();
 
                 for i in 0..obj.num_slots() {
@@ -127,31 +127,31 @@ pub fn deepcopy(
             }
 
             Value::Dict(p) => {
-                let new_obj = unsafe { (*p).clone(dst_alloc)? };
+                let new_obj = unsafe { (*p).clone(dst_alloc) };
 
                 for (key, val) in new_obj.key_values_mut() {
                     push_val!(&Value::String(*key));
                     push_val!(val);
                 }
 
-                Value::Dict(dst_alloc.alloc(new_obj)?)
+                Value::Dict(dst_alloc.alloc(new_obj))
             }
 
             Value::Array(p) => {
                 let arr = unsafe { &*p };
-                let new_arr = arr.clone(dst_alloc)?;
+                let new_arr = arr.clone(dst_alloc);
 
                 for val in new_arr.items() {
                     push_val!(val);
                 }
 
-                Value::Array(dst_alloc.alloc(new_arr)?)
+                Value::Array(dst_alloc.alloc(new_arr))
             }
 
             Value::ByteArray(p) => {
                 let ba = unsafe { &*p };
-                let new_ba = ba.clone(dst_alloc)?;
-                Value::ByteArray(dst_alloc.alloc(new_ba)?)
+                let new_ba = ba.clone(dst_alloc);
+                Value::ByteArray(dst_alloc.alloc(new_ba))
             }
 
             _ => panic!("deepcopy unimplemented for type {:?}", val)
@@ -161,8 +161,7 @@ pub fn deepcopy(
         dst_map_entry.or_insert(new_val);
     }
 
-    let new_val = *dst_map.get(&src_val).unwrap();
-    Ok(new_val)
+    *dst_map.get(&src_val).unwrap()
 }
 
 /// Remap internal references to copied values
@@ -237,7 +236,7 @@ mod tests
         let mut dst_alloc = Alloc::new();
         let mut dst_map = HashMap::default();
         let v1 = Value::Int64(1337);
-        let v2 = deepcopy(v1, &mut dst_alloc, &mut dst_map).unwrap();
+        let v2 = deepcopy(v1, &mut dst_alloc, &mut dst_map);
         assert!(v1 == v2);
     }
 
@@ -247,8 +246,8 @@ mod tests
         let mut src_alloc = Alloc::new();
         let mut dst_alloc = Alloc::new();
         let mut dst_map = HashMap::default();
-        let s1 = src_alloc.str_val("foo").unwrap();
-        let s2 = deepcopy(s1, &mut dst_alloc, &mut dst_map).unwrap();
+        let s1 = src_alloc.str_val("foo");
+        let s2 = deepcopy(s1, &mut dst_alloc, &mut dst_map);
         assert!(s1 == s2);
     }
 }

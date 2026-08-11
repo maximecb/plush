@@ -326,14 +326,14 @@ impl ExprBox
             Expr::HostFn(f) => code.push(Insn::push { val: Value::HostFn(*f) }),
 
             Expr::String(s) => {
-                code.push(Insn::push { val: alloc.str_val(&s).unwrap() });
+                code.push(Insn::push { val: alloc.str_val(&s) });
             }
 
             Expr::ByteArray(bytes) => {
                 use crate::bytearray::ByteArray;
-                let mut ba = ByteArray::with_size(bytes.len(), alloc).unwrap();
+                let mut ba = ByteArray::with_size(bytes.len(), alloc);
                 unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-                let p_ba = alloc.alloc(ba).unwrap();
+                let p_ba = alloc.alloc(ba);
                 code.push(Insn::push { val: Value::ByteArray(p_ba) });
                 code.push(Insn::ba_clone);
             }
@@ -368,7 +368,7 @@ impl ExprBox
 
             Expr::Member { base, field } => {
                 base.gen_code(fun, code, alloc)?;
-                let field = alloc.str(&field).unwrap();
+                let field = alloc.str(&field);
                 code.push(Insn::get_field {
                     field,
                     class_id: Default::default(),
@@ -447,7 +447,7 @@ impl ExprBox
                             arg.gen_code(fun, code, alloc)?;
                         }
 
-                        let name = alloc.str(&field).unwrap();
+                        let name = alloc.str(&field);
                         code.push(Insn::call_method { name, argc });
                     }
 
@@ -542,7 +542,7 @@ fn gen_dict_expr(
 
         expr.gen_code(fun, code, alloc)?;
 
-        let field_name = alloc.str(&name).unwrap();
+        let field_name = alloc.str(&name);
 
         code.push(Insn::set_field {
             field: field_name,
@@ -784,7 +784,7 @@ fn gen_assign(
         }
 
         Expr::Member { base, field } => {
-            let field = alloc.str(&field).unwrap();
+            let field = alloc.str(&field);
 
             if need_value {
                 rhs.gen_code(fun, code, alloc)?;

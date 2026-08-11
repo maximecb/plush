@@ -715,7 +715,7 @@ impl Actor
             None => return Err(()),
         };
         let mut dst_map = HashMap::default();
-        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map).unwrap();
+        let msg = deepcopy(msg, alloc_rc.lock().as_mut().unwrap(), &mut dst_map);
         remap(&mut dst_map);
 
         match actor_tx.sender.send(Message { sender: self.actor_id, msg }) {
@@ -817,7 +817,7 @@ impl Actor
             &mut []
         );
 
-        Object::new(class_id, num_slots, &mut self.alloc).unwrap()
+        Object::new(class_id, num_slots, &mut self.alloc)
     }
 
     /// Set the value of an object field
@@ -844,38 +844,37 @@ impl Actor
 
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
-        self.alloc.str_val(str_const).unwrap()
+        self.alloc.str_val(str_const)
     }
 
     /// Perform a garbage collection cycle
     pub fn gc_collect(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
     {
-        fn try_copy(
+        fn copy_all(
             actor: &mut Actor,
             dst_alloc: &mut Alloc,
             extra_roots: &mut [&mut Value],
-        ) -> Result<(), ()>
-        {
+        ) {
             // Copy the global variables
             for val in &mut actor.globals {
-                deepcopy(*val, dst_alloc, &mut actor.dst_map)?;
+                deepcopy(*val, dst_alloc, &mut actor.dst_map);
             }
 
             // Copy values on the stack
             for val in &mut actor.stack {
-                deepcopy(*val, dst_alloc, &mut actor.dst_map)?;
+                deepcopy(*val, dst_alloc, &mut actor.dst_map);
             }
 
             // Copy closures in the stack frames
             for frame in &mut actor.frames {
-                deepcopy(frame.fun, dst_alloc, &mut actor.dst_map)?;
+                deepcopy(frame.fun, dst_alloc, &mut actor.dst_map);
             }
 
             // Copy heap values referenced in instructions
             for insn in &mut actor.insns {
                 match insn {
                     Insn::push { val } => {
-                        deepcopy(*val, dst_alloc, &mut actor.dst_map)?;
+                        deepcopy(*val, dst_alloc, &mut actor.dst_map);
                     }
 
                     // Instructions referencing name strings
@@ -883,7 +882,7 @@ impl Actor
                     Insn::set_field { field: s, .. } |
                     Insn::call_method { name: s, .. } |
                     Insn::call_method_pc { name: s, .. } => {
-                        deepcopy(Value::String(*s), dst_alloc, &mut actor.dst_map)?;
+                        deepcopy(Value::String(*s), dst_alloc, &mut actor.dst_map);
                     }
 
                     _ => {}
@@ -892,7 +891,7 @@ impl Actor
 
             // Copy extra roots supplied by the user
             for val in extra_roots {
-                deepcopy(**val, dst_alloc, &mut actor.dst_map)?;
+                deepcopy(**val, dst_alloc, &mut actor.dst_map);
             }
 
             println!(
@@ -902,8 +901,6 @@ impl Actor
             );
 
             remap(&mut actor.dst_map);
-
-            Ok(())
         }
 
         fn get_new_val(val: Value, dst_map: &HashMap<Value, Value>) -> Value
@@ -947,8 +944,7 @@ impl Actor
 
         // Copy all objects into the new allocator. Sized as above, this
         // cannot run out of space, so there is no need to retry.
-        try_copy(self, &mut dst_alloc, extra_roots)
-            .expect("ran out of space while copying the heap");
+        copy_all(self, &mut dst_alloc, extra_roots);
 
         // Size the heap from the live data we just measured, rather than
         // guessing from the old heap size. This lets the heap shrink again
@@ -1402,7 +1398,7 @@ impl Actor
 
                             let s0 = unwrap_str!(v0);
                             let s1 = unwrap_str!(v1);
-                            self.alloc.str_val(&(s0.to_owned() + s1)).unwrap()
+                            self.alloc.str_val(&(s0.to_owned() + s1))
                         }
 
                         _ => error!("add", "unsupported operand types")
@@ -1692,7 +1688,7 @@ impl Actor
                         &mut [],
                     );
 
-                    let clos = Closure::new(fun_id, num_slots, &mut self.alloc).unwrap();
+                    let clos = Closure::new(fun_id, num_slots, &mut self.alloc);
                     push!(clos);
                 }
 
@@ -1736,7 +1732,7 @@ impl Actor
                         &mut [],
                     );
 
-                    let p_cell = self.alloc.alloc(Value::Nil).unwrap();
+                    let p_cell = self.alloc.alloc(Value::Nil);
                     push!(Value::Cell(p_cell));
                 }
 
@@ -1769,8 +1765,8 @@ impl Actor
                         size_of::<Dict>() + 2 * Dict::size_of_slot(),
                         &mut []
                     );
-                    let dict = Dict::with_capacity(0, &mut self.alloc).unwrap();
-                    let new_obj = self.alloc.alloc(dict).unwrap();
+                    let dict = Dict::with_capacity(0, &mut self.alloc);
+                    let new_obj = self.alloc.alloc(dict);
                     push!(Value::Dict(new_obj))
                 }
 
@@ -1813,7 +1809,7 @@ impl Actor
 
                             field_name = field_name_val.unwrap_str();
                             let dict = obj.unwrap_dict();
-                            dict.set(field_name, val, &mut self.alloc).unwrap();
+                            dict.set(field_name, val, &mut self.alloc);
                         }
 
                         _ => error!("set_field", "set_field on non-object/dict value")
@@ -1831,7 +1827,7 @@ impl Actor
                         &mut [],
                     );
 
-                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc).unwrap();
+                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc);
 
                     // If a constructor method is present
                     let init_fun = self.get_method(class_id, "init");
@@ -1868,7 +1864,7 @@ impl Actor
                     );
 
                     // Allocate the object
-                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc).unwrap();
+                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc);
 
                     // The self value should be first argument to the constructor
                     // The constructor also returns the allocated object
@@ -2034,7 +2030,7 @@ impl Actor
 
                             let dict = arr.unwrap_dict();
                             let key = idx.unwrap_str();
-                            dict.set(key, val, &mut self.alloc).unwrap();
+                            dict.set(key, val, &mut self.alloc);
                         }
 
                         _ => error!("set_index", "expected array or dict type")
@@ -2050,8 +2046,8 @@ impl Actor
                         &mut [],
                     );
 
-                    let new_arr = Array::with_capacity(capacity, &mut self.alloc).unwrap();
-                    push!(Value::Array(self.alloc.alloc(new_arr).unwrap()))
+                    let new_arr = Array::with_capacity(capacity, &mut self.alloc);
+                    push!(Value::Array(self.alloc.alloc(new_arr)))
                 }
 
                 // Append an element at the end of an array
@@ -2073,8 +2069,8 @@ impl Actor
                     );
 
                     let ba = val.unwrap_ba();
-                    let ba_clone = ba.clone(&mut self.alloc).unwrap();
-                    let p_clone = self.alloc.alloc(ba_clone).unwrap();
+                    let ba_clone = ba.clone(&mut self.alloc);
+                    let p_clone = self.alloc.alloc(ba_clone);
                     push!(Value::ByteArray(p_clone));
                 }
 
@@ -2326,19 +2322,19 @@ impl VM
         let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
 
         // Create an allocator to send messages to the actor
-        let mut msg_alloc = Alloc::new();
+        let mut msg_alloc = Alloc::for_messages();
 
         // Hash map for remapping copied values
         let mut dst_map = HashMap::default();
 
         // We need to recursively copy the function/closure
         // using the actor's message allocator
-        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map).unwrap();
+        let fun = deepcopy(fun, &mut msg_alloc, &mut dst_map);
 
         // Copy the global variables from the parent actor
         let mut globals = parent.globals.clone();
         for val in &mut globals {
-            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map).unwrap();
+            *val = deepcopy(*val, &mut msg_alloc, &mut dst_map);
         }
 
         remap(&mut dst_map);
@@ -2413,7 +2409,7 @@ impl VM
         let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
 
         // Create an allocator to send messages to the actor
-        let msg_alloc = Arc::new(Mutex::new(Alloc::new()));
+        let msg_alloc = Arc::new(Mutex::new(Alloc::for_messages()));
 
         // Info needed to send the actor a message
         let actor_tx = ActorTx {

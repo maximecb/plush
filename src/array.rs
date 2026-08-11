@@ -11,20 +11,20 @@ pub struct Array
 
 impl Array
 {
-    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Result<Self, ()>
+    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Self
     {
         let capacity = std::cmp::max(capacity, 1);
-        let table = alloc.alloc_table(capacity)?;
-        Ok(Array { elems: table, len: 0 })
+        let table = alloc.alloc_table(capacity);
+        Array { elems: table, len: 0 }
     }
 
-    pub fn clone(&self, alloc: &mut Alloc) -> Result<Self, ()>
+    pub fn clone(&self, alloc: &mut Alloc) -> Self
     {
         let capacity = std::cmp::max(self.len, 1);
-        let table = alloc.alloc_table(capacity)?;
+        let table = alloc.alloc_table(capacity);
         let mut new_arr = Array { elems: table, len: self.len };
         new_arr.items_mut().copy_from_slice(self.items());
-        Ok(new_arr)
+        new_arr
     }
 
     pub fn len(&self) -> usize
@@ -57,7 +57,7 @@ impl Array
         &mut elems[..self.len]
     }
 
-    pub fn push(&mut self, val: Value, alloc: &mut Alloc) -> Result<(), ()>
+    pub fn push(&mut self, val: Value, alloc: &mut Alloc)
     {
         assert!(self.len <= self.elems.len());
 
@@ -66,7 +66,7 @@ impl Array
         // If we are at capacity
         if self.len == self.elems.len() {
             let new_len = self.len * 2;
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len)? };
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len) };
             new_elems[..self.len].copy_from_slice(self.items());
             self.elems = new_elems;
         }
@@ -75,16 +75,14 @@ impl Array
             (&mut *self.elems)[self.len] = val;
             self.len += 1;
         }
-
-        Ok(())
     }
 
-    pub fn insert(&mut self, idx: usize, val: Value, alloc: &mut Alloc) -> Result<(), ()>
+    pub fn insert(&mut self, idx: usize, val: Value, alloc: &mut Alloc)
     {
         // If we are at capacity
         if self.len == self.elems.len() {
             let new_len = self.len * 2;
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len)? };
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len) };
             new_elems[..self.len].copy_from_slice(self.items());
             self.elems = new_elems;
         }
@@ -94,8 +92,6 @@ impl Array
             (&mut *self.elems)[idx] = val;
             self.len += 1;
         }
-
-        Ok(())
     }
 
     pub fn remove(&mut self, idx: usize) -> Value
@@ -113,13 +109,13 @@ impl Array
         removed
     }
 
-    pub fn append(&mut self, other: &Array, alloc: &mut Alloc) -> Result<(), ()> {
+    pub fn append(&mut self, other: &Array, alloc: &mut Alloc) {
         let other_elems = other.items();
         let cur_len = self.len();
 
         if self.len + other_elems.len() > self.elems.len() {
             let new_len = self.len + other_elems.len();
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len)? };
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len) };
 
             let elems = self.items();
             new_elems[..cur_len].copy_from_slice(elems);
@@ -131,8 +127,6 @@ impl Array
         }
 
         self.len += other_elems.len();
-
-        Ok(())
     }
 
     pub fn pop(&mut self) -> Value
@@ -155,10 +149,10 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fi
         &mut [&mut fill_val]
     );
 
-    let mut elems = actor.alloc.alloc_table(num_elems).unwrap();
+    let mut elems = actor.alloc.alloc_table(num_elems);
     unsafe { (&mut *elems).fill(fill_val); }
     let arr = Array { elems, len: num_elems };
-    Ok(Value::Array(actor.alloc.alloc(arr).unwrap()))
+    Ok(Value::Array(actor.alloc.alloc(arr)))
 }
 
 pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result<Value, String>
@@ -173,7 +167,7 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result
     }
 
     let arr = array.unwrap_arr();
-    arr.push(val, &mut actor.alloc).unwrap();
+    arr.push(val, &mut actor.alloc);
     Ok(Value::Nil)
 }
 
@@ -201,7 +195,7 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val
 
     let arr = array.unwrap_arr();
     let idx = unwrap_usize!(idx);
-    arr.insert(idx, val, &mut actor.alloc).unwrap();
+    arr.insert(idx, val, &mut actor.alloc);
     Ok(Value::Nil)
 }
 
@@ -220,6 +214,6 @@ pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: V
 
     let a0 = self_array.unwrap_arr();
     let a1 = other_array.unwrap_arr();
-    a0.append(a1, &mut actor.alloc).unwrap();
+    a0.append(a1, &mut actor.alloc);
     Ok(Value::Nil)
 }

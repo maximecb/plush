@@ -11,18 +11,18 @@ pub struct Closure
 impl Closure
 {
     /// Allocate a new closure with a given number of slots
-    pub fn new(fun_id: FunId, num_slots: usize, alloc: &mut Alloc) -> Result<Value, ()>
+    pub fn new(fun_id: FunId, num_slots: usize, alloc: &mut Alloc) -> Value
     {
         // Allocate the slots for the closure
-        let slots = alloc.alloc_table::<Value>(num_slots)?;
+        let slots = alloc.alloc_table::<Value>(num_slots);
 
         // Create the closure struct
         let obj = Closure { fun_id, slots };
 
         // Allocate the Object struct itself
-        let obj_ptr = alloc.alloc(obj)?;
+        let obj_ptr = alloc.alloc(obj);
 
-        Ok(Value::Closure(obj_ptr))
+        Value::Closure(obj_ptr)
     }
 
     pub fn num_slots(&self) -> usize

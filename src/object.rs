@@ -11,18 +11,18 @@ pub struct Object
 impl Object
 {
     /// Allocate a new object with a given number of slots
-    pub fn new(class_id: ClassId, num_slots: usize, alloc: &mut Alloc) -> Result<Value, ()>
+    pub fn new(class_id: ClassId, num_slots: usize, alloc: &mut Alloc) -> Value
     {
         // Allocate the slots for the object
-        let slots = alloc.alloc_table::<Value>(num_slots)?;
+        let slots = alloc.alloc_table::<Value>(num_slots);
 
         // Create the Object struct
         let obj = Object { class_id, slots };
 
         // Allocate the Object struct itself
-        let obj_ptr = alloc.alloc(obj)?;
+        let obj_ptr = alloc.alloc(obj);
 
-        Ok(Value::Object(obj_ptr))
+        Value::Object(obj_ptr)
     }
 
     pub fn num_slots(&self) -> usize

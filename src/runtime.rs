@@ -57,7 +57,7 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
     let s = format!("{}", v);
 
     actor.gc_check(32, &mut []);
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result<Value, String>
@@ -67,7 +67,7 @@ fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result<Value, Str
     let s = format!("{:0width$X}", v, width = digits);
 
     actor.gc_check(32 + digits, &mut []);
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 fn float64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
@@ -176,7 +176,7 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
     let v = v.unwrap_f64();
     let s = format!("{}", v);
     actor.gc_check(1024, &mut []);
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Result<Value, String>
@@ -185,7 +185,7 @@ fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Resu
     let decimals = unwrap_usize!(decimals);
     let s = format!("{:.*}", decimals, num);
     actor.gc_check(std::cmp::max(1024, decimals), &mut []);
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 /// Create a single-character string from a codepoint integer value
@@ -202,7 +202,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
     s.push(ch);
 
     actor.gc_check(size_of::<Str>() + s.len(), &mut []);
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 /// Get the UTF-8 byte at the given index
@@ -240,7 +240,7 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value,
 
     let ch_s = ch.to_string();
     actor.gc_check(size_of::<Str>() + ch_s.len(), &mut []);
-    Ok(actor.alloc.str_val(&ch_s).unwrap())
+    Ok(actor.alloc.str_val(&ch_s))
 }
 
 /// Try to parse the string as an integer with the given radix
@@ -272,7 +272,7 @@ fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
     let s = unwrap_str!(s);
     let s = s.trim().to_string();
     actor.gc_check(size_of::<Str>() + s.len(), &mut []);
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 /// Uppercase a String
@@ -281,7 +281,7 @@ fn string_upper(actor: &mut Actor, s: Value) -> Result<Value, String>
     let s = unwrap_str!(s);
     let s = s.to_uppercase();
     actor.gc_check(size_of::<Str>() + s.len(), &mut []);
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 /// Lowercase a String
@@ -290,7 +290,7 @@ fn string_lower(actor: &mut Actor, s: Value) -> Result<Value, String>
     let s = unwrap_str!(s);
     let s = s.to_lowercase();
     actor.gc_check(size_of::<Str>() + s.len(), &mut []);
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 /// Split a string by a separator and return an array of strings
@@ -316,12 +316,12 @@ fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value
         &mut []
     );
 
-    let mut array = Array::with_capacity(num_strs, &mut actor.alloc).unwrap();
+    let mut array = Array::with_capacity(num_strs, &mut actor.alloc);
     for part in str_parts {
-        array.push(actor.alloc.str_val(part).unwrap(), &mut actor.alloc).unwrap();
+        array.push(actor.alloc.str_val(part), &mut actor.alloc);
     }
 
-    Ok(Value::Array(actor.alloc.alloc(array).unwrap()))
+    Ok(Value::Array(actor.alloc.alloc(array)))
 }
 
 pub fn init_runtime(prog: &mut Program)

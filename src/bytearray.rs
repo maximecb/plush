@@ -12,16 +12,15 @@ pub struct ByteArray
 
 impl ByteArray
 {
-    pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Result<Self, ()>
+    pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Self
     {
-        let bytes = alloc.alloc_table(num_bytes)?;
-        let ba = ByteArray { bytes, len: num_bytes };
-        Ok(ba)
+        let bytes = alloc.alloc_table(num_bytes);
+        ByteArray { bytes, len: num_bytes }
     }
 
-    pub fn clone(&self, alloc: &mut Alloc) -> Result<Self, ()>
+    pub fn clone(&self, alloc: &mut Alloc) -> Self
     {
-        let bytes = alloc.alloc_table(self.len)?;
+        let bytes = alloc.alloc_table(self.len);
         let mut new_ba = ByteArray { bytes, len: self.len };
 
         unsafe {
@@ -30,7 +29,7 @@ impl ByteArray
             dst_slice.copy_from_slice(src_slice);
         }
 
-        Ok(new_ba)
+        new_ba
     }
 
     pub fn num_bytes(&self) -> usize
@@ -208,8 +207,8 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result
         &mut []
     );
 
-    let ba = ByteArray::with_size(num_bytes, &mut actor.alloc).unwrap();
-    let p_ba = actor.alloc.alloc(ba).unwrap();
+    let ba = ByteArray::with_size(num_bytes, &mut actor.alloc);
+    let p_ba = actor.alloc.alloc(ba);
     Ok(Value::ByteArray(p_ba))
 }
 
@@ -228,7 +227,7 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Va
         let ba_mut = ba.unwrap_ba();
 
         let old_len = ba_mut.len;
-        let new_bytes = actor.alloc.alloc_table(new_size).unwrap();
+        let new_bytes = actor.alloc.alloc_table(new_size);
         let copy_len = std::cmp::min(old_len, new_size);
 
         unsafe {

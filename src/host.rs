@@ -178,7 +178,7 @@ pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<V
         &mut [],
     );
 
-    Ok(actor.alloc.str_val(arg_str).unwrap())
+    Ok(actor.alloc.str_val(arg_str))
 }
 
 /// Get a command-line argument string by index
@@ -229,7 +229,7 @@ fn readln(actor: &mut Actor) -> Result<Value, String>
                 &mut [],
             );
 
-            Ok(actor.alloc.str_val(&line).unwrap())
+            Ok(actor.alloc.str_val(&line))
         }
 
         Err(_) => Ok(Value::Nil)
@@ -378,9 +378,9 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
         &mut [],
     );
 
-    let mut ba = ByteArray::with_size(bytes.len(), &mut actor.alloc).unwrap();
+    let mut ba = ByteArray::with_size(bytes.len(), &mut actor.alloc);
     unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-    let ba_obj = actor.alloc.alloc(ba).unwrap();
+    let ba_obj = actor.alloc.alloc(ba);
     Ok(Value::ByteArray(ba_obj))
 }
 
@@ -403,7 +403,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
         &mut [],
     );
 
-    Ok(actor.alloc.str_val(&s).unwrap())
+    Ok(actor.alloc.str_val(&s))
 }
 
 /// Writes the contents of a ByteArray to a file

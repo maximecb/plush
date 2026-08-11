@@ -58,27 +58,26 @@ pub struct Dict {
 const THRESHOLD: usize = 75;
 
 impl Dict {
-    fn empty_zeroed_table(capacity: usize, alloc: &mut Alloc) -> Result<*mut [TableSlot], ()> {
-        let table = alloc.alloc_table(capacity)?;
-        Ok(table)
+    fn empty_zeroed_table(capacity: usize, alloc: &mut Alloc) -> *mut [TableSlot] {
+        alloc.alloc_table(capacity)
     }
 
-    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Result<Self, ()>
+    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Self
     {
         let capacity = std::cmp::max(capacity, 2);
-        let table = Self::empty_zeroed_table(capacity, alloc)?;
-        Ok(Dict { table, len: 0 })
+        let table = Self::empty_zeroed_table(capacity, alloc);
+        Dict { table, len: 0 }
     }
 
-    pub fn clone(&self, alloc: &mut Alloc) -> Result<Self, ()>
+    pub fn clone(&self, alloc: &mut Alloc) -> Self
     {
         let capacity = std::cmp::max(self.capacity(), 1);
-        let table = Self::empty_zeroed_table(capacity, alloc)?;
-        let mut new_dict = Dict { table, len: self.len };
+        let table = Self::empty_zeroed_table(capacity, alloc);
+        let new_dict = Dict { table, len: self.len };
         let table = unsafe { &mut *table };
         let self_table = unsafe { &*self.table };
         table.copy_from_slice(self_table);
-        Ok(new_dict)
+        new_dict
     }
 
     // get slot is the heart of the dict implementation, as it's used for both
@@ -109,20 +108,18 @@ impl Dict {
 
     // Double the size of the internal backing table. This allocates a whole new backing table
     // and rehashes all entries into it
-    fn double_size(&mut self, alloc: &mut Alloc) -> Result<(), ()> {
+    fn double_size(&mut self, alloc: &mut Alloc) {
         let old_table = unsafe { &* self.table };
 
-        let new_table = Self::empty_zeroed_table((old_table.len() + 1) * 2, alloc)?;
+        let new_table = Self::empty_zeroed_table((old_table.len() + 1) * 2, alloc);
 
         self.table = new_table;
 
         for entry in old_table {
             if let Some((key, val)) = entry.key_value() {
-                self.set(*key, *val, alloc).unwrap();
+                self.set(*key, *val, alloc);
             }
         }
-
-        Ok(())
     }
 
     pub fn capacity(&self) -> usize {
@@ -152,17 +149,15 @@ impl Dict {
     }
 
     // Set the value associated with a given key
-    pub fn set(&mut self, field_name: *const Str, new_val: Value, alloc: &mut Alloc) -> Result<(), ()> {
+    pub fn set(&mut self, field_name: *const Str, new_val: Value, alloc: &mut Alloc) {
         if self.will_allocate_on_set() {
-            self.double_size(alloc)?;
+            self.double_size(alloc);
         }
 
         let key = unsafe { &*field_name }.as_str();
         let slot = self.get_slot(key);
         *slot = TableSlot::new(field_name, new_val);
         self.len += 1;
-
-        Ok(())
     }
 
     // Get the value associated with a given field

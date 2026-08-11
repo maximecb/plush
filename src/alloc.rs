@@ -1,9 +1,15 @@
 use crate::str::Str;
 use crate::vm::Value;
 
-/// Initial size for a new allocator. Kept small so that actors are
-/// cheap to spawn, since each one owns a heap.
+/// Initial size for a new heap. Kept small so that actors are cheap to
+/// spawn, since each one owns a heap. Heaps grow as needed.
 pub const INIT_SIZE: usize = 4 * 1024 * 1024;
+
+/// Size of a message allocator. Messages are copied into a buffer that is
+/// cleared when it fills up rather than grown, so this also caps how large
+/// a single message can be. Committed pages that are never touched cost
+/// nothing, so this can afford to be much larger than a new heap.
+pub const MSG_SIZE: usize = 16 * 1024 * 1024;
 
 pub struct Alloc
 {
@@ -59,6 +65,14 @@ impl Alloc
     pub fn new() -> Self
     {
         Self::with_size(INIT_SIZE)
+    }
+
+    /// Allocator for incoming messages. These are cleared when full
+    /// rather than grown, so they start out large enough to hold a
+    /// worthwhile message.
+    pub fn for_messages() -> Self
+    {
+        Self::with_size(MSG_SIZE)
     }
 
     pub fn with_size(mem_size_bytes: usize) -> Self
@@ -209,7 +223,12 @@ impl Alloc
     }
 
     /// Allocate a block of a given size
-    fn alloc_bytes(&mut self, size_bytes: usize) -> Result<*mut u8, ()>
+    ///
+    /// Callers are expected to have made room first: the mutator goes
+    /// through gc_check, and the GC sizes its to-space up front. Running
+    /// out here means one of those was wrong, so there is nothing useful
+    /// to do but abort.
+    fn alloc_bytes(&mut self, size_bytes: usize) -> *mut u8
     {
         let align_bytes = 8;
 
@@ -219,40 +238,45 @@ impl Alloc
         // Bump the next allocation index
         let next_idx = obj_pos + size_bytes;
         if next_idx > self.mem_size {
-            return Err(())
+            panic!(
+                "allocator out of memory, could not allocate {} bytes ({} of {} used)",
+                size_bytes,
+                self.next_idx,
+                self.mem_size,
+            );
         }
         self.next_idx = next_idx;
 
-        Ok(unsafe { self.mem_block.add(obj_pos) })
+        unsafe { self.mem_block.add(obj_pos) }
     }
 
     /// Allocate a variable-sized table of elements of a given type
-    pub fn alloc_table<T>(&mut self, num_elems: usize) -> Result<*mut [T], ()>
+    pub fn alloc_table<T>(&mut self, num_elems: usize) -> *mut [T]
     {
         let num_bytes = num_elems * std::mem::size_of::<T>();
-        let bytes = self.alloc_bytes(num_bytes)?;
+        let bytes = self.alloc_bytes(num_bytes);
         let p = bytes as *mut T;
 
-        Ok(std::ptr::slice_from_raw_parts_mut(p, num_elems))
+        std::ptr::slice_from_raw_parts_mut(p, num_elems)
     }
 
     /// Allocate a new object of a given type
-    pub fn alloc<T>(&mut self, obj: T) -> Result<*mut T, ()>
+    pub fn alloc<T>(&mut self, obj: T) -> *mut T
     {
         let num_bytes = std::mem::size_of::<T>();
-        let bytes = self.alloc_bytes(num_bytes)?;
+        let bytes = self.alloc_bytes(num_bytes);
         let p = bytes as *mut T;
 
         // Write object at location without calling drop
         // on what's currently at that location
         unsafe { std::ptr::write(p, obj) };
 
-        Ok(p)
+        p
     }
 
-    pub fn str(&mut self, s: &str) -> Result<*const Str, ()>
+    pub fn str(&mut self, s: &str) -> *const Str
     {
-        let bytes = self.alloc_bytes(s.len())?;
+        let bytes = self.alloc_bytes(s.len());
         let p = bytes as *mut u8;
 
         // Write string bytes at location without calling drop
@@ -263,13 +287,12 @@ impl Alloc
         };
         let raw_str_ptr = raw_str as *const str;
 
-        let p_str = self.alloc(Str::new(raw_str_ptr))?;
-        Ok(p_str)
+        self.alloc(Str::new(raw_str_ptr))
     }
 
-    pub fn str_val(&mut self, s: &str) -> Result<Value, ()>
+    pub fn str_val(&mut self, s: &str) -> Value
     {
-        Ok(Value::String(self.str(s)?))
+        Value::String(self.str(s))
     }
 }
 
@@ -302,7 +325,7 @@ mod tests
     fn grow_keeps_addresses_and_zeroes()
     {
         let mut alloc = Alloc::with_size(1024 * 1024);
-        let p = alloc.alloc::<u64>(1337).unwrap();
+        let p = alloc.alloc::<u64>(1337);
 
         // An allocator can always grow into its own reservation
         let reserve_size = alloc.reserve_size();
@@ -312,7 +335,7 @@ mod tests
         assert!(unsafe { *p } == 1337);
         assert!(alloc.mem_size() == reserve_size);
 
-        let table = alloc.alloc_table::<u64>(4096).unwrap();
+        let table = alloc.alloc_table::<u64>(4096);
         assert!(unsafe { (*table).iter().all(|&x| x == 0) });
     }
 
@@ -328,7 +351,7 @@ mod tests
 
         // The new reservation must be usable and zeroed
         alloc.grow(64 * 1024 * 1024);
-        let table = alloc.alloc_table::<u64>(4 * 1024 * 1024).unwrap();
+        let table = alloc.alloc_table::<u64>(4 * 1024 * 1024);
         assert!(unsafe { (*table).iter().all(|&x| x == 0) });
     }
 
@@ -339,7 +362,7 @@ mod tests
     fn grow_reserve_rejects_live_objects()
     {
         let mut alloc = Alloc::with_size(1024 * 1024);
-        alloc.alloc::<u64>(1337).unwrap();
+        alloc.alloc::<u64>(1337);
         alloc.grow_reserve(64 * 1024 * 1024);
     }
 
@@ -359,7 +382,7 @@ mod tests
     {
         let mut alloc = Alloc::with_size(8 * 1024 * 1024);
 
-        let table = alloc.alloc_table::<u64>(256 * 1024).unwrap();
+        let table = alloc.alloc_table::<u64>(256 * 1024);
         unsafe { (*table).fill(0xABAB_ABAB_ABAB_ABAB) };
         alloc.clear();
 
@@ -367,7 +390,7 @@ mod tests
         assert!(alloc.mem_size() <= 128 * 1024);
 
         alloc.grow(8 * 1024 * 1024);
-        let table = alloc.alloc_table::<u64>(256 * 1024).unwrap();
+        let table = alloc.alloc_table::<u64>(256 * 1024);
         assert!(unsafe { (*table).iter().all(|&x| x == 0) });
     }
 
@@ -384,7 +407,7 @@ mod tests
 
         let mut src = Alloc::with_size(INIT_SIZE);
         for &s in &sizes {
-            src.alloc_bytes(s).unwrap();
+            src.alloc_bytes(s);
         }
 
         // Copy the same allocations back in the worst order we can pick
@@ -392,10 +415,11 @@ mod tests
         dst.grow_reserve(2 * src.bytes_used());
         dst.grow(2 * src.bytes_used());
 
+        // If the bound were wrong, alloc_bytes would panic here
         let mut reordered = sizes.clone();
         reordered.sort();
         for &s in &reordered {
-            assert!(dst.alloc_bytes(s).is_ok(), "copy ran out of space");
+            dst.alloc_bytes(s);
         }
 
         assert!(dst.bytes_used() <= 2 * src.bytes_used());
