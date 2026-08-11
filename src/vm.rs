@@ -6,7 +6,7 @@ use crate::dict::Dict;
 use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
-use crate::alloc::Alloc;
+use crate::alloc::{Alloc, INIT_SIZE};
 use crate::object::Object;
 use crate::closure::Closure;
 use crate::array::Array;
@@ -895,12 +895,10 @@ impl Actor
                 deepcopy(**val, dst_alloc, &mut actor.dst_map)?;
             }
 
-            let pct_free = 100 * dst_alloc.bytes_free() / dst_alloc.mem_size();
             println!(
-                "GC copied {} values, {} bytes ({}% free)",
+                "GC copied {} values, {} bytes",
                 thousands_sep(actor.dst_map.len()),
                 thousands_sep(dst_alloc.bytes_used()),
-                pct_free
             );
 
             remap(&mut actor.dst_map);
@@ -921,55 +919,52 @@ impl Actor
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
         let start_time = crate::host::get_time_ms();
 
-        let mut new_mem_size = self.alloc.mem_size();
+        // Upper bound on how much space the copy can take. Every object is
+        // copied at most once and none of them grow, but allocations are
+        // aligned individually, so copying them in a different order can
+        // add up to a few bytes of padding each. Twice the size of the
+        // from-space covers that with room to spare.
+        //
+        // Committing memory we never touch costs nothing, so there is no
+        // reason to be tight here. The excess is released below, once we
+        // know how much data is actually live.
+        let max_copy_bytes = std::cmp::max(
+            2 * self.alloc.bytes_used() + bytes_needed,
+            INIT_SIZE,
+        );
 
-        // Get a new allocator to copy the data into
-        let mut dst_alloc = if self.to_space.is_some() {
-            let alloc = self.to_space.take().unwrap();
-            if alloc.mem_size() >= new_mem_size {
-                alloc
-            } else {
-                Alloc::with_size(new_mem_size)
-            }
-        } else {
-            Alloc::with_size(new_mem_size)
+        // Get an allocator to copy the data into. The to-space is empty at
+        // this point, so its reservation can be replaced if it is too small.
+        let mut dst_alloc = match self.to_space.take() {
+            Some(alloc) => alloc,
+            None => Alloc::new()
         };
+        dst_alloc.grow_reserve(max_copy_bytes);
+        dst_alloc.grow(max_copy_bytes);
 
-        loop {
-            // Clear the value map
-            self.dst_map.clear();
+        // Clear the value map
+        self.dst_map.clear();
 
-            // Try to copy all objects into the new allocator
-            let copy_fail = try_copy(self, &mut dst_alloc, extra_roots).is_err();
+        // Copy all objects into the new allocator. Sized as above, this
+        // cannot run out of space, so there is no need to retry.
+        try_copy(self, &mut dst_alloc, extra_roots)
+            .expect("ran out of space while copying the heap");
 
-            // If there is not enough free memory after copying
-            let min_free_bytes = std::cmp::max(self.alloc.mem_size() / 5, bytes_needed);
-            let bytes_free = dst_alloc.bytes_free();
-            let not_enough_space = bytes_free < min_free_bytes;
+        // Size the heap from the live data we just measured, rather than
+        // guessing from the old heap size. This lets the heap shrink again
+        // when a program's live set gets smaller.
+        let live_bytes = dst_alloc.bytes_used();
+        let new_mem_size = std::cmp::max(
+            std::cmp::max((live_bytes * 3) / 2, live_bytes + bytes_needed),
+            INIT_SIZE,
+        );
+        dst_alloc.shrink_to(new_mem_size);
 
-            // If we could not copy all the data or there is not enough free space
-            // Increase the target heap size
-            if copy_fail || not_enough_space {
-                new_mem_size = std::cmp::max(
-                    (new_mem_size * 3) / 2,
-                    new_mem_size + bytes_needed,
-                );
-
-                println!(
-                    "Increasing heap size to {} bytes",
-                    thousands_sep(new_mem_size),
-                );
-
-                // Recreate the target allocator
-                dst_alloc = Alloc::with_size(new_mem_size);
-
-                // Try again
-                continue;
-            }
-
-            // Copying successful
-            break;
-        }
+        println!(
+            "Heap size now {} bytes ({}% free)",
+            thousands_sep(dst_alloc.mem_size()),
+            100 * dst_alloc.bytes_free() / dst_alloc.mem_size(),
+        );
 
         // Remap the global variables
         for val in &mut self.globals {
