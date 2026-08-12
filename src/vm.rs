@@ -739,10 +739,10 @@ impl Actor
         // full queue holds the lock, and only we can drain the queue to
         // release it.
         //
-        // We reset it every time the queue drains rather than waiting for it
-        // to fill up. Clearing only costs time proportional to what has been
-        // allocated since the last reset, so doing it often is cheap, and it
-        // keeps the buffer from filling while a sender is mid-flight.
+        // We reset it every time the queue drains rather than waiting for
+        // it to fill up. Resetting is just an index, so doing it often is
+        // free, and it keeps the buffer from filling while a sender is
+        // mid-flight.
         let alloc_rc = self.msg_alloc.clone();
 
         if let Ok(mut msg_alloc) = alloc_rc.try_lock() {
@@ -756,7 +756,10 @@ impl Actor
                     }
 
                     Err(_) => {
-                        msg_alloc.clear();
+                        // Nothing but the copier ever allocates in here,
+                        // and it writes every byte of every block it
+                        // copies, so this buffer never has to be zeroed.
+                        msg_alloc.reset();
 
                         // Only give memory back after something genuinely
                         // large came through. Shrinking is an mmap call, so
@@ -1000,13 +1003,25 @@ impl Actor
             INIT_SIZE,
         );
 
-        // Get an allocator to copy the data into. The to-space is empty at
-        // this point, so its reservation can be replaced if it is too small.
+        // Get an allocator to copy the data into. It still holds whatever
+        // it had when it was last a heap, and its allocation point is the
+        // high water mark of that: everything past it was never written
+        // and is still zero. The copy overwrites every byte of what it
+        // allocates, so only the rest has to be cleared, once we know how
+        // far the copy got.
         let mut dst_alloc = match self.to_space.take() {
             Some(alloc) => alloc,
             None => Alloc::new()
         };
+        let dirty_bytes = dst_alloc.bytes_used();
+
+        // The to-space has to be empty for its reservation to be replaced
+        dst_alloc.reset();
         dst_alloc.grow_reserve(max_copy_bytes);
+
+        // A replaced reservation is freshly mapped, so nothing in it is
+        // stale any more. Growing only ever commits zeroed pages.
+        let dirty_bytes = std::cmp::min(dirty_bytes, dst_alloc.mem_size());
         dst_alloc.grow(max_copy_bytes);
 
         // Copy the roots into the new allocator, then everything they
@@ -1079,15 +1094,22 @@ impl Actor
         );
         dst_alloc.shrink_to(new_mem_size);
 
+        // Clear what the copy did not overwrite, so that the mutator
+        // still allocates out of zeroed memory. Shrinking above released
+        // its pages, which come back zeroed, so only what is left of the
+        // old high water mark is worth touching.
+        dst_alloc.zero_up_to(dirty_bytes);
+
         println!(
             "Heap size now {} bytes ({}% free)",
             thousands_sep(dst_alloc.mem_size()),
             100 * dst_alloc.bytes_free() / dst_alloc.mem_size(),
         );
 
-        // Swap the old and new allocators
+        // Swap the old and new allocators. The from-space is left as it
+        // is: keeping its allocation point is what tells the next cycle
+        // how much of it holds stale bytes.
         std::mem::swap(&mut self.alloc, &mut dst_alloc);
-        dst_alloc.clear();
         self.to_space = Some(dst_alloc);
 
         #[cfg(feature = "verify_gc")]

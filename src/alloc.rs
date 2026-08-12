@@ -337,15 +337,34 @@ impl Alloc
         self.mem_size = new_size;
     }
 
-    /// Clear/erase all allocations
-    pub fn clear(&mut self)
+    /// Discard all allocations, leaving the memory as it was.
+    ///
+    /// The bytes are deliberately not zeroed here. Everything that fills
+    /// a reset allocator writes every byte of what it allocates: the
+    /// collector copies whole blocks in. What it does not reach has to be
+    /// zeroed with zero_up_to before anything relying on zeroed memory
+    /// allocates from it again.
+    pub fn reset(&mut self)
     {
-        // Clear the memory up to the next allocation index
-        // Some objects rely on uninitialized memory being zero
-        unsafe { std::ptr::write_bytes(self.mem_block, 0, self.next_idx) }
-
-        // Reset the next allocation index
         self.next_idx = 0;
+    }
+
+    /// Zero the bytes between the allocation point and a given offset.
+    ///
+    /// This is how a reset allocator is made safe to allocate from
+    /// again, once we know how much of it an incoming copy overwrote.
+    /// Anything past the offset was never written and is already zero.
+    pub fn zero_up_to(&mut self, end: usize)
+    {
+        let end = std::cmp::min(end, self.mem_size);
+
+        if end > self.next_idx {
+            unsafe { std::ptr::write_bytes(
+                self.mem_block.add(self.next_idx),
+                0,
+                end - self.next_idx
+            )};
+        }
     }
 
     /// Payload pointer for the block starting at a given byte offset.
@@ -551,14 +570,52 @@ mod tests
 
         let table = alloc.alloc_table::<u64>(256 * 1024, Tag::Bytes);
         unsafe { (*table).fill(0xABAB_ABAB_ABAB_ABAB) };
-        alloc.clear();
+        alloc.reset();
 
-        alloc.shrink_to(64 * 1024);
-        assert!(alloc.mem_size() <= 128 * 1024);
+        // Release every page, so none of the old contents can come back
+        alloc.shrink_to(0);
+        assert!(alloc.mem_size() == 0);
 
         alloc.grow(8 * 1024 * 1024);
         let table = alloc.alloc_table::<u64>(256 * 1024, Tag::Bytes);
         assert!(unsafe { (*table).iter().all(|&x| x == 0) });
+    }
+
+    /// Resetting leaves the old bytes in place, and zero_up_to clears
+    /// whatever was not allocated over in the meantime
+    #[test]
+    fn zero_up_to_clears_what_was_not_overwritten()
+    {
+        let mut alloc = Alloc::with_size(1024 * 1024);
+
+        let table = alloc.alloc_table::<u64>(1024, Tag::Bytes);
+        unsafe { (*table).fill(0xABAB_ABAB_ABAB_ABAB) };
+        let dirty_bytes = alloc.bytes_used();
+        alloc.reset();
+
+        // Allocate over the first half, the way a copy would
+        let kept = alloc.alloc_table::<u64>(512, Tag::Bytes);
+        unsafe { (*kept).fill(1337) };
+
+        alloc.zero_up_to(dirty_bytes);
+
+        // What we wrote is untouched, and the tail is back to zero
+        assert!(unsafe { (*kept).iter().all(|&x| x == 1337) });
+        let rest = alloc.alloc_table::<u64>(510, Tag::Bytes);
+        assert!(unsafe { (*rest).iter().all(|&x| x == 0) });
+    }
+
+    /// Zeroing must stop at the committed size, not run off the end
+    #[test]
+    fn zero_up_to_is_clamped_to_the_heap()
+    {
+        let mut alloc = Alloc::with_size(1024 * 1024);
+        let mem_size = alloc.mem_size();
+
+        alloc.alloc_table::<u64>(8, Tag::Bytes);
+        alloc.zero_up_to(usize::MAX);
+
+        assert!(alloc.mem_size() == mem_size);
     }
 
     /// A block costs its header plus its own rounded size and nothing

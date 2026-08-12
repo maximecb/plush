@@ -68,7 +68,18 @@ impl Dict {
     }
 
     fn empty_zeroed_table(capacity: usize, alloc: &mut Alloc) -> *mut [TableSlot] {
-        alloc.alloc_table(capacity, Tag::SlotTable)
+        let table = alloc.alloc_table::<TableSlot>(capacity, Tag::SlotTable);
+
+        // Lookups probe until they land on an empty slot, so a table
+        // handed back with stale keys in it would loop forever rather
+        // than fail. Nothing else notices this, so check it here.
+        #[cfg(feature = "verify_gc")]
+        assert!(
+            unsafe { &*table }.iter().all(|slot| !slot.is_occupied()),
+            "dict table allocated over memory that was not zeroed"
+        );
+
+        table
     }
 
     pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Self

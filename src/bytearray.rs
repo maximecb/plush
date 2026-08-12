@@ -23,6 +23,15 @@ impl ByteArray
     pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Self
     {
         let bytes = alloc.alloc_table(num_bytes, Tag::Bytes);
+
+        // A new bytearray reads as zeroed. Stale bytes here would be
+        // silently wrong data rather than anything that fails.
+        #[cfg(feature = "verify_gc")]
+        assert!(
+            unsafe { &*bytes }.iter().all(|b| *b == 0),
+            "bytearray allocated over memory that was not zeroed"
+        );
+
         ByteArray { bytes, len: num_bytes }
     }
 
