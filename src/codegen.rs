@@ -3,7 +3,7 @@ use crate::ast::*;
 use crate::lexer::ParseError;
 use crate::symbols::Decl;
 use crate::vm::{Insn, Value};
-use crate::alloc::Alloc;
+use crate::alloc::{Alloc, Tag};
 
 /// Compiled function object
 #[derive(Copy, Clone)]
@@ -333,7 +333,7 @@ impl ExprBox
                 use crate::bytearray::ByteArray;
                 let mut ba = ByteArray::with_size(bytes.len(), alloc);
                 unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-                let p_ba = alloc.alloc(ba);
+                let p_ba = alloc.alloc(ba, Tag::ByteArray);
                 code.push(Insn::push { val: Value::ByteArray(p_ba) });
                 code.push(Insn::ba_clone);
             }

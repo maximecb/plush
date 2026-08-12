@@ -18,7 +18,7 @@ mod array;
 mod bytearray;
 mod runtime;
 mod host;
-mod deepcopy;
+mod gc;
 mod window;
 mod audio;
 mod exec_tests;

@@ -1,27 +1,36 @@
 use crate::vm::{Value, Actor};
-use crate::alloc::Alloc;
+use crate::alloc::{Alloc, Tag, HEADER_SIZE};
 use crate::host::HostFn;
 use crate::*;
 
 pub struct Array
 {
-    elems: *mut [Value],
+    // Relocated by the collector, which walks the table on its own
+    pub(crate) elems: *mut [Value],
     len: usize,
 }
 
 impl Array
 {
+    /// Bytes an array with a given capacity occupies, counting the
+    /// headers of both the array and its element table
+    pub fn alloc_size(capacity: usize) -> usize
+    {
+        HEADER_SIZE + size_of::<Array>() +
+        HEADER_SIZE + std::cmp::max(capacity, 1) * size_of::<Value>()
+    }
+
     pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Self
     {
         let capacity = std::cmp::max(capacity, 1);
-        let table = alloc.alloc_table(capacity);
+        let table = alloc.alloc_table(capacity, Tag::ValueTable);
         Array { elems: table, len: 0 }
     }
 
     pub fn clone(&self, alloc: &mut Alloc) -> Self
     {
         let capacity = std::cmp::max(self.len, 1);
-        let table = alloc.alloc_table(capacity);
+        let table = alloc.alloc_table(capacity, Tag::ValueTable);
         let mut new_arr = Array { elems: table, len: self.len };
         new_arr.items_mut().copy_from_slice(self.items());
         new_arr
@@ -66,7 +75,7 @@ impl Array
         // If we are at capacity
         if self.len == self.elems.len() {
             let new_len = self.len * 2;
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len) };
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len, Tag::ValueTable) };
             new_elems[..self.len].copy_from_slice(self.items());
             self.elems = new_elems;
         }
@@ -82,7 +91,7 @@ impl Array
         // If we are at capacity
         if self.len == self.elems.len() {
             let new_len = self.len * 2;
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len) };
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len, Tag::ValueTable) };
             new_elems[..self.len].copy_from_slice(self.items());
             self.elems = new_elems;
         }
@@ -106,6 +115,7 @@ impl Array
         }
 
         self.len -= 1;
+        self.clear_slot(self.len);
         removed
     }
 
@@ -115,15 +125,15 @@ impl Array
 
         if self.len + other_elems.len() > self.elems.len() {
             let new_len = self.len + other_elems.len();
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len) };
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len, Tag::ValueTable) };
 
             let elems = self.items();
             new_elems[..cur_len].copy_from_slice(elems);
             new_elems[cur_len..].copy_from_slice(other_elems);
             self.elems = new_elems;
         } else {
-            let mut elems = self.items_mut();
-            elems[cur_len..].copy_from_slice(other.items());
+            let elems = unsafe { &mut *self.elems };
+            elems[cur_len..cur_len + other_elems.len()].copy_from_slice(other_elems);
         }
 
         self.len += other_elems.len();
@@ -136,7 +146,16 @@ impl Array
         }
 
         self.len -= 1;
-        unsafe { (*self.elems) [self.len] }
+        let popped = unsafe { (*self.elems) [self.len] };
+        self.clear_slot(self.len);
+        popped
+    }
+
+    /// Clear a slot past the end of the array. The collector scans the
+    /// whole table, so a stale value left here would be kept alive.
+    fn clear_slot(&mut self, idx: usize)
+    {
+        unsafe { (*self.elems)[idx] = Value::Undef };
     }
 }
 
@@ -145,14 +164,14 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fi
     let num_elems = unwrap_usize!(num_elems);
 
     actor.gc_check(
-        size_of::<Array>() + size_of::<Value>() * num_elems,
+        Array::alloc_size(num_elems),
         &mut [&mut fill_val]
     );
 
-    let mut elems = actor.alloc.alloc_table(num_elems);
+    let elems = actor.alloc.alloc_table(num_elems, Tag::ValueTable);
     unsafe { (&mut *elems).fill(fill_val); }
     let arr = Array { elems, len: num_elems };
-    Ok(Value::Array(actor.alloc.alloc(arr)))
+    Ok(Value::Array(actor.alloc.alloc(arr, Tag::Array)))
 }
 
 pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result<Value, String>
@@ -161,7 +180,7 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result
 
     if arr.len() == arr.capacity() {
         actor.gc_check(
-            size_of::<Array>() + size_of::<Value>() * arr.capacity() * 2,
+            HEADER_SIZE + size_of::<Value>() * arr.capacity() * 2,
             &mut [&mut array, &mut val]
         )
     }
@@ -188,7 +207,7 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val
 
     if arr.len() == arr.capacity() {
         actor.gc_check(
-            size_of::<Array>() + size_of::<Value>() * arr.capacity() * 2,
+            HEADER_SIZE + size_of::<Value>() * arr.capacity() * 2,
             &mut [&mut array, &mut idx, &mut val]
         )
     }
@@ -207,7 +226,7 @@ pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: V
 
     if a0.len() + a1.len() > a0.capacity() {
         actor.gc_check(
-            size_of::<Value>() * new_len,
+            HEADER_SIZE + size_of::<Value>() * new_len,
             &mut [&mut self_array, &mut other_array]
         )
     }

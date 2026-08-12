@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use crate::alloc::Tag;
 use crate::array::Array;
 use crate::ast::*;
 use crate::vm::{Value, Actor};
@@ -56,7 +57,7 @@ fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
     let v = unwrap_i64!(v);
     let s = format!("{}", v);
 
-    actor.gc_check(32, &mut []);
+    actor.gc_check(Str::alloc_size(32), &mut []);
     Ok(actor.alloc.str_val(&s))
 }
 
@@ -66,7 +67,7 @@ fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result<Value, Str
     let digits = unwrap_usize!(digits);
     let s = format!("{:0width$X}", v, width = digits);
 
-    actor.gc_check(32 + digits, &mut []);
+    actor.gc_check(Str::alloc_size(32 + digits), &mut []);
     Ok(actor.alloc.str_val(&s))
 }
 
@@ -175,7 +176,7 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = v.unwrap_f64();
     let s = format!("{}", v);
-    actor.gc_check(1024, &mut []);
+    actor.gc_check(Str::alloc_size(1024), &mut []);
     Ok(actor.alloc.str_val(&s))
 }
 
@@ -184,7 +185,7 @@ fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Resu
     let num = v.unwrap_f64();
     let decimals = unwrap_usize!(decimals);
     let s = format!("{:.*}", decimals, num);
-    actor.gc_check(std::cmp::max(1024, decimals), &mut []);
+    actor.gc_check(Str::alloc_size(std::cmp::max(1024, decimals)), &mut []);
     Ok(actor.alloc.str_val(&s))
 }
 
@@ -201,7 +202,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
     let mut s = String::new();
     s.push(ch);
 
-    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
+    actor.gc_check(Str::alloc_size(s.len()), &mut []);
     Ok(actor.alloc.str_val(&s))
 }
 
@@ -239,7 +240,7 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value,
     };
 
     let ch_s = ch.to_string();
-    actor.gc_check(size_of::<Str>() + ch_s.len(), &mut []);
+    actor.gc_check(Str::alloc_size(ch_s.len()), &mut []);
     Ok(actor.alloc.str_val(&ch_s))
 }
 
@@ -271,7 +272,7 @@ fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(s);
     let s = s.trim().to_string();
-    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
+    actor.gc_check(Str::alloc_size(s.len()), &mut []);
     Ok(actor.alloc.str_val(&s))
 }
 
@@ -280,7 +281,7 @@ fn string_upper(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(s);
     let s = s.to_uppercase();
-    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
+    actor.gc_check(Str::alloc_size(s.len()), &mut []);
     Ok(actor.alloc.str_val(&s))
 }
 
@@ -289,7 +290,7 @@ fn string_lower(actor: &mut Actor, s: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(s);
     let s = s.to_lowercase();
-    actor.gc_check(size_of::<Str>() + s.len(), &mut []);
+    actor.gc_check(Str::alloc_size(s.len()), &mut []);
     Ok(actor.alloc.str_val(&s))
 }
 
@@ -309,9 +310,11 @@ fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value
 
     // We need to keep the input string alive because we're
     // relying on string slices for the string parts
+    // The extra 8 bytes per string cover rounding each one up to the
+    // allocation alignment
     actor.gc_check(
-        (size_of::<Array>() + num_strs * size_of::<Value>()) +
-        (size_of::<Str>() + 32) * num_strs +
+        Array::alloc_size(num_strs) +
+        num_strs * Str::alloc_size(8) +
         total_str_len,
         &mut []
     );
@@ -321,7 +324,7 @@ fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value
         array.push(actor.alloc.str_val(part), &mut actor.alloc);
     }
 
-    Ok(Value::Array(actor.alloc.alloc(array)))
+    Ok(Value::Array(actor.alloc.alloc(array, Tag::Array)))
 }
 
 pub fn init_runtime(prog: &mut Program)

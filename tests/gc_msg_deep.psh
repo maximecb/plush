@@ -1,0 +1,92 @@
+// Copying a message reads out of the sender's own live heap and leaves
+// forwarding addresses in it, which have to be taken back out afterwards.
+// Send a deep mix of every heap type while both actors are collecting,
+// and check that the sender's own copy survives untouched.
+
+class Node
+{
+    init(self, depth)
+    {
+        self.name = 'node' + depth.to_s();
+        self.depth = depth;
+
+        // Repeated strings, to exercise deduplication during the copy
+        self.tags = ['tag', 'tag', self.name, 'tag'];
+        self.attrs = { kind: 'branch', label: self.name, tag: 'tag' };
+        self.bytes = ByteArray.with_size(64);
+        self.bytes[0] = depth;
+
+        if (depth > 0) {
+            self.child = Node(depth - 1);
+        } else {
+            self.child = nil;
+        }
+    }
+
+    check(self, depth)
+    {
+        assert(self.depth == depth);
+        assert(self.name == 'node' + depth.to_s());
+        assert(self.tags.len == 4);
+        assert(self.tags[0] == 'tag');
+        assert(self.tags[2] == self.name);
+        assert(self.attrs.kind == 'branch');
+        assert(self.attrs.label == self.name);
+        assert(self.bytes.len == 64);
+        assert(self.bytes[0] == depth);
+
+        if (depth > 0) {
+            self.child.check(depth - 1);
+        } else {
+            assert(self.child == nil);
+        }
+    }
+}
+
+fun echo()
+{
+    $vm_shrink_heap(256_000);
+
+    loop {
+        let msg = $actor_recv();
+
+        if (msg == nil) {
+            break;
+        }
+
+        // Collect between taking the message and sending it back, so the
+        // copy has to survive being moved
+        $vm_gc_collect();
+        msg.check(24);
+        $actor_send($actor_parent(), msg);
+    }
+}
+
+$vm_shrink_heap(256_000);
+
+let aid = $actor_spawn(echo);
+let tree = Node(24);
+
+for (let var i = 0; i < 200; ++i)
+{
+    $actor_send(aid, tree);
+
+    // Allocate and collect while the round trip is in flight
+    let junk = [];
+    for (let var j = 0; j < 200; ++j) {
+        junk.push('junk' + j.to_s());
+    }
+    $vm_gc_collect();
+
+    let reply = $actor_recv();
+    reply.check(24);
+
+    // The message copy must have left our own tree exactly as it was
+    tree.check(24);
+    assert(junk.len == 200);
+    assert(junk[199] == 'junk199');
+}
+
+$actor_send(aid, nil);
+$actor_join(aid);
+$println('ok');

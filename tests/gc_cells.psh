@@ -1,0 +1,37 @@
+// A closure over a mutable variable captures it through a cell, which
+// the collector has to know how to copy
+
+fun make_counter(n)
+{
+    let var c = n;
+    fun inc() { ++c; return c; }
+    return inc;
+}
+
+fun worker()
+{
+    let f = $actor_recv();
+    assert(f() == 6);
+    assert(f() == 7);
+    $actor_send($actor_parent(), 'ok');
+}
+
+let counters = [];
+for (let var i = 0; i < 200; ++i) {
+    counters.push(make_counter(i));
+}
+
+$vm_gc_collect();
+
+for (let var i = 0; i < 200; ++i) {
+    assert(counters[i]() == i + 1);
+    assert(counters[i]() == i + 2);
+}
+
+// Cells also have to survive being copied into a message
+let aid = $actor_spawn(worker);
+$actor_send(aid, make_counter(5));
+assert($actor_recv() == 'ok');
+$actor_join(aid);
+
+$println('ok');

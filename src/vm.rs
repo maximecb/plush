@@ -6,7 +6,7 @@ use crate::dict::Dict;
 use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
-use crate::alloc::{Alloc, INIT_SIZE, MSG_INIT_SIZE};
+use crate::alloc::{Alloc, Tag, HEADER_SIZE, INIT_SIZE, MSG_INIT_SIZE};
 
 /// How many bytes of undrained messages a sender will let pile up in a
 /// receiver's message allocator before waiting for it to catch up.
@@ -22,7 +22,7 @@ use crate::closure::Closure;
 use crate::array::Array;
 use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
-use crate::deepcopy::{deepcopy, remap};
+use crate::gc::{undo_forwarding, Copier, StrTable, UndoLog};
 use crate::host::*;
 use crate::str::Str;
 
@@ -573,13 +573,14 @@ pub struct Actor
     // Spare allocator used as to-space for copying GC
     to_space: Option<Alloc>,
 
-    // Hash map used for garbage collection
-    dst_map: HashMap::<Value, Value>,
+    // Strings copied during the current copy, so that equal strings can
+    // share one allocation. Forwarding pointers work by address, so
+    // nothing else would deduplicate them.
+    str_table: StrTable,
 
-    // Hash map used when copying received messages. Kept separate from
-    // dst_map, which is sized for the whole heap and so would be costly
-    // to clear once per message.
-    msg_map: HashMap::<Value, Value>,
+    // Headers overwritten with forwarding addresses, kept when copying
+    // out of this actor's own heap so that they can be put back
+    undo_log: UndoLog,
 
     // Cache of actor ids to message queue endpoints
     actor_map: HashMap<u64, ActorTx>,
@@ -624,8 +625,8 @@ impl Actor
             queue_rx,
             globals,
             to_space: None,
-            dst_map: HashMap::default(),
-            msg_map: HashMap::default(),
+            str_table: StrTable::default(),
+            undo_log: UndoLog::default(),
             actor_map: HashMap::default(),
             stack: Vec::default(),
             frames: Vec::default(),
@@ -648,20 +649,26 @@ impl Actor
         // Make room for the copy first. The message is not reachable from
         // any root yet, so a collection here does not need to know about
         // it: it stays put in the message allocator until we copy it
-        // below. Allocation padding depends on the order objects are
-        // copied in, so allow for twice its size in the buffer.
+        // below. A copy is never larger than what it copies, but ask for
+        // twice the size so there is no chance of the copy running dry
+        // partway through, when the heap can no longer be collected.
         self.gc_check(2 * msg.size, &mut []);
 
-        // Reuse a map kept at message size. A single large message can grow
-        // it, so replace it outright in that case to keep clearing cheap.
-        if self.msg_map.capacity() > 1024 {
-            self.msg_map = HashMap::default();
-        } else {
-            self.msg_map.clear();
+        // The string table is shared with the collector, which sizes it
+        // for the whole heap. Drop it if it has grown past what a message
+        // needs, rather than keeping it around at that size.
+        if self.str_table.capacity() > 1024 {
+            self.str_table = StrTable::default();
         }
 
-        let val = deepcopy(msg.msg, &mut self.alloc, &mut self.msg_map);
-        remap(&mut self.msg_map);
+        // The message allocator holds nothing but messages waiting to be
+        // taken, so the copy is free to leave forwarding addresses in it
+        let mut str_table = std::mem::take(&mut self.str_table);
+        let mut copier = Copier::new(&mut self.alloc, &mut str_table);
+        let val = copier.forward(msg.msg);
+        copier.run();
+        self.str_table = str_table;
+
         val
     }
 
@@ -785,10 +792,13 @@ impl Actor
             actor_tx = self.actor_map.get(&actor_id);
         }
 
+        // Take owned handles to the receiver so that we stop borrowing
+        // ourselves, since the copy below needs our scratch buffers
+        // Note: upgrading can fail if the receiving thread panics
         let actor_tx = actor_tx.unwrap();
+        let sender = actor_tx.sender.clone();
 
         // Copy the message using the receiver's message allocator
-        // Note: locking can fail if the receiving thread panics
         let alloc_rc = match actor_tx.msg_alloc.upgrade() {
             Some(rc) => rc,
             None => return Err(()),
@@ -818,9 +828,23 @@ impl Actor
 
         let bytes_before = msg_alloc.bytes_used();
 
-        let mut dst_map = HashMap::default();
-        let msg = deepcopy(msg, &mut msg_alloc, &mut dst_map);
-        remap(&mut dst_map);
+        // Unlike the other two copies, this one reads out of our own live
+        // heap, so the forwarding addresses it leaves behind have to be
+        // taken back out afterwards.
+        let mut str_table = std::mem::take(&mut self.str_table);
+        let mut undo_log = std::mem::take(&mut self.undo_log);
+
+        let mut copier = Copier::with_undo(
+            &mut msg_alloc,
+            &mut str_table,
+            &mut undo_log
+        );
+        let msg = copier.forward(msg);
+        copier.run();
+
+        undo_forwarding(&mut undo_log);
+        self.str_table = str_table;
+        self.undo_log = undo_log;
 
         let size = msg_alloc.bytes_used() - bytes_before;
 
@@ -828,7 +852,7 @@ impl Actor
         // lock. That way the receiver never observes an empty queue while
         // a message is sitting unqueued in its buffer, which is what makes
         // it safe for the receiver to reset the buffer.
-        let res = actor_tx.sender.send(Message { sender: self.actor_id, msg, size });
+        let res = sender.send(Message { sender: self.actor_id, msg, size });
         drop(msg_alloc);
 
         match res {
@@ -926,7 +950,7 @@ impl Actor
         let num_slots = self.get_num_slots(class_id);
 
         self.gc_check(
-            size_of::<Object>() + size_of::<Value>() * num_slots,
+            Object::alloc_size(num_slots),
             &mut []
         );
 
@@ -951,7 +975,7 @@ impl Actor
     pub fn intern_str(&mut self, str_const: &str) -> Value
     {
         self.gc_check(
-            size_of::<Str>() + str_const.len(),
+            Str::alloc_size(str_const.len()),
             &mut []
         );
 
@@ -963,81 +987,14 @@ impl Actor
     /// Perform a garbage collection cycle
     pub fn gc_collect(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
     {
-        fn copy_all(
-            actor: &mut Actor,
-            dst_alloc: &mut Alloc,
-            extra_roots: &mut [&mut Value],
-        ) {
-            // Copy the global variables
-            for val in &mut actor.globals {
-                deepcopy(*val, dst_alloc, &mut actor.dst_map);
-            }
-
-            // Copy values on the stack
-            for val in &mut actor.stack {
-                deepcopy(*val, dst_alloc, &mut actor.dst_map);
-            }
-
-            // Copy closures in the stack frames
-            for frame in &mut actor.frames {
-                deepcopy(frame.fun, dst_alloc, &mut actor.dst_map);
-            }
-
-            // Copy heap values referenced in instructions
-            for insn in &mut actor.insns {
-                match insn {
-                    Insn::push { val } => {
-                        deepcopy(*val, dst_alloc, &mut actor.dst_map);
-                    }
-
-                    // Instructions referencing name strings
-                    Insn::get_field { field: s, .. } |
-                    Insn::set_field { field: s, .. } |
-                    Insn::call_method { name: s, .. } |
-                    Insn::call_method_pc { name: s, .. } => {
-                        deepcopy(Value::String(*s), dst_alloc, &mut actor.dst_map);
-                    }
-
-                    _ => {}
-                }
-            }
-
-            // Copy extra roots supplied by the user
-            for val in extra_roots {
-                deepcopy(**val, dst_alloc, &mut actor.dst_map);
-            }
-
-            println!(
-                "GC copied {} values, {} bytes",
-                thousands_sep(actor.dst_map.len()),
-                thousands_sep(dst_alloc.bytes_used()),
-            );
-
-            remap(&mut actor.dst_map);
-        }
-
-        fn get_new_val(val: Value, dst_map: &HashMap<Value, Value>) -> Value
-        {
-            if !val.is_heap() {
-                return val;
-            }
-
-            let new_val = *dst_map.get(&val).unwrap();
-            new_val
-        }
-
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
         let start_time = crate::host::get_time_ms();
 
-        // Upper bound on how much space the copy can take. Every object is
-        // copied at most once and none of them grow, but allocations are
-        // aligned individually, so copying them in a different order can
-        // add up to a few bytes of padding each. Twice the size of the
-        // from-space covers that with room to spare.
-        //
-        // Committing memory we never touch costs nothing, so there is no
-        // reason to be tight here. The excess is released below, once we
-        // know how much data is actually live.
+        // Upper bound on how much space the copy can take. Every block is
+        // copied at most once and none of them grow, so the copy is never
+        // larger than what it copies, but leave room to spare since
+        // committing memory we never touch costs nothing. The excess is
+        // released below, once we know how much data is actually live.
         let max_copy_bytes = std::cmp::max(
             2 * self.alloc.bytes_used() + bytes_needed,
             INIT_SIZE,
@@ -1052,12 +1009,65 @@ impl Actor
         dst_alloc.grow_reserve(max_copy_bytes);
         dst_alloc.grow(max_copy_bytes);
 
-        // Clear the value map
-        self.dst_map.clear();
+        // Copy the roots into the new allocator, then everything they
+        // reach. The from-space is discarded below, so the copier is free
+        // to leave forwarding addresses behind in it.
+        //
+        // Roots are updated in place as they are forwarded, so unlike a
+        // copy through a translation map this needs no second pass.
+        let mut str_table = std::mem::take(&mut self.str_table);
+        {
+            let mut copier = Copier::new(&mut dst_alloc, &mut str_table);
 
-        // Copy all objects into the new allocator. Sized as above, this
-        // cannot run out of space, so there is no need to retry.
-        copy_all(self, &mut dst_alloc, extra_roots);
+            // Global variables
+            for val in &mut self.globals {
+                *val = copier.forward(*val);
+            }
+
+            // Values on the stack
+            for val in &mut self.stack {
+                *val = copier.forward(*val);
+            }
+
+            // Closures in the stack frames
+            for frame in &mut self.frames {
+                frame.fun = copier.forward(frame.fun);
+            }
+
+            // Heap values referenced in instructions
+            for insn in &mut self.insns {
+                match insn {
+                    Insn::push { val } => {
+                        *val = copier.forward(*val);
+                    }
+
+                    // Instructions referencing name strings
+                    Insn::get_field { field: s, .. } |
+                    Insn::set_field { field: s, .. } |
+                    Insn::call_method { name: s, .. } |
+                    Insn::call_method_pc { name: s, .. } => {
+                        *s = copier.forward_str(*s);
+                    }
+
+                    _ => {}
+                }
+            }
+
+            // Extra roots supplied by the user
+            for val in extra_roots {
+                **val = copier.forward(**val);
+            }
+
+            // Sized as above, this cannot run out of space
+            copier.run();
+
+            println!(
+                "GC copied {} blocks, {} bytes",
+                thousands_sep(copier.num_blocks()),
+                thousands_sep(dst_alloc.bytes_used()),
+            );
+        }
+        self.str_table = str_table;
 
         // Size the heap from the live data we just measured, rather than
         // guessing from the old heap size. This lets the heap shrink again
@@ -1075,52 +1085,13 @@ impl Actor
             100 * dst_alloc.bytes_free() / dst_alloc.mem_size(),
         );
 
-        // Remap the global variables
-        for val in &mut self.globals {
-            *val = get_new_val(*val, &self.dst_map);
-        }
-
-        // Remap values on the stack
-        for val in &mut self.stack {
-            *val = get_new_val(*val, &self.dst_map);
-        }
-
-        // Remap closures in the stack frames
-        for frame in &mut self.frames {
-            frame.fun = get_new_val(frame.fun, &self.dst_map);
-        }
-
-        // Remap heap values referenced in instructions
-        for insn in &mut self.insns {
-            match insn {
-                Insn::push { val } => {
-                    *val = get_new_val(*val, &self.dst_map);
-                }
-
-                // Instructions referencing name strings
-                Insn::get_field { field: s, .. } |
-                Insn::set_field { field: s, .. } |
-                Insn::call_method { name: s, .. } |
-                Insn::call_method_pc { name: s, .. } => {
-                    match get_new_val(Value::String(*s), &self.dst_map) {
-                        Value::String(new_s) => *s = new_s,
-                        _ => panic!(),
-                    }
-                }
-
-                _ => {}
-            }
-        }
-
-        // Remap extra roots supplied by the user
-        for val in extra_roots {
-            **val = get_new_val(**val, &self.dst_map);
-        }
-
         // Swap the old and new allocators
         std::mem::swap(&mut self.alloc, &mut dst_alloc);
         dst_alloc.clear();
         self.to_space = Some(dst_alloc);
+
+        #[cfg(feature = "verify_gc")]
+        crate::gc::verify_heap(&self.alloc);
 
         let end_time = crate::host::get_time_ms();
         let gc_time = end_time - start_time;
@@ -1504,8 +1475,7 @@ impl Actor
                             let s1 = unsafe { &*s1 };
 
                             self.gc_check(
-                                std::mem::size_of::<Str>() +
-                                s0.len() + s1.len(),
+                                Str::alloc_size(s0.len() + s1.len()),
                                 &mut [&mut v0, &mut v1],
                             );
 
@@ -1796,8 +1766,7 @@ impl Actor
                     let num_slots = num_slots as usize;
 
                      self.gc_check(
-                        std::mem::size_of::<Closure>() +
-                        std::mem::size_of::<Value>() * num_slots,
+                        Closure::alloc_size(num_slots),
                         &mut [],
                     );
 
@@ -1841,11 +1810,11 @@ impl Actor
                 // Create a new mutable cell
                 Insn::cell_new => {
                      self.gc_check(
-                        std::mem::size_of::<Value>(),
+                        HEADER_SIZE + std::mem::size_of::<Value>(),
                         &mut [],
                     );
 
-                    let p_cell = self.alloc.alloc(Value::Nil);
+                    let p_cell = self.alloc.alloc(Value::Nil, Tag::Cell);
                     push!(Value::Cell(p_cell));
                 }
 
@@ -1875,11 +1844,11 @@ impl Actor
                 // Create new empty dictionary
                 Insn::dict_new => {
                     self.gc_check(
-                        size_of::<Dict>() + 2 * Dict::size_of_slot(),
+                        Dict::alloc_size(0),
                         &mut []
                     );
                     let dict = Dict::with_capacity(0, &mut self.alloc);
-                    let new_obj = self.alloc.alloc(dict);
+                    let new_obj = self.alloc.alloc(dict, Tag::Dict);
                     push!(Value::Dict(new_obj))
                 }
 
@@ -1913,7 +1882,7 @@ impl Actor
                         Value::Dict(p) => {
                             let dict = unsafe { &mut *p };
                             let mut field_name_val = Value::String(field);
-                            let alloc_size = dict.will_allocate(field_name.as_str());
+                            let alloc_size = dict.will_allocate();
 
                             self.gc_check(
                                 alloc_size,
@@ -1935,8 +1904,7 @@ impl Actor
                     let num_slots = self.get_num_slots(class_id);
 
                     self.gc_check(
-                        std::mem::size_of::<Object>() +
-                        std::mem::size_of::<Value>() * num_slots,
+                        Object::alloc_size(num_slots),
                         &mut [],
                     );
 
@@ -1971,8 +1939,7 @@ impl Actor
                     let num_slots = num_slots as usize;
 
                     self.gc_check(
-                        std::mem::size_of::<Object>() +
-                        std::mem::size_of::<Value>() * num_slots,
+                        Object::alloc_size(num_slots),
                         &mut [],
                     );
 
@@ -2135,7 +2102,7 @@ impl Actor
                             let dict = unsafe { &mut *p };
                             let key = unwrap_str!(idx);
 
-                            let alloc_size = dict.will_allocate(key);
+                            let alloc_size = dict.will_allocate();
                             self.gc_check(
                                 alloc_size,
                                 &mut [&mut arr, &mut idx, &mut val],
@@ -2155,12 +2122,12 @@ impl Actor
                     let capacity = capacity as usize;
 
                     self.gc_check(
-                        size_of::<Array>() + size_of::<Value>() * capacity,
+                        Array::alloc_size(capacity),
                         &mut [],
                     );
 
                     let new_arr = Array::with_capacity(capacity, &mut self.alloc);
-                    push!(Value::Array(self.alloc.alloc(new_arr)))
+                    push!(Value::Array(self.alloc.alloc(new_arr, Tag::Array)))
                 }
 
                 // Append an element at the end of an array
@@ -2177,13 +2144,13 @@ impl Actor
                     let ba = val.unwrap_ba();
 
                     self.gc_check(
-                        size_of::<ByteArray>() + ba.num_bytes(),
+                        ByteArray::alloc_size(ba.num_bytes()),
                         &mut [&mut val],
                     );
 
                     let ba = val.unwrap_ba();
                     let ba_clone = ba.clone(&mut self.alloc);
-                    let p_clone = self.alloc.alloc(ba_clone);
+                    let p_clone = self.alloc.alloc(ba_clone, Tag::ByteArray);
                     push!(Value::ByteArray(p_clone));
                 }
 
@@ -2449,19 +2416,27 @@ impl VM
         alloc.grow_reserve(max_copy_bytes);
         alloc.grow(max_copy_bytes);
 
-        // Hash map for remapping copied values
-        let mut dst_map = HashMap::default();
-
-        // We need to recursively copy the function/closure
-        let fun = deepcopy(fun, &mut alloc, &mut dst_map);
-
-        // Copy the global variables from the parent actor
+        // Copy the function/closure and the parent's globals. This reads
+        // out of the parent's live heap, so the forwarding addresses left
+        // behind have to be taken back out afterwards.
         let mut globals = parent.globals.clone();
-        for val in &mut globals {
-            *val = deepcopy(*val, &mut alloc, &mut dst_map);
-        }
+        let mut str_table = std::mem::take(&mut parent.str_table);
+        let mut undo_log = std::mem::take(&mut parent.undo_log);
 
-        remap(&mut dst_map);
+        let mut copier = Copier::with_undo(
+            &mut alloc,
+            &mut str_table,
+            &mut undo_log
+        );
+        let fun = copier.forward(fun);
+        for val in &mut globals {
+            *val = copier.forward(*val);
+        }
+        copier.run();
+
+        undo_forwarding(&mut undo_log);
+        parent.str_table = str_table;
+        parent.undo_log = undo_log;
 
         // Give the new heap room to run, but not the whole upper bound
         let live_bytes = alloc.bytes_used();
