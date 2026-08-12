@@ -1,26 +1,34 @@
 use std::mem::{transmute, size_of};
 use crate::vm::{Value, Actor};
-use crate::alloc::Alloc;
+use crate::alloc::{Alloc, Tag, HEADER_SIZE};
 use crate::host::HostFn;
 use crate::*;
 
 pub struct ByteArray
 {
-    bytes: *mut [u8],
+    // Relocated by the collector, which walks the table on its own
+    pub(crate) bytes: *mut [u8],
     len: usize,
 }
 
 impl ByteArray
 {
+    /// Bytes a bytearray of a given size occupies, counting the headers
+    /// of both the bytearray and its byte table
+    pub fn alloc_size(num_bytes: usize) -> usize
+    {
+        HEADER_SIZE + size_of::<ByteArray>() + HEADER_SIZE + num_bytes
+    }
+
     pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Self
     {
-        let bytes = alloc.alloc_table(num_bytes);
+        let bytes = alloc.alloc_table(num_bytes, Tag::Bytes);
         ByteArray { bytes, len: num_bytes }
     }
 
     pub fn clone(&self, alloc: &mut Alloc) -> Self
     {
-        let bytes = alloc.alloc_table(self.len);
+        let bytes = alloc.alloc_table(self.len, Tag::Bytes);
         let mut new_ba = ByteArray { bytes, len: self.len };
 
         unsafe {
@@ -203,12 +211,12 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result
     let num_bytes = unwrap_usize!(num_bytes);
 
     actor.gc_check(
-        size_of::<ByteArray>() + num_bytes,
+        ByteArray::alloc_size(num_bytes),
         &mut []
     );
 
     let ba = ByteArray::with_size(num_bytes, &mut actor.alloc);
-    let p_ba = actor.alloc.alloc(ba);
+    let p_ba = actor.alloc.alloc(ba, Tag::ByteArray);
     Ok(Value::ByteArray(p_ba))
 }
 
@@ -221,13 +229,13 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Va
 
     if new_size > capacity {
         actor.gc_check(
-            new_size,
+            HEADER_SIZE + new_size,
             &mut [&mut ba]
         );
         let ba_mut = ba.unwrap_ba();
 
         let old_len = ba_mut.len;
-        let new_bytes = actor.alloc.alloc_table(new_size);
+        let new_bytes = actor.alloc.alloc_table(new_size, Tag::Bytes);
         let copy_len = std::cmp::min(old_len, new_size);
 
         unsafe {

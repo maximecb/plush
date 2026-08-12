@@ -1,11 +1,12 @@
 use std::{collections::HashMap, hash::{DefaultHasher, Hash, Hasher}, ops::Deref};
 
-use crate::{alloc::Alloc, str::Str, vm::Value};
+use crate::{alloc::{Alloc, Tag, HEADER_SIZE}, str::Str, vm::Value};
 
 #[derive(Clone, Copy)]
-struct TableSlot {
-    key: *const Str,
-    val: Value
+pub(crate) struct TableSlot {
+    // Scanned by the collector, which walks slot tables on their own
+    pub(crate) key: *const Str,
+    pub(crate) val: Value
 }
 
 impl TableSlot {
@@ -51,15 +52,23 @@ impl TableSlot {
 }
 
 pub struct Dict {
-    table: *mut [TableSlot],
+    // Relocated by the collector, which walks the table on its own
+    pub(crate) table: *mut [TableSlot],
     len: usize
 }
 
 const THRESHOLD: usize = 75;
 
 impl Dict {
+    /// Bytes a dict with a given capacity occupies, counting the headers
+    /// of both the dict and its slot table
+    pub fn alloc_size(capacity: usize) -> usize {
+        HEADER_SIZE + size_of::<Dict>() +
+        HEADER_SIZE + std::cmp::max(capacity, 2) * size_of::<TableSlot>()
+    }
+
     fn empty_zeroed_table(capacity: usize, alloc: &mut Alloc) -> *mut [TableSlot] {
-        alloc.alloc_table(capacity)
+        alloc.alloc_table(capacity, Tag::SlotTable)
     }
 
     pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Self
@@ -130,9 +139,10 @@ impl Dict {
         size_of::<TableSlot>()
     }
 
-    pub fn will_allocate(&self, field_name: &str) -> usize {
+    /// Bytes the next set may need for a bigger table, zero if it fits
+    pub fn will_allocate(&self) -> usize {
         if self.will_allocate_on_set() {
-            return self.capacity() * Dict::size_of_slot() * 2 + 64;
+            return HEADER_SIZE + (self.capacity() + 1) * 2 * Dict::size_of_slot();
         }
 
         0

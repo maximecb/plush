@@ -1,3 +1,4 @@
+use std::mem::{align_of, size_of};
 use crate::str::Str;
 use crate::vm::Value;
 
@@ -14,6 +15,117 @@ pub const MSG_INIT_SIZE: usize = 2 * 1024 * 1024;
 /// up front to grow into. Reserving costs address space but no memory,
 /// and this is what bounds how large a single message can be.
 pub const MSG_RESERVE_SIZE: usize = 16 * 1024 * 1024 * 1024;
+
+/// Alignment of every allocation
+const ALIGN: usize = 8;
+
+/// What kind of block an allocation holds. The collector needs this to
+/// know which references live inside a block it has walked to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Tag
+{
+    // Objects with their variable-sized part stored inline
+    Str = 1,
+    Object,
+    Closure,
+
+    // Objects pointing to a separate table
+    Array,
+    ByteArray,
+    Dict,
+
+    // Captured variable, holds a single value
+    Cell,
+
+    // Tables, referenced by the objects above
+    ValueTable,
+    SlotTable,
+    Bytes,
+}
+
+impl Tag
+{
+    const LAST: u8 = Tag::Bytes as u8;
+
+    fn from_u8(val: u8) -> Tag
+    {
+        assert!(val >= 1 && val <= Tag::LAST, "invalid block tag {}", val);
+        unsafe { std::mem::transmute(val) }
+    }
+}
+
+/// Header word preceding every allocation.
+///
+/// Bit 0 set means the block is live: bits 1..8 hold the tag and bits
+/// 8..64 the payload size. Bit 0 clear means the block has been copied
+/// and the word is the address the payload moved to, which is aligned
+/// and so always has bit 0 clear.
+#[derive(Debug, Clone, Copy)]
+#[repr(transparent)]
+pub struct Header(u64);
+
+/// Size of the header preceding every allocation
+pub const HEADER_SIZE: usize = size_of::<Header>();
+
+impl Header
+{
+    fn new(tag: Tag, size: usize) -> Self
+    {
+        debug_assert!(size < (1 << 56), "block too large to fit in a header");
+        Header(((size as u64) << 8) | ((tag as u64) << 1) | 1)
+    }
+
+    pub fn is_forwarded(&self) -> bool
+    {
+        self.0 & 1 == 0
+    }
+
+    /// Address the payload moved to. Only valid if the block is forwarded.
+    pub fn forward_addr(&self) -> *mut u8
+    {
+        debug_assert!(self.is_forwarded());
+        self.0 as *mut u8
+    }
+
+    pub fn tag(&self) -> Tag
+    {
+        debug_assert!(!self.is_forwarded());
+        Tag::from_u8(((self.0 >> 1) & 0x7F) as u8)
+    }
+
+    /// Payload size in bytes, already rounded up to the alignment
+    pub fn size(&self) -> usize
+    {
+        debug_assert!(!self.is_forwarded());
+        (self.0 >> 8) as usize
+    }
+}
+
+/// Read the header of the block whose payload starts at a given address
+pub fn header_of(payload: *const u8) -> Header
+{
+    unsafe { *(payload as *const Header).sub(1) }
+}
+
+/// Record that a block has been copied, and where its payload moved to
+pub fn set_forwarded(payload: *mut u8, new_payload: *mut u8)
+{
+    debug_assert!(new_payload as usize % ALIGN == 0);
+    unsafe { *(payload as *mut Header).sub(1) = Header(new_payload as u64) };
+}
+
+/// Put back a header that was overwritten with a forwarding address
+pub fn restore_header(payload: *mut u8, header: Header)
+{
+    unsafe { *(payload as *mut Header).sub(1) = header };
+}
+
+/// Round a size up to the allocation alignment
+fn align_up(size: usize) -> usize
+{
+    (size + (ALIGN - 1)) & !(ALIGN - 1)
+}
 
 pub struct Alloc
 {
@@ -236,13 +348,40 @@ impl Alloc
         self.next_idx = 0;
     }
 
-    /// Allocate a block of a given size
-    fn alloc_bytes(&mut self, size_bytes: usize) -> *mut u8
+    /// Payload pointer for the block starting at a given byte offset.
+    /// The collector uses this to walk the heap block by block.
+    pub fn block_at(&self, offset: usize) -> *mut u8
     {
-        let align_bytes = 8;
+        debug_assert!(offset + HEADER_SIZE <= self.next_idx);
+        unsafe { self.mem_block.add(offset + HEADER_SIZE) }
+    }
 
-        // Align the current alloc index
-        let obj_pos = (self.next_idx + (align_bytes - 1)) & !(align_bytes - 1);
+    /// Whether an address is the payload of a block in this heap.
+    ///
+    /// An empty block has its payload one past the last byte allocated,
+    /// so it is the header that has to be inside the region, not the
+    /// address itself.
+    pub fn contains(&self, p: *const u8) -> bool
+    {
+        let addr = p as usize;
+        let start = self.mem_block as usize;
+
+        addr >= start + HEADER_SIZE && addr - HEADER_SIZE < start + self.next_idx
+    }
+
+    /// Allocate a block with a given payload size and tag.
+    ///
+    /// Sizes are rounded up to the alignment so that blocks sit back to
+    /// back with no gaps between them. That is what lets the collector
+    /// walk the heap linearly, one header at a time.
+    pub fn alloc_bytes(&mut self, size_bytes: usize, tag: Tag) -> *mut u8
+    {
+        let size_bytes = align_up(size_bytes);
+
+        // Every block is a header plus a rounded payload, so the next
+        // allocation index stays aligned without any adjustment here
+        debug_assert!(self.next_idx % ALIGN == 0);
+        let obj_pos = self.next_idx + HEADER_SIZE;
 
         // Bump the next allocation index
         let next_idx = obj_pos + size_bytes;
@@ -267,24 +406,40 @@ impl Alloc
 
         self.next_idx = next_idx;
 
-        unsafe { self.mem_block.add(obj_pos) }
+        unsafe {
+            let p = self.mem_block.add(obj_pos);
+            std::ptr::write(
+                p.sub(HEADER_SIZE) as *mut Header,
+                Header::new(tag, size_bytes)
+            );
+            p
+        }
     }
 
     /// Allocate a variable-sized table of elements of a given type
-    pub fn alloc_table<T>(&mut self, num_elems: usize) -> *mut [T]
+    pub fn alloc_table<T>(&mut self, num_elems: usize, tag: Tag) -> *mut [T]
     {
-        let num_bytes = num_elems * std::mem::size_of::<T>();
-        let bytes = self.alloc_bytes(num_bytes);
+        debug_assert!(align_of::<T>() <= ALIGN);
+
+        let num_bytes = num_elems * size_of::<T>();
+        let bytes = self.alloc_bytes(num_bytes, tag);
         let p = bytes as *mut T;
 
         std::ptr::slice_from_raw_parts_mut(p, num_elems)
     }
 
     /// Allocate a new object of a given type
-    pub fn alloc<T>(&mut self, obj: T) -> *mut T
+    pub fn alloc<T>(&mut self, obj: T, tag: Tag) -> *mut T
     {
-        let num_bytes = std::mem::size_of::<T>();
-        let bytes = self.alloc_bytes(num_bytes);
+        self.alloc_var(obj, 0, tag)
+    }
+
+    /// Allocate an object with a variable-sized tail stored right after it
+    pub fn alloc_var<T>(&mut self, obj: T, tail_bytes: usize, tag: Tag) -> *mut T
+    {
+        debug_assert!(align_of::<T>() <= ALIGN);
+
+        let bytes = self.alloc_bytes(size_of::<T>() + tail_bytes, tag);
         let p = bytes as *mut T;
 
         // Write object at location without calling drop
@@ -296,18 +451,15 @@ impl Alloc
 
     pub fn str(&mut self, s: &str) -> *const Str
     {
-        let bytes = self.alloc_bytes(s.len());
-        let p = bytes as *mut u8;
+        let p = self.alloc_var(Str::new(s.len()), s.len(), Tag::Str);
 
-        // Write string bytes at location without calling drop
-        // on what's currently at that location
-        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), p, s.len()) };
-        let raw_str = unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, s.len()))
-        };
-        let raw_str_ptr = raw_str as *const str;
+        // Copy the string bytes into the tail of the allocation
+        unsafe {
+            let bytes = (p as *mut u8).add(size_of::<Str>());
+            std::ptr::copy_nonoverlapping(s.as_ptr(), bytes, s.len());
+        }
 
-        self.alloc(Str::new(raw_str_ptr))
+        p
     }
 
     pub fn str_val(&mut self, s: &str) -> Value
@@ -340,7 +492,7 @@ mod tests
     fn grow_keeps_addresses_and_zeroes()
     {
         let mut alloc = Alloc::with_size(1024 * 1024);
-        let p = alloc.alloc::<u64>(1337);
+        let p = alloc.alloc::<u64>(1337, Tag::Bytes);
 
         // An allocator can always grow into its own reservation
         let reserve_size = alloc.reserve_size();
@@ -350,7 +502,7 @@ mod tests
         assert!(unsafe { *p } == 1337);
         assert!(alloc.mem_size() == reserve_size);
 
-        let table = alloc.alloc_table::<u64>(4096);
+        let table = alloc.alloc_table::<u64>(4096, Tag::Bytes);
         assert!(unsafe { (*table).iter().all(|&x| x == 0) });
     }
 
@@ -366,7 +518,7 @@ mod tests
 
         // The new reservation must be usable and zeroed
         alloc.grow(64 * 1024 * 1024);
-        let table = alloc.alloc_table::<u64>(4 * 1024 * 1024);
+        let table = alloc.alloc_table::<u64>(4 * 1024 * 1024, Tag::Bytes);
         assert!(unsafe { (*table).iter().all(|&x| x == 0) });
     }
 
@@ -377,7 +529,7 @@ mod tests
     fn grow_reserve_rejects_live_objects()
     {
         let mut alloc = Alloc::with_size(1024 * 1024);
-        alloc.alloc::<u64>(1337);
+        alloc.alloc::<u64>(1337, Tag::Bytes);
         alloc.grow_reserve(64 * 1024 * 1024);
     }
 
@@ -397,7 +549,7 @@ mod tests
     {
         let mut alloc = Alloc::with_size(8 * 1024 * 1024);
 
-        let table = alloc.alloc_table::<u64>(256 * 1024);
+        let table = alloc.alloc_table::<u64>(256 * 1024, Tag::Bytes);
         unsafe { (*table).fill(0xABAB_ABAB_ABAB_ABAB) };
         alloc.clear();
 
@@ -405,38 +557,111 @@ mod tests
         assert!(alloc.mem_size() <= 128 * 1024);
 
         alloc.grow(8 * 1024 * 1024);
-        let table = alloc.alloc_table::<u64>(256 * 1024);
+        let table = alloc.alloc_table::<u64>(256 * 1024, Tag::Bytes);
         assert!(unsafe { (*table).iter().all(|&x| x == 0) });
     }
 
-    /// Copying a heap into a to-space sized the way the GC sizes it must
-    /// never run out of room, however the allocations are ordered
+    /// A block costs its header plus its own rounded size and nothing
+    /// else, so copying a heap into another cannot make it grow, whatever
+    /// order the copy visits the objects in
     #[test]
-    fn copy_always_fits_in_twice_the_source()
+    fn copy_cannot_grow_the_heap()
     {
-        // Sizes that force padding: interleaving odd and aligned sizes
-        // costs more than grouping them, so the worst case depends on order
+        // Sizes that would force padding if blocks were not rounded up
         let sizes: Vec<usize> = (0..20000).map(|i| match i % 4 {
             0 => 3, 1 => 8, 2 => 24, _ => 17
         }).collect();
 
         let mut src = Alloc::with_size(INIT_SIZE);
         for &s in &sizes {
-            src.alloc_bytes(s);
+            src.alloc_bytes(s, Tag::Bytes);
         }
 
-        // Copy the same allocations back in the worst order we can pick
+        // Copy the same allocations back in a different order
         let mut dst = Alloc::with_size(INIT_SIZE);
         dst.grow_reserve(2 * src.bytes_used());
         dst.grow(2 * src.bytes_used());
 
-        // If the bound were wrong, alloc_bytes would panic here
         let mut reordered = sizes.clone();
         reordered.sort();
         for &s in &reordered {
-            dst.alloc_bytes(s);
+            dst.alloc_bytes(s, Tag::Bytes);
         }
 
-        assert!(dst.bytes_used() <= 2 * src.bytes_used());
+        assert!(dst.bytes_used() == src.bytes_used());
+    }
+
+    /// Blocks sit back to back, so a linear walk must land on every one
+    /// of them and recover the tag and size it was allocated with
+    #[test]
+    fn heap_walk_visits_every_block()
+    {
+        let blocks: Vec<(usize, Tag)> = (0..1000).map(|i| match i % 4 {
+            0 => (3, Tag::Bytes),
+            1 => (8, Tag::ValueTable),
+            2 => (24, Tag::Object),
+            _ => (17, Tag::Str),
+        }).collect();
+
+        let mut alloc = Alloc::with_size(INIT_SIZE);
+        for &(size, tag) in &blocks {
+            alloc.alloc_bytes(size, tag);
+        }
+
+        let mut offset = 0;
+        let mut visited = 0;
+
+        while offset < alloc.bytes_used() {
+            let p = alloc.block_at(offset);
+            let hdr = header_of(p);
+            let (size, tag) = blocks[visited];
+
+            assert!(alloc.contains(p));
+            assert!(!hdr.is_forwarded());
+            assert!(hdr.tag() == tag);
+            assert!(hdr.size() == align_up(size));
+
+            offset += HEADER_SIZE + hdr.size();
+            visited += 1;
+        }
+
+        assert!(visited == blocks.len());
+    }
+
+    /// A forwarded header reads back as the address the block moved to,
+    /// and can be put back the way it was
+    #[test]
+    fn forwarding_round_trips()
+    {
+        let mut alloc = Alloc::with_size(INIT_SIZE);
+        let p = alloc.alloc_bytes(24, Tag::Object);
+        let q = alloc.alloc_bytes(24, Tag::Object);
+
+        let hdr = header_of(p);
+        assert!(!hdr.is_forwarded());
+
+        set_forwarded(p, q);
+        assert!(header_of(p).is_forwarded());
+        assert!(header_of(p).forward_addr() == q);
+
+        restore_header(p, hdr);
+        assert!(!header_of(p).is_forwarded());
+        assert!(header_of(p).tag() == Tag::Object);
+        assert!(header_of(p).size() == 24);
+    }
+
+    /// Tables start out zeroed and the collector scans every slot of the
+    /// ones it walks, so zeroed memory has to read back as a value that
+    /// holds no reference
+    #[test]
+    fn zeroed_memory_reads_as_undef()
+    {
+        let mut alloc = Alloc::with_size(INIT_SIZE);
+        let table = alloc.alloc_table::<Value>(64, Tag::ValueTable);
+
+        for val in unsafe { &*table } {
+            assert!(!val.is_heap());
+            assert!(*val == Value::Undef);
+        }
     }
 }

@@ -2,7 +2,7 @@ use std::env;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use crate::alloc::Alloc;
+use crate::alloc::{Alloc, Tag};
 use crate::vm::{Value, VM, Actor};
 use crate::ast::{Expr, Function, Program};
 use crate::str::Str;
@@ -174,7 +174,7 @@ pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<V
     let arg_str = &args[idx];
 
     actor.gc_check(
-        std::mem::size_of::<Str>() + arg_str.len(),
+        Str::alloc_size(arg_str.len()),
         &mut [],
     );
 
@@ -225,7 +225,7 @@ fn readln(actor: &mut Actor) -> Result<Value, String>
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => {
             actor.gc_check(
-                std::mem::size_of::<Str>() + line.len(),
+                Str::alloc_size(line.len()),
                 &mut [],
             );
 
@@ -374,13 +374,13 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
     };
 
     actor.gc_check(
-        std::mem::size_of::<ByteArray>() + bytes.len(),
+        ByteArray::alloc_size(bytes.len()),
         &mut [],
     );
 
     let mut ba = ByteArray::with_size(bytes.len(), &mut actor.alloc);
     unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-    let ba_obj = actor.alloc.alloc(ba);
+    let ba_obj = actor.alloc.alloc(ba, Tag::ByteArray);
     Ok(Value::ByteArray(ba_obj))
 }
 
@@ -399,7 +399,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
     };
 
     actor.gc_check(
-        std::mem::size_of::<Str>() + s.len(),
+        Str::alloc_size(s.len()),
         &mut [],
     );
 
