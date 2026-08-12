@@ -4,6 +4,38 @@ use rustc_hash::FxHashSet as HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::process::Command;
+use std::sync::Once;
+
+/// Where the interpreter the tests run scripts through is built
+const BIN_PATH: &str = "target/verify_gc/debug/plush";
+
+/// Build an interpreter with heap verification turned on, so that every
+/// collection a test triggers checks the heap it produced.
+///
+/// The build gets its own target directory: cargo holds a lock on the one
+/// the test run itself is using. This costs one extra build the first
+/// time, and is cached from then on.
+fn verify_gc_binary() -> &'static str
+{
+    static BUILD: Once = Once::new();
+
+    // The test functions run in parallel, so only the first one through
+    // builds and the others wait for it
+    BUILD.call_once(|| {
+        let status = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "--features", "verify_gc",
+                "--target-dir", "target/verify_gc",
+            ])
+            .status()
+            .unwrap();
+
+        assert!(status.success(), "could not build plush with verify_gc");
+    });
+
+    BIN_PATH
+}
 
 fn test_file(file_path: &str, no_exec: bool)
 {
@@ -15,7 +47,7 @@ fn test_file(file_path: &str, no_exec: bool)
     io::stdout().flush().unwrap();
 
     // Compile the source file
-    let mut command = Command::new("target/debug/plush");
+    let mut command = Command::new(verify_gc_binary());
     command.current_dir(".");
     if no_exec {
         command.arg("--no-exec");
