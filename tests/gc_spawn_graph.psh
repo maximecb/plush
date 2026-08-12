@@ -1,0 +1,118 @@
+// Spawning copies the function and the parent's globals out of the
+// parent's own live heap, which means leaving forwarding addresses in it
+// and then taking them back out. Give it something with sharing, a
+// cycle, and every heap type in it, and check both sides afterwards.
+
+class Node
+{
+    init(self, name)
+    {
+        self.name = name;
+        self.next = nil;
+        self.also = nil;
+        self.tags = ['tag', 'tag'];
+        self.attrs = { kind: 'node', tag: 'tag' };
+        self.bytes = ByteArray.with_size(32);
+    }
+}
+
+// Globals are what gets copied into a spawned actor
+let var head = nil;
+let var shared = nil;
+let var spare = nil;
+let var counter = nil;
+
+fun build()
+{
+    shared = Node('shared');
+    shared.bytes[0] = 7;
+
+    let a = Node('a');
+    let b = Node('b');
+    a.next = b;
+    b.next = a;
+    a.also = shared;
+    b.also = shared;
+    head = a;
+
+    // An array with room past its end, so the copy has to drop the
+    // spare capacity rather than walk into it
+    spare = [1, 2, 3];
+    spare.push(4);
+
+    // A dict big enough to have been grown, so its table has empty
+    // slots mixed in with the live ones
+    let d = {};
+    for (let var i = 0; i < 200; ++i) {
+        d[i.to_s()] = 'v' + i.to_s();
+    }
+    shared.attrs = d;
+
+    // A closure over a mutable variable, which captures it by cell
+    let var n = 41;
+    counter = || { ++n; return n; };
+}
+
+fun check()
+{
+    let a = head;
+    let b = a.next;
+
+    assert(b.next == a);
+    assert(a.name == 'a');
+    assert(b.name == 'b');
+
+    // Still one shared node rather than one per reference
+    assert(a.also == b.also);
+    assert(a.also == shared);
+    assert(shared.bytes.len == 32);
+    assert(shared.bytes[0] == 7);
+    assert(shared.bytes[1] == 0);
+
+    assert(a.tags[0] == 'tag');
+    assert(a.tags[1] == 'tag');
+
+    assert(spare.len == 4);
+    assert(spare[3] == 4);
+
+    assert(shared.attrs['0'] == 'v0');
+    assert(shared.attrs['199'] == 'v199');
+    assert(!shared.attrs.has('200'));
+}
+
+fun child()
+{
+    // The whole graph came across with the spawn
+    check();
+    $vm_gc_collect();
+    check();
+
+    // The captured cell came too, with its value
+    assert(counter() == 42);
+    assert(counter() == 43);
+
+    return 1;
+}
+
+build();
+check();
+
+let var sum = 0;
+
+for (let var i = 0; i < 20; ++i) {
+    let aid = $actor_spawn(child);
+
+    // Collect while the child is copying, then check that spawning left
+    // our own heap exactly as it was
+    $vm_gc_collect();
+    check();
+
+    sum = sum + $actor_join(aid);
+}
+
+assert(sum == 20);
+
+// Our counter is untouched by the copies the children took of it
+assert(counter() == 42);
+
+$println('ok');

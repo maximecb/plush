@@ -1,0 +1,143 @@
+// Copying forwards each block once and points every reference at that
+// one copy. Sharing and cycles depend on it: without sharing a subgraph
+// would be duplicated at every reference, and a cycle would not
+// terminate at all.
+
+class Node
+{
+    init(self, name)
+    {
+        self.name = name;
+        self.next = nil;
+        self.also = nil;
+        self.items = [];
+    }
+}
+
+// Three nodes in a cycle, all pointing at one shared node
+fun build_cycle()
+{
+    let shared = Node('shared');
+    shared.items.push('payload');
+
+    let a = Node('a');
+    let b = Node('b');
+    let c = Node('c');
+
+    a.next = b;
+    b.next = c;
+    c.next = a;
+
+    a.also = shared;
+    b.also = shared;
+    c.also = shared;
+
+    return a;
+}
+
+fun check_cycle(a)
+{
+    let b = a.next;
+    let c = b.next;
+
+    // The cycle still closes on the node it started from
+    assert(c.next == a);
+    assert(a.name == 'a');
+    assert(b.name == 'b');
+    assert(c.name == 'c');
+
+    // One shared node, not three copies of it
+    assert(a.also == b.also);
+    assert(b.also == c.also);
+    assert(a.also.items[0] == 'payload');
+
+    // Writing through one reference is visible through the others,
+    // which it would not be if the copy had split them apart
+    a.also.name = 'written';
+    assert(c.also.name == 'written');
+    a.also.name = 'shared';
+}
+
+// A chain where every node holds the next one twice. Losing sharing
+// would turn this into 2^depth nodes rather than depth of them.
+fun build_dag(depth)
+{
+    let var node = Node('leaf');
+
+    for (let var i = 0; i < depth; ++i) {
+        let up = Node('level');
+        up.next = node;
+        up.also = node;
+        node = up;
+    }
+
+    return node;
+}
+
+fun check_dag(root, depth)
+{
+    let var node = root;
+
+    for (let var i = 0; i < depth; ++i) {
+        assert(node.name == 'level');
+        assert(node.next == node.also);
+        node = node.next;
+    }
+
+    assert(node.name == 'leaf');
+    assert(node.next == nil);
+}
+
+fun worker()
+{
+    loop {
+        let msg = $actor_recv();
+
+        if (msg == nil) {
+            break;
+        }
+
+        // The structure has to arrive intact, and survive being moved
+        // again once it is in this actor's own heap
+        check_cycle(msg[0]);
+        check_dag(msg[1], 200);
+        $vm_gc_collect();
+        check_cycle(msg[0]);
+        check_dag(msg[1], 200);
+
+        $actor_send($actor_parent(), msg);
+    }
+}
+
+let cycle = build_cycle();
+let dag = build_dag(200);
+
+// Surviving repeated collections
+for (let var i = 0; i < 20; ++i) {
+    $vm_gc_collect();
+    check_cycle(cycle);
+    check_dag(dag, 200);
+}
+
+// Surviving a round trip through another actor, which copies out of a
+// live heap on the way there and into a live heap on the way back
+let aid = $actor_spawn(worker);
+
+for (let var i = 0; i < 20; ++i) {
+    $actor_send(aid, [cycle, dag]);
+    let reply = $actor_recv();
+
+    check_cycle(reply[0]);
+    check_dag(reply[1], 200);
+
+    // Our own copy is still the way we left it
+    check_cycle(cycle);
+    check_dag(dag, 200);
+
+    // The reply is a separate copy, sharing nothing with ours
+    assert(reply[0] != cycle);
+}
+
+$actor_send(aid, nil);
+$actor_join(aid);
+$println('ok');

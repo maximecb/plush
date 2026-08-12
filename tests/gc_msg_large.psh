@@ -1,0 +1,68 @@
+// A message far bigger than the message allocator starts out at, made
+// of many small blocks so the copy is partway through its scan when the
+// buffer has to grow. Growing commits more pages without moving what is
+// already there, which is what lets the scan carry on from where it was.
+//
+// It is also bigger than a heap starts out at, so the receiving actor
+// has to grow its own heap to make room before it can copy it out.
+
+let COUNT = 100_000;
+
+fun make_payload()
+{
+    let items = [];
+
+    for (let var i = 0; i < COUNT; ++i) {
+        // Distinct strings, so none of this collapses on the way over
+        items.push('item number ' + i.to_s());
+    }
+
+    return items;
+}
+
+fun check(items)
+{
+    assert(items.len == COUNT);
+    assert(items[0] == 'item number 0');
+    assert(items[1] == 'item number 1');
+    assert(items[50_000] == 'item number 50000');
+    assert(items[COUNT - 1] == 'item number 99999');
+}
+
+fun worker()
+{
+    loop {
+        let msg = $actor_recv();
+
+        if (msg == nil) {
+            break;
+        }
+
+        check(msg);
+
+        // Moving it again once it is in our own heap
+        $vm_gc_collect();
+        check(msg);
+
+        $actor_send($actor_parent(), msg);
+    }
+}
+
+let payload = make_payload();
+check(payload);
+
+let aid = $actor_spawn(worker);
+
+for (let var i = 0; i < 3; ++i) {
+    $actor_send(aid, payload);
+
+    let reply = $actor_recv();
+    check(reply);
+
+    // Sending it did not disturb our own copy
+    check(payload);
+}
+
+$actor_send(aid, nil);
+$actor_join(aid);
+$println('ok');

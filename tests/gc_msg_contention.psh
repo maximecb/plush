@@ -1,0 +1,80 @@
+// Many actors copying into one receiver's message buffer at once.
+//
+// Senders hold the buffer's lock across their copy and their queue send,
+// and the receiver only resets the buffer while holding that lock with
+// the queue observed empty. That is what keeps a message from being
+// reset out from under a sender that has not queued it yet. None of it
+// runs with a single sender taking turns with the receiver.
+
+let SENDERS = 8;
+let PER_SENDER = 250;
+
+class Item
+{
+    init(self, who, seq)
+    {
+        self.who = who;
+        self.seq = seq;
+        self.tags = ['tag', 'tag', 'tag'];
+        self.attrs = { who: who, kind: 'item' };
+        self.bytes = ByteArray.with_size(256);
+        self.bytes[0] = who;
+    }
+}
+
+fun sender()
+{
+    let who = $actor_recv();
+
+    for (let var i = 0; i < PER_SENDER; ++i) {
+        $actor_send(0, Item(who, i));
+
+        // Collect while other senders are mid-copy, so our own heap is
+        // being rewritten at the same time as it is being read out of
+        if (i % 50 == 0) {
+            $vm_gc_collect();
+        }
+    }
+
+    return who;
+}
+
+let ids = [];
+
+for (let var i = 0; i < SENDERS; ++i) {
+    let aid = $actor_spawn(sender);
+    $actor_send(aid, i);
+    ids.push(aid);
+}
+
+// Every sender's messages have to arrive whole and in their own order
+let counts = Array.with_size(SENDERS, 0);
+let total = SENDERS * PER_SENDER;
+
+for (let var n = 0; n < total; ++n) {
+    let item = $actor_recv();
+
+    assert(item.tags.len == 3);
+    assert(item.tags[0] == 'tag');
+    assert(item.attrs.kind == 'item');
+    assert(item.attrs.who == item.who);
+    assert(item.bytes.len == 256);
+    assert(item.bytes[0] == item.who);
+    assert(item.bytes[1] == 0);
+
+    // Messages from one sender keep their order
+    assert(item.seq == counts[item.who]);
+    counts[item.who] = item.seq + 1;
+
+    // Collect while senders are still filling the buffer
+    if (n % 200 == 0) {
+        $vm_gc_collect();
+    }
+}
+
+for (let var i = 0; i < SENDERS; ++i) {
+    assert(counts[i] == PER_SENDER);
+    assert($actor_join(ids[i]) == i);
+}
+
+$println('ok');
