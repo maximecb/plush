@@ -240,24 +240,54 @@ fn readln(actor: &mut Actor) -> Result<Value, String>
 /// security risks for file accesses
 fn is_safe_path(file_path: &str) -> bool
 {
-    use std::path::Path;
-    use std::path::PathBuf;
+    use std::path::{PathBuf, Component};
     use std::fs::canonicalize;
 
     let file_path = file_path.trim();
     let mut file_path = PathBuf::from(file_path);
 
-    // Reject extensions associated with executable files
-    if let Some(ext) = file_path.extension() {
-        if ext == "exe" || ext == "bat" || ext == "cmd" || ext == "com" || ext == "sh" {
-            return false;
+    // Guard specifically against touching the source code and tooling
+    // directories of the UVM project itself. We reject the path if any of
+    // its components names one of these directories (case-insensitive). This
+    // is checked on the requested path, before canonicalization, so it also
+    // prevents creating new files under such a directory.
+    for comp in file_path.components() {
+        if let Component::Normal(name) = comp {
+            match name.to_string_lossy().to_lowercase().as_str() {
+                "src" | ".cargo" | "cargo.toml" | "cargo.lock" |
+                ".git" | ".github" => return false,
+                _ => {}
+            }
         }
     }
 
-    // If this is a file that does not exist yet,
-    // Pop the file name from the path
-    if !file_path.exists() {
+    // Reject extensions associated with executable, script or
+    // loadable library files. The comparison is case-insensitive
+    // because some filesystems (e.g. macOS, Windows) treat "EXE"
+    // and "exe" as referring to the same file, so a case-sensitive
+    // check would be trivially bypassable.
+    if let Some(ext) = file_path.extension() {
+        match ext.to_string_lossy().to_lowercase().as_str() {
+            // Windows executables and scripts
+            "exe" | "com" | "scr" | "msi" | "cpl" | "dll" |
+            "bat" | "cmd" | "ps1" | "psm1" | "vbs" | "vbe" |
+            "js" | "jse" | "wsf" | "wsh" | "hta" | "jar" |
+            // Unix/macOS executables, libraries and shell scripts
+            "sh" | "bash" | "zsh" | "csh" | "ksh" | "fish" |
+            "command" | "so" | "dylib" | "app" | "out" |
+            // Interpreted language sources
+            "py" | "pyc" | "pyo" | "rb" | "pl" | "php" | "lua"
+                => return false,
+            _ => {}
+        }
+    }
+
+    // If this is a file that does not exist yet, pop the trailing
+    // components from the path. This is necessary for the canonicalize
+    // function to work
+    while !file_path.exists() {
         file_path.pop();
+
         if file_path.as_os_str().is_empty() {
             file_path = PathBuf::from(".");
         }
@@ -277,7 +307,7 @@ fn is_safe_path(file_path: &str) -> bool
 
     // On Unix/Linux platforms, deny access to files marked as executable
     #[cfg(unix)]
-    if !file_path.is_dir() {
+    if file_path.exists() && !file_path.is_dir() {
         use std::os::unix::fs::PermissionsExt;
         let metadata = std::fs::metadata(&file_path).unwrap();
         let permissions = metadata.permissions();
@@ -347,12 +377,44 @@ mod tests
         assert!(!is_safe_path("run_me.sh"));
         assert!(!is_safe_path("run_me.exe"));
 
+        // Other executable/script/library extensions are unsafe
+        assert!(!is_safe_path("lib.dylib"));
+        assert!(!is_safe_path("script.py"));
+        assert!(!is_safe_path("app.jar"));
+
+        // The blocklist must not be bypassable by changing the case
+        assert!(!is_safe_path("run_me.SH"));
+        assert!(!is_safe_path("MALWARE.Exe"));
+
+        // Reject access to the UVM project's own source and tooling dirs
+        assert!(!is_safe_path("src/main.rs"));
+        assert!(!is_safe_path("vm/src/host.rs"));
+        assert!(!is_safe_path(".cargo/config.toml"));
+        assert!(!is_safe_path(".git/config"));
+        assert!(!is_safe_path(".github/workflows/test.yml"));
+        assert!(!is_safe_path("../.git/config"));
+
+        // The manifest files are guarded as whole-name components
+        // (the extension is part of the component, not separate)
+        assert!(!is_safe_path("Cargo.toml"));
+        assert!(!is_safe_path("Cargo.lock"));
+        assert!(!is_safe_path("vm/Cargo.toml"));
+
+        // The project-dir blocklist is also case-insensitive
+        assert!(!is_safe_path("SRC/main.rs"));
+        assert!(!is_safe_path(".GitHub/workflows/test.yml"));
+        assert!(!is_safe_path("CARGO.TOML"));
+
+        // Home directory access is not safe
         if let Some(home_path) = std::env::home_dir() {
             let home_path = home_path.to_str().unwrap();
             assert!(!is_safe_path(home_path));
         }
 
+        // Safe paths inside CWD
+        assert!(is_safe_path("."));
         assert!(is_safe_path("foo.txt"));
+        assert!(is_safe_path("data.csv"));
         assert!(is_safe_path("docs/language.md"));
     }
 }
