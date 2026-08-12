@@ -14,4 +14,45 @@ $vm_gc_collect();
 assert(a.len == 0);
 assert(b.len == 0);
 
+// Growing an array with no capacity at all has to work, rather than
+// relying on there always being a slot already there
+a.push(1);
+assert(a.len == 1);
+assert(a[0] == 1);
+
+a.push(2);
+a.push(3);
+assert(a.len == 3);
+assert(a[2] == 3);
+
+$vm_gc_collect();
+assert(a.len == 3);
+assert(a[0] == 1);
+assert(a[2] == 3);
+
+// Same for inserting into one
+let c = Array.with_size(0, 0);
+c.insert(0, 'first');
+assert(c.len == 1);
+assert(c[0] == 'first');
+
+// And for an empty literal, which starts with no capacity either
+let d = [];
+assert(d.len == 0);
+$vm_gc_collect();
+for (let var i = 0; i < 100; ++i) {
+    d.push(i);
+}
+assert(d.len == 100);
+assert(d[99] == 99);
+
+// Popping everything back off leaves it empty but still usable
+for (let var i = 0; i < 100; ++i) {
+    d.pop();
+}
+assert(d.len == 0);
+$vm_gc_collect();
+d.push('again');
+assert(d[0] == 'again');
+
 $println('ok');

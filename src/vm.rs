@@ -649,10 +649,9 @@ impl Actor
         // Make room for the copy first. The message is not reachable from
         // any root yet, so a collection here does not need to know about
         // it: it stays put in the message allocator until we copy it
-        // below. A copy is never larger than what it copies, but ask for
-        // twice the size so there is no chance of the copy running dry
-        // partway through, when the heap can no longer be collected.
-        self.gc_check(2 * msg.size, &mut []);
+        // below. Copying it here cannot come out larger than it already
+        // is, since it was itself produced by a copy.
+        self.gc_check(msg.size, &mut []);
 
         // The string table is shared with the collector, which sizes it
         // for the whole heap. Drop it if it has grown past what a message
@@ -993,13 +992,18 @@ impl Actor
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
         let start_time = crate::host::get_time_ms();
 
-        // Upper bound on how much space the copy can take. Every block is
-        // copied at most once and none of them grow, so the copy is never
-        // larger than what it copies, but leave room to spare since
-        // committing memory we never touch costs nothing. The excess is
-        // released below, once we know how much data is actually live.
-        let max_copy_bytes = std::cmp::max(
-            2 * self.alloc.bytes_used() + bytes_needed,
+        // How big to make the to-space. A block costs its header plus its
+        // own rounded size and nothing else, and each one is copied at
+        // most once, so the copy can never come out larger than what it
+        // copies. That makes what the copy needs exactly the bytes in use
+        // plus what the allocation waiting on us wants.
+        //
+        // The heap is also sized from the live data below, and it has to
+        // be grown for that here rather than after the fact, so take
+        // whichever of the two is larger.
+        let used_bytes = self.alloc.bytes_used();
+        let to_space_bytes = std::cmp::max(
+            std::cmp::max(used_bytes + bytes_needed, (used_bytes * 3) / 2),
             INIT_SIZE,
         );
 
@@ -1017,12 +1021,12 @@ impl Actor
 
         // The to-space has to be empty for its reservation to be replaced
         dst_alloc.reset();
-        dst_alloc.grow_reserve(max_copy_bytes);
+        dst_alloc.grow_reserve(to_space_bytes);
 
         // A replaced reservation is freshly mapped, so nothing in it is
         // stale any more. Growing only ever commits zeroed pages.
         let dirty_bytes = std::cmp::min(dirty_bytes, dst_alloc.mem_size());
-        dst_alloc.grow(max_copy_bytes);
+        dst_alloc.grow(to_space_bytes);
 
         // Copy the roots into the new allocator, then everything they
         // reach. The from-space is discarded below, so the copier is free
@@ -2430,13 +2434,16 @@ impl VM
         // globals directly into it. Routing them through the message
         // allocator instead would cap them at its fixed size, and would
         // leave the actor referencing memory outside its own heap.
+        // What we copy over cannot come out larger than the parent's
+        // heap, and the new heap is sized from the live data below, so
+        // this covers both
         let mut alloc = Alloc::new();
-        let max_copy_bytes = std::cmp::max(
-            2 * parent.alloc.bytes_used(),
+        let heap_bytes = std::cmp::max(
+            (parent.alloc.bytes_used() * 3) / 2,
             INIT_SIZE,
         );
-        alloc.grow_reserve(max_copy_bytes);
-        alloc.grow(max_copy_bytes);
+        alloc.grow_reserve(heap_bytes);
+        alloc.grow(heap_bytes);
 
         // Copy the function/closure and the parent's globals. This reads
         // out of the parent's live heap, so the forwarding addresses left

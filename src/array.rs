@@ -17,23 +17,20 @@ impl Array
     pub fn alloc_size(capacity: usize) -> usize
     {
         HEADER_SIZE + size_of::<Array>() +
-        HEADER_SIZE + std::cmp::max(capacity, 1) * size_of::<Value>()
+        HEADER_SIZE + capacity * size_of::<Value>()
     }
 
     pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Self
     {
-        let capacity = std::cmp::max(capacity, 1);
         let table = alloc.alloc_table(capacity, Tag::ValueTable);
         Array { elems: table, len: 0 }
     }
 
-    pub fn clone(&self, alloc: &mut Alloc) -> Self
+    /// Capacity to grow to when the element table is full. Growing
+    /// doubles, but an empty array has to end up with room for one.
+    fn grown_capacity(&self) -> usize
     {
-        let capacity = std::cmp::max(self.len, 1);
-        let table = alloc.alloc_table(capacity, Tag::ValueTable);
-        let mut new_arr = Array { elems: table, len: self.len };
-        new_arr.items_mut().copy_from_slice(self.items());
-        new_arr
+        std::cmp::max(self.capacity() * 2, 1)
     }
 
     pub fn len(&self) -> usize
@@ -70,12 +67,10 @@ impl Array
     {
         assert!(self.len <= self.elems.len());
 
-        let elems = self.items_mut();
-
         // If we are at capacity
         if self.len == self.elems.len() {
-            let new_len = self.len * 2;
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len, Tag::ValueTable) };
+            let new_capacity = self.grown_capacity();
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_capacity, Tag::ValueTable) };
             new_elems[..self.len].copy_from_slice(self.items());
             self.elems = new_elems;
         }
@@ -90,8 +85,8 @@ impl Array
     {
         // If we are at capacity
         if self.len == self.elems.len() {
-            let new_len = self.len * 2;
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len, Tag::ValueTable) };
+            let new_capacity = self.grown_capacity();
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_capacity, Tag::ValueTable) };
             new_elems[..self.len].copy_from_slice(self.items());
             self.elems = new_elems;
         }
@@ -180,7 +175,7 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result
 
     if arr.len() == arr.capacity() {
         actor.gc_check(
-            HEADER_SIZE + size_of::<Value>() * arr.capacity() * 2,
+            HEADER_SIZE + size_of::<Value>() * arr.grown_capacity(),
             &mut [&mut array, &mut val]
         )
     }
@@ -207,7 +202,7 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val
 
     if arr.len() == arr.capacity() {
         actor.gc_check(
-            HEADER_SIZE + size_of::<Value>() * arr.capacity() * 2,
+            HEADER_SIZE + size_of::<Value>() * arr.grown_capacity(),
             &mut [&mut array, &mut idx, &mut val]
         )
     }

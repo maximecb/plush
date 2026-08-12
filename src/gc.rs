@@ -276,9 +276,12 @@ impl<'a> Copier<'a>
             Tag::Array => {
                 let arr = unsafe { &mut *(p as *mut Array) };
 
-                // Keep a spare slot the way a fresh array does, but never
-                // claim more than the table actually has
-                let capacity = std::cmp::max(arr.len(), 1).min(arr.capacity());
+                // Keep room to grow into, so that pushing again does not
+                // immediately have to reallocate the table. Doubling
+                // never leaves more than this, so a growing array keeps
+                // its capacity and only one shrunk by pop or remove
+                // gives any of it back.
+                let capacity = (2 * arr.len()).min(arr.capacity());
                 let elems = self.copy_table_prefix(arr.elems, capacity, Tag::ValueTable);
                 arr.elems = elems;
             }
