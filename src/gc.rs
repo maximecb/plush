@@ -1,4 +1,4 @@
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::FxHashSet;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 
@@ -43,7 +43,7 @@ impl PartialEq for StrKey
 
 impl Eq for StrKey {}
 
-pub type StrTable = HashSet<StrKey>;
+pub type StrTable = FxHashSet<StrKey>;
 
 /// A header that was overwritten with a forwarding address
 pub struct UndoEntry
