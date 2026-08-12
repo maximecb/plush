@@ -1,0 +1,38 @@
+// A message is copied into the receiving actor's heap, so what the
+// receiver mutates is its own copy. If the copy left the two heaps
+// sharing a block, the writes below would show up in our object.
+
+class Point
+{
+    init(self, x, y)
+    {
+        self.x = x;
+        self.y = y;
+    }
+}
+
+fun receiver()
+{
+    let p = $actor_recv();
+    assert(p.x == 1);
+    assert(p.y == 2);
+
+    p.x = 777;
+    p.y = 888;
+
+    $vm_gc_collect();
+    assert(p.x == 777);
+    assert(p.y == 888);
+}
+
+let p = Point(1, 2);
+
+let aid = $actor_spawn(receiver);
+$actor_send(aid, p);
+$actor_join(aid);
+
+$vm_gc_collect();
+assert(p.x == 1);
+assert(p.y == 2);
+
+$println('ok');
