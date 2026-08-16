@@ -118,6 +118,43 @@ let result = add(5, 10);
 $println(result); // 15
 ```
 
+### Closures and Lambdas
+
+Anonymous functions are written with the parameter list between vertical bars, followed by either a single
+expression or a block. In the expression form, the value of the expression is returned implicitly.
+
+```plush
+let square = |x| x * x;
+let greet = |name| { $println("Hello " + name); };
+
+$println(square(5));  // 25
+greet("world");
+```
+
+Lambdas are commonly passed directly as arguments:
+
+```plush
+fun apply(f, v) {
+    return f(v);
+}
+
+$println(apply(|x| x + 1, 41)); // 42
+```
+
+Both lambdas and nested `fun` declarations are closures: they capture variables from the enclosing function,
+and can mutate them if the captured variable was declared with `let var`.
+
+```plush
+fun counter() {
+    let var n = 0;
+    return || { n = n + 1; return n; };
+}
+
+let next = counter();
+$println(next()); // 1
+$println(next()); // 2
+```
+
 ### Arrays
 
 The syntax for array literals is similar to that of JavaScript, e.g.
@@ -149,6 +186,32 @@ class Point {
 let p = Point(10, 20);
 $println(p.to_s()); // (10, 20)
 ```
+
+### Inheritance
+
+A class can inherit from a single parent class using the `extends` keyword. The child inherits the parent's
+methods and can override them by redefining a method with the same name. There is no `super` keyword: to call
+a parent method, including the parent's constructor, name the parent class explicitly and pass `self` as the
+first argument.
+
+```plush
+class Point3D extends Point {
+    init(self, x, y, z) {
+        Point.init(self, x, y);
+        self.z = z;
+    }
+
+    to_s(self) {
+        return "(" + self.x.to_s() + ", " + self.y.to_s() + ", " + self.z.to_s() + ")";
+    }
+}
+
+let p = Point3D(1, 2, 3);
+$println(p.to_s()); // (1, 2, 3)
+```
+
+Note that the `instanceof` operator tests for the exact class of an object, and does not take
+inheritance into account.
 
 ### Imports
 
