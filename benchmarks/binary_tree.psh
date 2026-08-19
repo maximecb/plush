@@ -1,0 +1,68 @@
+// Binary tree traversal benchmark
+// Heavy on pointer chasing, object field accesses and recursive calls.
+// The tree is built once and kept small enough to avoid triggering GC,
+// so this measures traversal and not allocation.
+
+class Node
+{
+    init(self, left, right, val)
+    {
+        self.left = left;
+        self.right = right;
+        self.val = val;
+    }
+}
+
+// Build a perfect binary tree of a given depth.
+// A tree of depth d holds 2^(d+1) - 1 nodes.
+fun make_tree(depth, val) {
+    if (depth == 0) {
+        return Node(nil, nil, val);
+    }
+
+    return Node(
+        make_tree(depth - 1, val * 2),
+        make_tree(depth - 1, val * 2 + 1),
+        val
+    );
+}
+
+// Sum the values of every node in the tree
+fun check_tree(node) {
+    if (node.left == nil) {
+        return node.val;
+    }
+
+    return node.val + check_tree(node.left) + check_tree(node.right);
+}
+
+fun main() {
+    let DEPTH = 14;
+    let NUM_ITRS = 2000;
+
+    let num_nodes = (1 << (DEPTH + 1)) - 1;
+    let tree = make_tree(DEPTH, 1);
+
+    let start_time = $time_current_ms();
+
+    let var sum = 0;
+    for (let var i = 0; i < NUM_ITRS; ++i) {
+        sum = sum + check_tree(tree);
+    }
+
+    let end_time = $time_current_ms();
+    let elapsed_ms = end_time - start_time;
+
+    $println(
+        NUM_ITRS.to_s() + " traversals of a " + num_nodes.to_s() +
+        " node tree took " + elapsed_ms.to_s() + " ms"
+    );
+
+    // Each traversal visits every node exactly once
+    let expected = check_tree(tree) * NUM_ITRS;
+    if (sum != expected) {
+        $println("checksum FAILED, got " + sum.to_s() + ", expected " + expected.to_s());
+    }
+}
+
+main();

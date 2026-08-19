@@ -1,0 +1,160 @@
+// SHA-256 benchmark
+// Heavy on 32-bit integer arithmetic, bit manipulation and array indexing
+
+let MASK = 0xFFFFFFFF;
+
+let K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+// Message schedule, reused across blocks
+let W = Array.with_size(64, 0);
+
+// Hash a ByteArray that has already been padded to a multiple of 64 bytes.
+// Returns the digest as an array of 8 32-bit words.
+fun sha256(msg) {
+    let var h0 = 0x6a09e667;
+    let var h1 = 0xbb67ae85;
+    let var h2 = 0x3c6ef372;
+    let var h3 = 0xa54ff53a;
+    let var h4 = 0x510e527f;
+    let var h5 = 0x9b05688c;
+    let var h6 = 0x1f83d9ab;
+    let var h7 = 0x5be0cd19;
+
+    let num_blocks = msg.len _/ 64;
+
+    for (let var blk = 0; blk < num_blocks; ++blk) {
+        let base = blk * 64;
+
+        // Read the 16 big-endian words of this block
+        for (let var i = 0; i < 16; ++i) {
+            let j = base + i * 4;
+            W[i] = (msg[j] << 24) | (msg[j + 1] << 16) | (msg[j + 2] << 8) | msg[j + 3];
+        }
+
+        // Extend into the remaining 48 words
+        for (let var i = 16; i < 64; ++i) {
+            let x = W[i - 15];
+            let s0 = (((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3)) & MASK;
+            let y = W[i - 2];
+            let s1 = (((y >> 17) | (y << 15)) ^ ((y >> 19) | (y << 13)) ^ (y >> 10)) & MASK;
+            W[i] = (W[i - 16] + s0 + W[i - 7] + s1) & MASK;
+        }
+
+        let var a = h0;
+        let var b = h1;
+        let var c = h2;
+        let var d = h3;
+        let var e = h4;
+        let var f = h5;
+        let var g = h6;
+        let var h = h7;
+
+        for (let var i = 0; i < 64; ++i) {
+            let s1 = (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))) & MASK;
+            let ch = (e & f) ^ ((e ^ MASK) & g);
+            let temp1 = (h + s1 + ch + K[i] + W[i]) & MASK;
+            let s0 = (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) & MASK;
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = (s0 + maj) & MASK;
+
+            h = g;
+            g = f;
+            f = e;
+            e = (d + temp1) & MASK;
+            d = c;
+            c = b;
+            b = a;
+            a = (temp1 + temp2) & MASK;
+        }
+
+        h0 = (h0 + a) & MASK;
+        h1 = (h1 + b) & MASK;
+        h2 = (h2 + c) & MASK;
+        h3 = (h3 + d) & MASK;
+        h4 = (h4 + e) & MASK;
+        h5 = (h5 + f) & MASK;
+        h6 = (h6 + g) & MASK;
+        h7 = (h7 + h) & MASK;
+    }
+
+    return [h0, h1, h2, h3, h4, h5, h6, h7];
+}
+
+// Copy msg_len bytes of data into a new buffer with SHA-256 padding appended
+fun pad(data, msg_len) {
+    let padded_len = ((msg_len + 8) _/ 64 + 1) * 64;
+    let buf = ByteArray.with_size(padded_len);
+
+    for (let var i = 0; i < msg_len; ++i) {
+        buf[i] = data[i];
+    }
+
+    buf[msg_len] = 0x80;
+
+    // Message length in bits, big-endian, in the last 8 bytes
+    let bit_len = msg_len * 8;
+    for (let var i = 0; i < 8; ++i) {
+        buf[padded_len - 1 - i] = (bit_len >> (i * 8)) & 0xFF;
+    }
+
+    return buf;
+}
+
+fun digest_to_s(d) {
+    let var s = "";
+    for (let var i = 0; i < 8; ++i) {
+        s = s + d[i].to_hex(8).lower();
+    }
+    return s;
+}
+
+fun main() {
+    // Check the digest of "abc" against the known SHA-256 test vector
+    let abc = ByteArray.with_size(3);
+    abc[0] = 97;
+    abc[1] = 98;
+    abc[2] = 99;
+    let test = digest_to_s(sha256(pad(abc, 3)));
+    let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    if (test != expected) {
+        $println("SHA-256 self-test FAILED");
+        $println("  got:      " + test);
+        $println("  expected: " + expected);
+        return;
+    }
+
+    // Hash a buffer filled with a simple byte pattern
+    let NUM_BYTES = 1536 * 1024;
+    let data = ByteArray.with_size(NUM_BYTES);
+    for (let var i = 0; i < NUM_BYTES; ++i) {
+        data[i] = i & 0xFF;
+    }
+    let msg = pad(data, NUM_BYTES);
+
+    let start_time = $time_current_ms();
+    let d = sha256(msg);
+    let end_time = $time_current_ms();
+
+    $println("SHA-256 of " + NUM_BYTES.to_s() + " bytes took " + (end_time - start_time).to_s() + " ms");
+    $println("digest: " + digest_to_s(d));
+}
+
+main();
