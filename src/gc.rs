@@ -245,7 +245,7 @@ impl<'a> Copier<'a>
     {
         match hdr.tag() {
             // Strings and raw bytes hold no references
-            Tag::Str | Tag::Bytes => {}
+            Tag::Str | Tag::Bytes | Tag::Int64 | Tag::Float64 => {}
 
             Tag::Object => {
                 let obj = unsafe { &mut *(p as *mut Object) };
@@ -384,7 +384,7 @@ pub fn verify_heap(alloc: &Alloc)
         offset += HEADER_SIZE + hdr.size();
 
         match hdr.tag() {
-            Tag::Str | Tag::Bytes => {}
+            Tag::Str | Tag::Bytes | Tag::Int64 | Tag::Float64 => {}
 
             Tag::Object => {
                 let obj = unsafe { &*(p as *const Object) };

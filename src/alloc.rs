@@ -38,6 +38,10 @@ pub enum Tag
     // Captured variable, holds a single value
     Cell,
 
+    // Boxed numbers that don't fit in an immediate value
+    Int64,
+    Float64,
+
     // Tables, referenced by the objects above
     ValueTable,
     SlotTable,

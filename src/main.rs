@@ -3,6 +3,7 @@
 #![allow(unused_mut)]
 #![allow(unused_imports)]
 #![allow(unused_parens)]
+#![allow(unused_macros)]
 
 mod utils;
 mod ast;
@@ -11,6 +12,7 @@ mod parser;
 mod symbols;
 mod codegen;
 mod vm;
+mod value;
 mod alloc;
 mod object;
 mod closure;
