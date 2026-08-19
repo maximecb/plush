@@ -208,6 +208,11 @@ fn print(actor: &mut Actor, v: Value) -> Result<Value, String>
         _ => print!("{:?}", v)
     }
 
+    // Rust line-buffers stdout, so without this a program that prints
+    // incrementally without newlines shows nothing until its buffer fills
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+
     Ok(Value::Nil)
 }
 
