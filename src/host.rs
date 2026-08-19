@@ -78,6 +78,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
     static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1(read_file) };
     static READ_FILE_UTF8: HostFn = HostFn { name: "read_file", f: Fn1(read_file_utf8) };
     static WRITE_FILE: HostFn = HostFn { name: "write_file", f: Fn2(write_file) };
+    static MAKE_DIR: HostFn = HostFn { name: "make_dir", f: Fn1(make_dir) };
     static VM_SHRINK_HEAP: HostFn = HostFn { name: "vm_shrink_heap", f: Fn1(vm_shrink_heap) };
     static VM_GC_COLLECT: HostFn = HostFn { name: "vm_gc_collect", f: Fn0(vm_gc_collect) };
     static ACTOR_ID: HostFn = HostFn { name: "actor_id", f: Fn0(actor_id) };
@@ -110,6 +111,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
         "read_file" => &READ_FILE,
         "read_file_utf8" => &READ_FILE_UTF8,
         "write_file" => &WRITE_FILE,
+        "make_dir" => &MAKE_DIR,
 
         "vm_shrink_heap" => &VM_SHRINK_HEAP,
         "vm_gc_collect" => &VM_GC_COLLECT,
@@ -480,6 +482,22 @@ fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<V
     }
 
     match std::fs::write(file_path, &bytes) {
+        Err(_) => Ok(Value::False),
+        Ok(_) => Ok(Value::True)
+    }
+}
+
+/// Create a directory, along with any missing parent directories.
+/// Succeeds if the directory already exists.
+fn make_dir(actor: &mut Actor, dir_path: Value) -> Result<Value, String>
+{
+    let dir_path = unwrap_str!(dir_path);
+
+    if !is_safe_path(&dir_path) {
+        return Err(format!("requested file path breaks sandboxing rules: {}", dir_path));
+    }
+
+    match std::fs::create_dir_all(dir_path) {
         Err(_) => Ok(Value::False),
         Ok(_) => Ok(Value::True)
     }

@@ -3,6 +3,8 @@ use std::{thread, thread::sleep};
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::dict::Dict;
+// Only the GC logging below formats numbers this way
+#[cfg(feature = "log_gc")]
 use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
@@ -989,7 +991,13 @@ impl Actor
     /// Perform a garbage collection cycle
     pub fn gc_collect(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
     {
+        // Collections can happen many times a second, so the reporting here,
+        // its argument formatting, and the timing it needs all compile out
+        // unless the `log_gc` feature is enabled.
+        #[cfg(feature = "log_gc")]
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
+
+        #[cfg(feature = "log_gc")]
         let start_time = crate::host::get_time_ms();
 
         // How big to make the to-space. A block costs its header plus its
@@ -1080,6 +1088,7 @@ impl Actor
             // Sized as above, this cannot run out of space
             copier.run();
 
+            #[cfg(feature = "log_gc")]
             println!(
                 "GC copied {} blocks, {} bytes",
                 thousands_sep(copier.num_blocks()),
@@ -1104,6 +1113,7 @@ impl Actor
         // old high water mark is worth touching.
         dst_alloc.zero_up_to(dirty_bytes);
 
+        #[cfg(feature = "log_gc")]
         println!(
             "Heap size now {} bytes ({}% free)",
             thousands_sep(dst_alloc.mem_size()),
@@ -1119,9 +1129,8 @@ impl Actor
         #[cfg(feature = "verify_gc")]
         crate::gc::verify_heap(&self.alloc);
 
-        let end_time = crate::host::get_time_ms();
-        let gc_time = end_time - start_time;
-        println!("GC time: {} ms", gc_time);
+        #[cfg(feature = "log_gc")]
+        println!("GC time: {} ms", crate::host::get_time_ms() - start_time);
     }
 
     /// Ensure that at least bytes_needed of free space are available in the

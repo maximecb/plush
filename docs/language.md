@@ -317,7 +317,8 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$readln()`: Read one line of input into a string.
 -   `$read_file(file_path)`: Read an entire file into a new `ByteArray`.
 -   `$read_file_utf8(file_path)`: Read an entire file encoded as valid UTF-8 into a `String`.
--   `$write_file(file_path, bytes)`: Writes a `ByteArray` to a file.
+-   `$write_file(file_path, bytes)`: Writes a `ByteArray` to a file. Returns `true` on success and `false` on failure. The parent directory must already exist.
+-   `$make_dir(dir_path)`: Creates a directory, along with any missing parent directories. Returns `true` if the directory exists afterwards, including when it already existed, and `false` on failure.
 -   `$actor_id()`: Returns the ID of the current actor.
 -   `$actor_parent()`: Returns the ID of the parent actor.
 -   `$actor_sleep(msecs)`: Pauses the current actor for the specified number of milliseconds.
@@ -364,6 +365,13 @@ e.g.
 
 ```
 RUST_BACKTRACE=1 cargo run my_program.psh
+```
+
+Garbage collection is silent by default. To see each collection reported on stdout, along with how much
+was copied and how long it took, build with the `log_gc` feature:
+
+```
+cargo run --features log_gc my_program.psh
 ```
 
 ## Manipulating Image Data
