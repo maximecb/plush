@@ -21,9 +21,20 @@ impl ByteArray
         HEADER_SIZE + size_of::<ByteArray>() + HEADER_SIZE + num_bytes
     }
 
-    pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Self
+    /// Allocate a zeroed bytearray of a given size.
+    ///
+    /// The bytearray is allocated before its table, so that the two end
+    /// up in the same order the collector puts them in, with the bytes
+    /// following the bytearray they belong to. No collection can happen
+    /// between the two allocations: callers reserve the space up front.
+    pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Value
     {
+        // Placeholder standing in until the table below is allocated
+        const NO_TABLE: *mut [u8] = std::ptr::slice_from_raw_parts_mut(std::ptr::null_mut(), 0);
+
+        let ba = alloc.alloc(ByteArray { bytes: NO_TABLE, len: num_bytes }, Tag::ByteArray);
         let bytes = alloc.alloc_table(num_bytes, Tag::Bytes);
+        unsafe { (*ba).bytes = bytes };
 
         // A new bytearray reads as zeroed. Stale bytes here would be
         // silently wrong data rather than anything that fails.
@@ -33,17 +44,16 @@ impl ByteArray
             "bytearray allocated over memory that was not zeroed"
         );
 
-        ByteArray { bytes, len: num_bytes }
+        Value::bytearray(ba)
     }
 
-    pub fn clone(&self, alloc: &mut Alloc) -> Self
+    pub fn clone(&self, alloc: &mut Alloc) -> Value
     {
-        let bytes = alloc.alloc_table(self.len, Tag::Bytes);
-        let mut new_ba = ByteArray { bytes, len: self.len };
+        let new_ba = Self::with_size(self.len, alloc);
 
         unsafe {
             let src_slice: &[u8] = self.get_slice(0, self.len);
-            let dst_slice: &mut [u8] = new_ba.get_slice_mut(0, self.len);
+            let dst_slice: &mut [u8] = new_ba.as_ba().get_slice_mut(0, self.len);
             dst_slice.copy_from_slice(src_slice);
         }
 
@@ -225,9 +235,7 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result
         &mut []
     );
 
-    let ba = ByteArray::with_size(num_bytes, &mut actor.alloc);
-    let p_ba = actor.alloc.alloc(ba, Tag::ByteArray);
-    Ok(Value::bytearray(p_ba))
+    Ok(ByteArray::with_size(num_bytes, &mut actor.alloc))
 }
 
 pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Value, String>

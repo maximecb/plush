@@ -144,8 +144,8 @@ pub enum Insn
     instanceof { class_id: ClassId },
 
     // Get/set field
-    get_field { field: *const Str, class_id: ClassId, slot_idx: u32 },
-    set_field { field: *const Str, class_id: ClassId, slot_idx: u32 },
+    get_field { field: Value, class_id: ClassId, slot_idx: u32 },
+    set_field { field: Value, class_id: ClassId, slot_idx: u32 },
 
     // Get/set indexed element
     get_index,
@@ -183,10 +183,10 @@ pub enum Insn
 
     // Call a method on an object
     // call_method (self, arg0, ..., argN)
-    call_method { name: *const Str, argc: u8 },
+    call_method { name: Value, argc: u8 },
 
     // Call a method with a previously known pc
-    call_method_pc { name: *const Str, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
+    call_method_pc { name: Value, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
 
     // Return
     ret,
@@ -766,7 +766,7 @@ impl Actor
 
         // Note: for now this doesn't do interning but we
         // may choose to add this optimization later
-        self.alloc.str_val(str_const)
+        Str::new(str_const, &mut self.alloc)
     }
 
     /// Perform a garbage collection cycle
@@ -845,16 +845,12 @@ impl Actor
             // Heap values referenced in instructions
             for insn in &mut self.insns {
                 match insn {
-                    Insn::push { val } => {
+                    Insn::push { val } |
+                    Insn::get_field { field: val, .. } |
+                    Insn::set_field { field: val, .. } |
+                    Insn::call_method { name: val, .. } |
+                    Insn::call_method_pc { name: val, .. } => {
                         *val = copier.forward(*val);
-                    }
-
-                    // Instructions referencing name strings
-                    Insn::get_field { field: s, .. } |
-                    Insn::set_field { field: s, .. } |
-                    Insn::call_method { name: s, .. } |
-                    Insn::call_method_pc { name: s, .. } => {
-                        *s = copier.forward_str(*s);
                     }
 
                     _ => {}
@@ -990,7 +986,7 @@ impl Actor
             self.gc_check(Str::alloc_size(len), &mut [&mut v0, &mut v1]);
 
             let cat = v0.as_str().to_owned() + v1.as_str();
-            return Ok(self.alloc.str_val(&cat));
+            return Ok(Str::new(&cat, &mut self.alloc));
         }
 
         Err(format!("unsupported operand types for add: {:?} and {:?}", v0, v1))
@@ -1713,9 +1709,7 @@ impl Actor
                         Dict::alloc_size(0),
                         &mut []
                     );
-                    let dict = Dict::with_capacity(0, &mut self.alloc);
-                    let new_obj = self.alloc.alloc(dict, Tag::Dict);
-                    push!(Value::dict(new_obj))
+                    push!(Dict::with_capacity(0, &mut self.alloc))
                 }
 
                 // Set object field
@@ -1727,14 +1721,13 @@ impl Actor
                         if class_id == obj.class_id {
                             obj.set(slot_idx as usize, val);
                         } else {
-                            let field_name = unsafe { &*field };
-                            let slot_idx = match self.get_slot_idx(obj.class_id, field_name.as_str()) {
+                            let slot_idx = match self.get_slot_idx(obj.class_id, field.as_str()) {
                                 Some(slot_idx) => slot_idx,
                                 None => error!(
                                     "set_field",
                                     "class `{}` has no field `{}`, known fields are: {}",
                                     self.get_class_name(obj.class_id),
-                                    field_name.as_str(),
+                                    field.as_str(),
                                     self.get_field_names(obj.class_id),
                                 )
                             };
@@ -1756,14 +1749,13 @@ impl Actor
                         // The field name is reachable from the instruction
                         // stream, which the collector updates, so it has to
                         // be read back after the check
-                        let mut name_val = Value::string(field);
+                        let mut field = field;
                         self.gc_check(
                             alloc_size,
-                            &mut [&mut obj, &mut val, &mut name_val]
+                            &mut [&mut obj, &mut val, &mut field]
                         );
 
-                        let field = name_val.as_string() as *const Str;
-                        obj.as_dict().set(field, val, &mut self.alloc);
+                        obj.as_dict().set(field.as_string() as *const Str, val, &mut self.alloc);
                     }
                     else {
                         error!("set_field", "set_field on non-object/dict value")
@@ -1848,7 +1840,6 @@ impl Actor
                 // Get object field
                 Insn::get_field { field, class_id, slot_idx } => {
                     let obj = pop!();
-                    let field_name = unsafe { &*field };
 
                     if !obj.is_heap() {
                         error!("get_field", "get_field on non-object value {:?}", obj);
@@ -1864,13 +1855,13 @@ impl Actor
                             let val = if class_id == obj.class_id {
                                 obj.get(slot_idx as usize)
                             } else {
-                                let slot_idx = match self.get_slot_idx(obj.class_id, field_name.as_str()) {
+                                let slot_idx = match self.get_slot_idx(obj.class_id, field.as_str()) {
                                     Some(slot_idx) => slot_idx,
                                     None => error!(
                                         "get_field",
                                         "class `{}` has no field `{}`, known fields are: {}",
                                         self.get_class_name(obj.class_id),
-                                        field_name.as_str(),
+                                        field.as_str(),
                                         self.get_field_names(obj.class_id),
                                     )
                                 };
@@ -1887,14 +1878,14 @@ impl Actor
                             };
 
                             if val.is_undef() {
-                                error!("get_field", "object field not initialized `{}`", field_name.as_str());
+                                error!("get_field", "object field not initialized `{}`", field.as_str());
                             }
 
                             val
                         }
 
                         Tag::Dict => {
-                            let key = field_name.as_str();
+                            let key = field.as_str();
 
                             match obj.as_dict().get(key) {
                                 Some(v) => v,
@@ -1903,21 +1894,21 @@ impl Actor
                         }
 
                         Tag::Array => {
-                            match field_name.as_str() {
+                            match field.as_str() {
                                 "len" => Value::fixnum(obj.as_arr().len() as i64),
                                 _ => error!("get_field", "field not found on array")
                             }
                         }
 
                         Tag::ByteArray => {
-                            match field_name.as_str() {
+                            match field.as_str() {
                                 "len" => Value::fixnum(obj.as_ba().num_bytes() as i64),
                                 _ => error!("get_field", "field not found on bytearray")
                             }
                         }
 
                         Tag::Str => {
-                            match field_name.as_str() {
+                            match field.as_str() {
                                 "len" => Value::fixnum(obj.as_str().len() as i64),
                                 _ => error!("get_field", "field not found on string")
                             }
@@ -2012,8 +2003,7 @@ impl Actor
                         &mut [],
                     );
 
-                    let new_arr = Array::with_capacity(capacity, &mut self.alloc);
-                    push!(Value::array(self.alloc.alloc(new_arr, Tag::Array)))
+                    push!(Array::with_capacity(capacity, &mut self.alloc))
                 }
 
                 // Append an element at the end of an array
@@ -2035,8 +2025,7 @@ impl Actor
                     );
 
                     let ba_clone = val.as_ba().clone(&mut self.alloc);
-                    let p_clone = self.alloc.alloc(ba_clone, Tag::ByteArray);
-                    push!(Value::bytearray(p_clone));
+                    push!(ba_clone);
                 }
 
                 // Jump if true
@@ -2106,15 +2095,14 @@ impl Actor
                 // Call a method with a known name
                 // call_method (self, arg0, ..., argN)
                 Insn::call_method { name, argc } => {
-                    let method_name = unsafe { &*name };
                     let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
 
                     match self_val.to_obj() {
                         Some(obj) => {
-                            let fun_id = match self.get_method(obj.class_id, method_name.as_str()) {
+                            let fun_id = match self.get_method(obj.class_id, name.as_str()) {
                                 None => error!(
                                     "call to method `{}`, not found on class `{}`",
-                                    method_name.as_str(),
+                                    name.as_str(),
                                     self.get_class_name(obj.class_id)
                                 ),
                                 Some(fun_id) => fun_id,
@@ -2135,10 +2123,10 @@ impl Actor
                         }
 
                         None => {
-                            let fun = crate::runtime::get_method(self_val, method_name.as_str());
+                            let fun = crate::runtime::get_method(self_val, name.as_str());
 
                             if fun.is_nil() {
-                                error!("call to unknown method `{}`", method_name.as_str());
+                                error!("call to unknown method `{}`", name.as_str());
                             }
 
                             call_fun!(fun, argc + 1);

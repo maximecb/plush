@@ -150,7 +150,7 @@ impl<'a> Copier<'a>
     }
 
     /// Copy a string, sharing one that was already copied if it is equal
-    pub fn forward_str(&mut self, p: *const Str) -> *const Str
+    fn forward_str(&mut self, p: *const Str) -> *const Str
     {
         let hdr = header_of(p as *const u8);
 

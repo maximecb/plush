@@ -5,6 +5,7 @@ use crate::symbols::Decl;
 use crate::vm::Insn;
 use crate::value::Value;
 use crate::alloc::{Alloc, Tag};
+use crate::str::Str;
 
 /// Compiled function object
 #[derive(Copy, Clone)]
@@ -343,15 +344,14 @@ impl ExprBox
             }
 
             Expr::String(s) => {
-                code.push(Insn::push { val: alloc.str_val(&s) });
+                code.push(Insn::push { val: Str::new(&s, alloc) });
             }
 
             Expr::ByteArray(bytes) => {
                 use crate::bytearray::ByteArray;
-                let mut ba = ByteArray::with_size(bytes.len(), alloc);
-                unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-                let p_ba = alloc.alloc(ba, Tag::ByteArray);
-                code.push(Insn::push { val: Value::bytearray(p_ba) });
+                let ba = ByteArray::with_size(bytes.len(), alloc);
+                unsafe { ba.as_ba().get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
+                code.push(Insn::push { val: ba });
                 code.push(Insn::ba_clone);
             }
 
@@ -385,7 +385,7 @@ impl ExprBox
 
             Expr::Member { base, field } => {
                 base.gen_code(fun, code, alloc)?;
-                let field = alloc.str(&field);
+                let field = Str::new(&field, alloc);
                 code.push(Insn::get_field {
                     field,
                     class_id: Default::default(),
@@ -464,7 +464,7 @@ impl ExprBox
                             arg.gen_code(fun, code, alloc)?;
                         }
 
-                        let name = alloc.str(&field);
+                        let name = Str::new(&field, alloc);
                         code.push(Insn::call_method { name, argc });
                     }
 
@@ -559,7 +559,7 @@ fn gen_dict_expr(
 
         expr.gen_code(fun, code, alloc)?;
 
-        let field_name = alloc.str(&name);
+        let field_name = Str::new(&name, alloc);
 
         code.push(Insn::set_field {
             field: field_name,
@@ -804,7 +804,7 @@ fn gen_assign(
         }
 
         Expr::Member { base, field } => {
-            let field = alloc.str(&field);
+            let field = Str::new(&field, alloc);
 
             if need_value {
                 rhs.gen_code(fun, code, alloc)?;

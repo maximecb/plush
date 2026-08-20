@@ -181,7 +181,7 @@ pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<V
         &mut [],
     );
 
-    Ok(actor.alloc.str_val(arg_str))
+    Ok(Str::new(arg_str, &mut actor.alloc))
 }
 
 /// Get a command-line argument string by index
@@ -230,7 +230,7 @@ fn readln(actor: &mut Actor) -> Result<Value, String>
                 &mut [],
             );
 
-            Ok(actor.alloc.str_val(&line))
+            Ok(Str::new(&line, &mut actor.alloc))
         }
 
         Err(_) => Ok(Value::NIL)
@@ -441,10 +441,9 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
         &mut [],
     );
 
-    let mut ba = ByteArray::with_size(bytes.len(), &mut actor.alloc);
-    unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-    let ba_obj = actor.alloc.alloc(ba, Tag::ByteArray);
-    Ok(Value::bytearray(ba_obj))
+    let ba = ByteArray::with_size(bytes.len(), &mut actor.alloc);
+    unsafe { ba.as_ba().get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
+    Ok(ba)
 }
 
 /// Read the contents of an entire file encoded as valid UTF-8
@@ -466,7 +465,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
         &mut [],
     );
 
-    Ok(actor.alloc.str_val(&s))
+    Ok(Str::new(&s, &mut actor.alloc))
 }
 
 /// Writes the contents of a ByteArray to a file

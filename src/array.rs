@@ -21,10 +21,28 @@ impl Array
         HEADER_SIZE + capacity * size_of::<Value>()
     }
 
-    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Self
+    /// Allocate an empty array with room for a given number of elements.
+    ///
+    /// The array is allocated before its table, so that the two end up in
+    /// the same order the collector puts them in, with the elements
+    /// following the array they belong to. No collection can happen
+    /// between the two allocations: callers reserve the space up front.
+    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Value
     {
-        let table = alloc.alloc_table(capacity, Tag::ValueTable);
-        Array { elems: table, len: 0 }
+        // Placeholder standing in until the table below is allocated
+        const NO_TABLE: *mut [Value] = std::ptr::slice_from_raw_parts_mut(std::ptr::null_mut(), 0);
+
+        let arr = alloc.alloc(Array { elems: NO_TABLE, len: 0 }, Tag::Array);
+        unsafe { (*arr).elems = alloc.alloc_table(capacity, Tag::ValueTable) };
+        Value::array(arr)
+    }
+
+    /// Allocate an array of a given size, with every element filled in
+    pub fn with_size(size: usize, fill_val: Value, alloc: &mut Alloc) -> Value
+    {
+        let arr = Self::with_capacity(size, alloc);
+        arr.as_arr().resize(size, fill_val, alloc);
+        arr
     }
 
     /// Capacity to grow to when the element table is full. Growing
@@ -185,10 +203,7 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fi
         &mut [&mut fill_val]
     );
 
-    let elems = actor.alloc.alloc_table(num_elems, Tag::ValueTable);
-    unsafe { (&mut *elems).fill(fill_val); }
-    let arr = Array { elems, len: num_elems };
-    Ok(Value::array(actor.alloc.alloc(arr, Tag::Array)))
+    Ok(Array::with_size(num_elems, fill_val, &mut actor.alloc))
 }
 
 pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result<Value, String>

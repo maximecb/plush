@@ -472,24 +472,6 @@ impl Alloc
         p
     }
 
-    pub fn str(&mut self, s: &str) -> *const Str
-    {
-        let p = self.alloc_var(Str::new(s.len()), s.len(), Tag::Str);
-
-        // Copy the string bytes into the tail of the allocation
-        unsafe {
-            let bytes = (p as *mut u8).add(size_of::<Str>());
-            std::ptr::copy_nonoverlapping(s.as_ptr(), bytes, s.len());
-        }
-
-        p
-    }
-
-    pub fn str_val(&mut self, s: &str) -> Value
-    {
-        Value::string(self.str(s))
-    }
-
     /// Box an integer that is too large to be a fixnum
     pub fn heap_int64(&mut self, val: i64) -> Value
     {

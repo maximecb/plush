@@ -15,6 +15,7 @@ use std::time::Duration;
 use crate::vm::{VM, Actor};
 use crate::value::*;
 use crate::bytearray::ByteArray;
+use crate::str::Str;
 use crate::ast::UIEVENT_ID;
 use crate::*;
 
@@ -298,7 +299,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             actor.set_field(msg, "window_id", Value::from(0));
             let kind = actor.intern_str("TEXT_INPUT");
             actor.set_field(msg, "kind", kind);
-            let text = actor.alloc.str_val(&text);
+            let text = Str::new(&text, &mut actor.alloc);
             actor.set_field(msg, "text", text);
 
             Some(msg)

@@ -82,22 +82,21 @@ impl Dict {
         table
     }
 
-    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Self
+    /// Allocate an empty dict with room for a given number of entries.
+    ///
+    /// The dict is allocated before its table, so that the two end up in
+    /// the same order the collector puts them in, with the slots
+    /// following the dict they belong to. No collection can happen
+    /// between the two allocations: callers reserve the space up front.
+    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Value
     {
-        let capacity = std::cmp::max(capacity, 2);
-        let table = Self::empty_zeroed_table(capacity, alloc);
-        Dict { table, len: 0 }
-    }
+        // Placeholder standing in until the table below is allocated
+        const NO_TABLE: *mut [TableSlot] = std::ptr::slice_from_raw_parts_mut(std::ptr::null_mut(), 0);
 
-    pub fn clone(&self, alloc: &mut Alloc) -> Self
-    {
-        let capacity = std::cmp::max(self.capacity(), 1);
-        let table = Self::empty_zeroed_table(capacity, alloc);
-        let new_dict = Dict { table, len: self.len };
-        let table = unsafe { &mut *table };
-        let self_table = unsafe { &*self.table };
-        table.copy_from_slice(self_table);
-        new_dict
+        let capacity = std::cmp::max(capacity, 2);
+        let dict = alloc.alloc(Dict { table: NO_TABLE, len: 0 }, Tag::Dict);
+        unsafe { (*dict).table = Self::empty_zeroed_table(capacity, alloc) };
+        Value::dict(dict)
     }
 
     // get slot is the heart of the dict implementation, as it's used for both
