@@ -2,7 +2,8 @@ use std::cmp::max;
 use crate::ast::*;
 use crate::lexer::ParseError;
 use crate::symbols::Decl;
-use crate::vm::{Insn, Value};
+use crate::vm::Insn;
+use crate::value::Value;
 use crate::alloc::{Alloc, Tag};
 
 /// Compiled function object
@@ -76,7 +77,7 @@ impl Function
             if self.is_ctor() {
                 code.push(Insn::get_arg { idx: 0 });
             } else {
-                code.push(Insn::push { val: Value::Nil });
+                code.push(Insn::push { val: Value::NIL });
             }
 
             code.push(Insn::ret);
@@ -318,12 +319,28 @@ impl ExprBox
     ) -> Result<(), ParseError>
     {
         match self.expr.as_ref() {
-            Expr::Nil => code.push(Insn::push { val: Value::Nil }),
-            Expr::True => code.push(Insn::push { val: Value::True }),
-            Expr::False => code.push(Insn::push { val: Value::False }),
-            Expr::Int64(v) => code.push(Insn::push { val: Value::Int64(*v) }),
-            Expr::Float64(v) => code.push(Insn::push { val: Value::Float64(*v) }),
-            Expr::HostFn(f) => code.push(Insn::push { val: Value::HostFn(*f) }),
+            Expr::Nil => code.push(Insn::push { val: Value::NIL }),
+            Expr::True => code.push(Insn::push { val: Value::TRUE }),
+            Expr::False => code.push(Insn::push { val: Value::FALSE }),
+            Expr::HostFn(f) => code.push(Insn::push { val: Value::host_fn(*f) }),
+
+            // Constants that don't fit in an immediate are boxed in the
+            // heap the code is compiled for, and traced from there
+            Expr::Int64(v) => {
+                let val = match Value::try_fixnum(*v) {
+                    Some(val) => val,
+                    None => alloc.heap_int64(*v),
+                };
+                code.push(Insn::push { val });
+            }
+
+            Expr::Float64(v) => {
+                let val = match Value::try_flonum(*v) {
+                    Some(val) => val,
+                    None => alloc.heap_float64(*v),
+                };
+                code.push(Insn::push { val });
+            }
 
             Expr::String(s) => {
                 code.push(Insn::push { val: alloc.str_val(&s) });
@@ -334,7 +351,7 @@ impl ExprBox
                 let mut ba = ByteArray::with_size(bytes.len(), alloc);
                 unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
                 let p_ba = alloc.alloc(ba, Tag::ByteArray);
-                code.push(Insn::push { val: Value::ByteArray(p_ba) });
+                code.push(Insn::push { val: Value::bytearray(p_ba) });
                 code.push(Insn::ba_clone);
             }
 
@@ -386,7 +403,7 @@ impl ExprBox
 
                 match op {
                     UnOp::Minus => {
-                        code.push(Insn::push { val: Value::Int64(-1) });
+                        code.push(Insn::push { val: Value::fixnum(-1) });
                         code.push(Insn::mul);
                     }
 
@@ -476,7 +493,7 @@ impl ExprBox
             Expr::Fun { fun_id, captured } => {
                 // If this is not a closure
                 if captured.len() == 0 {
-                    code.push(Insn::push { val: Value::Fun(*fun_id) });
+                    code.push(Insn::push { val: Value::fun(*fun_id) });
                     return Ok(())
                 }
 
@@ -585,14 +602,14 @@ fn gen_bin_op(
         code.push(Insn::if_false { target_ofs: 0 });
 
         // Both subexpressions are true
-        code.push(Insn::push { val: Value::True });
+        code.push(Insn::push { val: Value::TRUE });
         let jmp_idx = code.len();
         code.push(Insn::jump { target_ofs: 0 });
 
         // If false, short-circuit here
         patch_jump(code, if0_idx, code.len());
         patch_jump(code, if1_idx, code.len());
-        code.push(Insn::push { val: Value::False });
+        code.push(Insn::push { val: Value::FALSE });
 
         // Done label
         patch_jump(code, jmp_idx, code.len());
@@ -614,14 +631,14 @@ fn gen_bin_op(
         code.push(Insn::if_true { target_ofs: 0 });
 
         // Both subexpressions are false
-        code.push(Insn::push { val: Value::False });
+        code.push(Insn::push { val: Value::FALSE });
         let jmp_idx = code.len();
         code.push(Insn::jump { target_ofs: 0 });
 
         // If true, short-circuit here
         patch_jump(code, if0_idx, code.len());
         patch_jump(code, if1_idx, code.len());
-        code.push(Insn::push { val: Value::True });
+        code.push(Insn::push { val: Value::TRUE });
 
         // Done label
         patch_jump(code, jmp_idx, code.len());
@@ -629,16 +646,19 @@ fn gen_bin_op(
         return Ok(());
     }
 
-    // If the rhs is a constant integer value
+    // If the rhs is a constant integer value that fits in an immediate
     if let Expr::Int64(int_val) = rhs.expr.as_ref() {
+        // The negation below has to fit as well, so keep one bit of room
+        let fits = Value::fits_fixnum(*int_val) && Value::fits_fixnum(-*int_val);
+
         match op {
-            Add => {
+            Add if fits => {
                 lhs.gen_code(fun, code, alloc)?;
                 code.push(Insn::add_i64 { val: *int_val });
                 return Ok(())
             }
 
-            Sub => {
+            Sub if fits => {
                 lhs.gen_code(fun, code, alloc)?;
                 code.push(Insn::add_i64 { val: -int_val });
                 return Ok(())
@@ -722,11 +742,11 @@ fn gen_var_read(
 {
     match *decl {
         Decl::Fun { id } => {
-            code.push(Insn::push { val: Value::Fun(id) });
+            code.push(Insn::push { val: Value::fun(id) });
         }
 
         Decl::Class { id } => {
-            code.push(Insn::push { val: Value::Class(id) });
+            code.push(Insn::push { val: Value::class(id) });
         }
 
         Decl::Global { idx, .. } => {

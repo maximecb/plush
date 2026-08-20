@@ -1,6 +1,6 @@
 use std::mem::{align_of, size_of};
 use crate::str::Str;
-use crate::vm::Value;
+use crate::value::Value;
 
 /// Initial size for a new heap. Kept small so that actors are cheap to
 /// spawn, since each one owns a heap. Heaps grow as needed.
@@ -37,6 +37,10 @@ pub enum Tag
 
     // Captured variable, holds a single value
     Cell,
+
+    // Boxed numbers that don't fit in an immediate value
+    Int64,
+    Float64,
 
     // Tables, referenced by the objects above
     ValueTable,
@@ -483,7 +487,21 @@ impl Alloc
 
     pub fn str_val(&mut self, s: &str) -> Value
     {
-        Value::String(self.str(s))
+        Value::string(self.str(s))
+    }
+
+    /// Box an integer that is too large to be a fixnum
+    pub fn heap_int64(&mut self, val: i64) -> Value
+    {
+        debug_assert!(!Value::fits_fixnum(val));
+        Value::int64_box(self.alloc(val, Tag::Int64))
+    }
+
+    /// Box a double that has no inline flonum encoding
+    pub fn heap_float64(&mut self, val: f64) -> Value
+    {
+        debug_assert!(Value::try_flonum(val).is_none());
+        Value::float64_box(self.alloc(val, Tag::Float64))
     }
 }
 
@@ -711,14 +729,14 @@ mod tests
     /// ones it walks, so zeroed memory has to read back as a value that
     /// holds no reference
     #[test]
-    fn zeroed_memory_reads_as_undef()
+    fn zeroed_memory_holds_no_reference()
     {
         let mut alloc = Alloc::with_size(INIT_SIZE);
         let table = alloc.alloc_table::<Value>(64, Tag::ValueTable);
 
         for val in unsafe { &*table } {
             assert!(!val.is_heap());
-            assert!(*val == Value::Undef);
+            assert!(*val == Value::fixnum(0));
         }
     }
 }

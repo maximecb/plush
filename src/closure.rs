@@ -1,6 +1,6 @@
 use std::mem::size_of;
 use crate::ast::FunId;
-use crate::vm::Value;
+use crate::value::Value;
 use crate::alloc::{Alloc, Tag, HEADER_SIZE};
 
 /// The slots are stored inline, right after the closure
@@ -24,8 +24,13 @@ impl Closure
     {
         let clos = Closure { fun_id, num_slots: num_slots as u32 };
         let tail_bytes = num_slots * size_of::<Value>();
+        let p = alloc.alloc_var(clos, tail_bytes, Tag::Closure);
 
-        Value::Closure(alloc.alloc_var(clos, tail_bytes, Tag::Closure))
+        // Zeroed memory reads back as the integer zero, so the slots have
+        // to be marked uninitialized explicitly
+        unsafe { &mut *p }.slots_mut().fill(Value::UNDEF);
+
+        Value::closure(p)
     }
 
     pub fn num_slots(&self) -> usize

@@ -3,6 +3,7 @@
 #![allow(unused_mut)]
 #![allow(unused_imports)]
 #![allow(unused_parens)]
+#![allow(unused_macros)]
 
 mod utils;
 mod ast;
@@ -11,6 +12,7 @@ mod parser;
 mod symbols;
 mod codegen;
 mod vm;
+mod value;
 mod alloc;
 mod object;
 mod closure;
@@ -29,7 +31,8 @@ extern crate sdl2;
 use std::env;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
-use crate::vm::{VM, Value};
+use crate::vm::VM;
+use crate::value::Value;
 use crate::utils::{thousands_sep};
 use crate::ast::Program;
 use crate::parser::{parse_file, parse_str};
@@ -181,13 +184,12 @@ fn main()
     let ret = VM::call(&mut vm, main_fn, vec![]);
 
     // This is the value returned by the main unit
-    match ret {
-        Value::Nil => exit(0),
+    if ret.is_nil() {
+        exit(0);
+    }
 
-        Value::Int64(v) => {
-            exit(v as i32);
-        }
-
-        _ => panic!("main unit should return an integer value")
+    match ret.to_i64() {
+        Some(v) => exit(v as i32),
+        None => panic!("main unit should return an integer value")
     }
 }

@@ -1,4 +1,5 @@
-use crate::vm::{Value, Actor};
+use crate::vm::Actor;
+use crate::value::*;
 use crate::alloc::{Alloc, Tag, HEADER_SIZE};
 use crate::host::HostFn;
 use crate::*;
@@ -101,7 +102,7 @@ impl Array
     pub fn remove(&mut self, idx: usize) -> Value
     {
         if idx >= self.len {
-            return Value::Nil;
+            return Value::NIL;
         }
 
         let removed = unsafe { (&mut *self.elems)[idx] };
@@ -137,7 +138,7 @@ impl Array
     pub fn pop(&mut self) -> Value
     {
         if self.len == 0 {
-            return Value::Nil;
+            return Value::NIL;
         }
 
         self.len -= 1;
@@ -150,7 +151,7 @@ impl Array
     /// whole table, so a stale value left here would be kept alive.
     fn clear_slot(&mut self, idx: usize)
     {
-        unsafe { (*self.elems)[idx] = Value::Undef };
+        unsafe { (*self.elems)[idx] = Value::UNDEF };
     }
 }
 
@@ -166,12 +167,12 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fi
     let elems = actor.alloc.alloc_table(num_elems, Tag::ValueTable);
     unsafe { (&mut *elems).fill(fill_val); }
     let arr = Array { elems, len: num_elems };
-    Ok(Value::Array(actor.alloc.alloc(arr, Tag::Array)))
+    Ok(Value::array(actor.alloc.alloc(arr, Tag::Array)))
 }
 
 pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result<Value, String>
 {
-    let arr = array.unwrap_arr();
+    let arr = unwrap_arr!(array);
 
     if arr.len() == arr.capacity() {
         actor.gc_check(
@@ -180,25 +181,25 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result
         )
     }
 
-    let arr = array.unwrap_arr();
+    let arr = array.as_arr();
     arr.push(val, &mut actor.alloc);
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 pub fn array_pop(actor: &mut Actor, mut array: Value) -> Result<Value, String>
 {
-    Ok(array.unwrap_arr().pop())
+    Ok(unwrap_arr!(array).pop())
 }
 
 pub fn array_remove(actor: &mut Actor, mut array: Value, idx: Value) -> Result<Value, String>
 {
     let idx = unwrap_usize!(idx);
-    Ok(array.unwrap_arr().remove(idx))
+    Ok(unwrap_arr!(array).remove(idx))
 }
 
 pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val: Value) -> Result<Value, String>
 {
-    let arr = array.unwrap_arr();
+    let arr = unwrap_arr!(array);
 
     if arr.len() == arr.capacity() {
         actor.gc_check(
@@ -207,16 +208,16 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val
         )
     }
 
-    let arr = array.unwrap_arr();
+    let arr = array.as_arr();
     let idx = unwrap_usize!(idx);
     arr.insert(idx, val, &mut actor.alloc);
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> Result<Value, String>
 {
-    let a0 = self_array.unwrap_arr();
-    let a1 = other_array.unwrap_arr();
+    let a0 = unwrap_arr!(self_array);
+    let a1 = unwrap_arr!(other_array);
     let new_len = a0.len() + a1.len();
 
     if a0.len() + a1.len() > a0.capacity() {
@@ -226,8 +227,8 @@ pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: V
         )
     }
 
-    let a0 = self_array.unwrap_arr();
-    let a1 = other_array.unwrap_arr();
+    let a0 = self_array.as_arr();
+    let a1 = other_array.as_arr();
     a0.append(a1, &mut actor.alloc);
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }

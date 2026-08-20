@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use crate::alloc::{Alloc, Tag};
-use crate::vm::{Value, VM, Actor};
+use crate::vm::{VM, Actor};
+use crate::value::*;
 use crate::ast::{Expr, Function, Program};
 use crate::str::Str;
 use crate::*;
@@ -152,14 +153,14 @@ pub fn get_time_ms() -> u64
 /// Get the current time stamp in milliseconds since the unix epoch
 pub fn time_current_ms(actor: &mut Actor) -> Result<Value, String>
 {
-    Ok(Value::from(get_time_ms()))
+    Ok(actor.int64(get_time_ms() as i64))
 }
 
 /// Get the number of command-line arguments
 pub fn cmd_num_args(actor: &mut Actor) -> Result<Value, String>
 {
     let num_args = crate::REST_ARGS.lock().unwrap().len();
-    Ok(Value::from(num_args))
+    Ok(Value::fixnum(num_args as i64))
 }
 
 /// Get a command-line argument string by index
@@ -186,25 +187,18 @@ pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<V
 /// Get a command-line argument string by index
 pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
 {
-    cmd_get_arg_or(actor, idx, Value::Nil)
+    cmd_get_arg_or(actor, idx, Value::NIL)
 }
 
 /// Print a value to stdout
 fn print(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    match v {
-        Value::String(_) => {
-            let rust_str = unwrap_str!(v);
-            print!("{}", rust_str);
-        }
-
-        Value::Int64(v) => print!("{}", v),
-        Value::Float64(v) => print!("{}", v),
-
-        Value::True => print!("true"),
-        Value::False => print!("false"),
-        Value::Nil => print!("nil"),
-
+    match v.type_of() {
+        Type::String => print!("{}", v.as_str()),
+        Type::Int64 => print!("{}", v.to_i64().unwrap()),
+        Type::Float64 => print!("{}", v.to_f64().unwrap()),
+        Type::Bool => print!("{}", v.as_bool()),
+        Type::Nil => print!("nil"),
         _ => print!("{:?}", v)
     }
 
@@ -213,7 +207,7 @@ fn print(actor: &mut Actor, v: Value) -> Result<Value, String>
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 /// Print a value to stdout, followed by a newline
@@ -221,7 +215,7 @@ fn println(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     print(actor, v)?;
     println!();
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 /// Read one line of input from stdin
@@ -239,7 +233,7 @@ fn readln(actor: &mut Actor) -> Result<Value, String>
             Ok(actor.alloc.str_val(&line))
         }
 
-        Err(_) => Ok(Value::Nil)
+        Err(_) => Ok(Value::NIL)
     }
 }
 
@@ -438,7 +432,7 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
     }
 
     let bytes: Vec<u8> = match std::fs::read(file_path) {
-        Err(_) => return Ok(Value::Nil),
+        Err(_) => return Ok(Value::NIL),
         Ok(bytes) => bytes
     };
 
@@ -450,7 +444,7 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
     let mut ba = ByteArray::with_size(bytes.len(), &mut actor.alloc);
     unsafe { ba.get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
     let ba_obj = actor.alloc.alloc(ba, Tag::ByteArray);
-    Ok(Value::ByteArray(ba_obj))
+    Ok(Value::bytearray(ba_obj))
 }
 
 /// Read the contents of an entire file encoded as valid UTF-8
@@ -463,7 +457,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
     }
 
     let s: String = match std::fs::read_to_string(file_path) {
-        Err(_) => return Ok(Value::Nil),
+        Err(_) => return Ok(Value::NIL),
         Ok(s) => s
     };
 
@@ -479,7 +473,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<Value, String>
 {
     let file_path = unwrap_str!(file_path);
-    let bytes = bytes.unwrap_ba();
+    let bytes = unwrap_ba!(bytes);
     let bytes = unsafe { bytes.get_slice(0, bytes.num_bytes()) };
 
     if !is_safe_path(&file_path) {
@@ -487,8 +481,8 @@ fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<V
     }
 
     match std::fs::write(file_path, &bytes) {
-        Err(_) => Ok(Value::False),
-        Ok(_) => Ok(Value::True)
+        Err(_) => Ok(Value::FALSE),
+        Ok(_) => Ok(Value::TRUE)
     }
 }
 
@@ -503,8 +497,8 @@ fn make_dir(actor: &mut Actor, dir_path: Value) -> Result<Value, String>
     }
 
     match std::fs::create_dir_all(dir_path) {
-        Err(_) => Ok(Value::False),
-        Ok(_) => Ok(Value::True)
+        Err(_) => Ok(Value::FALSE),
+        Ok(_) => Ok(Value::TRUE)
     }
 }
 
@@ -523,28 +517,28 @@ fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> Result<Value, String>
 
     actor.alloc.shrink_to(new_size);
 
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 /// Manually trigger garbage collection in the current actor
 fn vm_gc_collect(actor: &mut Actor) -> Result<Value, String>
 {
     actor.gc_collect(0, &mut []);
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 /// Get the id of the current actor
 fn actor_id(actor: &mut Actor) -> Result<Value, String>
 {
-    Ok(Value::from(actor.actor_id))
+    Ok(actor.int64(actor.actor_id as i64))
 }
 
 /// Get the id of the parent actor
 fn actor_parent(actor: &mut Actor) -> Result<Value, String>
 {
     Ok(match actor.parent_id {
-        Some(actor_id) => Value::from(actor_id),
-        None => Value::Nil,
+        Some(actor_id) => actor.int64(actor_id as i64),
+        None => Value::NIL,
     })
 }
 
@@ -553,7 +547,7 @@ fn actor_sleep(actor: &mut Actor, msecs: Value) -> Result<Value, String>
 {
     let msecs = unwrap_u64!(msecs);
     thread::sleep(Duration::from_millis(msecs));
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 /// Spawn a new actor
@@ -561,17 +555,15 @@ fn actor_sleep(actor: &mut Actor, msecs: Value) -> Result<Value, String>
 /// Returns an actor id
 fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
 {
-    let fun_id = match fun {
-        Value::Closure(clos) => unsafe { (*clos).fun_id },
-        Value::Fun(fun_id) => fun_id,
-        _ => return Err("actor_spawn received non-function value".into())
-    };
+    if fun.to_clos().is_none() && !fun.is_fun() {
+        return Err("actor_spawn received non-function value".into());
+    }
 
     // TODO: check the function argument count and report a helpful
     // error message here
 
     let actor_id = VM::new_actor(actor, fun, vec![]);
-    Ok(Value::from(actor_id))
+    Ok(actor.int64(actor_id as i64))
 }
 
 /// Wait for a thread to terminate, produce the return value
@@ -589,9 +581,9 @@ fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Result<Value, S
     let res = actor.send(actor_id, msg);
 
     if res.is_ok() {
-        Ok(Value::True)
+        Ok(Value::TRUE)
     } else {
-        Ok(Value::False)
+        Ok(Value::FALSE)
     }
 }
 
@@ -608,7 +600,7 @@ fn actor_poll(actor: &mut Actor) -> Result<Value, String>
 {
     Ok(match actor.try_recv() {
         Some(msg_val) => msg_val,
-        None => Value::Nil,
+        None => Value::NIL,
     })
 }
 

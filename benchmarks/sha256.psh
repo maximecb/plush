@@ -70,7 +70,9 @@ fun sha256(msg) {
             let s1 = (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))) & MASK;
             let ch = (e & f) ^ ((e ^ MASK) & g);
             let temp1 = (h + s1 + ch + K[i] + W[i]) & MASK;
-            let s0 = (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) & MASK;
+            // Only the low bits of a survive the mask on the way out, so
+            // they are masked off first to keep every value 32-bit
+            let s0 = (((a >> 2) | ((a & 0x3) << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) & MASK;
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = (s0 + maj) & MASK;
 
