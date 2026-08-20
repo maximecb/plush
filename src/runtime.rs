@@ -431,6 +431,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
     static ARRAY_REMOVE: HostFn = HostFn { name: "remove", f: Fn2(array_remove) };
     static ARRAY_INSERT: HostFn = HostFn { name: "insert", f: Fn3(array_insert) };
     static ARRAY_APPEND: HostFn = HostFn { name: "append", f: Fn2(array_append) };
+    static ARRAY_RESIZE: HostFn = HostFn { name: "resize", f: Fn3(array_resize) };
 
     static BA_WITH_SIZE: HostFn = HostFn { name: "with_size", f: Fn2(ba_with_size) };
     static BA_READ_U32: HostFn = HostFn { name: "load_u32", f: Fn2(ba_load_u32) };
@@ -496,6 +497,7 @@ pub fn get_method(val: Value, method_name: &str) -> Value
         (Type::Array, "remove") => &ARRAY_REMOVE,
         (Type::Array, "insert") => &ARRAY_INSERT,
         (Type::Array, "append") => &ARRAY_APPEND,
+        (Type::Array, "resize") => &ARRAY_RESIZE,
 
         (Type::ByteArray, "load_u32") => &BA_READ_U32,
         (Type::ByteArray, "store_u32") => &BA_WRITE_U32,

@@ -135,6 +135,27 @@ impl Array
         self.len += other_elems.len();
     }
 
+    pub fn resize(&mut self, new_len: usize, fill_val: Value, alloc: &mut Alloc)
+    {
+        // If the new length doesn't fit in the current table
+        if new_len > self.elems.len() {
+            let new_elems = unsafe { &mut *alloc.alloc_table(new_len, Tag::ValueTable) };
+            new_elems[..self.len].copy_from_slice(self.items());
+            self.elems = new_elems;
+        }
+
+        let elems = unsafe { &mut *self.elems };
+
+        if new_len > self.len {
+            elems[self.len..new_len].fill(fill_val);
+        } else {
+            // Clear the slots past the new end, which the collector scans
+            elems[new_len..self.len].fill(Value::UNDEF);
+        }
+
+        self.len = new_len;
+    }
+
     pub fn pop(&mut self) -> Value
     {
         if self.len == 0 {
@@ -211,6 +232,23 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val
     let arr = array.as_arr();
     let idx = unwrap_usize!(idx);
     arr.insert(idx, val, &mut actor.alloc);
+    Ok(Value::NIL)
+}
+
+pub fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mut fill_val: Value) -> Result<Value, String>
+{
+    let new_len = unwrap_usize!(new_size);
+    let capacity = unwrap_arr!(array).capacity();
+
+    if new_len > capacity {
+        actor.gc_check(
+            HEADER_SIZE + size_of::<Value>() * new_len,
+            &mut [&mut array, &mut new_size, &mut fill_val]
+        )
+    }
+
+    let arr = array.as_arr();
+    arr.resize(new_len, fill_val, &mut actor.alloc);
     Ok(Value::NIL)
 }
 
