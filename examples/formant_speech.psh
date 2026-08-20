@@ -2,7 +2,9 @@
 //
 // A Klatt-style parallel formant synthesizer: a glottal pulse train and a
 // noise source are shaped by three tunable resonators to produce speech.
-// Usage: plush examples/formant_speech.psh [utterance] [out.wav]
+// Text is turned into phonemes with a dictionary of common English words,
+// falling back to letter-to-sound rules for anything else.
+// Usage: plush examples/formant_speech.psh ["text to speak"] [out.wav]
 
 let SAMPLE_RATE = 44100;
 let PI = 3.141592653589793;
@@ -218,6 +220,7 @@ let PHONEMES = {
     "z":  [vfric(300, 4200, 6000, 0.4, 0.7, 0.5, 90)],
     "v":  [vfric(280, 1300, 4500, 0.25, 0.3, 0.25, 80)],
     "dh": [vfric(300, 1500, 5200, 0.2, 0.3, 0.2, 80)],
+    "zh": [vfric(300, 2200, 2900, 0.7, 0.8, 0.45, 90)],
 
     // Stops: a silent closure, a release burst, then aspiration into the
     // following vowel. Voiced stops have a shorter, weaker release.
@@ -232,10 +235,435 @@ let PHONEMES = {
     "ch": [gap(60, 0.0), affric(2200, 2900, 0.9, 1.0, 0.0, 0.65, 65)],
     "jh": [gap(50, 0.10), affric(2200, 2900, 0.8, 0.9, 0.3, 0.45, 55)],
 
-    // Pauses: between words, and between clauses
+    // Pauses: between words, between clauses, and between sentences
     "_": [gap(70, 0.0)],
+    ",": [gap(260, 0.0)],
     ".": [gap(600, 0.0)],
 };
+
+// --- Pronunciation dictionary ---
+
+// Pronunciations for the most common English words, plus a few that this
+// example needs. Words that aren't here fall back to the letter-to-sound
+// rules below.
+let WORDS = {
+    // Function words
+    "the": "dh ax", "a": "ax", "an": "ae n", "and": "ae n d", "or": "ao r",
+    "of": "ah v", "to": "t uw", "in": "ih n", "on": "aa n", "at": "ae t",
+    "by": "b ay", "for": "f ao r", "with": "w ih dh", "from": "f r ah m",
+    "as": "ae z", "if": "ih f", "so": "s ow", "but": "b ah t", "not": "n aa t",
+    "no": "n ow", "yes": "y eh s", "all": "ao l", "any": "eh n iy",
+    "some": "s ah m", "such": "s ah ch", "than": "dh ae n", "then": "dh eh n",
+    "that": "dh ae t", "this": "dh ih s", "these": "dh iy z", "those": "dh ow z",
+    "there": "dh eh r", "their": "dh eh r", "here": "hh ih r", "what": "w ah t",
+    "which": "w ih ch", "who": "hh uw", "when": "w eh n", "where": "w eh r",
+    "why": "w ay", "how": "hh aw", "into": "ih n t uw", "out": "aw t",
+    "up": "ah p", "down": "d aw n", "off": "ao f", "over": "ow v er",
+    "under": "ah n d er", "about": "ax b aw t", "after": "ae f t er",
+    "before": "b ih f ao r", "between": "b ih t w iy n", "through": "th r uw",
+    "during": "d uh r ih ng", "against": "ax g eh n s t", "around": "ax r aw n d",
+    "because": "b ih k ao z", "while": "w ay l", "just": "jh ah s t",
+    "only": "ow n l iy", "also": "ao l s ow", "even": "iy v ax n",
+    "still": "s t ih l", "too": "t uw", "very": "v eh r iy", "more": "m ao r",
+    "most": "m ow s t", "much": "m ah ch", "many": "m eh n iy", "few": "f y uw",
+    "both": "b ow th", "each": "iy ch", "other": "ah dh er",
+    "another": "ax n ah dh er", "same": "s ey m", "own": "ow n",
+    "again": "ax g eh n", "never": "n eh v er", "always": "ao l w ey z",
+    "often": "ao f ax n", "now": "n aw", "away": "ax w ey",
+
+    // Pronouns and forms of "to be" and "to have"
+    "i": "ay", "me": "m iy", "my": "m ay", "we": "w iy", "us": "ah s",
+    "our": "aw er", "you": "y uw", "your": "y ao r", "he": "hh iy",
+    "him": "hh ih m", "his": "hh ih z", "she": "sh iy", "her": "hh er",
+    "it": "ih t", "its": "ih t s", "they": "dh ey", "them": "dh eh m",
+    "is": "ih z", "am": "ae m", "are": "aa r", "was": "w ah z", "were": "w er",
+    "be": "b iy", "been": "b ih n", "being": "b iy ih ng", "have": "hh ae v",
+    "has": "hh ae z", "had": "hh ae d", "do": "d uw", "does": "d ah z",
+    "did": "d ih d", "done": "d ah n", "will": "w ih l", "would": "w uh d",
+    "can": "k ae n", "could": "k uh d", "should": "sh uh d", "may": "m ey",
+    "might": "m ay t", "must": "m ah s t", "let": "l eh t",
+
+    // Contractions
+    "i'm": "ay m", "i'll": "ay l", "i've": "ay v", "it's": "ih t s",
+    "that's": "dh ae t s", "what's": "w ah t s", "there's": "dh eh r z",
+    "let's": "l eh t s", "you're": "y uh r", "we're": "w ih r",
+    "they're": "dh eh r", "don't": "d ow n t", "can't": "k ae n t",
+    "won't": "w ow n t", "isn't": "ih z ax n t", "didn't": "d ih d ax n t",
+    "doesn't": "d ah z ax n t",
+
+    // Verbs
+    "go": "g ow", "going": "g ow ih ng", "get": "g eh t", "make": "m ey k",
+    "take": "t ey k", "come": "k ah m", "see": "s iy", "look": "l uh k",
+    "know": "n ow", "think": "th ih ng k", "say": "s ey", "said": "s eh d",
+    "tell": "t eh l", "ask": "ae s k", "try": "t r ay", "trying": "t r ay ih ng",
+    "want": "w aa n t", "need": "n iy d", "give": "g ih v", "find": "f ay n d",
+    "use": "y uw z", "work": "w er k", "call": "k ao l", "feel": "f iy l",
+    "seem": "s iy m", "leave": "l iy v", "put": "p uh t", "keep": "k iy p",
+    "mean": "m iy n", "help": "hh eh l p", "show": "sh ow", "hear": "hh ih r",
+    "play": "p l ey", "move": "m uw v", "live": "l ih v", "run": "r ah n",
+    "read": "r iy d", "write": "r ay t", "open": "ow p ax n", "close": "k l ow z",
+    "start": "s t aa r t", "stop": "s t aa p", "learn": "l er n",
+    "change": "ch ey n jh", "follow": "f aa l ow", "create": "k r iy ey t",
+    "speak": "s p iy k", "add": "ae d", "send": "s eh n d", "build": "b ih l d",
+    "wait": "w ey t", "stay": "s t ey", "hope": "hh ow p", "love": "l ah v",
+    "believe": "b ax l iy v", "remember": "r ih m eh m b er", "meet": "m iy t",
+    "pay": "p ey", "set": "s eh t", "sit": "s ih t", "stand": "s t ae n d",
+    "bring": "b r ih ng", "happen": "hh ae p ax n", "return": "r ih t er n",
+    "request": "r ih k w eh s t", "report": "r ih p ao r t",
+    "require": "r ih k w ay er", "include": "ih n k l uw d",
+    "continue": "k ax n t ih n y uw", "understand": "ah n d er s t ae n d",
+    "explain": "ih k s p l ey n", "please": "p l iy z", "thank": "th ae ng k",
+
+    // Nouns and adjectives
+    "time": "t ay m", "day": "d ey", "week": "w iy k", "year": "y ih r",
+    "night": "n ay t", "today": "t ax d ey", "tomorrow": "t ax m aa r ow",
+    "morning": "m ao r n ih ng", "people": "p iy p ax l", "man": "m ae n",
+    "woman": "w uh m ax n", "child": "ch ay l d", "baby": "b ey b iy",
+    "friend": "f r eh n d",
+    "life": "l ay f", "hand": "hh ae n d", "eye": "ay", "home": "hh ow m",
+    "house": "hh aw s", "room": "r uw m", "water": "w ao t er",
+    "money": "m ah n iy", "book": "b uh k", "story": "s t ao r iy",
+    "word": "w er d", "name": "n ey m", "line": "l ay n", "part": "p aa r t",
+    "place": "p l ey s", "point": "p oy n t", "case": "k ey s",
+    "group": "g r uw p", "number": "n ah m b er", "problem": "p r aa b l ax m",
+    "question": "k w eh s ch ax n", "answer": "ae n s er",
+    "example": "ih g z ae m p ax l", "thing": "th ih ng",
+    "something": "s ah m th ih ng", "anything": "eh n iy th ih ng",
+    "everything": "eh v r iy th ih ng", "nothing": "n ah th ih ng",
+    "way": "w ey", "world": "w er l d", "fact": "f ae k t", "idea": "ay d iy ax",
+    "issue": "ih sh uw", "feature": "f iy ch er", "sound": "s aw n d",
+    "voice": "v oy s", "speech": "s p iy ch", "music": "m y uw z ih k",
+    "code": "k ow d", "file": "f ay l", "data": "d ey t ax", "test": "t eh s t",
+    "program": "p r ow g r ae m", "computer": "k ax m p y uw t er",
+    "machine": "m ax sh iy n", "system": "s ih s t ax m",
+    "language": "l ae ng g w ih jh", "good": "g uh d", "bad": "b ae d",
+    "great": "g r ey t", "new": "n uw", "old": "ow l d", "long": "l ao ng",
+    "little": "l ih t ax l", "small": "s m ao l", "large": "l aa r jh",
+    "high": "hh ay", "right": "r ay t", "left": "l eh f t", "last": "l ae s t",
+    "next": "n eh k s t", "first": "f er s t", "well": "w eh l",
+    "back": "b ae k", "sure": "sh uh r", "happy": "hh ae p iy",
+    "sorry": "s aa r iy", "different": "d ih f er ax n t", "easy": "iy z iy",
+    "hard": "hh aa r d", "true": "t r uw", "free": "f r iy",
+
+    // Greetings and proper nouns
+    "hello": "hh eh l ow", "hi": "hh ay", "ha": "hh aa",
+    "ok": "ow k ey", "okay": "ow k ey",
+    "maybe": "m ey b iy", "plush": "p l ah sh", "github": "g ih t hh ah b",
+
+    // Numbers
+    "zero": "z ih r ow", "one": "w ah n", "two": "t uw", "three": "th r iy",
+    "four": "f ao r", "five": "f ay v", "six": "s ih k s", "seven": "s eh v ax n",
+    "eight": "ey t", "nine": "n ay n", "ten": "t eh n",
+    "hundred": "hh ah n d r ax d", "thousand": "th aw z ax n d",
+};
+
+let DIGITS = {
+    "0": "z ih r ow", "1": "w ah n", "2": "t uw", "3": "th r iy", "4": "f ao r",
+    "5": "f ay v", "6": "s ih k s", "7": "s eh v ax n", "8": "ey t", "9": "n ay n",
+};
+
+// --- Letter-to-sound rules ---
+
+// Letter groups and the sounds they usually make, for words that aren't in
+// the dictionary. English spelling is nowhere near this regular, but the
+// result is usually recognizable. Longer groups are matched first.
+let LETTER_RULES = {
+    "ation": "ey sh ax n", "ition": "ih sh ax n",
+    "tion": "sh ax n", "sion": "zh ax n", "ough": "ao",
+    "tch": "ch", "sch": "s k", "igh": "ay", "air": "eh r", "ear": "ih r",
+    "ck": "k", "ch": "ch", "sh": "sh", "th": "th", "ph": "f", "wh": "w",
+    "gh": "", "ng": "ng", "qu": "k w", "kn": "n", "wr": "r",
+    "ee": "iy", "ea": "iy", "oo": "uw", "ou": "aw", "ow": "ow",
+    "oi": "oy", "oy": "oy", "ai": "ey", "ay": "ey", "au": "ao", "aw": "ao",
+    "oa": "ow", "ie": "iy", "ei": "iy", "ue": "uw", "ew": "uw", "eu": "y uw",
+    "ar": "aa r", "or": "ao r", "er": "er", "ir": "er", "ur": "er",
+    "a": "ae", "b": "b", "c": "k", "d": "d", "e": "eh", "f": "f", "g": "g",
+    "h": "hh", "i": "ih", "j": "jh", "k": "k", "l": "l", "m": "m", "n": "n",
+    "o": "aa", "p": "p", "q": "k", "r": "r", "s": "s", "t": "t", "u": "ah",
+    "v": "v", "w": "w", "x": "k s", "y": "y", "z": "z",
+};
+
+// A vowel followed by a consonant and a silent "e" is long: "make", "time"
+let LONG_VOWELS = { "a": "ey", "e": "iy", "i": "ay", "o": "ow", "u": "uw" };
+
+fun is_vowel(c)
+{
+    return c == "a" || c == "e" || c == "i" || c == "o" || c == "u";
+}
+
+fun join_chars(chars, start, count)
+{
+    let var s = "";
+    for (let var i = 0; i < count; ++i)
+        s = s + chars[start + i];
+    return s;
+}
+
+fun ends_with(s, suffix)
+{
+    if (suffix.len > s.len)
+        return false;
+    let var i = 0;
+    while (i < suffix.len) {
+        if (s.byte_at(s.len - suffix.len + i) != suffix.byte_at(i))
+            return false;
+        ++i;
+    }
+    return true;
+}
+
+fun drop_last(s, count)
+{
+    let var r = "";
+    for (let var i = 0; i < s.len - count; ++i)
+        r = r + s.char_at(i);
+    return r;
+}
+
+// Sound out a word one letter group at a time
+fun spell(word)
+{
+    let chars = [];
+    for (let var i = 0; i < word.len; ++i) {
+        let c = word.char_at(i);
+        // char_at returns nil in the middle of a multi-byte character
+        if (c != nil && c != "'")
+            chars.push(c);
+    }
+
+    let n = chars.len;
+    if (n == 0)
+        return "";
+
+    // A final "e" is usually silent
+    let var limit = n;
+    if (n >= 3 && chars[n - 1] == "e" && !is_vowel(chars[n - 2]))
+        limit = n - 1;
+    let silent_e = limit < n;
+
+    let out = [];
+    let var i = 0;
+
+    while (i < limit) {
+        let c = chars[i];
+
+        // Doubled consonants are pronounced once
+        if (i + 1 < limit && c == chars[i + 1] && !is_vowel(c)) {
+            ++i;
+            continue;
+        }
+
+        // The silent "e" lengthens the vowel two letters back
+        if (silent_e && i + 2 == limit && LONG_VOWELS.has(c)) {
+            out.push(LONG_VOWELS[c]);
+            ++i;
+            continue;
+        }
+
+        // The "e" of a final "ed" is silent, except after "t" or "d"
+        if (c == "e" && i + 2 == limit && chars[i + 1] == "d" && i > 0 &&
+            chars[i - 1] != "t" && chars[i - 1] != "d") {
+            out.push("d");
+            i = i + 2;
+            continue;
+        }
+
+        // Soft "c" before a front vowel, soft "g" before a silent "e"
+        if (c == "c" && i + 1 < n &&
+            (chars[i + 1] == "e" || chars[i + 1] == "i" || chars[i + 1] == "y")) {
+            out.push("s");
+            ++i;
+            continue;
+        }
+        if (c == "g" && silent_e && i + 1 == limit) {
+            out.push("jh");
+            ++i;
+            continue;
+        }
+
+        // Only a leading "y" is a consonant: "happy", "system"
+        if (c == "y" && i > 0) {
+            if (i + 1 == limit)
+                out.push("iy");
+            else
+                out.push("ih");
+            ++i;
+            continue;
+        }
+
+        let var matched = false;
+        for (let var k = 5; k >= 1; --k) {
+            if (i + k > limit)
+                continue;
+
+            let key = join_chars(chars, i, k);
+            if (LETTER_RULES.has(key)) {
+                if (LETTER_RULES[key] != "")
+                    out.push(LETTER_RULES[key]);
+                i = i + k;
+                matched = true;
+                break;
+            }
+        }
+
+        // Skip anything the rules don't cover
+        if (!matched)
+            ++i;
+    }
+
+    let var s = "";
+    for (let var j = 0; j < out.len; ++j) {
+        if (j > 0)
+            s = s + " ";
+        s = s + out[j];
+    }
+    return s;
+}
+
+// Add a plural or possessive ending, which takes its voicing from the
+// sound before it: "cats", "dogs", "boxes"
+fun add_s(phonemes)
+{
+    let parts = phonemes.split(" ");
+    let last = parts[parts.len - 1];
+
+    if (last == "s" || last == "z" || last == "sh" || last == "zh" ||
+        last == "ch" || last == "jh")
+        return phonemes + " ih z";
+
+    if (last == "p" || last == "t" || last == "k" || last == "f" || last == "th")
+        return phonemes + " s";
+
+    return phonemes + " z";
+}
+
+fun word_phonemes(word)
+{
+    if (WORDS.has(word))
+        return WORDS[word];
+
+    // Numbers are read out digit by digit
+    if (DIGITS.has(word.char_at(0))) {
+        let var s = "";
+        for (let var i = 0; i < word.len; ++i) {
+            let c = word.char_at(i);
+            if (!DIGITS.has(c))
+                continue;
+            if (s != "")
+                s = s + " ";
+            s = s + DIGITS[c];
+        }
+        return s;
+    }
+
+    // Possessives and plurals of known words
+    if (ends_with(word, "'s") || ends_with(word, "s'")) {
+        let base = drop_last(word, 2);
+        if (WORDS.has(base))
+            return add_s(WORDS[base]);
+    }
+    if (ends_with(word, "s")) {
+        let base = drop_last(word, 1);
+        if (WORDS.has(base))
+            return add_s(WORDS[base]);
+    }
+
+    return spell(word);
+}
+
+// --- Text parsing ---
+
+// Split text into word tokens and the pause markers "," and "."
+fun tokenize(text)
+{
+    let s = text.lower();
+    let toks = [];
+    let var word = "";
+
+    for (let var i = 0; i < s.len; ++i) {
+        let b = s.byte_at(i);
+
+        // Letters, digits and apostrophes build up the current word
+        if ((b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 39) {
+            word = word + s.char_at(i);
+            continue;
+        }
+
+        // A typographic right single quote is an apostrophe too
+        if (b == 0xE2 && i + 2 < s.len && s.byte_at(i + 1) == 0x80 && s.byte_at(i + 2) == 0x99) {
+            word = word + "'";
+            i = i + 2;
+            continue;
+        }
+
+        if (word != "") {
+            toks.push(word);
+            word = "";
+        }
+
+        // Commas break up a sentence, the other marks end one. Question and
+        // exclamation marks get no intonation of their own, just the pause.
+        if (b == 44 || b == 59 || b == 58)
+            toks.push(",");
+        else if (b == 46 || b == 63 || b == 33)
+            toks.push(".");
+    }
+
+    if (word != "")
+        toks.push(word);
+
+    return toks;
+}
+
+fun is_pause(tok)
+{
+    return tok == "," || tok == ".";
+}
+
+fun text_to_phonemes(text)
+{
+    let toks = tokenize(text);
+    let parts = [];
+
+    for (let var i = 0; i < toks.len; ++i) {
+        let tok = toks[i];
+
+        if (is_pause(tok)) {
+            // Nothing to pause between yet
+            if (parts.len == 0)
+                continue;
+
+            // Collapse runs of punctuation, keeping the longest pause
+            let last = parts[parts.len - 1];
+            if (is_pause(last)) {
+                if (tok == ".")
+                    parts[parts.len - 1] = ".";
+                continue;
+            }
+
+            parts.push(tok);
+            continue;
+        }
+
+        let ph = word_phonemes(tok);
+        if (ph == "")
+            continue;
+
+        // Words are separated by a short pause, clauses by their own marker
+        if (parts.len > 0 && !is_pause(parts[parts.len - 1]))
+            parts.push("_");
+
+        parts.push(ph);
+    }
+
+    let var s = "";
+    for (let var i = 0; i < parts.len; ++i) {
+        if (i > 0)
+            s = s + " ";
+        s = s + parts[i];
+    }
+    return s;
+}
 
 // --- Utterance building ---
 
@@ -402,35 +830,19 @@ fun write_wav(path, samples)
 
 // --- Demo ---
 
-let UTTERANCES = {
-    "vowels": "aa _ iy _ uw _ eh _ ow",
-    "hello": "hh eh l ow _ w er l d",
-    "plush": "p l ah sh",
-    "computer": "ay _ ae m ax k ax m p y uw t er",
-    "greetings": "g r iy t ih ng z _ hh y uw m ax n",
-
-    // "Hello world. I'm very happy to see that you are trying out the Plush language.
-    //  If you run into any issue or want to request new features, please open an
-    //  issue on GitHub."
-    "sentence":
-        "hh eh l ow _ w er l d . " +
-        "ay m _ v eh r iy _ hh ae p iy _ t uw _ s iy _ dh ae t _ y uw _ aa r _ " +
-        "t r ay ih ng _ aw t _ dh ax _ p l ah sh _ l ae ng g w ih jh . " +
-        "ih f _ y uw _ r ah n _ ih n t uw _ eh n iy _ ih sh uw _ ao r _ w aa n t _ t uw _ " +
-        "r ih k w eh s t _ n uw _ f iy ch er z _ _ p l iy z _ ow p ax n _ ae n _ " +
-        "ih sh uw _ aa n _ g ih t hh ah b",
-};
+let DEFAULT_TEXT =
+    "Hello world. I'm very happy to see that you are trying out the Plush " +
+    "language. If you run into any issue or want to request new features, " +
+    "please open an issue on GitHub.";
 
 fun main()
 {
-    let name = $cmd_get_arg_or(1, "sentence");
+    let text = $cmd_get_arg_or(1, DEFAULT_TEXT);
     let out_path = $cmd_get_arg_or(2, nil);
 
-    let var phonemes = name;
-    if (UTTERANCES.has(name))
-        phonemes = UTTERANCES[name];
-
-    $println("phonemes: " + phonemes);
+    let phonemes = text_to_phonemes(text);
+    $println("Text: " + text);
+    $println("Phonemes: " + phonemes);
 
     let segs = build_segments(phonemes);
     if (segs.len == 0) {
@@ -448,7 +860,7 @@ fun main()
     // Ratio kept in tenths so it can be printed without float formatting
     let ratio = (duration_ms * 10) _/ gen_ms.max(1);
     $println(
-        "generated " + duration_ms.to_s() + "ms of audio in " + gen_ms.to_s() + "ms " +
+        "Generated " + duration_ms.to_s() + "ms of audio in " + gen_ms.to_s() + "ms " +
         "(" + (ratio _/ 10).to_s() + "." + (ratio % 10).to_s() + "x realtime)"
     );
 
