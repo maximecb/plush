@@ -40,5 +40,13 @@ jobs:
 
     # We do this to verify that the benchmarks can all run without crashing
     # The benchmarks are designed to run fairly quickly, less than 5 seconds each
+    #
+    # They collect several times more than the test suite does, so they run
+    # with verify_gc, which walks and checks the heap after every GC cycle
     - name: Run benchmarks
-      run: ./run_benchmarks.sh
+      run: |
+        cargo build --release --features verify_gc --target-dir target/verify_gc
+        for f in benchmarks/*.psh; do
+          echo "Running benchmark: $f"
+          ./target/verify_gc/release/plush "$f"
+        done

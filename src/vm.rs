@@ -29,6 +29,9 @@ use crate::host::*;
 use crate::str::Str;
 use crate::value::*;
 use std::mem::size_of;
+// Named forms of the float operators, so that the instruction macros
+// below can take one as an argument
+use std::ops::{Add, Sub, Mul};
 
 /// Instruction opcodes
 /// Note: commonly used upcodes should be in the [0, 127] range (one byte)
@@ -366,15 +369,6 @@ cmp_slow_path!(cmp_lt, "less-than", <);
 cmp_slow_path!(cmp_le, "less-than-or-equal", <=);
 cmp_slow_path!(cmp_gt, "greater-than", >);
 cmp_slow_path!(cmp_ge, "greater-than-or-equal", >=);
-
-/// Function a value calls into, if it is one this VM can enter
-fn fun_id_of(val: Value) -> Option<FunId>
-{
-    match val.to_clos() {
-        Some(clos) => Some(clos.fun_id),
-        None => val.to_fun(),
-    }
-}
 
 impl Actor
 {
@@ -1092,7 +1086,7 @@ impl Actor
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
 
-        let fun_id = match fun_id_of(fun) {
+        let fun_id = match fun.to_fun_id() {
             Some(fun_id) => fun_id,
             None => panic!("invalid function passed to Actor::call")
         };
@@ -1150,16 +1144,6 @@ impl Actor
             }
         }
 
-        // Same for a comparison, which always produces a boolean
-        macro_rules! flonum_cmp {
-            ($v0: expr, $v1: expr, $op: tt) => {
-                if $v0.is_flonum() && $v1.is_flonum() {
-                    push_bool!($v0.as_flonum() $op $v1.as_flonum());
-                    continue;
-                }
-            }
-        }
-
         // Take the result of a slow path, reporting a type error the
         // same way the instruction itself would
         macro_rules! slow {
@@ -1171,6 +1155,72 @@ impl Actor
             }
         }
 
+        // Arithmetic on the tagged words themselves. `$rhs` says how the
+        // right operand enters: `raw` keeps its tag, which is what add
+        // and sub want, and `as_fixnum` drops it, so that a product comes
+        // out tagged exactly once.
+        macro_rules! arith_insn {
+            ($insn: literal, $checked_op: ident, $rhs: ident, $float_op: path, $slow_path: ident) => {{
+                let v1 = pop!();
+                let v0 = pop!();
+
+                // A 64-bit overflow is exactly the case where the result
+                // no longer fits in a fixnum
+                if v0.is_fixnum() && v1.is_fixnum() {
+                    if let Some(r) = (v0.raw() as i64).$checked_op(v1.$rhs() as i64) {
+                        push!(Value::from_raw(r as u64));
+                        continue;
+                    }
+                }
+
+                if v0.is_flonum() && v1.is_flonum() {
+                    let f = $float_op(v0.as_flonum(), v1.as_flonum());
+
+                    if let Some(r) = Value::try_flonum(f) {
+                        push!(r);
+                        continue;
+                    }
+                }
+
+                let r = slow!($insn, self.$slow_path(v0, v1));
+                push!(r);
+            }}
+        }
+
+        // Bitwise ops. Fixnum tags are zero, so the op keeps them that
+        // way and the result needs no retagging.
+        macro_rules! bitop_insn {
+            ($insn: literal, $op: tt, $slow_path: ident) => {{
+                let v1 = pop!();
+                let v0 = pop!();
+
+                if v0.is_fixnum() && v1.is_fixnum() {
+                    push!(Value::from_raw(v0.raw() $op v1.raw()));
+                    continue;
+                }
+
+                let r = slow!($insn, self.$slow_path(v0, v1));
+                push!(r);
+            }}
+        }
+
+        // Comparisons. Tagged fixnums order like the integers they hold,
+        // and inline doubles are decoded and compared directly.
+        macro_rules! cmp_insn {
+            ($insn: literal, $op: tt, $slow_path: ident) => {{
+                let v1 = pop!();
+                let v0 = pop!();
+
+                if v0.is_fixnum() && v1.is_fixnum() {
+                    push_bool!((v0.raw() as i64) $op (v1.raw() as i64));
+                } else if v0.is_flonum() && v1.is_flonum() {
+                    push_bool!(v0.as_flonum() $op v1.as_flonum());
+                } else {
+                    push_bool!(slow!($insn, $slow_path(v0, v1)));
+                }
+            }}
+        }
+
         // Set up a new frame for a function call
         macro_rules! call_fun {
             ($fun: expr, $argc: expr) => {{
@@ -1178,7 +1228,7 @@ impl Actor
                     error!("not enough call arguments on stack");
                 }
 
-                let fun_id = match fun_id_of($fun) {
+                let fun_id = match $fun.to_fun_id() {
                     Some(id) => id,
 
                     None => match $fun.to_host_fn() {
@@ -1242,7 +1292,7 @@ impl Actor
 
                 // For each stack frame, from top to bottom
                 for frame in self.frames.clone().into_iter().rev() {
-                    let fun_id = match fun_id_of(frame.fun) {
+                    let fun_id = match frame.fun.to_fun_id() {
                         Some(id) => id,
                         None => panic!("non-function on stack")
                     };
@@ -1388,61 +1438,9 @@ impl Actor
                     self.globals[idx] = val;
                 }
 
-                Insn::add => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    // Tagged fixnums add as they are, and a 64-bit
-                    // overflow is exactly the case where the sum no
-                    // longer fits in one
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        if let Some(sum) = (v0.raw() as i64).checked_add(v1.raw() as i64) {
-                            push!(Value::from_raw(sum as u64));
-                            continue;
-                        }
-                    }
-
-                    flonum_op!(v0, v1, +);
-
-                    let r = slow!("add", self.add_slow(v0, v1));
-                    push!(r);
-                }
-
-                Insn::sub => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        if let Some(dif) = (v0.raw() as i64).checked_sub(v1.raw() as i64) {
-                            push!(Value::from_raw(dif as u64));
-                            continue;
-                        }
-                    }
-
-                    flonum_op!(v0, v1, -);
-
-                    let r = slow!("sub", self.sub_slow(v0, v1));
-                    push!(r);
-                }
-
-                Insn::mul => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    // One operand keeps its tag and the other is untagged,
-                    // so that the product comes out tagged
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        if let Some(prod) = (v0.raw() as i64).checked_mul(v1.as_fixnum()) {
-                            push!(Value::from_raw(prod as u64));
-                            continue;
-                        }
-                    }
-
-                    flonum_op!(v0, v1, *);
-
-                    let r = slow!("mul", self.mul_slow(v0, v1));
-                    push!(r);
-                }
+                Insn::add => arith_insn!("add", checked_add, raw, f64::add, add_slow),
+                Insn::sub => arith_insn!("sub", checked_sub, raw, f64::sub, sub_slow),
+                Insn::mul => arith_insn!("mul", checked_mul, as_fixnum, f64::mul, mul_slow),
 
                 // Division always produces a float
                 // Division by zero produces an infinity (this is intentional)
@@ -1519,48 +1517,9 @@ impl Actor
                     push!(r);
                 }
 
-                // Integer bitwise or
-                Insn::bit_or => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    // Fixnum tags are zero, so bitwise ops keep them that way
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        push!(Value::from_raw(v0.raw() | v1.raw()));
-                        continue;
-                    }
-
-                    let r = slow!("bit_or", self.bit_or_slow(v0, v1));
-                    push!(r);
-                }
-
-                // Integer bitwise and
-                Insn::bit_and => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        push!(Value::from_raw(v0.raw() & v1.raw()));
-                        continue;
-                    }
-
-                    let r = slow!("bit_and", self.bit_and_slow(v0, v1));
-                    push!(r);
-                }
-
-                // Integer bitwise XOR
-                Insn::bit_xor => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        push!(Value::from_raw(v0.raw() ^ v1.raw()));
-                        continue;
-                    }
-
-                    let r = slow!("bit_xor", self.bit_xor_slow(v0, v1));
-                    push!(r);
-                }
+                Insn::bit_or => bitop_insn!("bit_or", |, bit_or_slow),
+                Insn::bit_and => bitop_insn!("bit_and", &, bit_and_slow),
+                Insn::bit_xor => bitop_insn!("bit_xor", ^, bit_xor_slow),
 
                 // Integer left shift
                 Insn::lshift => {
@@ -1604,66 +1563,10 @@ impl Actor
                     push!(r);
                 }
 
-                // Less than
-                Insn::lt => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    // Tagged fixnums order like the integers they hold
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        push_bool!((v0.raw() as i64) < (v1.raw() as i64));
-                        continue;
-                    }
-
-                    flonum_cmp!(v0, v1, <);
-
-                    push_bool!(slow!("lt", cmp_lt(v0, v1)));
-                }
-
-                // Less than or equal
-                Insn::le => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        push_bool!((v0.raw() as i64) <= (v1.raw() as i64));
-                        continue;
-                    }
-
-                    flonum_cmp!(v0, v1, <=);
-
-                    push_bool!(slow!("le", cmp_le(v0, v1)));
-                }
-
-                // Greater than
-                Insn::gt => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        push_bool!((v0.raw() as i64) > (v1.raw() as i64));
-                        continue;
-                    }
-
-                    flonum_cmp!(v0, v1, >);
-
-                    push_bool!(slow!("gt", cmp_gt(v0, v1)));
-                }
-
-                // Greater than or equal
-                Insn::ge => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        push_bool!((v0.raw() as i64) >= (v1.raw() as i64));
-                        continue;
-                    }
-
-                    flonum_cmp!(v0, v1, >=);
-
-                    push_bool!(slow!("ge", cmp_ge(v0, v1)));
-                }
+                Insn::lt => cmp_insn!("lt", <, cmp_lt),
+                Insn::le => cmp_insn!("le", <=, cmp_le),
+                Insn::gt => cmp_insn!("gt", >, cmp_gt),
+                Insn::ge => cmp_insn!("ge", >=, cmp_ge),
 
                 Insn::eq => {
                     let v1 = pop!();
@@ -1686,7 +1589,6 @@ impl Actor
                         None => error!("not", "unsupported type in logical not {:?}", v0)
                     }
                 }
-
 
                 // Create a new closure
                 Insn::clos_new { fun_id, num_slots } => {

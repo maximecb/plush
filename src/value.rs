@@ -521,6 +521,18 @@ impl Value
         if self.is_closure() { Some(self.as_clos()) } else { None }
     }
 
+    /// Function a call to this value enters, whether it holds one
+    /// directly or through a closure. Host functions are not among
+    /// these: they are called through `to_host_fn` instead.
+    #[inline(always)]
+    pub fn to_fun_id(self) -> Option<FunId>
+    {
+        match self.to_clos() {
+            Some(clos) => Some(clos.fun_id),
+            None => self.to_fun(),
+        }
+    }
+
     #[inline(always)]
     pub fn cell(p: *mut Value) -> Value { Value::ptr_id(p as *const u8) }
 
