@@ -77,7 +77,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
     static PRINTLN: HostFn = HostFn { name: "println", f: Fn1(println) };
     static READLN: HostFn = HostFn { name: "readln", f: Fn0(readln) };
     static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1(read_file) };
-    static READ_FILE_UTF8: HostFn = HostFn { name: "read_file", f: Fn1(read_file_utf8) };
+    static READ_FILE_UTF8: HostFn = HostFn { name: "read_file_utf8", f: Fn1(read_file_utf8) };
     static WRITE_FILE: HostFn = HostFn { name: "write_file", f: Fn2(write_file) };
     static MAKE_DIR: HostFn = HostFn { name: "make_dir", f: Fn1(make_dir) };
     static VM_SHRINK_HEAP: HostFn = HostFn { name: "vm_shrink_heap", f: Fn1(vm_shrink_heap) };

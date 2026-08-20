@@ -30,10 +30,11 @@ Caveats and limitations:
 To run a Plush script, you can use the `cargo run` command, followed by the path to the script. For example:
 
 ```sh
-cargo run examples/amigaball.psh
+cargo run examples/helloworld.psh
 ```
 
-This will execute the `helloworld.psh` script and print "Hello, World!" to the console. More example programs
+This will execute the `helloworld.psh` script and print "Hello World!" to the console. Any of the other
+examples can be run the same way, e.g. `cargo run examples/amigaball.psh`. More example programs
 can be found in the [`examples/`](/examples) directory. These examples are available under the
 [CC0 license](https://creativecommons.org/public-domain/cc0/) (public domain).
 
@@ -81,7 +82,21 @@ Plush supports a range of arithmetic, comparison, and logical operators:
 The `_/` operator performs integer division, that is, truncated division which only accepts integer inputs and yields
 an integer output, whereas the division operator `/` yields a floating-point value as output.
 
-Note that unlike in JavaScript, the `==` operator performs reference equality for objects and arrays, not structural equality.
+Note that unlike in JavaScript, the `==` operator performs reference equality for objects, arrays and
+dictionaries, not structural equality.
+
+Strings are the exception: they compare structurally, so two strings with the same contents are equal
+regardless of how they were produced. The ordered comparison operators also accept strings, and compare
+them lexicographically by UTF-8 bytes.
+
+```plush
+$println("abc" == "ab" + "c");  // true
+$println("abc" < "abd");        // true
+```
+
+Numbers compare across types, that is, an integer and a float are equal if they represent the same
+number, e.g. `1 == 1.0` is `true`. Note also that the `+` operator does not perform implicit
+conversions: adding a string and a number is an error, and you have to call `to_s()` yourself.
 
 ### Control Flow
 
@@ -102,6 +117,30 @@ let var i = 0;
 while (i < 10) {
     $println(i);
     i = i + 1;
+}
+```
+
+The `loop` statement is an infinite loop, equivalent to `while (true)`:
+
+```plush
+loop {
+    let line = $readln();
+    $println(line);
+}
+```
+
+Inside any of the loop forms, `break` exits the loop and `continue` skips to the next iteration. Both
+apply to the innermost enclosing loop, as there are no loop labels.
+
+```plush
+for (let var i = 0; i < 10; ++i) {
+    if (i % 2 == 0)
+        continue;
+
+    if (i > 5)
+        break;
+
+    $println(i); // 1, 3, 5
 }
 ```
 
@@ -165,7 +204,38 @@ let a = [0, 1, 2, 3, 4];
 
 Array elements an be accessed using the indexing operator with square brackets, e.g. `a[0] = 1`.
 ByteArrays can also be indexed using square brackets to read and write individual bytes.
-The length of arrays and ByteArrays is accessed via the `.len` field.
+The length of arrays, ByteArrays and strings is accessed via the `.len` field. For strings,
+this is the length in UTF-8 bytes, not in characters.
+
+### Dictionaries
+
+Dictionaries are hash maps with string keys, written with a JSON-like syntax. Keys in dictionary
+literals can be written as identifiers or as quoted strings:
+
+```plush
+let d = { a: 1, "b": 2 };
+```
+
+Values can be read and written using either the dot syntax or the indexing operator. Indexing takes
+any string expression as the key, which is what you need when the key is computed at run time.
+Assigning to a key that isn't present yet adds it to the dictionary:
+
+```plush
+let key = "b";
+$println(d.a);      // 1
+$println(d[key]);   // 2
+
+d.c = 3;            // Adds a new key
+d["e"] = 4;         // Same thing, with a computed key
+```
+
+Only strings can be used as keys, and reading a key that is not present is an error, so use the
+`has(key)` method to check for a key that may be absent:
+
+```plush
+if (d.has("f"))
+    $println(d.f);
+```
 
 ### Classes
 
@@ -218,7 +288,8 @@ inheritance into account.
 Plush supports an `import` directive with a syntax similar to Python's. This makes it possible to import code from other files.
 There are a few restrictions. For now, only relative local imports are supported. That is, you can import from other source files,
 but Plush does not yet have a standard library to speak of. You also need to place all import directives at the beginning of the file.
-Lastly, you can import functions and classes, but you can't import global variables from other units.
+Lastly, you can import functions, classes and immutable globals declared with `let`, but you can't
+import mutable globals declared with `let var`.
 
 Example usage:
 
@@ -228,6 +299,13 @@ from ./font import Font, render_text;
 
 let date = DateTime();
 render_text("Hello world");
+```
+
+The path in an import directive can also name a subdirectory, e.g. `from ./ui/font import Font;`. To
+import every symbol a unit exports instead of listing them, use `*`:
+
+```plush
+from ./font import *;
 ```
 
 ## Built-in Functions and Methods
@@ -257,6 +335,7 @@ render_text("Hello world");
     -   `min(other)`: Returns the minimum of this number and `other`.
     -   `max(other)`: Returns the maximum of this number and `other`.
     -   `clip(min, max)`: Restrict the value of if it's outside the range defined by `min` and `max`.
+    -   `to_f()`: Returns the float itself. Provided so that code can accept both integers and floats.
     -   `to_s()`: Returns a string representation of the float.
     -   `format_decimals(n)`: Produce a string representation with a given number of decimals.
 
