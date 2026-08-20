@@ -1,0 +1,466 @@
+// Formant speech synthesis
+//
+// A Klatt-style parallel formant synthesizer: a glottal pulse train and a
+// noise source are shaped by three tunable resonators to produce speech.
+// Usage: plush examples/formant_speech.psh [utterance] [out.wav]
+
+let SAMPLE_RATE = 44100;
+let PI = 3.141592653589793;
+
+// Samples between formant coefficient updates. Formants move far slower than
+// the audio rate, so recomputing them every sample would be wasted work.
+let CONTROL_PERIOD = 16;
+
+let F0_BASE = 110.0;
+let F0_DECLINE = 0.18;
+
+// The upper two formants barely move between phonemes, so they are fixed.
+// They contribute little energy but their absence sounds muffled.
+let F4 = 3300.0;
+let F5 = 3850.0;
+let A4 = 0.12;
+let A5 = 0.06;
+
+// --- Noise source ---
+
+// Scales white noise to roughly the same level as the glottal source, so that
+// the per-phoneme voicing and frication levels are directly comparable.
+let NOISE_GAIN = 0.25;
+
+let var noise_seed = 22222;
+
+fun noise()
+{
+    noise_seed = (noise_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (noise_seed.to_f() / 1073741824.0 - 1.0) * NOISE_GAIN;
+}
+
+// --- Voiced source ---
+
+// Rosenberg glottal pulse model. A raw impulse train sounds harsh and buzzy;
+// modelling the opening and closing of the glottis gives a much softer tone.
+class Glottis
+{
+    init(self)
+    {
+        self.phase = 0.0;
+        self.prev = 0.0;
+    }
+
+    update(self, f0)
+    {
+        self.phase = (self.phase + f0 / SAMPLE_RATE) % 1.0;
+
+        let OPEN = 0.40;
+        let CLOSE = 0.16;
+
+        let var g = 0.0;
+        if (self.phase < OPEN) {
+            let u = self.phase / OPEN;
+            g = 0.5 * (1.0 - (PI * u).cos());
+        } else if (self.phase < OPEN + CLOSE) {
+            let u = (self.phase - OPEN) / CLOSE;
+            g = (0.5 * PI * u).cos();
+        }
+
+        // Radiation from the lips differentiates the glottal flow
+        let d = g - self.prev;
+        self.prev = g;
+        return d * 10.0;
+    }
+}
+
+// --- Resonator ---
+
+// Two-pole resonator, the building block of a formant synthesizer
+class Reson
+{
+    init(self)
+    {
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+        self.a = 0.0;
+        self.b = 0.0;
+        self.c = 0.0;
+    }
+
+    set_coeffs(self, freq, bw)
+    {
+        let r = (-PI * bw / SAMPLE_RATE).exp();
+        let theta = 2.0 * PI * freq / SAMPLE_RATE;
+        self.c = -(r * r);
+        self.b = 2.0 * r * theta.cos();
+        self.a = 1.0 - self.b - self.c;
+    }
+
+    update(self, x)
+    {
+        let y = self.a * x + self.b * self.y1 + self.c * self.y2;
+        self.y2 = self.y1;
+        self.y1 = y;
+        return y;
+    }
+}
+
+// --- Phoneme targets ---
+
+// A synthesis target: three formants with their bandwidths and gains, the
+// voicing and frication levels, a duration in ms, and the fraction of that
+// duration spent gliding in from the previous target.
+fun seg(f1, f2, f3, b1, b2, b3, a1, a2, a3, av, af, dur, blend)
+{
+    return {
+        f1: f1.to_f(), f2: f2.to_f(), f3: f3.to_f(),
+        b1: b1.to_f(), b2: b2.to_f(), b3: b3.to_f(),
+        a1: a1.to_f(), a2: a2.to_f(), a3: a3.to_f(),
+        av: av.to_f(), af: af.to_f(),
+        dur: dur,
+        blend: blend.to_f(),
+        follow: false,
+    };
+}
+
+fun copy_seg(s)
+{
+    return seg(s.f1, s.f2, s.f3, s.b1, s.b2, s.b3, s.a1, s.a2, s.a3, s.av, s.af, s.dur, s.blend);
+}
+
+fun vowel(f1, f2, f3, dur)
+{
+    return seg(f1, f2, f3, 60, 90, 150, 1.0, 0.55, 0.3, 1.0, 0.0, dur, 0.45);
+}
+
+// Glides transition over most of their duration rather than holding a target
+fun glide(f1, f2, f3, dur)
+{
+    return seg(f1, f2, f3, 80, 110, 180, 1.0, 0.5, 0.28, 1.0, 0.0, dur, 0.7);
+}
+
+fun nasal(f1, f2, f3, dur)
+{
+    return seg(f1, f2, f3, 120, 160, 220, 0.8, 0.10, 0.06, 0.8, 0.0, dur, 0.35);
+}
+
+fun fric(f2, f3, a2, a3, af, dur)
+{
+    return seg(500, f2, f3, 200, 300, 500, 0.0, a2, a3, 0.0, af, dur, 0.15);
+}
+
+fun vfric(f1, f2, f3, a2, a3, af, dur)
+{
+    return seg(f1, f2, f3, 150, 280, 450, 0.4, a2, a3, 0.35, af, dur, 0.2);
+}
+
+// Aspiration takes its formants from the phoneme that follows it
+fun aspirate(af, dur)
+{
+    let s = seg(500, 1400, 2400, 200, 300, 500, 0.1, 0.4, 0.3, 0.0, af, dur, 0.15);
+    s.follow = true;
+    return s;
+}
+
+// Stop closure. A voiced stop keeps a faint low-frequency voice bar.
+fun gap(dur, av)
+{
+    return seg(200, 1000, 2400, 100, 150, 250, av, 0.0, 0.0, av, 0.0, dur, 0.2);
+}
+
+// Release burst, entered abruptly rather than glided into
+fun burst(f2, f3, a2, a3, af, dur)
+{
+    return seg(500, f2, f3, 300, 400, 600, 0.0, a2, a3, 0.0, af, dur, 0.0);
+}
+
+// Affricate release: sustained frication, but entered abruptly like a burst
+fun affric(f2, f3, a2, a3, av, af, dur)
+{
+    return seg(400, f2, f3, 200, 300, 500, av, a2, a3, av, af, dur, 0.0);
+}
+
+let PHONEMES = {
+    // Vowels
+    "iy": [vowel(270, 2290, 3010, 130)],
+    "ih": [vowel(390, 1990, 2550, 90)],
+    "eh": [vowel(530, 1840, 2480, 110)],
+    "ae": [vowel(660, 1720, 2410, 140)],
+    "aa": [vowel(730, 1090, 2440, 140)],
+    "ao": [vowel(570, 840, 2410, 130)],
+    "ah": [vowel(640, 1190, 2390, 100)],
+    "uh": [vowel(440, 1020, 2240, 90)],
+    "uw": [vowel(300, 870, 2240, 130)],
+    "er": [vowel(490, 1350, 1690, 130)],
+    "ax": [vowel(500, 1400, 2400, 60)],
+
+    // Diphthongs: a vowel target followed by a glide to a second target
+    "ow": [vowel(490, 910, 2300, 90), glide(360, 800, 2240, 90)],
+    "ey": [vowel(530, 1840, 2480, 90), glide(390, 2100, 2600, 80)],
+    "ay": [vowel(730, 1090, 2440, 110), glide(390, 1990, 2550, 90)],
+    "aw": [vowel(730, 1090, 2440, 110), glide(360, 800, 2240, 90)],
+    "oy": [vowel(570, 840, 2410, 110), glide(390, 1990, 2550, 90)],
+
+    // Glides and liquids. The low F3 is what makes "r" sound like an r.
+    "w": [glide(300, 610, 2200, 70)],
+    "y": [glide(260, 2200, 3000, 60)],
+    "l": [glide(400, 1100, 2600, 70)],
+    "r": [glide(400, 1100, 1400, 80)],
+
+    // Nasals
+    "m": [nasal(250, 1100, 2300, 80)],
+    "n": [nasal(250, 1600, 2700, 80)],
+    "ng": [nasal(250, 2000, 2800, 80)],
+
+    // Fricatives
+    "s":  [fric(4200, 6000, 0.5, 1.0, 0.6, 110)],
+    "sh": [fric(2200, 2900, 0.9, 1.0, 0.6, 110)],
+    "f":  [fric(1300, 4500, 0.3, 0.4, 0.35, 90)],
+    "th": [fric(1500, 5200, 0.25, 0.35, 0.3, 90)],
+    "hh": [aspirate(0.3, 60)],
+    "z":  [vfric(300, 4200, 6000, 0.4, 0.7, 0.5, 90)],
+    "v":  [vfric(280, 1300, 4500, 0.25, 0.3, 0.25, 80)],
+    "dh": [vfric(300, 1500, 5200, 0.2, 0.3, 0.2, 80)],
+
+    // Stops: a silent closure, a release burst, then aspiration into the
+    // following vowel. Voiced stops have a shorter, weaker release.
+    "p": [gap(60, 0.0), burst(1000, 2200, 0.5, 0.4, 0.7, 10), aspirate(0.25, 35)],
+    "t": [gap(60, 0.0), burst(3000, 4200, 0.8, 0.9, 0.9, 10), aspirate(0.25, 30)],
+    "k": [gap(60, 0.0), burst(1800, 2600, 0.9, 0.6, 0.8, 12), aspirate(0.25, 35)],
+    "b": [gap(50, 0.10), burst(1000, 2200, 0.5, 0.4, 0.55, 14)],
+    "d": [gap(50, 0.10), burst(3000, 4200, 0.7, 0.7, 0.60, 14)],
+    "g": [gap(50, 0.10), burst(1800, 2600, 0.8, 0.5, 0.60, 16)],
+
+    // Affricates: a stop closure released into frication
+    "ch": [gap(60, 0.0), affric(2200, 2900, 0.9, 1.0, 0.0, 0.65, 65)],
+    "jh": [gap(50, 0.10), affric(2200, 2900, 0.8, 0.9, 0.3, 0.45, 55)],
+
+    // Pauses: between words, and between clauses
+    "_": [gap(70, 0.0)],
+    ".": [gap(600, 0.0)],
+};
+
+// --- Utterance building ---
+
+// Expand a space-separated phoneme string into a flat list of targets
+fun build_segments(phoneme_str)
+{
+    let names = phoneme_str.trim().split(" ");
+    let segs = [];
+
+    for (let var i = 0; i < names.len; ++i) {
+        let name = names[i].trim();
+        if (name == "")
+            continue;
+
+        if (!PHONEMES.has(name)) {
+            $println("unknown phoneme: " + name);
+            continue;
+        }
+
+        let parts = PHONEMES[name];
+        for (let var j = 0; j < parts.len; ++j) {
+            let s = copy_seg(parts[j]);
+            s.follow = parts[j].follow;
+            segs.push(s);
+        }
+    }
+
+    // Ramp down at the end so a vowel-final utterance doesn't click
+    if (segs.len > 0)
+        segs.push(copy_seg(gap(30, 0.0)));
+
+    // Resolve anticipatory segments to the formants of what follows them
+    for (let var i = 0; i < segs.len; ++i) {
+        if (segs[i].follow && i + 1 < segs.len) {
+            segs[i].f1 = segs[i + 1].f1;
+            segs[i].f2 = segs[i + 1].f2;
+            segs[i].f3 = segs[i + 1].f3;
+        }
+    }
+
+    return segs;
+}
+
+fun ms_to_samples(ms)
+{
+    return (ms.to_f() * SAMPLE_RATE.to_f() / 1000.0).floor();
+}
+
+fun lerp(a, b, t)
+{
+    return a + (b - a) * t;
+}
+
+// --- Synthesis ---
+
+fun render(segs)
+{
+    let var total = 0;
+    for (let var i = 0; i < segs.len; ++i)
+        total = total + ms_to_samples(segs[i].dur);
+
+    let out = ByteArray.with_size(total * 4);
+
+    let glottis = Glottis();
+    let r1 = Reson();
+    let r2 = Reson();
+    let r3 = Reson();
+    let r4 = Reson();
+    let r5 = Reson();
+    r4.set_coeffs(F4, 250.0);
+    r5.set_coeffs(F5, 300.0);
+
+    // The previous target, used as the starting point for each transition
+    let var prev = gap(0, 0.0);
+
+    let var out_idx = 0;
+    let var peak = 0.0;
+
+    for (let var si = 0; si < segs.len; ++si) {
+        let s = segs[si];
+        let n = ms_to_samples(s.dur);
+
+        for (let var i = 0; i < n; ++i) {
+            // Smoothstep from the previous target over the blend fraction
+            let p = i.to_f() / n.to_f();
+            let var t = 1.0;
+            if (s.blend > 0.0 && p < s.blend) {
+                let u = p / s.blend;
+                t = u * u * (3.0 - 2.0 * u);
+            }
+
+            if (i % CONTROL_PERIOD == 0) {
+                r1.set_coeffs(lerp(prev.f1, s.f1, t), lerp(prev.b1, s.b1, t));
+                r2.set_coeffs(lerp(prev.f2, s.f2, t), lerp(prev.b2, s.b2, t));
+                r3.set_coeffs(lerp(prev.f3, s.f3, t), lerp(prev.b3, s.b3, t));
+            }
+
+            let av = lerp(prev.av, s.av, t);
+            let af = lerp(prev.af, s.af, t);
+            let a1 = lerp(prev.a1, s.a1, t);
+            let a2 = lerp(prev.a2, s.a2, t);
+            let a3 = lerp(prev.a3, s.a3, t);
+
+            // Pitch falls gradually across the utterance
+            let progress = out_idx.to_f() / total.to_f();
+            let f0 = F0_BASE * (1.0 - F0_DECLINE * progress);
+
+            let src = av * glottis.update(f0) + af * noise();
+
+            // Alternating signs keep adjacent formants from cancelling
+            let sample = a1 * r1.update(src) - a2 * r2.update(src) + a3 * r3.update(src)
+                       - A4 * r4.update(src) + A5 * r5.update(src);
+
+            out.set_f32(out_idx, sample);
+            ++out_idx;
+
+            let mag = sample.abs();
+            if (mag > peak)
+                peak = mag;
+        }
+
+        prev = s;
+    }
+
+    // Normalize
+    if (peak > 0.0) {
+        let gain = 0.85 / peak;
+        for (let var i = 0; i < total; ++i)
+            out.set_f32(i, out.get_f32(i) * gain);
+    }
+
+    return out;
+}
+
+// --- WAV output ---
+
+fun write_wav(path, samples)
+{
+    let num_samples = samples.len _/ 4;
+    let data_size = num_samples * 2;
+    let buf = ByteArray.with_size(44 + data_size);
+
+    buf.store_u32(0, 0x46464952);            // "RIFF"
+    buf.store_u32(4, 36 + data_size);
+    buf.store_u32(8, 0x45564157);            // "WAVE"
+    buf.store_u32(12, 0x20746D66);           // "fmt "
+    buf.store_u32(16, 16);
+    buf.store_u16(20, 1);                    // PCM
+    buf.store_u16(22, 1);                    // mono
+    buf.store_u32(24, SAMPLE_RATE);
+    buf.store_u32(28, SAMPLE_RATE * 2);      // byte rate
+    buf.store_u16(32, 2);                    // block align
+    buf.store_u16(34, 16);                   // bits per sample
+    buf.store_u32(36, 0x61746164);           // "data"
+    buf.store_u32(40, data_size);
+
+    for (let var i = 0; i < num_samples; ++i) {
+        let v = (samples.get_f32(i).clip(-1.0, 1.0) * 32767.0).floor();
+        buf.store_u16(44 + i * 2, v & 0xFFFF);
+    }
+
+    $write_file(path, buf);
+}
+
+// --- Demo ---
+
+let UTTERANCES = {
+    "vowels": "aa _ iy _ uw _ eh _ ow",
+    "hello": "hh eh l ow _ w er l d",
+    "plush": "p l ah sh",
+    "computer": "ay _ ae m ax k ax m p y uw t er",
+    "greetings": "g r iy t ih ng z _ hh y uw m ax n",
+
+    // "Hello world. I'm very happy to see that you are trying out the Plush language."
+    "sentence":
+        "hh eh l ow _ w er l d . " +
+        "ay m _ v eh r iy _ hh ae p iy _ t uw _ s iy _ dh ae t _ y uw _ aa r _ " +
+        "t r ay ih ng _ aw t _ dh ax _ p l ah sh _ l ae ng g w ih jh",
+};
+
+fun main()
+{
+    let name = $cmd_get_arg_or(1, "sentence");
+    let out_path = $cmd_get_arg_or(2, nil);
+
+    let var phonemes = name;
+    if (UTTERANCES.has(name))
+        phonemes = UTTERANCES[name];
+
+    $println("phonemes: " + phonemes);
+
+    let segs = build_segments(phonemes);
+    if (segs.len == 0) {
+        $println("nothing to say");
+        return;
+    }
+
+    let t0 = $time_current_ms();
+    let samples = render(segs);
+    let gen_ms = $time_current_ms() - t0;
+
+    let num_samples = samples.len _/ 4;
+    let duration_ms = (num_samples * 1000) _/ SAMPLE_RATE;
+
+    // Ratio kept in tenths so it can be printed without float formatting
+    let ratio = (duration_ms * 10) _/ gen_ms.max(1);
+    $println(
+        "generated " + duration_ms.to_s() + "ms of audio in " + gen_ms.to_s() + "ms " +
+        "(" + (ratio _/ 10).to_s() + "." + (ratio % 10).to_s() + "x realtime)"
+    );
+
+    if (out_path != nil) {
+        write_wav(out_path, samples);
+        $println("wrote " + out_path);
+        return;
+    }
+
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+    if (dev == nil) {
+        $println("could not open audio device");
+        return;
+    }
+
+    $audio_write_samples(dev, samples);
+    $actor_sleep(duration_ms + 200);
+}
+
+main();
