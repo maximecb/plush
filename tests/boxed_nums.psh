@@ -1,0 +1,78 @@
+// Numbers outside the range the tagged representation holds inline are
+// boxed in the heap, so they have to survive collection and compare and
+// print the same as the ones that are not
+
+$vm_shrink_heap(256_000);
+
+// Largest and smallest integers that stay inline
+let fix_max = 4611686018427387903;
+let fix_min = -4611686018427387904;
+
+let big = fix_max + 1;
+let small = fix_min - 1;
+
+assert(big == 4611686018427387904);
+assert(small == -4611686018427387905);
+assert(big - 1 == fix_max);
+assert(small + 1 == fix_min);
+assert(big != small);
+assert(big > fix_max);
+assert(small < fix_min);
+assert(big.to_s() == "4611686018427387904");
+
+// Boxing and unboxing round-trips through every operation that produces
+// an integer
+assert((big _/ 2) == 2305843009213693952);
+assert((big % 10) == 4);
+assert((big >> 1) == 2305843009213693952);
+assert((big & 0xFF) == 0);
+assert((big | 1) == 4611686018427387905);
+assert((big ^ big) == 0);
+assert((1 << 62) == big);
+assert(big.abs() == big);
+assert(small.abs() == 4611686018427387905);
+assert(big.min(fix_max) == fix_max);
+assert(big.max(fix_max) == big);
+
+// Doubles too small or too large to hold inline
+let huge = 1e300;
+let tiny = 1e-300;
+
+assert(huge == 1e300);
+assert(huge > 1.0);
+assert(tiny < 1.0);
+assert(huge * tiny == 1.0);
+assert(huge / huge == 1.0);
+assert(huge.sqrt() == 1e150);
+assert((-huge).abs() == huge);
+
+// Integers and floats compare across representations
+assert(big == 4611686018427387904.0);
+assert(4611686018427387904.0 == big);
+
+// Keep boxed numbers alive across collections, both on their own and
+// inside the containers the collector walks
+let vals = [];
+let dict = {};
+
+for (let var i = 0; i < 2000; ++i)
+{
+    let n = big + i;
+    let f = huge * (1.0 + i.to_f());
+
+    vals.push(n);
+    vals.push(f);
+    dict["k"] = n;
+
+    // Force enough garbage to collect several times over
+    let s = n.to_s() + "!";
+    assert(s.len > 18);
+}
+
+assert(vals.len == 4000);
+assert(vals[0] == big);
+assert(vals[1] == huge);
+assert(vals[3998] == big + 1999);
+assert(dict["k"] == big + 1999);
+
+$println("all boxed number tests passed");

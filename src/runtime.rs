@@ -2,7 +2,8 @@ use std::mem::size_of;
 use crate::alloc::Tag;
 use crate::array::Array;
 use crate::ast::*;
-use crate::vm::{Value, Actor};
+use crate::vm::Actor;
+use crate::value::*;
 use crate::str::Str;
 use crate::*;
 
@@ -29,27 +30,27 @@ fn nil_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
 fn int64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = unwrap_i64!(v);
-    Ok(Value::Int64(if v > 0 { v } else { -v }))
+    Ok(actor.int64(if v > 0 { v } else { -v }))
 }
 
 fn int64_min(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
     let v = unwrap_i64!(v);
     let other = unwrap_i64!(other);
-    Ok(Value::Int64(v.min(other)))
+    Ok(actor.int64(v.min(other)))
 }
 
 fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
     let v = unwrap_i64!(v);
     let other = unwrap_i64!(other);
-    Ok(Value::Int64(v.max(other)))
+    Ok(actor.int64(v.max(other)))
 }
 
 fn int64_to_f(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = unwrap_i64!(v);
-    Ok(Value::Float64(v as f64))
+    Ok(actor.float64(v as f64))
 }
 
 fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
@@ -73,108 +74,108 @@ fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result<Value, Str
 
 fn float64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    Ok(Value::Float64(if v > 0.0 { v } else { -v }))
+    let v = unwrap_f64!(v);
+    Ok(actor.float64(if v > 0.0 { v } else { -v }))
 }
 
 fn float64_ceil(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     // TODO: check that float value fits in integer range
-    let v = v.unwrap_f64();
+    let v = unwrap_f64!(v);
     let int_val = v.ceil() as i64;
-    Ok(Value::Int64(int_val))
+    Ok(actor.int64(int_val))
 }
 
 fn float64_floor(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     // TODO: check that float value fits in integer range
-    let v = v.unwrap_f64();
+    let v = unwrap_f64!(v);
     let int_val = v.floor() as i64;
-    Ok(Value::Int64(int_val))
+    Ok(actor.int64(int_val))
 }
 
 fn float64_trunc(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     // TODO: check that float value fits in integer range
-    let v = v.unwrap_f64();
+    let v = unwrap_f64!(v);
     let int_val = v.trunc() as i64;
-    Ok(Value::Int64(int_val))
+    Ok(actor.int64(int_val))
 }
 
 fn float64_sin(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    Ok(Value::Float64(v.sin()))
+    let v = unwrap_f64!(v);
+    Ok(actor.float64(v.sin()))
 }
 
 fn float64_cos(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    Ok(Value::Float64(v.cos()))
+    let v = unwrap_f64!(v);
+    Ok(actor.float64(v.cos()))
 }
 
 fn float64_tan(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    Ok(Value::Float64(v.tan()))
+    let v = unwrap_f64!(v);
+    Ok(actor.float64(v.tan()))
 }
 
 fn float64_atan(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    Ok(Value::Float64(v.atan()))
+    let v = unwrap_f64!(v);
+    Ok(actor.float64(v.atan()))
 }
 
 fn float64_sqrt(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    Ok(Value::Float64(v.sqrt()))
+    let v = unwrap_f64!(v);
+    Ok(actor.float64(v.sqrt()))
 }
 
 fn float64_min(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    let other = other.unwrap_f64();
-    Ok(Value::Float64(v.min(other)))
+    let v = unwrap_f64!(v);
+    let other = unwrap_f64!(other);
+    Ok(actor.float64(v.min(other)))
 }
 
 fn float64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    let other = other.unwrap_f64();
-    Ok(Value::Float64(v.max(other)))
+    let v = unwrap_f64!(v);
+    let other = unwrap_f64!(other);
+    Ok(actor.float64(v.max(other)))
 }
 
 fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    let min = min.unwrap_f64();
-    let max = max.unwrap_f64();
-    Ok(Value::Float64(v.clamp(min, max)))
+    let v = unwrap_f64!(v);
+    let min = unwrap_f64!(min);
+    let max = unwrap_f64!(max);
+    Ok(actor.float64(v.clamp(min, max)))
 }
 
 fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    let exponent = exponent.unwrap_f64();
-    Ok(Value::Float64(v.powf(exponent)))
+    let v = unwrap_f64!(v);
+    let exponent = unwrap_f64!(exponent);
+    Ok(actor.float64(v.powf(exponent)))
 }
 
 fn float64_exp(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    Ok(Value::Float64(v.exp()))
+    let v = unwrap_f64!(v);
+    Ok(actor.float64(v.exp()))
 }
 
 fn float64_ln(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
-    Ok(Value::Float64(v.ln()))
+    let v = unwrap_f64!(v);
+    Ok(actor.float64(v.ln()))
 }
 
 fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
-    let v = v.unwrap_f64();
+    let v = unwrap_f64!(v);
     let s = format!("{}", v);
     actor.gc_check(Str::alloc_size(1024), &mut []);
     Ok(actor.alloc.str_val(&s))
@@ -182,7 +183,7 @@ fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
 
 fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Result<Value, String>
 {
-    let num = v.unwrap_f64();
+    let num = unwrap_f64!(v);
     let decimals = unwrap_usize!(decimals);
     let s = format!("{:.*}", decimals, num);
     actor.gc_check(Str::alloc_size(std::cmp::max(1024, decimals)), &mut []);
@@ -228,14 +229,14 @@ fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value,
 
     // Indexing in the middle of a character
     if !s.is_char_boundary(byte_idx) {
-        return Ok(Value::Nil);
+        return Ok(Value::NIL);
     }
 
     let ch = s[byte_idx..].chars().next();
 
     let ch = match ch {
         // Not a valid character
-        None => return Ok(Value::Nil),
+        None => return Ok(Value::NIL),
         Some(ch) => ch,
     };
 
@@ -251,8 +252,8 @@ fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Result<Value, 
     let radix = unwrap_u32!(radix);
 
     match i64::from_str_radix(s, radix) {
-        Ok(int_val) => Ok(Value::from(int_val)),
-        Err(_) => Ok(Value::Nil),
+        Ok(int_val) => Ok(actor.int64(int_val)),
+        Err(_) => Ok(Value::NIL),
     }
 }
 
@@ -262,8 +263,8 @@ fn string_parse_float(actor: &mut Actor, s: Value) -> Result<Value, String>
     let s = unwrap_str!(s);
 
     match s.parse::<f64>() {
-        Ok(float_val) => Ok(Value::from(float_val)),
-        Err(_) => Ok(Value::Nil),
+        Ok(float_val) => Ok(actor.float64(float_val)),
+        Err(_) => Ok(Value::NIL),
     }
 }
 
@@ -324,7 +325,7 @@ fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value
         array.push(actor.alloc.str_val(part), &mut actor.alloc);
     }
 
-    Ok(Value::Array(actor.alloc.alloc(array, Tag::Array)))
+    Ok(Value::array(actor.alloc.alloc(array, Tag::Array)))
 }
 
 pub fn init_runtime(prog: &mut Program)
@@ -370,7 +371,7 @@ pub fn init_runtime(prog: &mut Program)
 
 fn dict_has(actor: &mut Actor, mut d: Value, key: Value) -> Result<Value, String>
 {
-    let d = d.unwrap_dict();
+    let d = unwrap_dict!(d);
     let key = unwrap_str!(key);
     Ok(Value::from(d.has(key)))
 }
@@ -451,101 +452,103 @@ pub fn get_method(val: Value, method_name: &str) -> Value
 
     static DICT_HAS: HostFn = HostFn { name: "has", f: Fn2(dict_has) };
 
-    let f = match (val, method_name) {
-        (Value::Int64(_), "abs") => &INT64_ABS,
-        (Value::Int64(_), "min") => &INT64_MIN,
-        (Value::Int64(_), "max") => &INT64_MAX,
-        (Value::Int64(_), "to_f") => &INT64_TO_F,
-        (Value::Int64(_), "to_s") => &INT64_TO_S,
-        (Value::Int64(_), "to_hex") => &INT64_TO_HEX,
+    // Dispatch on the language-level type first, so that a value that
+    // has no methods at all costs one branch and no string compares
+    let f = match (val.type_of(), method_name) {
+        (Type::Int64, "abs") => &INT64_ABS,
+        (Type::Int64, "min") => &INT64_MIN,
+        (Type::Int64, "max") => &INT64_MAX,
+        (Type::Int64, "to_f") => &INT64_TO_F,
+        (Type::Int64, "to_s") => &INT64_TO_S,
+        (Type::Int64, "to_hex") => &INT64_TO_HEX,
 
-        (Value::Float64(_), "abs") => &FLOAT64_ABS,
-        (Value::Float64(_), "ceil") => &FLOAT64_CEIL,
-        (Value::Float64(_), "floor") => &FLOAT64_FLOOR,
-        (Value::Float64(_), "trunc") => &FLOAT64_TRUNC,
-        (Value::Float64(_), "sin") => &FLOAT64_SIN,
-        (Value::Float64(_), "cos") => &FLOAT64_COS,
-        (Value::Float64(_), "tan") => &FLOAT64_TAN,
-        (Value::Float64(_), "atan") => &FLOAT64_ATAN,
-        (Value::Float64(_), "sqrt") => &FLOAT64_SQRT,
-        (Value::Float64(_), "min") => &FLOAT64_MIN,
-        (Value::Float64(_), "max") => &FLOAT64_MAX,
-        (Value::Float64(_), "clip") => &FLOAT64_CLIP,
-        (Value::Float64(_), "pow") => &FLOAT64_POW,
-        (Value::Float64(_), "exp") => &FLOAT64_EXP,
-        (Value::Float64(_), "ln") => &FLOAT64_LN,
-        (Value::Float64(_), "to_f") => &FLOAT64_TO_F,
-        (Value::Float64(_), "to_s") => &FLOAT64_TO_S,
-        (Value::Float64(_), "format_decimals") => &FLOAT64_FORMAT_DECIMALS,
+        (Type::Float64, "abs") => &FLOAT64_ABS,
+        (Type::Float64, "ceil") => &FLOAT64_CEIL,
+        (Type::Float64, "floor") => &FLOAT64_FLOOR,
+        (Type::Float64, "trunc") => &FLOAT64_TRUNC,
+        (Type::Float64, "sin") => &FLOAT64_SIN,
+        (Type::Float64, "cos") => &FLOAT64_COS,
+        (Type::Float64, "tan") => &FLOAT64_TAN,
+        (Type::Float64, "atan") => &FLOAT64_ATAN,
+        (Type::Float64, "sqrt") => &FLOAT64_SQRT,
+        (Type::Float64, "min") => &FLOAT64_MIN,
+        (Type::Float64, "max") => &FLOAT64_MAX,
+        (Type::Float64, "clip") => &FLOAT64_CLIP,
+        (Type::Float64, "pow") => &FLOAT64_POW,
+        (Type::Float64, "exp") => &FLOAT64_EXP,
+        (Type::Float64, "ln") => &FLOAT64_LN,
+        (Type::Float64, "to_f") => &FLOAT64_TO_F,
+        (Type::Float64, "to_s") => &FLOAT64_TO_S,
+        (Type::Float64, "format_decimals") => &FLOAT64_FORMAT_DECIMALS,
 
-        (Value::Class(STRING_ID), "from_codepoint") => &STRING_FROM_CODEPOINT,
-        (Value::String(_), "byte_at") => &STRING_BYTE_AT,
-        (Value::String(_), "char_at") => &STRING_CHAR_AT,
-        (Value::String(_), "parse_int") => &STRING_PARSE_INT,
-        (Value::String(_), "parse_float") => &STRING_PARSE_FLOAT,
-        (Value::String(_), "trim") => &STRING_TRIM,
-        (Value::String(_), "upper") => &STRING_UPPER,
-        (Value::String(_), "lower") => &STRING_LOWER,
-        (Value::String(_), "split") => &STRING_SPLIT,
-        (Value::String(_), "to_s") => &STRING_TO_S,
+        (Type::String, "byte_at") => &STRING_BYTE_AT,
+        (Type::String, "char_at") => &STRING_CHAR_AT,
+        (Type::String, "parse_int") => &STRING_PARSE_INT,
+        (Type::String, "parse_float") => &STRING_PARSE_FLOAT,
+        (Type::String, "trim") => &STRING_TRIM,
+        (Type::String, "upper") => &STRING_UPPER,
+        (Type::String, "lower") => &STRING_LOWER,
+        (Type::String, "split") => &STRING_SPLIT,
+        (Type::String, "to_s") => &STRING_TO_S,
 
-        (Value::Class(ARRAY_ID), "with_size") => &ARRAY_WITH_SIZE,
-        (Value::Array(_), "push") => &ARRAY_PUSH,
-        (Value::Array(_), "pop") => &ARRAY_POP,
-        (Value::Array(_), "remove") => &ARRAY_REMOVE,
-        (Value::Array(_), "insert") => &ARRAY_INSERT,
-        (Value::Array(_), "append") => &ARRAY_APPEND,
+        (Type::Array, "push") => &ARRAY_PUSH,
+        (Type::Array, "pop") => &ARRAY_POP,
+        (Type::Array, "remove") => &ARRAY_REMOVE,
+        (Type::Array, "insert") => &ARRAY_INSERT,
+        (Type::Array, "append") => &ARRAY_APPEND,
 
-        (Value::Class(BYTEARRAY_ID), "with_size") => &BA_WITH_SIZE,
-        (Value::ByteArray(_), "load_u32") => &BA_READ_U32,
-        (Value::ByteArray(_), "store_u32") => &BA_WRITE_U32,
-        (Value::ByteArray(_), "load_u16") => &BA_READ_U16,
-        (Value::ByteArray(_), "store_u16") => &BA_WRITE_U16,
-        (Value::ByteArray(_), "load_f32") => &BA_READ_F32,
-        (Value::ByteArray(_), "store_f32") => &BA_WRITE_F32,
-        (Value::ByteArray(_), "get_u32") => &BA_GET_U32,
-        (Value::ByteArray(_), "set_u32") => &BA_SET_U32,
-        (Value::ByteArray(_), "get_f32") => &BA_GET_F32,
-        (Value::ByteArray(_), "set_f32") => &BA_SET_F32,
-        (Value::ByteArray(_), "num_u32") => &BA_NUM_U32,
-        (Value::ByteArray(_), "num_f32") => &BA_NUM_U32,
-        (Value::ByteArray(_), "memcpy") => &BA_MEMCPY,
-        (Value::ByteArray(_), "resize") => &BA_RESIZE,
-        (Value::ByteArray(_), "zero_fill") => &BA_ZERO_FILL,
-        (Value::ByteArray(_), "fill_u32") => &BA_FILL_U32,
-        (Value::ByteArray(_), "blit_bgra32") => &BA_BLIT_BGRA32,
+        (Type::ByteArray, "load_u32") => &BA_READ_U32,
+        (Type::ByteArray, "store_u32") => &BA_WRITE_U32,
+        (Type::ByteArray, "load_u16") => &BA_READ_U16,
+        (Type::ByteArray, "store_u16") => &BA_WRITE_U16,
+        (Type::ByteArray, "load_f32") => &BA_READ_F32,
+        (Type::ByteArray, "store_f32") => &BA_WRITE_F32,
+        (Type::ByteArray, "get_u32") => &BA_GET_U32,
+        (Type::ByteArray, "set_u32") => &BA_SET_U32,
+        (Type::ByteArray, "get_f32") => &BA_GET_F32,
+        (Type::ByteArray, "set_f32") => &BA_SET_F32,
+        (Type::ByteArray, "num_u32") => &BA_NUM_U32,
+        (Type::ByteArray, "num_f32") => &BA_NUM_U32,
+        (Type::ByteArray, "memcpy") => &BA_MEMCPY,
+        (Type::ByteArray, "resize") => &BA_RESIZE,
+        (Type::ByteArray, "zero_fill") => &BA_ZERO_FILL,
+        (Type::ByteArray, "fill_u32") => &BA_FILL_U32,
+        (Type::ByteArray, "blit_bgra32") => &BA_BLIT_BGRA32,
 
-        (Value::Dict(_), "has") => &DICT_HAS,
+        (Type::Dict, "has") => &DICT_HAS,
 
-        (Value::True, "to_s") => &TRUE_TO_S,
-        (Value::False, "to_s") => &FALSE_TO_S,
-        (Value::Nil, "to_s") => &NIL_TO_S,
+        (Type::Bool, "to_s") => if val.as_bool() { &TRUE_TO_S } else { &FALSE_TO_S },
+        (Type::Nil, "to_s") => &NIL_TO_S,
+
+        // Static methods, called on the class itself
+        (Type::Class, _) => match (val.as_class(), method_name) {
+            (STRING_ID, "from_codepoint") => &STRING_FROM_CODEPOINT,
+            (ARRAY_ID, "with_size") => &ARRAY_WITH_SIZE,
+            (BYTEARRAY_ID, "with_size") => &BA_WITH_SIZE,
+            _ => return Value::NIL,
+        }
 
         // Method not defined on type
-        _ => return Value::Nil,
+        _ => return Value::NIL,
     };
 
-    Value::HostFn(f)
+    Value::host_fn(f)
 }
 
 pub fn get_class_id(val: Value) -> ClassId
 {
-    match val {
-        Value::Object(p) => {
-            let obj = unsafe { &*p };
-            obj.class_id
-        }
+    match val.type_of() {
+        Type::Object => val.as_obj().class_id,
 
-        Value::Nil => NIL_ID,
-        Value::True => BOOL_ID,
-        Value::False => BOOL_ID,
-        Value::Int64(_) => INT64_ID,
-        Value::Float64(_) => FLOAT64_ID,
-        Value::String(_) => STRING_ID,
-        Value::Array(_) => ARRAY_ID,
-        Value::ByteArray(_) => BYTEARRAY_ID,
-        Value::Dict(_) => DICT_ID,
+        Type::Nil => NIL_ID,
+        Type::Bool => BOOL_ID,
+        Type::Int64 => INT64_ID,
+        Type::Float64 => FLOAT64_ID,
+        Type::String => STRING_ID,
+        Type::Array => ARRAY_ID,
+        Type::ByteArray => BYTEARRAY_ID,
+        Type::Dict => DICT_ID,
 
-        _ => todo!("get_class_id for unsupported type")
+        t => todo!("get_class_id for {:?} values", t)
     }
 }

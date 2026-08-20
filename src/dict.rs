@@ -1,6 +1,6 @@
 use std::{collections::HashMap, hash::{DefaultHasher, Hash, Hasher}, ops::Deref};
 
-use crate::{alloc::{Alloc, Tag, HEADER_SIZE}, str::Str, vm::Value};
+use crate::{alloc::{Alloc, Tag, HEADER_SIZE}, str::Str, value::Value};
 
 #[derive(Clone, Copy)]
 pub(crate) struct TableSlot {

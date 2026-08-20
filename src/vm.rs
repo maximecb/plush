@@ -27,6 +27,8 @@ use crate::codegen::CompiledFun;
 use crate::gc::{undo_forwarding, Copier, StrTable, UndoLog};
 use crate::host::*;
 use crate::str::Str;
+use crate::value::*;
+use std::mem::size_of;
 
 /// Instruction opcodes
 /// Note: commonly used upcodes should be in the [0, 127] range (one byte)
@@ -187,143 +189,6 @@ pub enum Insn
     ret,
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum Value
-{
-    // Undef means uninitialized.
-    // This should never be observed in user code.
-    Undef,
-
-    Nil,
-    False,
-    True,
-    Int64(i64),
-    Float64(f64),
-
-    // Immutable string
-    String(*const Str),
-
-    HostFn(&'static HostFn),
-    Fun(FunId),
-    Closure(*mut Closure),
-
-    // Mutable cell, captured variable
-    Cell(*mut Value),
-
-    Object(*mut Object),
-    Array(*mut Array),
-    ByteArray(*mut ByteArray),
-    Dict(*mut Dict),
-
-    Class(ClassId),
-}
-use Value::{Undef, Nil, False, True, Int64, Float64};
-
-// Allow sending Value between threads
-unsafe impl Send for Value {}
-unsafe impl Sync for Value {}
-
-impl Value
-{
-    pub fn is_heap(&self) -> bool
-    {
-        use Value::*;
-        match self {
-            // Non-heap values
-            Undef       |
-            Nil         |
-            False       |
-            True        |
-            Int64(_)    |
-            Float64(_)  |
-            HostFn(_)   |
-            Fun(_)      |
-            Class(_)    => false,
-
-            // Heap-allocated values
-            String(_)   |
-            Closure(_)  |
-            Cell(_)     |
-            Object(_)   |
-            Array(_)    |
-            ByteArray(_)|
-            Dict(_)     => true,
-        }
-    }
-
-    pub fn unwrap_u8(&self) -> u8
-    {
-        match self {
-            Int64(v) => (*v).try_into().unwrap(),
-            _ => panic!("expected int64 value but got {:?}", self)
-        }
-    }
-
-    pub fn unwrap_i32(&self) -> i32
-    {
-        match self {
-            Int64(v) => (*v).try_into().unwrap(),
-            _ => panic!("expected int64 value but got {:?}", self)
-        }
-    }
-
-    pub fn unwrap_f64(&self) -> f64
-    {
-        match self {
-            Float64(v) => *v,
-            _ => panic!("expected float64 value but got {:?}", self)
-        }
-    }
-
-    pub fn unwrap_obj(&mut self) -> &mut Object
-    {
-        match self {
-            Value::Object(p) => unsafe { &mut **p },
-            _ => panic!("expected object value but got {:?}", self)
-        }
-    }
-
-    pub fn unwrap_clos(&mut self) -> &mut Closure
-    {
-        match self {
-            Value::Closure(p) => unsafe { &mut **p },
-            _ => panic!("expected closure value but got {:?}", self)
-        }
-    }
-
-    pub fn unwrap_arr(&mut self) -> &mut Array
-    {
-        match self {
-            Value::Array(p) => unsafe { &mut **p },
-            _ => panic!("expected array value but got {:?}", self)
-        }
-    }
-
-    pub fn unwrap_ba(&mut self) -> &mut ByteArray
-    {
-        match self {
-            Value::ByteArray(p) => unsafe { &mut **p },
-            _ => panic!("expected byte array value but got {:?}", self)
-        }
-    }
-
-    pub fn unwrap_dict(&mut self) -> &mut Dict
-    {
-        match self {
-            Value::Dict(p) => unsafe { &mut **p },
-            _ => panic!("expected dict value but got {:?}", self)
-        }
-    }
-
-    pub fn unwrap_str(&mut self) -> &Str
-    {
-        match self {
-            Value::String(p) => unsafe { &**p },
-            _ => panic!("expected dict value but got {:?}", self)
-        }
-    }
-}
-
 // This error macro is to be used inside host functions
 #[macro_export]
 macro_rules! error {
@@ -334,191 +199,6 @@ macro_rules! error {
     }}
 }
 
-#[macro_export]
-macro_rules! unwrap_i64 {
-    // To be used inside the interpreter loop
-    ($val: expr, $requester: literal) => {
-        match $val {
-            Value::Int64(v) => v,
-            _ => error!($requester, "expected int64 value but got {:?}", $val)
-        }
-    };
-
-    // To be used by host functions
-    ($val: expr) => {
-        unwrap_i64!($val, "")
-    }
-}
-
-#[macro_export]
-macro_rules! unwrap_u32 {
-    // To be used inside the interpreter loop
-    ($val: expr, $requester: literal) => {
-        match $val {
-            Value::Int64(v) => {
-                match u32::try_from(v) {
-                    Ok(v) => v,
-                    Err(_) => error!($requester, "integer value doesn't fit into u32 range")
-                }
-            },
-            _ => error!($requester, "expected int64 value but got {:?}", $val)
-        }
-    };
-
-    // To be used by host functions
-    ($val: expr) => {
-        unwrap_u32!($val, "")
-    }
-}
-
-#[macro_export]
-macro_rules! unwrap_u64 {
-    // To be used inside the interpreter loop
-    ($val: expr, $requester: literal) => {
-        match $val {
-            Value::Int64(v) => {
-                if (v < 0) {
-                    error!($requester, "expected non-negative integer but got {:?}", v)
-                }
-                v as u64
-            },
-            _ => error!($requester, "expected int64 value but got {:?}", $val)
-        }
-    };
-
-    // To be used by host functions
-    ($val: expr) => {
-        unwrap_u64!($val, "")
-    }
-}
-
-#[macro_export]
-macro_rules! unwrap_usize {
-    // To be used inside the interpreter loop
-    ($val: expr, $requester: literal) => {
-        match $val {
-            Value::Int64(v) => {
-                if (v < 0) {
-                    error!($requester, "expected non-negative integer but got {:?}", v)
-                }
-                v as usize
-            },
-            _ => error!($requester, "expected int64 value but got {:?}", $val)
-        }
-    };
-
-    // To be used by host functions
-    ($val: expr) => {
-        unwrap_usize!($val, "")
-    }
-}
-
-#[macro_export]
-macro_rules! unwrap_str {
-    // To be used inside the interpreter loop
-    ($val: expr, $requester: literal) => {
-        match $val {
-            Value::String(p) => unsafe { (*p).as_str() },
-            _ => error!($requester, "expected string value but got {:?}", $val)
-        }
-    };
-
-    // To be used by host functions
-    ($val: expr) => {
-        unwrap_str!($val, "")
-    }
-}
-
-// Implement PartialEq for Value
-impl PartialEq for Value
-{
-    fn eq(&self, other: &Self) -> bool
-    {
-        use Value::*;
-
-        match (self, other) {
-            (Undef, Undef) => true,
-            (Nil, Nil) => true,
-            (True, True) => true,
-            (False, False) => true,
-
-            // For strings, we do a structural equality comparison, so
-            // that some strings can be interned (deduplicated)
-            (String(p1), String(p2))    => p1 == p2 || unsafe { (**p1).as_str() == (**p2).as_str() },
-
-            // For int & float, we may need type conversions
-            (Float64(a), Int64(b))      => *a == *b as f64,
-            (Int64(a), Float64(b))      => *a as f64 == *b,
-
-            // For all other cases, use structural equality
-            (Int64(a), Int64(b))        => a == b,
-            (Float64(a), Float64(b))    => a == b,
-            (HostFn(a), HostFn(b))      => *a as *const crate::host::HostFn == *b as *const crate::host::HostFn,
-            (Fun(a), Fun(b))            => a == b,
-            (Closure(a), Closure(b))    => a == b,
-            (Object(a), Object(b))      => a == b,
-            (Array(a), Array(b))            => a == b,
-            (ByteArray(a), ByteArray(b))    => a == b,
-            (Dict(a), Dict(b))          => a == b,
-
-            _ => false,
-        }
-    }
-}
-
-// Implement Eq since our equality relation is reflexive
-impl Eq for Value {}
-
-impl From<usize> for Value {
-    fn from(val: usize) -> Self {
-        Value::Int64(val.try_into().unwrap())
-    }
-}
-
-impl From<u64> for Value {
-    fn from(val: u64) -> Self {
-        Value::Int64(val.try_into().unwrap())
-    }
-}
-
-impl From<u8> for Value {
-    fn from(val: u8) -> Self {
-        Value::Int64(val as i64)
-    }
-}
-
-impl From<u32> for Value {
-    fn from(val: u32) -> Self {
-        Value::Int64(val as i64)
-    }
-}
-
-impl From<i32> for Value {
-    fn from(val: i32) -> Self {
-        Value::Int64(val as i64)
-    }
-}
-
-impl From<i64> for Value {
-    fn from(val: i64) -> Self {
-        Value::Int64(val)
-    }
-}
-
-impl From<f64> for Value {
-    fn from(val: f64) -> Self {
-        Value::Float64(val)
-    }
-}
-
-impl From<bool> for Value {
-    fn from(val: bool) -> Self {
-        match val {
-            true => Value::True,
-            false => Value::False,
-        }
-    }
-}
 
 /// Mesage to be sent to an actor
 pub struct Message
@@ -604,6 +284,96 @@ pub struct Actor
 
     // Array of compiled instructions
     insns: Vec<Insn>,
+}
+
+/// Why an integer operation produced no result
+fn int_op_error(insn: &str, divisor: i64) -> String
+{
+    if divisor == 0 {
+        format!("division by zero in {}", insn)
+    } else {
+        format!("integer overflow in {}", insn)
+    }
+}
+
+/// Slow path of an arithmetic instruction: integers that don't fit a
+/// fixnum, floats, and mixed operands. `$checked` is the i64 operation
+/// and `$op` the float one.
+macro_rules! num_slow_path {
+    ($name: ident, $insn: literal, $checked: ident, $op: tt) => {
+        #[cold]
+        fn $name(&mut self, v0: Value, v1: Value) -> Result<Value, String>
+        {
+            if let (Some(a), Some(b)) = (v0.to_i64(), v1.to_i64()) {
+                return match a.$checked(b) {
+                    Some(r) => Ok(self.int64(r)),
+                    None => Err(int_op_error($insn, b)),
+                };
+            }
+
+            if v0.is_num() && v1.is_num() {
+                let r = v0.num_as_f64() $op v1.num_as_f64();
+                return Ok(self.float64(r));
+            }
+
+            Err(format!("unsupported operand types for {}: {:?} and {:?}", $insn, v0, v1))
+        }
+    }
+}
+
+/// Slow path of an instruction that only accepts integers. `$op` is
+/// the operation, and produces None where it is undefined.
+macro_rules! int_slow_path {
+    ($name: ident, $insn: literal, $op: expr) => {
+        #[cold]
+        fn $name(&mut self, v0: Value, v1: Value) -> Result<Value, String>
+        {
+            let a = unwrap_i64!(v0, $insn);
+            let b = unwrap_i64!(v1, $insn);
+
+            match ($op)(a, b) {
+                Some(r) => Ok(self.int64(r)),
+                None => Err(int_op_error($insn, b)),
+            }
+        }
+    }
+}
+
+/// Slow path of a comparison: boxed integers, floats and strings
+macro_rules! cmp_slow_path {
+    ($name: ident, $insn: literal, $op: tt) => {
+        #[cold]
+        fn $name(v0: Value, v1: Value) -> Result<bool, String>
+        {
+            if let (Some(a), Some(b)) = (v0.to_i64(), v1.to_i64()) {
+                return Ok(a $op b);
+            }
+
+            if v0.is_num() && v1.is_num() {
+                return Ok(v0.num_as_f64() $op v1.num_as_f64());
+            }
+
+            if v0.is_string() && v1.is_string() {
+                return Ok(v0.as_str() $op v1.as_str());
+            }
+
+            Err(format!("unsupported types in {}: {:?} and {:?}", $insn, v0, v1))
+        }
+    }
+}
+
+cmp_slow_path!(cmp_lt, "less-than", <);
+cmp_slow_path!(cmp_le, "less-than-or-equal", <=);
+cmp_slow_path!(cmp_gt, "greater-than", >);
+cmp_slow_path!(cmp_ge, "greater-than-or-equal", >=);
+
+/// Function a value calls into, if it is one this VM can enter
+fn fun_id_of(val: Value) -> Option<FunId>
+{
+    match val.to_clos() {
+        Some(clos) => Some(clos.fun_id),
+        None => val.to_fun(),
+    }
 }
 
 impl Actor
@@ -964,13 +734,12 @@ impl Actor
     /// Set the value of an object field
     pub fn set_field(&mut self, obj: Value, field_name: &str, val: Value)
     {
-        match obj {
-            Value::Object(p) => {
-                let obj = unsafe { &mut *p };
+        match obj.to_obj() {
+            Some(obj) => {
                 let slot_idx = self.get_slot_idx(obj.class_id, field_name);
                 obj.set(slot_idx, val);
-            },
-            _ => panic!()
+            }
+            None => panic!("set_field on non-object value")
         }
     }
 
@@ -1147,6 +916,96 @@ impl Actor
         self.gc_collect(bytes_needed, extra_roots);
     }
 
+    /// Wrap an integer in a value, boxing it if it is too large to be
+    /// a fixnum. Boxing allocates, so this may collect.
+    #[inline(always)]
+    pub fn int64(&mut self, val: i64) -> Value
+    {
+        match Value::try_fixnum(val) {
+            Some(v) => v,
+            None => self.box_int64(val),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn box_int64(&mut self, val: i64) -> Value
+    {
+        self.gc_check(HEADER_SIZE + size_of::<i64>(), &mut []);
+        self.alloc.heap_int64(val)
+    }
+
+    /// Wrap a double in a value, boxing it if it has no inline encoding
+    #[inline(always)]
+    pub fn float64(&mut self, val: f64) -> Value
+    {
+        match Value::try_flonum(val) {
+            Some(v) => v,
+            None => self.box_float64(val),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn box_float64(&mut self, val: f64) -> Value
+    {
+        self.gc_check(HEADER_SIZE + size_of::<f64>(), &mut []);
+        self.alloc.heap_float64(val)
+    }
+
+    /// Slow path for `add`: anything the fixnum fast path leaves over,
+    /// which is boxed integers, floats and string concatenation
+    #[cold]
+    fn add_slow(&mut self, mut v0: Value, mut v1: Value) -> Result<Value, String>
+    {
+        if let (Some(a), Some(b)) = (v0.to_i64(), v1.to_i64()) {
+            return match a.checked_add(b) {
+                Some(r) => Ok(self.int64(r)),
+                None => Err(int_op_error("add", b)),
+            };
+        }
+
+        if v0.is_num() && v1.is_num() {
+            let r = v0.num_as_f64() + v1.num_as_f64();
+            return Ok(self.float64(r));
+        }
+
+        if v0.is_string() && v1.is_string() {
+            let len = v0.as_string().len() + v1.as_string().len();
+
+            // The operands are only reachable through us here, so they
+            // have to be handed to the collector as roots
+            self.gc_check(Str::alloc_size(len), &mut [&mut v0, &mut v1]);
+
+            let cat = v0.as_str().to_owned() + v1.as_str();
+            return Ok(self.alloc.str_val(&cat));
+        }
+
+        Err(format!("unsupported operand types for add: {:?} and {:?}", v0, v1))
+    }
+
+    /// Division always produces a float, whatever the operand types
+    fn div_num(&mut self, v0: Value, v1: Value) -> Result<Value, String>
+    {
+        if v0.is_num() && v1.is_num() {
+            let r = v0.num_as_f64() / v1.num_as_f64();
+            return Ok(self.float64(r));
+        }
+
+        Err(format!("unsupported operand types for div: {:?} and {:?}", v0, v1))
+    }
+
+    num_slow_path!(sub_slow, "sub", checked_sub, -);
+    num_slow_path!(mul_slow, "mul", checked_mul, *);
+    num_slow_path!(modulo_slow, "modulo", checked_rem, %);
+
+    int_slow_path!(div_int_slow, "div_int", |a: i64, b: i64| a.checked_div(b));
+    int_slow_path!(bit_and_slow, "bit_and", |a: i64, b: i64| Some(a & b));
+    int_slow_path!(bit_or_slow, "bit_or", |a: i64, b: i64| Some(a | b));
+    int_slow_path!(bit_xor_slow, "bit_xor", |a: i64, b: i64| Some(a ^ b));
+    int_slow_path!(lshift_slow, "lshift", |a: i64, b: i64| Some(a << b));
+    int_slow_path!(rshift_slow, "rshift", |a: i64, b: i64| Some(a >> b));
+
     /// Call a host function
     fn call_host(&mut self, host_fn: &HostFn, argc: usize) -> Result<(), String>
     {
@@ -1233,10 +1092,9 @@ impl Actor
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
 
-        let fun_id = match fun {
-            Value::Closure(clos) => unsafe { (*clos).fun_id },
-            Value::Fun(fun_id) => fun_id,
-            _ => panic!("invalid function passed to Actor::call")
+        let fun_id = match fun_id_of(fun) {
+            Some(fun_id) => fun_id,
+            None => panic!("invalid function passed to Actor::call")
         };
 
         // Get a compiled address for this function
@@ -1264,7 +1122,7 @@ impl Actor
         let mut bp = self.stack.len();
 
         // Allocate stack slots for the local variables
-        self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::Nil);
+        self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::NIL);
 
         macro_rules! pop {
             () => { self.stack.pop().unwrap() }
@@ -1275,7 +1133,42 @@ impl Actor
         }
 
         macro_rules! push_bool {
-            ($b: expr) => { push!(if $b { True } else { False }) }
+            ($b: expr) => { push!(Value::bool_val($b)) }
+        }
+
+        // Fast path for two inline doubles: decode, apply and re-encode.
+        // Falls through when either operand is not one, or when the
+        // result is a double that has to be boxed.
+        macro_rules! flonum_op {
+            ($v0: expr, $v1: expr, $op: tt) => {
+                if $v0.is_flonum() && $v1.is_flonum() {
+                    if let Some(r) = Value::try_flonum($v0.as_flonum() $op $v1.as_flonum()) {
+                        push!(r);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Same for a comparison, which always produces a boolean
+        macro_rules! flonum_cmp {
+            ($v0: expr, $v1: expr, $op: tt) => {
+                if $v0.is_flonum() && $v1.is_flonum() {
+                    push_bool!($v0.as_flonum() $op $v1.as_flonum());
+                    continue;
+                }
+            }
+        }
+
+        // Take the result of a slow path, reporting a type error the
+        // same way the instruction itself would
+        macro_rules! slow {
+            ($insn_name: literal, $res: expr) => {
+                match $res {
+                    Ok(v) => v,
+                    Err(msg) => error!($insn_name, "{}", msg),
+                }
+            }
         }
 
         // Set up a new frame for a function call
@@ -1285,17 +1178,18 @@ impl Actor
                     error!("not enough call arguments on stack");
                 }
 
-                let fun_id = match $fun {
-                    Value::Fun(id) => id,
-                    Value::Closure(clos) => unsafe { (*clos).fun_id },
-                    Value::HostFn(f) => {
-                        match self.call_host(f, $argc.into()) {
-                            Err(msg) => error!("{}", msg),
-                            Ok(ret_val) => continue
+                let fun_id = match fun_id_of($fun) {
+                    Some(id) => id,
+
+                    None => match $fun.to_host_fn() {
+                        Some(f) => {
+                            match self.call_host(f, $argc.into()) {
+                                Err(msg) => error!("{}", msg),
+                                Ok(ret_val) => continue
+                            }
                         }
-                        //continue;
+                        None => error!("call to non-function value: `{:?}`", $fun)
                     }
-                    _ => error!("call to non-function value: `{:?}`", $fun)
                 };
 
                 // Get a compiled address for this function
@@ -1325,7 +1219,7 @@ impl Actor
                 pc = fun_entry.entry_pc;
 
                 // Allocate stack slots for the local variables
-                self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::Nil);
+                self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::NIL);
 
                 fun_entry
             }}
@@ -1348,10 +1242,9 @@ impl Actor
 
                 // For each stack frame, from top to bottom
                 for frame in self.frames.clone().into_iter().rev() {
-                    let fun_id = match frame.fun {
-                        Value::Fun(id) => id,
-                        Value::Closure(clos) => unsafe { (*clos).fun_id },
-                        _ => panic!("non-function on stack")
+                    let fun_id = match fun_id_of(frame.fun) {
+                        Some(id) => id,
+                        None => panic!("non-function on stack")
                     };
 
                     // Get the name of the function and its source position
@@ -1477,7 +1370,7 @@ impl Actor
 
                     let val = self.globals[idx];
 
-                    if val == Value::Undef {
+                    if val.is_undef() {
                         error!("get_global", "attempting to read uninitialized global");
                     }
 
@@ -1496,32 +1389,22 @@ impl Actor
                 }
 
                 Insn::add => {
-                    let mut v1 = pop!();
-                    let mut v0 = pop!();
+                    let v1 = pop!();
+                    let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 + v1),
-                        (Float64(v0), Float64(v1)) => Float64(v0 + v1),
-                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 + v1),
-                        (Float64(v0), Int64(v1)) => Float64(v0 + v1 as f64),
-
-                        (Value::String(s0), Value::String(s1)) => {
-                            let s0 = unsafe { &*s0 };
-                            let s1 = unsafe { &*s1 };
-
-                            self.gc_check(
-                                Str::alloc_size(s0.len() + s1.len()),
-                                &mut [&mut v0, &mut v1],
-                            );
-
-                            let s0 = unwrap_str!(v0);
-                            let s1 = unwrap_str!(v1);
-                            self.alloc.str_val(&(s0.to_owned() + s1))
+                    // Tagged fixnums add as they are, and a 64-bit
+                    // overflow is exactly the case where the sum no
+                    // longer fits in one
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        if let Some(sum) = (v0.raw() as i64).checked_add(v1.raw() as i64) {
+                            push!(Value::from_raw(sum as u64));
+                            continue;
                         }
+                    }
 
-                        _ => error!("add", "unsupported operand types")
-                    };
+                    flonum_op!(v0, v1, +);
 
+                    let r = slow!("add", self.add_slow(v0, v1));
                     push!(r);
                 }
 
@@ -1529,14 +1412,16 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 - v1),
-                        (Float64(v0), Float64(v1)) => Float64(v0 - v1),
-                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 - v1),
-                        (Float64(v0), Int64(v1)) => Float64(v0 - v1 as f64),
-                        _ => error!("sub", "unsupported operand types")
-                    };
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        if let Some(dif) = (v0.raw() as i64).checked_sub(v1.raw() as i64) {
+                            push!(Value::from_raw(dif as u64));
+                            continue;
+                        }
+                    }
 
+                    flonum_op!(v0, v1, -);
+
+                    let r = slow!("sub", self.sub_slow(v0, v1));
                     push!(r);
                 }
 
@@ -1544,30 +1429,30 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 * v1),
-                        (Float64(v0), Float64(v1)) => Float64(v0 * v1),
-                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 * v1),
-                        (Float64(v0), Int64(v1)) => Float64(v0 * v1 as f64),
-                        _ => error!("mul", "unsupported operand types")
-                    };
+                    // One operand keeps its tag and the other is untagged,
+                    // so that the product comes out tagged
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        if let Some(prod) = (v0.raw() as i64).checked_mul(v1.as_fixnum()) {
+                            push!(Value::from_raw(prod as u64));
+                            continue;
+                        }
+                    }
 
+                    flonum_op!(v0, v1, *);
+
+                    let r = slow!("mul", self.mul_slow(v0, v1));
                     push!(r);
                 }
 
-                // Division by zero will cause a panic (this is intentional)
+                // Division always produces a float
+                // Division by zero produces an infinity (this is intentional)
                 Insn::div => {
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Float64(v0 as f64 / v1 as f64),
-                        (Float64(v0), Float64(v1)) => Float64(v0 / v1),
-                        (Float64(v0), Int64(v1)) => Float64(v0 / v1 as f64),
-                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 / v1),
-                        _ => error!("div", "unsupported operand types")
-                    };
+                    flonum_op!(v0, v1, /);
 
+                    let r = slow!("div", self.div_num(v0, v1));
                     push!(r);
                 }
 
@@ -1577,11 +1462,18 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 / v1),
-                        _ => error!("div_int", "integer division with non-integer types")
-                    };
+                    // Dividing shrinks the magnitude, so the quotient
+                    // fits unless it is the one case that overflows
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        if let Some(q) = v0.as_fixnum().checked_div(v1.as_fixnum()) {
+                            if let Some(r) = Value::try_fixnum(q) {
+                                push!(r);
+                                continue;
+                            }
+                        }
+                    }
 
+                    let r = slow!("div_int", self.div_int_slow(v0, v1));
                     push!(r);
                 }
 
@@ -1590,28 +1482,41 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 % v1),
-                        (Float64(v0), Float64(v1)) => Float64(v0 % v1),
-                        (Float64(v0), Int64(v1)) => Float64(v0 % v1 as f64),
-                        (Int64(v0), Float64(v1)) => Float64(v0 as f64 % v1),
-                        _ => error!("modulo", "modulo with unsupported types")
-                    };
+                    // A remainder is smaller than its divisor, so it
+                    // always fits back into a fixnum
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        if let Some(rem) = v0.as_fixnum().checked_rem(v1.as_fixnum()) {
+                            push!(Value::fixnum(rem));
+                            continue;
+                        }
+                    }
 
+                    flonum_op!(v0, v1, %);
+
+                    let r = slow!("modulo", self.modulo_slow(v0, v1));
                     push!(r);
                 }
 
                 // Add a constant int64 value
                 Insn::add_i64 { val } => {
-                    if let Some(top_val) = self.stack.last_mut() {
-                        match top_val {
-                            Int64(v0) => *v0 += val,
-                            Float64(v0) => *v0 += val as f64,
-                            _ => error!("add_i64", "unsupported operand type")
+                    // The constant fits a fixnum, so the tagged words add
+                    let cst = Value::fixnum(val);
+
+                    let top = match self.stack.last_mut() {
+                        Some(top) => top,
+                        None => error!("add_i64", "stack is empty"),
+                    };
+
+                    if top.is_fixnum() {
+                        if let Some(sum) = (top.raw() as i64).checked_add(cst.raw() as i64) {
+                            *top = Value::from_raw(sum as u64);
+                            continue;
                         }
-                    } else {
-                        error!("add_i64", "stack is empty");
                     }
+
+                    let v0 = pop!();
+                    let r = slow!("add_i64", self.add_slow(v0, cst));
+                    push!(r);
                 }
 
                 // Integer bitwise or
@@ -1619,11 +1524,13 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 | v1),
-                        _ => error!("bit_or", "unsupported operand types")
-                    };
+                    // Fixnum tags are zero, so bitwise ops keep them that way
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        push!(Value::from_raw(v0.raw() | v1.raw()));
+                        continue;
+                    }
 
+                    let r = slow!("bit_or", self.bit_or_slow(v0, v1));
                     push!(r);
                 }
 
@@ -1632,11 +1539,12 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 & v1),
-                        _ => error!("bit_and", "bitwise AND with non-integer values")
-                    };
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        push!(Value::from_raw(v0.raw() & v1.raw()));
+                        continue;
+                    }
 
+                    let r = slow!("bit_and", self.bit_and_slow(v0, v1));
                     push!(r);
                 }
 
@@ -1645,11 +1553,12 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 ^ v1),
-                        _ => error!("bit_xor", "unsupported operand types")
-                    };
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        push!(Value::from_raw(v0.raw() ^ v1.raw()));
+                        continue;
+                    }
 
+                    let r = slow!("bit_xor", self.bit_xor_slow(v0, v1));
                     push!(r);
                 }
 
@@ -1658,11 +1567,20 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 << v1),
-                        _ => error!("lshift", "unsupported operand types")
-                    };
+                    // The shift can push bits out of fixnum range, so the
+                    // result has to be checked rather than retagged
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        let shift = v1.as_fixnum();
 
+                        if shift >= 0 && shift < 62 {
+                            if let Some(r) = Value::try_fixnum(v0.as_fixnum() << shift) {
+                                push!(r);
+                                continue;
+                            }
+                        }
+                    }
+
+                    let r = slow!("lshift", self.lshift_slow(v0, v1));
                     push!(r);
                 }
 
@@ -1671,11 +1589,18 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let r = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => Int64(v0 >> v1),
-                        _ => error!("rshift", "unsupported operand types")
-                    };
+                    // Shifting a fixnum right keeps it in range, so only
+                    // the bits the tag occupies have to be cleared
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        let shift = v1.as_fixnum();
 
+                        if shift >= 0 && shift < 62 {
+                            push!(Value::fixnum(v0.as_fixnum() >> shift));
+                            continue;
+                        }
+                    }
+
+                    let r = slow!("rshift", self.rshift_slow(v0, v1));
                     push!(r);
                 }
 
@@ -1684,22 +1609,15 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let b = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => v0 < v1,
-                        (Float64(v0), Float64(v1)) => v0 < v1,
-                        (Float64(v0), Int64(v1)) => v0 < (v1 as f64),
-                        (Int64(v0), Float64(v1)) => (v0 as f64) < v1,
+                    // Tagged fixnums order like the integers they hold
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        push_bool!((v0.raw() as i64) < (v1.raw() as i64));
+                        continue;
+                    }
 
-                        (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { (*s1).as_str() };
-                            let s2 = unsafe { (*s2).as_str() };
-                            s1 < s2
-                        }
+                    flonum_cmp!(v0, v1, <);
 
-                        _ => error!("lt", "unsupported types in less-than")
-                    };
-
-                    push_bool!(b);
+                    push_bool!(slow!("lt", cmp_lt(v0, v1)));
                 }
 
                 // Less than or equal
@@ -1707,22 +1625,14 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let b = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => v0 <= v1,
-                        (Float64(v0), Float64(v1)) => v0 <= v1,
-                        (Float64(v0), Int64(v1)) => v0 <= (v1 as f64),
-                        (Int64(v0), Float64(v1)) => (v0 as f64) <= v1,
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        push_bool!((v0.raw() as i64) <= (v1.raw() as i64));
+                        continue;
+                    }
 
-                        (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { (*s1).as_str() };
-                            let s2 = unsafe { (*s2).as_str() };
-                            s1 <= s2
-                        }
+                    flonum_cmp!(v0, v1, <=);
 
-                        _ => error!("le", "unsupported types in less-than-or-equal")
-                    };
-
-                    push_bool!(b);
+                    push_bool!(slow!("le", cmp_le(v0, v1)));
                 }
 
                 // Greater than
@@ -1730,22 +1640,14 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let b = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => v0 > v1,
-                        (Float64(v0), Float64(v1)) => v0 > v1,
-                        (Float64(v0), Int64(v1)) => v0 > (v1 as f64),
-                        (Int64(v0), Float64(v1)) => (v0 as f64) > v1,
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        push_bool!((v0.raw() as i64) > (v1.raw() as i64));
+                        continue;
+                    }
 
-                        (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { (*s1).as_str() };
-                            let s2 = unsafe { (*s2).as_str() };
-                            s1 > s2
-                        }
+                    flonum_cmp!(v0, v1, >);
 
-                        _ => error!("gt", "unsupported types in greather-than")
-                    };
-
-                    push_bool!(b);
+                    push_bool!(slow!("gt", cmp_gt(v0, v1)));
                 }
 
                 // Greater than or equal
@@ -1753,22 +1655,14 @@ impl Actor
                     let v1 = pop!();
                     let v0 = pop!();
 
-                    let b = match (v0, v1) {
-                        (Int64(v0), Int64(v1)) => v0 >= v1,
-                        (Float64(v0), Float64(v1)) => v0 >= v1,
-                        (Float64(v0), Int64(v1)) => v0 >= (v1 as f64),
-                        (Int64(v0), Float64(v1)) => (v0 as f64) >= v1,
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        push_bool!((v0.raw() as i64) >= (v1.raw() as i64));
+                        continue;
+                    }
 
-                        (Value::String(s1), Value::String(s2)) => {
-                            let s1 = unsafe { (*s1).as_str() };
-                            let s2 = unsafe { (*s2).as_str() };
-                            s1 >= s2
-                        }
+                    flonum_cmp!(v0, v1, >=);
 
-                        _ => error!("ge", "unsupported types in greater-than-or-equal")
-                    };
-
-                    push_bool!(b);
+                    push_bool!(slow!("ge", cmp_ge(v0, v1)));
                 }
 
                 Insn::eq => {
@@ -1787,14 +1681,12 @@ impl Actor
                 Insn::not => {
                     let v0 = pop!();
 
-                    let b = match v0 {
-                        Value::True => Value::False,
-                        Value::False => Value::True,
-                        _ => error!("not", "unsupported type in logical not {:?}", v0)
-                    };
-
-                    push!(b);
+                    match v0.to_bool() {
+                        Some(b) => push_bool!(!b),
+                        None => error!("not", "unsupported type in logical not {:?}", v0)
+                    }
                 }
+
 
                 // Create a new closure
                 Insn::clos_new { fun_id, num_slots } => {
@@ -1814,28 +1706,22 @@ impl Actor
                     let val = pop!();
                     let clos = pop!();
 
-                    match clos {
-                        Value::Closure(clos) => {
-                            let clos = unsafe { &mut *clos };
-                            clos.set(idx as usize, val);
-                        }
-                        _ => error!("clos_set", "expected closure")
+                    match clos.to_clos() {
+                        Some(clos) => clos.set(idx as usize, val),
+                        None => error!("clos_set", "expected closure")
                     }
                 }
 
                 // Get a closure slot for the function currently executing
                 Insn::clos_get { idx } => {
-                    let fun = &self.frames[self.frames.len() - 1].fun;
+                    let fun = self.frames[self.frames.len() - 1].fun;
 
-                    let val = match fun {
-                        Value::Closure(clos) => {
-                            let clos = unsafe { &**clos };
-                            clos.get(idx as usize)
-                        }
-                        _ => error!("clos_get", "not a closure")
+                    let val = match fun.to_clos() {
+                        Some(clos) => clos.get(idx as usize),
+                        None => error!("clos_get", "not a closure")
                     };
 
-                    if val == Value::Undef {
+                    if val.is_undef() {
                         error!("clos_get", "executing uninitialized closure");
                     }
 
@@ -1849,8 +1735,8 @@ impl Actor
                         &mut [],
                     );
 
-                    let p_cell = self.alloc.alloc(Value::Nil, Tag::Cell);
-                    push!(Value::Cell(p_cell));
+                    let p_cell = self.alloc.alloc(Value::NIL, Tag::Cell);
+                    push!(Value::cell(p_cell));
                 }
 
                 // Set the value stored in a mutable cell
@@ -1858,9 +1744,9 @@ impl Actor
                     let cell = pop!();
                     let val = pop!();
 
-                    match cell {
-                        Value::Cell(p_cell) => unsafe { *p_cell = val },
-                        _ => error!("cell_set", "expected cell")
+                    match cell.to_cell() {
+                        Some(p_cell) => *p_cell = val,
+                        None => error!("cell_set", "expected cell")
                     };
                 }
 
@@ -1868,9 +1754,9 @@ impl Actor
                 Insn::cell_get => {
                     let cell = pop!();
 
-                    let val = match cell {
-                        Value::Cell(p_cell) => unsafe { *p_cell },
-                        _ => error!("cell_get", "invalid cell in cell_get")
+                    let val = match cell.to_cell() {
+                        Some(p_cell) => *p_cell,
+                        None => error!("cell_get", "invalid cell in cell_get")
                     };
 
                     push!(val);
@@ -1884,52 +1770,49 @@ impl Actor
                     );
                     let dict = Dict::with_capacity(0, &mut self.alloc);
                     let new_obj = self.alloc.alloc(dict, Tag::Dict);
-                    push!(Value::Dict(new_obj))
+                    push!(Value::dict(new_obj))
                 }
 
                 // Set object field
-                Insn::set_field { mut field, class_id, slot_idx } => {
+                Insn::set_field { field, class_id, slot_idx } => {
                     let mut val = pop!();
                     let mut obj = pop!();
-                    let mut field_name = unsafe { &*field };
 
-                    match obj {
-                        Value::Object(p) => {
-                            let obj = unsafe { &mut *p };
+                    if let Some(obj) = obj.to_obj() {
+                        if class_id == obj.class_id {
+                            obj.set(slot_idx as usize, val);
+                        } else {
+                            let field_name = unsafe { &*field };
+                            let slot_idx = self.get_slot_idx(obj.class_id, field_name.as_str());
+                            let class_id = obj.class_id;
 
-                            if class_id == obj.class_id {
-                                obj.set(slot_idx as usize, val);
-                            } else {
-                                let slot_idx = self.get_slot_idx(obj.class_id, field_name.as_str());
-                                let class_id = obj.class_id;
+                            // Update the cache
+                            self.insns[pc - 1] = Insn::set_field {
+                                field,
+                                class_id,
+                                slot_idx: slot_idx as u32,
+                            };
 
-                                // Update the cache
-                                self.insns[pc - 1] = Insn::set_field {
-                                    field,
-                                    class_id,
-                                    slot_idx: slot_idx as u32,
-                                };
-
-                                obj.set(slot_idx, val);
-                            }
-                        },
-
-                        Value::Dict(p) => {
-                            let dict = unsafe { &mut *p };
-                            let mut field_name_val = Value::String(field);
-                            let alloc_size = dict.will_allocate();
-
-                            self.gc_check(
-                                alloc_size,
-                                &mut [&mut obj, &mut val, &mut field_name_val]
-                            );
-
-                            field_name = field_name_val.unwrap_str();
-                            let dict = obj.unwrap_dict();
-                            dict.set(field_name, val, &mut self.alloc);
+                            obj.set(slot_idx, val);
                         }
+                    }
+                    else if obj.is_dict() {
+                        let alloc_size = obj.as_dict().will_allocate();
 
-                        _ => error!("set_field", "set_field on non-object/dict value")
+                        // The field name is reachable from the instruction
+                        // stream, which the collector updates, so it has to
+                        // be read back after the check
+                        let mut name_val = Value::string(field);
+                        self.gc_check(
+                            alloc_size,
+                            &mut [&mut obj, &mut val, &mut name_val]
+                        );
+
+                        let field = name_val.as_string() as *const Str;
+                        obj.as_dict().set(field, val, &mut self.alloc);
+                    }
+                    else {
+                        error!("set_field", "set_field on non-object/dict value")
                     }
                 }
 
@@ -1953,7 +1836,7 @@ impl Actor
                         // The self value should be first argument to the constructor
                         // The constructor also returns the allocated object
                         self.stack.insert(self.stack.len() - argc as usize, obj_val);
-                        let ctor_entry = call_fun!(Value::Fun(fun_id), argc + 1);
+                        let ctor_entry = call_fun!(Value::fun(fun_id), argc + 1);
 
                         // Patch the instruction to avoid lookups next time
                         self.insns[this_pc] = Insn::new_known_ctor {
@@ -1988,7 +1871,7 @@ impl Actor
                     // We add an extra argument for the self value
                     self.frames.push(StackFrame {
                         argc: argc + 1,
-                        fun: Value::Fun(fun_id),
+                        fun: Value::fun(fun_id),
                         prev_bp: bp,
                         ret_addr: pc,
                     });
@@ -1998,48 +1881,30 @@ impl Actor
                     pc = ctor_pc as usize;
 
                     // Allocate stack slots for the local variables
-                    self.stack.resize(self.stack.len() + num_locals as usize, Value::Nil);
+                    self.stack.resize(self.stack.len() + num_locals as usize, Value::NIL);
                 }
 
                 Insn::instanceof { class_id } => {
                     // Check that the class id matches
-                    let mut val = pop!();
+                    let val = pop!();
                     let id = crate::runtime::get_class_id(val);
                     push_bool!(id == class_id);
                 }
 
                 // Get object field
                 Insn::get_field { field, class_id, slot_idx } => {
-                    let mut obj = pop!();
+                    let obj = pop!();
                     let field_name = unsafe { &*field };
 
-                    let val = match obj {
-                        Value::Array(p) => {
-                            match field_name.as_str() {
-                                "len" => obj.unwrap_arr().len().into(),
-                                _ => error!("get_field", "field not found on array")
-                            }
-                        }
+                    if !obj.is_heap() {
+                        error!("get_field", "get_field on non-object value {:?}", obj);
+                    }
 
-                        Value::ByteArray(p) => {
-                            match field_name.as_str() {
-                                "len" => obj.unwrap_ba().num_bytes().into(),
-                                _ => error!("get_field", "field not found on bytearray")
-                            }
-                        }
-
-                        Value::String(p) => {
-                            match field_name.as_str() {
-                                "len" => {
-                                    let s = unsafe { (*p).as_str() };
-                                    s.len().into()
-                                }
-                                _ => error!("get_field", "field not found on string")
-                            }
-                        }
-
-                        Value::Object(p) => {
-                            let obj = unsafe { &*p };
+                    // The block header says what the value points at, so
+                    // one load and one switch settle the type
+                    let val = match obj.heap_tag() {
+                        Tag::Object => {
+                            let obj = obj.as_obj();
 
                             // If the class id doesn't match the cache, update it
                             let val = if class_id == obj.class_id {
@@ -2058,20 +1923,40 @@ impl Actor
                                 obj.get(slot_idx as usize)
                             };
 
-                            if val == Value::Undef {
+                            if val.is_undef() {
                                 error!("get_field", "object field not initialized `{}`", field_name.as_str());
                             }
 
                             val
-                        },
+                        }
 
-                        Value::Dict(p) => {
-                            let dict = unsafe { &mut *p };
+                        Tag::Dict => {
                             let key = field_name.as_str();
 
-                            match dict.get(key) {
+                            match obj.as_dict().get(key) {
                                 Some(v) => v,
                                 None => error!("get_field", "key '{}' not found in dict", key)
+                            }
+                        }
+
+                        Tag::Array => {
+                            match field_name.as_str() {
+                                "len" => Value::fixnum(obj.as_arr().len() as i64),
+                                _ => error!("get_field", "field not found on array")
+                            }
+                        }
+
+                        Tag::ByteArray => {
+                            match field_name.as_str() {
+                                "len" => Value::fixnum(obj.as_ba().num_bytes() as i64),
+                                _ => error!("get_field", "field not found on bytearray")
+                            }
+                        }
+
+                        Tag::Str => {
+                            match field_name.as_str() {
+                                "len" => Value::fixnum(obj.as_str().len() as i64),
+                                _ => error!("get_field", "field not found on string")
                             }
                         }
 
@@ -2083,26 +1968,27 @@ impl Actor
 
                 Insn::get_index => {
                     let idx = pop!();
-                    let mut arr = pop!();
+                    let arr = pop!();
 
-                    let val = match arr {
-                        Value::Array(p) => {
-                            let arr = unsafe { &mut *p };
+                    if !arr.is_heap() {
+                        error!("get_index", "expected array or dict type in get_index");
+                    }
+
+                    let val = match arr.heap_tag() {
+                        Tag::Array => {
                             let idx = unwrap_usize!(idx, "get_index");
-                            arr.get(idx)
+                            arr.as_arr().get(idx)
                         }
 
-                        Value::ByteArray(p) => {
-                            let ba = unsafe { &mut *p };
+                        Tag::ByteArray => {
                             let idx = unwrap_usize!(idx, "get_index");
-                            Value::from(ba.get::<u8>(idx))
+                            Value::from(arr.as_ba().get::<u8>(idx))
                         }
 
-                        Value::Dict(p) => {
-                            let dict = unsafe { &mut *p };
-                            let key = unwrap_str!(idx);
+                        Tag::Dict => {
+                            let key = unwrap_str!(idx, "get_index");
 
-                            match dict.get(key) {
+                            match arr.as_dict().get(key) {
                                 Some(v) => v,
                                 None => error!("get_index", "key '{}' not found in dict", key)
                             }
@@ -2119,33 +2005,35 @@ impl Actor
                     let mut idx = pop!();
                     let mut arr = pop!();
 
-                    match arr {
-                        Value::Array(p) => {
-                            let arr = unsafe { &mut *p };
-                            let idx = unwrap_usize!(idx, "get_index");
-                            arr.set(idx, val);
+                    if !arr.is_heap() {
+                        error!("set_index", "expected array or dict type");
+                    }
+
+                    match arr.heap_tag() {
+                        Tag::Array => {
+                            let elem_idx = unwrap_usize!(idx, "set_index");
+                            arr.as_arr().set(elem_idx, val);
                         }
 
-                        Value::ByteArray(p) => {
-                            let ba = unsafe { &mut *p };
-                            let idx = unwrap_usize!(idx, "get_index");
-                            let b = val.unwrap_u8();
-                            ba.set::<u8>(idx, b);
+                        Tag::ByteArray => {
+                            let byte_idx = unwrap_usize!(idx, "set_index");
+                            let b = unwrap_u8!(val, "set_index");
+                            arr.as_ba().set::<u8>(byte_idx, b);
                         }
 
-                        Value::Dict(p) => {
-                            let dict = unsafe { &mut *p };
-                            let key = unwrap_str!(idx);
+                        Tag::Dict => {
+                            if !idx.is_string() {
+                                error!("set_index", "expected string key but got {:?}", idx);
+                            }
 
-                            let alloc_size = dict.will_allocate();
+                            let alloc_size = arr.as_dict().will_allocate();
                             self.gc_check(
                                 alloc_size,
                                 &mut [&mut arr, &mut idx, &mut val],
                             );
 
-                            let dict = arr.unwrap_dict();
-                            let key = idx.unwrap_str();
-                            dict.set(key, val, &mut self.alloc);
+                            let key = idx.as_string() as *const Str;
+                            arr.as_dict().set(key, val, &mut self.alloc);
                         }
 
                         _ => error!("set_index", "expected array or dict type")
@@ -2162,7 +2050,7 @@ impl Actor
                     );
 
                     let new_arr = Array::with_capacity(capacity, &mut self.alloc);
-                    push!(Value::Array(self.alloc.alloc(new_arr, Tag::Array)))
+                    push!(Value::array(self.alloc.alloc(new_arr, Tag::Array)))
                 }
 
                 // Append an element at the end of an array
@@ -2176,27 +2064,26 @@ impl Actor
                 // Clone a bytearray
                 Insn::ba_clone => {
                     let mut val = pop!();
-                    let ba = val.unwrap_ba();
+                    let ba = unwrap_ba!(val, "ba_clone");
 
                     self.gc_check(
                         ByteArray::alloc_size(ba.num_bytes()),
                         &mut [&mut val],
                     );
 
-                    let ba = val.unwrap_ba();
-                    let ba_clone = ba.clone(&mut self.alloc);
+                    let ba_clone = val.as_ba().clone(&mut self.alloc);
                     let p_clone = self.alloc.alloc(ba_clone, Tag::ByteArray);
-                    push!(Value::ByteArray(p_clone));
+                    push!(Value::bytearray(p_clone));
                 }
 
                 // Jump if true
                 Insn::if_true { target_ofs } => {
                     let v = pop!();
 
-                    match v {
-                        Value::True => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
-                        Value::False => {}
-                        _ => error!("if_true", "if_true instruction only accepts boolean values")
+                    if v.is_true() {
+                        pc = ((pc as i64) + (target_ofs as i64)) as usize;
+                    } else if !v.is_false() {
+                        error!("if_true", "if_true instruction only accepts boolean values");
                     }
                 }
 
@@ -2204,10 +2091,10 @@ impl Actor
                 Insn::if_false { target_ofs } => {
                     let v = pop!();
 
-                    match v {
-                        Value::False => { pc = ((pc as i64) + (target_ofs as i64)) as usize }
-                        Value::True => {}
-                        _ => error!("if_false", "if_false instruction only accepts boolean values")
+                    if v.is_false() {
+                        pc = ((pc as i64) + (target_ofs as i64)) as usize;
+                    } else if !v.is_true() {
+                        error!("if_false", "if_false instruction only accepts boolean values");
                     }
                 }
 
@@ -2225,7 +2112,7 @@ impl Actor
                 // call_direct (arg0, arg1, ..., argN)
                 Insn::call_direct { fun_id, argc } => {
                     let this_pc = pc - 1;
-                    let fun_entry = call_fun!(Value::Fun(fun_id), argc);
+                    let fun_entry = call_fun!(Value::fun(fun_id), argc);
 
                     // Patch the instruction to jump directly to the entry point next time
                     self.insns[this_pc] = Insn::call_pc {
@@ -2240,7 +2127,7 @@ impl Actor
                 Insn::call_pc { entry_pc, fun_id, num_locals, argc } => {
                     self.frames.push(StackFrame {
                         argc,
-                        fun: Value::Fun(fun_id),
+                        fun: Value::fun(fun_id),
                         prev_bp: bp,
                         ret_addr: pc,
                     });
@@ -2250,7 +2137,7 @@ impl Actor
                     pc = entry_pc as usize;
 
                     // Allocate stack slots for the local variables
-                    self.stack.resize(self.stack.len() + num_locals as usize, Value::Nil);
+                    self.stack.resize(self.stack.len() + num_locals as usize, Value::NIL);
                 }
 
                 // Call a method with a known name
@@ -2259,9 +2146,8 @@ impl Actor
                     let method_name = unsafe { &*name };
                     let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
 
-                    match self_val {
-                        Value::Object(p) => {
-                            let obj = unsafe { &*p };
+                    match self_val.to_obj() {
+                        Some(obj) => {
                             let fun_id = match self.get_method(obj.class_id, method_name.as_str()) {
                                 None => error!(
                                     "call to method `{}`, not found on class `{}`",
@@ -2272,7 +2158,7 @@ impl Actor
                             };
 
                             let this_pc = pc - 1;
-                            let fun_entry = call_fun!(Value::Fun(fun_id), argc + 1);
+                            let fun_entry = call_fun!(Value::fun(fun_id), argc + 1);
 
                             // Patch this instruction to avoid the method lookup next time
                             self.insns[this_pc] = Insn::call_method_pc {
@@ -2285,10 +2171,10 @@ impl Actor
                             };
                         }
 
-                        _ => {
+                        None => {
                             let fun = crate::runtime::get_method(self_val, method_name.as_str());
 
-                            if fun == Value::Nil {
+                            if fun.is_nil() {
                                 error!("call to unknown method `{}`", method_name.as_str());
                             }
 
@@ -2301,14 +2187,12 @@ impl Actor
                     let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
 
                     // Guard that self is an object with a matching class id
-                    if let Value::Object(p_obj) = self_val {
-                        let obj = unsafe { &*p_obj };
-
+                    if let Some(obj) = self_val.to_obj() {
                         if obj.class_id == class_id {
                             let argc: u8 = argc.into();
                             self.frames.push(StackFrame {
                                 argc: argc + 1,
-                                fun: Value::Fun(fun_id),
+                                fun: Value::fun(fun_id),
                                 prev_bp: bp,
                                 ret_addr: pc,
                             });
@@ -2318,7 +2202,7 @@ impl Actor
                             pc = entry_pc as usize;
 
                             // Allocate stack slots for the local variables
-                            self.stack.resize(self.stack.len() + num_locals as usize, Value::Nil);
+                            self.stack.resize(self.stack.len() + num_locals as usize, Value::NIL);
 
                             // Proceed with the call
                             continue;
@@ -2570,7 +2454,7 @@ impl VM
         vm_ref.actor_txs.insert(actor_id, actor_tx);
 
         // Initialize the global slots
-        let globals = vec![Value::Undef; vm_ref.prog.num_globals as usize];
+        let globals = vec![Value::UNDEF; vm_ref.prog.num_globals as usize];
 
         drop(vm_ref);
 
@@ -2584,7 +2468,7 @@ impl VM
             globals,
         );
 
-        actor.call(Value::Fun(fun_id), &args)
+        actor.call(Value::fun(fun_id), &args)
     }
 
     /// Send a message to an actor without copying it to its message allocator
@@ -2611,6 +2495,11 @@ mod tests
         VM::call(&mut vm, main_fn, vec![])
     }
 
+    fn flonum(v: f64) -> Value
+    {
+        Value::try_flonum(v).unwrap()
+    }
+
     fn eval_eq(s: &str, v: Value)
     {
         let val = eval(s);
@@ -2623,7 +2512,7 @@ mod tests
         use std::mem::size_of;
 
         dbg!(size_of::<Value>());
-        assert!(size_of::<Value>() <= 16);
+        assert!(size_of::<Value>() == 8);
 
         dbg!(size_of::<Insn>());
         assert!(size_of::<Insn>() <= 24);
@@ -2642,67 +2531,67 @@ mod tests
     #[test]
     fn empty_unit()
     {
-        eval_eq("", Value::Nil);
+        eval_eq("", Value::NIL);
     }
 
     #[test]
     fn simple_exprs()
     {
-        eval_eq("return 77;", Value::Int64(77));
-        eval_eq("return -77;", Value::Int64(-77));
-        eval_eq("return 1 + 5;", Value::Int64(6));
-        eval_eq("return 5 - 3;", Value::Int64(2));
-        eval_eq("return 2 * 3 + 4;", Value::Int64(10));
-        eval_eq("return 5 + 2 * -2;", Value::Int64(1));
-        eval_eq("return 2 * 2 - 1;", Value::Int64(3));
+        eval_eq("return 77;", Value::fixnum(77));
+        eval_eq("return -77;", Value::fixnum(-77));
+        eval_eq("return 1 + 5;", Value::fixnum(6));
+        eval_eq("return 5 - 3;", Value::fixnum(2));
+        eval_eq("return 2 * 3 + 4;", Value::fixnum(10));
+        eval_eq("return 5 + 2 * -2;", Value::fixnum(1));
+        eval_eq("return 2 * 2 - 1;", Value::fixnum(3));
     }
 
     #[test]
     fn if_else()
     {
-        eval_eq("if (true) return 1; return 2;", Value::Int64(1));
-        eval_eq("if (false) return 1; return 2;", Value::Int64(2));
-        eval_eq("if (true) return 77; else return 88;", Value::Int64(77));
-        eval_eq("if (false) return 77; else return 88;", Value::Int64(88));
-        eval_eq("if (3 < 5) return 1; return 2;", Value::Int64(1));
+        eval_eq("if (true) return 1; return 2;", Value::fixnum(1));
+        eval_eq("if (false) return 1; return 2;", Value::fixnum(2));
+        eval_eq("if (true) return 77; else return 88;", Value::fixnum(77));
+        eval_eq("if (false) return 77; else return 88;", Value::fixnum(88));
+        eval_eq("if (3 < 5) return 1; return 2;", Value::fixnum(1));
     }
 
     #[test]
     fn logical_and()
     {
-        eval_eq("if (false && false) return 1; else return 0;", Value::Int64(0));
-        eval_eq("if (false && true) return 1; else return 0;", Value::Int64(0));
-        eval_eq("if (true && false) return 1; else return 0;", Value::Int64(0));
-        eval_eq("if (true && true) return 1; else return 0;", Value::Int64(1));
+        eval_eq("if (false && false) return 1; else return 0;", Value::fixnum(0));
+        eval_eq("if (false && true) return 1; else return 0;", Value::fixnum(0));
+        eval_eq("if (true && false) return 1; else return 0;", Value::fixnum(0));
+        eval_eq("if (true && true) return 1; else return 0;", Value::fixnum(1));
     }
 
     #[test]
     fn logical_or()
     {
-        eval_eq("if (false || false) return 1; else return 0;", Value::Int64(0));
-        eval_eq("if (false || true) return 1; else return 0;", Value::Int64(1));
-        eval_eq("if (true || false) return 1; else return 0;", Value::Int64(1));
-        eval_eq("if (true || true) return 1; else return 0;", Value::Int64(1));
+        eval_eq("if (false || false) return 1; else return 0;", Value::fixnum(0));
+        eval_eq("if (false || true) return 1; else return 0;", Value::fixnum(1));
+        eval_eq("if (true || false) return 1; else return 0;", Value::fixnum(1));
+        eval_eq("if (true || true) return 1; else return 0;", Value::fixnum(1));
     }
 
     #[test]
     fn let_expr()
     {
-        eval_eq("let x = 1; return x;", Value::Int64(1));
-        eval_eq("let var x = 1; return x;", Value::Int64(1));
-        eval_eq("let x = 1; let y = 2; return x + y;", Value::Int64(3));
+        eval_eq("let x = 1; return x;", Value::fixnum(1));
+        eval_eq("let var x = 1; return x;", Value::fixnum(1));
+        eval_eq("let x = 1; let y = 2; return x + y;", Value::fixnum(3));
     }
 
     #[test]
     fn inc_dec()
     {
-        eval_eq("let var x = 10; --x; return x;", Value::Int64(9));
+        eval_eq("let var x = 10; --x; return x;", Value::fixnum(9));
     }
 
     #[test]
     fn assign()
     {
-        eval_eq("let var x = 1; x = 2; return x;", Value::Int64(2));
+        eval_eq("let var x = 1; x = 2; return x;", Value::fixnum(2));
     }
 
     #[test]
@@ -2725,24 +2614,24 @@ mod tests
     #[test]
     fn comparisons()
     {
-        eval_eq("class F {} let o1 = F(); let o2 = F(); return o1 == o2;", Value::False);
-        eval_eq("class F {} let o1 = F(); let o2 = F(); return o1 != o2;", Value::True);
+        eval_eq("class F {} let o1 = F(); let o2 = F(); return o1 == o2;", Value::FALSE);
+        eval_eq("class F {} let o1 = F(); let o2 = F(); return o1 != o2;", Value::TRUE);
 
         // Integer comparisons
-        eval_eq("return 3 <= 5;", Value::True);
+        eval_eq("return 3 <= 5;", Value::TRUE);
 
         // String comparison
-        eval_eq("return 'foo' == 'bar';", Value::False);
-        eval_eq("return 'foo' == 'foo';", Value::True);
-        eval_eq("return 'foo' != 'foo';", Value::False);
+        eval_eq("return 'foo' == 'bar';", Value::FALSE);
+        eval_eq("return 'foo' == 'foo';", Value::TRUE);
+        eval_eq("return 'foo' != 'foo';", Value::FALSE);
     }
 
     #[test]
     fn ternary_expr()
     {
-        eval_eq("return true? 1:2;", Value::Int64(1));
-        eval_eq("return false? 1:2;", Value::Int64(2));
-        eval_eq("let b = (1 < 5)? 1:2; return b;", Value::Int64(1));
+        eval_eq("return true? 1:2;", Value::fixnum(1));
+        eval_eq("return false? 1:2;", Value::fixnum(2));
+        eval_eq("let b = (1 < 5)? 1:2; return b;", Value::fixnum(1));
     }
 
     #[test]
@@ -2754,97 +2643,97 @@ mod tests
     #[test]
     fn while_loop()
     {
-        eval_eq("let x = 1; while (false) {} return x;", Value::Int64(1));
-        eval_eq("let var x = 1; while (x < 10) { x = x + 1; } return x;", Value::Int64(10));
+        eval_eq("let x = 1; while (false) {} return x;", Value::fixnum(1));
+        eval_eq("let var x = 1; while (x < 10) { x = x + 1; } return x;", Value::fixnum(10));
     }
 
     #[test]
     fn for_loop()
     {
         eval("for (;;) break;");
-        eval_eq("let x = 1; for (let var x = 0; x < 10; ++x) {} return x;", Value::Int64(1));
-        eval_eq("let var x = 0; for (let var i = 0; i < 10; ++i) { x = x + 2; } return x;", Value::Int64(20));
-        eval_eq("let var x = 0; for (let var i = 0; i < 10; ++i) { ++x; assert(x < 11); continue; } return x;", Value::Int64(10));
+        eval_eq("let x = 1; for (let var x = 0; x < 10; ++x) {} return x;", Value::fixnum(1));
+        eval_eq("let var x = 0; for (let var i = 0; i < 10; ++i) { x = x + 2; } return x;", Value::fixnum(20));
+        eval_eq("let var x = 0; for (let var i = 0; i < 10; ++i) { ++x; assert(x < 11); continue; } return x;", Value::fixnum(10));
     }
 
     #[test]
     fn fun_call()
     {
-        eval_eq("fun f() { return 7; } return f();", Value::Int64(7));
-        eval_eq("fun f(x) { return x + 1; } return f(7);", Value::Int64(8));
-        eval_eq("fun f(a, b) { return a - b; } return f(7, 2);", Value::Int64(5));
+        eval_eq("fun f() { return 7; } return f();", Value::fixnum(7));
+        eval_eq("fun f(x) { return x + 1; } return f(7);", Value::fixnum(8));
+        eval_eq("fun f(a, b) { return a - b; } return f(7, 2);", Value::fixnum(5));
 
         // Global variable read
-        eval_eq("let g = 3; fun f() { return g+1; } return f();", Value::Int64(4));
+        eval_eq("let g = 3; fun f() { return g+1; } return f();", Value::fixnum(4));
 
         // Function calling another function
-        eval_eq("fun a() { return 8; } fun b() { return a(); } return b();", Value::Int64(8));
+        eval_eq("fun a() { return 8; } fun b() { return a(); } return b();", Value::fixnum(8));
     }
 
     #[test]
     fn ret_clos()
     {
         // Function returning a closure
-        eval_eq("fun a() { fun b() { return 33; } return b; } let f = a(); return f();", Value::Int64(33));
+        eval_eq("fun a() { fun b() { return 33; } return b; } let f = a(); return f();", Value::fixnum(33));
     }
 
     #[test]
     fn capture_local()
     {
         // Captured function argument
-        eval_eq("fun f(n) { return || n+1; } let g = f(7); return g();", Value::Int64(8));
+        eval_eq("fun f(n) { return || n+1; } let g = f(7); return g();", Value::fixnum(8));
 
         // Capture local variable
-        eval_eq("fun f(n) { let m = n+1; return || m+1; } let g = f(3); return g();", Value::Int64(5));
-        eval_eq("fun f(n) { let m = n+1; return |x| m+x; } let g = f(3); return g(4);", Value::Int64(8));
+        eval_eq("fun f(n) { let m = n+1; return || m+1; } let g = f(3); return g();", Value::fixnum(5));
+        eval_eq("fun f(n) { let m = n+1; return |x| m+x; } let g = f(3); return g(4);", Value::fixnum(8));
     }
 
     #[test]
     fn counter_clos()
     {
         // Read mutable captured variable
-        eval_eq("fun f() { let var n = 0; return || n; } let c = f(); return c();", Value::Int64(0));
+        eval_eq("fun f() { let var n = 0; return || n; } let c = f(); return c();", Value::fixnum(0));
 
         // Write mutable captured variable
-        eval_eq("fun f() { let var n = 0; return || n = 1; } let c = f(); return c();", Value::Int64(1));
+        eval_eq("fun f() { let var n = 0; return || n = 1; } let c = f(); return c();", Value::fixnum(1));
 
         // Counter
-        eval_eq("fun f() { let var n = 0; return || ++n; } let c = f(); c(); return c();", Value::Int64(2));
+        eval_eq("fun f() { let var n = 0; return || ++n; } let c = f(); c(); return c();", Value::fixnum(2));
     }
 
     #[test]
     fn fact()
     {
         // Recursive factorial function
-        eval_eq("fun f(n) { if (n < 2) return 1; return n * f(n-1); } return f(6);", Value::Int64(720));
+        eval_eq("fun f(n) { if (n < 2) return 1; return n * f(n-1); } return f(6);", Value::fixnum(720));
     }
 
     #[test]
     fn fib()
     {
         // Recursive fibonacci function
-        eval_eq("fun f(n) { if (n < 2) return n; return f(n-1) + f(n-2); } return f(10);", Value::Int64(55));
+        eval_eq("fun f(n) { if (n < 2) return n; return f(n-1) + f(n-2); } return f(10);", Value::fixnum(55));
     }
 
     #[test]
     fn call_ahead()
     {
         // Call a function before its definition
-        eval_eq("fun a() { return b(); } fun b() { return 7; } return a();", Value::Int64(7));
+        eval_eq("fun a() { return b(); } fun b() { return 7; } return a();", Value::fixnum(7));
     }
 
     #[test]
     fn mutual_rec()
     {
         // Mutual recursion
-        eval_eq("fun a(n) { return b(n-1); } fun b(n) { if (n<1) return 0; return a(n-1); } return a(8);", Value::Int64(0));
+        eval_eq("fun a(n) { return b(n-1); } fun b(n) { if (n<1) return 0; return a(n-1); } return a(8);", Value::fixnum(0));
     }
 
     #[test]
     fn host_call()
     {
-        eval_eq("return $actor_id();", Value::Int64(0));
-        eval_eq("return $actor_parent();", Value::Nil);
+        eval_eq("return $actor_id();", Value::fixnum(0));
+        eval_eq("return $actor_parent();", Value::NIL);
         eval("return $print('hi');");
         eval("return $time_current_ms();");
     }
@@ -2859,7 +2748,7 @@ mod tests
                 "let ret = $actor_join(id);",
                 "return ret;",
             ),
-            Value::Int64(77)
+            Value::fixnum(77)
         );
     }
 
@@ -2873,7 +2762,7 @@ mod tests
                 "$actor_send(id, 1336);",
                 "return $actor_join(id);",
             ),
-            Value::Int64(1337)
+            Value::fixnum(1337)
         );
     }
 
@@ -2887,7 +2776,7 @@ mod tests
                 "let id = $actor_spawn(f);",
                 "return $actor_join(id);",
             ),
-            Value::Int64(33)
+            Value::fixnum(33)
         );
     }
 
@@ -2905,7 +2794,7 @@ mod tests
                 "let id = $actor_spawn(f);",
                 "return $actor_join(id);",
             ),
-            Value::True
+            Value::TRUE
         );
     }
 
@@ -2918,18 +2807,44 @@ mod tests
     #[test]
     fn float64()
     {
-        eval_eq("return 77.0 instanceof Float64;", Value::True);
-        eval_eq("return 4.0 + 1.0;", Value::Float64(5.0));
-        eval_eq("return 6.0 / 2.0;", Value::Float64(3.0));
-        eval_eq("return 4.0.sqrt();", Value::Float64(2.0));
+        eval_eq("return 77.0 instanceof Float64;", Value::TRUE);
+        eval_eq("return 4.0 + 1.0;", flonum(5.0));
+        eval_eq("return 6.0 / 2.0;", flonum(3.0));
+        eval_eq("return 4.0.sqrt();", flonum(2.0));
+    }
+
+    #[test]
+    fn boxed_nums()
+    {
+        // Integers past the fixnum range are boxed, and behave the same
+        eval_eq("return 4611686018427387903 + 1 == 4611686018427387904;", Value::TRUE);
+        eval_eq("return -4611686018427387904 - 1 == -4611686018427387905;", Value::TRUE);
+        eval_eq("return (1 << 62) >> 62;", Value::fixnum(1));
+        eval_eq("return (4611686018427387904 & 0xFF) == 0;", Value::TRUE);
+        eval_eq("let x = 4611686018427387904; return x.to_s().len;", Value::fixnum(19));
+
+        // Doubles with no inline encoding are boxed
+        eval_eq("let x = 1e300; return x * 1e-300;", flonum(1.0));
+        eval_eq("return 1e-300 == 1e-300;", Value::TRUE);
+        eval_eq("return 1e300 > 1e-300;", Value::TRUE);
+
+        // Boxed and inline representations of the same number are equal
+        eval_eq("return 4611686018427387904 == 4611686018427387904.0;", Value::TRUE);
+    }
+
+    #[test]
+    #[should_panic]
+    fn int_overflow()
+    {
+        eval("return 4611686018427387904 * 4;");
     }
 
     #[test]
     fn strings()
     {
-        eval_eq("return ''.len;", Value::Int64(0));
-        eval_eq("return 'hello'.len;", Value::Int64(5));
-        eval_eq("let s1 = 'foo'; let s2 = 'bar'; return s1 + s2 == 'foobar';", Value::True);
+        eval_eq("return ''.len;", Value::fixnum(0));
+        eval_eq("return 'hello'.len;", Value::fixnum(5));
+        eval_eq("let s1 = 'foo'; let s2 = 'bar'; return s1 + s2 == 'foobar';", Value::TRUE);
     }
 
     #[test]
@@ -2937,12 +2852,12 @@ mod tests
     {
         eval("let o = {};");
         eval("let o = { x: 1, y: 2 };");
-        eval_eq("let o = { x: 1, y: 2 }; return o.x;", Value::Int64(1));
-        eval_eq("let o = { x: 1, y: 2 }; return o.x + o.y;", Value::Int64(3));
-        eval_eq("let o = { 'x': 77 }; return o.x;", Value::Int64(77));
-        eval_eq("let o = { 'foo bar': 5 }; return o['foo bar'];", Value::Int64(5));
-        eval_eq("let o = { x:5 }; o['x'] = 3; return o.x;", Value::Int64(3));
-        eval_eq("let o = { x:5 }; return o.has('x');", Value::True);
+        eval_eq("let o = { x: 1, y: 2 }; return o.x;", Value::fixnum(1));
+        eval_eq("let o = { x: 1, y: 2 }; return o.x + o.y;", Value::fixnum(3));
+        eval_eq("let o = { 'x': 77 }; return o.x;", Value::fixnum(77));
+        eval_eq("let o = { 'foo bar': 5 }; return o['foo bar'];", Value::fixnum(5));
+        eval_eq("let o = { x:5 }; o['x'] = 3; return o.x;", Value::fixnum(3));
+        eval_eq("let o = { x:5 }; return o.has('x');", Value::TRUE);
     }
 
     #[test]
@@ -2957,12 +2872,12 @@ mod tests
     {
         eval("let a = [];");
         eval("let a = [1, 2, 3];");
-        eval_eq("let a = [11, 22, 33]; return a[0];", Value::Int64(11));
-        eval_eq("let a = [11, 22, 33]; return a[2];", Value::Int64(33));
-        eval_eq("let a = [11, 22, 33]; a[2] = 44; return a[2];", Value::Int64(44));
-        eval_eq("let a = [11, 22, 33]; return a.len;", Value::Int64(3));
-        eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::Int64(4));
-        eval_eq("let a = Array.with_size(5, nil); return a.len;", Value::Int64(5));
+        eval_eq("let a = [11, 22, 33]; return a[0];", Value::fixnum(11));
+        eval_eq("let a = [11, 22, 33]; return a[2];", Value::fixnum(33));
+        eval_eq("let a = [11, 22, 33]; a[2] = 44; return a[2];", Value::fixnum(44));
+        eval_eq("let a = [11, 22, 33]; return a.len;", Value::fixnum(3));
+        eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::fixnum(4));
+        eval_eq("let a = Array.with_size(5, nil); return a.len;", Value::fixnum(5));
     }
 
     #[test]
@@ -2989,13 +2904,13 @@ mod tests
         eval("class Foo { init(s) { s.x = 1; } } let o = Foo();");
         eval("class Foo { init(s, a) { s.x = a; } } let o = Foo(7);");
 
-        eval_eq("class Foo {} return Foo() != nil;", Value::True);
-        eval_eq("class Foo { init(s) {} } return Foo() != nil;", Value::True);
+        eval_eq("class Foo {} return Foo() != nil;", Value::TRUE);
+        eval_eq("class Foo { init(s) {} } return Foo() != nil;", Value::TRUE);
 
-        eval_eq("class Foo { init(s) { s.x = 1; } } let o = Foo(); return o.x;", Value::Int64(1));
-        eval_eq("class Foo { init(s, a) { s.x = a; } } let o = Foo(7); return o.x;", Value::Int64(7));
-        eval_eq("class Foo { init(s, a, b) { s.x = a; s.y = b; } } let o = Foo(5, 3); return o.x - o.y;", Value::Int64(2));
-        eval_eq("class C { init(s) { s.c = 0; } inc(s) { ++s.c; } } let o = C(); o.inc(); return o.c;", Value::Int64(1));
+        eval_eq("class Foo { init(s) { s.x = 1; } } let o = Foo(); return o.x;", Value::fixnum(1));
+        eval_eq("class Foo { init(s, a) { s.x = a; } } let o = Foo(7); return o.x;", Value::fixnum(7));
+        eval_eq("class Foo { init(s, a, b) { s.x = a; s.y = b; } } let o = Foo(5, 3); return o.x - o.y;", Value::fixnum(2));
+        eval_eq("class C { init(s) { s.c = 0; } inc(s) { ++s.c; } } let o = C(); o.inc(); return o.c;", Value::fixnum(1));
     }
 
     #[test]
@@ -3025,18 +2940,18 @@ mod tests
     #[test]
     fn instanceof()
     {
-        eval_eq("class F {} return nil instanceof F;", Value::False);
-        eval_eq("class F {} let o = F(); return o instanceof F;", Value::True);
-        eval_eq("class F {} class G {} let o = F(); return o instanceof G;", Value::False);
-        eval_eq("class F {} return F() instanceof F;", Value::True);
+        eval_eq("class F {} return nil instanceof F;", Value::FALSE);
+        eval_eq("class F {} let o = F(); return o instanceof F;", Value::TRUE);
+        eval_eq("class F {} class G {} let o = F(); return o instanceof G;", Value::FALSE);
+        eval_eq("class F {} return F() instanceof F;", Value::TRUE);
 
         // Core runtime classes
-        eval_eq("return nil instanceof Int64;", Value::False);
-        eval_eq("return true instanceof Int64;", Value::False);
-        eval_eq("return 5 instanceof Int64;", Value::True);
-        eval_eq("return 77 instanceof String;", Value::False);
-        eval_eq("return 'foo' instanceof String;", Value::True);
-        eval_eq("return [] instanceof Array;", Value::True);
-        eval_eq("return {} instanceof Dict;", Value::True);
+        eval_eq("return nil instanceof Int64;", Value::FALSE);
+        eval_eq("return true instanceof Int64;", Value::FALSE);
+        eval_eq("return 5 instanceof Int64;", Value::TRUE);
+        eval_eq("return 77 instanceof String;", Value::FALSE);
+        eval_eq("return 'foo' instanceof String;", Value::TRUE);
+        eval_eq("return [] instanceof Array;", Value::TRUE);
+        eval_eq("return {} instanceof Dict;", Value::TRUE);
     }
 }

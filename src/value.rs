@@ -726,7 +726,7 @@ macro_rules! unwrap_val {
     ($conv:ident, $expect:literal, $val:expr, $req:literal) => {
         match $val.$conv() {
             Some(v) => v,
-            None => error!($req, concat!("expected ", $expect, " value but got {:?}"), $val)
+            None => error!($req, "expected {} value but got {:?}", $expect, $val)
         }
     }
 }

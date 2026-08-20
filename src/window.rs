@@ -12,7 +12,8 @@ use sdl2::pixels::PixelFormatEnum;
 use sdl2::video::WindowContext;
 use std::sync::{Mutex, mpsc};
 use std::time::Duration;
-use crate::vm::{VM, Value, Actor};
+use crate::vm::{VM, Actor};
+use crate::value::*;
 use crate::bytearray::ByteArray;
 use crate::ast::UIEVENT_ID;
 use crate::*;
@@ -151,7 +152,7 @@ pub fn window_draw_frame(
     }
 
     let window_id = unwrap_u32!(window_id);
-    let frame = frame.unwrap_ba();
+    let frame = unwrap_ba!(frame);
 
     assert!(window_id == 0);
     let mut window_lock = WINDOW.lock().unwrap();
@@ -195,7 +196,7 @@ pub fn window_draw_frame(
     // Update the screen with any rendering performed since the previous call
     window.canvas.present();
 
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 /// Poll for UI events

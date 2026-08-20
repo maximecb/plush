@@ -1,7 +1,8 @@
 use rustc_hash::FxHashMap as HashMap;
 use sdl2::audio::{AudioCallback, AudioSpecDesired, AudioDevice};
 use std::sync::{Arc, Weak, Mutex, Condvar};
-use crate::vm::{Value, VM, Actor, Message};
+use crate::vm::{VM, Actor, Message};
+use crate::value::*;
 use crate::object::Object;
 use crate::alloc::Alloc;
 use crate::ast::{AUDIO_NEEDED_ID, AUDIO_DATA_ID};
@@ -46,11 +47,11 @@ impl OutputCB
         // Create the AudioNeeded object
         let bytes_before = msg_alloc.bytes_used();
         let obj = {
-            let mut obj_val = Object::new(AUDIO_NEEDED_ID, 3, &mut msg_alloc);
-            let obj = obj_val.unwrap_obj();
-            obj.set(0, Value::from(num_samples));
-            obj.set(1, Value::from(self.num_channels));
-            obj.set(2, Value::from(0)); // device_id 0
+            let obj_val = Object::new(AUDIO_NEEDED_ID, 3, &mut msg_alloc);
+            let obj = obj_val.as_obj();
+            obj.set(0, Value::fixnum(num_samples as i64));
+            obj.set(1, Value::fixnum(self.num_channels as i64));
+            obj.set(2, Value::fixnum(0)); // device_id 0
             obj_val
         };
         let size = msg_alloc.bytes_used() - bytes_before;
@@ -178,9 +179,9 @@ pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) 
     }
     let state = audio_state.as_mut().unwrap();
 
-    let samples_ba = match samples {
-        Value::ByteArray(p) => unsafe { &mut *p },
-        _ => return Err("expected a byte array of samples".into())
+    let samples_ba = match samples.to_ba() {
+        Some(ba) => ba,
+        None => return Err("expected a byte array of samples".into())
     };
 
     // The bytearray contains f32 samples
@@ -193,7 +194,7 @@ pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) 
     // Notify the audio thread that samples are available
     cvar.notify_one();
 
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }
 
 // --- Audio Input ---
@@ -233,10 +234,10 @@ impl InputCB
         // Create the AudioData object
         let bytes_before = msg_alloc.bytes_used();
         let obj = {
-            let mut obj_val = Object::new(AUDIO_DATA_ID, 2, &mut msg_alloc);
-            let obj = obj_val.unwrap_obj();
-            obj.set(0, Value::from(device_id));
-            obj.set(1, Value::from(num_samples));
+            let obj_val = Object::new(AUDIO_DATA_ID, 2, &mut msg_alloc);
+            let obj = obj_val.as_obj();
+            obj.set(0, Value::fixnum(device_id as i64));
+            obj.set(1, Value::fixnum(num_samples as i64));
             obj_val
         };
         let size = msg_alloc.bytes_used() - bytes_before;
@@ -380,24 +381,24 @@ pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Valu
 
     let state = audio_state_lock.as_mut().unwrap();
 
-    let dst_ba_ptr = match dst_ba {
-        Value::ByteArray(p) => p,
-        _ => panic!("expected a byte array for dst_ba")
+    let dst_ba = match dst_ba.to_ba() {
+        Some(ba) => ba,
+        None => panic!("expected a byte array for dst_ba")
     };
 
     // Ensure dst_ba has enough space
-    let dst_ba_len_f32 = unsafe { (*dst_ba_ptr).num_bytes() } / std::mem::size_of::<f32>();
+    let dst_ba_len_f32 = dst_ba.num_bytes() / std::mem::size_of::<f32>();
     if dst_idx_f32 + num_samples_to_read > dst_ba_len_f32 {
         panic!("dst_ba does not have enough space for samples at given dst_idx");
     }
 
     // Copy samples from in_queue to dst_ba using get_slice_mut
     unsafe {
-        let dst_slice = (*dst_ba_ptr).get_slice_mut::<f32>(dst_idx_f32, num_samples_to_read);
+        let dst_slice = dst_ba.get_slice_mut::<f32>(dst_idx_f32, num_samples_to_read);
         dst_slice.copy_from_slice(&state.in_queue[0..num_samples_to_read]);
     }
 
     state.in_queue.drain(0..num_samples_to_read);
 
-    Ok(Value::Nil)
+    Ok(Value::NIL)
 }

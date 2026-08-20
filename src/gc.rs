@@ -10,7 +10,7 @@ use crate::closure::Closure;
 use crate::dict::{Dict, TableSlot};
 use crate::object::Object;
 use crate::str::Str;
-use crate::vm::Value;
+use crate::value::Value;
 
 /// A string that has already been copied, keyed by its contents.
 ///
@@ -125,24 +125,28 @@ impl<'a> Copier<'a>
     /// Copy the value's referent into the destination and return the
     /// value with its pointer updated. A block that was already copied
     /// is not copied again: its old header holds the address of the copy.
+    ///
+    /// The value only says that it points at a block, so what kind of
+    /// block it is comes from the header. Only strings need to be told
+    /// apart here, because they are the one thing the copy deduplicates.
     pub fn forward(&mut self, val: Value) -> Value
     {
-        use Value::*;
-
-        match val {
-            String(p)    => String(self.forward_str(p)),
-            Object(p)    => Object(self.copy(p as *mut u8) as *mut _),
-            Closure(p)   => Closure(self.copy(p as *mut u8) as *mut _),
-            Cell(p)      => Cell(self.copy(p as *mut u8) as *mut _),
-            Array(p)     => Array(self.copy(p as *mut u8) as *mut _),
-            ByteArray(p) => ByteArray(self.copy(p as *mut u8) as *mut _),
-            Dict(p)      => Dict(self.copy(p as *mut u8) as *mut _),
-
-            _ => {
-                debug_assert!(!val.is_heap());
-                val
-            }
+        if !val.is_heap() {
+            return val;
         }
+
+        let p = val.heap_ptr();
+        let hdr = header_of(p);
+
+        let new_p = if hdr.is_forwarded() {
+            hdr.forward_addr()
+        } else if hdr.tag() == Tag::Str {
+            self.forward_str(p as *const Str) as *mut u8
+        } else {
+            self.copy(p)
+        };
+
+        val.with_heap_ptr(new_p)
     }
 
     /// Copy a string, sharing one that was already copied if it is equal
@@ -360,19 +364,35 @@ pub fn verify_heap(alloc: &Alloc)
 
     fn check_val(alloc: &Alloc, val: Value)
     {
-        use Value::*;
-
-        match val {
-            String(p)    => check(alloc, p as *const u8, Tag::Str),
-            Object(p)    => check(alloc, p as *const u8, Tag::Object),
-            Closure(p)   => check(alloc, p as *const u8, Tag::Closure),
-            Cell(p)      => check(alloc, p as *const u8, Tag::Cell),
-            Array(p)     => check(alloc, p as *const u8, Tag::Array),
-            ByteArray(p) => check(alloc, p as *const u8, Tag::ByteArray),
-            Dict(p)      => check(alloc, p as *const u8, Tag::Dict),
-
-            _ => assert!(!val.is_heap()),
+        if !val.is_heap() {
+            // Anything that is not a pointer still has to name a type
+            val.type_of();
+            return;
         }
+
+        let p = val.heap_ptr();
+        assert!(alloc.contains(p), "reference {:p} outside the heap", p);
+        assert!(p as usize % 8 == 0, "misaligned reference {:p}", p);
+
+        let hdr = header_of(p);
+        assert!(!hdr.is_forwarded(), "reference {:p} to a forwarded block", p);
+
+        // The pointer tag says how the value compares and the header says
+        // what it points at, so the two have to agree
+        let agrees = match hdr.tag() {
+            Tag::Str => val.is_string(),
+            Tag::Object => val.is_object(),
+            Tag::Closure => val.is_closure(),
+            Tag::Cell => val.is_cell(),
+            Tag::Array => val.is_array(),
+            Tag::ByteArray => val.is_bytearray(),
+            Tag::Dict => val.is_dict(),
+            Tag::Int64 => val.is_int64_box(),
+            Tag::Float64 => val.is_float64_box(),
+            _ => false,
+        };
+
+        assert!(agrees, "value points at a {:?} block", hdr.tag());
     }
 
     let mut offset = 0;
