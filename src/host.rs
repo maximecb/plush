@@ -559,8 +559,16 @@ fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
         return Err("actor_spawn received non-function value".into());
     }
 
-    // TODO: check the function argument count and report a helpful
-    // error message here
+    // The new actor is started with no arguments. Checking here reports the
+    // problem at the spawn site instead of inside the actor being spawned.
+    let fun_id = fun.to_fun_id().unwrap();
+    let num_params = actor.get_num_params(fun_id);
+    if num_params != 0 {
+        return Err(format!(
+            "function passed to actor_spawn should take no arguments, but takes {}",
+            num_params
+        ));
+    }
 
     let actor_id = VM::new_actor(actor, fun, vec![]);
     Ok(actor.int64(actor_id as i64))

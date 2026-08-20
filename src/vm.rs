@@ -629,6 +629,14 @@ impl Actor
         }
     }
 
+    /// Get the number of parameters a function takes, without
+    /// having to compile it first
+    pub fn get_num_params(&self, fun_id: FunId) -> usize
+    {
+        let vm = self.vm.lock().unwrap();
+        vm.prog.funs[&fun_id].params.len()
+    }
+
     /// Get a compiled function entry for a given function id
     fn get_compiled_fun(&mut self, fun_id: FunId) -> CompiledFun
     {
@@ -660,8 +668,10 @@ impl Actor
 
         let class = vm.prog.classes.get(&class_id);
 
+        // Class ids come from the compiler and from the runtime itself,
+        // so a missing class means we are at fault, not the running program
         if class.is_none() {
-            panic!("could not find class with id={:?}", class_id);
+            panic!("internal error: could not find class with id={:?}", class_id);
         }
 
         let class = class.unwrap().clone();
@@ -689,19 +699,19 @@ impl Actor
     }
 
     /// Get the slot index for a given field of a given class
-    pub fn get_slot_idx(&mut self, class_id: ClassId, field_name: &str) -> usize
+    /// Returns `None` if the class has no such field
+    pub fn get_slot_idx(&mut self, class_id: ClassId, field_name: &str) -> Option<usize>
     {
-        self.with_class(
-            class_id, |c| {
-                match c.fields.get(field_name) {
-                    Some(slot_idx) => *slot_idx,
-                    None => panic!("unknown field '{}' in class '{}' (class_id: {:?}). Available fields: {:?}",
-                        field_name,
-                        c.name,
-                        class_id,
-                        c.fields.keys().collect::<Vec<_>>()
-                    )
-                }
+        self.with_class(class_id, |c| c.fields.get(field_name).copied())
+    }
+
+    /// List the field names of a class, for error reporting
+    fn get_field_names(&mut self, class_id: ClassId) -> String
+    {
+        self.with_class(class_id, |c| {
+            let mut names: Vec<&str> = c.fields.keys().map(|s| s.as_str()).collect();
+            names.sort();
+            names.join(", ")
         })
     }
 
@@ -725,15 +735,23 @@ impl Actor
         Object::new(class_id, num_slots, &mut self.alloc)
     }
 
-    /// Set the value of an object field
+    /// Set the value of an object field on an object the runtime itself
+    /// allocated, e.g. a UI event. The class and its fields are known here,
+    /// so a failure means the runtime is at fault, not the running program.
     pub fn set_field(&mut self, obj: Value, field_name: &str, val: Value)
     {
-        match obj.to_obj() {
-            Some(obj) => {
-                let slot_idx = self.get_slot_idx(obj.class_id, field_name);
-                obj.set(slot_idx, val);
-            }
-            None => panic!("set_field on non-object value")
+        let obj = match obj.to_obj() {
+            Some(obj) => obj,
+            None => panic!("internal error: set_field on non-object value {:?}", obj)
+        };
+
+        match self.get_slot_idx(obj.class_id, field_name) {
+            Some(slot_idx) => obj.set(slot_idx, val),
+            None => panic!(
+                "internal error: no field `{}` on class `{}`",
+                field_name,
+                self.get_class_name(obj.class_id)
+            )
         }
     }
 
@@ -1080,6 +1098,61 @@ impl Actor
         }
     }
 
+    /// Report a runtime error, printing the message along with a stack
+    /// trace, then terminate the execution. The instruction name is empty
+    /// for errors that don't come from executing an instruction.
+    ///
+    /// Marked cold so that the error paths in the interpreter loop, which
+    /// call this at many sites, stay out of the way of the hot code
+    #[cold]
+    #[inline(never)]
+    fn report_error(&self, insn_name: &str, msg: &str) -> !
+    {
+        eprintln!();
+
+        if insn_name != "" {
+            eprintln!("Runtime error while executing `{}` instruction:", insn_name);
+        }
+
+        // Print the error message to standard error
+        eprintln!("{}", msg);
+        eprintln!();
+
+        // For each stack frame, from top to bottom
+        for frame in self.frames.clone().into_iter().rev() {
+            // A frame we can't identify shouldn't keep us from
+            // reporting the error that got us here
+            let fun_id = match frame.fun.to_fun_id() {
+                Some(id) => id,
+                None => {
+                    eprintln!("<unknown function>");
+                    continue;
+                }
+            };
+
+            // Get the name of the function and its source position
+            let vm = self.vm.lock().unwrap();
+            let fun = &vm.prog.funs[&fun_id];
+            let fun_name = fun.name.clone();
+            let fun_pos = fun.pos;
+            let fun_class_id = fun.class_id;
+
+            // If this is a method, prepend the class name
+            let fun_name = if fun_class_id != ClassId::default() {
+                let class_name = &vm.prog.classes[&fun_class_id].name;
+                format!("{}.{}", class_name, fun_name)
+            } else {
+                fun_name
+            };
+
+            eprintln!("{}", fun_name);
+            eprintln!("  defined at {}", fun_pos);
+        }
+
+        // End program execution
+        panic!();
+    }
+
     /// Call and execute a function in this actor
     pub fn call(&mut self, fun: Value, args: &[Value]) -> Value
     {
@@ -1088,7 +1161,7 @@ impl Actor
 
         let fun_id = match fun.to_fun_id() {
             Some(fun_id) => fun_id,
-            None => panic!("invalid function passed to Actor::call")
+            None => self.report_error("", &format!("expected function value but got {:?}", fun))
         };
 
         // Get a compiled address for this function
@@ -1096,7 +1169,11 @@ impl Actor
         let mut pc = fun_entry.entry_pc;
 
         if args.len() != fun_entry.num_params {
-            panic!("incorrect argument count for function passed to Actor::call");
+            self.report_error("", &format!(
+                "function takes {} argument(s) but was called with {}",
+                fun_entry.num_params,
+                args.len()
+            ));
         }
 
         // Push the arguments on the stack
@@ -1280,44 +1357,10 @@ impl Actor
         // and terminate the execution
         macro_rules! error {
             ($insn_name: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
-                eprintln!();
-
-                if $insn_name != "" {
-                    eprintln!("Runtime error while executing `{}` instruction:", $insn_name);
-                }
-
-                // Print the error message to standard error
-                eprintln!($format_str $(, $arg)*);
-                eprintln!();
-
-                // For each stack frame, from top to bottom
-                for frame in self.frames.clone().into_iter().rev() {
-                    let fun_id = match frame.fun.to_fun_id() {
-                        Some(id) => id,
-                        None => panic!("non-function on stack")
-                    };
-
-                    // Get the name of the function and its source position
-                    let vm = self.vm.lock().unwrap();
-                    let fun = &vm.prog.funs[&fun_id];
-                    let fun_name = fun.name.clone();
-                    let fun_pos = fun.pos;
-                    let fun_class_id = fun.class_id;
-
-                    // If this is a method, prepend the class name
-                    let fun_name = if fun_class_id != ClassId::default() {
-                        let class_name = &vm.prog.classes[&fun_class_id].name;
-                        format!("{}.{}", class_name, fun_name)
-                    } else {
-                        fun_name
-                    };
-
-                    eprintln!("{}", fun_name);
-                    eprintln!("  defined at {}", fun_pos);
-                }
-
-                // End program execution
-                panic!();
+                // The message is formatted first because the arguments may
+                // need to borrow the actor
+                let msg = format!($format_str $(, $arg)*);
+                self.report_error($insn_name, &msg);
             }};
 
             ($format_str:literal $(, $arg:expr)* $(,)?) => {
@@ -1685,7 +1728,16 @@ impl Actor
                             obj.set(slot_idx as usize, val);
                         } else {
                             let field_name = unsafe { &*field };
-                            let slot_idx = self.get_slot_idx(obj.class_id, field_name.as_str());
+                            let slot_idx = match self.get_slot_idx(obj.class_id, field_name.as_str()) {
+                                Some(slot_idx) => slot_idx,
+                                None => error!(
+                                    "set_field",
+                                    "class `{}` has no field `{}`, known fields are: {}",
+                                    self.get_class_name(obj.class_id),
+                                    field_name.as_str(),
+                                    self.get_field_names(obj.class_id),
+                                )
+                            };
                             let class_id = obj.class_id;
 
                             // Update the cache
@@ -1812,7 +1864,16 @@ impl Actor
                             let val = if class_id == obj.class_id {
                                 obj.get(slot_idx as usize)
                             } else {
-                                let slot_idx = self.get_slot_idx(obj.class_id, field_name.as_str());
+                                let slot_idx = match self.get_slot_idx(obj.class_id, field_name.as_str()) {
+                                    Some(slot_idx) => slot_idx,
+                                    None => error!(
+                                        "get_field",
+                                        "class `{}` has no field `{}`, known fields are: {}",
+                                        self.get_class_name(obj.class_id),
+                                        field_name.as_str(),
+                                        self.get_field_names(obj.class_id),
+                                    )
+                                };
                                 let class_id = obj.class_id;
 
                                 // Update the cache
@@ -2299,7 +2360,11 @@ impl VM
             // This is because the allocator owning this memory is about
             // to die
             if ret_val.is_heap() {
-                panic!("cannot return heap-allocated value from actor");
+                actor.report_error("", &format!(
+                    "actor cannot return heap-allocated value of type {:?}, \
+                    only primitive values can be returned",
+                    ret_val.type_of()
+                ));
             }
 
             ret_val
@@ -2325,7 +2390,13 @@ impl VM
 
         // Note: there is no need to copy data when joining,
         // because the actor sending the data is done running
-        handle.join().expect(&format!("could not join thread with id {}", tid))
+        match handle.join() {
+            Ok(val) => val,
+
+            // The actor reported its own error before dying, so there is
+            // nothing useful to add here
+            Err(_) => panic!("actor with id {} terminated with an error", tid)
+        }
     }
 
     // Call a function in the main actor
