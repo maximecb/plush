@@ -1,0 +1,71 @@
+// Inline caching of host method calls on primitives
+
+// A shared call site that every type below goes through
+fun to_s_of(v) { return v.to_s(); }
+
+// Monomorphic: the site caches on Int64 and keeps hitting
+for (let var i = 0; i < 100; ++i) {
+    assert(to_s_of(i) == i.to_s());
+}
+
+// Polymorphic: each new type tag deoptimizes the site
+assert(to_s_of(7) == "7");
+assert(to_s_of(2.5) == "2.5");
+assert(to_s_of("hi") == "hi");
+assert(to_s_of(true) == "true");
+assert(to_s_of(false) == "false");
+assert(to_s_of(nil) == "nil");
+assert(to_s_of(7) == "7");
+
+// Boxed and unboxed numbers share a type tag, so no deopt between them
+for (let var i = 0; i < 100; ++i) {
+    let big = 1 << 62;
+    assert(to_s_of(big) == "4611686018427387904");
+    assert(to_s_of(1) == "1");
+    assert(to_s_of(1e100).len == 101);
+    assert(to_s_of(1.5) == "1.5");
+}
+
+// Alternating types at one site, forcing repeated deopt
+fun abs_of(v) { return v.abs(); }
+for (let var i = 0; i < 100; ++i) {
+    assert(abs_of(-3) == 3);
+    assert(abs_of(-3.5) == 3.5);
+}
+
+// A cached site whose callee allocates, so collections happen with the
+// method name live only inside the patched instruction
+let strs = [];
+for (let var i = 0; i < 500; ++i) {
+    strs.push(("a,b," + i.to_s()).split(","));
+}
+assert(strs[499][2] == "499");
+$vm_gc_collect();
+assert(strs[499][2] == "499");
+assert(strs[0][0] == "a");
+
+// Static methods are called on the class itself and are not cached
+for (let var i = 0; i < 10; ++i) {
+    assert(Array.with_size(3, 7)[2] == 7);
+    assert(ByteArray.with_size(4).len == 4);
+    assert(String.from_codepoint(65) == "A");
+}
+
+// Methods on the remaining primitive types
+for (let var i = 0; i < 10; ++i) {
+    let a = [1, 2];
+    a.push(3);
+    assert(a.pop() == 3);
+
+    let ba = ByteArray.with_size(8);
+    ba.store_u32(0, 12345);
+    assert(ba.load_u32(0) == 12345);
+
+    let d = { x: 1 };
+    assert(d.has("x"));
+    assert(!d.has("y"));
+
+    assert("  z ".trim() == "z");
+    assert((255).to_hex(2) == "FF");
+    assert((2.0).sqrt().format_decimals(3) == "1.414");
+}

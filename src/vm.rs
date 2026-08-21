@@ -35,7 +35,7 @@ const MSG_BACKLOG_LIMIT: usize = 64 * 1024 * 1024;
 /// Note: commonly used upcodes should be in the [0, 127] range (one byte)
 ///       less frequently used opcodes can take multiple bytes if necessary.
 #[allow(non_camel_case_types)]
-#[derive(PartialEq, Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum Insn
 {
     // Halt execution and produce an error
@@ -184,6 +184,9 @@ pub enum Insn
 
     // Call a method with a previously known pc
     call_method_pc { name: Value, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
+
+    // Call a host method on a primitive, guarded on the type tag
+    call_method_host { name: Value, argc: u8, type_tag: Type, host_fn: &'static HostFn },
 
     // Return
     ret,
@@ -874,7 +877,8 @@ impl Actor
                     Insn::get_field { field: val, .. } |
                     Insn::set_field { field: val, .. } |
                     Insn::call_method { name: val, .. } |
-                    Insn::call_method_pc { name: val, .. } => {
+                    Insn::call_method_pc { name: val, .. } |
+                    Insn::call_method_host { name: val, .. } => {
                         *val = copier.forward(*val);
                     }
 
@@ -1040,6 +1044,8 @@ impl Actor
     int_slow_path!(rshift_slow, "rshift", |a: i64, b: i64| Some(a >> b));
 
     /// Call a host function
+    /// Kept out of line so its arity dispatch doesn't bloat the interpreter loop
+    #[inline(never)]
     fn call_host(&mut self, host_fn: &HostFn, argc: usize) -> Result<(), String>
     {
         macro_rules! pop {
@@ -2163,14 +2169,38 @@ impl Actor
                             };
                         }
 
+                        // Call to a primitive e.g. Int64/Float64/immediate (not an object)
                         None => {
+                            // Lookup the method to call
                             let fun = crate::runtime::get_method(self_val, name.as_str());
 
-                            if fun.is_nil() {
-                                error!("call to unknown method `{}`", name.as_str());
+                            let host_fn = match fun.to_host_fn() {
+                                None => error!("call to unknown method `{}`", name.as_str()),
+                                Some(f) => f,
+                            };
+
+                            if argc as usize + 1 > self.stack.len() - bp {
+                                error!("not enough call arguments on stack");
                             }
 
-                            call_fun!(fun, argc + 1);
+                            // Patch this instruction to avoid the method
+                            // lookup next time. Bools and classes are left
+                            // alone because their methods depend on more
+                            // than the type tag. Nothing has allocated since
+                            // the name was read, so it hasn't moved.
+                            let type_tag = self_val.type_of();
+                            if !matches!(type_tag, Type::Bool | Type::Class) {
+                                self.insns[pc - 1] = Insn::call_method_host {
+                                    name,
+                                    argc,
+                                    type_tag,
+                                    host_fn,
+                                };
+                            }
+
+                            if let Err(msg) = self.call_host(host_fn, argc as usize + 1) {
+                                error!("{}", msg);
+                            }
                         }
                     };
                 }
@@ -2207,6 +2237,25 @@ impl Actor
                         name,
                         argc: argc.into(),
                     };
+                }
+
+                Insn::call_method_host { name, argc, type_tag, host_fn } => {
+                    // Checked when the instruction was patched in
+                    debug_assert!(argc as usize + 1 <= self.stack.len() - bp);
+                    let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
+
+                    // Guard that self still has the type the method was found on
+                    if self_val.type_of() == type_tag {
+                        if let Err(msg) = self.call_host(host_fn, argc as usize + 1) {
+                            error!("{}", msg);
+                        }
+
+                        continue;
+                    }
+
+                    // The guard failed, deoptimize this instruction and try again
+                    pc -= 1;
+                    self.insns[pc] = Insn::call_method { name, argc };
                 }
 
                 Insn::ret => {
