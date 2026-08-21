@@ -170,11 +170,7 @@ fn main()
     if opts.no_exec {
         // Generate code for all the functions to test
         // that this works correctly
-        let mut code = vec![];
-        let mut alloc = crate::alloc::Alloc::new();
-        for (fun_id, fun) in prog.funs {
-            fun.gen_code(&mut code, &mut alloc).unwrap();
-        }
+        VM::compile_all(prog);
 
         return;
     }

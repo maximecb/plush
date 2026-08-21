@@ -9,16 +9,6 @@ use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::{Alloc, Tag, HEADER_SIZE, INIT_SIZE, MSG_INIT_SIZE};
-
-/// How many bytes of undrained messages a sender will let pile up in a
-/// receiver's message allocator before waiting for it to catch up.
-///
-/// This is backpressure, not a limit on message size: a message that is
-/// already being copied grows the buffer past this point if it needs to.
-/// It exists because the buffer is only reclaimed in one go, when the
-/// receiver has drained its queue, so without it a fast sender would grow
-/// the buffer without bound.
-const MSG_BACKLOG_LIMIT: usize = 64 * 1024 * 1024;
 use crate::object::Object;
 use crate::closure::Closure;
 use crate::array::Array;
@@ -29,9 +19,17 @@ use crate::host::*;
 use crate::str::Str;
 use crate::value::*;
 use std::mem::size_of;
-// Named forms of the float operators, so that the instruction macros
-// below can take one as an argument
 use std::ops::{Add, Sub, Mul};
+
+/// How many bytes of undrained messages a sender will let pile up in a
+/// receiver's message allocator before waiting for it to catch up.
+///
+/// This is backpressure, not a limit on message size: a message that is
+/// already being copied grows the buffer past this point if it needs to.
+/// It exists because the buffer is only reclaimed in one go, when the
+/// receiver has drained its queue, so without it a fast sender would grow
+/// the buffer without bound.
+const MSG_BACKLOG_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Instruction opcodes
 /// Note: commonly used upcodes should be in the [0, 127] range (one byte)
@@ -202,7 +200,6 @@ macro_rules! error {
     }}
 }
 
-
 /// Mesage to be sent to an actor
 pub struct Message
 {
@@ -286,7 +283,7 @@ pub struct Actor
     funs: HashMap<FunId, CompiledFun>,
 
     // Array of compiled instructions
-    insns: Vec<Insn>,
+    pub(crate) insns: Vec<Insn>,
 }
 
 /// Why an integer operation produced no result
@@ -638,17 +635,45 @@ impl Actor
     }
 
     /// Get a compiled function entry for a given function id
-    fn get_compiled_fun(&mut self, fun_id: FunId) -> CompiledFun
+    /// Compile a function, if it has not been compiled yet.
+    ///
+    /// Compiling allocates the names and literals the function needs, so
+    /// this can collect. That makes it a safepoint: callers must hold no
+    /// heap value across it that the collector cannot reach.
+    #[inline]
+    fn get_compiled_fun(&mut self, fun: &mut Value) -> CompiledFun
     {
+        // A closure compiles as the function it closes over
+        let fun_id = fun.to_fun_id().expect("function value");
+
         if let Some(entry) = self.funs.get(&fun_id) {
             return *entry;
         }
 
-        // Borrow the function from the VM and compile it
-        let vm = self.vm.lock().unwrap();
-        let fun = &vm.prog.funs[&fun_id];
-        let entry = fun.gen_code(&mut self.insns, &mut self.alloc).unwrap();
+        self.compile_fun(fun_id, fun)
+    }
+
+    /// Compile a function that has not been compiled yet. Kept out of
+    /// line so that calling an already compiled function, which is the
+    /// common case, stays a lookup and nothing more.
+    #[inline(never)]
+    fn compile_fun(&mut self, fun_id: FunId, fun: &mut Value) -> CompiledFun
+    {
+        // The callee itself may be a closure that only the caller holds,
+        // which the collection below would leave behind. Park it on the
+        // stack, which the collector walks and updates, for as long as
+        // compiling takes.
+        self.stack.push(*fun);
+
+        // Borrow the function from the VM and compile it. The handle is
+        // cloned so that the lock does not borrow the actor, which
+        // compiling needs to itself in order to make room as it goes.
+        let vm = self.vm.clone();
+        let vm = vm.lock().unwrap();
+        let entry = vm.prog.funs[&fun_id].gen_code(self).unwrap();
         self.funs.insert(fun_id, entry);
+
+        *fun = self.stack.pop().unwrap();
 
         // Return the compiled function entry
         entry
@@ -792,7 +817,7 @@ impl Actor
         // whichever of the two is larger.
         let used_bytes = self.alloc.bytes_used();
         let to_space_bytes = std::cmp::max(
-            std::cmp::max(used_bytes + bytes_needed, (used_bytes * 3) / 2),
+            ((used_bytes + bytes_needed) * 3) / 2,
             INIT_SIZE,
         );
 
@@ -879,7 +904,7 @@ impl Actor
         // when a program's live set gets smaller.
         let live_bytes = dst_alloc.bytes_used();
         let new_mem_size = std::cmp::max(
-            std::cmp::max((live_bytes * 3) / 2, live_bytes + bytes_needed),
+            ((live_bytes + bytes_needed) * 3) / 2,
             INIT_SIZE,
         );
         dst_alloc.shrink_to(new_mem_size);
@@ -1160,8 +1185,15 @@ impl Actor
             None => self.report_error("", &format!("expected function value but got {:?}", fun))
         };
 
+        // Push the arguments on the stack. Compiling below can collect,
+        // and the stack is where the collector looks for them.
+        for arg in args {
+            self.stack.push(*arg);
+        }
+
         // Get a compiled address for this function
-        let fun_entry = self.get_compiled_fun(fun_id);
+        let mut fun = fun;
+        let fun_entry = self.get_compiled_fun(&mut fun);
         let mut pc = fun_entry.entry_pc;
 
         if args.len() != fun_entry.num_params {
@@ -1170,11 +1202,6 @@ impl Actor
                 fun_entry.num_params,
                 args.len()
             ));
-        }
-
-        // Push the arguments on the stack
-        for arg in args {
-            self.stack.push(*arg);
         }
 
         // Push a new stack frame
@@ -1301,22 +1328,26 @@ impl Actor
                     error!("not enough call arguments on stack");
                 }
 
-                let fun_id = match $fun.to_fun_id() {
+                // The callee can be a closure, and compiling below can
+                // collect, so it is held where it can be rooted
+                let mut fun_val = $fun;
+
+                let fun_id = match fun_val.to_fun_id() {
                     Some(id) => id,
 
-                    None => match $fun.to_host_fn() {
+                    None => match fun_val.to_host_fn() {
                         Some(f) => {
                             match self.call_host(f, $argc.into()) {
                                 Err(msg) => error!("{}", msg),
                                 Ok(ret_val) => continue
                             }
                         }
-                        None => error!("call to non-function value: `{:?}`", $fun)
+                        None => error!("call to non-function value: `{:?}`", fun_val)
                     }
                 };
 
                 // Get a compiled address for this function
-                let fun_entry = self.get_compiled_fun(fun_id);
+                let fun_entry = self.get_compiled_fun(&mut fun_val);
 
                 if $argc as usize != fun_entry.num_params {
                     let vm = self.vm.lock().unwrap();
@@ -1332,7 +1363,7 @@ impl Actor
 
                 self.frames.push(StackFrame {
                     argc: $argc,
-                    fun: $fun,
+                    fun: fun_val,
                     prev_bp: bp,
                     ret_addr: pc,
                 });
@@ -2099,11 +2130,15 @@ impl Actor
 
                     match self_val.to_obj() {
                         Some(obj) => {
-                            let fun_id = match self.get_method(obj.class_id, name.as_str()) {
+                            // Read before the call below, which can compile
+                            // the callee and collect, leaving obj behind
+                            let class_id = obj.class_id;
+
+                            let fun_id = match self.get_method(class_id, name.as_str()) {
                                 None => error!(
                                     "call to method `{}`, not found on class `{}`",
                                     name.as_str(),
-                                    self.get_class_name(obj.class_id)
+                                    self.get_class_name(class_id)
                                 ),
                                 Some(fun_id) => fun_id,
                             };
@@ -2111,11 +2146,19 @@ impl Actor
                             let this_pc = pc - 1;
                             let fun_entry = call_fun!(Value::fun(fun_id), argc + 1);
 
-                            // Patch this instruction to avoid the method lookup next time
+                            // Patch this instruction to avoid the method lookup
+                            // next time. The name is read back out of the
+                            // instruction rather than reused, since a collection
+                            // in the call above would have moved the string.
+                            let name = match self.insns[this_pc] {
+                                Insn::call_method { name, .. } => name,
+                                _ => panic!("call_method instruction expected")
+                            };
+
                             self.insns[this_pc] = Insn::call_method_pc {
                                 name,
                                 argc: argc.try_into().unwrap(),
-                                class_id: obj.class_id,
+                                class_id,
                                 entry_pc: fun_entry.entry_pc.try_into().unwrap(),
                                 fun_id,
                                 num_locals: fun_entry.num_locals.try_into().unwrap(),
@@ -2430,6 +2473,53 @@ impl VM
         );
 
         actor.call(Value::fun(fun_id), &args)
+    }
+
+    // Compile every function in a program without running it, which is
+    // what --no-exec does to check that code generation works
+    pub fn compile_all(prog: Program)
+    {
+        let fun_ids: Vec<FunId> = prog.funs.keys().copied().collect();
+        let vm = VM::new(prog);
+        let vm_mutex = vm.clone();
+
+        // Create a message queue for the actor
+        let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
+
+        // Create an allocator to send messages to the actor
+        let msg_alloc = Arc::new(Mutex::new(Alloc::for_messages()));
+
+        // Info needed to send the actor a message
+        let actor_tx = ActorTx {
+            sender: queue_tx,
+            msg_alloc: Arc::downgrade(&msg_alloc),
+        };
+
+        // Assign an actor id
+        // Store the queue endpoints on the VM
+        let mut vm_ref = vm.lock().unwrap();
+        let actor_id = vm_ref.next_actor_id;
+        vm_ref.next_actor_id += 1;
+        vm_ref.actor_txs.insert(actor_id, actor_tx);
+
+        // Initialize the global slots
+        let globals = vec![Value::UNDEF; vm_ref.prog.num_globals as usize];
+
+        drop(vm_ref);
+
+        let mut actor = Actor::new(
+            actor_id,
+            None,
+            vm_mutex,
+            Alloc::new(),
+            msg_alloc,
+            queue_rx,
+            globals,
+        );
+
+        for fun_id in fun_ids {
+            actor.get_compiled_fun(&mut Value::fun(fun_id));
+        }
     }
 
     /// Send a message to an actor without copying it to its message allocator
