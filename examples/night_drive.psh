@@ -1,0 +1,1111 @@
+// Night Drive: a first-person drive down a neon-lit city highway at night.
+//
+// Usage:
+//   plush examples/night_drive.psh
+//   plush examples/night_drive.psh --bench [num_frames]
+//   plush examples/night_drive.psh --capture <num_frames> <out_prefix> [z_step]
+//
+// --capture writes raw BGRA frames, one file each. To view one:
+//   ffmpeg -f rawvideo -pixel_format bgra -video_size 1280x720 -i f.raw f.png
+//
+// The camera looks straight down +Z and never rotates, it only translates.
+// That is what the reference art does (every building edge stays vertical) and
+// it buys us a lot: a face at a constant Z projects to an axis-aligned screen
+// rectangle, so its windows are plain fill_u32 rect fills instead of triangle
+// pairs. Only faces that span a range of Z need the triangle rasterizer.
+
+from ./random import *;
+
+// Everything below derives from these, so changing the resolution is enough.
+// Remember to match --capture's ffmpeg -video_size to it.
+let FRAME_WIDTH = 1280;
+let FRAME_HEIGHT = 720;
+
+// Principal point. The road's vanishing point sits at CY, so pushing it below
+// the middle of the frame gives more sky and a lower, car-like viewpoint.
+let CX = FRAME_WIDTH.to_f() * 0.5;
+let CY = FRAME_HEIGHT.to_f() * 0.60;
+
+let PI = 3.1415926535;
+let FOV_X_DEG = 75.0;
+let FOCAL = (FRAME_WIDTH.to_f() * 0.5) / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
+
+// Anything closer than this is clipped away
+let NEAR_Z = 0.5;
+
+// Distance haze. Colors lerp toward the fog color between these two distances.
+let FOG_START = 70.0;
+let FOG_END = 520.0;
+let FOG_R = 26;
+let FOG_G = 32;
+let FOG_B = 52;
+let FOG_COLOR = 0xFF000000 | (FOG_R << 16) | (FOG_G << 8) | FOG_B;
+
+// --- World layout ---
+//
+// Every world-space length in this file is in meters, including building
+// sizes, window pitches, camera height, fog distances and speed (m/s).
+
+let ROAD_HALF = 11.0;      // Asphalt spans [-ROAD_HALF, ROAD_HALF], so 22m
+let CURB_HALF = 14.5;      // 3.5m of sidewalk each side
+
+// --- Window grid metrics ---
+
+let BASE_HEIGHT = 5.0;     // Windowless ground floor
+let TOP_MARGIN = 2.0;      // Windowless parapet
+
+// A building is strictly one of these. A grid building has nothing but its own
+// window repeated; a band building has nothing but bands. Mixing the two on one
+// building is what made the earlier facades look like several buildings at once.
+let KIND_GRID = 0;
+let KIND_BAND = 1;
+
+// Window archetypes, sampled off city_04's shape/placement sheet. A building
+// picks exactly one and uses it on every wall:
+//   [kind, column pitch, floor height, glass width frac, glass height frac]
+let WIN_SHAPES = [
+    [KIND_GRID, 2.4, 3.2, 0.45, 0.42],   // small square
+    [KIND_GRID, 2.0, 3.4, 0.32, 0.70],   // tall slit
+    [KIND_GRID, 3.0, 3.4, 0.64, 0.60],   // big square
+    [KIND_GRID, 1.7, 2.6, 0.46, 0.50],   // narrow and dense
+    [KIND_GRID, 3.4, 3.4, 0.78, 0.34],   // wide slot
+    [KIND_BAND, 3.0, 3.6, 0.90, 0.42],   // neon bands, must stay last
+];
+
+// Bands carry a lot of the reference look, so they get more weight than an
+// even split across the archetypes would give them
+fun pick_shape() {
+    if (rand_float(0.0, 1.0) < 0.30) return WIN_SHAPES[WIN_SHAPES.len - 1];
+    return WIN_SHAPES[rand_int(0, WIN_SHAPES.len - 1)];
+}
+
+// An unlit window still catches the sky and the lit city around it, so it
+// reads as grey glass. It must never vanish into the wall: the grid has to
+// stay legible whether the lights are on or not.
+let GLASS_OFF = 0xFF2C313A;
+
+// How much a window's state carries over to the one beside it. 0 is an
+// independent coin flip per window, closer to 1 gives longer unbroken runs.
+let RUN_STICK = 0.62;
+
+// Widest a neon halo may spread, in pixels, scaled so it looks the same at
+// any frame size
+let GLOW_MAX = (FRAME_HEIGHT _/ 180).max(2);
+
+// Individual windows want a much tighter halo than the big neon bands do
+let WIN_GLOW_MAX = (GLOW_MAX _/ 2).max(1);
+
+// --- Palettes ---
+
+// Sampled from city_03 and city_04 by isolating small bright lights surrounded
+// by dark facade, so these are the actual window colors from the references
+// rather than bloom cores or large signage.
+//
+// A building picks one WIN_TINTS entry and uses it for every window it has.
+let WIN_TINTS = [
+    0xFFF8B858, // amber, the dominant window in city_04
+    0xFFF8C878, // warm gold
+    0xFFF8D291, // pale gold
+    0xFFF8F898, // pale yellow
+    0xFFF8F8E8, // warm white
+    0xFFF8F8F8, // white
+    0xFFD8F8F8, // pale cyan
+    0xFF88F8F8, // cyan
+    0xFF28E8F8, // bright cyan
+    0xFF3898F8, // sky blue
+    0xFF1868E8, // mid blue
+    0xFF283898, // deep blue
+];
+
+// Weighted toward the warm end, which is how both references read
+let TINT_WARM_END = 5;
+let TINT_COOL_END = 9;
+
+// Signage and the bold facade bands, from the same two images
+let NEON = [
+    0xFF08C8F8, // cyan neon
+    0xFF28F8F8, // bright cyan
+    0xFF40E0B0, // teal
+    0xFFF8F858, // yellow
+    0xFFF8B858, // amber
+    0xFFF8A898, // salmon
+    0xFFE8402C, // red
+    0xFFF050C0, // magenta
+    0xFFF88FBB, // pink
+    0xFF3898F8, // blue
+];
+
+// --- Color helpers ---
+
+// Scale a color's brightness, clamping each channel at 255
+fun color_scale(c, t) {
+    let r = (((c >> 16) & 0xFF).to_f() * t).floor().min(255).max(0);
+    let g = (((c >> 8) & 0xFF).to_f() * t).floor().min(255).max(0);
+    let b = ((c & 0xFF).to_f() * t).floor().min(255).max(0);
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// Saturating per-channel add of two colors. SWAR: the per-byte carry-out is
+// detected in one shot and used to force the overflowed bytes to 0xFF.
+// Plush has no ~ operator, so the complement is written as ^ -1.
+fun color_add_sat(a, b) {
+    let x = a & 0x00FFFFFF;
+    let y = b & 0x00FFFFFF;
+    let s = x + y;
+    let m = ((x & y) | ((x | y) & (s ^ -1))) & 0x00808080;
+    return 0xFF000000 | ((s | ((m << 1) - (m >> 7))) & 0x00FFFFFF);
+}
+
+// Linear blend between two colors, t in [0, 1]
+fun color_lerp(a, b, t) {
+    let it = 1.0 - t;
+    let r = (((a >> 16) & 0xFF).to_f() * it + ((b >> 16) & 0xFF).to_f() * t).floor();
+    let g = (((a >> 8) & 0xFF).to_f() * it + ((b >> 8) & 0xFF).to_f() * t).floor();
+    let bl = ((a & 0xFF).to_f() * it + (b & 0xFF).to_f() * t).floor();
+    return 0xFF000000 | (r << 16) | (g << 8) | bl;
+}
+
+// --- Camera ---
+//
+// Looks down +Z with no rotation, so projection is just a scale by FOCAL/depth.
+// A world point maps to:
+//   sx = CX + (wx - cam_x) * s
+//   sy = CY - (wy - cam_y) * s     with s = FOCAL / (wz - cam_z)
+
+let var cam_x = 0.0;
+let var cam_y = 3.2;
+let var cam_z = 0.0;
+
+// --- Fog ---
+
+// How much a surface at this distance has faded into the haze, in [0, 1]
+fun fog_factor(dist) {
+    if (dist <= FOG_START) return 0.0;
+    let t = (dist - FOG_START) / (FOG_END - FOG_START);
+    return t.min(1.0);
+}
+
+fun fog_mix(color, f) {
+    if (f < 0.004) return color;
+    let it = 1.0 - f;
+    let r = (((color >> 16) & 0xFF).to_f() * it + FOG_R.to_f() * f).floor();
+    let g = (((color >> 8) & 0xFF).to_f() * it + FOG_G.to_f() * f).floor();
+    let b = ((color & 0xFF).to_f() * it + FOG_B.to_f() * f).floor();
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// --- Screen-space rasterization ---
+
+// Axis-aligned rectangle, clipped to the frame. This is the workhorse: every
+// window on a constant-Z face goes through here.
+fun fill_rect(fb, x0, y0, x1, y1, color) {
+    let xa = x0.max(0);
+    let xb = x1.min(FRAME_WIDTH);
+    if (xa >= xb) return;
+    let ya = y0.max(0);
+    let yb = y1.min(FRAME_HEIGHT);
+    let n = xb - xa;
+    for (let var y = ya; y < yb; ++y) {
+        fb.fill_u32(y * FRAME_WIDTH + xa, n, color);
+    }
+}
+
+// A lit rectangle with a halo around it. Painting progressively larger, dimmer
+// rects underneath reads as an emissive glow without a post-process blur. The
+// halo has to be *added* to the wall behind it: a dimmed neon color on its own
+// is often darker than the wall, which would draw as a dark frame instead.
+fun fill_rect_glow(fb, x0, y0, x1, y1, color, back, g) {
+    if (g > 0) {
+        let g2 = g + g;
+        let g3 = g2 + g;
+        fill_rect(fb, x0 - g3, y0 - g3, x1 + g3, y1 + g3,
+                  color_add_sat(back, color_scale(color, 0.05)));
+        fill_rect(fb, x0 - g2, y0 - g2, x1 + g2, y1 + g2,
+                  color_add_sat(back, color_scale(color, 0.13)));
+        fill_rect(fb, x0 - g, y0 - g, x1 + g, y1 + g,
+                  color_add_sat(back, color_scale(color, 0.30)));
+    }
+    fill_rect(fb, x0, y0, x1, y1, color);
+}
+
+// Tight single-layer halo. Individual windows are small enough that the
+// two-step falloff above reads as a drawn border instead of light bleed, so
+// they get one close, brighter ring instead.
+fun fill_rect_halo(fb, x0, y0, x1, y1, color, back, g) {
+    if (g > 0) {
+        fill_rect(fb, x0 - g, y0 - g, x1 + g, y1 + g,
+                  color_add_sat(back, color_scale(color, 0.34)));
+    }
+    fill_rect(fb, x0, y0, x1, y1, color);
+}
+
+// Flat-shaded triangle taking raw float coordinates, adapted from
+// benchmarks/rasterize.psh. +x points right, +y points down.
+fun raster_tri(fb, ax, ay, bx, by, cx, cy, color) {
+    let var x0 = ax; let var py0 = ay;
+    let var x1 = bx; let var py1 = by;
+    let var x2 = cx; let var py2 = cy;
+
+    if (py0 > py1) {
+        let tx = x0; let ty = py0;
+        x0 = x1; py0 = py1; x1 = tx; py1 = ty;
+    }
+    if (py0 > py2) {
+        let tx = x0; let ty = py0;
+        x0 = x2; py0 = py2; x2 = tx; py2 = ty;
+    }
+    if (py1 > py2) {
+        let tx = x1; let ty = py1;
+        x1 = x2; py1 = py2; x2 = tx; py2 = ty;
+    }
+
+    let y0 = py0.floor();
+    let y1 = py1.floor();
+    let y2 = py2.floor();
+    if (y0 == y2) return;
+
+    let var inv_slope1 = 0.0;
+    if (py1 > py0) inv_slope1 = (x1 - x0) / (py1 - py0);
+
+    let var inv_slope2 = 0.0;
+    if (py2 > py0) inv_slope2 = (x2 - x0) / (py2 - py0);
+
+    let start_top = y0.max(0);
+    let end_top = y1.min(FRAME_HEIGHT);
+
+    // Top half
+    if (start_top < end_top) {
+        let dy = start_top + 1 - py0;
+        let xa = x0 + dy * inv_slope1;
+        let xb = x0 + dy * inv_slope2;
+
+        // Both edges radiate from p0, so the left/right roles are fixed
+        // for the whole half and can be decided once
+        let var cur_xl = xa; let var slope_l = inv_slope1;
+        let var cur_xr = xb; let var slope_r = inv_slope2;
+        if (xb < xa) {
+            cur_xl = xb; slope_l = inv_slope2;
+            cur_xr = xa; slope_r = inv_slope1;
+        }
+
+        for (let var y = start_top; y < end_top; ++y) {
+            let sx = cur_xl.floor().max(0);
+            let ex = cur_xr.floor().min(FRAME_WIDTH);
+            if (sx < ex) {
+                fb.fill_u32(y * FRAME_WIDTH + sx, ex - sx, color);
+            }
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
+        }
+    }
+
+    let var inv_slope3 = 0.0;
+    if (py2 > py1) inv_slope3 = (x2 - x1) / (py2 - py1);
+
+    let start_bot = y1.max(0);
+    let end_bot = y2.min(FRAME_HEIGHT);
+
+    // Bottom half
+    if (start_bot < end_bot) {
+        let xa = x1 + (start_bot + 1 - py1) * inv_slope3;
+        let xb = x0 + (start_bot + 1 - py0) * inv_slope2;
+
+        // Both edges converge on p2, so the order is fixed here too
+        let var cur_xl = xa; let var slope_l = inv_slope3;
+        let var cur_xr = xb; let var slope_r = inv_slope2;
+        if (xb < xa) {
+            cur_xl = xb; slope_l = inv_slope2;
+            cur_xr = xa; slope_r = inv_slope3;
+        }
+
+        for (let var y = start_bot; y < end_bot; ++y) {
+            let sx = cur_xl.floor().max(0);
+            let ex = cur_xr.floor().min(FRAME_WIDTH);
+            if (sx < ex) {
+                fb.fill_u32(y * FRAME_WIDTH + sx, ex - sx, color);
+            }
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
+        }
+    }
+}
+
+// Convex screen-space quad, corners given in order around the perimeter
+fun fill_quad(fb, x0, y0, x1, y1, x2, y2, x3, y3, color) {
+    raster_tri(fb, x0, y0, x1, y1, x2, y2, color);
+    raster_tri(fb, x0, y0, x2, y2, x3, y3, color);
+}
+
+// --- Facades ---
+//
+// A Facade is the window layout for one wall, in face-local coordinates:
+// u runs along the wall (0..span) and v is height above the ground.
+//
+// Rows are one of three kinds:
+//   0  dark, nothing drawn
+//   1  a grid of individual windows, per-cell colors in self.cells
+//   2  a neon band spanning columns [row_c0, row_c1]
+
+class Facade {
+    init(self, span, height, style) {
+        let cols = (span / style.pitch_u).floor().max(1);
+        let usable = height - BASE_HEIGHT - TOP_MARGIN;
+        let rows = (usable / style.pitch_v).floor().max(1);
+
+        self.cols = cols;
+        self.rows = rows;
+        // Pitch is fixed by the archetype and the whole block is centered on
+        // the wall, so a window comes out exactly the same size on every wall
+        // of the building regardless of how wide that wall happens to be
+        self.upitch = style.pitch_u;
+        self.uwin = style.pitch_u * style.frac_u;
+        self.u0 = (span - cols.to_f() * style.pitch_u) * 0.5
+                  + (style.pitch_u - self.uwin) * 0.5;
+        self.vpitch = style.pitch_v;
+        self.vwin = style.pitch_v * style.frac_v;
+        self.v0 = BASE_HEIGHT + (style.pitch_v - self.vwin) * 0.5;
+
+        self.row_kind = Array.with_size(rows, 0);
+        self.row_color = Array.with_size(rows, 0);
+        // Whether a band row is lit, so unlit grey strips do not glow
+        self.row_hot = Array.with_size(rows, 0);
+        self.row_c0 = Array.with_size(rows, 0);
+        self.row_c1 = Array.with_size(rows, 0);
+        self.cells = Array.with_size(rows * cols, 0);
+        // Which cells are bright enough to earn a halo
+        self.hot = Array.with_size(rows * cols, 0);
+
+        if (style.kind == KIND_BAND) {
+            self.gen_bands(style);
+        } else {
+            self.gen_grid(style);
+        }
+    }
+
+    // Bands only. Every floor carries a strip, so the wall never opens up into
+    // a blank vertical stretch. A strip's glass is only 42% of the floor
+    // height, so consecutive rows still read as separate bars with gaps
+    // between them rather than merging into one slab.
+    gen_bands(self, style) {
+        let cols = self.cols;
+
+        // One column span for the whole building, so the strips stack cleanly
+        let c0 = rand_int(0, (cols _/ 5).max(1));
+        // Clamped so the range stays non-empty on narrow walls
+        let lo = ((cols * 4) _/ 5).max(c0 + 1).min(cols - 1);
+        let c1 = rand_int(lo, cols);
+
+        let var r = 0;
+        while (r < self.rows) {
+            // Colors change every one to three floors
+            let var thick = rand_int(1, 4);
+            if (thick > self.rows - r) thick = self.rows - r;
+
+            let var color = 0;
+            let var hot = 0;
+            if (rand_float(0.0, 1.0) < style.band_prob) {
+                // Mostly the building's own accent, so a strip building reads
+                // as one sign rather than several. Raise this for more mixing.
+                let var base = style.accent;
+                if (rand_float(0.0, 1.0) < 0.12) base = NEON[rand_int(0, NEON.len)];
+                color = color_scale(base, rand_float(0.62, 1.0));
+                hot = 1;
+            } else {
+                // An unlit strip is grey glass, same as an unlit window
+                color = window_off();
+            }
+
+            for (let var k = 0; k < thick; ++k) {
+                self.row_kind[r + k] = 2;
+                self.row_color[r + k] = color;
+                self.row_hot[r + k] = hot;
+                self.row_c0[r + k] = c0;
+                self.row_c1[r + k] = c1;
+            }
+            r = r + thick;
+        }
+    }
+
+    // Grid only: every cell of every floor gets a window. Lit ones vary in
+    // brightness, unlit ones are grey glass, and nothing is ever left blank.
+    gen_grid(self, style) {
+        let cols = self.cols;
+        for (let var r = 0; r < self.rows; ++r) {
+            self.row_kind[r] = 1;
+            // Floors differ: some are still busy, some have mostly gone home
+            let floor_lit = (style.lit_prob * rand_float(0.35, 1.4)).min(0.95);
+
+            // Two-state chain along the floor rather than an independent coin
+            // per window: a lit window makes its neighbour much more likely to
+            // be lit, so the lights group into runs the way whole occupied
+            // office bays do. RUN_STICK sets the run length; the stationary
+            // probability of the chain is still exactly floor_lit.
+            let p_on = (1.0 - RUN_STICK) * floor_lit;
+            let p_off = (1.0 - RUN_STICK) * (1.0 - floor_lit);
+            let var on = rand_float(0.0, 1.0) < floor_lit;
+
+            let base = r * cols;
+            for (let var c = 0; c < cols; ++c) {
+                if (on) {
+                    let k = window_level();
+                    self.cells[base + c] = color_scale(style.tint, k);
+                    if (k > 0.55) self.hot[base + c] = 1;
+                } else {
+                    self.cells[base + c] = window_off();
+                }
+
+                // Advance the chain for the next window along
+                if (on) {
+                    if (rand_float(0.0, 1.0) < p_off) on = false;
+                } else {
+                    if (rand_float(0.0, 1.0) < p_on) on = true;
+                }
+            }
+        }
+    }
+}
+
+// Every building commits to one window tint, so a facade reads as a single
+// coherent block of light rather than as confetti
+fun pick_window_tint() {
+    let roll = rand_float(0.0, 1.0);
+    if (roll < 0.60) return WIN_TINTS[rand_int(0, TINT_WARM_END)];
+    if (roll < 0.88) return WIN_TINTS[rand_int(TINT_WARM_END, TINT_COOL_END)];
+    return WIN_TINTS[rand_int(TINT_COOL_END, WIN_TINTS.len)];
+}
+
+// Brightness of one lit window. Rooms differ in which lights are on and what
+// is in them, so this spreads wide but stays weighted toward the bright end.
+// Discrete levels rather than a continuous range, which suits the flat shading.
+fun window_level() {
+    let t = rand_float(0.0, 1.0);
+    if (t < 0.32) return 1.0;
+    if (t < 0.56) return 0.78;
+    if (t < 0.75) return 0.58;
+    if (t < 0.90) return 0.40;
+    return 0.26;
+}
+
+// Grey glass, varied a little so a dark floor is not a flat slab
+fun window_off() {
+    return color_scale(GLASS_OFF, rand_float(0.70, 1.30));
+}
+
+// Everything that makes one building's facades look like they belong together:
+// one window color, one window shape, one spacing, one density.
+class FacadeStyle {
+    init(self, lit_prob, band_prob, tint, accent, shape) {
+        self.kind = shape[0];
+        self.pitch_u = shape[1];
+        self.pitch_v = shape[2];
+        self.frac_u = shape[3];
+        self.frac_v = shape[4];
+        self.lit_prob = lit_prob;
+        self.band_prob = band_prob;
+        self.tint = tint;
+        self.accent = accent;
+    }
+}
+
+// --- Buildings ---
+//
+// A building is an axis-aligned box spanning [x0,x1] x [0,height] x [z0,z1].
+// At most two of its walls ever face the camera: the near wall at z0 (constant
+// Z, drawn as rects) and whichever side wall faces the road (constant X, drawn
+// as trapezoids).
+
+class Building {
+    init(self, x0, x1, z0, z1, height) {
+        self.x0 = x0;
+        self.x1 = x1;
+        self.z0 = z0;
+        self.z1 = z1;
+        self.height = height;
+
+        // Near-black concrete with a slight blue cast
+        let g = rand_int(12, 26);
+        self.wall = 0xFF000000 | (g << 16) | (g << 8) | (g + rand_int(4, 10));
+
+        // Building character: some are dense window grids, some are dark
+        // slabs carrying only a few neon bands
+        let shape = pick_shape();
+        let var lit_prob = 0.0;
+        let var band_prob = 0.0;
+        if (shape[0] == KIND_BAND) {
+            // Chance a strip is lit rather than grey
+            band_prob = rand_float(0.72, 0.92);
+        } else {
+            // How much of this building is still working late
+            lit_prob = rand_float(0.40, 0.85);
+        }
+
+        // Both walls share one style, so the building is coherent all the way
+        // around as we drive past it
+        let style = FacadeStyle(lit_prob, band_prob, pick_window_tint(),
+                                NEON[rand_int(0, NEON.len)], shape);
+        self.front = Facade(x1 - x0, height, style);
+        self.side = Facade(z1 - z0, height, style);
+    }
+}
+
+// Draw the windows of a facade onto a constant-Z wall. Every window is an
+// axis-aligned screen rectangle, so this never touches the triangle rasterizer.
+//
+// ax, ay map world coordinates to screen: sx = ax + wx * s, sy = ay - wy * s
+fun draw_facade_flat(fb, f, u_org, s, ax, ay, fog, wall) {
+    let cols = f.cols;
+    let min_px = 1.0 / s;   // A window narrower than this is sub-pixel
+
+    for (let var r = 0; r < f.rows; ++r) {
+        let kind = f.row_kind[r];
+        if (kind == 0) continue;
+
+        let v_lo = f.v0 + r.to_f() * f.vpitch;
+        let py1 = (ay - v_lo * s).floor();
+        let py0 = (ay - (v_lo + f.vwin) * s).floor();
+        if (py1 <= py0) continue;
+        if (py0 >= FRAME_HEIGHT) continue;
+        if (py1 <= 0) continue;
+
+        if (kind == 2) {
+            let ua = u_org + f.u0 + f.row_c0[r].to_f() * f.upitch;
+            let ub = u_org + f.u0 + f.row_c1[r].to_f() * f.upitch + f.uwin;
+            let var g = 0;
+            if (f.row_hot[r] == 1) g = ((py1 - py0) _/ 4).min(GLOW_MAX);
+            fill_rect_glow(fb, (ax + ua * s).floor(), py0,
+                           (ax + ub * s).floor(), py1,
+                           fog_mix(f.row_color[r], fog), wall, g);
+            continue;
+        }
+
+        if (f.uwin < min_px) continue;
+
+        // Windows only earn a halo once they are big enough on screen for it
+        // to be visible, so distant facades cost nothing extra
+        let gw = ((py1 - py0) _/ 5).min(WIN_GLOW_MAX);
+        let base = r * cols;
+        for (let var c = 0; c < cols; ++c) {
+            let col = fog_mix(f.cells[base + c], fog);
+            let ua = u_org + f.u0 + c.to_f() * f.upitch;
+            let x0 = (ax + ua * s).floor();
+            let x1 = (ax + (ua + f.uwin) * s).floor();
+            // Only genuinely bright rooms bleed light onto the wall
+            if (f.hot[base + c] == 1) {
+                fill_rect_halo(fb, x0, py0, x1, py1, col, wall, gw);
+            } else {
+                fill_rect(fb, x0, py0, x1, py1, col);
+            }
+        }
+    }
+}
+
+// Draw the windows of a facade onto a constant-X wall. Here u runs along Z, so
+// each window column has its own perspective scale and windows come out as
+// trapezoids with vertical left and right edges.
+//
+// xw is the wall's X offset from the camera, z_org the wall's near Z.
+fun draw_facade_side(fb, f, z_org, xw, fog, wall) {
+    let cols = f.cols;
+    let zmin = cam_z + NEAR_Z;
+
+    // Neon bands span several columns, so they get their own Z extents
+    for (let var r = 0; r < f.rows; ++r) {
+        if (f.row_kind[r] != 2) continue;
+
+        let var za = z_org + f.u0 + f.row_c0[r].to_f() * f.upitch;
+        let zb = z_org + f.u0 + f.row_c1[r].to_f() * f.upitch + f.uwin;
+        if (za < zmin) za = zmin;
+        if (zb <= za) continue;
+
+        let sa = FOCAL / (za - cam_z);
+        let sb = FOCAL / (zb - cam_z);
+        let v_lo = f.v0 + r.to_f() * f.vpitch;
+        let v_hi = v_lo + f.vwin;
+        let color = fog_mix(f.row_color[r], fog);
+        let xa = CX + xw * sa;
+        let xb = CX + xw * sb;
+        let ya_hi = CY - (v_hi - cam_y) * sa;
+        let yb_hi = CY - (v_hi - cam_y) * sb;
+        let ya_lo = CY - (v_lo - cam_y) * sa;
+        let yb_lo = CY - (v_lo - cam_y) * sb;
+
+        // The halo is expanded along the band's thickness and past its ends,
+        // which is close enough to a real outset for a shape this thin
+        let var g = 0.0;
+        if (f.row_hot[r] == 1) g = ((ya_lo - ya_hi) * 0.25).min(GLOW_MAX.to_f());
+        if (g >= 1.0) {
+            let g2 = g + g;
+            fill_quad(fb, xa - g2, ya_hi - g2, xb + g2, yb_hi - g2,
+                          xb + g2, yb_lo + g2, xa - g2, ya_lo + g2,
+                      color_add_sat(wall, color_scale(color, 0.07)));
+            fill_quad(fb, xa - g, ya_hi - g, xb + g, yb_hi - g,
+                          xb + g, yb_lo + g, xa - g, ya_lo + g,
+                      color_add_sat(wall, color_scale(color, 0.24)));
+        }
+
+        fill_quad(fb, xa, ya_hi, xb, yb_hi, xb, yb_lo, xa, ya_lo, color);
+    }
+
+    // Individual windows, column-major so the two divisions per column are
+    // shared by every window in it
+    for (let var c = 0; c < cols; ++c) {
+        let var za = z_org + f.u0 + c.to_f() * f.upitch;
+        let zb = za + f.uwin;
+        if (za < zmin) za = zmin;
+        if (zb <= za) continue;
+
+        let sa = FOCAL / (za - cam_z);
+        let sb = FOCAL / (zb - cam_z);
+        let xa = CX + xw * sa;
+        let xb = CX + xw * sb;
+        if ((xb - xa).abs() < 1.0) continue;   // sub-pixel column
+
+        let aya = CY + cam_y * sa;
+        let ayb = CY + cam_y * sb;
+
+        for (let var r = 0; r < f.rows; ++r) {
+            if (f.row_kind[r] != 1) continue;
+            let idx = r * cols + c;
+
+            let v_lo = f.v0 + r.to_f() * f.vpitch;
+            let v_hi = v_lo + f.vwin;
+            let y_ah = aya - v_hi * sa; let y_bh = ayb - v_hi * sb;
+            let y_al = aya - v_lo * sa; let y_bl = ayb - v_lo * sb;
+            let c2 = fog_mix(f.cells[idx], fog);
+
+            // Single tight halo, matching what the flat facades do
+            let var g = 0.0;
+            if (f.hot[idx] == 1) g = ((y_al - y_ah) * 0.2).min(WIN_GLOW_MAX.to_f());
+            if (g >= 1.0) {
+                fill_quad(fb, xa - g, y_ah - g, xb + g, y_bh - g,
+                              xb + g, y_bl + g, xa - g, y_al + g,
+                          color_add_sat(wall, color_scale(c2, 0.34)));
+            }
+
+            fill_quad(fb, xa, y_ah, xb, y_bh, xb, y_bl, xa, y_al, c2);
+        }
+    }
+}
+
+fun draw_building(fb, b) {
+    if (b.z1 <= cam_z + NEAR_Z) return;
+    // Past the fog limit a building is indistinguishable from the haze, so
+    // culling here keeps the per-frame cost independent of how long the
+    // generated city is
+    if (b.z0 - cam_z > FOG_END) return;
+
+    // Which side wall faces the road, if any
+    let var xf = 0.0;
+    let var has_side = true;
+    if (cam_x > b.x1) {
+        xf = b.x1;
+    } else if (cam_x < b.x0) {
+        xf = b.x0;
+    } else {
+        has_side = false;
+    }
+
+    // Side wall (constant X), drawn first: it is the one we are alongside
+    if (has_side) {
+        let zmin = cam_z + NEAR_Z;
+        let var za = b.z0;
+        if (za < zmin) za = zmin;
+        let zb = b.z1;
+
+        if (zb > za) {
+            let sa = FOCAL / (za - cam_z);
+            let sb = FOCAL / (zb - cam_z);
+            let xw = xf - cam_x;
+            let pxa = CX + xw * sa;
+            let pxb = CX + xw * sb;
+            let fog = fog_factor(za - cam_z);
+
+            // Side walls read slightly darker than the front, which is what
+            // gives the boxes their sense of volume
+            let wall = fog_mix(color_scale(b.wall, 0.62), fog);
+            fill_quad(fb,
+                pxa, CY - (b.height - cam_y) * sa,
+                pxb, CY - (b.height - cam_y) * sb,
+                pxb, CY + cam_y * sb,
+                pxa, CY + cam_y * sa,
+                wall);
+
+            // Skip the windows once the wall is only a sliver on screen
+            if ((pxb - pxa).abs() > 3.0) {
+                draw_facade_side(fb, b.side, b.z0, xw, fog, wall);
+            }
+        }
+    }
+
+    // Near wall (constant Z)
+    let d = b.z0 - cam_z;
+    if (d >= NEAR_Z) {
+        let s = FOCAL / d;
+        let ax = CX - cam_x * s;
+        let ay = CY + cam_y * s;
+        let px0 = (ax + b.x0 * s).floor();
+        let px1 = (ax + b.x1 * s).floor();
+        let fog = fog_factor(d);
+        let wall = fog_mix(b.wall, fog);
+
+        fill_rect(fb, px0, (ay - b.height * s).floor(), px1, ay.floor(), wall);
+
+        if (px1 - px0 > 3) {
+            draw_facade_flat(fb, b.front, b.x0, s, ax, ay, fog, wall);
+        }
+    }
+}
+
+// --- Background ---
+//
+// With no camera rotation the horizon never moves, so the sky and ground
+// gradients are the same every frame and can be baked once.
+
+let bg_rows = Array.with_size(FRAME_HEIGHT, 0);
+
+fun build_background() {
+    let horizon = CY.floor();
+
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+        if (y < horizon) {
+            // Sky: near-black at the zenith warming into the haze at the horizon
+            let t = y.to_f() / horizon.to_f();
+            let tt = t * t * t;
+            bg_rows[y] = color_lerp(0xFF05060E, FOG_COLOR, tt);
+        } else {
+            // Ground: haze at the horizon settling into dark asphalt underfoot
+            let t = (y - horizon).to_f() / (FRAME_HEIGHT - horizon).to_f();
+            let tt = (t * 3.0).min(1.0);
+            bg_rows[y] = color_lerp(FOG_COLOR, 0xFF0E0F14, tt);
+        }
+    }
+}
+
+// --- Moon ---
+//
+// The camera never rotates, so the moon hangs at a fixed screen position.
+// Its halo is added on top of the baked sky row rather than painted over it,
+// which keeps the sky gradient showing through.
+
+// Kept near the top of the canyon of sky between the two rows of buildings,
+// off-center so it does not sit on the vanishing point. Tall buildings still
+// eclipse it as we drive, which is what we want.
+let MOON_X = (FRAME_WIDTH.to_f() * 0.57).floor();
+let MOON_Y = (FRAME_HEIGHT.to_f() * 0.10).floor();
+let MOON_R = (FRAME_HEIGHT _/ 29).max(6);
+let MOON_HALO_R = MOON_R * 4;
+// One step every couple of pixels, otherwise the falloff shows as rings
+let MOON_HALO_STEPS = (MOON_HALO_R _/ 2).max(8);
+let MOON_COLOR = 0xFFF2F5FF;
+let MOON_GLOW = 0xFFA8C4FF;
+
+fun fill_disc(fb, cx, cy, r, color) {
+    let y0 = (cy - r).max(0);
+    let y1 = (cy + r + 1).min(FRAME_HEIGHT);
+    let rr = (r * r).to_f();
+    for (let var y = y0; y < y1; ++y) {
+        let dy = (y - cy).to_f();
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+        let h = h2.sqrt().floor();
+        let xa = (cx - h).max(0);
+        let xb = (cx + h + 1).min(FRAME_WIDTH);
+        if (xa < xb) fb.fill_u32(y * FRAME_WIDTH + xa, xb - xa, color);
+    }
+}
+
+// Same shape, but each row is the sky underneath plus the glow
+fun glow_disc(fb, cx, cy, r, add) {
+    let y0 = (cy - r).max(0);
+    let y1 = (cy + r + 1).min(FRAME_HEIGHT);
+    let rr = (r * r).to_f();
+    for (let var y = y0; y < y1; ++y) {
+        let dy = (y - cy).to_f();
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+        let h = h2.sqrt().floor();
+        let xa = (cx - h).max(0);
+        let xb = (cx + h + 1).min(FRAME_WIDTH);
+        if (xa < xb) {
+            fb.fill_u32(y * FRAME_WIDTH + xa, xb - xa,
+                        color_add_sat(bg_rows[y], add));
+        }
+    }
+}
+
+fun draw_moon(fb) {
+    // Halo, drawn outside in so each smaller disc steps the falloff up
+    for (let var i = MOON_HALO_STEPS; i >= 1; --i) {
+        let t = i.to_f() / MOON_HALO_STEPS.to_f();
+        let k = 1.0 - t;
+        glow_disc(fb, MOON_X, MOON_Y, MOON_R + (MOON_HALO_R.to_f() * t).floor(),
+                  color_scale(MOON_GLOW, k * k * 0.5));
+    }
+
+    fill_disc(fb, MOON_X, MOON_Y, MOON_R, MOON_COLOR);
+
+    // A couple of maria, just enough that it reads as a moon and not a lamp
+    let m = color_scale(MOON_COLOR, 0.90);
+    fill_disc(fb, MOON_X - (MOON_R _/ 3), MOON_Y - (MOON_R _/ 4), MOON_R _/ 3, m);
+    fill_disc(fb, MOON_X + (MOON_R _/ 4), MOON_Y + (MOON_R _/ 3), MOON_R _/ 4, m);
+}
+
+// Fixed stars, as screen positions since the sky is effectively at infinity
+let star_x = [];
+let star_y = [];
+let star_c = [];
+
+fun build_stars(count) {
+    let horizon = CY.floor();
+    for (let var i = 0; i < count; ++i) {
+        let y = rand_int(0, horizon - 40);
+        star_x.push(rand_int(0, FRAME_WIDTH));
+        star_y.push(y);
+        // Stars low in the sky are washed out by the haze
+        let fade = 1.0 - (y.to_f() / horizon.to_f());
+        star_c.push(color_scale(0xFFFFFFFF, rand_float(0.25, 0.85) * fade));
+    }
+}
+
+fun draw_background(fb) {
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+        fb.fill_u32(y * FRAME_WIDTH, FRAME_WIDTH, bg_rows[y]);
+    }
+    for (let var i = 0; i < star_x.len; ++i) {
+        fb.set_u32(star_y[i] * FRAME_WIDTH + star_x[i], star_c[i]);
+    }
+    // After the stars, so the halo washes out the ones near it
+    draw_moon(fb);
+}
+
+// --- Road ---
+
+// Six 3.67m lanes, three each way. Standard lane widths are 3.0-3.7m, so the
+// 22m of asphalt divides into six rather than the four it used to.
+let NUM_LANES = 6;
+let LANE_W = (ROAD_HALF * 2.0) / NUM_LANES.to_f();
+
+// Standard dashed-line pattern: 3m of paint, 9m of gap
+let LANE_DASH_LEN = 3.0;
+let LANE_DASH_GAP = 9.0;
+let LINE_W = 0.12;         // Painted line width
+let EDGE_W = 0.15;
+
+let ROAD_DRAW_FAR = FOG_END;   // Asphalt runs out to where the haze hides it
+let DASH_DRAW_FAR = 260.0;     // Markings past here are sub-pixel anyway
+
+// A strip of road surface between two Z values, spanning [wx0, wx1] in X.
+// Constant-Z edges are horizontal on screen, so this is a simple trapezoid.
+fun road_quad(fb, wx0, wx1, za, zb, color) {
+    let sa = FOCAL / (za - cam_z);
+    let sb = FOCAL / (zb - cam_z);
+    let aya = CY + cam_y * sa;
+    let ayb = CY + cam_y * sb;
+    fill_quad(fb,
+        CX + (wx0 - cam_x) * sa, aya,
+        CX + (wx1 - cam_x) * sa, aya,
+        CX + (wx1 - cam_x) * sb, ayb,
+        CX + (wx0 - cam_x) * sb, ayb,
+        color);
+}
+
+fun draw_road(fb) {
+    let zn = cam_z + NEAR_Z;
+    let zf = cam_z + ROAD_DRAW_FAR;
+
+    // Asphalt and sidewalks. These do not overlap, so no ordering is needed.
+    road_quad(fb, -CURB_HALF, -ROAD_HALF, zn, zf, 0xFF17181D);
+    road_quad(fb, ROAD_HALF, CURB_HALF, zn, zf, 0xFF17181D);
+    road_quad(fb, -ROAD_HALF, ROAD_HALF, zn, zf, 0xFF101116);
+
+    // Dashed dividers between the lanes, at every lane boundary except the
+    // road edges, which get solid lines instead
+    let zd = (cam_z + DASH_DRAW_FAR).min(zf);
+    let period = LANE_DASH_LEN + LANE_DASH_GAP;
+    let var z = (cam_z / period).floor().to_f() * period;
+
+    while (z < zd) {
+        let za = z.max(zn);
+        let zb = (z + LANE_DASH_LEN).min(zd);
+        if (zb > za) {
+            let c = fog_mix(0xFFB9BCC4, fog_factor(za - cam_z));
+            for (let var i = 1; i < NUM_LANES; ++i) {
+                let x = -ROAD_HALF + LANE_W * i.to_f();
+                road_quad(fb, x - LINE_W * 0.5, x + LINE_W * 0.5, za, zb, c);
+            }
+        }
+        z = z + period;
+    }
+
+    // Solid edge lines
+    road_quad(fb, -ROAD_HALF, -ROAD_HALF + EDGE_W, zn, zf, 0xFFC8B478);
+    road_quad(fb, ROAD_HALF - EDGE_W, ROAD_HALF, zn, zf, 0xFFC8B478);
+}
+
+// --- Main ---
+
+let mode_arg = $cmd_get_arg_or(1, "");
+let var capture_frames = 0;
+let var capture_prefix = "";
+let var capture_step = 1.6;
+if (mode_arg == "--capture") {
+    capture_frames = $cmd_get_arg_or(2, "1").parse_int(10);
+    capture_prefix = $cmd_get_arg_or(3, "frame");
+    capture_step = $cmd_get_arg_or(4, "1.6").parse_float();
+}
+
+rand_init(12345);
+build_background();
+build_stars(220);
+
+// --- City layout ---
+
+let BLOCK_HALF = 21.0;     // Nearest a building may come to the center line
+let CITY_FAR = 1600.0;     // How far down the road buildings are generated
+
+// Lines both sides of the road with a run of boxes. Buildings on one side are
+// sequential in Z and never overlap; buildings on opposite sides never overlap
+// on screen, so ordering the whole list by near edge is an exact painter's
+// sort.
+fun generate_city(list, side) {
+    let var z = 24.0;
+    while (z < CITY_FAR) {
+        let depth = rand_float(16.0, 42.0);
+        let width = rand_float(15.0, 40.0);
+        let setback = rand_float(0.0, 9.0);
+
+        // Roughly 12 to 27 floors normally, with a minority of real towers.
+        // The floor is well above the old 24m, which read as stubby next to
+        // the tall ones.
+        let var height = rand_float(42.0, 90.0);
+        if (rand_float(0.0, 1.0) < 0.28) height = rand_float(90.0, 187.5);
+
+        let var x0 = 0.0;
+        let var x1 = 0.0;
+        if (side < 0) {
+            x1 = -(BLOCK_HALF + setback);
+            x0 = x1 - width;
+        } else {
+            x0 = BLOCK_HALF + setback;
+            x1 = x0 + width;
+        }
+
+        list.push(Building(x0, x1, z, z + depth, height));
+        z = z + depth + rand_float(1.5, 9.0);
+    }
+}
+
+let buildings = [];
+generate_city(buildings, -1);
+generate_city(buildings, 1);
+
+// Sort by near edge so we can paint back to front by walking it in reverse
+fun sort_buildings(list) {
+    for (let var i = 1; i < list.len; ++i) {
+        let key = list[i];
+        let var j = i - 1;
+        while (j >= 0 && list[j].z0 > key.z0) {
+            list[j + 1] = list[j];
+            j = j - 1;
+        }
+        list[j + 1] = key;
+    }
+}
+sort_buildings(buildings);
+$println("generated " + buildings.len.to_s() + " buildings");
+
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+
+fun render_frame(fb) {
+    draw_background(fb);
+    draw_road(fb);
+    // Back to front. Buildings are disjoint boxes laid out along the road, so
+    // ordering by their near edge is exact.
+    for (let var i = buildings.len - 1; i >= 0; --i) {
+        draw_building(fb, buildings[i]);
+    }
+}
+
+if (mode_arg == "--bench") {
+    let n = $cmd_get_arg_or(2, "120").parse_int(10);
+    let t0 = $time_current_ms();
+    for (let var i = 0; i < n; ++i) {
+        cam_z = i.to_f() * 1.6;
+        render_frame(frame_buffer);
+    }
+    let ms = $time_current_ms() - t0;
+    $println(n.to_s() + " frames in " + ms.to_s() + "ms  ("
+             + (ms.to_f() / n.to_f()).format_decimals(2) + " ms/frame, "
+             + ((n * 1000).to_f() / ms.to_f()).format_decimals(1) + " fps)");
+    return;
+}
+
+if (capture_frames > 0) {
+    for (let var i = 0; i < capture_frames; ++i) {
+        cam_z = i.to_f() * capture_step;
+        render_frame(frame_buffer);
+        $write_file(capture_prefix + "_" + i.to_s() + ".raw", frame_buffer);
+    }
+    $println("wrote " + capture_frames.to_s() + " frames");
+    return;
+}
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Night Drive", 0);
+
+let var paused = false;
+let var speed = 48.0;      // meters per second
+let var frame_no = 0;
+let var last_ms = $time_current_ms();
+
+// Render time is accumulated over the reporting interval rather than sampled
+// once: a single frame only resolves to whole milliseconds, which is too
+// coarse to tell 12ms from 13ms
+let var render_accum = 0;
+let var report_start = last_ms;
+
+loop {
+    let msg = $actor_poll();
+    if (msg != nil && msg instanceof UIEvent) {
+        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+            break;
+        }
+        if (msg.kind == 'KEY_DOWN' && msg.key == 'SPACE') {
+            paused = !paused;
+        }
+    }
+
+    let now = $time_current_ms();
+    let dt = (now - last_ms).to_f() / 1000.0;
+    last_ms = now;
+
+    if (!paused) {
+        cam_z = cam_z + speed * dt.min(0.1);
+    }
+
+    let t0 = $time_current_ms();
+    render_frame(frame_buffer);
+    render_accum = render_accum + ($time_current_ms() - t0);
+
+    $window_draw_frame(window, frame_buffer);
+
+    frame_no = frame_no + 1;
+    if (frame_no >= 30) {
+        let elapsed = ($time_current_ms() - report_start).max(1);
+        let avg_render = render_accum.to_f() / frame_no.to_f();
+        // Two rates: what the renderer alone could sustain, and what the loop
+        // actually achieves once the window blit and event handling are in
+        let render_fps = 1000.0 / avg_render.max(0.001);
+        let real_fps = (frame_no * 1000).to_f() / elapsed.to_f();
+
+        $println(
+            "render: " + avg_render.format_decimals(2) + "ms (" +
+            render_fps.format_decimals(1) + " fps)  actual: " +
+            real_fps.format_decimals(1) + " fps  cam_z: " +
+            cam_z.format_decimals(1)
+        );
+
+        frame_no = 0;
+        render_accum = 0;
+        report_start = $time_current_ms();
+    }
+}
