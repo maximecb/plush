@@ -5,14 +5,11 @@ use sdl2::pixels::Color;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
-use sdl2::surface::Surface;
 use sdl2::render::Texture;
 use sdl2::render::TextureAccess;
 use sdl2::pixels::PixelFormatEnum;
-use sdl2::video::WindowContext;
-use std::sync::{Mutex, mpsc};
-use std::time::Duration;
-use crate::vm::{VM, Actor};
+use std::sync::Mutex;
+use crate::vm::Actor;
 use crate::value::*;
 use crate::bytearray::ByteArray;
 use crate::str::Str;
@@ -66,7 +63,6 @@ struct Window<'a>
 {
     width: u32,
     height: u32,
-    window_id: u32,
 
     // SDL canvas to draw into
     canvas: sdl2::render::Canvas<sdl2::video::Window>,
@@ -85,7 +81,7 @@ pub fn window_create(
     width: Value,
     height: Value,
     title: Value,
-    flags: Value
+    _flags: Value
 ) -> Result<Value, String>
 {
     if actor.actor_id != 0 {
@@ -103,7 +99,7 @@ pub fn window_create(
     let title_str = unwrap_str!(title);
 
     init_sdl_video();
-    let mut sdl_state = SDL_STATE.lock().unwrap();
+    let sdl_state = SDL_STATE.lock().unwrap();
     let video_subsystem = sdl_state.video.as_ref().unwrap();
 
     let sdl_window = video_subsystem.window(&title_str, width, height)
@@ -123,7 +119,6 @@ pub fn window_create(
     let window = Window {
         width,
         height,
-        window_id: 0,
         canvas,
         texture_creator,
         texture: None,
@@ -145,7 +140,7 @@ unsafe fn make_static<T>(t: &T) -> &'static T {
 pub fn window_draw_frame(
     actor: &mut Actor,
     window_id: Value,
-    mut frame: Value,
+    frame: Value,
 ) -> Result<Value, String>
 {
     if actor.actor_id != 0 {
@@ -157,7 +152,7 @@ pub fn window_draw_frame(
 
     assert!(window_id == 0);
     let mut window_lock = WINDOW.lock().unwrap();
-    let mut window = window_lock.as_mut().unwrap();
+    let window = window_lock.as_mut().unwrap();
 
     // Get the address to copy pixel data from
     let data_len = (4 * window.width * window.height) as usize;
@@ -219,7 +214,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
         sdl_state.event_pump = Some(sdl.event_pump().unwrap());
     }
 
-    let mut event_pump = sdl_state.event_pump.as_mut().unwrap();
+    let event_pump = sdl_state.event_pump.as_mut().unwrap();
 
     let event = match event_pump.poll_event() {
         Some(event) => event,
@@ -235,8 +230,8 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             Some(msg)
         }
 
-        Event::KeyDown { window_id, keycode: Some(keycode), .. } |
-        Event::KeyUp { window_id, keycode: Some(keycode), .. } => {
+        Event::KeyDown { window_id: _, keycode: Some(keycode), .. } |
+        Event::KeyUp { window_id: _, keycode: Some(keycode), .. } => {
             let key_name = translate_keycode(keycode);
             if key_name.is_none() {
                 return None;
@@ -258,8 +253,8 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             Some(msg)
         }
 
-        Event::MouseButtonDown { window_id, which, mouse_btn, x, y, .. } |
-        Event::MouseButtonUp { window_id, which, mouse_btn, x, y, .. } => {
+        Event::MouseButtonDown { window_id: _, which: _, mouse_btn, x, y, .. } |
+        Event::MouseButtonUp { window_id: _, which: _, mouse_btn, x, y, .. } => {
             let button_name = translate_mouse_button(mouse_btn);
             if button_name.is_none() {
                 return None;
@@ -284,7 +279,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             Some(msg)
         }
 
-        Event::MouseMotion { window_id, x, y, .. } => {
+        Event::MouseMotion { window_id: _, x, y, .. } => {
             let msg = actor.alloc_obj(UIEVENT_ID);
             actor.set_field(msg, "window_id", Value::from(0));
             let event_type = actor.intern_str("MOUSE_MOVE");
@@ -294,7 +289,7 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             Some(msg)
         }
 
-        Event::TextInput { window_id, text, .. } => {
+        Event::TextInput { window_id: _, text, .. } => {
             let msg = actor.alloc_obj(UIEVENT_ID);
             actor.set_field(msg, "window_id", Value::from(0));
             let kind = actor.intern_str("TEXT_INPUT");

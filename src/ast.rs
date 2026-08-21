@@ -1,5 +1,4 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use std::fmt;
 use crate::lexer::SrcPos;
 use crate::symbols::Decl;
 use crate::host::HostFn;
@@ -266,9 +265,6 @@ pub struct Function
     /// Parameter list
     pub params: Vec<String>,
 
-    /// Variadic function, variable argument count
-    pub var_arg: bool,
-
     /// Body of the function
     pub body: StmtBox,
 
@@ -401,6 +397,8 @@ pub const BOOL_ID: ClassId = ClassId(2);
 pub const INT64_ID: ClassId = ClassId(3);
 pub const FLOAT64_ID: ClassId = ClassId(4);
 pub const STRING_ID: ClassId = ClassId(5);
+// Reserved for a future Object class
+#[allow(dead_code)]
 pub const OBJECT_ID: ClassId = ClassId(6);
 pub const ARRAY_ID: ClassId = ClassId(7);
 pub const BYTEARRAY_ID: ClassId = ClassId(8);
@@ -413,9 +411,6 @@ pub const LAST_RESERVED_ID: usize = 0xFF;
 #[derive(Default, Clone, Debug)]
 pub struct Import
 {
-    // Path as given in the import directive
-    pub import_path: String,
-
     // Full path to the imported unit
     pub full_path: String,
 

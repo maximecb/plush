@@ -1,5 +1,4 @@
 use std::mem::{align_of, size_of};
-use crate::str::Str;
 use crate::value::Value;
 
 /// Initial size for a new heap. Kept small so that actors are cheap to
@@ -243,6 +242,7 @@ impl Alloc
     }
 
     /// Size of the reserved address range
+    #[allow(dead_code)] // used by the unit tests below
     pub fn reserve_size(&self) -> usize
     {
         self.reserve_size
@@ -384,6 +384,7 @@ impl Alloc
     /// An empty block has its payload one past the last byte allocated,
     /// so it is the header that has to be inside the region, not the
     /// address itself.
+    #[allow(dead_code)] // used by the verify_gc heap walk
     pub fn contains(&self, p: *const u8) -> bool
     {
         let addr = p as usize;

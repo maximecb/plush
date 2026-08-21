@@ -117,6 +117,7 @@ impl<'a> Copier<'a>
         copier
     }
 
+    #[allow(dead_code)] // used by the log_gc cycle report
     pub fn num_blocks(&self) -> usize
     {
         self.num_blocks

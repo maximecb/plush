@@ -96,14 +96,6 @@ impl ParseError
         })
     }
 
-    /// Parse error with just an error message, no location
-    pub fn msg_only<T>(msg: &str) -> Result<T, ParseError>
-    {
-        Err(ParseError {
-            msg: msg.to_string(),
-            pos: SrcPos::default(),
-        })
-    }
 }
 
 impl fmt::Display for ParseError
@@ -193,13 +185,6 @@ impl Lexer
         }
     }
 
-    pub fn set_pos(&mut self, pos: SrcPos)
-    {
-        assert!(pos.line_no > 0);
-        assert!(pos.col_no > 0);
-        self.line_no = pos.line_no;
-        self.col_no = pos.col_no;
-    }
 
     /// Test if the end of the input has been reached
     pub fn eof(&self) -> bool

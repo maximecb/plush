@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet as HashSet;
-use crate::lexer::{ParseError, SrcPos};
+use crate::lexer::ParseError;
 use crate::ast::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -221,7 +221,7 @@ impl Program
             let mut parent_methods = classes[&parent_id].methods.clone();
             let mut parent_fields = classes[&parent_id].fields.clone();
 
-            let mut class = classes.get_mut(&class_id).unwrap();
+            let class = classes.get_mut(&class_id).unwrap();
 
             if lineage.len() > 0 {
                 class.has_children = true;
@@ -542,7 +542,7 @@ impl ExprBox
             Expr::Ident(name) => {
                 //dbg!(&name);
 
-                if let Some(mut decl) = env.lookup(name) {
+                if let Some(decl) = env.lookup(name) {
                     // If this variable comes from another function,
                     // then it must be captured as a closure variable
                     let decl = match decl {
@@ -593,7 +593,7 @@ impl ExprBox
                 index.resolve_syms(prog, fun, env)?;
             }
 
-            Expr::Member { base, field } => {
+            Expr::Member { base, field: _ } => {
                 base.resolve_syms(prog, fun, env)?;
             }
 
@@ -610,7 +610,7 @@ impl ExprBox
                 }
             }
 
-            Expr::Unary { op, child, .. } => {
+            Expr::Unary { op: _, child, .. } => {
                 child.resolve_syms(prog, fun, env)?;
             }
 
@@ -754,7 +754,7 @@ impl ExprBox
                 entries.sort_by_key(|&(_, idx)| idx);
 
                 // For each variable captured by the nested function
-                for (decl, idx) in entries {
+                for (decl, _) in entries {
                     match decl {
                         // If this variable doesn't comes from this function,
                         // then it must be captured by this closure
@@ -789,7 +789,7 @@ impl ExprBox
 #[cfg(test)]
 mod tests
 {
-    use super::*;
+    
     use crate::lexer::Lexer;
     use crate::parser::parse_program;
 
@@ -807,13 +807,6 @@ mod tests
         let mut input = Lexer::new(&src, "src");
         let mut prog = parse_program(&mut input).unwrap();
         assert!(prog.resolve_syms().is_err());
-    }
-
-    fn parse_file(file_name: &str)
-    {
-        dbg!(file_name);
-        let mut prog = crate::parser::parse_file(file_name).unwrap();
-        prog.resolve_syms().unwrap();
     }
 
     #[test]
@@ -878,12 +871,4 @@ mod tests
     {
         fails("Array();");
     }
-
-    /*
-    #[test]
-    fn test_files()
-    {
-        //parse_file("tests/call_ident.psh");
-    }
-    */
 }

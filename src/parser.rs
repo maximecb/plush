@@ -1,7 +1,4 @@
 use rustc_hash::FxHashMap as HashMap;
-use std::io;
-use std::io::Read;
-use std::cmp::max;
 use crate::lexer::*;
 use crate::ast::*;
 
@@ -372,8 +369,8 @@ fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseE
 
         // If this is an integer or floating-point value, do nothing
         let expr = match sub_expr.expr.as_ref() {
-            Expr::Int64(int_val) => sub_expr,
-            Expr::Float64(f_val) => sub_expr,
+            Expr::Int64(_) => sub_expr,
+            Expr::Float64(_) => sub_expr,
             _ => return input.parse_error("unary plus operator applied to non-constant value")
         };
 
@@ -476,7 +473,7 @@ fn parse_dict(
 // Parse a byte array literal
 fn parse_bytearray(
     input: &mut Lexer,
-    prog: &mut Program,
+    _prog: &mut Program,
     pos: SrcPos,
 ) -> Result<ExprBox, ParseError>
 {
@@ -600,7 +597,7 @@ fn parse_bytearray(
 
             // Read one binary byte
             let mut byte = 0;
-            for mut i in 0..8 {
+            for _ in 0..8 {
                 let d = input.eat_ch().to_digit(2);
 
                 if d == None {
@@ -1147,7 +1144,6 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
 fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcPos) -> Result<FunId, ParseError>
 {
     let mut params = Vec::default();
-    let mut var_arg = false;
 
     input.expect_token("(")?;
 
@@ -1186,7 +1182,6 @@ fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcP
     let fun = Function {
         name,
         params,
-        var_arg,
         body,
         num_locals: 0,
         captured: Default::default(),
@@ -1205,7 +1200,6 @@ fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcP
 fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<FunId, ParseError>
 {
     let mut params = Vec::default();
-    let mut var_arg = false;
 
     input.expect_token("|")?;
 
@@ -1254,7 +1248,6 @@ fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<Fu
     let fun = Function {
         name: "lambda".to_owned(),
         params,
-        var_arg,
         body,
         num_locals: 0,
         captured: Default::default(),
@@ -1408,7 +1401,6 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         }
 
         let import = Import {
-            import_path,
             full_path: full_path.display().to_string(),
             symbols,
             import_all,
@@ -1487,7 +1479,6 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
     let unit_fn = Function {
         name,
         params: Default::default(),
-        var_arg: false,
         body,
         num_locals: 0,
         captured: Default::default(),

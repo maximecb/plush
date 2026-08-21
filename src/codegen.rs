@@ -1,11 +1,10 @@
-use std::cmp::max;
 use std::mem::size_of;
 use crate::ast::*;
 use crate::lexer::ParseError;
 use crate::symbols::Decl;
 use crate::vm::Insn;
 use crate::value::Value;
-use crate::alloc::{HEADER_SIZE, Tag};
+use crate::alloc::HEADER_SIZE;
 use crate::str::Str;
 use crate::vm::Actor;
 
@@ -257,14 +256,14 @@ impl StmtBox
             }
 
             // Variable declaration
-            Stmt::Let { mutable, var_name, init_expr, decl } => {
+            Stmt::Let { mutable: _, var_name: _, init_expr, decl } => {
                 // Nothing to do for top-level functions
                 if let Some(Decl::Fun { .. }) = decl {
                     return Ok(())
                 }
 
                 match init_expr.expr.as_ref() {
-                    Expr::Fun { fun_id, captured } => {
+                    Expr::Fun { fun_id: _, captured } => {
                         // Read the closure decl
                         let decl = decl.as_ref().unwrap();
                         gen_var_read(decl, fun, &mut actor.insns);

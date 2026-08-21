@@ -1,5 +1,3 @@
-use std::mem::size_of;
-use crate::alloc::Tag;
 use crate::array::Array;
 use crate::ast::*;
 use crate::vm::Actor;
@@ -7,7 +5,7 @@ use crate::value::*;
 use crate::str::Str;
 use crate::*;
 
-fn identity_method(actor: &mut Actor, self_val: Value) -> Result<Value, String>
+fn identity_method(_actor: &mut Actor, self_val: Value) -> Result<Value, String>
 {
     Ok(self_val)
 }
@@ -208,7 +206,7 @@ fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> 
 }
 
 /// Get the UTF-8 byte at the given index
-fn string_byte_at(actor: &mut Actor, s: Value, idx: Value) -> Result<Value, String>
+fn string_byte_at(_actor: &mut Actor, s: Value, idx: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(s);
     let idx = unwrap_usize!(idx);
@@ -296,7 +294,7 @@ fn string_lower(actor: &mut Actor, s: Value) -> Result<Value, String>
 }
 
 /// Split a string by a separator and return an array of strings
-fn string_split(actor: &mut Actor, mut input: Value, sep: Value) -> Result<Value, String>
+fn string_split(actor: &mut Actor, input: Value, sep: Value) -> Result<Value, String>
 {
     let s = unwrap_str!(input);
     let sep = unwrap_str!(sep);
@@ -368,9 +366,18 @@ pub fn init_runtime(prog: &mut Program)
     audio_needed.reg_field("num_channels");
     audio_needed.reg_field("device_id");
     prog.reg_class(audio_needed);
+
+    // AudioData
+    // Note: the field order must match the slots written
+    // by the audio input callback
+    let mut audio_data = Class::default();
+    audio_data.id = AUDIO_DATA_ID;
+    audio_data.reg_field("device_id");
+    audio_data.reg_field("num_samples");
+    prog.reg_class(audio_data);
 }
 
-fn dict_has(actor: &mut Actor, mut d: Value, key: Value) -> Result<Value, String>
+fn dict_has(_actor: &mut Actor, d: Value, key: Value) -> Result<Value, String>
 {
     let d = unwrap_dict!(d);
     let key = unwrap_str!(key);

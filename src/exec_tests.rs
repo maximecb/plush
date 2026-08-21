@@ -1,6 +1,5 @@
 #![cfg(test)]
 
-use rustc_hash::FxHashSet as HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::process::Command;

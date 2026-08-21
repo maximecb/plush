@@ -299,6 +299,7 @@ impl Value
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     pub fn to_class(self) -> Option<ClassId>
     {
         if self.is_class() { Some(self.as_class()) } else { None }
@@ -783,6 +784,7 @@ macro_rules! unwrap_usize {
     ($val: expr) => { $crate::value::unwrap_val!(to_usize, "non-negative integer", $val, "") };
 }
 
+#[allow(unused_macros)]
 macro_rules! unwrap_bool {
     ($val: expr, $req: literal) => { $crate::value::unwrap_val!(to_bool, "boolean", $val, $req) };
     ($val: expr) => { $crate::value::unwrap_val!(to_bool, "boolean", $val, "") };
@@ -793,6 +795,7 @@ macro_rules! unwrap_str {
     ($val: expr) => { $crate::value::unwrap_val!(to_str, "string", $val, "") };
 }
 
+#[allow(unused_macros)]
 macro_rules! unwrap_obj {
     ($val: expr, $req: literal) => { $crate::value::unwrap_val!(to_obj, "object", $val, $req) };
     ($val: expr) => { $crate::value::unwrap_val!(to_obj, "object", $val, "") };
@@ -813,16 +816,19 @@ macro_rules! unwrap_dict {
     ($val: expr) => { $crate::value::unwrap_val!(to_dict, "dict", $val, "") };
 }
 
+#[allow(unused_macros)]
 macro_rules! unwrap_clos {
     ($val: expr, $req: literal) => { $crate::value::unwrap_val!(to_clos, "closure", $val, $req) };
     ($val: expr) => { $crate::value::unwrap_val!(to_clos, "closure", $val, "") };
 }
 
+#[allow(unused_macros)]
 macro_rules! unwrap_fun {
     ($val: expr, $req: literal) => { $crate::value::unwrap_val!(to_fun, "function", $val, $req) };
     ($val: expr) => { $crate::value::unwrap_val!(to_fun, "function", $val, "") };
 }
 
+#[allow(unused_imports)]
 pub(crate) use {
     unwrap_arr, unwrap_ba, unwrap_bool, unwrap_clos, unwrap_dict, unwrap_f64, unwrap_fun,
     unwrap_i32, unwrap_i64, unwrap_obj, unwrap_str, unwrap_u32, unwrap_u64, unwrap_u8,

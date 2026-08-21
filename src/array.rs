@@ -1,7 +1,6 @@
 use crate::vm::Actor;
 use crate::value::*;
 use crate::alloc::{Alloc, Tag, HEADER_SIZE};
-use crate::host::HostFn;
 use crate::*;
 
 pub struct Array
@@ -75,11 +74,6 @@ impl Array
     pub fn items(&self) -> &[Value] {
         let elems = unsafe { &*self.elems };
         &elems[..self.len]
-    }
-
-    pub fn items_mut(&mut self) -> &mut [Value] {
-        let elems = unsafe { &mut *self.elems };
-        &mut elems[..self.len]
     }
 
     pub fn push(&mut self, val: Value, alloc: &mut Alloc)
@@ -222,12 +216,12 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result
     Ok(Value::NIL)
 }
 
-pub fn array_pop(actor: &mut Actor, mut array: Value) -> Result<Value, String>
+pub fn array_pop(_actor: &mut Actor, array: Value) -> Result<Value, String>
 {
     Ok(unwrap_arr!(array).pop())
 }
 
-pub fn array_remove(actor: &mut Actor, mut array: Value, idx: Value) -> Result<Value, String>
+pub fn array_remove(_actor: &mut Actor, array: Value, idx: Value) -> Result<Value, String>
 {
     let idx = unwrap_usize!(idx);
     Ok(unwrap_arr!(array).remove(idx))

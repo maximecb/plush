@@ -1,8 +1,5 @@
-use std::env;
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use crate::alloc::{Alloc, Tag};
 use crate::vm::{VM, Actor};
 use crate::value::*;
 use crate::ast::{Expr, Function, Program};
@@ -157,7 +154,7 @@ pub fn time_current_ms(actor: &mut Actor) -> Result<Value, String>
 }
 
 /// Get the number of command-line arguments
-pub fn cmd_num_args(actor: &mut Actor) -> Result<Value, String>
+pub fn cmd_num_args(_actor: &mut Actor) -> Result<Value, String>
 {
     let num_args = crate::REST_ARGS.lock().unwrap().len();
     Ok(Value::fixnum(num_args as i64))
@@ -191,7 +188,7 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
 }
 
 /// Print a value to stdout
-fn print(actor: &mut Actor, v: Value) -> Result<Value, String>
+fn print(_actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     match v.type_of() {
         Type::String => print!("{}", v.as_str()),
@@ -469,7 +466,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 }
 
 /// Writes the contents of a ByteArray to a file
-fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<Value, String>
+fn write_file(_actor: &mut Actor, file_path: Value, bytes: Value) -> Result<Value, String>
 {
     let file_path = unwrap_str!(file_path);
     let bytes = unwrap_ba!(bytes);
@@ -487,7 +484,7 @@ fn write_file(actor: &mut Actor, file_path: Value, mut bytes: Value) -> Result<V
 
 /// Create a directory, along with any missing parent directories.
 /// Succeeds if the directory already exists.
-fn make_dir(actor: &mut Actor, dir_path: Value) -> Result<Value, String>
+fn make_dir(_actor: &mut Actor, dir_path: Value) -> Result<Value, String>
 {
     let dir_path = unwrap_str!(dir_path);
 
@@ -542,7 +539,7 @@ fn actor_parent(actor: &mut Actor) -> Result<Value, String>
 }
 
 /// Make the current actor sleep
-fn actor_sleep(actor: &mut Actor, msecs: Value) -> Result<Value, String>
+fn actor_sleep(_actor: &mut Actor, msecs: Value) -> Result<Value, String>
 {
     let msecs = unwrap_u64!(msecs);
     thread::sleep(Duration::from_millis(msecs));
@@ -612,7 +609,7 @@ fn actor_poll(actor: &mut Actor) -> Result<Value, String>
 }
 
 /// End program execution
-fn exit(thread: &mut Actor, val: Value) -> Result<Value, String>
+fn exit(_actor: &mut Actor, val: Value) -> Result<Value, String>
 {
     let val = (unwrap_i64!(val) & 0xFF) as i32;
     std::process::exit(val);

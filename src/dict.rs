@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::{DefaultHasher, Hash, Hasher}, ops::Deref};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::{alloc::{Alloc, Tag, HEADER_SIZE}, str::Str, value::Value};
 
@@ -35,14 +35,6 @@ impl TableSlot {
             None
         } else {
             Some((&self.key , &self.val))
-        }
-    }
-
-    fn key_value_mut(&mut self) -> Option<(&mut *const Str, &mut Value)> {
-        if self.key.is_null() {
-            None
-        } else {
-            Some((&mut self.key, &mut self.val))
         }
     }
 
@@ -183,11 +175,6 @@ impl Dict {
     // Get the value associated with a given field
     pub fn get(&mut self, field_name: &str) -> Option<Value> {
         (self.get_slot(field_name).value()).copied()
-    }
-
-    pub fn key_values_mut(&self) -> impl Iterator<Item = (&mut *const Str, &mut Value)> {
-        let table = unsafe { &mut *self.table };
-        table.iter_mut().filter_map(|e| e.key_value_mut())
     }
 
     pub fn has(&mut self, field_name: &str) -> bool {

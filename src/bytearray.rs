@@ -2,7 +2,6 @@ use std::mem::{transmute, size_of};
 use crate::vm::Actor;
 use crate::value::*;
 use crate::alloc::{Alloc, Tag, HEADER_SIZE};
-use crate::host::HostFn;
 use crate::*;
 
 pub struct ByteArray
@@ -275,7 +274,7 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Va
     Ok(Value::NIL)
 }
 
-pub fn ba_load_u32(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<Value, String>
+pub fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -283,7 +282,7 @@ pub fn ba_load_u32(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<
     Ok(Value::from(val))
 }
 
-pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -292,7 +291,7 @@ pub fn ba_store_u32(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Valu
     Ok(Value::NIL)
 }
 
-pub fn ba_load_u16(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<Value, String>
+pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -300,7 +299,7 @@ pub fn ba_load_u16(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<
     Ok(Value::from(val as u32))
 }
 
-pub fn ba_store_u16(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -309,7 +308,7 @@ pub fn ba_store_u16(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Valu
     Ok(Value::NIL)
 }
 
-pub fn ba_load_f32(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<Value, String>
+pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -317,7 +316,7 @@ pub fn ba_load_f32(actor: &mut Actor, mut ba: Value, byte_idx: Value) -> Result<
     Ok(actor.float64(val as f64))
 }
 
-pub fn ba_store_f32(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -326,7 +325,7 @@ pub fn ba_store_f32(actor: &mut Actor, mut ba: Value, byte_idx: Value, val: Valu
     Ok(Value::NIL)
 }
 
-pub fn ba_get_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
+pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -334,7 +333,7 @@ pub fn ba_get_u32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value,
     Ok(Value::from(val))
 }
 
-pub fn ba_set_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -343,7 +342,7 @@ pub fn ba_set_u32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> R
     Ok(Value::NIL)
 }
 
-pub fn ba_get_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value, String>
+pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -351,7 +350,7 @@ pub fn ba_get_f32(actor: &mut Actor, mut ba: Value, idx: Value) -> Result<Value,
     Ok(actor.float64(val as f64))
 }
 
-pub fn ba_set_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -360,7 +359,7 @@ pub fn ba_set_f32(actor: &mut Actor, mut ba: Value, idx: Value, val: Value) -> R
     Ok(Value::NIL)
 }
 
-pub fn ba_num_u32(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
+pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let len = ba.len;
@@ -372,7 +371,7 @@ pub fn ba_num_u32(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
     Ok(Value::fixnum((len / 4) as i64))
 }
 
-pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> Result<Value, String>
+pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> Result<Value, String>
 {
     let dst = unwrap_ba!(dst);
 
@@ -385,7 +384,7 @@ pub fn ba_memcpy(actor: &mut Actor, mut dst: Value, dst_idx: Value, src: Value, 
     Ok(Value::NIL)
 }
 
-pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
+pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let slice = unsafe { ba.get_slice_mut(0, ba.len) };
@@ -393,7 +392,7 @@ pub fn ba_zero_fill(actor: &mut Actor, mut ba: Value) -> Result<Value, String>
     Ok(Value::NIL)
 }
 
-pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val: Value) -> Result<Value, String>
+pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -404,11 +403,11 @@ pub fn ba_fill_u32(actor: &mut Actor, mut ba: Value, idx: Value, num: Value, val
 }
 
 pub fn ba_blit_bgra32(
-    actor: &mut Actor,
-    mut dst: Value,
+    _actor: &mut Actor,
+    dst: Value,
     dst_width: Value,
     dst_height: Value,
-    mut src: Value,
+    src: Value,
     src_width: Value,
     src_height: Value,
     dst_x: Value,

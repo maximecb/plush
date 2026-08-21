@@ -1,9 +1,4 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
-#![allow(unused_mut)]
-#![allow(unused_imports)]
 #![allow(unused_parens)]
-#![allow(unused_macros)]
 
 mod utils;
 mod ast;
@@ -30,10 +25,8 @@ mod dict;
 extern crate sdl2;
 use std::env;
 use std::process::exit;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use crate::vm::VM;
-use crate::value::Value;
-use crate::utils::{thousands_sep};
 use crate::ast::Program;
 use crate::parser::{parse_file, parse_str};
 

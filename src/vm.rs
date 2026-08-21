@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap as HashMap;
-use std::{thread, thread::sleep};
+use std::thread;
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::dict::Dict;
@@ -42,6 +42,8 @@ pub enum Insn
     panic { pos: SrcPos },
 
     // No-op
+    // Not currently emitted by codegen, kept as a building block
+    #[allow(dead_code)]
     nop,
 
     // Push a value to the stack
@@ -50,6 +52,9 @@ pub enum Insn
     // Stack manipulation
     pop,
     dup,
+
+    // Not currently emitted by codegen, kept as a building block
+    #[allow(dead_code)]
     swap,
 
     // Push the nth-value (indexed from the stack top) on top of the stack
@@ -68,12 +73,6 @@ pub enum Insn
 
     // Get the function argument at a given index
     get_arg { idx: u32 },
-
-    /*
-    // Get a variadic argument with a dynamic index variable
-    // get_arg (idx)
-    get_var_arg,
-    */
 
     // Get the local variable at a given stack slot index
     // The index is relative to the base of the stack frame
@@ -205,6 +204,7 @@ pub struct Message
 {
     // Sender actor id
     // Can be none when the message is a callback
+    #[allow(dead_code)]
     sender: u64,
 
     // Message to be sent
@@ -1180,10 +1180,9 @@ impl Actor
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
 
-        let fun_id = match fun.to_fun_id() {
-            Some(fun_id) => fun_id,
-            None => self.report_error("", &format!("expected function value but got {:?}", fun))
-        };
+        if fun.to_fun_id().is_none() {
+            self.report_error("", &format!("expected function value but got {:?}", fun));
+        }
 
         // Push the arguments on the stack. Compiling below can collect,
         // and the stack is where the collector looks for them.
@@ -1339,7 +1338,7 @@ impl Actor
                         Some(f) => {
                             match self.call_host(f, $argc.into()) {
                                 Err(msg) => error!("{}", msg),
-                                Ok(ret_val) => continue
+                                Ok(()) => continue
                             }
                         }
                         None => error!("call to non-function value: `{:?}`", fun_val)
@@ -2041,7 +2040,7 @@ impl Actor
                 // This instruction is used to construct array literals
                 Insn::arr_push => {
                     let val = pop!();
-                    let mut array = pop!();
+                    let array = pop!();
                     crate::array::array_push(self, array, val).unwrap();
                 }
 
@@ -2415,7 +2414,7 @@ impl VM
     {
         // Get the join handle, then release the VM lock
         let mut vm = vm.lock().unwrap();
-        let mut handle = vm.threads.remove(&tid).unwrap();
+        let handle = vm.threads.remove(&tid).unwrap();
         vm.actor_txs.remove(&tid).unwrap();
         drop(vm);
 

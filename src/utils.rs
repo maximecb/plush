@@ -1,4 +1,5 @@
 /// Produce a string with comma separator for thousands for an integer
+#[allow(dead_code)] // used by the log_gc cycle report
 pub fn thousands_sep<T: ToString>(n: T) -> String
 {
     let num_chars: Vec<char> = n.to_string().chars().rev().collect();

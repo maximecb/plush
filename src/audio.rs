@@ -1,13 +1,11 @@
-use rustc_hash::FxHashMap as HashMap;
 use sdl2::audio::{AudioCallback, AudioSpecDesired, AudioDevice};
 use std::sync::{Arc, Weak, Mutex, Condvar};
-use crate::vm::{VM, Actor, Message};
+use crate::vm::{VM, Actor};
 use crate::value::*;
 use crate::object::Object;
 use crate::alloc::Alloc;
 use crate::ast::{AUDIO_NEEDED_ID, AUDIO_DATA_ID};
 use crate::window::with_sdl_context;
-use crate::bytearray::ByteArray;
 use crate::*;
 
 // --- Audio Output ---
@@ -98,6 +96,8 @@ impl AudioCallback for OutputCB
 
 struct OutputState
 {
+    // Held to keep the device alive: dropping it stops playback
+    #[allow(dead_code)]
     output_dev: AudioDevice<OutputCB>,
 
     // Samples queued for output
@@ -164,7 +164,7 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
 
 /// Write samples to an audio device
 /// The samples must be a ByteArray containing float32 values
-pub fn audio_write_samples(actor: &mut Actor, device_id: Value, samples: Value) -> Result<Value, String>
+pub fn audio_write_samples(_actor: &mut Actor, device_id: Value, samples: Value) -> Result<Value, String>
 {
     let device_id = unwrap_usize!(device_id);
 
@@ -265,7 +265,7 @@ impl AudioCallback for InputCB
         let mut audio_state_lock = lock.lock().unwrap();
 
         // Clip the samples in [-1, 1] for portability
-        for mut s in input.iter_mut() {
+        for s in input.iter_mut() {
             *s = s.max(-1.0).min(1.0);
         }
 
@@ -291,6 +291,8 @@ impl AudioCallback for InputCB
 
 struct InputState
 {
+    // Held to keep the device alive: dropping it stops recording
+    #[allow(dead_code)]
     input_dev: AudioDevice<InputCB>,
 
     // Samples queued from input
@@ -354,7 +356,7 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
 }
 
 /// Read samples from an audio input device into an existing ByteArray
-pub fn audio_read_samples(actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> Result<Value, String>
+pub fn audio_read_samples(_actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> Result<Value, String>
 {
     let device_id = unwrap_usize!(device_id);
     let num_samples_to_read = unwrap_usize!(num_samples);
