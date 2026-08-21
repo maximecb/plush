@@ -47,12 +47,17 @@ let FOG_COLOR = 0xFF000000 | (FOG_R << 16) | (FOG_G << 8) | FOG_B;
 // sizes, window pitches, camera height, fog distances and speed (m/s).
 
 let ROAD_HALF = 11.0;      // Asphalt spans [-ROAD_HALF, ROAD_HALF], so 22m
-let CURB_HALF = 14.5;      // 3.5m of sidewalk each side
+let BARRIER_H = 1.0;       // Highway side barrier, 1m tall
+let BARRIER_W = 0.4;       // and 0.4m thick
+
+// The roadway is elevated: buildings carry on down past it into the dark
+// instead of meeting a ground plane, so the deck reads as being up in the air.
+// How far down they actually need to go is worked out in the city layout
+// section, because barely any of it is visible past the barriers.
 
 // --- Window grid metrics ---
 
-let BASE_HEIGHT = 5.0;     // Windowless ground floor
-let TOP_MARGIN = 2.0;      // Windowless parapet
+let TOP_MARGIN = 2.0;      // Windowless parapet at the roof
 
 // A building is strictly one of these. A grid building has nothing but its own
 // window repeated; a band building has nothing but bands. Mixing the two on one
@@ -173,7 +178,9 @@ fun color_lerp(a, b, t) {
 //   sy = CY - (wy - cam_y) * s     with s = FOCAL / (wz - cam_z)
 
 let var cam_x = 0.0;
-let var cam_y = 3.2;
+// Eye height of a rider on a motorcycle: about 0.8m of seat plus about 0.75m
+// of seated torso and head
+let var cam_y = 1.55;
 let var cam_z = 0.0;
 
 // --- Fog ---
@@ -347,9 +354,10 @@ fun fill_quad(fb, x0, y0, x1, y1, x2, y2, x3, y3, color) {
 //   2  a neon band spanning columns [row_c0, row_c1]
 
 class Facade {
-    init(self, span, height, style) {
+    // base is the wall's bottom in world Y, normally below the roadway
+    init(self, span, base, height, style) {
         let cols = (span / style.pitch_u).floor().max(1);
-        let usable = height - BASE_HEIGHT - TOP_MARGIN;
+        let usable = height - TOP_MARGIN - base;
         let rows = (usable / style.pitch_v).floor().max(1);
 
         self.cols = cols;
@@ -363,7 +371,8 @@ class Facade {
                   + (style.pitch_u - self.uwin) * 0.5;
         self.vpitch = style.pitch_v;
         self.vwin = style.pitch_v * style.frac_v;
-        self.v0 = BASE_HEIGHT + (style.pitch_v - self.vwin) * 0.5;
+        // Windows start at the very bottom of the wall, with no blank plinth
+        self.v0 = base + (style.pitch_v - self.vwin) * 0.5;
 
         self.row_kind = Array.with_size(rows, 0);
         self.row_color = Array.with_size(rows, 0);
@@ -515,12 +524,13 @@ class FacadeStyle {
 // as trapezoids).
 
 class Building {
-    init(self, x0, x1, z0, z1, height) {
+    init(self, x0, x1, z0, z1, height, base) {
         self.x0 = x0;
         self.x1 = x1;
         self.z0 = z0;
         self.z1 = z1;
         self.height = height;
+        self.base = base;
 
         // Near-black concrete with a slight blue cast
         let g = rand_int(12, 26);
@@ -543,8 +553,8 @@ class Building {
         // around as we drive past it
         let style = FacadeStyle(lit_prob, band_prob, pick_window_tint(),
                                 NEON[rand_int(0, NEON.len)], shape);
-        self.front = Facade(x1 - x0, height, style);
-        self.side = Facade(z1 - z0, height, style);
+        self.front = Facade(x1 - x0, base, height, style);
+        self.side = Facade(z1 - z0, base, height, style);
     }
 }
 
@@ -726,8 +736,8 @@ fun draw_building(fb, b) {
             fill_quad(fb,
                 pxa, CY - (b.height - cam_y) * sa,
                 pxb, CY - (b.height - cam_y) * sb,
-                pxb, CY + cam_y * sb,
-                pxa, CY + cam_y * sa,
+                pxb, CY - (b.base - cam_y) * sb,
+                pxa, CY - (b.base - cam_y) * sa,
                 wall);
 
             // Skip the windows once the wall is only a sliver on screen
@@ -748,7 +758,8 @@ fun draw_building(fb, b) {
         let fog = fog_factor(d);
         let wall = fog_mix(b.wall, fog);
 
-        fill_rect(fb, px0, (ay - b.height * s).floor(), px1, ay.floor(), wall);
+        fill_rect(fb, px0, (ay - b.height * s).floor(), px1,
+                  (ay - b.base * s).floor(), wall);
 
         if (px1 - px0 > 3) {
             draw_facade_flat(fb, b.front, b.x0, s, ax, ay, fog, wall);
@@ -773,10 +784,12 @@ fun build_background() {
             let tt = t * t * t;
             bg_rows[y] = color_lerp(0xFF05060E, FOG_COLOR, tt);
         } else {
-            // Ground: haze at the horizon settling into dark asphalt underfoot
+            // No ground plane. Below the horizon is open air falling away
+            // under the elevated deck, so it drops off into the dark rather
+            // than settling onto a lit surface.
             let t = (y - horizon).to_f() / (FRAME_HEIGHT - horizon).to_f();
-            let tt = (t * 3.0).min(1.0);
-            bg_rows[y] = color_lerp(FOG_COLOR, 0xFF0E0F14, tt);
+            let tt = (t * 4.0).min(1.0);
+            bg_rows[y] = color_lerp(FOG_COLOR, 0xFF04050A, tt);
         }
     }
 }
@@ -894,13 +907,13 @@ let EDGE_W = 0.15;
 let ROAD_DRAW_FAR = FOG_END;   // Asphalt runs out to where the haze hides it
 let DASH_DRAW_FAR = 260.0;     // Markings past here are sub-pixel anyway
 
-// A strip of road surface between two Z values, spanning [wx0, wx1] in X.
+// A horizontal strip at height wy between two Z values, spanning [wx0, wx1].
 // Constant-Z edges are horizontal on screen, so this is a simple trapezoid.
-fun road_quad(fb, wx0, wx1, za, zb, color) {
+fun deck_quad(fb, wx0, wx1, za, zb, wy, color) {
     let sa = FOCAL / (za - cam_z);
     let sb = FOCAL / (zb - cam_z);
-    let aya = CY + cam_y * sa;
-    let ayb = CY + cam_y * sb;
+    let aya = CY - (wy - cam_y) * sa;
+    let ayb = CY - (wy - cam_y) * sb;
     fill_quad(fb,
         CX + (wx0 - cam_x) * sa, aya,
         CX + (wx1 - cam_x) * sa, aya,
@@ -909,14 +922,57 @@ fun road_quad(fb, wx0, wx1, za, zb, color) {
         color);
 }
 
+// Road surface, at y = 0
+fun road_quad(fb, wx0, wx1, za, zb, color) {
+    deck_quad(fb, wx0, wx1, za, zb, 0.0, color);
+}
+
+// A vertical wall at constant X, running from y0 up to y1 along Z
+fun wall_quad(fb, wx, y0, y1, za, zb, color) {
+    let sa = FOCAL / (za - cam_z);
+    let sb = FOCAL / (zb - cam_z);
+    let xa = CX + (wx - cam_x) * sa;
+    let xb = CX + (wx - cam_x) * sb;
+    fill_quad(fb,
+        xa, CY - (y1 - cam_y) * sa,
+        xb, CY - (y1 - cam_y) * sb,
+        xb, CY - (y0 - cam_y) * sb,
+        xa, CY - (y0 - cam_y) * sa,
+        color);
+}
+
 fun draw_road(fb) {
     let zn = cam_z + NEAR_Z;
     let zf = cam_z + ROAD_DRAW_FAR;
 
-    // Asphalt and sidewalks. These do not overlap, so no ordering is needed.
-    road_quad(fb, -CURB_HALF, -ROAD_HALF, zn, zf, 0xFF17181D);
-    road_quad(fb, ROAD_HALF, CURB_HALF, zn, zf, 0xFF17181D);
-    road_quad(fb, -ROAD_HALF, ROAD_HALF, zn, zf, 0xFF101116);
+    // The deck and its barriers are drawn in Z segments so the haze can take
+    // hold with distance. Segments grow geometrically because a far one covers
+    // far fewer pixels than a near one.
+    let var za = zn;
+    let var seg = 5.0;
+    while (za < zf) {
+        let zb = (za + seg).min(zf);
+        let f = fog_factor(za - cam_z);
+
+        road_quad(fb, -ROAD_HALF, ROAD_HALF, za, zb, fog_mix(0xFF101116, f));
+
+        // 1m barriers along both edges: the inner face we look at, plus the
+        // top cap, which is visible because the camera sits above it
+        let face = fog_mix(0xFF272A31, f);
+        let cap = fog_mix(0xFF3C404A, f);
+        wall_quad(fb, -ROAD_HALF, 0.0, BARRIER_H, za, zb, face);
+        wall_quad(fb, ROAD_HALF, 0.0, BARRIER_H, za, zb, face);
+        deck_quad(fb, -ROAD_HALF - BARRIER_W, -ROAD_HALF, za, zb, BARRIER_H, cap);
+        deck_quad(fb, ROAD_HALF, ROAD_HALF + BARRIER_W, za, zb, BARRIER_H, cap);
+
+        // Solid edge lines, in the same segments so they fog with the deck
+        let edge = fog_mix(0xFFC8B478, f);
+        road_quad(fb, -ROAD_HALF, -ROAD_HALF + EDGE_W, za, zb, edge);
+        road_quad(fb, ROAD_HALF - EDGE_W, ROAD_HALF, za, zb, edge);
+
+        za = zb;
+        seg = seg * 1.35;
+    }
 
     // Dashed dividers between the lanes, at every lane boundary except the
     // road edges, which get solid lines instead
@@ -936,10 +992,6 @@ fun draw_road(fb) {
         }
         z = z + period;
     }
-
-    // Solid edge lines
-    road_quad(fb, -ROAD_HALF, -ROAD_HALF + EDGE_W, zn, zf, 0xFFC8B478);
-    road_quad(fb, ROAD_HALF - EDGE_W, ROAD_HALF, zn, zf, 0xFFC8B478);
 }
 
 // --- Main ---
@@ -960,8 +1012,29 @@ build_stars(220);
 
 // --- City layout ---
 
-let BLOCK_HALF = 21.0;     // Nearest a building may come to the center line
+let BLOCK_HALF = 25.0;     // Nearest a building may come to the center line
+let SETBACK_MAX = 20.0;    // Extra distance back from the block line
+let WIDTH_MIN = 15.0;
+let WIDTH_MAX = 40.0;
+let DEPTH_MIN = 16.0;
+let DEPTH_MAX = 42.0;
 let CITY_FAR = 1600.0;     // How far down the road buildings are generated
+
+// How far below the deck a building actually needs to reach.
+//
+// Looking forward from a car, the barrier hides nearly everything under the
+// roadway. A sightline grazing the barrier's outer top edge drops only
+// (cam_y - BARRIER_H) / (ROAD_HALF + BARRIER_W) per meter of lateral offset,
+// which is about 0.19 here, and that ratio does not depend on distance down
+// the road. So a wall X meters to the side is visible down to cam_y - 0.19*X
+// and no further: about -1m for the nearest buildings, about -10m for the far
+// edge of the widest one. Taking the worst case plus a small margin is enough,
+// and everything below it is invisible by construction.
+// Clamped so the base always ends up below the deck, including the case where
+// the eye sits at or under the barrier top and nothing below is visible at all
+let SIGHT_SLOPE = (cam_y - BARRIER_H) / (ROAD_HALF + BARRIER_W);
+let BUILDING_BASE =
+    (cam_y - SIGHT_SLOPE * (BLOCK_HALF + SETBACK_MAX + WIDTH_MAX) - 2.0).min(-2.0);
 
 // Lines both sides of the road with a run of boxes. Buildings on one side are
 // sequential in Z and never overlap; buildings on opposite sides never overlap
@@ -970,9 +1043,9 @@ let CITY_FAR = 1600.0;     // How far down the road buildings are generated
 fun generate_city(list, side) {
     let var z = 24.0;
     while (z < CITY_FAR) {
-        let depth = rand_float(16.0, 42.0);
-        let width = rand_float(15.0, 40.0);
-        let setback = rand_float(0.0, 9.0);
+        let depth = rand_float(DEPTH_MIN, DEPTH_MAX);
+        let width = rand_float(WIDTH_MIN, WIDTH_MAX);
+        let setback = rand_float(0.0, SETBACK_MAX);
 
         // Roughly 12 to 27 floors normally, with a minority of real towers.
         // The floor is well above the old 24m, which read as stubby next to
@@ -990,7 +1063,7 @@ fun generate_city(list, side) {
             x1 = x0 + width;
         }
 
-        list.push(Building(x0, x1, z, z + depth, height));
+        list.push(Building(x0, x1, z, z + depth, height, BUILDING_BASE));
         z = z + depth + rand_float(1.5, 9.0);
     }
 }
@@ -1018,12 +1091,19 @@ let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 
 fun render_frame(fb) {
     draw_background(fb);
-    draw_road(fb);
+
     // Back to front. Buildings are disjoint boxes laid out along the road, so
     // ordering by their near edge is exact.
     for (let var i = buildings.len - 1; i >= 0; --i) {
         draw_building(fb, buildings[i]);
     }
+
+    // The deck goes last. Now that buildings carry on below it they overlap it
+    // on screen, and wherever that happens the deck is always the nearer of the
+    // two: a building at Z only overlaps road at distance D when Z > 1.9*D,
+    // because the road is narrower than the gap between the two rows of
+    // buildings. So painting it over everything is exact, not a fudge.
+    draw_road(fb);
 }
 
 if (mode_arg == "--bench") {
