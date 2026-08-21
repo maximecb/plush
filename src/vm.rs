@@ -1396,10 +1396,9 @@ impl Actor
 
         loop
         {
-            if pc >= self.insns.len() {
-                error!("pc out of bounds");
-            }
-
+            // Every compiled function ends with a ret instruction,
+            // so execution can never run past the end of the insn stream
+            debug_assert!(pc < self.insns.len());
             let insn = self.insns[pc];
             pc += 1;
             //println!("executing {:?}", insn);
