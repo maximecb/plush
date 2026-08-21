@@ -36,9 +36,13 @@ fun rasterize_triangle(v0, v1, v2, color, fb) {
     if (p0.y > p2.y) { let tmp = p0; p0 = p2; p2 = tmp; }
     if (p1.y > p2.y) { let tmp = p1; p1 = p2; p2 = tmp; }
 
-    let y0 = p0.y.floor();
-    let y1 = p1.y.floor();
-    let y2 = p2.y.floor();
+    let py0 = p0.y;
+    let py1 = p1.y;
+    let py2 = p2.y;
+
+    let y0 = py0.floor();
+    let y1 = py1.floor();
+    let y2 = py2.floor();
 
     if (y0 == y2) return;
 
@@ -47,47 +51,67 @@ fun rasterize_triangle(v0, v1, v2, color, fb) {
     let x2 = p2.x;
 
     let var inv_slope1 = 0.0;
-    if (p1.y > p0.y) inv_slope1 = (p1.x - p0.x) / (p1.y - p0.y);
+    if (py1 > py0) inv_slope1 = (x1 - x0) / (py1 - py0);
 
     let var inv_slope2 = 0.0;
-    if (p2.y > p0.y) inv_slope2 = (p2.x - p0.x) / (p2.y - p0.y);
+    if (py2 > py0) inv_slope2 = (x2 - x0) / (py2 - py0);
 
     let start_scanline_y_top = y0.max(0);
     let end_scanline_y_top = y1.min(FRAME_HEIGHT);
 
+    // Top half of triangle
     if (start_scanline_y_top < end_scanline_y_top) {
-        let var cur_x1 = x0 + (start_scanline_y_top + 1 - p0.y) * inv_slope1;
-        let var cur_x2 = x0 + (start_scanline_y_top + 1 - p0.y) * inv_slope2;
+        let dy = start_scanline_y_top + 1 - py0;
+        let xa = x0 + dy * inv_slope1;
+        let xb = x0 + dy * inv_slope2;
+
+        // Both edges radiate from p0, so which of the two is the left one
+        // is fixed for the whole half and can be decided once
+        let var cur_xl = xa; let var slope_l = inv_slope1;
+        let var cur_xr = xb; let var slope_r = inv_slope2;
+        if (xb < xa) {
+            cur_xl = xb; slope_l = inv_slope2;
+            cur_xr = xa; slope_r = inv_slope1;
+        }
 
         for (let var scanline_y = start_scanline_y_top; scanline_y < end_scanline_y_top; ++scanline_y) {
-            let start_x = cur_x1.min(cur_x2).floor().max(0);
-            let end_x = cur_x1.max(cur_x2).floor().min(FRAME_WIDTH);
+            let start_x = cur_xl.floor().max(0);
+            let end_x = cur_xr.floor().min(FRAME_WIDTH);
             if (start_x < end_x) {
                 fb.fill_u32(scanline_y * FRAME_WIDTH + start_x, end_x - start_x, color);
             }
-            cur_x1 = cur_x1 + inv_slope1;
-            cur_x2 = cur_x2 + inv_slope2;
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
         }
     }
 
     let var inv_slope3 = 0.0;
-    if (p2.y > p1.y) inv_slope3 = (p2.x - p1.x) / (p2.y - p1.y);
+    if (py2 > py1) inv_slope3 = (x2 - x1) / (py2 - py1);
 
     let start_scanline_y_bot = y1.max(0);
     let end_scanline_y_bot = y2.min(FRAME_HEIGHT);
 
+    // Bottom half of triangle
     if (start_scanline_y_bot < end_scanline_y_bot) {
-        let var cur_x1 = x1 + (start_scanline_y_bot + 1 - p1.y) * inv_slope3;
-        let var cur_x2 = x0 + (start_scanline_y_bot + 1 - p0.y) * inv_slope2;
+        let xa = x1 + (start_scanline_y_bot + 1 - py1) * inv_slope3;
+        let xb = x0 + (start_scanline_y_bot + 1 - py0) * inv_slope2;
+
+        // Both edges converge on p2, so the left/right order is fixed here too
+        let var cur_xl = xa; let var slope_l = inv_slope3;
+        let var cur_xr = xb; let var slope_r = inv_slope2;
+        if (xb < xa) {
+            cur_xl = xb; slope_l = inv_slope2;
+            cur_xr = xa; slope_r = inv_slope3;
+        }
 
         for (let var scanline_y = start_scanline_y_bot; scanline_y < end_scanline_y_bot; ++scanline_y) {
-            let start_x = cur_x1.min(cur_x2).floor().max(0);
-            let end_x = cur_x1.max(cur_x2).floor().min(FRAME_WIDTH);
+            let start_x = cur_xl.floor().max(0);
+            let end_x = cur_xr.floor().min(FRAME_WIDTH);
             if (start_x < end_x) {
                 fb.fill_u32(scanline_y * FRAME_WIDTH + start_x, end_x - start_x, color);
             }
-            cur_x1 = cur_x1 + inv_slope3;
-            cur_x2 = cur_x2 + inv_slope2;
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
         }
     }
 }
@@ -131,14 +155,16 @@ let num_tris = colors.len;
 let start_ms = $time_current_ms();
 
 for (let var frame = 0; frame < num_frames; ++frame) {
+    let var i = 0;
     for (let var t = 0; t < num_tris; ++t) {
         rasterize_triangle(
-            vertices[indices[t * 3]],
-            vertices[indices[t * 3 + 1]],
-            vertices[indices[t * 3 + 2]],
+            vertices[indices[i]],
+            vertices[indices[i + 1]],
+            vertices[indices[i + 2]],
             colors[t],
             frame_buffer
         );
+        i += 3;
     }
 }
 
