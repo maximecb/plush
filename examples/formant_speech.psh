@@ -6,6 +6,8 @@
 // falling back to letter-to-sound rules for anything else.
 // Usage: plush examples/formant_speech.psh ["text to speak"] [out.wav]
 
+from ./random import *;
+
 let SAMPLE_RATE = 44100;
 let PI = 3.141592653589793;
 
@@ -29,12 +31,12 @@ let A5 = 0.06;
 // the per-phoneme voicing and frication levels are directly comparable.
 let NOISE_GAIN = 0.25;
 
-let var noise_seed = 22222;
+// A fixed seed keeps the synthesized output reproducible
+rand_init(22222);
 
 fun noise()
 {
-    noise_seed = (noise_seed * 1103515245 + 12345) & 0x7FFFFFFF;
-    return (noise_seed.to_f() / 1073741824.0 - 1.0) * NOISE_GAIN;
+    return rand_float(-1.0, 1.0) * NOISE_GAIN;
 }
 
 // --- Voiced source ---

@@ -1,5 +1,7 @@
 // Benchmark for matrix-vector multiplication
 
+from ./lib/random import *;
+
 let var num_inputs = 8192;
 if ($cmd_num_args() > 1) {
     num_inputs = $cmd_get_arg(1).parse_int(10);
@@ -13,23 +15,17 @@ if ($cmd_num_args() > 2) {
 $println("Matrix size: " + num_outputs.to_s() + "x" + num_inputs.to_s());
 
 // Initialize matrix and vector with random values
-let var lcg_seed = 1;
-fun rand_float() {
-    lcg_seed = (lcg_seed * 1103515245 + 12345) & 0x7FFFFFFF;
-    return (lcg_seed.to_f() / 0x7FFFFFFF.to_f()) * 2.0 - 1.0; // -1.0 to 1.0
-}
-
 let matrix = Array.with_size(num_outputs, 0);
 for (let var i = 0; i < num_outputs; ++i) {
     matrix[i] = Array.with_size(num_inputs, 0);
     for (let var j = 0; j < num_inputs; ++j) {
-        matrix[i][j] = rand_float();
+        matrix[i][j] = rand_float(-1.0, 1.0);
     }
 }
 
 let vector = Array.with_size(num_inputs, 0);
 for (let var i = 0; i < num_inputs; ++i) {
-    vector[i] = rand_float();
+    vector[i] = rand_float(-1.0, 1.0);
 }
 
 let result = Array.with_size(num_outputs, 0);

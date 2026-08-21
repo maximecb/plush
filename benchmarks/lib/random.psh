@@ -2,7 +2,12 @@
 // This is a basic pseudo-random number generator.
 //
 // Import it with:
-//   from ./random import *;
+//   from ./lib/random import *;
+//
+// This lives in a subdirectory so that run_benchmarks.sh, which globs
+// benchmarks/*.psh, does not try to run it as a benchmark. It mirrors
+// examples/random.psh: imports cannot reach outside their own directory,
+// so the benchmarks cannot share that copy.
 //
 // Importing does not seed the generator. A unit that wants a different
 // sequence on each run has to call rand_init() itself.
@@ -11,7 +16,6 @@
 let var lcg_seed = 1;
 
 // Initializes the random number generator with a seed value.
-// Using a different seed will produce a different sequence of random numbers.
 fun rand_init(seed) {
     // We use a bitwise AND to keep the seed as a positive 31-bit integer.
     lcg_seed = seed & 0x7FFFFFFF;
@@ -38,38 +42,3 @@ fun rand_float(min_val, max_val) {
     let t = rand_next().to_f() / 2147483648.0;
     return min_val + t * (max_val - min_val);
 }
-
-if (!$MAIN_UNIT) {
-    return;
-}
-
-// Seed the generator with the current time for a different sequence on each run.
-rand_init($time_current_ms());
-
-$println("--- 10 Random Integers (0-99) ---");
-for (let var i = 0; i < 10; ++i) {
-    $println(rand_int(0, 100));
-}
-
-$println("\n--- 5 Random Floats (10.0-20.0) ---");
-for (let var i = 0; i < 5; ++i) {
-    $println(rand_float(10.0, 20.0).to_s());
-}
-
-$println("\n--- 5 Random Integers in a specific range (50-74) ---");
-for (let var i = 0; i < 5; ++i) {
-    // To get a number in a range [min, max), use: rand_int(min, max)
-    $println(rand_int(50, 75));
-}
-
-// --- Reseeding the generator ---
-$println("\n--- Reseeding with a fixed seed (42) ---");
-rand_init(42);
-$println(rand_int(0, 100));
-$println(rand_int(0, 100));
-
-$println("\n--- Reseeding with the same fixed seed (42) ---");
-// This will produce the exact same sequence as before.
-rand_init(42);
-$println(rand_int(0, 100));
-$println(rand_int(0, 100));
