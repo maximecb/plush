@@ -46,7 +46,12 @@ let FOG_COLOR = 0xFF000000 | (FOG_R << 16) | (FOG_G << 8) | FOG_B;
 // Every world-space length in this file is in meters, including building
 // sizes, window pitches, camera height, fog distances and speed (m/s).
 
-let ROAD_HALF = 11.0;      // Asphalt spans [-ROAD_HALF, ROAD_HALF], so 22m
+// An odd lane count puts the middle lane astride x = 0, so the camera sitting
+// at cam_x = 0 is centered in it rather than straddling a lane line.
+let NUM_LANES = 5;
+let LANE_W = 3.7;          // Standard highway lane
+
+let ROAD_HALF = LANE_W * NUM_LANES.to_f() * 0.5;
 let BARRIER_H = 1.0;       // Highway side barrier, 1m tall
 let BARRIER_W = 0.4;       // and 0.4m thick
 
@@ -899,11 +904,6 @@ fun draw_background(fb) {
 
 // --- Road ---
 
-// Six 3.67m lanes, three each way. Standard lane widths are 3.0-3.7m, so the
-// 22m of asphalt divides into six rather than the four it used to.
-let NUM_LANES = 6;
-let LANE_W = (ROAD_HALF * 2.0) / NUM_LANES.to_f();
-
 // Standard dashed-line pattern: 3m of paint, 9m of gap
 let LANE_DASH_LEN = 3.0;
 let LANE_DASH_GAP = 9.0;
@@ -1112,9 +1112,10 @@ fun render_frame(fb) {
 
     // The deck goes last. Now that buildings carry on below it they overlap it
     // on screen, and wherever that happens the deck is always the nearer of the
-    // two: a building at Z only overlaps road at distance D when Z > 1.9*D,
-    // because the road is narrower than the gap between the two rows of
-    // buildings. So painting it over everything is exact, not a fudge.
+    // two: a building at Z only overlaps road at distance D when
+    // Z > D * BLOCK_HALF / ROAD_HALF, and that ratio is above 1 because the
+    // road is narrower than the gap between the two rows of buildings. So
+    // painting it over everything is exact, not a fudge.
     draw_road(fb);
 }
 
