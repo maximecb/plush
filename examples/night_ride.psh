@@ -33,13 +33,25 @@ let FOCAL = (FRAME_WIDTH.to_f() * 0.5) / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
 // Anything closer than this is clipped away
 let NEAR_Z = 0.5;
 
-// Distance haze. Colors lerp toward the fog color between these two distances.
-let FOG_START = 70.0;
-let FOG_END = 520.0;
-let FOG_R = 26;
-let FOG_G = 32;
-let FOG_B = 52;
+// Distance haze. Colors lerp toward the fog color between these two
+// distances. The haze is violet rather than the blue-grey it started as,
+// which is what gives the whole city its cast.
+let FOG_START = 80.0;
+let FOG_END = 760.0;
+let FOG_R = 58;
+let FOG_G = 30;
+let FOG_B = 76;
 let FOG_COLOR = 0xFF000000 | (FOG_R << 16) | (FOG_G << 8) | FOG_B;
+
+// The haze never quite closes over a building. Letting it reach 1.0 would
+// paint the far ones in exactly the sky color and they would disappear
+// instead of massing up into a skyline.
+let FOG_MAX = 0.94;
+
+// Buildings are drawn well past where the haze has taken them, because that
+// hazed-out mass near the vanishing point is what makes the city read as a
+// downtown core rather than two rows of boxes.
+let CULL_FAR = 1900.0;
 
 // --- World layout ---
 //
@@ -98,6 +110,38 @@ let GLASS_OFF = 0xFF2C313A;
 // independent coin flip per window, closer to 1 gives longer unbroken runs.
 let RUN_STICK = 0.62;
 
+// How facade detail drops away with distance.
+//
+// These are distances to the building, not sizes on screen. Detail has to go
+// in depth order or it reads as a mistake, and a screen-size test does not
+// give that: window width varies three to one across the archetypes, so a
+// near building with narrow windows would lose its glass while a far one
+// with wide windows kept it. Judging by the building's own distance means
+// two buildings always lose the same detail in the order they recede.
+//
+// Each level fades into the wall over the stretch between its two numbers,
+// so nothing ever appears or vanishes in one frame.
+let UNLIT_FADE = 90.0;   let UNLIT_GONE = 240.0;
+let LIT_FADE = 190.0;    let LIT_GONE = 430.0;
+let BAND_FADE = 520.0;   let BAND_GONE = 1050.0;
+
+// A building itself fades into the haze over the last of its range, rather
+// than appearing out of nothing at CULL_FAR
+let BUILD_FADE = CULL_FAR - 300.0;
+
+// A floor under all of the above: a window narrower than this on screen is
+// never worth a quad whatever its distance says. It rarely binds now that
+// distance drives the LOD, and exists so an edge-on wall cannot spend
+// thousands of quads on slivers.
+let MIN_WIN_PX = 1.4;
+
+// 1 while nearer than fade_from, 0 once past gone_at, ramping between
+fun lod_fade(d, fade_from, gone_at) {
+    if (d <= fade_from) return 1.0;
+    if (d >= gone_at) return 0.0;
+    return (gone_at - d) / (gone_at - fade_from);
+}
+
 // Widest a neon halo may spread, in pixels, scaled so it looks the same at
 // any frame size
 let GLOW_MAX = (FRAME_HEIGHT _/ 180).max(2);
@@ -112,9 +156,11 @@ let WIN_GLOW_MAX = (GLOW_MAX _/ 2).max(1);
 // rather than bloom cores or large signage.
 //
 // A building picks one WIN_TINTS entry and uses it for every window it has.
-// The pale gold, warm white and pale cyan that used to sit here read as faint
-// beige once dimmed, so the warm half is now saturated amber/orange/yellow and
-// the cool half leans on blue rather than washed-out near-whites.
+// Lit rooms stay warm, because that is what a window with a light on in it
+// looks like whatever the city outside is doing. The cool half has moved off
+// plain blue toward the violets and magentas that carry city_downtown, so
+// the two halves now read as lamplight against neon rather than warm against
+// cold.
 let WIN_TINTS = [
     0xFFFFB030, // bright amber, the dominant window in city_04
     0xFFFF8418, // orange
@@ -122,31 +168,33 @@ let WIN_TINTS = [
     0xFFFFF040, // bright yellow
     0xFFFFF888, // light yellow
     0xFFF8F8F8, // white
-    0xFF60F0F8, // cyan
-    0xFF20E0F8, // bright cyan
-    0xFF70C8FF, // light blue
-    0xFF3898F8, // sky blue
-    0xFF1868F8, // vivid blue
-    0xFF2038C8, // deep blue
+    0xFF30E8FF, // bright cyan
+    0xFF58C0FF, // pale blue
+    0xFF7860FF, // violet
+    0xFFB050FF, // purple
+    0xFFFF58D0, // pink
+    0xFFE030F0, // magenta
 ];
 
-// Weighted toward the warm end, which is how both references read, with the
-// blues given a bigger share than before
+// Warm windows still outnumber the rest, but the violet end now gets as big
+// a share as the blues used to
 let TINT_WARM_END = 5;
-let TINT_COOL_END = 9;
+let TINT_COOL_END = 8;
 
-// Signage and the bold facade bands, from the same two images
+// Signage and the bold facade bands. city_downtown is carried almost
+// entirely by magenta, violet and cyan, with warm accents used sparingly, so
+// the weighting here has swung a long way from the earlier references.
 let NEON = [
-    0xFF08C8F8, // cyan neon
+    0xFFFF3CC8, // hot magenta
+    0xFFE838F0, // magenta
+    0xFFC040FF, // purple
+    0xFF8850FF, // violet
     0xFF28F8F8, // bright cyan
+    0xFF08C8F8, // cyan neon
     0xFF40E0B0, // teal
-    0xFFF8F858, // yellow
-    0xFFFFB030, // amber
-    0xFFFF8418, // orange
-    0xFFE8402C, // red
-    0xFFF050C0, // magenta
-    0xFF1848F8, // vivid blue
     0xFF3898F8, // blue
+    0xFFFF6098, // rose
+    0xFFFFB030, // amber, the one warm note
 ];
 
 // --- Color helpers ---
@@ -290,7 +338,7 @@ fun update_ride(dt, speed_frac) {
 fun fog_factor(dist) {
     if (dist <= FOG_START) return 0.0;
     let t = (dist - FOG_START) / (FOG_END - FOG_START);
-    return t.min(1.0);
+    return t.min(FOG_MAX);
 }
 
 fun fog_mix(color, f) {
@@ -628,7 +676,9 @@ class Facade {
         self.row_c0 = Array.with_size(rows, 0);
         self.row_c1 = Array.with_size(rows, 0);
         self.cells = Array.with_size(rows * cols, 0);
-        // Which cells are bright enough to earn a halo
+        // 0 unlit grey glass, 1 lit, 2 lit brightly enough to earn a halo.
+        // Distance LOD leans on this: the grey ones are the first to go,
+        // since they are the closest to the wall they sit on.
         self.hot = Array.with_size(rows * cols, 0);
 
         if (style.kind == KIND_BAND) {
@@ -704,7 +754,7 @@ class Facade {
                 if (on) {
                     let k = window_level();
                     self.cells[base + c] = color_scale(style.tint, k);
-                    if (k > 0.55) self.hot[base + c] = 1;
+                    if (k > 0.55) self.hot[base + c] = 2; else self.hot[base + c] = 1;
                 } else {
                     self.cells[base + c] = window_off();
                 }
@@ -822,47 +872,43 @@ class Building {
     render(self, fb) {
         let xf = self.xf;
 
-        // Side wall (constant X), drawn first: it is the one we are alongside
-        let side_fog = fog_factor(self.z0 - cam_z);
+        // Everything about this building's detail comes off its own distance,
+        // so two buildings side by side always shed detail in depth order
+        let d = self.z0 - cam_z;
+        let f_unlit = lod_fade(d, UNLIT_FADE, UNLIT_GONE);
+        let f_lit = lod_fade(d, LIT_FADE, LIT_GONE);
+        let f_band = lod_fade(d, BAND_FADE, BAND_GONE);
 
-        // Side walls read slightly darker than the front, which is what
-        // gives the boxes their sense of volume
-        let side_wall = fog_mix(color_scale(self.wall, 0.62), side_fog);
+        // The last of its range is spent sinking into the haze, so a building
+        // never appears out of nothing at the far edge of the world
+        let far = lod_fade(d, BUILD_FADE, CULL_FAR);
+        let var fog = fog_factor(d);
+        if (far < 1.0) fog = fog + (1.0 - far) * (1.0 - fog);
+
+        // Side wall (constant X), drawn first: it is the one we are alongside.
+        // Side walls read slightly darker than the front, which is what gives
+        // the boxes their sense of volume.
+        let side_wall = fog_mix(color_scale(self.wall, 0.62), fog);
         world_quad(fb,
             xf, self.height, self.z0,
             xf, self.height, self.z1,
             xf, self.base, self.z1,
             xf, self.base, self.z0,
             side_wall);
-
-        // Skip the windows once the wall is only a sliver on screen. Looking
-        // along it rather than at it foreshortens its whole depth into the
-        // gap between where its two ends project to.
-        let za = (self.z0 - cam_z).max(NEAR_Z);
-        let zb = (self.z1 - cam_z).max(za + 0.001);
-        if ((xf - cam_x).abs() * FOCAL * (zb - za) / (za * zb) > 3.0) {
-            draw_facade(fb, self.side, xf, 0.0, self.z0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
-                        self.z1 - self.z0, side_fog, side_wall);
-        }
+        draw_facade(fb, self.side, xf, 0.0, self.z0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                    self.z1 - self.z0, fog, side_wall, f_unlit, f_lit, f_band);
 
         // Near wall (constant Z)
-        let d = self.z0 - cam_z;
         if (d >= NEAR_Z) {
-            let px_per_m = FOCAL / d;
-            let fog = fog_factor(d);
             let wall = fog_mix(self.wall, fog);
-
             world_quad(fb,
                 self.x0, self.height, self.z0,
                 self.x1, self.height, self.z0,
                 self.x1, self.base, self.z0,
                 self.x0, self.base, self.z0,
                 wall);
-
-            if ((self.x1 - self.x0) * px_per_m > 3.0) {
-                draw_facade(fb, self.front, self.x0, 0.0, self.z0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-                            self.x1 - self.x0, fog, wall);
-            }
+            draw_facade(fb, self.front, self.x0, 0.0, self.z0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                        self.x1 - self.x0, fog, wall, f_unlit, f_lit, f_band);
         }
     }
 }
@@ -898,10 +944,13 @@ fun row_offscreen(hx, hy, hz, lx, ly, lz, ux, uy, uz, span) {
 // same coordinates the Facade was laid out in. One function now covers both
 // walls of a building, and any tilted wall we add later.
 //
-// px_per_m is roughly how many pixels a meter of this wall covers, which is
-// what decides when detail has shrunk below a pixel and can be dropped.
+// f_unlit, f_lit and f_band are how present each kind of detail is at this
+// building's distance, from 1 down to 0. Anything below 1 is lerped toward
+// the wall it sits on, so a window is already the wall color by the time it
+// is dropped and nothing pops. The caller works them out from the building's
+// distance alone, which is what keeps detail going in depth order.
 fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
-                span, fog, wall) {
+                span, fog, wall, f_unlit, f_lit, f_band) {
     let cols = f.cols;
 
     // The wall is flat, so its corners are an eye-space origin plus multiples
@@ -922,13 +971,19 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
     // fixed for the whole wall. So one squared compare says whether a column
     // has gone narrower than a pixel, with no division, and it accounts for
     // the foreshortening of a wall we are looking along rather than at.
-    let cull_z2 = (u_x * o_z - o_x * u_z).abs() * FOCAL * f.uwin;
-    let row_cull_z = f.vwin * FOCAL;
+    let cull_z2 = (u_x * o_z - o_x * u_z).abs() * FOCAL * f.uwin / MIN_WIN_PX;
+    let row_cull_z = f.vwin * FOCAL / MIN_WIN_PX;
     let u_end = u_z * span;
+
+    // Nothing of this kind is left at this distance, so skip the walk
+    let grid_gone = f_lit <= 0.0 && f_unlit <= 0.0;
+    if (grid_gone && f_band <= 0.0) return;
 
     for (let var r = 0; r < f.rows; ++r) {
         let kind = f.row_kind[r];
         if (kind == 0) continue;
+        if (kind == 2 && f_band <= 0.0) continue;
+        if (kind == 1 && grid_gone) continue;
 
         let v_lo = f.v0 + r.to_f() * f.vpitch;
         let v_hi = v_lo + f.vwin;
@@ -947,7 +1002,8 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
         if (kind == 2) {
             let ua = f.u0 + f.row_c0[r].to_f() * f.upitch;
             let ub = f.u0 + f.row_c1[r].to_f() * f.upitch + f.uwin;
-            let color = fog_mix(f.row_color[r], fog);
+            let var color = fog_mix(f.row_color[r], fog);
+            if (f_band < 1.0) color = color_lerp(wall, color, f_band);
             let var g = 0.0;
             // A band earns a halo once it is thick enough on screen to show
             if (f.row_hot[r] == 1) {
@@ -967,16 +1023,31 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
 
         let base = r * cols;
         for (let var c = 0; c < cols; ++c) {
+            let hot = f.hot[base + c];
             let ua = f.u0 + c.to_f() * f.upitch;
             let ub = ua + f.uwin;
             let az = hz + u_z * ua;
             let bz = hz + u_z * ub;
-            // Distance culls the far end of a wall we are driving alongside,
-            // where the columns have gone narrower than a pixel
-            if (az * az > cull_z2 && bz * bz > cull_z2) continue;
             if (az < NEAR_Z && bz < NEAR_Z) continue;
 
-            let col = fog_mix(f.cells[base + c], fog);
+            // Nearest squared depth of the two edges, which is what decides
+            // how far into its fade this window is. A wall we are driving
+            // alongside runs its columns out through the whole range at once.
+            let var z2 = az * az;
+            let bz2 = bz * bz;
+            if (bz2 < z2) z2 = bz2;
+            // The floor: a sliver narrower than a pixel is never worth a quad
+            if (z2 > cull_z2) continue;
+
+            // How present this window is at the building's distance. Unlit
+            // glass goes first, being the nearest thing to the wall already.
+            let var pres = f_lit;
+            if (hot == 0) pres = f_unlit;
+            if (pres <= 0.0) continue;
+
+            let var col = fog_mix(f.cells[base + c], fog);
+            if (pres < 1.0) col = color_lerp(wall, col, pres);
+
             let ax = hx + u_x * ua; let ay = hy + u_y * ua;
             let bx = hx + u_x * ub; let by = hy + u_y * ub;
             let cx = lx + u_x * ub; let cy = ly + u_y * ub; let cz = lz + u_z * ub;
@@ -984,7 +1055,7 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
 
             // Only genuinely bright rooms bleed light onto the wall, and only
             // once they are big enough on screen for the bleed to show
-            if (f.hot[base + c] == 1 && az >= NEAR_Z) {
+            if (hot == 2 && az >= NEAR_Z) {
                 eye_quad_halo(fb, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
                               col, wall,
                               (f.vwin * FOCAL / az * 0.2).min(WIN_GLOW_MAX.to_f()));
@@ -1019,14 +1090,14 @@ fun build_background() {
             // Sky: near-black at the zenith warming into the haze at the horizon
             let t = y.to_f() / horizon.to_f();
             let tt = t * t * t;
-            bg_rows[y] = color_lerp(0xFF05060E, FOG_COLOR, tt);
+            bg_rows[y] = color_lerp(0xFF0A0614, FOG_COLOR, tt);
         } else {
             // No ground plane. Below the horizon is open air falling away
             // under the elevated deck, so it drops off into the dark rather
             // than settling onto a lit surface.
             let t = (y - horizon).to_f() / (FRAME_HEIGHT - horizon).to_f();
             let tt = (t * 4.0).min(1.0);
-            bg_rows[y] = color_lerp(FOG_COLOR, 0xFF04050A, tt);
+            bg_rows[y] = color_lerp(FOG_COLOR, 0xFF08040E, tt);
         }
     }
 }
@@ -1414,10 +1485,13 @@ build_stars(500);
 
 // --- City layout ---
 
-let BLOCK_HALF = 25.0;     // Nearest a building may come to the center line
-let SETBACK_MAX = 20.0;    // Extra distance back from the block line
-let WIDTH_MIN = 15.0;
-let WIDTH_MAX = 40.0;
+// The block line sits a long way back off a road this wide, which is what
+// opens the canyon out and lets the towers stand up properly instead of
+// leaning over the carriageway
+let BLOCK_HALF = 45.0;     // Nearest a building may come to the center line
+let SETBACK_MAX = 26.0;    // Extra distance back from the block line
+let WIDTH_MIN = 18.0;
+let WIDTH_MAX = 46.0;
 
 // A building lives inside one slot and never crosses into the next, which is
 // what lets a chunk be built without knowing anything about its neighbours.
@@ -1455,9 +1529,10 @@ fun generate_slot(list, side, zs) {
     // Where it sits in its slot is what opens the gap to the one before it
     let lead = rand_float(0.0, SLOT_LEN - depth);
 
-    // Roughly 12 to 27 floors normally, with a minority of real towers
-    let var height = rand_float(42.0, 90.0);
-    if (rand_float(0.0, 1.0) < 0.28) height = rand_float(90.0, 187.5);
+    // Set back this far, a mid-rise no longer fills the frame, so the whole
+    // range has moved up and the towers reach a lot higher
+    let var height = rand_float(70.0, 150.0);
+    if (rand_float(0.0, 1.0) < 0.34) height = rand_float(150.0, 330.0);
 
     let var x0 = 0.0;
     let var x1 = 0.0;
@@ -1571,7 +1646,7 @@ let var live_hi = 0;
 // leaves here on the first compare.
 fun ensure_chunks() {
     let iz_lo = (cam_z / CHUNK_LEN).floor() - CHUNK_BEHIND;
-    let iz_hi = ((cam_z + FOG_END) / CHUNK_LEN).floor();
+    let iz_hi = ((cam_z + CULL_FAR) / CHUNK_LEN).floor();
     if (iz_lo == live_lo && iz_hi == live_hi) return;
     live_lo = iz_lo;
     live_hi = iz_hi;
@@ -1610,7 +1685,7 @@ let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 // once one object is past the haze every object after it is too.
 fun collect_scene() {
     let near = cam_z + NEAR_Z;
-    let far = cam_z + FOG_END;
+    let far = cam_z + CULL_FAR;
     for (let var i = 0; i < scene.len; ++i) {
         let o = scene[i];
         if (o.zn > far) break;
