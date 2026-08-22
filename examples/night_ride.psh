@@ -739,14 +739,6 @@ class Facade {
         // since they are the closest to the wall they sit on.
         self.hot = Array.with_size(rows * cols, 0);
 
-        // What this facade averages out to, and how much of the wall its
-        // glass covers. Once the windows have faded out the wall has to take
-        // on this instead of the bare concrete underneath, or a building
-        // visibly darkens as it loses its detail and stands out against the
-        // neighbour that still has it.
-        self.avg = 0;
-        self.cover = 0.0;
-
         if (style.kind == KIND_BAND) {
             self.gen_bands(style);
         } else {
@@ -795,40 +787,6 @@ class Facade {
             }
             r = r + thick;
         }
-        self.set_average();
-    }
-
-    // Mean of everything drawn on the wall, and the share of the wall it
-    // takes up, so a faded-out facade can be replaced by one flat quad that
-    // still reads as the same brightness from a distance
-    set_average(self) {
-        let var sr = 0; let var sg = 0; let var sb = 0; let var n = 0;
-        for (let var r = 0; r < self.rows; ++r) {
-            if (self.row_kind[r] == 2) {
-                let c = self.row_color[r];
-                sr = sr + ((c >> 16) & 0xFF); sg = sg + ((c >> 8) & 0xFF);
-                sb = sb + (c & 0xFF); n = n + 1;
-            } else if (self.row_kind[r] == 1) {
-                let base = r * self.cols;
-                for (let var c = 0; c < self.cols; ++c) {
-                    let v = self.cells[base + c];
-                    sr = sr + ((v >> 16) & 0xFF); sg = sg + ((v >> 8) & 0xFF);
-                    sb = sb + (v & 0xFF); n = n + 1;
-                }
-            }
-        }
-        if (n == 0) return;
-        self.avg = 0xFF000000 | ((sr _/ n) << 16) | ((sg _/ n) << 8) | (sb _/ n);
-
-        let vfrac = self.vwin / self.vpitch;
-        if (self.row_kind[0] == 2) {
-            // A band covers the columns it spans rather than one pitch
-            let span = (self.row_c1[0] - self.row_c0[0]).to_f() * self.upitch
-                       + self.uwin;
-            self.cover = (span / (self.cols.to_f() * self.upitch)).min(1.0) * vfrac;
-        } else {
-            self.cover = (self.uwin / self.upitch) * vfrac;
-        }
     }
 
     // Grid only: every cell of every floor gets a window. Lit ones vary in
@@ -867,7 +825,6 @@ class Facade {
                 }
             }
         }
-        self.set_average();
     }
 }
 
@@ -1000,18 +957,6 @@ class Building {
         self.front = nil;
         self.side = nil;
 
-        // What a facade would average out to, worked out from the style
-        // rather than by laying one out. Used for the flat, faded-out LOD
-        // whether or not the real facade exists yet, so a building gaining
-        // one does not change colour.
-        let var tint = style.accent;
-        let var cover = 0.42 * 0.5;
-        if (shape[0] != KIND_BAND) {
-            tint = color_scale(style.tint, 0.55 * style.lit_prob + 0.2);
-            cover = style.frac_u * style.frac_v;
-        }
-        self.avg_front = color_lerp(self.wall, tint, cover);
-        self.avg_side = color_lerp(color_scale(self.wall, 0.62), tint, cover);
     }
 
     build_detail(self) {
@@ -1113,8 +1058,7 @@ class Building {
         // Side wall (constant X), drawn first: it is the one we are alongside.
         // Side walls read slightly darker than the front, which is what gives
         // the boxes their sense of volume.
-        let s_plain = color_scale(self.wall, 0.62);
-        let var side_wall = fog_mix(color_lerp(self.avg_side, s_plain, shown), fog);
+        let var side_wall = fog_mix(color_scale(self.wall, 0.62), fog);
         if (far < 1.0) side_wall = color_lerp(back, side_wall, far);
         world_quad(fb,
             xf, self.height, self.z0,
@@ -1124,13 +1068,13 @@ class Building {
             side_wall);
         if (shown > 0.0) {
             draw_facade(fb, self.side, xf, 0.0, self.z0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
-                        self.z1 - self.z0, fog, fog_mix(s_plain, fog),
+                        self.z1 - self.z0, fog, side_wall,
                         f_unlit, f_lit, f_band);
         }
 
         // Near wall (constant Z)
         if (d >= NEAR_Z) {
-            let var wall = fog_mix(color_lerp(self.avg_front, self.wall, shown), fog);
+            let var wall = fog_mix(self.wall, fog);
             if (far < 1.0) wall = color_lerp(back, wall, far);
             world_quad(fb,
                 self.x0, self.height, self.z0,
@@ -1140,7 +1084,7 @@ class Building {
                 wall);
             if (shown > 0.0) {
                 draw_facade(fb, self.front, self.x0, 0.0, self.z0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-                            self.x1 - self.x0, fog, fog_mix(self.wall, fog),
+                            self.x1 - self.x0, fog, wall,
                             f_unlit, f_lit, f_band);
             }
         }
