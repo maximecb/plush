@@ -46,8 +46,8 @@ let FOG_COLOR = 0xFF000000 | (FOG_R << 16) | (FOG_G << 8) | FOG_B;
 // Every world-space length in this file is in meters, including building
 // sizes, window pitches, camera height, fog distances and speed (m/s).
 
-// An odd lane count puts the middle lane astride x = 0, so the camera sitting
-// at cam_x = 0 is centered in it rather than straddling a lane line.
+// Odd on purpose: it puts the middle lane astride x = 0, so a rider at
+// lane_x = 0 sits centered in it rather than straddling a lane line.
 let NUM_LANES = 7;
 let LANE_W = 3.7;          // Standard highway lane
 
@@ -190,10 +190,12 @@ fun color_lerp(a, b, t) {
 // angle at zero the rows are the identity and that reduces to the plain
 // look-down-+Z projection this started out with.
 
-let var cam_x = 0.0;
 // Eye height of a rider on a motorcycle: about 0.8m of seat plus about 0.75m
 // of seated torso and head
-let var cam_y = 1.55;
+let EYE_H = 1.55;
+
+let var cam_x = 0.0;
+let var cam_y = EYE_H;
 let var cam_z = 0.0;
 
 let var cam_yaw = 0.0;
@@ -219,6 +221,67 @@ fun update_camera() {
     r00 = ax * cr - ux * sr; r01 = ay * cr - uy * sr; r02 = az * cr - uz * sr;
     r10 = ux * cr + ax * sr; r11 = uy * cr + ay * sr; r12 = uz * cr + az * sr;
     r20 = fx; r21 = fy; r22 = fz;
+}
+
+// --- Rider motion ---
+//
+// A bike is never still. Roll, pitch and eye height each get a sum of three
+// sines, and the nine frequencies are picked so no two are in a simple ratio.
+// A sum like that has no short period, so the motion never settles into a
+// loop the eye can catch, which one sine per axis would do within seconds.
+//
+// On top of the sway sits a faster tremble standing in for the engine. Its
+// rate has to stay well under half the frame rate or it aliases into a slow
+// wobble, so it runs far below a real engine and leans on amplitude rather
+// than speed to read as vibration.
+
+let SWAY_ROLL = 1.8 * PI / 180.0;    // peak lean either way
+let SWAY_RISE = 0.03;                // meters of suspension travel
+let VIB_ROLL = 0.06 * PI / 180.0;
+let VIB_RISE = 0.0022;
+let VIB_W0 = 11.0 * 2.0 * PI;        // rad/s, safely under Nyquist at 40fps
+let VIB_W1 = 7.3 * 2.0 * PI;
+
+// Steering and look angles the rider is holding, before any of the above
+let var lean_base = 0.0;
+let var pitch_base = 0.0;
+let var lane_x = 0.0;
+
+let var ride_t = 0.0;
+
+// Three sines, weighted so the sum stays inside [-1, 1]
+fun sway(t, w0, w1, w2, phase) {
+    return 0.55 * (t * w0 + phase).sin()
+         + 0.30 * (t * w1 + phase * 1.7).sin()
+         + 0.15 * (t * w2 + phase * 2.3).sin();
+}
+
+// speed_frac scales the engine tremble, so it fades out when stopped
+fun update_ride(dt, speed_frac) {
+    ride_t = ride_t + dt;
+    let t = ride_t;
+
+    let vib = (t * VIB_W0).sin() * 0.7 + (t * VIB_W1).sin() * 0.3;
+    // Balance drifts slowly. Halving these against the other axes is what
+    // makes the lean read as the bike settling rather than being nudged.
+    let lean = lean_base + SWAY_ROLL * sway(t, 0.97, 1.67, 2.73, 0.0)
+             + VIB_ROLL * vib * speed_frac;
+
+    cam_roll = lean;
+    // No sway on pitch. A pitch of even half a degree slides the whole frame
+    // several pixels at every distance, which reads as the horizon drifting
+    // rather than as the bike moving. Suspension travel goes into cam_y
+    // below instead, where it shows as parallax on the near road and leaves
+    // the far city still.
+    cam_pitch = pitch_base;
+
+    // The bike pivots on its contact patch, not on the rider's head, so a
+    // lean swings the eye out sideways and drops it a little. Without this
+    // the same angle reads as the rider tilting their head instead.
+    let rise = SWAY_RISE * sway(t, 2.11, 3.77, 6.13, 2.6)
+             + VIB_RISE * vib * speed_frac;
+    cam_x = lane_x + EYE_H * lean.sin();
+    cam_y = EYE_H * lean.cos() + rise;
 }
 
 // --- Fog ---
@@ -1327,9 +1390,9 @@ if (mode_arg == "--capture") {
     capture_frames = $cmd_get_arg_or(2, "1").parse_int(10);
     capture_prefix = $cmd_get_arg_or(3, "frame");
     capture_step = $cmd_get_arg_or(4, "1.6").parse_float();
-    // Fixed lean and look angle, so a capture can check the rotation path
-    cam_roll = $cmd_get_arg_or(5, "0.0").parse_float() * PI / 180.0;
-    cam_pitch = $cmd_get_arg_or(6, "0.0").parse_float() * PI / 180.0;
+    // A lean and look angle the rider holds, on top of which the sway runs
+    lean_base = $cmd_get_arg_or(5, "0.0").parse_float() * PI / 180.0;
+    pitch_base = $cmd_get_arg_or(6, "0.0").parse_float() * PI / 180.0;
 }
 
 rand_init(12345);
@@ -1566,11 +1629,16 @@ fun render_frame(fb) {
     road.render(fb);
 }
 
+// Both offline modes step the clock at a fixed rate, so a capture is
+// reproducible and a benchmark still pays for the motion
+let OFFLINE_DT = 1.0 / 60.0;
+
 if (mode_arg == "--bench") {
     let n = $cmd_get_arg_or(2, "120").parse_int(10);
     let t0 = $time_current_ms();
     for (let var i = 0; i < n; ++i) {
         cam_z = i.to_f() * 1.6;
+        update_ride(OFFLINE_DT, 1.0);
         render_frame(frame_buffer);
     }
     let ms = $time_current_ms() - t0;
@@ -1583,6 +1651,7 @@ if (mode_arg == "--bench") {
 if (capture_frames > 0) {
     for (let var i = 0; i < capture_frames; ++i) {
         cam_z = i.to_f() * capture_step;
+        update_ride(OFFLINE_DT, 1.0);
         render_frame(frame_buffer);
         $write_file(capture_prefix + "_" + i.to_s() + ".raw", frame_buffer);
     }
@@ -1621,6 +1690,7 @@ loop {
     let step = dt.min(0.1);
     if (!paused) {
         cam_z = cam_z + speed * step;
+        update_ride(step, 1.0);
         update_scene(step);
     }
 
