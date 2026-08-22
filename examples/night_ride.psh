@@ -48,7 +48,7 @@ let FOG_COLOR = 0xFF000000 | (FOG_R << 16) | (FOG_G << 8) | FOG_B;
 
 // An odd lane count puts the middle lane astride x = 0, so the camera sitting
 // at cam_x = 0 is centered in it rather than straddling a lane line.
-let NUM_LANES = 5;
+let NUM_LANES = 7;
 let LANE_W = 3.7;          // Standard highway lane
 
 let ROAD_HALF = LANE_W * NUM_LANES.to_f() * 0.5;
@@ -255,101 +255,90 @@ fun fill_rect_halo(fb, x0, y0, x1, y1, color, back, g) {
     fill_rect(fb, x0, y0, x1, y1, color);
 }
 
-// Flat-shaded triangle taking raw float coordinates, adapted from
-// benchmarks/rasterize.psh. +x points right, +y points down.
-fun raster_tri(fb, ax, ay, bx, by, cx, cy, color) {
-    let var x0 = ax; let var py0 = ay;
-    let var x1 = bx; let var py1 = by;
-    let var x2 = cx; let var py2 = cy;
+// Corners of the quad being drawn. Reused so that a fill never allocates.
+let QX = Array.with_size(4, 0.0);
+let QY = Array.with_size(4, 0.0);
 
-    if (py0 > py1) {
-        let tx = x0; let ty = py0;
-        x0 = x1; py0 = py1; x1 = tx; py1 = ty;
-    }
-    if (py0 > py2) {
-        let tx = x0; let ty = py0;
-        x0 = x2; py0 = py2; x2 = tx; py2 = ty;
-    }
-    if (py1 > py2) {
-        let tx = x1; let ty = py1;
-        x1 = x2; py1 = py2; x2 = tx; py2 = ty;
-    }
-
-    let y0 = py0.floor();
-    let y1 = py1.floor();
-    let y2 = py2.floor();
-    if (y0 == y2) return;
-
-    let var inv_slope1 = 0.0;
-    if (py1 > py0) inv_slope1 = (x1 - x0) / (py1 - py0);
-
-    let var inv_slope2 = 0.0;
-    if (py2 > py0) inv_slope2 = (x2 - x0) / (py2 - py0);
-
-    let start_top = y0.max(0);
-    let end_top = y1.min(FRAME_HEIGHT);
-
-    // Top half
-    if (start_top < end_top) {
-        let dy = start_top + 1 - py0;
-        let xa = x0 + dy * inv_slope1;
-        let xb = x0 + dy * inv_slope2;
-
-        // Both edges radiate from p0, so the left/right roles are fixed
-        // for the whole half and can be decided once
-        let var cur_xl = xa; let var slope_l = inv_slope1;
-        let var cur_xr = xb; let var slope_r = inv_slope2;
-        if (xb < xa) {
-            cur_xl = xb; slope_l = inv_slope2;
-            cur_xr = xa; slope_r = inv_slope1;
-        }
-
-        for (let var y = start_top; y < end_top; ++y) {
-            let sx = cur_xl.floor().max(0);
-            let ex = cur_xr.floor().min(FRAME_WIDTH);
-            if (sx < ex) {
-                fb.fill_u32(y * FRAME_WIDTH + sx, ex - sx, color);
-            }
-            cur_xl = cur_xl + slope_l;
-            cur_xr = cur_xr + slope_r;
-        }
-    }
-
-    let var inv_slope3 = 0.0;
-    if (py2 > py1) inv_slope3 = (x2 - x1) / (py2 - py1);
-
-    let start_bot = y1.max(0);
-    let end_bot = y2.min(FRAME_HEIGHT);
-
-    // Bottom half
-    if (start_bot < end_bot) {
-        let xa = x1 + (start_bot + 1 - py1) * inv_slope3;
-        let xb = x0 + (start_bot + 1 - py0) * inv_slope2;
-
-        // Both edges converge on p2, so the order is fixed here too
-        let var cur_xl = xa; let var slope_l = inv_slope3;
-        let var cur_xr = xb; let var slope_r = inv_slope2;
-        if (xb < xa) {
-            cur_xl = xb; slope_l = inv_slope2;
-            cur_xr = xa; slope_r = inv_slope3;
-        }
-
-        for (let var y = start_bot; y < end_bot; ++y) {
-            let sx = cur_xl.floor().max(0);
-            let ex = cur_xr.floor().min(FRAME_WIDTH);
-            if (sx < ex) {
-                fb.fill_u32(y * FRAME_WIDTH + sx, ex - sx, color);
-            }
-            cur_xl = cur_xl + slope_l;
-            cur_xr = cur_xr + slope_r;
-        }
-    }
-}
-
-// Convex screen-space quad, corners given in order around the perimeter
+// Convex screen-space quad, corners given in order around the perimeter.
+// +x points right, +y points down. See benchmarks/raster_quad.psh.
+//
+// Cutting the quad into two triangles makes the rasterizer visit each of its
+// scanlines twice, once per triangle. This walks the left and right corner
+// chains down from the topmost corner instead, so a scanline is visited once.
+// A corner may be repeated, which is how a triangle is drawn.
 fun fill_quad(fb, x0, y0, x1, y1, x2, y2, x3, y3, color) {
-    raster_tri(fb, x0, y0, x1, y1, x2, y2, color);
-    raster_tri(fb, x0, y0, x2, y2, x3, y3, color);
+    // Both chains run from the topmost corner to the bottom-most one
+    let var top = 0; let var y_min = y0;
+    let var bot = 0; let var y_max = y0;
+    if (y1 < y_min) { y_min = y1; top = 1; }
+    if (y2 < y_min) { y_min = y2; top = 2; }
+    if (y3 < y_min) { y_min = y3; top = 3; }
+    if (y1 > y_max) { y_max = y1; bot = 1; }
+    if (y2 > y_max) { y_max = y2; bot = 2; }
+    if (y3 > y_max) { y_max = y3; bot = 3; }
+
+    let start_y = y_min.floor().max(0);
+    let end_y = y_max.floor().min(FRAME_HEIGHT);
+    if (start_y >= end_y) return;
+
+    QX[0] = x0; QY[0] = y0; QX[1] = x1; QY[1] = y1;
+    QX[2] = x2; QY[2] = y2; QX[3] = x3; QY[3] = y3;
+
+    // Winding says which way round the left chain runs. Measured across the
+    // diagonals rather than as the turn at the top corner, because that turn
+    // reads as zero whenever the top corner is the repeated one.
+    let var step_l = 1;
+    if ((x2 - x0) * (y3 - y1) - (x3 - x1) * (y2 - y0) > 0.0) step_l = 3;
+    let step_r = 4 - step_l;
+
+    // Per chain: the corner reached so far, the current x, how far x moves
+    // per scanline, and the scanline its current edge runs out on
+    let var cl = top; let var xl = 0.0; let var dxl = 0.0; let var end_l = start_y;
+    let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = start_y;
+
+    let var y = start_y;
+    let var row = start_y * FRAME_WIDTH;
+
+    while (y < end_y) {
+        // Step either chain the current scanline has run past. Edges too
+        // short to cover a scanline are skipped by the same loop.
+        while (y >= end_l && cl != bot) {
+            let ya = QY[cl]; let xa = QX[cl];
+            cl = (cl + step_l) & 3;
+            let yb = QY[cl];
+            end_l = yb.floor().min(end_y);
+            if (end_l > y) {
+                dxl = (QX[cl] - xa) / (yb - ya);
+                xl = xa + (y + 1 - ya) * dxl;
+            }
+        }
+        while (y >= end_r && cr != bot) {
+            let ya = QY[cr]; let xa = QX[cr];
+            cr = (cr + step_r) & 3;
+            let yb = QY[cr];
+            end_r = yb.floor().min(end_y);
+            if (end_r > y) {
+                dxr = (QX[cr] - xa) / (yb - ya);
+                xr = xa + (y + 1 - ya) * dxr;
+            }
+        }
+
+        // Both edges hold for this band, so it runs with no further checks
+        let band_end = end_l.min(end_r);
+        if (band_end <= y) return;
+
+        while (y < band_end) {
+            let sx = xl.floor().max(0);
+            let ex = xr.floor().min(FRAME_WIDTH);
+            if (sx < ex) {
+                fb.fill_u32(row + sx, ex - sx, color);
+            }
+            xl = xl + dxl;
+            xr = xr + dxr;
+            row = row + FRAME_WIDTH;
+            ++y;
+        }
+    }
 }
 
 // --- Facades ---
@@ -1220,7 +1209,7 @@ if (capture_frames > 0) {
     return;
 }
 
-let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Night Drive", 0);
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Night Ride", 0);
 
 let var paused = false;
 let var speed = 48.0;      // meters per second
