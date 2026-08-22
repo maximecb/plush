@@ -107,22 +107,26 @@ let WIN_GLOW_MAX = (GLOW_MAX _/ 2).max(1);
 // rather than bloom cores or large signage.
 //
 // A building picks one WIN_TINTS entry and uses it for every window it has.
+// The pale gold, warm white and pale cyan that used to sit here read as faint
+// beige once dimmed, so the warm half is now saturated amber/orange/yellow and
+// the cool half leans on blue rather than washed-out near-whites.
 let WIN_TINTS = [
-    0xFFF8B858, // amber, the dominant window in city_04
-    0xFFF8C878, // warm gold
-    0xFFF8D291, // pale gold
-    0xFFF8F898, // pale yellow
-    0xFFF8F8E8, // warm white
+    0xFFFFB030, // bright amber, the dominant window in city_04
+    0xFFFF8418, // orange
+    0xFFFFC824, // golden yellow
+    0xFFFFF040, // bright yellow
+    0xFFFFF888, // light yellow
     0xFFF8F8F8, // white
-    0xFFD8F8F8, // pale cyan
-    0xFF88F8F8, // cyan
-    0xFF28E8F8, // bright cyan
+    0xFF60F0F8, // cyan
+    0xFF20E0F8, // bright cyan
+    0xFF70C8FF, // light blue
     0xFF3898F8, // sky blue
-    0xFF1868E8, // mid blue
-    0xFF283898, // deep blue
+    0xFF1868F8, // vivid blue
+    0xFF2038C8, // deep blue
 ];
 
-// Weighted toward the warm end, which is how both references read
+// Weighted toward the warm end, which is how both references read, with the
+// blues given a bigger share than before
 let TINT_WARM_END = 5;
 let TINT_COOL_END = 9;
 
@@ -132,11 +136,11 @@ let NEON = [
     0xFF28F8F8, // bright cyan
     0xFF40E0B0, // teal
     0xFFF8F858, // yellow
-    0xFFF8B858, // amber
-    0xFFF8A898, // salmon
+    0xFFFFB030, // amber
+    0xFFFF8418, // orange
     0xFFE8402C, // red
     0xFFF050C0, // magenta
-    0xFFF88FBB, // pink
+    0xFF1848F8, // vivid blue
     0xFF3898F8, // blue
 ];
 
@@ -413,11 +417,10 @@ class Facade {
             let var color = 0;
             let var hot = 0;
             if (rand_float(0.0, 1.0) < style.band_prob) {
-                // Mostly the building's own accent, so a strip building reads
-                // as one sign rather than several. Raise this for more mixing.
-                let var base = style.accent;
-                if (rand_float(0.0, 1.0) < 0.12) base = NEON[rand_int(0, NEON.len)];
-                color = color_scale(base, rand_float(0.62, 1.0));
+                // Always the building's own accent. Only the brightness
+                // varies, never the hue, so the whole building reads as one
+                // sign rather than a stack of unrelated ones.
+                color = color_scale(style.accent, rand_float(0.62, 1.0));
                 hot = 1;
             } else {
                 // An unlit strip is grey glass, same as an unlit window
@@ -478,21 +481,24 @@ class Facade {
 // coherent block of light rather than as confetti
 fun pick_window_tint() {
     let roll = rand_float(0.0, 1.0);
-    if (roll < 0.60) return WIN_TINTS[rand_int(0, TINT_WARM_END)];
-    if (roll < 0.88) return WIN_TINTS[rand_int(TINT_WARM_END, TINT_COOL_END)];
+    if (roll < 0.56) return WIN_TINTS[rand_int(0, TINT_WARM_END)];
+    if (roll < 0.76) return WIN_TINTS[rand_int(TINT_WARM_END, TINT_COOL_END)];
     return WIN_TINTS[rand_int(TINT_COOL_END, WIN_TINTS.len)];
 }
 
 // Brightness of one lit window. Rooms differ in which lights are on and what
 // is in them, so this spreads wide but stays weighted toward the bright end.
 // Discrete levels rather than a continuous range, which suits the flat shading.
+// The floor is well above zero: a warm tint scaled down far enough stops
+// reading as a dim light and starts reading as beige, which is what made some
+// windows look washed out.
 fun window_level() {
     let t = rand_float(0.0, 1.0);
     if (t < 0.32) return 1.0;
-    if (t < 0.56) return 0.78;
-    if (t < 0.75) return 0.58;
-    if (t < 0.90) return 0.40;
-    return 0.26;
+    if (t < 0.56) return 0.84;
+    if (t < 0.75) return 0.70;
+    if (t < 0.90) return 0.56;
+    return 0.44;
 }
 
 // Grey glass, varied a little so a dark floor is not a flat slab
@@ -1018,6 +1024,12 @@ let WIDTH_MIN = 15.0;
 let WIDTH_MAX = 40.0;
 let DEPTH_MIN = 16.0;
 let DEPTH_MAX = 42.0;
+
+// Gap along the road between one building and the next on the same side. Still
+// random, but the upper end is doubled so the row opens up in places instead
+// of reading as one continuous wall.
+let GAP_MIN = 1.5;
+let GAP_MAX = 18.0;
 let CITY_FAR = 1600.0;     // How far down the road buildings are generated
 
 // How far below the deck a building actually needs to reach.
@@ -1064,7 +1076,7 @@ fun generate_city(list, side) {
         }
 
         list.push(Building(x0, x1, z, z + depth, height, BUILDING_BASE));
-        z = z + depth + rand_float(1.5, 9.0);
+        z = z + depth + rand_float(GAP_MIN, GAP_MAX);
     }
 }
 
