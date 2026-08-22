@@ -60,11 +60,12 @@ fun rasterize_quad(v0, v1, v2, v3, color, fb) {
     let end_y = y_max.floor().min(FRAME_HEIGHT);
     if (start_y >= end_y) return;
 
-    // Winding at the top corner says which way round the left chain runs
-    let nxt = (top + 1) & 3;
-    let prv = (top + 3) & 3;
-    let cross = (qx[nxt] - qx[top]) * (qy[prv] - qy[top])
-              - (qx[prv] - qx[top]) * (qy[nxt] - qy[top]);
+    // Winding says which way round the left chain runs. Taken across the
+    // diagonals rather than as the turn at the top corner, because that turn
+    // reads as zero whenever the top corner is a repeat, which is what a quad
+    // standing in for a triangle looks like.
+    let cross = (qx[2] - qx[0]) * (qy[3] - qy[1])
+              - (qx[3] - qx[1]) * (qy[2] - qy[0]);
     let var step_l = 1;
     if (cross > 0.0) step_l = 3;   // that is -1, modulo 4
     let step_r = 4 - step_l;
