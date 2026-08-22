@@ -1000,6 +1000,78 @@ fun draw_road(fb) {
     }
 }
 
+// --- Lamp posts ---
+
+let LAMP_SPACING = 42.0;   // Along the road, matched on both sides
+let LAMP_DRAW_FAR = 320.0;
+let LAMP_H = 9.0;          // Top of the pole
+let LAMP_POLE_W = 0.24;
+let LAMP_ARM = 2.6;        // How far the arm reaches out over the carriageway
+let LAMP_ARM_T = 0.18;
+let LAMP_HEAD_W = 1.1;
+let LAMP_HEAD_H = 0.34;
+let LAMP_X = ROAD_HALF + BARRIER_W + 0.4;   // Just outside the barrier
+let LAMP_COLOR = 0xFFFFD070;
+// Light enough to read against the dark facades behind it
+let LAMP_POLE_COLOR = 0xFF474D58;
+
+// A whole lamp post lives at a single (x, z), so every part of it projects to
+// an axis-aligned screen rectangle, same as the constant-Z walls. None of it
+// needs the triangle rasterizer.
+fun draw_lamp(fb, side, z) {
+    let d = z - cam_z;
+    if (d < NEAR_Z) return;
+
+    let s = FOCAL / d;
+    let f = fog_factor(d);
+    let sgn = side.to_f();
+    let ay = CY + cam_y * s;          // Deck level
+    let y_top = (ay - LAMP_H * s).floor();
+    let pole_c = fog_mix(LAMP_POLE_COLOR, f);
+
+    // Pole. It runs down to the deck; the barrier hides its foot for us,
+    // because the deck is painted after the lamps.
+    let px = CX + (LAMP_X * sgn - cam_x) * s;
+    let hw = LAMP_POLE_W * 0.5 * s;
+    let px0 = (px - hw).floor();
+    fill_rect(fb, px0, y_top, (px + hw).floor().max(px0 + 1), ay.floor(), pole_c);
+
+    // Arm reaching in over the road
+    let inner = (LAMP_X - LAMP_ARM) * sgn;
+    let outer = LAMP_X * sgn;
+    let ax0 = CX + (outer.min(inner) - cam_x) * s;
+    let ax1 = CX + (outer.max(inner) - cam_x) * s;
+    fill_rect(fb, ax0.floor(), y_top, ax1.floor(),
+              (ay - (LAMP_H - LAMP_ARM_T) * s).floor().max(y_top + 1), pole_c);
+
+    // Lamp head, hanging off the inner end of the arm
+    let hx = CX + (inner - cam_x) * s;
+    let hhw = LAMP_HEAD_W * 0.5 * s;
+    let hx0 = (hx - hhw).floor();
+    let hy1 = (ay - (LAMP_H - LAMP_HEAD_H) * s).floor().max(y_top + 1);
+
+    // One tight halo rather than the banded three: the head is small, and the
+    // backdrop here has to be assumed dark rather than sampled, so a wide
+    // multi-step falloff would show up as a drawn frame around the lamp
+    fill_rect_halo(fb, hx0, y_top, (hx + hhw).floor().max(hx0 + 1), hy1,
+                   fog_mix(LAMP_COLOR, f), fog_mix(0xFF0B0D16, f),
+                   ((hy1 - y_top) _/ 2).min(3));
+}
+
+fun draw_lamps(fb) {
+    // Far to near, so a near post paints over a distant one
+    let var i = ((cam_z + LAMP_DRAW_FAR) / LAMP_SPACING).floor();
+    let near_i = (cam_z / LAMP_SPACING).floor();
+    while (i >= near_i) {
+        let z = i.to_f() * LAMP_SPACING;
+        if (z - cam_z >= NEAR_Z) {
+            draw_lamp(fb, -1, z);
+            draw_lamp(fb, 1, z);
+        }
+        i = i - 1;
+    }
+}
+
 // --- Main ---
 
 let mode_arg = $cmd_get_arg_or(1, "");
@@ -1109,6 +1181,11 @@ fun render_frame(fb) {
     for (let var i = buildings.len - 1; i >= 0; --i) {
         draw_building(fb, buildings[i]);
     }
+
+    // Lamps stand nearer the centre line than any building, so a building only
+    // overlaps one when it is more than twice as far away. Drawing them after
+    // every building is therefore correct.
+    draw_lamps(fb);
 
     // The deck goes last. Now that buildings carry on below it they overlap it
     // on screen, and wherever that happens the deck is always the nearer of the
