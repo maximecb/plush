@@ -1010,15 +1010,32 @@ class Building {
         self.built = true;
     }
 
-    // Eases every level toward where this distance says it should be. Runs
-    // for hidden buildings too, so one coming back into view starts from
-    // wherever it had faded to rather than snapping to full detail.
-    update_lod(self, d) {
+    // Eases every level toward where this building's distance down the road
+    // says it should be. Runs for hidden buildings too, so one coming back
+    // into view starts from wherever it had faded to rather than snapping to
+    // full detail.
+    //
+    // The trigger is the distance along Z alone, not the true distance to
+    // the building. Z falls steadily as we drive, so every threshold is
+    // crossed exactly once, in order, and each fade always gets to finish.
+    // True distance is dominated by lateral offset for anything well off the
+    // road: it can level off and leave a building stuck part-faded, or drift
+    // back and forth across a threshold. Nothing far enough to the side for
+    // the difference to matter is on screen anyway, since the bearing cull
+    // only lets a building through once Z is at least its lateral offset.
+    update_lod(self, dz) {
+        // Only distance drives this. Being hidden behind another building
+        // must not, or a building coming back into view carries a part-faded
+        // presence that caps its windows, and a further building that was
+        // never occluded shows its own first. Nothing needs fading on the
+        // way out from behind something anyway: the building in front is
+        // painted after this one, so it covers whatever should still be
+        // hidden, and the reveal is already gradual.
         let var t_show = 1.0;
-        if (self.hidden || d >= CULL_FAR) t_show = 0.0;
-        let var t_unlit = 0.0; if (d < UNLIT_GONE) t_unlit = 1.0;
-        let var t_lit = 0.0;   if (d < LIT_GONE) t_lit = 1.0;
-        let var t_band = 0.0;  if (d < BAND_GONE) t_band = 1.0;
+        if (dz >= CULL_FAR) t_show = 0.0;
+        let var t_unlit = 0.0; if (dz < UNLIT_GONE) t_unlit = 1.0;
+        let var t_lit = 0.0;   if (dz < LIT_GONE) t_lit = 1.0;
+        let var t_band = 0.0;  if (dz < BAND_GONE) t_band = 1.0;
 
         if (!self.lod_init) {
             self.lod_init = true;
@@ -1045,9 +1062,13 @@ class Building {
         // window detail while it is nowhere near us.
         let dz = (self.z0 - cam_z).max(0.0);
         let dx = xf - cam_x;
-        let d = (dz * dz + dx * dx).sqrt();
-        self.update_lod(d);
+        self.update_lod(dz);
+        if (self.hidden) return;
         if (self.p_show <= 0.0) return;
+
+        // Haze still goes on the true distance, since that is how far the
+        // light actually has to travel to reach us
+        let d = (dz * dz + dx * dx).sqrt();
 
         // Whatever is fading the building in as a whole caps its detail too,
         // so nothing arrives ahead of the wall it sits on
