@@ -1,0 +1,179 @@
+// Convex quad rasterization benchmark
+//
+// Splits a 1024x1024 frame buffer into 4096 equal-area quads and
+// rasterizes all of them, once per frame. This is the same grid that
+// benchmarks/rasterize.psh covers with 8192 triangles, so the two
+// timings are directly comparable.
+// Usage: plush benchmarks/raster_quad.psh [num_frames]
+
+let FRAME_WIDTH = 1024;
+let FRAME_HEIGHT = 1024;
+
+// Grid of cells, one quad each: 64 * 64 = 4096 quads
+let GRID_COLS = 64;
+let GRID_ROWS = 64;
+
+// Command-line argument for the number of frames to render
+let num_frames = $cmd_get_arg_or(1, "300").parse_int(10);
+if (num_frames == nil) {
+    $println("expected an integer number of frames");
+    $exit(1);
+}
+
+class Vec2 {
+    init(self, x, y) {
+        self.x = x;
+        self.y = y;
+    }
+}
+
+// Corners of the quad being drawn. Reused so that rasterizing never allocates.
+let qx = Array.with_size(4, 0.0);
+let qy = Array.with_size(4, 0.0);
+
+// This function expects the coordinates to be floats such that
+// x is in [0, FRAME_WIDTH] and +x points right
+// y is in [0, FRAME_HEIGHT] and +y points down
+//
+// The corners must be convex and given in order around the perimeter,
+// either winding. A planar quad always projects to such a shape.
+//
+// Cutting a quad into two triangles makes the rasterizer visit every
+// scanline of it twice, once per triangle. This walks the left and right
+// corner chains down from the topmost corner instead, so a scanline is
+// visited once, which is where the win over two triangles comes from.
+fun rasterize_quad(v0, v1, v2, v3, color, fb) {
+    qx[0] = v0.x; qy[0] = v0.y;
+    qx[1] = v1.x; qy[1] = v1.y;
+    qx[2] = v2.x; qy[2] = v2.y;
+    qx[3] = v3.x; qy[3] = v3.y;
+
+    // Both chains run from the topmost corner to the bottom-most one
+    let var top = 0; let var y_min = qy[0];
+    let var bot = 0; let var y_max = qy[0];
+    for (let var i = 1; i < 4; ++i) {
+        if (qy[i] < y_min) { y_min = qy[i]; top = i; }
+        if (qy[i] > y_max) { y_max = qy[i]; bot = i; }
+    }
+
+    let start_y = y_min.floor().max(0);
+    let end_y = y_max.floor().min(FRAME_HEIGHT);
+    if (start_y >= end_y) return;
+
+    // Winding at the top corner says which way round the left chain runs
+    let nxt = (top + 1) & 3;
+    let prv = (top + 3) & 3;
+    let cross = (qx[nxt] - qx[top]) * (qy[prv] - qy[top])
+              - (qx[prv] - qx[top]) * (qy[nxt] - qy[top]);
+    let var step_l = 1;
+    if (cross > 0.0) step_l = 3;   // that is -1, modulo 4
+    let step_r = 4 - step_l;
+
+    // Per chain: the corner reached so far, the current x, how far x moves
+    // per scanline, and the scanline its current edge runs out on
+    let var cl = top; let var xl = 0.0; let var dxl = 0.0; let var end_l = start_y;
+    let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = start_y;
+
+    let var scanline_y = start_y;
+    let var row = start_y * FRAME_WIDTH;
+
+    while (scanline_y < end_y) {
+        // Step either chain the current scanline has run past. Edges too
+        // short to cover a scanline are skipped by the same loop.
+        while (scanline_y >= end_l && cl != bot) {
+            let ya = qy[cl]; let xa = qx[cl];
+            cl = (cl + step_l) & 3;
+            let yb = qy[cl];
+            end_l = yb.floor().min(end_y);
+            if (end_l > scanline_y) {
+                dxl = (qx[cl] - xa) / (yb - ya);
+                xl = xa + (scanline_y + 1 - ya) * dxl;
+            }
+        }
+        while (scanline_y >= end_r && cr != bot) {
+            let ya = qy[cr]; let xa = qx[cr];
+            cr = (cr + step_r) & 3;
+            let yb = qy[cr];
+            end_r = yb.floor().min(end_y);
+            if (end_r > scanline_y) {
+                dxr = (qx[cr] - xa) / (yb - ya);
+                xr = xa + (scanline_y + 1 - ya) * dxr;
+            }
+        }
+
+        // Both edges hold for this band, so it runs with no further checks
+        let band_end = end_l.min(end_r);
+        if (band_end <= scanline_y) return;
+
+        while (scanline_y < band_end) {
+            let start_x = xl.floor().max(0);
+            let end_x = xr.floor().min(FRAME_WIDTH);
+            if (start_x < end_x) {
+                fb.fill_u32(row + start_x, end_x - start_x, color);
+            }
+            xl = xl + dxl;
+            xr = xr + dxr;
+            row = row + FRAME_WIDTH;
+            ++scanline_y;
+        }
+    }
+}
+
+// --- Pre-generated geometry ---
+
+// Grid of vertices, GRID_COLS + 1 of them per row
+let vertices = [];
+for (let var r = 0; r <= GRID_ROWS; ++r) {
+    for (let var c = 0; c <= GRID_COLS; ++c) {
+        vertices.push(Vec2(
+            (c * FRAME_WIDTH) / GRID_COLS,
+            (r * FRAME_HEIGHT) / GRID_ROWS
+        ));
+    }
+}
+
+// One quad per cell, as indices into the vertex array, wound around the
+// perimeter: top-left, top-right, bottom-right, bottom-left
+let indices = [];
+let colors = [];
+for (let var r = 0; r < GRID_ROWS; ++r) {
+    for (let var c = 0; c < GRID_COLS; ++c) {
+        let i00 = r * (GRID_COLS + 1) + c;
+        let i10 = i00 + GRID_COLS + 1;
+
+        indices.push(i00); indices.push(i00 + 1);
+        indices.push(i10 + 1); indices.push(i10);
+
+        colors.push(0xFF000000 | ((c * 4) << 16) | ((r * 4) << 8) | 0xC0);
+    }
+}
+
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+let num_quads = colors.len;
+
+// --- Rendering ---
+
+// The quads tile the whole frame, so there is no need to clear it
+let start_ms = $time_current_ms();
+
+for (let var frame = 0; frame < num_frames; ++frame) {
+    let var i = 0;
+    for (let var t = 0; t < num_quads; ++t) {
+        rasterize_quad(
+            vertices[indices[i]],
+            vertices[indices[i + 1]],
+            vertices[indices[i + 2]],
+            vertices[indices[i + 3]],
+            colors[t],
+            frame_buffer
+        );
+        i += 4;
+    }
+}
+
+let total_ms = $time_current_ms() - start_ms;
+let fps = (num_frames * 1000) / total_ms;
+
+$println(num_frames.to_s() + " frames of " + num_quads.to_s() + " quads");
+$println("total time: " + total_ms.to_s() + "ms");
+$println("fps: " + fps.format_decimals(1));
