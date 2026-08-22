@@ -181,16 +181,45 @@ fun color_lerp(a, b, t) {
 
 // --- Camera ---
 //
-// Looks down +Z with no rotation, so projection is just a scale by FOCAL/depth.
-// A world point maps to:
-//   sx = CX + (wx - cam_x) * s
-//   sy = CY - (wy - cam_y) * s     with s = FOCAL / (wz - cam_z)
+// A position plus a yaw/pitch/roll orientation. The rows of the world-to-eye
+// rotation are the camera's right, up and forward axes in world space, so
+// moving a world point into eye space is three dot products against them.
+//
+// Eye space has +x right, +y up and +z straight ahead, which makes the
+// projection sx = CX + ex * FOCAL/ez, sy = CY - ey * FOCAL/ez. With every
+// angle at zero the rows are the identity and that reduces to the plain
+// look-down-+Z projection this started out with.
 
 let var cam_x = 0.0;
 // Eye height of a rider on a motorcycle: about 0.8m of seat plus about 0.75m
 // of seated torso and head
 let var cam_y = 1.55;
 let var cam_z = 0.0;
+
+let var cam_yaw = 0.0;
+let var cam_pitch = 0.0;
+let var cam_roll = 0.0;
+
+let var r00 = 1.0; let var r01 = 0.0; let var r02 = 0.0;
+let var r10 = 0.0; let var r11 = 1.0; let var r12 = 0.0;
+let var r20 = 0.0; let var r21 = 0.0; let var r22 = 1.0;
+
+fun update_camera() {
+    let cy = cam_yaw.cos();   let sy = cam_yaw.sin();
+    let cp = cam_pitch.cos(); let sp = cam_pitch.sin();
+    let cr = cam_roll.cos();  let sr = cam_roll.sin();
+
+    // Forward, plus the right and up axes the rider would have upright
+    let fx = sy * cp;  let fy = sp;  let fz = cy * cp;
+    let ax = cy;       let ay = 0.0; let az = -sy;
+    let ux = -sp * sy; let uy = cp;  let uz = -sp * cy;
+
+    // Leaning into a corner turns the world the other way, so right and up
+    // counter-rotate about the forward axis while forward itself is fixed
+    r00 = ax * cr - ux * sr; r01 = ay * cr - uy * sr; r02 = az * cr - uz * sr;
+    r10 = ux * cr + ax * sr; r11 = uy * cr + ay * sr; r12 = uz * cr + az * sr;
+    r20 = fx; r21 = fy; r22 = fz;
+}
 
 // --- Fog ---
 
@@ -212,48 +241,8 @@ fun fog_mix(color, f) {
 
 // --- Screen-space rasterization ---
 
-// Axis-aligned rectangle, clipped to the frame. This is the workhorse: every
-// window on a constant-Z face goes through here.
-fun fill_rect(fb, x0, y0, x1, y1, color) {
-    let xa = x0.max(0);
-    let xb = x1.min(FRAME_WIDTH);
-    if (xa >= xb) return;
-    let ya = y0.max(0);
-    let yb = y1.min(FRAME_HEIGHT);
-    let n = xb - xa;
-    for (let var y = ya; y < yb; ++y) {
-        fb.fill_u32(y * FRAME_WIDTH + xa, n, color);
-    }
-}
-
-// A lit rectangle with a halo around it. Painting progressively larger, dimmer
-// rects underneath reads as an emissive glow without a post-process blur. The
-// halo has to be *added* to the wall behind it: a dimmed neon color on its own
-// is often darker than the wall, which would draw as a dark frame instead.
-fun fill_rect_glow(fb, x0, y0, x1, y1, color, back, g) {
-    if (g > 0) {
-        let g2 = g + g;
-        let g3 = g2 + g;
-        fill_rect(fb, x0 - g3, y0 - g3, x1 + g3, y1 + g3,
-                  color_add_sat(back, color_scale(color, 0.05)));
-        fill_rect(fb, x0 - g2, y0 - g2, x1 + g2, y1 + g2,
-                  color_add_sat(back, color_scale(color, 0.13)));
-        fill_rect(fb, x0 - g, y0 - g, x1 + g, y1 + g,
-                  color_add_sat(back, color_scale(color, 0.30)));
-    }
-    fill_rect(fb, x0, y0, x1, y1, color);
-}
-
-// Tight single-layer halo. Individual windows are small enough that the
-// two-step falloff above reads as a drawn border instead of light bleed, so
-// they get one close, brighter ring instead.
-fun fill_rect_halo(fb, x0, y0, x1, y1, color, back, g) {
-    if (g > 0) {
-        fill_rect(fb, x0 - g, y0 - g, x1 + g, y1 + g,
-                  color_add_sat(back, color_scale(color, 0.34)));
-    }
-    fill_rect(fb, x0, y0, x1, y1, color);
-}
+// Once the camera can lean, nothing on screen stays axis-aligned, so the
+// quad rasterizer is the only primitive left.
 
 // Corners of the quad being drawn. Reused so that a fill never allocates.
 let QX = Array.with_size(4, 0.0);
@@ -339,6 +328,203 @@ fun fill_quad(fb, x0, y0, x1, y1, x2, y2, x3, y3, color) {
             ++y;
         }
     }
+}
+
+// --- World-space drawing ---
+//
+// Every surface in the scene is a quad given by four world-space corners in
+// order around the perimeter. They are rotated into eye space, clipped
+// against the near plane and projected. A quad straddling the near plane
+// comes out as a pentagon, which draws as two quads, the second of them
+// using a repeated corner to stand in for a triangle.
+
+// Screen corners of the quad being drawn, and the outset copy a halo uses.
+// Six slots because clipping one plane against a quad can add a corner.
+let SX = Array.with_size(6, 0.0);
+let SY = Array.with_size(6, 0.0);
+let OX = Array.with_size(6, 0.0);
+let OY = Array.with_size(6, 0.0);
+
+// Eye-space corners, only filled in when a quad actually needs clipping
+let CX3 = Array.with_size(4, 0.0);
+let CY3 = Array.with_size(4, 0.0);
+let CZ3 = Array.with_size(4, 0.0);
+
+// Screen position of the last direction put through project_dir
+let var psx = 0.0; let var psy = 0.0;
+
+fun draw_arr(fb, px, py, n, color) {
+    if (n < 3) return;
+    // A triangle is drawn as a quad whose last corner repeats
+    let var i3 = 3;
+    if (n == 3) i3 = 2;
+    fill_quad(fb, px[0], py[0], px[1], py[1],
+                  px[2], py[2], px[i3], py[i3], color);
+    if (n >= 5) {
+        fill_quad(fb, px[0], py[0], px[3], py[3],
+                      px[4], py[4], px[4], py[4], color);
+    }
+}
+
+// Clip the eye-space quad in CX3/CY3/CZ3 against the near plane and project
+// what survives into SX/SY. Returns the corner count, 0 if nothing is left.
+fun clip_project() {
+    let var n = 0;
+    for (let var i = 0; i < 4; ++i) {
+        let j = (i + 1) & 3;
+        let zi = CZ3[i];
+        let in_i = zi >= NEAR_Z;
+        if (in_i) {
+            let s = FOCAL / zi;
+            SX[n] = CX + CX3[i] * s; SY[n] = CY - CY3[i] * s;
+            n = n + 1;
+        }
+        // Crossing the plane, either way, adds the point where it crosses
+        if (in_i != (CZ3[j] >= NEAR_Z) && n < 6) {
+            let t = (NEAR_Z - zi) / (CZ3[j] - zi);
+            let px = CX3[i] + (CX3[j] - CX3[i]) * t;
+            let py = CY3[i] + (CY3[j] - CY3[i]) * t;
+            let s = FOCAL / NEAR_Z;
+            SX[n] = CX + px * s; SY[n] = CY - py * s;
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+// Project four eye-space corners, near-clipping if needed, leaving the screen
+// corners in SX/SY. Returns the corner count, 0 if nothing is visible.
+//
+// Callers that walk a flat surface, like a facade, step their corners along
+// the surface in eye space and come straight here, which saves them a full
+// rotation per corner.
+fun project_eye(e0x, e0y, e0z, e1x, e1y, e1z,
+                e2x, e2y, e2z, e3x, e3y, e3z) {
+    // Nearly everything is wholly in front of the near plane
+    if (e0z >= NEAR_Z && e1z >= NEAR_Z && e2z >= NEAR_Z && e3z >= NEAR_Z) {
+        let s0 = FOCAL / e0z; let s1 = FOCAL / e1z;
+        let s2 = FOCAL / e2z; let s3 = FOCAL / e3z;
+        SX[0] = CX + e0x * s0; SY[0] = CY - e0y * s0;
+        SX[1] = CX + e1x * s1; SY[1] = CY - e1y * s1;
+        SX[2] = CX + e2x * s2; SY[2] = CY - e2y * s2;
+        SX[3] = CX + e3x * s3; SY[3] = CY - e3y * s3;
+        return 4;
+    }
+    if (e0z < NEAR_Z && e1z < NEAR_Z && e2z < NEAR_Z && e3z < NEAR_Z) return 0;
+
+    CX3[0] = e0x; CY3[0] = e0y; CZ3[0] = e0z;
+    CX3[1] = e1x; CY3[1] = e1y; CZ3[1] = e1z;
+    CX3[2] = e2x; CY3[2] = e2y; CZ3[2] = e2z;
+    CX3[3] = e3x; CY3[3] = e3y; CZ3[3] = e3z;
+    return clip_project();
+}
+
+// Push the projected corners out from their centre by g pixels. For an
+// axis-aligned rectangle this reproduces the old rect outset exactly, and
+// for a leaning one it stays a uniform border.
+fun draw_outset(fb, n, color, g) {
+    let var mx = 0.0; let var my = 0.0;
+    for (let var i = 0; i < n; ++i) { mx = mx + SX[i]; my = my + SY[i]; }
+    let inv = 1.0 / n.to_f();
+    mx = mx * inv; my = my * inv;
+    for (let var i = 0; i < n; ++i) {
+        if (SX[i] < mx) OX[i] = SX[i] - g; else OX[i] = SX[i] + g;
+        if (SY[i] < my) OY[i] = SY[i] - g; else OY[i] = SY[i] + g;
+    }
+    draw_arr(fb, OX, OY, n, color);
+}
+
+// The whole-in-front case is projected and filled here rather than through
+// project_eye and draw_arr, because at ten thousand quads a frame the two
+// extra calls per quad cost more than the work inside them.
+fun eye_quad(fb, e0x, e0y, e0z, e1x, e1y, e1z,
+             e2x, e2y, e2z, e3x, e3y, e3z, color) {
+    if (e0z >= NEAR_Z && e1z >= NEAR_Z && e2z >= NEAR_Z && e3z >= NEAR_Z) {
+        let s0 = FOCAL / e0z; let s1 = FOCAL / e1z;
+        let s2 = FOCAL / e2z; let s3 = FOCAL / e3z;
+        fill_quad(fb, CX + e0x * s0, CY - e0y * s0,
+                      CX + e1x * s1, CY - e1y * s1,
+                      CX + e2x * s2, CY - e2y * s2,
+                      CX + e3x * s3, CY - e3y * s3, color);
+        return;
+    }
+    draw_arr(fb, SX, SY, project_eye(e0x, e0y, e0z, e1x, e1y, e1z,
+                                     e2x, e2y, e2z, e3x, e3y, e3z), color);
+}
+
+// A lit quad with a halo around it. Painting progressively larger, dimmer
+// copies underneath reads as an emissive glow without a post-process blur.
+// The halo has to be added to the wall behind it: a dimmed neon color on its
+// own is often darker than the wall, and would draw as a dark frame instead.
+fun eye_quad_glow(fb, e0x, e0y, e0z, e1x, e1y, e1z,
+                  e2x, e2y, e2z, e3x, e3y, e3z, color, back, g) {
+    let n = project_eye(e0x, e0y, e0z, e1x, e1y, e1z,
+                        e2x, e2y, e2z, e3x, e3y, e3z);
+    if (n < 3) return;
+    if (g >= 1.0) {
+        draw_outset(fb, n, color_add_sat(back, color_scale(color, 0.05)), g + g + g);
+        draw_outset(fb, n, color_add_sat(back, color_scale(color, 0.13)), g + g);
+        draw_outset(fb, n, color_add_sat(back, color_scale(color, 0.30)), g);
+    }
+    draw_arr(fb, SX, SY, n, color);
+}
+
+// Tight single-layer halo. Individual windows are small enough that the
+// two-step falloff above reads as a drawn border instead of light bleed.
+fun eye_quad_halo(fb, e0x, e0y, e0z, e1x, e1y, e1z,
+                  e2x, e2y, e2z, e3x, e3y, e3z, color, back, g) {
+    let n = project_eye(e0x, e0y, e0z, e1x, e1y, e1z,
+                        e2x, e2y, e2z, e3x, e3y, e3z);
+    if (n < 3) return;
+    if (g >= 1.0) {
+        draw_outset(fb, n, color_add_sat(back, color_scale(color, 0.34)), g);
+    }
+    draw_arr(fb, SX, SY, n, color);
+}
+
+// Four world corners, rotated into eye space and drawn. Used by everything
+// that is not a facade, where there is no flat surface to step along.
+fun world_quad(fb, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, color) {
+    let ux = ax - cam_x; let uy = ay - cam_y; let uz = az - cam_z;
+    let vx = bx - cam_x; let vy = by - cam_y; let vz = bz - cam_z;
+    let wx = cx - cam_x; let wy = cy - cam_y; let wz = cz - cam_z;
+    let tx = dx - cam_x; let ty = dy - cam_y; let tz = dz - cam_z;
+    eye_quad(fb,
+        r00 * ux + r01 * uy + r02 * uz,
+        r10 * ux + r11 * uy + r12 * uz,
+        r20 * ux + r21 * uy + r22 * uz,
+        r00 * vx + r01 * vy + r02 * vz,
+        r10 * vx + r11 * vy + r12 * vz,
+        r20 * vx + r21 * vy + r22 * vz,
+        r00 * wx + r01 * wy + r02 * wz,
+        r10 * wx + r11 * wy + r12 * wz,
+        r20 * wx + r21 * wy + r22 * wz,
+        r00 * tx + r01 * ty + r02 * tz,
+        r10 * tx + r11 * ty + r12 * tz,
+        r20 * tx + r21 * ty + r22 * tz,
+        color);
+}
+
+fun world_quad_halo(fb, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
+                    color, back, g) {
+    let ux = ax - cam_x; let uy = ay - cam_y; let uz = az - cam_z;
+    let vx = bx - cam_x; let vy = by - cam_y; let vz = bz - cam_z;
+    let wx = cx - cam_x; let wy = cy - cam_y; let wz = cz - cam_z;
+    let tx = dx - cam_x; let ty = dy - cam_y; let tz = dz - cam_z;
+    eye_quad_halo(fb,
+        r00 * ux + r01 * uy + r02 * uz,
+        r10 * ux + r11 * uy + r12 * uz,
+        r20 * ux + r21 * uy + r22 * uz,
+        r00 * vx + r01 * vy + r02 * vz,
+        r10 * vx + r11 * vy + r12 * vz,
+        r20 * vx + r21 * vy + r22 * vz,
+        r00 * wx + r01 * wy + r02 * wz,
+        r10 * wx + r11 * wy + r12 * wz,
+        r20 * wx + r21 * wy + r22 * wz,
+        r00 * tx + r01 * ty + r02 * tz,
+        r10 * tx + r11 * ty + r12 * tz,
+        r20 * tx + r21 * ty + r22 * tz,
+        color, back, g);
 }
 
 // --- Facades ---
@@ -519,9 +705,8 @@ class FacadeStyle {
 // --- Buildings ---
 //
 // A building is an axis-aligned box spanning [x0,x1] x [0,height] x [z0,z1].
-// At most two of its walls ever face the camera: the near wall at z0 (constant
-// Z, drawn as rects) and whichever side wall faces the road (constant X, drawn
-// as trapezoids).
+// At most two of its walls ever face the camera: the near wall at z0 and
+// whichever side wall faces the road.
 
 class Building {
     init(self, x0, x1, z0, z1, height, base) {
@@ -529,6 +714,9 @@ class Building {
         self.x1 = x1;
         self.z0 = z0;
         self.z1 = z1;
+        // The span the scene uses to cull and sort this object
+        self.zn = z0;
+        self.zf = z1;
         self.height = height;
         self.base = base;
 
@@ -556,221 +744,207 @@ class Building {
         self.front = Facade(x1 - x0, base, height, style);
         self.side = Facade(z1 - z0, base, height, style);
     }
+
+    render(self, fb) {
+        // Which side wall faces the road, if any
+        let var xf = 0.0;
+        let var has_side = true;
+        if (cam_x > self.x1) {
+            xf = self.x1;
+        } else if (cam_x < self.x0) {
+            xf = self.x0;
+        } else {
+            has_side = false;
+        }
+
+        // Side wall (constant X), drawn first: it is the one we are alongside
+        if (has_side) {
+            let fog = fog_factor(self.z0 - cam_z);
+
+            // Side walls read slightly darker than the front, which is what
+            // gives the boxes their sense of volume
+            let wall = fog_mix(color_scale(self.wall, 0.62), fog);
+            world_quad(fb,
+                xf, self.height, self.z0,
+                xf, self.height, self.z1,
+                xf, self.base, self.z1,
+                xf, self.base, self.z0,
+                wall);
+
+            // Skip the windows once the wall is only a sliver on screen. Looking
+            // along it rather than at it foreshortens its whole depth into the
+            // gap between where its two ends project to.
+            let za = (self.z0 - cam_z).max(NEAR_Z);
+            let zb = (self.z1 - cam_z).max(za + 0.001);
+            if ((xf - cam_x).abs() * FOCAL * (zb - za) / (za * zb) > 3.0) {
+                draw_facade(fb, self.side, xf, 0.0, self.z0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                            self.z1 - self.z0, fog, wall);
+            }
+        }
+
+        // Near wall (constant Z)
+        let d = self.z0 - cam_z;
+        if (d >= NEAR_Z) {
+            let px_per_m = FOCAL / d;
+            let fog = fog_factor(d);
+            let wall = fog_mix(self.wall, fog);
+
+            world_quad(fb,
+                self.x0, self.height, self.z0,
+                self.x1, self.height, self.z0,
+                self.x1, self.base, self.z0,
+                self.x0, self.base, self.z0,
+                wall);
+
+            if ((self.x1 - self.x0) * px_per_m > 3.0) {
+                draw_facade(fb, self.front, self.x0, 0.0, self.z0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                            self.x1 - self.x0, fog, wall);
+            }
+        }
+    }
 }
 
-// Draw the windows of a facade onto a constant-Z wall. Every window is an
-// axis-aligned screen rectangle, so this never touches the triangle rasterizer.
+// True when a row strip of the wall falls wholly outside the frame. Corners
+// are in eye space. A row reaching behind the near plane is never culled
+// here, the clipper has it.
 //
-// ax, ay map world coordinates to screen: sx = ax + wx * s, sy = ay - wy * s
-fun draw_facade_flat(fb, f, u_org, s, ax, ay, fog, wall) {
+// h* is the row's top edge at u = 0, l* its bottom edge, and the row runs
+// span meters along the u axis from there.
+fun row_offscreen(hx, hy, hz, lx, ly, lz, ux, uy, uz, span) {
+    let ex = ux * span; let ey = uy * span; let ez = uz * span;
+    if (hz < NEAR_Z || lz < NEAR_Z) return false;
+    let fz = hz + ez; let gz = lz + ez;
+    if (fz < NEAR_Z || gz < NEAR_Z) return false;
+
+    let s0 = FOCAL / hz; let s1 = FOCAL / fz;
+    let s2 = FOCAL / lz; let s3 = FOCAL / gz;
+    let x0 = hx * s0; let x1 = (hx + ex) * s1;
+    let x2 = lx * s2; let x3 = (lx + ex) * s3;
+    if (CX + x0.max(x1).max(x2).max(x3) <= 0.0) return true;
+    if (CX + x0.min(x1).min(x2).min(x3) >= FRAME_WIDTH.to_f()) return true;
+
+    let y0 = hy * s0; let y1 = (hy + ey) * s1;
+    let y2 = ly * s2; let y3 = (ly + ey) * s3;
+    // Screen y runs the other way, so the largest eye y is the topmost row
+    if (CY - y0.max(y1).max(y2).max(y3) >= FRAME_HEIGHT.to_f()) return true;
+    return CY - y0.min(y1).min(y2).min(y3) <= 0.0;
+}
+
+// Draw the windows of a facade onto a wall. The wall is a world origin plus
+// two unit axes: u runs along it, v runs up it, both in meters and in the
+// same coordinates the Facade was laid out in. One function now covers both
+// walls of a building, and any tilted wall we add later.
+//
+// px_per_m is roughly how many pixels a meter of this wall covers, which is
+// what decides when detail has shrunk below a pixel and can be dropped.
+fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
+                span, fog, wall) {
     let cols = f.cols;
-    let min_px = 1.0 / s;   // A window narrower than this is sub-pixel
+
+    // The wall is flat, so its corners are an eye-space origin plus multiples
+    // of two eye-space axes. Rotating those three vectors once lets every
+    // window come out of a few multiplies instead of its own transform.
+    let px = ox - cam_x; let py = oy - cam_y; let pz = oz - cam_z;
+    let o_x = r00 * px + r01 * py + r02 * pz;
+    let o_y = r10 * px + r11 * py + r12 * pz;
+    let o_z = r20 * px + r21 * py + r22 * pz;
+    let u_x = r00 * ux + r01 * uy + r02 * uz;
+    let u_y = r10 * ux + r11 * uy + r12 * uz;
+    let u_z = r20 * ux + r21 * uy + r22 * uz;
+    let v_x = r00 * vx + r01 * vy + r02 * vz;
+    let v_y = r10 * vx + r11 * vy + r12 * vz;
+    let v_z = r20 * vx + r21 * vy + r22 * vz;
+
+    // A window's width on screen is |k_u| * FOCAL * uwin / z^2, where k_u is
+    // fixed for the whole wall. So one squared compare says whether a column
+    // has gone narrower than a pixel, with no division, and it accounts for
+    // the foreshortening of a wall we are looking along rather than at.
+    let cull_z2 = (u_x * o_z - o_x * u_z).abs() * FOCAL * f.uwin;
+    let row_cull_z = f.vwin * FOCAL;
+    let u_end = u_z * span;
 
     for (let var r = 0; r < f.rows; ++r) {
         let kind = f.row_kind[r];
         if (kind == 0) continue;
 
         let v_lo = f.v0 + r.to_f() * f.vpitch;
-        let py1 = (ay - v_lo * s).floor();
-        let py0 = (ay - (v_lo + f.vwin) * s).floor();
-        if (py1 <= py0) continue;
-        if (py0 >= FRAME_HEIGHT) continue;
-        if (py1 <= 0) continue;
+        let v_hi = v_lo + f.vwin;
+
+        // The v part of the corners is shared by every window in the row
+        let hx = o_x + v_x * v_hi; let hy = o_y + v_y * v_hi; let hz = o_z + v_z * v_hi;
+        let lx = o_x + v_x * v_lo; let ly = o_y + v_y * v_lo; let lz = o_z + v_z * v_lo;
+
+        // Whole row thinner than a scanline, anywhere along its length
+        if (hz.min(hz + u_end) > row_cull_z) continue;
+
+        // One test on the whole row keeps tall buildings from paying for the
+        // dozens of floors that are off the top of the frame
+        if (row_offscreen(hx, hy, hz, lx, ly, lz, u_x, u_y, u_z, span)) continue;
 
         if (kind == 2) {
-            let ua = u_org + f.u0 + f.row_c0[r].to_f() * f.upitch;
-            let ub = u_org + f.u0 + f.row_c1[r].to_f() * f.upitch + f.uwin;
-            let var g = 0;
-            if (f.row_hot[r] == 1) g = ((py1 - py0) _/ 4).min(GLOW_MAX);
-            fill_rect_glow(fb, (ax + ua * s).floor(), py0,
-                           (ax + ub * s).floor(), py1,
-                           fog_mix(f.row_color[r], fog), wall, g);
+            let ua = f.u0 + f.row_c0[r].to_f() * f.upitch;
+            let ub = f.u0 + f.row_c1[r].to_f() * f.upitch + f.uwin;
+            let color = fog_mix(f.row_color[r], fog);
+            let var g = 0.0;
+            // A band earns a halo once it is thick enough on screen to show
+            if (f.row_hot[r] == 1) {
+                let z = hz + u_z * ua;
+                if (z >= NEAR_Z) {
+                    g = (f.vwin * FOCAL / z * 0.25).min(GLOW_MAX.to_f());
+                }
+            }
+            eye_quad_glow(fb,
+                hx + u_x * ua, hy + u_y * ua, hz + u_z * ua,
+                hx + u_x * ub, hy + u_y * ub, hz + u_z * ub,
+                lx + u_x * ub, ly + u_y * ub, lz + u_z * ub,
+                lx + u_x * ua, ly + u_y * ua, lz + u_z * ua,
+                color, wall, g);
             continue;
         }
 
-        if (f.uwin < min_px) continue;
-
-        // Windows only earn a halo once they are big enough on screen for it
-        // to be visible, so distant facades cost nothing extra
-        let gw = ((py1 - py0) _/ 5).min(WIN_GLOW_MAX);
         let base = r * cols;
         for (let var c = 0; c < cols; ++c) {
+            let ua = f.u0 + c.to_f() * f.upitch;
+            let ub = ua + f.uwin;
+            let az = hz + u_z * ua;
+            let bz = hz + u_z * ub;
+            // Distance culls the far end of a wall we are driving alongside,
+            // where the columns have gone narrower than a pixel
+            if (az * az > cull_z2 && bz * bz > cull_z2) continue;
+            if (az < NEAR_Z && bz < NEAR_Z) continue;
+
             let col = fog_mix(f.cells[base + c], fog);
-            let ua = u_org + f.u0 + c.to_f() * f.upitch;
-            let x0 = (ax + ua * s).floor();
-            let x1 = (ax + (ua + f.uwin) * s).floor();
-            // Only genuinely bright rooms bleed light onto the wall
-            if (f.hot[base + c] == 1) {
-                fill_rect_halo(fb, x0, py0, x1, py1, col, wall, gw);
+            let ax = hx + u_x * ua; let ay = hy + u_y * ua;
+            let bx = hx + u_x * ub; let by = hy + u_y * ub;
+            let cx = lx + u_x * ub; let cy = ly + u_y * ub; let cz = lz + u_z * ub;
+            let dx = lx + u_x * ua; let dy = ly + u_y * ua; let dz = lz + u_z * ua;
+
+            // Only genuinely bright rooms bleed light onto the wall, and only
+            // once they are big enough on screen for the bleed to show
+            if (f.hot[base + c] == 1 && az >= NEAR_Z) {
+                eye_quad_halo(fb, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
+                              col, wall,
+                              (f.vwin * FOCAL / az * 0.2).min(WIN_GLOW_MAX.to_f()));
             } else {
-                fill_rect(fb, x0, py0, x1, py1, col);
+                eye_quad(fb, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, col);
             }
-        }
-    }
-}
-
-// Draw the windows of a facade onto a constant-X wall. Here u runs along Z, so
-// each window column has its own perspective scale and windows come out as
-// trapezoids with vertical left and right edges.
-//
-// xw is the wall's X offset from the camera, z_org the wall's near Z.
-fun draw_facade_side(fb, f, z_org, xw, fog, wall) {
-    let cols = f.cols;
-    let zmin = cam_z + NEAR_Z;
-
-    // Neon bands span several columns, so they get their own Z extents
-    for (let var r = 0; r < f.rows; ++r) {
-        if (f.row_kind[r] != 2) continue;
-
-        let var za = z_org + f.u0 + f.row_c0[r].to_f() * f.upitch;
-        let zb = z_org + f.u0 + f.row_c1[r].to_f() * f.upitch + f.uwin;
-        if (za < zmin) za = zmin;
-        if (zb <= za) continue;
-
-        let sa = FOCAL / (za - cam_z);
-        let sb = FOCAL / (zb - cam_z);
-        let v_lo = f.v0 + r.to_f() * f.vpitch;
-        let v_hi = v_lo + f.vwin;
-        let color = fog_mix(f.row_color[r], fog);
-        let xa = CX + xw * sa;
-        let xb = CX + xw * sb;
-        let ya_hi = CY - (v_hi - cam_y) * sa;
-        let yb_hi = CY - (v_hi - cam_y) * sb;
-        let ya_lo = CY - (v_lo - cam_y) * sa;
-        let yb_lo = CY - (v_lo - cam_y) * sb;
-
-        // The halo is expanded along the band's thickness and past its ends,
-        // which is close enough to a real outset for a shape this thin
-        let var g = 0.0;
-        if (f.row_hot[r] == 1) g = ((ya_lo - ya_hi) * 0.25).min(GLOW_MAX.to_f());
-        if (g >= 1.0) {
-            let g2 = g + g;
-            fill_quad(fb, xa - g2, ya_hi - g2, xb + g2, yb_hi - g2,
-                          xb + g2, yb_lo + g2, xa - g2, ya_lo + g2,
-                      color_add_sat(wall, color_scale(color, 0.07)));
-            fill_quad(fb, xa - g, ya_hi - g, xb + g, yb_hi - g,
-                          xb + g, yb_lo + g, xa - g, ya_lo + g,
-                      color_add_sat(wall, color_scale(color, 0.24)));
-        }
-
-        fill_quad(fb, xa, ya_hi, xb, yb_hi, xb, yb_lo, xa, ya_lo, color);
-    }
-
-    // Individual windows, column-major so the two divisions per column are
-    // shared by every window in it
-    for (let var c = 0; c < cols; ++c) {
-        let var za = z_org + f.u0 + c.to_f() * f.upitch;
-        let zb = za + f.uwin;
-        if (za < zmin) za = zmin;
-        if (zb <= za) continue;
-
-        let sa = FOCAL / (za - cam_z);
-        let sb = FOCAL / (zb - cam_z);
-        let xa = CX + xw * sa;
-        let xb = CX + xw * sb;
-        if ((xb - xa).abs() < 1.0) continue;   // sub-pixel column
-
-        let aya = CY + cam_y * sa;
-        let ayb = CY + cam_y * sb;
-
-        for (let var r = 0; r < f.rows; ++r) {
-            if (f.row_kind[r] != 1) continue;
-            let idx = r * cols + c;
-
-            let v_lo = f.v0 + r.to_f() * f.vpitch;
-            let v_hi = v_lo + f.vwin;
-            let y_ah = aya - v_hi * sa; let y_bh = ayb - v_hi * sb;
-            let y_al = aya - v_lo * sa; let y_bl = ayb - v_lo * sb;
-            let c2 = fog_mix(f.cells[idx], fog);
-
-            // Single tight halo, matching what the flat facades do
-            let var g = 0.0;
-            if (f.hot[idx] == 1) g = ((y_al - y_ah) * 0.2).min(WIN_GLOW_MAX.to_f());
-            if (g >= 1.0) {
-                fill_quad(fb, xa - g, y_ah - g, xb + g, y_bh - g,
-                              xb + g, y_bl + g, xa - g, y_al + g,
-                          color_add_sat(wall, color_scale(c2, 0.34)));
-            }
-
-            fill_quad(fb, xa, y_ah, xb, y_bh, xb, y_bl, xa, y_al, c2);
-        }
-    }
-}
-
-fun draw_building(fb, b) {
-    if (b.z1 <= cam_z + NEAR_Z) return;
-    // Past the fog limit a building is indistinguishable from the haze, so
-    // culling here keeps the per-frame cost independent of how long the
-    // generated city is
-    if (b.z0 - cam_z > FOG_END) return;
-
-    // Which side wall faces the road, if any
-    let var xf = 0.0;
-    let var has_side = true;
-    if (cam_x > b.x1) {
-        xf = b.x1;
-    } else if (cam_x < b.x0) {
-        xf = b.x0;
-    } else {
-        has_side = false;
-    }
-
-    // Side wall (constant X), drawn first: it is the one we are alongside
-    if (has_side) {
-        let zmin = cam_z + NEAR_Z;
-        let var za = b.z0;
-        if (za < zmin) za = zmin;
-        let zb = b.z1;
-
-        if (zb > za) {
-            let sa = FOCAL / (za - cam_z);
-            let sb = FOCAL / (zb - cam_z);
-            let xw = xf - cam_x;
-            let pxa = CX + xw * sa;
-            let pxb = CX + xw * sb;
-            let fog = fog_factor(za - cam_z);
-
-            // Side walls read slightly darker than the front, which is what
-            // gives the boxes their sense of volume
-            let wall = fog_mix(color_scale(b.wall, 0.62), fog);
-            fill_quad(fb,
-                pxa, CY - (b.height - cam_y) * sa,
-                pxb, CY - (b.height - cam_y) * sb,
-                pxb, CY - (b.base - cam_y) * sb,
-                pxa, CY - (b.base - cam_y) * sa,
-                wall);
-
-            // Skip the windows once the wall is only a sliver on screen
-            if ((pxb - pxa).abs() > 3.0) {
-                draw_facade_side(fb, b.side, b.z0, xw, fog, wall);
-            }
-        }
-    }
-
-    // Near wall (constant Z)
-    let d = b.z0 - cam_z;
-    if (d >= NEAR_Z) {
-        let s = FOCAL / d;
-        let ax = CX - cam_x * s;
-        let ay = CY + cam_y * s;
-        let px0 = (ax + b.x0 * s).floor();
-        let px1 = (ax + b.x1 * s).floor();
-        let fog = fog_factor(d);
-        let wall = fog_mix(b.wall, fog);
-
-        fill_rect(fb, px0, (ay - b.height * s).floor(), px1,
-                  (ay - b.base * s).floor(), wall);
-
-        if (px1 - px0 > 3) {
-            draw_facade_flat(fb, b.front, b.x0, s, ax, ay, fog, wall);
         }
     }
 }
 
 // --- Background ---
 //
-// With no camera rotation the horizon never moves, so the sky and ground
-// gradients are the same every frame and can be baked once.
+// The gradient runs along the world's up axis, so it is baked once into a
+// table indexed by height above the horizon and then sampled through the
+// camera. Pitch slides the whole table up or down the frame, which is what
+// looking up at the sky should do.
+//
+// Roll is the one thing this does not follow: the gradient stays level
+// instead of leaning with the rider. Doing it properly means bands cutting
+// across the frame at an angle, and a tilted band crosses far more scanlines
+// than a level one, which costs several milliseconds. The gradient carries
+// no detail to give the cheat away, and the stars and moon do lean, so the
+// sky still reads as rolling with everything else.
 
 let bg_rows = Array.with_size(FRAME_HEIGHT, 0);
 
@@ -794,17 +968,25 @@ fun build_background() {
     }
 }
 
+// Where a screen row falls in the baked gradient. World up in eye space is
+// (r01, r11, r21), and at rest this is the identity y -> y.
+fun sky_row(y) {
+    let vy = (CY + (y.to_f() - CY) * r11 - FOCAL * r21).floor();
+    return bg_rows[vy.max(0).min(FRAME_HEIGHT - 1)];
+}
+
 // --- Moon ---
 //
-// The camera never rotates, so the moon hangs at a fixed screen position.
-// Its halo is added on top of the baked sky row rather than painted over it,
-// which keeps the sky gradient showing through.
+// The moon sits at a fixed world direction, so it swings across the frame as
+// the camera turns and leans. Its halo is added on top of the sky gradient
+// rather than painted over it, which keeps the gradient showing through.
 
 // Kept near the top of the canyon of sky between the two rows of buildings,
 // off-center so it does not sit on the vanishing point. Tall buildings still
-// eclipse it as we drive, which is what we want.
-let MOON_X = (FRAME_WIDTH.to_f() * 0.57).floor();
-let MOON_Y = (FRAME_HEIGHT.to_f() * 0.10).floor();
+// eclipse it as we drive, which is what we want. These two angles put it
+// where the old fixed screen position had it.
+let MOON_AZ = 0.107;       // radians right of straight ahead
+let MOON_EL = 0.4054;      // radians above the horizon
 let MOON_R = (FRAME_HEIGHT _/ 29).max(6);
 let MOON_HALO_R = MOON_R * 4;
 // One step every couple of pixels, otherwise the falloff shows as rings
@@ -841,51 +1023,86 @@ fun glow_disc(fb, cx, cy, r, add) {
         let xb = (cx + h + 1).min(FRAME_WIDTH);
         if (xa < xb) {
             fb.fill_u32(y * FRAME_WIDTH + xa, xb - xa,
-                        color_add_sat(bg_rows[y], add));
+                        color_add_sat(sky_row(y), add));
         }
     }
 }
 
+// A direction at infinity: the same rotation as a point, with no translation
+// and no perspective divide by distance. False when it is behind us.
+fun project_dir(dx, dy, dz) {
+    let ez = r20 * dx + r21 * dy + r22 * dz;
+    if (ez <= 0.01) return false;
+    let s = FOCAL / ez;
+    psx = CX + (r00 * dx + r01 * dy + r02 * dz) * s;
+    psy = CY - (r10 * dx + r11 * dy + r12 * dz) * s;
+    return true;
+}
+
 fun draw_moon(fb) {
+    let ce = MOON_EL.cos();
+    if (!project_dir(ce * MOON_AZ.sin(), MOON_EL.sin(), ce * MOON_AZ.cos())) return;
+    let mx = psx.floor();
+    let my = psy.floor();
+    if (mx < -MOON_HALO_R || mx > FRAME_WIDTH + MOON_HALO_R) return;
+    if (my < -MOON_HALO_R || my > FRAME_HEIGHT + MOON_HALO_R) return;
+
     // Halo, drawn outside in so each smaller disc steps the falloff up
     for (let var i = MOON_HALO_STEPS; i >= 1; --i) {
         let t = i.to_f() / MOON_HALO_STEPS.to_f();
         let k = 1.0 - t;
-        glow_disc(fb, MOON_X, MOON_Y, MOON_R + (MOON_HALO_R.to_f() * t).floor(),
+        glow_disc(fb, mx, my, MOON_R + (MOON_HALO_R.to_f() * t).floor(),
                   color_scale(MOON_GLOW, k * k * 0.5));
     }
 
-    fill_disc(fb, MOON_X, MOON_Y, MOON_R, MOON_COLOR);
+    fill_disc(fb, mx, my, MOON_R, MOON_COLOR);
 
-    // A couple of maria, just enough that it reads as a moon and not a lamp
+    // A couple of maria, just enough that it reads as a moon and not a lamp.
+    // They lean with the camera, so the disc turns rather than sliding.
+    let cr = cam_roll.cos(); let sr = cam_roll.sin();
     let m = color_scale(MOON_COLOR, 0.90);
-    fill_disc(fb, MOON_X - (MOON_R _/ 3), MOON_Y - (MOON_R _/ 4), MOON_R _/ 3, m);
-    fill_disc(fb, MOON_X + (MOON_R _/ 4), MOON_Y + (MOON_R _/ 3), MOON_R _/ 4, m);
+    let ax = -(MOON_R _/ 3).to_f(); let ay = -(MOON_R _/ 4).to_f();
+    let bx = (MOON_R _/ 4).to_f();  let by = (MOON_R _/ 3).to_f();
+    fill_disc(fb, mx + (ax * cr - ay * sr).floor(),
+                  my + (ax * sr + ay * cr).floor(), MOON_R _/ 3, m);
+    fill_disc(fb, mx + (bx * cr - by * sr).floor(),
+                  my + (bx * sr + by * cr).floor(), MOON_R _/ 4, m);
 }
 
-// Fixed stars, as screen positions since the sky is effectively at infinity
-let star_x = [];
-let star_y = [];
+// Stars, as world directions since the sky is effectively at infinity
+let star_dx = [];
+let star_dy = [];
+let star_dz = [];
 let star_c = [];
 
+let STAR_EL_MAX = 0.95;
+
 fun build_stars(count) {
-    let horizon = CY.floor();
     for (let var i = 0; i < count; ++i) {
-        let y = rand_int(0, horizon - 40);
-        star_x.push(rand_int(0, FRAME_WIDTH));
-        star_y.push(y);
+        // The patch of sky the old screen-space version covered, as angles
+        let az = rand_float(-1.2, 1.2);
+        let el = rand_float(0.06, STAR_EL_MAX);
+        let ce = el.cos();
+        star_dx.push(ce * az.sin());
+        star_dy.push(el.sin());
+        star_dz.push(ce * az.cos());
         // Stars low in the sky are washed out by the haze
-        let fade = 1.0 - (y.to_f() / horizon.to_f());
-        star_c.push(color_scale(0xFFFFFFFF, rand_float(0.25, 0.85) * fade));
+        star_c.push(color_scale(0xFFFFFFFF,
+                    rand_float(0.25, 0.85) * (el / STAR_EL_MAX)));
     }
 }
 
 fun draw_background(fb) {
     for (let var y = 0; y < FRAME_HEIGHT; ++y) {
-        fb.fill_u32(y * FRAME_WIDTH, FRAME_WIDTH, bg_rows[y]);
+        fb.fill_u32(y * FRAME_WIDTH, FRAME_WIDTH, sky_row(y));
     }
-    for (let var i = 0; i < star_x.len; ++i) {
-        fb.set_u32(star_y[i] * FRAME_WIDTH + star_x[i], star_c[i]);
+    for (let var i = 0; i < star_dx.len; ++i) {
+        if (!project_dir(star_dx[i], star_dy[i], star_dz[i])) continue;
+        let sx = psx.floor();
+        if (sx < 0 || sx >= FRAME_WIDTH) continue;
+        let sy = psy.floor();
+        if (sy < 0 || sy >= FRAME_HEIGHT) continue;
+        fb.set_u32(sy * FRAME_WIDTH + sx, star_c[i]);
     }
     // After the stars, so the halo washes out the ones near it
     draw_moon(fb);
@@ -902,19 +1119,9 @@ let EDGE_W = 0.15;
 let ROAD_DRAW_FAR = FOG_END;   // Asphalt runs out to where the haze hides it
 let DASH_DRAW_FAR = 260.0;     // Markings past here are sub-pixel anyway
 
-// A horizontal strip at height wy between two Z values, spanning [wx0, wx1].
-// Constant-Z edges are horizontal on screen, so this is a simple trapezoid.
+// A horizontal strip at height wy between two Z values, spanning [wx0, wx1]
 fun deck_quad(fb, wx0, wx1, za, zb, wy, color) {
-    let sa = FOCAL / (za - cam_z);
-    let sb = FOCAL / (zb - cam_z);
-    let aya = CY - (wy - cam_y) * sa;
-    let ayb = CY - (wy - cam_y) * sb;
-    fill_quad(fb,
-        CX + (wx0 - cam_x) * sa, aya,
-        CX + (wx1 - cam_x) * sa, aya,
-        CX + (wx1 - cam_x) * sb, ayb,
-        CX + (wx0 - cam_x) * sb, ayb,
-        color);
+    world_quad(fb, wx0, wy, za, wx1, wy, za, wx1, wy, zb, wx0, wy, zb, color);
 }
 
 // Road surface, at y = 0
@@ -924,65 +1131,74 @@ fun road_quad(fb, wx0, wx1, za, zb, color) {
 
 // A vertical wall at constant X, running from y0 up to y1 along Z
 fun wall_quad(fb, wx, y0, y1, za, zb, color) {
-    let sa = FOCAL / (za - cam_z);
-    let sb = FOCAL / (zb - cam_z);
-    let xa = CX + (wx - cam_x) * sa;
-    let xb = CX + (wx - cam_x) * sb;
-    fill_quad(fb,
-        xa, CY - (y1 - cam_y) * sa,
-        xb, CY - (y1 - cam_y) * sb,
-        xb, CY - (y0 - cam_y) * sb,
-        xa, CY - (y0 - cam_y) * sa,
-        color);
+    world_quad(fb, wx, y1, za, wx, y1, zb, wx, y0, zb, wx, y0, za, color);
 }
 
-fun draw_road(fb) {
-    let zn = cam_z + NEAR_Z;
-    let zf = cam_z + ROAD_DRAW_FAR;
-
-    // The deck and its barriers are drawn in Z segments so the haze can take
-    // hold with distance. Segments grow geometrically because a far one covers
-    // far fewer pixels than a near one.
-    let var za = zn;
-    let var seg = 5.0;
-    while (za < zf) {
-        let zb = (za + seg).min(zf);
-        let f = fog_factor(za - cam_z);
-
-        road_quad(fb, -ROAD_HALF, ROAD_HALF, za, zb, fog_mix(0xFF101116, f));
-
-        // 1m barriers along both edges: the inner face we look at, plus the
-        // top cap, which is visible because the camera sits above it
-        let face = fog_mix(0xFF272A31, f);
-        let cap = fog_mix(0xFF3C404A, f);
-        wall_quad(fb, -ROAD_HALF, 0.0, BARRIER_H, za, zb, face);
-        wall_quad(fb, ROAD_HALF, 0.0, BARRIER_H, za, zb, face);
-        deck_quad(fb, -ROAD_HALF - BARRIER_W, -ROAD_HALF, za, zb, BARRIER_H, cap);
-        deck_quad(fb, ROAD_HALF, ROAD_HALF + BARRIER_W, za, zb, BARRIER_H, cap);
-
-        // Solid edge lines, in the same segments so they fog with the deck
-        let edge = fog_mix(0xFFC8B478, f);
-        road_quad(fb, -ROAD_HALF, -ROAD_HALF + EDGE_W, za, zb, edge);
-        road_quad(fb, ROAD_HALF - EDGE_W, ROAD_HALF, za, zb, edge);
-
-        za = zb;
-        seg = seg * 1.35;
+// The deck is not in the depth sort, and does not need to be. A building
+// only overlaps the road on screen when it is more than ROAD_HALF/BLOCK_HALF
+// times further away, so wherever the two meet the road is the nearer of
+// them and painting it over everything is exact. An overpass ahead does not
+// change that either: it projects above the horizon line while road surface
+// projects below, so they never overlap.
+class Road {
+    init(self) {
+        self.zn = 0.0;
+        self.zf = ROAD_DRAW_FAR;
     }
 
-    // Dashed dividers between the lanes, at every lane boundary except the
-    // road edges, which get solid lines instead
-    let zd = (cam_z + DASH_DRAW_FAR).min(zf);
-    let period = LANE_DASH_LEN + LANE_DASH_GAP;
-    let var z = (cam_z / period).floor().to_f() * period;
+    // Cut into Z slices so the haze can take hold with distance. They grow
+    // geometrically because a far slice covers far fewer pixels.
+    render(self, fb) {
+        let zf = cam_z + ROAD_DRAW_FAR;
+        let var za = cam_z + NEAR_Z;
+        let var seg = 5.0;
+        while (za < zf) {
+            let zb = (za + seg).min(zf);
+            draw_road_seg(fb, za, zb);
+            za = zb;
+            seg = seg * 1.35;
+        }
+    }
+}
 
-    while (z < zd) {
-        let za = z.max(zn);
-        let zb = (z + LANE_DASH_LEN).min(zd);
-        if (zb > za) {
-            let c = fog_mix(0xFFB9BCC4, fog_factor(za - cam_z));
+// One Z slice of the deck: the asphalt, both barriers, the solid edge lines
+// and whatever lane dashes fall inside it. The dashes belong to the slice
+// carrying them because they are coplanar with its asphalt, and a fixed
+// order within an object is what keeps coplanar surfaces stacked correctly.
+fun draw_road_seg(fb, za, zb) {
+    let f = fog_factor(za - cam_z);
+
+    road_quad(fb, -ROAD_HALF, ROAD_HALF, za, zb, fog_mix(0xFF101116, f));
+
+    // 1m barriers along both edges: the inner face we look at, plus the
+    // top cap, which is visible because the camera sits above it
+    let face = fog_mix(0xFF272A31, f);
+    let cap = fog_mix(0xFF3C404A, f);
+    wall_quad(fb, -ROAD_HALF, 0.0, BARRIER_H, za, zb, face);
+    wall_quad(fb, ROAD_HALF, 0.0, BARRIER_H, za, zb, face);
+    deck_quad(fb, -ROAD_HALF - BARRIER_W, -ROAD_HALF, za, zb, BARRIER_H, cap);
+    deck_quad(fb, ROAD_HALF, ROAD_HALF + BARRIER_W, za, zb, BARRIER_H, cap);
+
+    // Solid edge lines, in the same slices so they fog with the deck
+    let edge = fog_mix(0xFFC8B478, f);
+    road_quad(fb, -ROAD_HALF, -ROAD_HALF + EDGE_W, za, zb, edge);
+    road_quad(fb, ROAD_HALF - EDGE_W, ROAD_HALF, za, zb, edge);
+
+    // Dashed dividers at every lane boundary except the road edges, which
+    // have the solid lines above instead
+    let zd = cam_z + DASH_DRAW_FAR;
+    if (za >= zd) return;
+    let dz = zb.min(zd);
+    let period = LANE_DASH_LEN + LANE_DASH_GAP;
+    let var z = (za / period).floor().to_f() * period;
+    while (z < dz) {
+        let da = z.max(za);
+        let db = (z + LANE_DASH_LEN).min(dz);
+        if (db > da) {
+            let c = fog_mix(0xFFB9BCC4, fog_factor(da - cam_z));
             for (let var i = 1; i < NUM_LANES; ++i) {
                 let x = -ROAD_HALF + LANE_W * i.to_f();
-                road_quad(fb, x - LINE_W * 0.5, x + LINE_W * 0.5, za, zb, c);
+                road_quad(fb, x - LINE_W * 0.5, x + LINE_W * 0.5, da, db, c);
             }
         }
         z = z + period;
@@ -1004,60 +1220,100 @@ let LAMP_COLOR = 0xFFFFD070;
 // Light enough to read against the dark facades behind it
 let LAMP_POLE_COLOR = 0xFF474D58;
 
-// A whole lamp post lives at a single (x, z), so every part of it projects to
-// an axis-aligned screen rectangle, same as the constant-Z walls. None of it
-// needs the triangle rasterizer.
-fun draw_lamp(fb, side, z) {
-    let d = z - cam_z;
-    if (d < NEAR_Z) return;
+// A whole post stands in one Z plane, so all of it is flat quads facing us
+class Lamp {
+    init(self, side, z) {
+        self.side = side;
+        self.z = z;
+        self.zn = z;
+        self.zf = z;
+    }
 
-    let s = FOCAL / d;
-    let f = fog_factor(d);
-    let sgn = side.to_f();
-    let ay = CY + cam_y * s;          // Deck level
-    let y_top = (ay - LAMP_H * s).floor();
-    let pole_c = fog_mix(LAMP_POLE_COLOR, f);
+    render(self, fb) {
+        let z = self.z;
+        let d = z - cam_z;
+        if (d < NEAR_Z) return;
+        // Its own draw distance, well short of where buildings give up
+        if (d > LAMP_DRAW_FAR) return;
 
-    // Pole. It runs down to the deck; the barrier hides its foot for us,
-    // because the deck is painted after the lamps.
-    let px = CX + (LAMP_X * sgn - cam_x) * s;
-    let hw = LAMP_POLE_W * 0.5 * s;
-    let px0 = (px - hw).floor();
-    fill_rect(fb, px0, y_top, (px + hw).floor().max(px0 + 1), ay.floor(), pole_c);
+        let s = FOCAL / d;
+        let f = fog_factor(d);
+        let pole_c = fog_mix(LAMP_POLE_COLOR, f);
 
-    // Arm reaching in over the road
-    let inner = (LAMP_X - LAMP_ARM) * sgn;
-    let outer = LAMP_X * sgn;
-    let ax0 = CX + (outer.min(inner) - cam_x) * s;
-    let ax1 = CX + (outer.max(inner) - cam_x) * s;
-    fill_rect(fb, ax0.floor(), y_top, ax1.floor(),
-              (ay - (LAMP_H - LAMP_ARM_T) * s).floor().max(y_top + 1), pole_c);
+        let outer = LAMP_X * self.side;
+        let inner = (LAMP_X - LAMP_ARM) * self.side;
+        let hw = LAMP_POLE_W * 0.5;
 
-    // Lamp head, hanging off the inner end of the arm
-    let hx = CX + (inner - cam_x) * s;
-    let hhw = LAMP_HEAD_W * 0.5 * s;
-    let hx0 = (hx - hhw).floor();
-    let hy1 = (ay - (LAMP_H - LAMP_HEAD_H) * s).floor().max(y_top + 1);
+        // Pole. It runs down to the deck; the barrier hides its foot for us,
+        // because the deck is painted after the lamps.
+        world_quad(fb, outer - hw, LAMP_H, z, outer + hw, LAMP_H, z,
+                       outer + hw, 0.0, z, outer - hw, 0.0, z, pole_c);
 
-    // One tight halo rather than the banded three: the head is small, and the
-    // backdrop here has to be assumed dark rather than sampled, so a wide
-    // multi-step falloff would show up as a drawn frame around the lamp
-    fill_rect_halo(fb, hx0, y_top, (hx + hhw).floor().max(hx0 + 1), hy1,
-                   fog_mix(LAMP_COLOR, f), fog_mix(0xFF0B0D16, f),
-                   ((hy1 - y_top) _/ 2).min(3));
+        // Arm reaching in over the road
+        world_quad(fb, inner, LAMP_H, z, outer, LAMP_H, z,
+                       outer, LAMP_H - LAMP_ARM_T, z,
+                       inner, LAMP_H - LAMP_ARM_T, z, pole_c);
+
+        // Lamp head, hanging off the inner end of the arm. One tight halo
+        // rather than the banded three: the head is small, and the backdrop
+        // here has to be assumed dark rather than sampled, so a wide
+        // multi-step falloff would show up as a drawn frame around the lamp.
+        let hhw = LAMP_HEAD_W * 0.5;
+        world_quad_halo(fb,
+            inner - hhw, LAMP_H, z, inner + hhw, LAMP_H, z,
+            inner + hhw, LAMP_H - LAMP_HEAD_H, z,
+            inner - hhw, LAMP_H - LAMP_HEAD_H, z,
+            fog_mix(LAMP_COLOR, f), fog_mix(0xFF0B0D16, f),
+            (LAMP_HEAD_H * s * 0.5).min(3.0));
+    }
 }
 
-fun draw_lamps(fb) {
-    // Far to near, so a near post paints over a distant one
-    let var i = ((cam_z + LAMP_DRAW_FAR) / LAMP_SPACING).floor();
-    let near_i = (cam_z / LAMP_SPACING).floor();
-    while (i >= near_i) {
-        let z = i.to_f() * LAMP_SPACING;
-        if (z - cam_z >= NEAR_Z) {
-            draw_lamp(fb, -1, z);
-            draw_lamp(fb, 1, z);
+// --- Draw list ---
+//
+// Objects are collected each frame, sorted back to front and drawn in that
+// order, each laying down its own quads in a fixed order so that a wall is
+// always painted before the windows on it. Sorting whole objects rather than
+// loose quads is what keeps that relationship intact, and it leaves room for
+// anything we place later, an overpass or a billboard, to fall into the
+// right slot without the renderer knowing what it is.
+
+// A scene object needs only three things:
+//   self.zn, self.zf   near and far edge in world Z, used to cull and sort it
+//   render(self, fb)   draw itself, choosing its own detail and inner order
+//
+// and optionally update(self, dt) if it animates, in which case it also goes
+// on the animated list so the static objects never pay for the call.
+//
+// zn and zf are fields rather than methods because the collector reads them
+// on every object every frame, and for anything that does not move they are
+// constant. Something that does move rewrites its own zn in update().
+//
+// The renderer keeps its camera and scratch buffers in globals, since every
+// one of the ten thousand quads a frame touches them. Above that level
+// everything is an object.
+
+let MAX_DRAW = 512;
+let draw_list = Array.with_size(MAX_DRAW, nil);
+let var draw_n = 0;
+
+fun draw_push(obj) {
+    if (draw_n >= MAX_DRAW) return;
+    draw_list[draw_n] = obj;
+    draw_n = draw_n + 1;
+}
+
+// Farthest first. The scene is collected in roughly that order already, so
+// insertion sort stays close to linear.
+fun draw_sort() {
+    for (let var i = 1; i < draw_n; ++i) {
+        let o = draw_list[i];
+        let k = o.zn;
+        let var j = i - 1;
+        while (j >= 0 && draw_list[j].zn < k) {
+            draw_list[j + 1] = draw_list[j];
+            j = j - 1;
         }
-        i = i - 1;
+        draw_list[j + 1] = o;
     }
 }
 
@@ -1071,6 +1327,9 @@ if (mode_arg == "--capture") {
     capture_frames = $cmd_get_arg_or(2, "1").parse_int(10);
     capture_prefix = $cmd_get_arg_or(3, "frame");
     capture_step = $cmd_get_arg_or(4, "1.6").parse_float();
+    // Fixed lean and look angle, so a capture can check the rotation path
+    cam_roll = $cmd_get_arg_or(5, "0.0").parse_float() * PI / 180.0;
+    cam_pitch = $cmd_get_arg_or(6, "0.0").parse_float() * PI / 180.0;
 }
 
 rand_init(12345);
@@ -1110,9 +1369,8 @@ let BUILDING_BASE =
     (cam_y - SIGHT_SLOPE * (BLOCK_HALF + SETBACK_MAX + WIDTH_MAX) - 2.0).min(-2.0);
 
 // Lines both sides of the road with a run of boxes. Buildings on one side are
-// sequential in Z and never overlap; buildings on opposite sides never overlap
-// on screen, so ordering the whole list by near edge is an exact painter's
-// sort.
+// sequential in Z and never overlap, and buildings on opposite sides never
+// overlap on screen, which is what makes ordering them by near edge exact.
 fun generate_city(list, side) {
     let var z = 24.0;
     while (z < CITY_FAR) {
@@ -1141,48 +1399,81 @@ fun generate_city(list, side) {
     }
 }
 
-let buildings = [];
-generate_city(buildings, -1);
-generate_city(buildings, 1);
+// Lamp posts march down both shoulders at a fixed spacing. They are scene
+// objects sitting at their own world Z, so they sort in among the buildings
+// rather than needing a pass of their own.
+fun generate_lamps(list) {
+    let var z = LAMP_SPACING;
+    while (z < CITY_FAR) {
+        list.push(Lamp(-1.0, z));
+        list.push(Lamp(1.0, z));
+        z = z + LAMP_SPACING;
+    }
+}
 
-// Sort by near edge so we can paint back to front by walking it in reverse
-fun sort_buildings(list) {
+// Everything in the world except the road, which is camera-relative
+let scene = [];
+generate_city(scene, -1);
+generate_city(scene, 1);
+generate_lamps(scene);
+
+// Kept sorted by near edge so collecting walks it in order and can stop early
+fun sort_scene(list) {
     for (let var i = 1; i < list.len; ++i) {
         let key = list[i];
         let var j = i - 1;
-        while (j >= 0 && list[j].z0 > key.z0) {
+        while (j >= 0 && list[j].zn > key.zn) {
             list[j + 1] = list[j];
             j = j - 1;
         }
         list[j + 1] = key;
     }
 }
-sort_buildings(buildings);
-$println("generated " + buildings.len.to_s() + " buildings");
+sort_scene(scene);
+
+// Objects that animate. Kept apart so the static ones never pay for a call
+// they do not need.
+let animated = [];
+
+let road = Road();
+
+$println("generated " + scene.len.to_s() + " scene objects");
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 
+// Coarse cull on the object's own span. The scene is sorted by near edge, so
+// once one object is past the haze every object after it is too.
+fun collect_scene() {
+    let near = cam_z + NEAR_Z;
+    let far = cam_z + FOG_END;
+    for (let var i = 0; i < scene.len; ++i) {
+        let o = scene[i];
+        if (o.zn > far) break;
+        if (o.zf <= near) continue;
+        draw_push(o);
+    }
+}
+
+fun update_scene(dt) {
+    for (let var i = 0; i < animated.len; ++i) {
+        animated[i].update(dt);
+    }
+}
+
 fun render_frame(fb) {
+    update_camera();
     draw_background(fb);
 
-    // Back to front. Buildings are disjoint boxes laid out along the road, so
-    // ordering by their near edge is exact.
-    for (let var i = buildings.len - 1; i >= 0; --i) {
-        draw_building(fb, buildings[i]);
+    draw_n = 0;
+    collect_scene();
+    draw_sort();
+    for (let var i = 0; i < draw_n; ++i) {
+        draw_list[i].render(fb);
     }
 
-    // Lamps stand nearer the centre line than any building, so a building only
-    // overlaps one when it is more than twice as far away. Drawing them after
-    // every building is therefore correct.
-    draw_lamps(fb);
-
-    // The deck goes last. Now that buildings carry on below it they overlap it
-    // on screen, and wherever that happens the deck is always the nearer of the
-    // two: a building at Z only overlaps road at distance D when
-    // Z > D * BLOCK_HALF / ROAD_HALF, and that ratio is above 1 because the
-    // road is narrower than the gap between the two rows of buildings. So
-    // painting it over everything is exact, not a fudge.
-    draw_road(fb);
+    // The deck last, over everything. See the note on Road for why that is
+    // exact rather than a fudge.
+    road.render(fb);
 }
 
 if (mode_arg == "--bench") {
@@ -1237,8 +1528,10 @@ loop {
     let dt = (now - last_ms).to_f() / 1000.0;
     last_ms = now;
 
+    let step = dt.min(0.1);
     if (!paused) {
-        cam_z = cam_z + speed * dt.min(0.1);
+        cam_z = cam_z + speed * step;
+        update_scene(step);
     }
 
     let t0 = $time_current_ms();
