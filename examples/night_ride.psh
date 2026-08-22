@@ -704,9 +704,17 @@ class FacadeStyle {
 
 // --- Buildings ---
 //
-// A building is an axis-aligned box spanning [x0,x1] x [0,height] x [z0,z1].
-// At most two of its walls ever face the camera: the near wall at z0 and
-// whichever side wall faces the road.
+// A building is an axis-aligned box spanning [x0,x1] x [0,height] x [z0,z1],
+// but only two of its six faces are ever built.
+//
+// The camera stays on the roadway between the two rows, so it is always
+// outside a building in X and always short of it in Z until it has gone by.
+// That leaves the near wall at z0 and the one side wall facing the road as
+// the only faces it can see. The far side wall and the back are never turned
+// toward it, and the roof is 40m or more above an eye 1.55m off the deck, so
+// none of them are generated at all. The rule for anything we add later is
+// the same one: an upward face is only worth building if the eye can get
+// above it, which is why the barrier caps exist and roofs do not.
 
 class Building {
     init(self, x0, x1, z0, z1, height, base) {
@@ -719,6 +727,9 @@ class Building {
         self.zf = z1;
         self.height = height;
         self.base = base;
+        // Which side wall faces the road. Fixed here rather than per frame,
+        // because the camera can never cross to the other side of it.
+        if (x0 > 0.0) self.xf = x0; else self.xf = x1;
 
         // Near-black concrete with a slight blue cast
         let g = rand_int(12, 26);
@@ -746,40 +757,29 @@ class Building {
     }
 
     render(self, fb) {
-        // Which side wall faces the road, if any
-        let var xf = 0.0;
-        let var has_side = true;
-        if (cam_x > self.x1) {
-            xf = self.x1;
-        } else if (cam_x < self.x0) {
-            xf = self.x0;
-        } else {
-            has_side = false;
-        }
+        let xf = self.xf;
 
         // Side wall (constant X), drawn first: it is the one we are alongside
-        if (has_side) {
-            let fog = fog_factor(self.z0 - cam_z);
+        let side_fog = fog_factor(self.z0 - cam_z);
 
-            // Side walls read slightly darker than the front, which is what
-            // gives the boxes their sense of volume
-            let wall = fog_mix(color_scale(self.wall, 0.62), fog);
-            world_quad(fb,
-                xf, self.height, self.z0,
-                xf, self.height, self.z1,
-                xf, self.base, self.z1,
-                xf, self.base, self.z0,
-                wall);
+        // Side walls read slightly darker than the front, which is what
+        // gives the boxes their sense of volume
+        let side_wall = fog_mix(color_scale(self.wall, 0.62), side_fog);
+        world_quad(fb,
+            xf, self.height, self.z0,
+            xf, self.height, self.z1,
+            xf, self.base, self.z1,
+            xf, self.base, self.z0,
+            side_wall);
 
-            // Skip the windows once the wall is only a sliver on screen. Looking
-            // along it rather than at it foreshortens its whole depth into the
-            // gap between where its two ends project to.
-            let za = (self.z0 - cam_z).max(NEAR_Z);
-            let zb = (self.z1 - cam_z).max(za + 0.001);
-            if ((xf - cam_x).abs() * FOCAL * (zb - za) / (za * zb) > 3.0) {
-                draw_facade(fb, self.side, xf, 0.0, self.z0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
-                            self.z1 - self.z0, fog, wall);
-            }
+        // Skip the windows once the wall is only a sliver on screen. Looking
+        // along it rather than at it foreshortens its whole depth into the
+        // gap between where its two ends project to.
+        let za = (self.z0 - cam_z).max(NEAR_Z);
+        let zb = (self.z1 - cam_z).max(za + 0.001);
+        if ((xf - cam_x).abs() * FOCAL * (zb - za) / (za * zb) > 3.0) {
+            draw_facade(fb, self.side, xf, 0.0, self.z0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                        self.z1 - self.z0, side_fog, side_wall);
         }
 
         // Near wall (constant Z)
@@ -1342,15 +1342,16 @@ let BLOCK_HALF = 25.0;     // Nearest a building may come to the center line
 let SETBACK_MAX = 20.0;    // Extra distance back from the block line
 let WIDTH_MIN = 15.0;
 let WIDTH_MAX = 40.0;
-let DEPTH_MIN = 16.0;
-let DEPTH_MAX = 42.0;
 
-// Gap along the road between one building and the next on the same side. Still
-// random, but the upper end is doubled so the row opens up in places instead
-// of reading as one continuous wall.
-let GAP_MIN = 1.5;
-let GAP_MAX = 18.0;
-let CITY_FAR = 1600.0;     // How far down the road buildings are generated
+// A building lives inside one slot and never crosses into the next, which is
+// what lets a chunk be built without knowing anything about its neighbours.
+// The slot is longer than the deepest building, and where the building sits
+// inside it is what produces the gap along the road. A slot is sometimes left
+// empty so the row opens up instead of reading as one continuous wall.
+let SLOT_LEN = 40.0;
+let DEPTH_MIN = 16.0;
+let DEPTH_MAX = 36.0;
+let SLOT_EMPTY_PROB = 0.12;
 
 // How far below the deck a building actually needs to reach.
 //
@@ -1368,56 +1369,100 @@ let SIGHT_SLOPE = (cam_y - BARRIER_H) / (ROAD_HALF + BARRIER_W);
 let BUILDING_BASE =
     (cam_y - SIGHT_SLOPE * (BLOCK_HALF + SETBACK_MAX + WIDTH_MAX) - 2.0).min(-2.0);
 
-// Lines both sides of the road with a run of boxes. Buildings on one side are
-// sequential in Z and never overlap, and buildings on opposite sides never
-// overlap on screen, which is what makes ordering them by near edge exact.
-fun generate_city(list, side) {
-    let var z = 24.0;
-    while (z < CITY_FAR) {
-        let depth = rand_float(DEPTH_MIN, DEPTH_MAX);
-        let width = rand_float(WIDTH_MIN, WIDTH_MAX);
-        let setback = rand_float(0.0, SETBACK_MAX);
+// One slot on one side of the street, filled or left as an opening
+fun generate_slot(list, side, zs) {
+    if (rand_float(0.0, 1.0) < SLOT_EMPTY_PROB) return;
 
-        // Roughly 12 to 27 floors normally, with a minority of real towers.
-        // The floor is well above the old 24m, which read as stubby next to
-        // the tall ones.
-        let var height = rand_float(42.0, 90.0);
-        if (rand_float(0.0, 1.0) < 0.28) height = rand_float(90.0, 187.5);
+    let depth = rand_float(DEPTH_MIN, DEPTH_MAX);
+    let width = rand_float(WIDTH_MIN, WIDTH_MAX);
+    let setback = rand_float(0.0, SETBACK_MAX);
+    // Where it sits in its slot is what opens the gap to the one before it
+    let lead = rand_float(0.0, SLOT_LEN - depth);
 
-        let var x0 = 0.0;
-        let var x1 = 0.0;
-        if (side < 0) {
-            x1 = -(BLOCK_HALF + setback);
-            x0 = x1 - width;
-        } else {
-            x0 = BLOCK_HALF + setback;
-            x1 = x0 + width;
+    // Roughly 12 to 27 floors normally, with a minority of real towers
+    let var height = rand_float(42.0, 90.0);
+    if (rand_float(0.0, 1.0) < 0.28) height = rand_float(90.0, 187.5);
+
+    let var x0 = 0.0;
+    let var x1 = 0.0;
+    if (side < 0) {
+        x1 = -(BLOCK_HALF + setback);
+        x0 = x1 - width;
+    } else {
+        x0 = BLOCK_HALF + setback;
+        x1 = x0 + width;
+    }
+
+    let z0 = zs + lead;
+    list.push(Building(x0, x1, z0, z0 + depth, height, BUILDING_BASE));
+}
+
+// Lamp posts march down the shoulder at a fixed spacing, so which ones fall
+// in a chunk is arithmetic rather than anything random
+fun generate_lamps(list, side, z0, z1) {
+    let var i = (z0 / LAMP_SPACING).ceil();
+    while (i.to_f() * LAMP_SPACING < z1) {
+        list.push(Lamp(side.to_f(), i.to_f() * LAMP_SPACING));
+        i = i + 1;
+    }
+}
+
+// --- Chunks ---
+//
+// The world is cut into chunks, one per side of the road per stretch of Z.
+// A chunk's contents come only from its own (ix, iz), so any chunk can be
+// built at any time, in any order, and comes out identical every time. That
+// is what makes the world endless: chunks are built as we approach them and
+// dropped once they fall behind, and driving back over the same ground
+// rebuilds exactly the city that was there before.
+//
+// ix is the lateral band, -1 and 1 for the rows flanking the road. Deeper
+// rows further from the road get their own ix later.
+
+let CHUNK_SLOTS = 4;
+let CHUNK_LEN = SLOT_LEN * CHUNK_SLOTS.to_f();
+let CHUNK_BEHIND = 1;      // kept behind us, so glancing back is not empty
+
+// Scrambles a chunk's coordinates into a seed. Adjacent chunks have to land
+// on unrelated seeds, otherwise neighbouring blocks come out looking alike.
+fun chunk_hash(ix, iz) {
+    let var h = (ix * 374761393 + iz * 668265263) & 0x3FFFFFFF;
+    h = ((h ^ (h >> 13)) * 76531729) & 0x3FFFFFFF;
+    h = ((h ^ (h >> 16)) * 30300301) & 0x3FFFFFFF;
+    return h ^ (h >> 11);
+}
+
+class Chunk {
+    init(self, ix, iz) {
+        self.ix = ix;
+        self.iz = iz;
+        self.z0 = iz.to_f() * CHUNK_LEN;
+        self.z1 = self.z0 + CHUNK_LEN;
+        self.objs = [];
+
+        rand_init(chunk_hash(ix, iz));
+        for (let var s = 0; s < CHUNK_SLOTS; ++s) {
+            generate_slot(self.objs, ix, self.z0 + s.to_f() * SLOT_LEN);
         }
-
-        list.push(Building(x0, x1, z, z + depth, height, BUILDING_BASE));
-        z = z + depth + rand_float(GAP_MIN, GAP_MAX);
+        generate_lamps(self.objs, ix, self.z0, self.z1);
     }
 }
 
 // Lamp posts march down both shoulders at a fixed spacing. They are scene
 // objects sitting at their own world Z, so they sort in among the buildings
 // rather than needing a pass of their own.
-fun generate_lamps(list) {
-    let var z = LAMP_SPACING;
-    while (z < CITY_FAR) {
-        list.push(Lamp(-1.0, z));
-        list.push(Lamp(1.0, z));
-        z = z + LAMP_SPACING;
-    }
-}
+// Chunks currently built, and everything in them flattened into one list
+// sorted by near edge. Both are rebuilt only when the live set changes, which
+// is once every CHUNK_LEN of road rather than once a frame.
+let var chunks = [];
+let var scene = [];
 
-// Everything in the world except the road, which is camera-relative
-let scene = [];
-generate_city(scene, -1);
-generate_city(scene, 1);
-generate_lamps(scene);
+// Objects that animate. Kept apart so the static ones never pay for a call
+// they do not need.
+let animated = [];
 
-// Kept sorted by near edge so collecting walks it in order and can stop early
+let road = Road();
+
 fun sort_scene(list) {
     for (let var i = 1; i < list.len; ++i) {
         let key = list[i];
@@ -1429,15 +1474,59 @@ fun sort_scene(list) {
         list[j + 1] = key;
     }
 }
-sort_scene(scene);
 
-// Objects that animate. Kept apart so the static ones never pay for a call
-// they do not need.
-let animated = [];
+fun rebuild_scene() {
+    let list = [];
+    for (let var c = 0; c < chunks.len; ++c) {
+        let objs = chunks[c].objs;
+        for (let var i = 0; i < objs.len; ++i) list.push(objs[i]);
+    }
+    sort_scene(list);
+    scene = list;
+}
 
-let road = Road();
+// The window of chunk indices the last call worked on. Starting it empty
+// forces the first frame to build.
+let var live_lo = 1;
+let var live_hi = 0;
 
-$println("generated " + scene.len.to_s() + " scene objects");
+// Build whatever the camera can now see and drop what it has left behind.
+// The window only moves once every CHUNK_LEN of road, so almost every frame
+// leaves here on the first compare.
+fun ensure_chunks() {
+    let iz_lo = (cam_z / CHUNK_LEN).floor() - CHUNK_BEHIND;
+    let iz_hi = ((cam_z + FOG_END) / CHUNK_LEN).floor();
+    if (iz_lo == live_lo && iz_hi == live_hi) return;
+    live_lo = iz_lo;
+    live_hi = iz_hi;
+    let var changed = false;
+
+    // Drop the chunks that have fallen outside the window
+    let keep = [];
+    for (let var c = 0; c < chunks.len; ++c) {
+        let ch = chunks[c];
+        if (ch.iz < iz_lo || ch.iz > iz_hi) { changed = true; continue; }
+        keep.push(ch);
+    }
+    if (changed) chunks = keep;
+
+    // Build the ones that are missing
+    for (let var iz = iz_lo; iz <= iz_hi; ++iz) {
+        for (let var s = 0; s < 2; ++s) {
+            let ix = s * 2 - 1;
+            let var found = false;
+            for (let var c = 0; c < chunks.len; ++c) {
+                if (chunks[c].iz == iz && chunks[c].ix == ix) { found = true; break; }
+            }
+            if (!found) {
+                chunks.push(Chunk(ix, iz));
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) rebuild_scene();
+}
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 
@@ -1462,6 +1551,7 @@ fun update_scene(dt) {
 
 fun render_frame(fb) {
     update_camera();
+    ensure_chunks();
     draw_background(fb);
 
     draw_n = 0;
