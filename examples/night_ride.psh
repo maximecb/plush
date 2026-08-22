@@ -121,19 +121,26 @@ let RUN_STICK = 0.62;
 //
 // Each level fades into the wall over the stretch between its two numbers,
 // so nothing ever appears or vanishes in one frame.
-let UNLIT_FADE = 90.0;   let UNLIT_GONE = 240.0;
-let LIT_FADE = 190.0;    let LIT_GONE = 430.0;
-let BAND_FADE = 520.0;   let BAND_GONE = 1050.0;
+let UNLIT_FADE = 70.0;   let UNLIT_GONE = 175.0;
+let LIT_FADE = 145.0;    let LIT_GONE = 330.0;
+let BAND_FADE = 460.0;   let BAND_GONE = 950.0;
 
 // A building itself fades into the haze over the last of its range, rather
 // than appearing out of nothing at CULL_FAR
 let BUILD_FADE = CULL_FAR - 300.0;
 
 // A floor under all of the above: a window narrower than this on screen is
-// never worth a quad whatever its distance says. It rarely binds now that
-// distance drives the LOD, and exists so an edge-on wall cannot spend
-// thousands of quads on slivers.
+// never worth a quad whatever its distance says. It exists so an edge-on
+// wall cannot spend thousands of quads on slivers.
+//
+// It is measured against one reference window width for every building
+// rather than each building's own. Using the real width made this the
+// binding constraint on side walls, where foreshortening bites early, and
+// since width varies three to one across the archetypes two neighbours would
+// drop their glass hundreds of metres apart. Consistency matters more here
+// than being exactly right per building.
 let MIN_WIN_PX = 1.4;
+let REF_WIN_W = 1.45;
 
 // 1 while nearer than fade_from, 0 once past gone_at, ramping between
 fun lod_fade(d, fade_from, gone_at) {
@@ -830,7 +837,10 @@ class FacadeStyle {
 // above it, which is why the barrier caps exist and roofs do not.
 
 class Building {
-    init(self, x0, x1, z0, z1, height, base) {
+    init(self, x0, x1, z0, z1, height, base, detail) {
+        // How far this building's detail carries, as a scale on every LOD
+        // distance. Backdrop bands get much less than the row on the road.
+        self.detail = detail;
         self.x0 = x0;
         self.x1 = x1;
         self.z0 = z0;
@@ -873,11 +883,20 @@ class Building {
         let xf = self.xf;
 
         // Everything about this building's detail comes off its own distance,
-        // so two buildings side by side always shed detail in depth order
-        let d = self.z0 - cam_z;
-        let f_unlit = lod_fade(d, UNLIT_FADE, UNLIT_GONE);
-        let f_lit = lod_fade(d, LIT_FADE, LIT_GONE);
-        let f_band = lod_fade(d, BAND_FADE, BAND_GONE);
+        // so two buildings side by side always shed detail in depth order.
+        //
+        // That distance has to be the real one, to the nearest corner of the
+        // box, not just how far down the road it is. A building in the band
+        // behind is a hundred metres off to the side even when we are level
+        // with it, and judging it by road distance alone would hand it full
+        // window detail while it is nowhere near us.
+        let dz = (self.z0 - cam_z).max(0.0);
+        let dx = xf - cam_x;
+        let d = (dz * dz + dx * dx).sqrt();
+        let k = self.detail;
+        let f_unlit = lod_fade(d, UNLIT_FADE * k, UNLIT_GONE * k);
+        let f_lit = lod_fade(d, LIT_FADE * k, LIT_GONE * k);
+        let f_band = lod_fade(d, BAND_FADE * k, BAND_GONE * k);
 
         // The last of its range is spent sinking into the haze, so a building
         // never appears out of nothing at the far edge of the world
@@ -971,8 +990,8 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
     // fixed for the whole wall. So one squared compare says whether a column
     // has gone narrower than a pixel, with no division, and it accounts for
     // the foreshortening of a wall we are looking along rather than at.
-    let cull_z2 = (u_x * o_z - o_x * u_z).abs() * FOCAL * f.uwin / MIN_WIN_PX;
-    let row_cull_z = f.vwin * FOCAL / MIN_WIN_PX;
+    let cull_z2 = (u_x * o_z - o_x * u_z).abs() * FOCAL * REF_WIN_W / MIN_WIN_PX;
+    let row_cull_z = REF_WIN_W * FOCAL / MIN_WIN_PX;
     let u_end = u_z * span;
 
     // Nothing of this kind is left at this distance, so skip the walk
@@ -1485,23 +1504,45 @@ build_stars(500);
 
 // --- City layout ---
 
-// The block line sits a long way back off a road this wide, which is what
-// opens the canyon out and lets the towers stand up properly instead of
-// leaning over the carriageway
-let BLOCK_HALF = 45.0;     // Nearest a building may come to the center line
-let SETBACK_MAX = 26.0;    // Extra distance back from the block line
+// The city is laid out in lateral bands either side of the road. Band 1
+// flanks the carriageway; the bands behind it stand further back, taller and
+// sparser, so what shows through the gaps in the front row is more city
+// rather than empty sky. That depth is what makes this read as driving into
+// a downtown core instead of down a corridor with two walls.
+let NUM_BANDS = 3;
+
+fun band_block(band) { return 45.0 + (band - 1).to_f() * 94.0; }
+fun band_setback(band) { return 26.0 + (band - 1).to_f() * 32.0; }
+
+// Further bands get longer slots, so their buildings are bigger and stand
+// further apart rather than crowding into a solid backdrop
+fun band_slots(band) { if (band == 1) return 4; if (band == 2) return 3; return 2; }
+fun band_empty(band) { return 0.26 + (band - 1).to_f() * 0.06; }
+
+// They also get taller, otherwise the front row simply hides them
+fun band_lift(band) { return 1.0 + (band - 1).to_f() * 0.35; }
+
+// And they carry less detail. A band a couple of hundred metres off the road
+// is backdrop: it wants a silhouette and some lit windows, not a facade we
+// pay full price for. This scales every LOD distance for the band, so the
+// falloff stays in depth order within a band and between bands.
+fun band_detail(band) {
+    if (band == 1) return 1.0;
+    if (band == 2) return 0.5;
+    return 0.28;
+}
+
 let WIDTH_MIN = 18.0;
 let WIDTH_MAX = 46.0;
 
 // A building lives inside one slot and never crosses into the next, which is
 // what lets a chunk be built without knowing anything about its neighbours.
 // The slot is longer than the deepest building, and where the building sits
-// inside it is what produces the gap along the road. A slot is sometimes left
-// empty so the row opens up instead of reading as one continuous wall.
-let SLOT_LEN = 40.0;
+// inside it is what produces the gap along the road. A slot is often left
+// empty, so the row opens up and lets the band behind it show through.
+let CHUNK_LEN = 208.0;
 let DEPTH_MIN = 16.0;
-let DEPTH_MAX = 36.0;
-let SLOT_EMPTY_PROB = 0.12;
+let DEPTH_MAX = 40.0;
 
 // How far below the deck a building actually needs to reach.
 //
@@ -1517,35 +1558,35 @@ let SLOT_EMPTY_PROB = 0.12;
 // the eye sits at or under the barrier top and nothing below is visible at all
 let SIGHT_SLOPE = (cam_y - BARRIER_H) / (ROAD_HALF + BARRIER_W);
 let BUILDING_BASE =
-    (cam_y - SIGHT_SLOPE * (BLOCK_HALF + SETBACK_MAX + WIDTH_MAX) - 2.0).min(-2.0);
+    (cam_y - SIGHT_SLOPE * (band_block(NUM_BANDS) + band_setback(NUM_BANDS)
+                            + WIDTH_MAX) - 2.0).min(-2.0);
 
-// One slot on one side of the street, filled or left as an opening
-fun generate_slot(list, side, zs) {
-    if (rand_float(0.0, 1.0) < SLOT_EMPTY_PROB) return;
+// One slot of one band on one side of the street, filled or left open.
+// side is -1 or 1, band counts outward from the road.
+fun generate_slot(list, side, band, zs, slot_len) {
+    if (rand_float(0.0, 1.0) < band_empty(band)) return;
 
     let depth = rand_float(DEPTH_MIN, DEPTH_MAX);
     let width = rand_float(WIDTH_MIN, WIDTH_MAX);
-    let setback = rand_float(0.0, SETBACK_MAX);
+    let setback = rand_float(0.0, band_setback(band));
     // Where it sits in its slot is what opens the gap to the one before it
-    let lead = rand_float(0.0, SLOT_LEN - depth);
+    let lead = rand_float(0.0, slot_len - depth);
 
-    // Set back this far, a mid-rise no longer fills the frame, so the whole
-    // range has moved up and the towers reach a lot higher
-    let var height = rand_float(70.0, 150.0);
-    if (rand_float(0.0, 1.0) < 0.34) height = rand_float(150.0, 330.0);
+    // Set back this far a mid-rise no longer fills the frame, so the range
+    // has moved up
+    let lift = band_lift(band);
+    let var height = rand_float(70.0, 150.0) * lift;
+    if (rand_float(0.0, 1.0) < 0.34) height = rand_float(150.0, 330.0) * lift;
 
+    let near = band_block(band) + setback;
     let var x0 = 0.0;
     let var x1 = 0.0;
-    if (side < 0) {
-        x1 = -(BLOCK_HALF + setback);
-        x0 = x1 - width;
-    } else {
-        x0 = BLOCK_HALF + setback;
-        x1 = x0 + width;
-    }
+    if (side < 0) { x1 = -near; x0 = x1 - width; }
+    else { x0 = near; x1 = x0 + width; }
 
     let z0 = zs + lead;
-    list.push(Building(x0, x1, z0, z0 + depth, height, BUILDING_BASE));
+    list.push(Building(x0, x1, z0, z0 + depth, height, BUILDING_BASE,
+                       band_detail(band)));
 }
 
 // Lamp posts march down the shoulder at a fixed spacing, so which ones fall
@@ -1567,11 +1608,10 @@ fun generate_lamps(list, side, z0, z1) {
 // dropped once they fall behind, and driving back over the same ground
 // rebuilds exactly the city that was there before.
 //
-// ix is the lateral band, -1 and 1 for the rows flanking the road. Deeper
-// rows further from the road get their own ix later.
+// ix is the signed lateral band: -1 and 1 flank the road, -2 and 2 stand
+// behind those, and so on outward. Its sign is the side of the road and its
+// magnitude is how far back the band sits.
 
-let CHUNK_SLOTS = 4;
-let CHUNK_LEN = SLOT_LEN * CHUNK_SLOTS.to_f();
 let CHUNK_BEHIND = 1;      // kept behind us, so glancing back is not empty
 
 // Scrambles a chunk's coordinates into a seed. Adjacent chunks have to land
@@ -1591,17 +1631,22 @@ class Chunk {
         self.z1 = self.z0 + CHUNK_LEN;
         self.objs = [];
 
+        let var side = 1;
+        if (ix < 0) side = -1;
+        let band = ix * side;
+
         rand_init(chunk_hash(ix, iz));
-        for (let var s = 0; s < CHUNK_SLOTS; ++s) {
-            generate_slot(self.objs, ix, self.z0 + s.to_f() * SLOT_LEN);
+        let slots = band_slots(band);
+        let slot_len = CHUNK_LEN / slots.to_f();
+        for (let var s = 0; s < slots; ++s) {
+            generate_slot(self.objs, side, band,
+                          self.z0 + s.to_f() * slot_len, slot_len);
         }
-        generate_lamps(self.objs, ix, self.z0, self.z1);
+        // Only the band against the road carries street lighting
+        if (band == 1) generate_lamps(self.objs, side, self.z0, self.z1);
     }
 }
 
-// Lamp posts march down both shoulders at a fixed spacing. They are scene
-// objects sitting at their own world Z, so they sort in among the buildings
-// rather than needing a pass of their own.
 // Chunks currently built, and everything in them flattened into one list
 // sorted by near edge. Both are rebuilt only when the live set changes, which
 // is once every CHUNK_LEN of road rather than once a frame.
@@ -1661,17 +1706,19 @@ fun ensure_chunks() {
     }
     if (changed) chunks = keep;
 
-    // Build the ones that are missing
+    // Build the ones that are missing, over every band on both sides
     for (let var iz = iz_lo; iz <= iz_hi; ++iz) {
-        for (let var s = 0; s < 2; ++s) {
-            let ix = s * 2 - 1;
-            let var found = false;
-            for (let var c = 0; c < chunks.len; ++c) {
-                if (chunks[c].iz == iz && chunks[c].ix == ix) { found = true; break; }
-            }
-            if (!found) {
-                chunks.push(Chunk(ix, iz));
-                changed = true;
+        for (let var b = 1; b <= NUM_BANDS; ++b) {
+            for (let var s = 0; s < 2; ++s) {
+                let ix = b * (s * 2 - 1);
+                let var found = false;
+                for (let var c = 0; c < chunks.len; ++c) {
+                    if (chunks[c].iz == iz && chunks[c].ix == ix) { found = true; break; }
+                }
+                if (!found) {
+                    chunks.push(Chunk(ix, iz));
+                    changed = true;
+                }
             }
         }
     }
