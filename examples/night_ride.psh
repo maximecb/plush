@@ -33,11 +33,15 @@ let FOCAL = (FRAME_WIDTH.to_f() * 0.5) / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
 // Anything closer than this is clipped away
 let NEAR_Z = 0.5;
 
+// How fast we are travelling, in m/s. Up here because the LOD fades are
+// timed against it, and a let is only visible to what comes after it.
+let var ride_speed = 48.0;
+
 // Distance haze. Colors lerp toward the fog color between these two
 // distances. The haze is violet rather than the blue-grey it started as,
 // which is what gives the whole city its cast.
-let FOG_START = 80.0;
-let FOG_END = 760.0;
+let FOG_START = 120.0;
+let FOG_END = 1500.0;
 let FOG_R = 58;
 let FOG_G = 30;
 let FOG_B = 76;
@@ -51,7 +55,7 @@ let FOG_MAX = 0.94;
 // Buildings are drawn well past where the haze has taken them, because that
 // hazed-out mass near the vanishing point is what makes the city read as a
 // downtown core rather than two rows of boxes.
-let CULL_FAR = 1900.0;
+let CULL_FAR = 3400.0;
 
 // --- World layout ---
 //
@@ -121,13 +125,38 @@ let RUN_STICK = 0.62;
 //
 // Each level fades into the wall over the stretch between its two numbers,
 // so nothing ever appears or vanishes in one frame.
-let UNLIT_FADE = 70.0;   let UNLIT_GONE = 175.0;
-let LIT_FADE = 145.0;    let LIT_GONE = 330.0;
-let BAND_FADE = 460.0;   let BAND_GONE = 950.0;
+// The distance at which each kind of detail is gone, and how long it should
+// spend fading in before that. Time, not distance: how long a building takes
+// to appear is what the eye judges, and pinning it to metres means the fade
+// gets quicker the faster we go. Converted to a distance each frame using
+// the current speed, with a floor so it can never collapse to a hard cut
+// when crawling.
+let UNLIT_GONE = 360.0;   let UNLIT_SECS = 5.0;
+let LIT_GONE = 780.0;     let LIT_SECS = 8.0;
+let BAND_GONE = 1600.0;   let BAND_SECS = 10.0;
+
+
+// How long a level takes to come in or go out, and how long a building
+// takes to appear once it is no longer hidden behind another
+let SHOW_SECS = 1.6;
+
+// Seconds this frame covered, for the eases below
+let var frame_dt = 0.016;
+
+// Move a presence toward where it should be, at a fixed rate. Everything
+// fades on a clock rather than on distance: a building carries its own
+// level for each kind of detail and eases it in, so however its distance
+// behaves, whatever appears takes the same time to do it. Judging by
+// distance alone meant anything whose distance changed abruptly, or that
+// came out from behind something else, arrived at full strength.
+fun approach(cur, target, secs) {
+    let step = frame_dt / secs;
+    if (target > cur) return (cur + step).min(target);
+    return (cur - step).max(target);
+}
 
 // A building itself fades into the haze over the last of its range, rather
 // than appearing out of nothing at CULL_FAR
-let BUILD_FADE = CULL_FAR - 300.0;
 
 // A floor under all of the above: a window narrower than this on screen is
 // never worth a quad whatever its distance says. It exists so an edge-on
@@ -139,8 +168,19 @@ let BUILD_FADE = CULL_FAR - 300.0;
 // since width varies three to one across the archetypes two neighbours would
 // drop their glass hundreds of metres apart. Consistency matters more here
 // than being exactly right per building.
-let MIN_WIN_PX = 1.4;
+// Kept low enough that the resulting cut-off distance is beyond every timed
+// fade above. At 1.1 it landed at 1100m, inside the band fade, and since a
+// front wall's rows all sit at one depth they appeared together and at full
+// strength: the timed fade had already finished easing them in by then. The
+// LOD gates make this redundant for distant work anyway; it is only here to
+// stop an edge-on wall spending quads on slivers.
+let MIN_WIN_PX = 0.7;
 let REF_WIN_W = 1.45;
+
+// Where in that floor's range the fade into the wall starts, in squared
+// depth. 0.3 spends the outer 45% of the range fading, which at road speed
+// is several seconds.
+let SUB_FADE = 0.3;
 
 // 1 while nearer than fade_from, 0 once past gone_at, ramping between
 fun lod_fade(d, fade_from, gone_at) {
@@ -688,6 +728,14 @@ class Facade {
         // since they are the closest to the wall they sit on.
         self.hot = Array.with_size(rows * cols, 0);
 
+        // What this facade averages out to, and how much of the wall its
+        // glass covers. Once the windows have faded out the wall has to take
+        // on this instead of the bare concrete underneath, or a building
+        // visibly darkens as it loses its detail and stands out against the
+        // neighbour that still has it.
+        self.avg = 0;
+        self.cover = 0.0;
+
         if (style.kind == KIND_BAND) {
             self.gen_bands(style);
         } else {
@@ -736,6 +784,40 @@ class Facade {
             }
             r = r + thick;
         }
+        self.set_average();
+    }
+
+    // Mean of everything drawn on the wall, and the share of the wall it
+    // takes up, so a faded-out facade can be replaced by one flat quad that
+    // still reads as the same brightness from a distance
+    set_average(self) {
+        let var sr = 0; let var sg = 0; let var sb = 0; let var n = 0;
+        for (let var r = 0; r < self.rows; ++r) {
+            if (self.row_kind[r] == 2) {
+                let c = self.row_color[r];
+                sr = sr + ((c >> 16) & 0xFF); sg = sg + ((c >> 8) & 0xFF);
+                sb = sb + (c & 0xFF); n = n + 1;
+            } else if (self.row_kind[r] == 1) {
+                let base = r * self.cols;
+                for (let var c = 0; c < self.cols; ++c) {
+                    let v = self.cells[base + c];
+                    sr = sr + ((v >> 16) & 0xFF); sg = sg + ((v >> 8) & 0xFF);
+                    sb = sb + (v & 0xFF); n = n + 1;
+                }
+            }
+        }
+        if (n == 0) return;
+        self.avg = 0xFF000000 | ((sr _/ n) << 16) | ((sg _/ n) << 8) | (sb _/ n);
+
+        let vfrac = self.vwin / self.vpitch;
+        if (self.row_kind[0] == 2) {
+            // A band covers the columns it spans rather than one pitch
+            let span = (self.row_c1[0] - self.row_c0[0]).to_f() * self.upitch
+                       + self.uwin;
+            self.cover = (span / (self.cols.to_f() * self.upitch)).min(1.0) * vfrac;
+        } else {
+            self.cover = (self.uwin / self.upitch) * vfrac;
+        }
     }
 
     // Grid only: every cell of every floor gets a window. Lit ones vary in
@@ -774,6 +856,7 @@ class Facade {
                 }
             }
         }
+        self.set_average();
     }
 }
 
@@ -841,6 +924,7 @@ class Building {
         // How far this building's detail carries, as a scale on every LOD
         // distance. Backdrop bands get much less than the row on the road.
         self.detail = detail;
+        self.hidden = false;
         self.x0 = x0;
         self.x1 = x1;
         self.z0 = z0;
@@ -875,8 +959,77 @@ class Building {
         // around as we drive past it
         let style = FacadeStyle(lit_prob, band_prob, pick_window_tint(),
                                 NEON[rand_int(0, NEON.len)], shape);
-        self.front = Facade(x1 - x0, base, height, style);
-        self.side = Facade(z1 - z0, base, height, style);
+
+        // A building further off the road than the furthest thing we ever
+        // draw on a facade can never show one, however long we drive past
+        // it, since its distance is at least its lateral offset. Those never
+        // get a facade at all.
+        //
+        // The rest get theirs lazily, the first frame they come close enough
+        // to show any of it. Laying one out costs far more than drawing the
+        // two flat quads a distant building amounts to, and the world is now
+        // built four kilometres ahead: doing it up front meant generating
+        // window grids for buildings a minute's ride away.
+        self.style = style;
+        self.simple = self.xf.abs() > BAND_GONE;
+        self.built = false;
+        // Its own seed, so a facade laid out lazily comes out the same
+        // whenever that happens. Without it the shared generator would make
+        // a chunk's contents depend on when its neighbours were drawn.
+        self.seed = rand_int(0, 0x3FFFFFF);
+
+        // How present each kind of detail currently is, eased on a clock.
+        // Snapped to where it belongs the first frame the building is seen,
+        // so the city does not fade up around us at startup.
+        self.lod_init = false;
+        self.p_show = 0.0;
+        self.p_unlit = 0.0;
+        self.p_lit = 0.0;
+        self.p_band = 0.0;
+        self.front = nil;
+        self.side = nil;
+
+        // What a facade would average out to, worked out from the style
+        // rather than by laying one out. Used for the flat, faded-out LOD
+        // whether or not the real facade exists yet, so a building gaining
+        // one does not change colour.
+        let var tint = style.accent;
+        let var cover = 0.42 * 0.5;
+        if (shape[0] != KIND_BAND) {
+            tint = color_scale(style.tint, 0.55 * style.lit_prob + 0.2);
+            cover = style.frac_u * style.frac_v;
+        }
+        self.avg_front = color_lerp(self.wall, tint, cover);
+        self.avg_side = color_lerp(color_scale(self.wall, 0.62), tint, cover);
+    }
+
+    build_detail(self) {
+        rand_init(self.seed);
+        self.front = Facade(self.x1 - self.x0, self.base, self.height, self.style);
+        self.side = Facade(self.z1 - self.z0, self.base, self.height, self.style);
+        self.built = true;
+    }
+
+    // Eases every level toward where this distance says it should be. Runs
+    // for hidden buildings too, so one coming back into view starts from
+    // wherever it had faded to rather than snapping to full detail.
+    update_lod(self, d) {
+        let var t_show = 1.0;
+        if (self.hidden || d >= CULL_FAR) t_show = 0.0;
+        let var t_unlit = 0.0; if (d < UNLIT_GONE) t_unlit = 1.0;
+        let var t_lit = 0.0;   if (d < LIT_GONE) t_lit = 1.0;
+        let var t_band = 0.0;  if (d < BAND_GONE) t_band = 1.0;
+
+        if (!self.lod_init) {
+            self.lod_init = true;
+            self.p_show = t_show; self.p_unlit = t_unlit;
+            self.p_lit = t_lit; self.p_band = t_band;
+            return;
+        }
+        self.p_show = approach(self.p_show, t_show, SHOW_SECS);
+        self.p_unlit = approach(self.p_unlit, t_unlit, UNLIT_SECS);
+        self.p_lit = approach(self.p_lit, t_lit, LIT_SECS);
+        self.p_band = approach(self.p_band, t_band, BAND_SECS);
     }
 
     render(self, fb) {
@@ -893,41 +1046,71 @@ class Building {
         let dz = (self.z0 - cam_z).max(0.0);
         let dx = xf - cam_x;
         let d = (dz * dz + dx * dx).sqrt();
-        let k = self.detail;
-        let f_unlit = lod_fade(d, UNLIT_FADE * k, UNLIT_GONE * k);
-        let f_lit = lod_fade(d, LIT_FADE * k, LIT_GONE * k);
-        let f_band = lod_fade(d, BAND_FADE * k, BAND_GONE * k);
+        self.update_lod(d);
+        if (self.p_show <= 0.0) return;
 
-        // The last of its range is spent sinking into the haze, so a building
-        // never appears out of nothing at the far edge of the world
-        let far = lod_fade(d, BUILD_FADE, CULL_FAR);
-        let var fog = fog_factor(d);
-        if (far < 1.0) fog = fog + (1.0 - far) * (1.0 - fog);
+        // Whatever is fading the building in as a whole caps its detail too,
+        // so nothing arrives ahead of the wall it sits on
+        let f_unlit = self.p_unlit.min(self.p_show);
+        let f_lit = self.p_lit.min(self.p_show);
+        let f_band = self.p_band.min(self.p_show);
+
+        // The last of its range is spent sinking into the background, so a
+        // building never appears out of nothing at the far edge of the
+        // world. It has to fade into what is actually behind it and not into
+        // the haze color: high in the frame the sky is a good deal darker
+        // than the haze, and a building fading to haze up there stops being
+        // a fade and becomes a pale rectangle switching on.
+        let far = self.p_show;
+        let fog = fog_factor(d);
+        let var back = FOG_COLOR;
+        if (far < 1.0) {
+            back = backdrop_at(xf, (self.height + self.base) * 0.5, self.z0);
+        }
+
+        // How much detail is still on the wall at all. Whatever has faded
+        // out, the wall itself has to make up for by drifting toward the
+        // average of what used to be there, or a building visibly darkens as
+        // it loses its windows and stands out from the neighbour that kept
+        // them. That is the lowest LOD: one flat quad, the right brightness.
+        let var shown = f_lit.max(f_band);
+        if (self.simple) shown = 0.0;
+        // First frame it is close enough to show detail, lay the facade out
+        if (shown > 0.0 && !self.built) self.build_detail();
 
         // Side wall (constant X), drawn first: it is the one we are alongside.
         // Side walls read slightly darker than the front, which is what gives
         // the boxes their sense of volume.
-        let side_wall = fog_mix(color_scale(self.wall, 0.62), fog);
+        let s_plain = color_scale(self.wall, 0.62);
+        let var side_wall = fog_mix(color_lerp(self.avg_side, s_plain, shown), fog);
+        if (far < 1.0) side_wall = color_lerp(back, side_wall, far);
         world_quad(fb,
             xf, self.height, self.z0,
             xf, self.height, self.z1,
             xf, self.base, self.z1,
             xf, self.base, self.z0,
             side_wall);
-        draw_facade(fb, self.side, xf, 0.0, self.z0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
-                    self.z1 - self.z0, fog, side_wall, f_unlit, f_lit, f_band);
+        if (shown > 0.0) {
+            draw_facade(fb, self.side, xf, 0.0, self.z0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                        self.z1 - self.z0, fog, fog_mix(s_plain, fog),
+                        f_unlit, f_lit, f_band);
+        }
 
         // Near wall (constant Z)
         if (d >= NEAR_Z) {
-            let wall = fog_mix(self.wall, fog);
+            let var wall = fog_mix(color_lerp(self.avg_front, self.wall, shown), fog);
+            if (far < 1.0) wall = color_lerp(back, wall, far);
             world_quad(fb,
                 self.x0, self.height, self.z0,
                 self.x1, self.height, self.z0,
                 self.x1, self.base, self.z0,
                 self.x0, self.base, self.z0,
                 wall);
-            draw_facade(fb, self.front, self.x0, 0.0, self.z0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-                        self.x1 - self.x0, fog, wall, f_unlit, f_lit, f_band);
+            if (shown > 0.0) {
+                draw_facade(fb, self.front, self.x0, 0.0, self.z0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                            self.x1 - self.x0, fog, fog_mix(self.wall, fog),
+                            f_unlit, f_lit, f_band);
+            }
         }
     }
 }
@@ -991,6 +1174,8 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
     // has gone narrower than a pixel, with no division, and it accounts for
     // the foreshortening of a wall we are looking along rather than at.
     let cull_z2 = (u_x * o_z - o_x * u_z).abs() * FOCAL * REF_WIN_W / MIN_WIN_PX;
+    let fade_z2 = cull_z2 * SUB_FADE;
+    let inv_fade_z2 = 1.0 / (cull_z2 - fade_z2);
     let row_cull_z = REF_WIN_W * FOCAL / MIN_WIN_PX;
     let u_end = u_z * span;
 
@@ -1055,13 +1240,20 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
             let var z2 = az * az;
             let bz2 = bz * bz;
             if (bz2 < z2) z2 = bz2;
-            // The floor: a sliver narrower than a pixel is never worth a quad
+            // The sub-pixel floor. Faded like everything else: on a wall we
+            // are looking along, foreshortening brings this on well before
+            // distance does, and cutting it hard was the last thing still
+            // popping.
             if (z2 > cull_z2) continue;
 
             // How present this window is at the building's distance. Unlit
             // glass goes first, being the nearest thing to the wall already.
             let var pres = f_lit;
             if (hot == 0) pres = f_unlit;
+            if (z2 > fade_z2) {
+                let sub = (cull_z2 - z2) * inv_fade_z2;
+                if (sub < pres) pres = sub;
+            }
             if (pres <= 0.0) continue;
 
             let var col = fog_mix(f.cells[base + c], fog);
@@ -1119,6 +1311,16 @@ fun build_background() {
             bg_rows[y] = color_lerp(FOG_COLOR, 0xFF08040E, tt);
         }
     }
+}
+
+// The background a point in the world sits against, for fading something
+// out into it rather than into a colour that only matches near the horizon
+fun backdrop_at(wx, wy, wz) {
+    let dx = wx - cam_x; let dy = wy - cam_y; let dz = wz - cam_z;
+    let ez = r20 * dx + r21 * dy + r22 * dz;
+    if (ez < NEAR_Z) return FOG_COLOR;
+    let sy = CY - (r10 * dx + r11 * dy + r12 * dz) * (FOCAL / ez);
+    return sky_row(sy.floor().max(0).min(FRAME_HEIGHT - 1));
 }
 
 // Where a screen row falls in the baked gradient. World up in eye space is
@@ -1391,6 +1593,8 @@ class Lamp {
         self.z = z;
         self.zn = z;
         self.zf = z;
+        // Lateral position, so the scene can cull it on bearing like anything else
+        self.xf = LAMP_X * side;
     }
 
     render(self, fb) {
@@ -1466,6 +1670,110 @@ fun draw_push(obj) {
     draw_n = draw_n + 1;
 }
 
+// --- Occlusion ---
+//
+// A downtown hides most of itself, and with no depth buffer a hidden
+// building still pays for every scanline it covers. In a city this dense
+// that is most of the frame, so it is worth spending a little to find out
+// what cannot be seen.
+//
+// The test works in world angles, not on screen. A building occupies a range
+// of compass bearings and rises to some elevation, and both of those are
+// unaffected by how the bike is leaning or where it is looking. An earlier
+// attempt at this in screen space kept culling visible buildings once the
+// camera rolled, because "covers this column from its top down" quietly
+// assumes a vertical world edge is vertical on screen, and leaning breaks
+// that. Bearings and elevations have no such assumption in them.
+//
+// Buildings stand on the ground and run below the deck, so a nearer one
+// blocks everything below its own top elevation across the bearings it
+// spans. One array of highest-blocked elevation per bearing is therefore
+// enough, filled walking from near to far.
+//
+// It is pessimistic at both ends. A building claims cover only up to the
+// lowest elevation its roof reaches, and is tested against the highest, so
+// the pass can only ever cull something genuinely hidden.
+
+let COVER_N = 256;
+let COVER_AZ = 1.15;          // bearings either side of straight ahead
+let COVER_SCALE = COVER_N.to_f() / (2.0 * COVER_AZ);
+// About four pixels of elevation, as a guard against bucket rounding
+let COVER_EPS = 0.005;
+let cover = Array.with_size(COVER_N, 0.0);
+
+fun atan2(y, x) {
+    if (x > 0.0) return (y / x).atan();
+    if (x < 0.0) {
+        if (y >= 0.0) return (y / x).atan() + PI;
+        return (y / x).atan() - PI;
+    }
+    if (y > 0.0) return PI * 0.5;
+    if (y < 0.0) return -PI * 0.5;
+    return 0.0;
+}
+
+// Bearing span and roof elevations of the last box put through box_angles
+let var az_lo = 0.0; let var az_hi = 0.0;
+let var el_hi = 0.0; let var el_lo = 0.0;
+
+// False when the box is not wholly in front of us, in which case it is left
+// alone: it is one of the few we are alongside, and those are always visible
+fun box_angles(x0, x1, z0, z1, h) {
+    if (z0 - cam_z <= 1.0) return false;
+    let top = h - cam_y;
+    let var alo = 1.0e30; let var ahi = -1.0e30;
+    let var ehi = -1.0e30; let var elo = 1.0e30;
+    for (let var i = 0; i < 4; ++i) {
+        let var wx = x0; if (i == 1 || i == 3) wx = x1;
+        let var wz = z0; if (i >= 2) wz = z1;
+        let dx = wx - cam_x; let dz = wz - cam_z;
+        let a = atan2(dx, dz);
+        if (a < alo) alo = a;
+        if (a > ahi) ahi = a;
+        let e = (top / (dx * dx + dz * dz).sqrt()).atan();
+        if (e > ehi) ehi = e;
+        if (e < elo) elo = e;
+    }
+    az_lo = alo; az_hi = ahi; el_hi = ehi; el_lo = elo;
+    return true;
+}
+
+// Walks the sorted list from the near end back, marking what is hidden
+fun cull_hidden() {
+    for (let var i = 0; i < COVER_N; ++i) cover[i] = -1.0e30;
+
+    for (let var i = draw_n - 1; i >= 0; --i) {
+        let o = draw_list[i];
+        if (!(o instanceof Building)) continue;
+        o.hidden = false;
+        if (!box_angles(o.x0, o.x1, o.z0, o.z1, o.height)) continue;
+
+        // Testing rounds the span outward, so every bearing it touches even
+        // partly has to be blocked before it is called hidden
+        let t0 = ((az_lo + COVER_AZ) * COVER_SCALE).floor().max(0);
+        let t1 = ((az_hi + COVER_AZ) * COVER_SCALE).ceil().min(COVER_N);
+        if (t0 >= t1) continue;
+
+        let var seen = false;
+        for (let var c = t0; c < t1; ++c) {
+            if (cover[c] < el_hi) { seen = true; break; }
+        }
+        if (!seen) { o.hidden = true; continue; }
+
+        // Claiming rounds inward instead, to whole bearings the building
+        // certainly fills. Rounding outward here would let it claim a sliver
+        // either side that it does not actually block.
+        let c0 = ((az_lo + COVER_AZ) * COVER_SCALE).ceil().max(0);
+        let c1 = ((az_hi + COVER_AZ) * COVER_SCALE).floor().min(COVER_N);
+        // A hair below what the roof actually reaches, to absorb the
+        // rounding in the bearing buckets
+        let claim = el_lo - COVER_EPS;
+        for (let var c = c0; c < c1; ++c) {
+            if (cover[c] < claim) cover[c] = claim;
+        }
+    }
+}
+
 // Farthest first. The scene is collected in roughly that order already, so
 // insertion sort stays close to linear.
 fun draw_sort() {
@@ -1504,45 +1812,81 @@ build_stars(500);
 
 // --- City layout ---
 
-// The city is laid out in lateral bands either side of the road. Band 1
-// flanks the carriageway; the bands behind it stand further back, taller and
-// sparser, so what shows through the gaps in the front row is more city
-// rather than empty sky. That depth is what makes this read as driving into
-// a downtown core instead of down a corridor with two walls.
-let NUM_BANDS = 3;
+// The city spreads out sideways rather than lining the road. Each band is a
+// normal distribution of lateral distance, and the three of them overlap
+// into one spread whose mean is well over 500m off the centre line. Almost
+// nothing stands right beside the carriageway, and what shows through the
+// gaps is more city receding rather than empty sky. That depth is what makes
+// this read as driving into a downtown core rather than down a corridor.
+let NUM_BANDS = 4;
 
-fun band_block(band) { return 45.0 + (band - 1).to_f() * 94.0; }
-fun band_setback(band) { return 26.0 + (band - 1).to_f() * 32.0; }
-
-// Further bands get longer slots, so their buildings are bigger and stand
-// further apart rather than crowding into a solid backdrop
-fun band_slots(band) { if (band == 1) return 4; if (band == 2) return 3; return 2; }
-fun band_empty(band) { return 0.26 + (band - 1).to_f() * 0.06; }
-
-// They also get taller, otherwise the front row simply hides them
-fun band_lift(band) { return 1.0 + (band - 1).to_f() * 0.35; }
-
-// And they carry less detail. A band a couple of hundred metres off the road
-// is backdrop: it wants a silhouette and some lit windows, not a facade we
-// pay full price for. This scales every LOD distance for the band, so the
-// falloff stays in depth order within a band and between bands.
-fun band_detail(band) {
-    if (band == 1) return 1.0;
-    if (band == 2) return 0.5;
-    return 0.28;
+// How far off the road a building stands is drawn from a normal
+// distribution, not placed in a fixed row. The mean sits far back, so most
+// of the city is well away from the carriageway and the few that do come
+// close are the exception rather than a wall we drive through.
+//
+// Each band is one such distribution. They overlap at the edges, which is
+// the point: the boundaries between them should not be visible.
+fun band_mu(band) {
+    if (band == 1) return 300.0;
+    if (band == 2) return 620.0;
+    if (band == 3) return 1150.0;
+    return 2700.0;
+}
+fun band_sigma(band) {
+    if (band == 1) return 150.0;
+    if (band == 2) return 240.0;
+    if (band == 3) return 380.0;
+    return 800.0;
 }
 
-let WIDTH_MIN = 18.0;
-let WIDTH_MAX = 46.0;
+// Nothing may stand closer than this to the centre line
+let BLOCK_MIN = 62.0;
+
+// A minority stand well in, close enough to loom over the barrier. Without
+// them the carriageway runs through open ground and the city only ever
+// reads as a backdrop rather than something we are driving into.
+let NEAR_PROB = 0.30;
+let NEAR_MU = 118.0;
+let NEAR_SIGMA = 58.0;
+
+// Slots per chunk. Further bands cover more ground, so they run fewer,
+// larger buildings spaced further apart.
+fun band_slots(band) { if (band == 1) return 7; if (band == 2) return 7;
+                       if (band == 3) return 7; return 6; }
+fun band_empty(band) { return 0.08 + (band - 1).to_f() * 0.015; }
+
+// Box-Muller. Plush has ln and cos, which is all it needs.
+fun rand_normal(mean, sd) {
+    let u1 = rand_float(0.0001, 1.0);
+    let u2 = rand_float(0.0, 1.0);
+    return mean + sd * (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
+}
+
+// Pareto. A real skyline is mostly low building with a thin tail of towers,
+// which is what a heavy-tailed draw gives and a uniform range does not: a
+// uniform one makes everything mid-rise and nothing stands out.
+fun rand_pareto(x_min, alpha, x_max) {
+    let u = rand_float(0.0001, 1.0);
+    return (x_min * u.pow(-1.0 / alpha)).min(x_max);
+}
+
+// Slender. In the reference a tower is roughly one part wide to four or five
+// tall, and there are twenty-odd of them across the frame rather than half a
+// dozen wide blocks. Narrow footprints packed tight are what produce that.
+let WIDTH_MIN = 20.0;
+let WIDTH_MAX = 96.0;
 
 // A building lives inside one slot and never crosses into the next, which is
 // what lets a chunk be built without knowing anything about its neighbours.
 // The slot is longer than the deepest building, and where the building sits
 // inside it is what produces the gap along the road. A slot is often left
 // empty, so the row opens up and lets the band behind it show through.
-let CHUNK_LEN = 208.0;
+let CHUNK_LEN = 384.0;
+// Clear ground left between neighbouring buildings
+let PLOT_GAP = 7.0;
 let DEPTH_MIN = 16.0;
-let DEPTH_MAX = 40.0;
+let DEPTH_MAX = 44.0;
 
 // How far below the deck a building actually needs to reach.
 //
@@ -1557,36 +1901,66 @@ let DEPTH_MAX = 40.0;
 // Clamped so the base always ends up below the deck, including the case where
 // the eye sits at or under the barrier top and nothing below is visible at all
 let SIGHT_SLOPE = (cam_y - BARRIER_H) / (ROAD_HALF + BARRIER_W);
-let BUILDING_BASE =
-    (cam_y - SIGHT_SLOPE * (band_block(NUM_BANDS) + band_setback(NUM_BANDS)
-                            + WIDTH_MAX) - 2.0).min(-2.0);
+
+// How deep a wall this far out has to run to stay closed. Working it out per
+// building rather than once for the whole city matters now that they range
+// from just off the barrier to a kilometre away: a single worst case would
+// give every one of them a wall tens of metres taller than it needs, and
+// wall height is scanlines. Floored, because past a certain distance the
+// deck itself covers whatever is under them.
+fun base_for(lateral) {
+    return (cam_y - SIGHT_SLOPE * lateral - 2.0).min(-2.0).max(-26.0);
+}
+
+// Building heights. Pareto, so most of the city is low and a thin tail runs
+// up into real towers.
+let H_MIN = 40.0;
+let H_ALPHA = 1.14;
+let H_MAX = 620.0;
 
 // One slot of one band on one side of the street, filled or left open.
-// side is -1 or 1, band counts outward from the road.
+// side is -1 or 1, band selects the lateral distribution.
 fun generate_slot(list, side, band, zs, slot_len) {
     if (rand_float(0.0, 1.0) < band_empty(band)) return;
 
-    let depth = rand_float(DEPTH_MIN, DEPTH_MAX);
-    let width = rand_float(WIDTH_MIN, WIDTH_MAX);
-    let setback = rand_float(0.0, band_setback(band));
+    let height = rand_pareto(H_MIN, H_ALPHA, H_MAX);
+
+    // Width is its own draw rather than a multiple of height, so a low
+    // building can still be a broad block. The height term is only a floor,
+    // there to stop the tail of the distribution producing needles.
+    let width = rand_float(WIDTH_MIN, WIDTH_MAX).max(height * 0.085).min(WIDTH_MAX);
+    let depth = (width * rand_float(0.7, 1.35)).max(DEPTH_MIN).min(DEPTH_MAX);
     // Where it sits in its slot is what opens the gap to the one before it
-    let lead = rand_float(0.0, slot_len - depth);
+    let lead = rand_float(0.0, (slot_len - depth).max(0.0));
 
-    // Set back this far a mid-rise no longer fills the frame, so the range
-    // has moved up
-    let lift = band_lift(band);
-    let var height = rand_float(70.0, 150.0) * lift;
-    if (rand_float(0.0, 1.0) < 0.34) height = rand_float(150.0, 330.0) * lift;
+    // Lateral distance out of this band's distribution, or out of the near
+    // one, and never closer than the block line
+    let var near = 0.0;
+    if (rand_float(0.0, 1.0) < NEAR_PROB) {
+        near = rand_normal(NEAR_MU, NEAR_SIGMA).max(BLOCK_MIN);
+    } else {
+        near = rand_normal(band_mu(band), band_sigma(band)).max(BLOCK_MIN);
+    }
 
-    let near = band_block(band) + setback;
     let var x0 = 0.0;
     let var x1 = 0.0;
     if (side < 0) { x1 = -near; x0 = x1 - width; }
     else { x0 = near; x1 = x0 + width; }
 
     let z0 = zs + lead;
-    list.push(Building(x0, x1, z0, z0 + depth, height, BUILDING_BASE,
-                       band_detail(band)));
+    let z1 = z0 + depth;
+
+    // Nothing may stand in ground another building already occupies, with a
+    // gap left between them. A building never crosses out of its own slot,
+    // so this only has to look at what this chunk has placed so far.
+    for (let var i = 0; i < list.len; ++i) {
+        let o = list[i];
+        if (!(o instanceof Building)) continue;
+        if (x0 < o.x1 + PLOT_GAP && x1 + PLOT_GAP > o.x0
+            && z0 < o.z1 + PLOT_GAP && z1 + PLOT_GAP > o.z0) return;
+    }
+
+    list.push(Building(x0, x1, z0, z1, height, base_for(near), 1.0));
 }
 
 // Lamp posts march down the shoulder at a fixed spacing, so which ones fall
@@ -1623,6 +1997,11 @@ fun chunk_hash(ix, iz) {
     return h ^ (h >> 11);
 }
 
+// One chunk carries every band on its side of the road, rather than one
+// chunk per band. Bands draw their lateral positions from distributions that
+// overlap, so two of them could put buildings in the same ground, and a
+// chunk that only knows about its own band cannot tell. Holding them
+// together lets each placement be checked against what is already there.
 class Chunk {
     init(self, ix, iz) {
         self.ix = ix;
@@ -1631,19 +2010,17 @@ class Chunk {
         self.z1 = self.z0 + CHUNK_LEN;
         self.objs = [];
 
-        let var side = 1;
-        if (ix < 0) side = -1;
-        let band = ix * side;
-
+        let side = ix;
         rand_init(chunk_hash(ix, iz));
-        let slots = band_slots(band);
-        let slot_len = CHUNK_LEN / slots.to_f();
-        for (let var s = 0; s < slots; ++s) {
-            generate_slot(self.objs, side, band,
-                          self.z0 + s.to_f() * slot_len, slot_len);
+        for (let var band = 1; band <= NUM_BANDS; ++band) {
+            let slots = band_slots(band);
+            let slot_len = CHUNK_LEN / slots.to_f();
+            for (let var s = 0; s < slots; ++s) {
+                generate_slot(self.objs, side, band,
+                              self.z0 + s.to_f() * slot_len, slot_len);
+            }
         }
-        // Only the band against the road carries street lighting
-        if (band == 1) generate_lamps(self.objs, side, self.z0, self.z1);
+        generate_lamps(self.objs, side, self.z0, self.z1);
     }
 }
 
@@ -1691,7 +2068,10 @@ let var live_hi = 0;
 // leaves here on the first compare.
 fun ensure_chunks() {
     let iz_lo = (cam_z / CHUNK_LEN).floor() - CHUNK_BEHIND;
-    let iz_hi = ((cam_z + CULL_FAR) / CHUNK_LEN).floor();
+    // One chunk past the cull distance. A chunk is 384m long, so building
+    // only as far as CULL_FAR lets its near edge arrive well inside the fade
+    // band, and everything in it switches on at full strength.
+    let iz_hi = ((cam_z + CULL_FAR) / CHUNK_LEN).floor() + 1;
     if (iz_lo == live_lo && iz_hi == live_hi) return;
     live_lo = iz_lo;
     live_hi = iz_hi;
@@ -1706,19 +2086,17 @@ fun ensure_chunks() {
     }
     if (changed) chunks = keep;
 
-    // Build the ones that are missing, over every band on both sides
+    // Build the ones that are missing, one per side of the road
     for (let var iz = iz_lo; iz <= iz_hi; ++iz) {
-        for (let var b = 1; b <= NUM_BANDS; ++b) {
-            for (let var s = 0; s < 2; ++s) {
-                let ix = b * (s * 2 - 1);
-                let var found = false;
-                for (let var c = 0; c < chunks.len; ++c) {
-                    if (chunks[c].iz == iz && chunks[c].ix == ix) { found = true; break; }
-                }
-                if (!found) {
-                    chunks.push(Chunk(ix, iz));
-                    changed = true;
-                }
+        for (let var s = 0; s < 2; ++s) {
+            let ix = s * 2 - 1;
+            let var found = false;
+            for (let var c = 0; c < chunks.len; ++c) {
+                if (chunks[c].iz == iz && chunks[c].ix == ix) { found = true; break; }
+            }
+            if (!found) {
+                chunks.push(Chunk(ix, iz));
+                changed = true;
             }
         }
     }
@@ -1730,6 +2108,10 @@ let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 
 // Coarse cull on the object's own span. The scene is sorted by near edge, so
 // once one object is past the haze every object after it is too.
+// Half the horizontal field of view, plus room for the frame corners to
+// swing round as the bike leans
+let FOV_TAN = ((CX * CX + CY * CY).sqrt() / FOCAL) * 1.15;
+
 fun collect_scene() {
     let near = cam_z + NEAR_Z;
     let far = cam_z + CULL_FAR;
@@ -1737,6 +2119,11 @@ fun collect_scene() {
         let o = scene[i];
         if (o.zn > far) break;
         if (o.zf <= near) continue;
+        // Off to the side beyond the edge of the frame. Its shallowest
+        // bearing is at its far end, so if even that falls outside, none of
+        // it can be on screen. Most of a city spread this wide sits outside
+        // the frame at any moment, so this is the cheapest cull there is.
+        if ((o.xf - cam_x).abs() > (o.zf - cam_z) * FOV_TAN) continue;
         draw_push(o);
     }
 }
@@ -1755,6 +2142,7 @@ fun render_frame(fb) {
     draw_n = 0;
     collect_scene();
     draw_sort();
+    cull_hidden();
     for (let var i = 0; i < draw_n; ++i) {
         draw_list[i].render(fb);
     }
@@ -1773,6 +2161,7 @@ if (mode_arg == "--bench") {
     let t0 = $time_current_ms();
     for (let var i = 0; i < n; ++i) {
         cam_z = i.to_f() * 1.6;
+        frame_dt = OFFLINE_DT;
         update_ride(OFFLINE_DT, 1.0);
         render_frame(frame_buffer);
     }
@@ -1786,6 +2175,7 @@ if (mode_arg == "--bench") {
 if (capture_frames > 0) {
     for (let var i = 0; i < capture_frames; ++i) {
         cam_z = i.to_f() * capture_step;
+        frame_dt = OFFLINE_DT;
         update_ride(OFFLINE_DT, 1.0);
         render_frame(frame_buffer);
         $write_file(capture_prefix + "_" + i.to_s() + ".raw", frame_buffer);
@@ -1797,7 +2187,6 @@ if (capture_frames > 0) {
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Night Ride", 0);
 
 let var paused = false;
-let var speed = 48.0;      // meters per second
 let var frame_no = 0;
 let var last_ms = $time_current_ms();
 
@@ -1824,7 +2213,8 @@ loop {
 
     let step = dt.min(0.1);
     if (!paused) {
-        cam_z = cam_z + speed * step;
+        cam_z = cam_z + ride_speed * step;
+        frame_dt = step;
         update_ride(step, 1.0);
         update_scene(step);
     }
