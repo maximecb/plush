@@ -235,7 +235,7 @@ fun update_camera() {
 // wobble, so it runs far below a real engine and leans on amplitude rather
 // than speed to read as vibration.
 
-let SWAY_ROLL = 1.8 * PI / 180.0;    // peak lean either way
+let SWAY_ROLL = 1.2 * PI / 180.0;    // peak lean either way
 let SWAY_RISE = 0.03;                // meters of suspension travel
 let VIB_ROLL = 0.06 * PI / 180.0;
 let VIB_RISE = 0.0022;
@@ -1138,20 +1138,31 @@ let star_dy = [];
 let star_dz = [];
 let star_c = [];
 
-let STAR_EL_MAX = 0.95;
+// How high up the sky the top of the frame actually reaches. Everything
+// above this is off screen, so the spread and the brightness falloff are
+// both set against it rather than against some arbitrary angle.
+let STAR_EL_TOP = (CY / FOCAL).atan();
+let STAR_AZ_EDGE = (CX / FOCAL).atan();
+
+// Spread half again as far as the frame reaches, so pitching up or leaning
+// brings more sky into view instead of running out of stars
+let STAR_EL_MAX = STAR_EL_TOP * 1.5;
+let STAR_AZ_MAX = STAR_AZ_EDGE * 1.5;
 
 fun build_stars(count) {
     for (let var i = 0; i < count; ++i) {
-        // The patch of sky the old screen-space version covered, as angles
-        let az = rand_float(-1.2, 1.2);
-        let el = rand_float(0.06, STAR_EL_MAX);
+        let az = rand_float(-STAR_AZ_MAX, STAR_AZ_MAX);
+        let el = rand_float(0.02, STAR_EL_MAX);
         let ce = el.cos();
         star_dx.push(ce * az.sin());
         star_dy.push(el.sin());
         star_dz.push(ce * az.cos());
-        // Stars low in the sky are washed out by the haze
+        // Haze thins with height, so one low down is washed out and one well
+        // up the frame is at full strength. Saturating at the top of the
+        // frame is what keeps the visible ones bright rather than putting
+        // the brightest stars where they cannot be seen.
         star_c.push(color_scale(0xFFFFFFFF,
-                    rand_float(0.25, 0.85) * (el / STAR_EL_MAX)));
+                    rand_float(0.25, 0.85) * (el / STAR_EL_TOP).min(1.0)));
     }
 }
 
@@ -1397,7 +1408,9 @@ if (mode_arg == "--capture") {
 
 rand_init(12345);
 build_background();
-build_stars(220);
+// Spread over more sky than the frame shows, so this is roughly double what
+// lands on screen at any one time
+build_stars(500);
 
 // --- City layout ---
 
