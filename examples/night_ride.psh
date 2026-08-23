@@ -2044,9 +2044,11 @@ let ENG_A_MAX = 0.78;
 // the ignition cuts in and out and it stutters. Generated here rather than
 // taken from the main actor, because at eleven a second it would alias into
 // nonsense against a frame rate in the twenties.
-let LIMIT_FROM = 0.92;
-let LIMIT_HZ = 11.5;
-let LIMIT_DUTY = 0.34;     // share of each cycle the ignition is cut
+let LIMIT_FROM = 0.95;
+let LIMIT_HZ = 8.0;
+let LIMIT_DUTY = 0.42;     // share of each cycle the ignition eases off
+let LIMIT_DEPTH = 0.26;    // how far the level drops at the bottom of a dip
+let LIMIT_SAG = 0.035;     // and how far the note sags with it
 
 // Pre-gain into the clipper. The clipping is deliberately lopsided: a
 // symmetric curve only makes odd harmonics and comes out as fuzz, while the
@@ -2068,10 +2070,10 @@ class EngineState {
     init(self, rpm, load, top, stop) {
         self.rpm = rpm;
         self.load = load;
-        // In top gear, where there is nowhere left to shift. Only then can
-        // the engine actually sit against the limiter: in the other gears it
-        // sweeps past the same revs on its way to an upshift and must not
-        // stutter on the way through.
+        // In top gear, where there is nowhere left to shift. The limiter is
+        // suppressed there: it is the one gear the engine can sit against
+        // the stop indefinitely, and a warble that never ends is far more
+        // noticeable than the same warble in passing.
         self.top = top;
         self.stop = stop;
     }
@@ -2103,10 +2105,7 @@ fun engine_fill(buf, n) {
         eng_rpm_cur = eng_rpm_cur + (eng_rpm_tgt - eng_rpm_cur) * ENG_RPM_GLIDE;
         eng_load_cur = eng_load_cur + (eng_load_tgt - eng_load_cur) * ENG_LOAD_GLIDE;
 
-        let f = ENG_F_IDLE + (ENG_F_MAX - ENG_F_IDLE) * eng_rpm_cur;
-        eng_phase = eng_phase + f * step;
-        if (eng_phase >= 1.0) eng_phase = eng_phase - 1.0;
-        let c = eng_phase * tau;
+        let f_base = ENG_F_IDLE + (ENG_F_MAX - ENG_F_IDLE) * eng_rpm_cur;
 
         // Loudness follows the revs far more than the throttle, so the level
         // dips on every upshift along with the tacho. Leaning on the
@@ -2115,17 +2114,35 @@ fun engine_fill(buf, n) {
         let var amp = (ENG_A_IDLE + (ENG_A_MAX - ENG_A_IDLE) * drive)
                       * (eng_rpm_cur * 6.0).min(1.0);
 
-        // Bouncing off the limiter, fading in over the last of the range so
-        // it does not switch on at a hard threshold
-        if (eng_top && eng_rpm_cur > LIMIT_FROM) {
+        // Bouncing off the limiter at the top of a gear, fading in over the
+        // last of the range so it does not switch on at a hard threshold.
+        //
+        // Not in top gear. Everywhere else the revs only touch the stop for
+        // a moment on their way to an upshift and it reads as the engine
+        // running out of road; in top gear they can sit there for as long as
+        // the throttle is held, and the same effect becomes a stutter that
+        // never goes away.
+        //
+        // The dip is a smooth curve rather than the ignition being gated on
+        // and off, and the note sags along with the level, which is most of
+        // why it reads as the engine faltering rather than as a tremolo.
+        let var f_lim = 1.0;
+        if (!eng_top && eng_rpm_cur > LIMIT_FROM) {
             eng_lim_ph = eng_lim_ph + LIMIT_HZ * step;
             if (eng_lim_ph >= 1.0) eng_lim_ph = eng_lim_ph - 1.0;
             if (eng_lim_ph < LIMIT_DUTY) {
                 let over = ((eng_rpm_cur - LIMIT_FROM)
                             / (1.0 - LIMIT_FROM)).min(1.0);
-                amp = amp * (1.0 - 0.62 * over);
+                // Raised cosine: eases down and back rather than switching
+                let dip = (0.5 - 0.5 * (eng_lim_ph / LIMIT_DUTY * tau).cos()) * over;
+                amp = amp * (1.0 - LIMIT_DEPTH * dip);
+                f_lim = 1.0 - LIMIT_SAG * dip;
             }
         }
+
+        eng_phase = eng_phase + f_base * f_lim * step;
+        if (eng_phase >= 1.0) eng_phase = eng_phase - 1.0;
+        let c = eng_phase * tau;
 
         // A stack of harmonics rather than one tone. It runs well up the
         // series: the top of it is the rasp, and cutting off at the sixth
