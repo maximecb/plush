@@ -1201,13 +1201,28 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
             continue;
         }
 
+        // Corners step by the same amount from one column to the next, so
+        // they are carried along the row rather than worked out afresh each
+        // time. Twelve multiplies a window becomes twelve adds, and there
+        // are ten thousand windows in a frame.
+        let sx = u_x * f.upitch; let sy = u_y * f.upitch; let sz = u_z * f.upitch;
+        let wx = u_x * f.uwin;   let wy = u_y * f.uwin;   let wz = u_z * f.uwin;
+        let u_start = f.u0 - f.upitch;
+        let var ax = hx + u_x * u_start;
+        let var ay = hy + u_y * u_start;
+        let var az = hz + u_z * u_start;
+        let var dx = lx + u_x * u_start;
+        let var dy = ly + u_y * u_start;
+        let var dz = lz + u_z * u_start;
+
         let base = r * cols;
         for (let var c = 0; c < cols; ++c) {
+            // Stepped at the top, so the skips below cannot lose a column
+            ax = ax + sx; ay = ay + sy; az = az + sz;
+            dx = dx + sx; dy = dy + sy; dz = dz + sz;
+
             let hot = f.hot[base + c];
-            let ua = f.u0 + c.to_f() * f.upitch;
-            let ub = ua + f.uwin;
-            let az = hz + u_z * ua;
-            let bz = hz + u_z * ub;
+            let bz = az + wz;
             if (az < NEAR_Z && bz < NEAR_Z) continue;
 
             // Nearest squared depth of the two edges, which is what decides
@@ -1235,10 +1250,8 @@ fun draw_facade(fb, f, ox, oy, oz, ux, uy, uz, vx, vy, vz,
             let var col = fog_mix(f.cells[base + c], fog);
             if (pres < 1.0) col = color_lerp(wall, col, pres);
 
-            let ax = hx + u_x * ua; let ay = hy + u_y * ua;
-            let bx = hx + u_x * ub; let by = hy + u_y * ub;
-            let cx = lx + u_x * ub; let cy = ly + u_y * ub; let cz = lz + u_z * ub;
-            let dx = lx + u_x * ua; let dy = ly + u_y * ua; let dz = lz + u_z * ua;
+            let bx = ax + wx; let by = ay + wy;
+            let cx = dx + wx; let cy = dy + wy; let cz = dz + wz;
 
             // Only genuinely bright rooms bleed light onto the wall, and only
             // once they are big enough on screen for the bleed to show
