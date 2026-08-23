@@ -1765,6 +1765,230 @@ fun draw_sort() {
     }
 }
 
+// --- Engine and controls ---
+//
+// Space opens the throttle, the arrow keys lean the bike, and leaning is
+// what carries it across the road: there is no separate steering input, the
+// same way there is not on a real one.
+
+let SPEED_MAX = 92.0;         // m/s, a little over 330 km/h
+let THROTTLE_ACC = 11.0;      // m/s^2 on the throttle
+let COAST_DEC = 2.2;          // engine braking, rolling off it
+
+// Drag rises with the square of speed and is what actually sets the top
+// end: without it the throttle pulls just as hard at 300 as at 30, and the
+// bike reaches its limit in a few seconds flat with no sense of effort.
+let DRAG_K = THROTTLE_ACC / (SPEED_MAX * SPEED_MAX);
+
+let MAX_LEAN = 26.0 * PI / 180.0;
+let LEAN_RATE = 2.6;          // radians per second toward the held angle
+let LEAN_SLIDE = 3.5;         // metres per second of drift per radian of lean
+
+let var key_accel = false;
+let var key_left = false;
+let var key_right = false;
+
+// Where each gear runs out. The tacho climbing and dropping back is most of
+// what makes a speed readout feel like it belongs to an engine.
+let GEAR_TOP = [13.0, 25.0, 38.0, 53.0, 71.0, 92.0];
+let RPM_IDLE = 0.14;
+
+fun engine_rpm() {
+    let var g = 0;
+    while (g < GEAR_TOP.len - 1 && ride_speed > GEAR_TOP[g]) g = g + 1;
+    let var lo = 0.0;
+    if (g > 0) lo = GEAR_TOP[g - 1] * 0.74;
+    let hi = GEAR_TOP[g];
+    let t = ((ride_speed - lo) / (hi - lo)).max(0.0).min(1.0);
+    return RPM_IDLE + t * (1.0 - RPM_IDLE);
+}
+
+fun update_drive(dt) {
+    let drag = DRAG_K * ride_speed * ride_speed;
+    if (key_accel) {
+        ride_speed = ride_speed + (THROTTLE_ACC - drag) * dt;
+    } else {
+        ride_speed = ride_speed - (COAST_DEC + drag) * dt;
+    }
+    ride_speed = ride_speed.max(0.0).min(SPEED_MAX);
+
+    let var target = 0.0;
+    if (key_left) target = target - MAX_LEAN;
+    if (key_right) target = target + MAX_LEAN;
+    let step = LEAN_RATE * dt;
+    if (target > lean_base) lean_base = (lean_base + step).min(target);
+    else lean_base = (lean_base - step).max(target);
+
+    // The lean is the steering. Faster means it bites harder, which is why
+    // the bike gets twitchy at the top end.
+    lane_x = lane_x + lean_base * LEAN_SLIDE * (ride_speed / 48.0) * dt;
+    let limit = ROAD_HALF - 1.4;
+    lane_x = lane_x.max(-limit).min(limit);
+}
+
+// --- Instruments ---
+//
+// Drawn straight in screen space after everything else, so none of it goes
+// through the camera. Both readouts sit on the bottom edge, the pair of them
+// centred, each with its label to the right.
+
+let HUD_H = FRAME_HEIGHT.to_f() * 0.10;   // digit height
+let HUD_BOT = FRAME_HEIGHT.to_f() - HUD_H * 0.42;
+let DIG_W = HUD_H * 0.56;
+let DIG_T = HUD_H * 0.13;                 // segment thickness
+let DIG_GAP = HUD_H * 0.13;
+
+let SEG_LIT = 0xFFFF2A22;
+let SEG_OFF = 0xFF2A0A08;
+let LABEL_COL = 0xFFB8B0C8;
+
+// Which of the seven segments each numeral lights, a through g in bits 0..6
+let SEG_MASK = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
+
+fun hud_rect(fb, x0, y0, x1, y1, color) {
+    fill_quad(fb, x0, y0, x1, y0, x1, y1, x0, y1, color);
+}
+
+// A stroke of the given thickness between two points, for the lettering
+fun hud_stroke(fb, x0, y0, x1, y1, t, color) {
+    let dx = x1 - x0; let dy = y1 - y0;
+    let len = (dx * dx + dy * dy).sqrt();
+    if (len < 0.0001) return;
+    let nx = -dy / len * t * 0.5;
+    let ny = dx / len * t * 0.5;
+    fill_quad(fb, x0 + nx, y0 + ny, x1 + nx, y1 + ny,
+                  x1 - nx, y1 - ny, x0 - nx, y0 - ny, color);
+}
+
+// One seven-segment numeral with its top-left at x, y. Unlit segments are
+// still drawn, faintly, which is what makes it read as a physical display
+// rather than as floating marks.
+fun seg_digit(fb, x, y, digit, lit_col, off_col) {
+    let var mask = 0;
+    if (digit >= 0 && digit <= 9) mask = SEG_MASK[digit];
+    let w = DIG_W; let h = HUD_H; let t = DIG_T;
+    let mid = h * 0.5;
+
+    let var c = off_col; if ((mask & 0x01) != 0) c = lit_col;
+    hud_rect(fb, x + t, y, x + w - t, y + t, c);
+    c = off_col; if ((mask & 0x02) != 0) c = lit_col;
+    hud_rect(fb, x + w - t, y + t, x + w, y + mid - t * 0.5, c);
+    c = off_col; if ((mask & 0x04) != 0) c = lit_col;
+    hud_rect(fb, x + w - t, y + mid + t * 0.5, x + w, y + h - t, c);
+    c = off_col; if ((mask & 0x08) != 0) c = lit_col;
+    hud_rect(fb, x + t, y + h - t, x + w - t, y + h, c);
+    c = off_col; if ((mask & 0x10) != 0) c = lit_col;
+    hud_rect(fb, x, y + mid + t * 0.5, x + t, y + h - t, c);
+    c = off_col; if ((mask & 0x20) != 0) c = lit_col;
+    hud_rect(fb, x, y + t, x + t, y + mid - t * 0.5, c);
+    c = off_col; if ((mask & 0x40) != 0) c = lit_col;
+    hud_rect(fb, x + t, y + mid - t * 0.5, x + w - t, y + mid + t * 0.5, c);
+}
+
+// Letters, as strokes in a box one unit wide and one tall with y running up.
+// Only the handful the labels need.
+fun glyph(ch) {
+    if (ch == "K") return [0.0,0.0,0.0,1.0,  0.0,0.45,0.85,1.0,  0.0,0.45,0.85,0.0];
+    if (ch == "M") return [0.0,0.0,0.0,1.0,  0.0,1.0,0.5,0.35,
+                           0.5,0.35,1.0,1.0, 1.0,1.0,1.0,0.0];
+    if (ch == "H") return [0.0,0.0,0.0,1.0,  1.0,0.0,1.0,1.0,  0.0,0.5,1.0,0.5];
+    if (ch == "/") return [0.0,0.0,0.9,1.0];
+    if (ch == "R") return [0.0,0.0,0.0,1.0,  0.0,1.0,0.85,1.0,  0.85,1.0,0.85,0.55,
+                           0.85,0.55,0.0,0.55, 0.4,0.55,1.0,0.0];
+    if (ch == "P") return [0.0,0.0,0.0,1.0,  0.0,1.0,0.85,1.0,  0.85,1.0,0.85,0.55,
+                           0.85,0.55,0.0,0.55];
+    return [];
+}
+
+// Returns the width it drew, so callers can lay things out left to right
+fun draw_label(fb, chars, x, y, size, color) {
+    let t = (size * 0.15).max(1.6);
+    let adv = size * 0.78;
+    let var cx = x;
+    for (let var i = 0; i < chars.len; ++i) {
+        let g = glyph(chars[i]);
+        for (let var k = 0; k < g.len; k = k + 4) {
+            // y runs up in the glyph box and down on screen
+            hud_stroke(fb, cx + g[k] * size * 0.62, y - g[k + 1] * size,
+                           cx + g[k + 2] * size * 0.62, y - g[k + 3] * size,
+                           t, color);
+        }
+        cx = cx + adv;
+    }
+    return cx - x;
+}
+
+// Tachometer: a row of quads swept round a half circle, filling up as the
+// engine climbs and running green through amber into red at the top end
+let RPM_SEGS = 22;
+let RPM_R0 = HUD_H * 0.60;
+let RPM_R1 = HUD_H * 1.02;
+
+fun rpm_color(t) {
+    if (t < 0.62) return color_lerp(0xFF30E060, 0xFFC8E028, t / 0.62);
+    if (t < 0.84) return color_lerp(0xFFC8E028, 0xFFFF9018, (t - 0.62) / 0.22);
+    return color_lerp(0xFFFF9018, 0xFFFF2820, (t - 0.84) / 0.16);
+}
+
+fun draw_rpm(fb, cx, cy, frac) {
+    let step = PI / RPM_SEGS.to_f();
+    for (let var i = 0; i < RPM_SEGS; ++i) {
+        let t = (i.to_f() + 0.5) / RPM_SEGS.to_f();
+        let a0 = PI - i.to_f() * step + step * 0.14;
+        let a1 = PI - (i + 1).to_f() * step + step * 0.86;
+        let var c = color_scale(rpm_color(t), 0.14);
+        if (t <= frac) c = rpm_color(t);
+        fill_quad(fb,
+            cx + RPM_R0 * a0.cos(), cy - RPM_R0 * a0.sin(),
+            cx + RPM_R1 * a0.cos(), cy - RPM_R1 * a0.sin(),
+            cx + RPM_R1 * a1.cos(), cy - RPM_R1 * a1.sin(),
+            cx + RPM_R0 * a1.cos(), cy - RPM_R0 * a1.sin(),
+            c);
+    }
+}
+
+let KMH_CHARS = ["K", "M", "/", "H"];
+let RPM_CHARS = ["R", "P", "M"];
+
+fun draw_hud(fb) {
+    let kmh = (ride_speed * 3.6).floor().max(0).min(999);
+
+    // Always three slots, with the leading ones left empty rather than
+    // shown as zeros. A field that changes width would shift the whole
+    // panel sideways every time the speed crossed ten or a hundred.
+    let digits = 3;
+    let var lead = 2;
+    if (kmh >= 10) lead = 1;
+    if (kmh >= 100) lead = 0;
+
+    let lab_size = HUD_H * 0.42;
+    let speed_w = digits.to_f() * (DIG_W + DIG_GAP) - DIG_GAP;
+    let kmh_w = KMH_CHARS.len.to_f() * lab_size * 0.78;
+    let rpm_w = RPM_R1 * 2.0;
+    let rpm_lab_w = RPM_CHARS.len.to_f() * lab_size * 0.78;
+    let pad = HUD_H * 0.34;
+    let group = speed_w + pad + kmh_w + HUD_H * 0.8 + rpm_w + pad + rpm_lab_w;
+
+    let var x = (FRAME_WIDTH.to_f() - group) * 0.5;
+    let top = HUD_BOT - HUD_H;
+
+    // Speed, most significant digit first
+    let var div = 1;
+    for (let var i = 1; i < digits; ++i) div = div * 10;
+    for (let var i = 0; i < digits; ++i) {
+        if (i >= lead) seg_digit(fb, x, top, (kmh _/ div) % 10, SEG_LIT, SEG_OFF);
+        x = x + DIG_W + DIG_GAP;
+        div = div _/ 10;
+    }
+    x = x - DIG_GAP + pad;
+    x = x + draw_label(fb, KMH_CHARS, x, HUD_BOT, lab_size, LABEL_COL);
+
+    x = x + HUD_H * 0.8;
+    draw_rpm(fb, x + RPM_R1, HUD_BOT, engine_rpm());
+    x = x + rpm_w + pad;
+    draw_label(fb, RPM_CHARS, x, HUD_BOT, lab_size, LABEL_COL);
+}
+
 // --- Main ---
 
 let mode_arg = $cmd_get_arg_or(1, "");
@@ -2126,6 +2350,8 @@ fun render_frame(fb) {
     // The deck last, over everything. See the note on Road for why that is
     // exact rather than a fudge.
     road.render(fb);
+
+    draw_hud(fb);
 }
 
 // Both offline modes step the clock at a fixed rate, so a capture is
@@ -2172,16 +2398,30 @@ let var last_ms = $time_current_ms();
 let var render_accum = 0;
 let var report_start = last_ms;
 
+let var quit = false;
+
 loop {
-    let msg = $actor_poll();
-    if (msg != nil && msg instanceof UIEvent) {
-        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
-            break;
+    // Every event waiting, not just one: at speed a frame can easily cover
+    // both the press and the release of a key
+    loop {
+        let msg = $actor_poll();
+        if (msg == nil) break;
+        if (!(msg instanceof UIEvent)) continue;
+        if (msg.kind == 'CLOSE_WINDOW') { quit = true; break; }
+        if (msg.kind == 'KEY_DOWN') {
+            if (msg.key == 'ESCAPE') { quit = true; break; }
+            if (msg.key == 'SPACE') key_accel = true;
+            if (msg.key == 'LEFT') key_left = true;
+            if (msg.key == 'RIGHT') key_right = true;
+            if (msg.key == 'P') paused = !paused;
         }
-        if (msg.kind == 'KEY_DOWN' && msg.key == 'SPACE') {
-            paused = !paused;
+        if (msg.kind == 'KEY_UP') {
+            if (msg.key == 'SPACE') key_accel = false;
+            if (msg.key == 'LEFT') key_left = false;
+            if (msg.key == 'RIGHT') key_right = false;
         }
     }
+    if (quit) break;
 
     let now = $time_current_ms();
     let dt = (now - last_ms).to_f() / 1000.0;
@@ -2189,9 +2429,10 @@ loop {
 
     let step = dt.min(0.1);
     if (!paused) {
+        update_drive(step);
         cam_z = cam_z + ride_speed * step;
         frame_dt = step;
-        update_ride(step, 1.0);
+        update_ride(step, ride_speed / 48.0);
         update_scene(step);
     }
 
