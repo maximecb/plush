@@ -883,6 +883,58 @@ class FacadeStyle {
     }
 }
 
+// --- Roof blocks ---
+//
+// What a tower does above its roofline is what separates it from a tall block
+// once both are far enough off to be a silhouette, so the tall ones carry a
+// square block set back on the roof: a plant room, the top of the core, the
+// sort of thing every tower in city_01 has up there.
+//
+// It is the same pair of faces the box below shows, which is two quads, and
+// like the building it stands on it needs no roof of its own.
+
+// Only real towers, not everything that clears the block around it. A top on
+// a mid-rise reads as clutter: the point of one is that it marks out the few
+// buildings that stand above the skyline.
+let CROWN_MIN_H = 300.0;
+// And only some of those. A top on every tower turns into a row of them, and
+// a row reads as how the buildings here are built rather than as the odd one
+// standing higher.
+let CROWN_PROB = 0.40;
+
+// Its width, against the shorter side of the roof it stands on. A top belongs
+// to its building, so it widens with the footprint under it. Kept under 1, or
+// it would overhang the walls in the shorter of the two directions.
+let CROWN_W_MIN = 0.62;
+let CROWN_W_MAX = 0.92;
+
+// And its height, against its own width rather than the building's height.
+// Taking it off the height gives a 600m tower a fifty-metre box up there,
+// which stops reading as something standing on the roof and becomes another
+// storey of the tower. Off its own width it stays a stubby thing whatever it
+// is standing on.
+let CROWN_H_MIN = 0.22;
+let CROWN_H_MAX = 0.50;
+
+// A top narrower than this on screen is not worth its quads
+let MIN_CROWN_PX = 1.0;
+
+// A top is drawn off the building's own seed rather than the shared
+// generator: taking even one number from that stream here would shift every
+// draw after it and lay out a different city. Same scramble as chunk_hash,
+// with a salt so the values one building takes are unrelated to each other.
+fun seed_frac(seed, salt) {
+    let var h = (seed * 374761393 + salt * 668265263) & 0x3FFFFFFF;
+    h = ((h ^ (h >> 13)) * 76531729) & 0x3FFFFFFF;
+    h = ((h ^ (h >> 16)) * 30300301) & 0x3FFFFFFF;
+    return (h >> 6).to_f() / 16777216.0;
+}
+
+fun seed_range(seed, salt, lo, hi) {
+    return lo + seed_frac(seed, salt) * (hi - lo);
+}
+
+
 // --- Buildings ---
 //
 // A building is an axis-aligned box spanning [x0,x1] x [0,height] x [z0,z1],
@@ -955,6 +1007,21 @@ class Building {
         // whenever that happens. Without it the shared generator would make
         // a chunk's contents depend on when its neighbours were drawn.
         self.seed = rand_int(0, 0x3FFFFFF);
+
+        // Only the tall ones get a top, and only its proportions vary
+        let s = self.seed;
+        self.crown_w = 0.0;
+        self.crown_h = 0.0;
+        if (height >= CROWN_MIN_H && seed_frac(s, 1) < CROWN_PROB) {
+            let foot = (x1 - x0).min(z1 - z0) * 0.5;
+            self.crown_w = foot * seed_range(s, 2, CROWN_W_MIN, CROWN_W_MAX);
+            self.crown_h = (self.crown_w + self.crown_w)
+                           * seed_range(s, 4, CROWN_H_MIN, CROWN_H_MAX);
+        }
+        // How high the occlusion pass has to look before calling this hidden.
+        // A top is set well in from both walls, so it only raises what must
+        // be seen, never what the building claims as covered.
+        self.top = height + self.crown_h;
 
         // How present each kind of detail currently is, eased on a clock.
         // Snapped to where it belongs the first frame the building is seen,
@@ -1065,11 +1132,24 @@ class Building {
         // First frame it is close enough to show detail, lay the facade out
         if (shown > 0.0 && !self.built) self.build_detail();
 
-        // Side wall (constant X), drawn first: it is the one we are alongside.
         // Side walls read slightly darker than the front, which is what gives
-        // the boxes their sense of volume.
+        // the boxes their sense of volume. Both colors are worked out here
+        // because the block on the roof is painted in the same two.
         let var side_wall = fog_mix(color_scale(self.wall, 0.62), fog);
-        if (far < 1.0) side_wall = color_lerp(back, side_wall, far);
+        let var wall = fog_mix(self.wall, fog);
+        if (far < 1.0) {
+            side_wall = color_lerp(back, side_wall, far);
+            wall = color_lerp(back, wall, far);
+        }
+
+        // The top goes down before any of the box does. It stands on the
+        // middle of the roof, set back from both walls, so it is the furthest
+        // part of the building from us and the walls have to be able to cover
+        // it: the near one does exactly that once we are close enough to be
+        // looking up at the roofline.
+        if (self.crown_h > 0.0) self.render_crown(fb, d, wall, side_wall);
+
+        // Side wall (constant X), drawn next: it is the one we are alongside
         world_quad(fb,
             xf, self.height, self.z0,
             xf, self.height, self.z1,
@@ -1084,8 +1164,6 @@ class Building {
 
         // Near wall (constant Z)
         if (d >= NEAR_Z) {
-            let var wall = fog_mix(self.wall, fog);
-            if (far < 1.0) wall = color_lerp(back, wall, far);
             world_quad(fb,
                 self.x0, self.height, self.z0,
                 self.x1, self.height, self.z0,
@@ -1098,6 +1176,36 @@ class Building {
                             f_unlit, f_lit, f_band);
             }
         }
+    }
+
+    // The block standing on the middle of the roof, in the same two faces the
+    // box below it shows and in the same two colors: it is the same concrete
+    // as the rest of the building, and only the step in the silhouette should
+    // say it is there.
+    render_crown(self, fb, d, front, side) {
+        // Held to about a pixel across: narrower than that and it breaks up
+        // scanline by scanline instead of reading as a step in the silhouette
+        let w = self.crown_w.max(MIN_CROWN_PX * d / FOCAL * 0.5);
+
+        let xc = (self.x0 + self.x1) * 0.5;
+        let zc = (self.z0 + self.z1) * 0.5;
+        let y0 = self.height;
+        let y1 = y0 + self.crown_h;
+
+        // Which side of it the road is on, same rule as the walls
+        let var sn = 1.0; if (self.xf > 0.0) sn = -1.0;
+
+        world_quad(fb,
+            xc + sn * w, y1, zc - w,
+            xc + sn * w, y1, zc + w,
+            xc + sn * w, y0, zc + w,
+            xc + sn * w, y0, zc - w, side);
+
+        world_quad(fb,
+            xc - w, y1, zc - w,
+            xc + w, y1, zc - w,
+            xc + w, y0, zc - w,
+            xc - w, y0, zc - w, front);
     }
 }
 
@@ -1484,6 +1592,31 @@ let EDGE_W = 0.15;
 let ROAD_DRAW_FAR = FOG_END;   // Asphalt runs out to where the haze hides it
 let DASH_DRAW_FAR = 260.0;     // Markings past here are sub-pixel anyway
 
+// The paint is the one bright thing down here, and lit by the city it sits
+// under it bleeds into the asphalt around it rather than ending at its own
+// edge. Both marking colors are lifted along with it: a halo around a dull
+// grey strip reads as a ring drawn on the road instead of as light.
+let LANE_COLOR = 0xFFE4E8F2;
+let EDGE_COLOR = 0xFFF0CE84;
+
+// The bleed either side of a marking: how wide each step runs as a multiple
+// of the paint's own width, and how much of its color that step carries.
+// Widest and dimmest first.
+//
+// It is the strip widened in world space, not its projected corners pushed
+// out. An outset spreads a marking along its own length as well as across
+// it, and on a dash receding down the road that lands as a grey block off
+// the far end of every one of them.
+//
+// Four steps rather than two: with two, the inner one reads as a second
+// stripe painted alongside the first instead of as light coming off it.
+let MARK_BLEED_W = [3.4, 2.4, 1.7, 1.25];
+let MARK_BLEED_K = [0.06, 0.13, 0.26, 0.45];
+
+// Under about this on screen the paint is a sliver and there is nothing for
+// it to bleed into
+let MIN_BLEED_PX = 1.5;
+
 // A horizontal strip at height wy between two Z values, spanning [wx0, wx1]
 fun deck_quad(fb, wx0, wx1, za, zb, wy, color) {
     world_quad(fb, wx0, wy, za, wx1, wy, za, wx1, wy, zb, wx0, wy, zb, color);
@@ -1492,6 +1625,21 @@ fun deck_quad(fb, wx0, wx1, za, zb, wy, color) {
 // Road surface, at y = 0
 fun road_quad(fb, wx0, wx1, za, zb, color) {
     deck_quad(fb, wx0, wx1, za, zb, 0.0, color);
+}
+
+// A marking on the road with its bleed either side, added to the asphalt it
+// sits on. Two steps, widest first, then the paint itself over them.
+fun mark_quad(fb, wx0, wx1, za, zb, color, road, w) {
+    if (w * FOCAL > MIN_BLEED_PX * (za - cam_z)) {
+        let mid = (wx0 + wx1) * 0.5;
+        let h = (wx1 - wx0) * 0.5;
+        for (let var i = 0; i < MARK_BLEED_W.len; ++i) {
+            let hb = h * MARK_BLEED_W[i];
+            road_quad(fb, mid - hb, mid + hb, za, zb,
+                      color_add_sat(road, color_scale(color, MARK_BLEED_K[i])));
+        }
+    }
+    road_quad(fb, wx0, wx1, za, zb, color);
 }
 
 // A vertical wall at constant X, running from y0 up to y1 along Z
@@ -1533,7 +1681,8 @@ class Road {
 fun draw_road_seg(fb, za, zb) {
     let f = fog_factor(za - cam_z);
 
-    road_quad(fb, -ROAD_HALF, ROAD_HALF, za, zb, fog_mix(0xFF101116, f));
+    let asphalt = fog_mix(0xFF101116, f);
+    road_quad(fb, -ROAD_HALF, ROAD_HALF, za, zb, asphalt);
 
     // 1m barriers along both edges: the inner face we look at, plus the
     // top cap, which is visible because the camera sits above it
@@ -1545,9 +1694,9 @@ fun draw_road_seg(fb, za, zb) {
     deck_quad(fb, ROAD_HALF, ROAD_HALF + BARRIER_W, za, zb, BARRIER_H, cap);
 
     // Solid edge lines, in the same slices so they fog with the deck
-    let edge = fog_mix(0xFFC8B478, f);
-    road_quad(fb, -ROAD_HALF, -ROAD_HALF + EDGE_W, za, zb, edge);
-    road_quad(fb, ROAD_HALF - EDGE_W, ROAD_HALF, za, zb, edge);
+    let edge = fog_mix(EDGE_COLOR, f);
+    mark_quad(fb, -ROAD_HALF, -ROAD_HALF + EDGE_W, za, zb, edge, asphalt, EDGE_W);
+    mark_quad(fb, ROAD_HALF - EDGE_W, ROAD_HALF, za, zb, edge, asphalt, EDGE_W);
 
     // Dashed dividers at every lane boundary except the road edges, which
     // have the solid lines above instead
@@ -1560,10 +1709,11 @@ fun draw_road_seg(fb, za, zb) {
         let da = z.max(za);
         let db = (z + LANE_DASH_LEN).min(dz);
         if (db > da) {
-            let c = fog_mix(0xFFB9BCC4, fog_factor(da - cam_z));
+            let c = fog_mix(LANE_COLOR, fog_factor(da - cam_z));
             for (let var i = 1; i < NUM_LANES; ++i) {
                 let x = -ROAD_HALF + LANE_W * i.to_f();
-                road_quad(fb, x - LINE_W * 0.5, x + LINE_W * 0.5, da, db, c);
+                mark_quad(fb, x - LINE_W * 0.5, x + LINE_W * 0.5, da, db,
+                          c, asphalt, LINE_W);
             }
         }
         z = z + period;
@@ -1717,11 +1867,10 @@ let var el_hi = 0.0; let var el_lo = 0.0;
 
 // False when the box is not wholly in front of us, in which case it is left
 // alone: it is one of the few we are alongside, and those are always visible
-fun box_angles(x0, x1, z0, z1, h) {
+fun box_angles(x0, x1, z0, z1, h, h_top) {
     if (z0 - cam_z <= 1.0) return false;
-    let top = h - cam_y;
     let var alo = 1.0e30; let var ahi = -1.0e30;
-    let var ehi = -1.0e30; let var elo = 1.0e30;
+    let var dlo = 1.0e30; let var dhi = 0.0;
     for (let var i = 0; i < 4; ++i) {
         let var wx = x0; if (i == 1 || i == 3) wx = x1;
         let var wz = z0; if (i >= 2) wz = z1;
@@ -1729,11 +1878,17 @@ fun box_angles(x0, x1, z0, z1, h) {
         let a = atan2(dx, dz);
         if (a < alo) alo = a;
         if (a > ahi) ahi = a;
-        let e = (top / (dx * dx + dz * dz).sqrt()).atan();
-        if (e > ehi) ehi = e;
-        if (e < elo) elo = e;
+        let d2 = dx * dx + dz * dz;
+        if (d2 < dlo) dlo = d2;
+        if (d2 > dhi) dhi = d2;
     }
-    az_lo = alo; az_hi = ahi; el_hi = ehi; el_lo = elo;
+    az_lo = alo; az_hi = ahi;
+    // A roof is above the eye either way, so the corner that reaches highest
+    // is the nearest one and the corner that reaches lowest is the furthest.
+    // Only the elevation to be tested takes the mast in: a mast is a metre
+    // or two wide and hides nothing, so what the box claims stops at its roof.
+    el_hi = ((h_top - cam_y) / dlo.sqrt()).atan();
+    el_lo = ((h - cam_y) / dhi.sqrt()).atan();
     return true;
 }
 
@@ -1745,7 +1900,7 @@ fun cull_hidden() {
         let o = draw_list[i];
         if (!(o instanceof Building)) continue;
         o.hidden = false;
-        if (!box_angles(o.x0, o.x1, o.z0, o.z1, o.height)) continue;
+        if (!box_angles(o.x0, o.x1, o.z0, o.z1, o.height, o.top)) continue;
 
         // Testing rounds the span outward, so every bearing it touches even
         // partly has to be blocked before it is called hidden
