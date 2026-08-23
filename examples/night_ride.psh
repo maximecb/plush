@@ -1793,9 +1793,27 @@ let var key_right = false;
 let GEAR_TOP = [13.0, 25.0, 38.0, 53.0, 71.0, 92.0];
 let RPM_IDLE = 0.14;
 
+// How far below a gear's bottom the speed has to fall before dropping down
+// one. Well below, deliberately: a gearbox that picked its gear from speed
+// alone would drop one the instant a gear boundary was crossed on the way
+// down, and the needle would jump back up every time the throttle was
+// released. Real ones hold the gear and let the revs fall away.
+let GEAR_DOWN = 0.42;
+
+let var cur_gear = 0;
+
+fun update_gear() {
+    while (cur_gear < GEAR_TOP.len - 1 && ride_speed > GEAR_TOP[cur_gear]) {
+        cur_gear = cur_gear + 1;
+    }
+    while (cur_gear > 0 && ride_speed < GEAR_TOP[cur_gear - 1] * GEAR_DOWN) {
+        cur_gear = cur_gear - 1;
+    }
+}
+
 fun engine_rpm() {
-    let var g = 0;
-    while (g < GEAR_TOP.len - 1 && ride_speed > GEAR_TOP[g]) g = g + 1;
+    update_gear();
+    let g = cur_gear;
     let var lo = 0.0;
     if (g > 0) lo = GEAR_TOP[g - 1] * 0.74;
     let hi = GEAR_TOP[g];
@@ -1947,6 +1965,21 @@ fun draw_rpm(fb, cx, cy, frac) {
     }
 }
 
+// The needle has weight. Every gear change is a step in the underlying
+// figure, and without this the last downshift before a stop snaps the arc up
+// by a third of its length in a single frame.
+let RPM_LAG = 0.26;        // seconds to catch up
+let var rpm_shown = -1.0;  // negative until the first frame sets it
+
+fun tacho_reading() {
+    let target = engine_rpm();
+    if (rpm_shown < 0.0) { rpm_shown = target; return target; }
+    let step = frame_dt / RPM_LAG;
+    if (target > rpm_shown) rpm_shown = (rpm_shown + step).min(target);
+    else rpm_shown = (rpm_shown - step).max(target);
+    return rpm_shown;
+}
+
 let KMH_CHARS = ["K", "M", "/", "H"];
 let RPM_CHARS = ["R", "P", "M"];
 
@@ -1981,7 +2014,7 @@ fun draw_hud(fb) {
     x = x + draw_label(fb, KMH_CHARS, x, HUD_BOT, lab_size, LABEL_COL);
 
     x = x + HUD_H * 0.8;
-    draw_rpm(fb, x + RPM_R1, HUD_BOT, engine_rpm());
+    draw_rpm(fb, x + RPM_R1, HUD_BOT, tacho_reading());
     x = x + rpm_w + pad;
     draw_label(fb, RPM_CHARS, x, HUD_BOT, lab_size, LABEL_COL);
 }
