@@ -2019,6 +2019,181 @@ fun draw_hud(fb) {
     draw_label(fb, RPM_CHARS, x, HUD_BOT, lab_size, LABEL_COL);
 }
 
+// --- Engine audio ---
+//
+// Synthesised in an actor of its own. The audio driver asks for samples on
+// its own schedule and will not wait for a frame to finish, so generating
+// them on the main actor would tie the sound to the frame rate and break up
+// whenever a frame ran long. The actor owns the output device, because that
+// is where the driver sends its requests.
+//
+// The main actor posts the engine state each frame and the synth glides
+// toward it, so nothing has to be in step.
+
+let SAMPLE_RATE = 44100;
+
+// Firing frequency, not crankshaft speed: a four-stroke twin fires once per
+// revolution, so this is roughly 2000 to 12000 rpm
+let ENG_F_IDLE = 32.0;
+let ENG_F_MAX = 195.0;
+
+let ENG_A_IDLE = 0.10;
+let ENG_A_MAX = 0.78;
+
+// Rev limiter. Held against the stop a bike does not sit on a steady note:
+// the ignition cuts in and out and it stutters. Generated here rather than
+// taken from the main actor, because at eleven a second it would alias into
+// nonsense against a frame rate in the twenties.
+let LIMIT_FROM = 0.92;
+let LIMIT_HZ = 11.5;
+let LIMIT_DUTY = 0.34;     // share of each cycle the ignition is cut
+
+// Pre-gain into the clipper. The clipping is deliberately lopsided: a
+// symmetric curve only makes odd harmonics and comes out as fuzz, while the
+// asymmetry adds even ones too, which is what reads as grit.
+let ENG_DRIVE = 3.1;
+let ENG_ASYM = 0.68;
+
+// How fast the synth chases the state it was last told about, per sample.
+//
+// The throttle gets a much slower one than the revs. It is the only input
+// that steps: the key goes down and load goes straight from nothing to full,
+// and at the revs' rate that arrives as a jump in level. Revs already move
+// smoothly on their own, so they only need enough smoothing to cover the gap
+// between one buffer and the next.
+let ENG_RPM_GLIDE = 0.00055;    // about 40ms
+let ENG_LOAD_GLIDE = 0.000060;  // about 380ms, a throttle body opening
+
+class EngineState {
+    init(self, rpm, load, top, stop) {
+        self.rpm = rpm;
+        self.load = load;
+        // In top gear, where there is nowhere left to shift. Only then can
+        // the engine actually sit against the limiter: in the other gears it
+        // sweeps past the same revs on its way to an upshift and must not
+        // stutter on the way through.
+        self.top = top;
+        self.stop = stop;
+    }
+}
+
+// Synth state. Module level rather than local to the actor so the waveform
+// can be generated and checked without an audio device present.
+let var eng_phase = 0.0;      // in revolutions, kept in [0, 1)
+let var eng_noise = 0.0;
+let var eng_noise2 = 0.0;
+let var eng_lim_ph = 0.0;
+let var eng_dc = 0.0;
+let var eng_rpm_cur = 0.0;  let var eng_rpm_tgt = 0.0;
+let var eng_load_cur = 0.0; let var eng_load_tgt = 0.0;
+let var eng_top = false;
+
+// Only records what was asked for. Everything is derived from the smoothed
+// values inside the fill, so nothing downstream can step.
+fun engine_set(rpm, load, top) {
+    eng_rpm_tgt = rpm;
+    eng_load_tgt = load;
+    eng_top = top;
+}
+
+fun engine_fill(buf, n) {
+    let step = 1.0 / SAMPLE_RATE.to_f();
+    let tau = 2.0 * PI;
+    for (let var i = 0; i < n; ++i) {
+        eng_rpm_cur = eng_rpm_cur + (eng_rpm_tgt - eng_rpm_cur) * ENG_RPM_GLIDE;
+        eng_load_cur = eng_load_cur + (eng_load_tgt - eng_load_cur) * ENG_LOAD_GLIDE;
+
+        let f = ENG_F_IDLE + (ENG_F_MAX - ENG_F_IDLE) * eng_rpm_cur;
+        eng_phase = eng_phase + f * step;
+        if (eng_phase >= 1.0) eng_phase = eng_phase - 1.0;
+        let c = eng_phase * tau;
+
+        // Loudness follows the revs far more than the throttle, so the level
+        // dips on every upshift along with the tacho. Leaning on the
+        // throttle for it made the level lurch the moment the key went down.
+        let drive = 0.22 * eng_load_cur + 0.78 * eng_rpm_cur;
+        let var amp = (ENG_A_IDLE + (ENG_A_MAX - ENG_A_IDLE) * drive)
+                      * (eng_rpm_cur * 6.0).min(1.0);
+
+        // Bouncing off the limiter, fading in over the last of the range so
+        // it does not switch on at a hard threshold
+        if (eng_top && eng_rpm_cur > LIMIT_FROM) {
+            eng_lim_ph = eng_lim_ph + LIMIT_HZ * step;
+            if (eng_lim_ph >= 1.0) eng_lim_ph = eng_lim_ph - 1.0;
+            if (eng_lim_ph < LIMIT_DUTY) {
+                let over = ((eng_rpm_cur - LIMIT_FROM)
+                            / (1.0 - LIMIT_FROM)).min(1.0);
+                amp = amp * (1.0 - 0.62 * over);
+            }
+        }
+
+        // A stack of harmonics rather than one tone. It runs well up the
+        // series: the top of it is the rasp, and cutting off at the sixth
+        // left the whole thing sounding muffled. Even the sixteenth is only
+        // three kilohertz at the redline, so there is no aliasing risk.
+        let hard = 0.45 + 0.55 * eng_load_cur;
+        let var v = c.sin() * 0.46
+                  + (c * 2.0).sin() * 0.30
+                  + (c * 3.0).sin() * (0.15 + 0.13 * hard)
+                  + (c * 4.0).sin() * (0.10 + 0.13 * hard)
+                  + (c * 6.0).sin() * (0.06 + 0.13 * hard)
+                  + (c * 8.0).sin() * (0.04 + 0.12 * hard)
+                  + (c * 10.0).sin() * (0.03 + 0.10 * hard)
+                  + (c * 12.0).sin() * (0.02 + 0.08 * hard)
+                  + (c * 16.0).sin() * (0.01 + 0.06 * hard);
+
+        // Half-order: a four-stroke fires on alternate revolutions, and that
+        // lopsidedness is most of what makes it sound like a twin
+        v = v * (0.70 + 0.30 * (c * 0.5).sin().abs());
+
+        // Intake and exhaust rush. Two poles rather than one, so it is a
+        // rumble under the note instead of hiss over it, and it barely opens
+        // with the throttle: quintupling it on the key press was most of what
+        // read as noise popping in.
+        eng_noise = eng_noise * 0.92 + rand_float(-1.0, 1.0) * 0.08;
+        eng_noise2 = eng_noise2 * 0.92 + eng_noise * 0.08;
+        v = v + eng_noise2 * (0.9 + 0.7 * eng_load_cur);
+
+        // Drive it hard into a lopsided curve. Squashing one half harder
+        // than the other is what puts the even harmonics in.
+        let var d = v * ENG_DRIVE * (0.72 + 0.55 * eng_load_cur);
+        if (d < 0.0) d = d * ENG_ASYM;
+        d = d / (1.0 + d.abs());
+
+        // That asymmetry leaves an offset behind, which would eat headroom
+        // and thump on every change in drive, so take it back out
+        eng_dc = eng_dc * 0.9995 + d * 0.0005;
+        d = d - eng_dc;
+
+        buf.set_f32(i, d * amp);
+    }
+}
+
+fun audio_actor() {
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+    if (dev == nil) {
+        $println("no audio device, running silent");
+        return 0;
+    }
+    rand_init(20461);
+
+    loop {
+        let msg = $actor_recv();
+        if (msg == nil) break;
+        if (msg instanceof EngineState) {
+            if (msg.stop) break;
+            engine_set(msg.rpm, msg.load, msg.top);
+            continue;
+        }
+        if (!(msg instanceof AudioNeeded)) continue;
+        let n = msg.num_samples;
+        let buf = ByteArray.with_size(n * 4);
+        engine_fill(buf, n);
+        $audio_write_samples(dev, buf);
+    }
+    return 0;
+}
+
 // --- Main ---
 
 let mode_arg = $cmd_get_arg_or(1, "");
@@ -2416,6 +2591,10 @@ if (capture_frames > 0) {
     return;
 }
 
+// Spawned before the world is built, so the copy of the globals it takes
+// with it stays small
+let audio_id = $actor_spawn(audio_actor);
+
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Night Ride", 0);
 
 let var paused = false;
@@ -2451,7 +2630,10 @@ loop {
             if (msg.key == 'RIGHT') key_right = false;
         }
     }
-    if (quit) break;
+    if (quit) {
+        $actor_send(audio_id, EngineState(0.0, 0.0, false, true));
+        break;
+    }
 
     let now = $time_current_ms();
     let dt = (now - last_ms).to_f() / 1000.0;
@@ -2460,6 +2642,10 @@ loop {
     let step = dt.min(0.1);
     if (!paused) {
         update_drive(step);
+        let var load = 0.0;
+        if (key_accel) load = 1.0;
+        $actor_send(audio_id, EngineState(engine_rpm(), load,
+                                          cur_gear == GEAR_TOP.len - 1, false));
         cam_z = cam_z + ride_speed * step;
         frame_dt = step;
         update_ride(step, ride_speed / 48.0);
