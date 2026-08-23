@@ -30,8 +30,11 @@ let PI = 3.1415926535;
 let FOV_X_DEG = 75.0;
 let FOCAL = (FRAME_WIDTH.to_f() * 0.5) / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
 
-// Anything closer than this is clipped away
-let NEAR_Z = 0.5;
+// Anything closer than this is clipped away. Practically on the lens: a
+// crash puts the eye 15cm off the deck, and half a meter of clip there cut
+// a hole in the road under us. fill_quad clamps to the frame, so the large
+// FOCAL/NEAR_Z that clipped corners project at costs nothing.
+let NEAR_Z = 0.02;
 
 // How fast we are travelling, in m/s. Up here because the LOD fades are
 // timed against it, and a let is only visible to what comes after it.
@@ -56,6 +59,10 @@ let FOG_MAX = 0.94;
 // hazed-out mass near the vanishing point is what makes the city read as a
 // downtown core rather than two rows of boxes.
 let CULL_FAR = 3400.0;
+
+// Only a crash ever looks back down the road. Short of CULL_FAR because by
+// then the haze has closed over anyway, and everything behind is extra work.
+let CULL_BEHIND = 1500.0;
 
 // --- World layout ---
 //
@@ -322,7 +329,23 @@ let var r00 = 1.0; let var r01 = 0.0; let var r02 = 0.0;
 let var r10 = 0.0; let var r11 = 1.0; let var r12 = 0.0;
 let var r20 = 0.0; let var r21 = 0.0; let var r22 = 1.0;
 
+// A crash takes the camera off yaw/pitch/roll and onto the tumbling ball's
+// own orientation, which is a free rotation those three cannot hold. Rows
+// are right, up and forward, same as r. Declared up here rather than with
+// the rest of the crash because the renderer below reads them.
+let var crashed = false;
+let var f00 = 1.0; let var f01 = 0.0; let var f02 = 0.0;
+let var f10 = 0.0; let var f11 = 1.0; let var f12 = 0.0;
+let var f20 = 0.0; let var f21 = 0.0; let var f22 = 1.0;
+
 fun update_camera() {
+    if (crashed) {
+        r00 = f00; r01 = f01; r02 = f02;
+        r10 = f10; r11 = f11; r12 = f12;
+        r20 = f20; r21 = f21; r22 = f22;
+        return;
+    }
+
     let cy = cam_yaw.cos();   let sy = cam_yaw.sin();
     let cp = cam_pitch.cos(); let sp = cam_pitch.sin();
     let cr = cam_roll.cos();  let sr = cam_roll.sin();
@@ -1662,6 +1685,25 @@ class Road {
     // Cut into Z slices so the haze can take hold with distance. They grow
     // geometrically because a far slice covers far fewer pixels.
     render(self, fb) {
+        // Tumbling means facing back down the deck for part of every turn,
+        // so the same slices run behind us. Their edges are stepped out from
+        // the camera and then consumed in reverse, so they still paint
+        // farthest first.
+        if (crashed) {
+            let bounds = [];
+            let var d = NEAR_Z;
+            let var seg = 5.0;
+            while (d < ROAD_DRAW_FAR) {
+                bounds.push(d);
+                d = d + seg;
+                seg = seg * 1.35;
+            }
+            bounds.push(ROAD_DRAW_FAR);
+            for (let var i = bounds.len - 1; i > 0; --i) {
+                draw_road_seg(fb, cam_z - bounds[i], cam_z - bounds[i - 1]);
+            }
+        }
+
         let zf = cam_z + ROAD_DRAW_FAR;
         let var za = cam_z + NEAR_Z;
         let var seg = 5.0;
@@ -1679,7 +1721,8 @@ class Road {
 // carrying them because they are coplanar with its asphalt, and a fixed
 // order within an object is what keeps coplanar surfaces stacked correctly.
 fun draw_road_seg(fb, za, zb) {
-    let f = fog_factor(za - cam_z);
+    // Absolute, so slices behind a crashed camera haze like the ones ahead
+    let f = fog_factor((za - cam_z).abs());
 
     let asphalt = fog_mix(0xFF101116, f);
     road_quad(fb, -ROAD_HALF, ROAD_HALF, za, zb, asphalt);
@@ -1809,13 +1852,20 @@ class Lamp {
 // one of the ten thousand quads a frame touches them. Above that level
 // everything is an object.
 
-let MAX_DRAW = 512;
+// Headroom above what a forward view needs, because a tumbling camera also
+// collects what is behind it
+let MAX_DRAW = 1024;
 let draw_list = Array.with_size(MAX_DRAW, nil);
+
+// Distance from the camera along Z, kept alongside because it is the sort
+// key and objects behind us have to sort by how far back they are
+let draw_key = Array.with_size(MAX_DRAW, 0.0);
 let var draw_n = 0;
 
-fun draw_push(obj) {
+fun draw_push(obj, key) {
     if (draw_n >= MAX_DRAW) return;
     draw_list[draw_n] = obj;
+    draw_key[draw_n] = key;
     draw_n = draw_n + 1;
 }
 
@@ -1933,13 +1983,15 @@ fun cull_hidden() {
 fun draw_sort() {
     for (let var i = 1; i < draw_n; ++i) {
         let o = draw_list[i];
-        let k = o.zn;
+        let k = draw_key[i];
         let var j = i - 1;
-        while (j >= 0 && draw_list[j].zn < k) {
+        while (j >= 0 && draw_key[j] < k) {
             draw_list[j + 1] = draw_list[j];
+            draw_key[j + 1] = draw_key[j];
             j = j - 1;
         }
         draw_list[j + 1] = o;
+        draw_key[j + 1] = k;
     }
 }
 
@@ -1961,6 +2013,9 @@ let DRAG_K = THROTTLE_ACC / (SPEED_MAX * SPEED_MAX);
 let MAX_LEAN = 26.0 * PI / 180.0;
 let LEAN_RATE = 2.6;          // radians per second toward the held angle
 let LEAN_SLIDE = 18.0;        // metres per second of drift per radian of lean
+
+// How far out the bike can get before its side is against a barrier
+let LANE_LIMIT = ROAD_HALF - 1.4;
 
 let var key_accel = false;
 let var key_left = false;
@@ -1999,6 +2054,211 @@ fun engine_rpm() {
     return RPM_IDLE + t * (1.0 - RPM_IDLE);
 }
 
+// --- Crash ---
+//
+// Clip a barrier hard enough and the rider comes off as a ball 30cm across,
+// dropped from head height with the bike's speed on it. Where it stops
+// rolling it stays; the ride is over.
+
+let CRASH_KMH = 100.0;
+let CRASH_SPEED = CRASH_KMH / 3.6;   // below this the barrier is just a scrape
+
+let BALL_R = 0.15;                   // 30cm ball
+let GRAVITY = 9.81;
+
+let BOUNCE_DECK = 0.42;              // restitution off the asphalt
+let BOUNCE_WALL = 0.55;              // and off a barrier, which gives less
+let MIN_BOUNCE = 1.0;                // slower than this and it has settled
+
+// Speed decays exponentially, so the ball sheds most of it early and then
+// creeps. Distance covered works out at v0 / ROLL_DECAY, so this is the dial
+// for how far down the road a crash carries.
+let ROLL_DECAY = 0.45;               // per second
+
+// The roll never quite dies out: it holds at SPIN_MIN and keeps turning
+// until the ball is somewhere worth stopping.
+let SPIN_MIN = 2.5;                  // rad/s
+let STOP_SPEED = 2.0;                // m/s, below this it may stop
+
+// Where it may come to rest: eye pitched somewhere up at the city, with the
+// horizon near enough level in frame. The tilt is measured on the right
+// vector rather than on up, because up carries the pitch as well and at 70
+// degrees of it there is no uprightness left to ask for. The peak rule below
+// is what guarantees a stop, so these can be as tight as they like without
+// risking a ball that rolls for ever looking for an attitude that never
+// comes round.
+let STOP_EYE_LO = (10.0 * PI / 180.0).sin();
+let STOP_EYE_HI = (50.0 * PI / 180.0).sin();
+let STOP_TILT_MAX = 0.30;            // right vector off horizontal, ~17 deg
+
+// The ricochet off the barrier, as fractions of the lateral speed the bike
+// carried into it. A square-on hit throws the rider well clear; a graze
+// barely deflects them.
+let RICOCHET_X = 1.15;
+let RICOCHET_Y = 0.30;
+
+// The tumble rate is v / r, one turn per 2*PI*BALL_R of road, scaled down by
+// a constant. A 30cm ball really does turn some sixty times a second at
+// highway speed, which no frame rate here can sample: played straight it
+// aliases, appearing to freeze near 177 rad/s and to run backwards either
+// side of that. Scaling keeps it strictly proportional to speed, so the
+// spin still winds down in step with the ball, and keeps every frame under
+// a third of a turn so the direction always reads.
+let SPIN_SCALE = 0.05;
+
+let var ball_x = 0.0;
+let var ball_y = 0.0;
+let var ball_z = 0.0;
+let var ball_vx = 0.0;
+let var ball_vy = 0.0;
+let var ball_vz = 0.0;
+
+// Tumble, as a horizontal axis and a rate. Rolling contact is the only thing
+// that sets it, so in the air it just carries through.
+let var spin_ax = 1.0;
+let var spin_az = 0.0;
+let var spin_rate = 0.0;
+
+// up.y last frame and whether it was climbing, for catching the top of its
+// swing
+let var prev_up = -2.0;
+let var up_rising = false;
+
+// The axis is up x velocity over radius, so it follows the XZ motion: down
+// the road it is lateral and the ball goes end over end, sideways off a
+// barrier it lines up with travel and the ball rolls about it.
+fun set_spin() {
+    let gs = (ball_vx * ball_vx + ball_vz * ball_vz).sqrt();
+    if (gs < 0.0001) { spin_rate = 0.0; return; }
+    spin_ax = ball_vz / gs;
+    spin_az = -ball_vx / gs;
+    spin_rate = (gs / BALL_R * SPIN_SCALE).max(SPIN_MIN);
+}
+
+// lat is the bike's lateral speed into the barrier, signed
+fun start_crash(lat) {
+    crashed = true;
+
+    ball_x = lane_x;
+    ball_y = EYE_H;
+    ball_z = cam_z;
+    ball_vx = -lat * RICOCHET_X;
+    ball_vy = lat.abs() * RICOCHET_Y;
+    ball_vz = ride_speed;
+
+    f00 = 1.0; f01 = 0.0; f02 = 0.0;
+    f10 = 0.0; f11 = 1.0; f12 = 0.0;
+    f20 = 0.0; f21 = 0.0; f22 = 1.0;
+
+    // Already tumbling as they leave the bike, off the speed they leave with
+    set_spin();
+    prev_up = -2.0;
+    up_rising = false;
+
+    lean_base = 0.0;
+    ride_speed = 0.0;
+}
+
+// Turn the camera basis by ang about the unit axis (ax, ay, az), Rodrigues
+// on each row. The rows stay orthonormal to within rounding, and a crash is
+// short enough that it never needs correcting.
+fun spin_camera(ax, ay, az, ang) {
+    let c = ang.cos();
+    let s = ang.sin();
+    let k = 1.0 - c;
+
+    let var vx = f00; let var vy = f01; let var vz = f02;
+    let var d = ax * vx + ay * vy + az * vz;
+    f00 = vx * c + (ay * vz - az * vy) * s + ax * d * k;
+    f01 = vy * c + (az * vx - ax * vz) * s + ay * d * k;
+    f02 = vz * c + (ax * vy - ay * vx) * s + az * d * k;
+
+    vx = f10; vy = f11; vz = f12;
+    d = ax * vx + ay * vy + az * vz;
+    f10 = vx * c + (ay * vz - az * vy) * s + ax * d * k;
+    f11 = vy * c + (az * vx - ax * vz) * s + ay * d * k;
+    f12 = vz * c + (ax * vy - ay * vx) * s + az * d * k;
+
+    vx = f20; vy = f21; vz = f22;
+    d = ax * vx + ay * vy + az * vz;
+    f20 = vx * c + (ay * vz - az * vy) * s + ax * d * k;
+    f21 = vy * c + (az * vx - ax * vz) * s + ay * d * k;
+    f22 = vz * c + (ax * vy - ay * vx) * s + az * d * k;
+}
+
+fun update_crash(dt) {
+    ball_vy = ball_vy - GRAVITY * dt;
+
+    ball_x = ball_x + ball_vx * dt;
+    ball_y = ball_y + ball_vy * dt;
+    ball_z = ball_z + ball_vz * dt;
+
+    let var on_deck = false;
+    if (ball_y <= BALL_R) {
+        ball_y = BALL_R;
+        on_deck = true;
+        if (ball_vy < 0.0) ball_vy = -ball_vy * BOUNCE_DECK;
+        if (ball_vy < MIN_BOUNCE) ball_vy = 0.0;
+    }
+
+    // A ball this small never gets near the top of a barrier, so both faces
+    // are solid and it only ever comes off them sideways.
+    let wall = ROAD_HALF - BALL_R;
+    if (ball_x > wall) {
+        ball_x = wall;
+        ball_vx = -ball_vx.abs() * BOUNCE_WALL;
+    }
+    if (ball_x < -wall) {
+        ball_x = -wall;
+        ball_vx = ball_vx.abs() * BOUNCE_WALL;
+    }
+
+    // Both components by the same factor, so the direction of travel holds
+    let horiz = (ball_vx * ball_vx + ball_vz * ball_vz).sqrt();
+    if (on_deck && horiz > 0.0) {
+        let decay = (-ROLL_DECAY * dt).exp();
+        ball_vx = ball_vx * decay;
+        ball_vz = ball_vz * decay;
+    }
+
+    // Only contact can change the tumble, so it is re-read off the ground
+    // speed on the deck and left alone in the air
+    if (on_deck) set_spin();
+
+    // Exponential decay never quite reaches zero, so walking pace is what
+    // ends the roll rather than the speed running out. It stops at the top
+    // of the up vector's swing: turning about a fixed horizontal axis lifts
+    // the eye and puts it back down once a turn, and the top of that arc is
+    // both the most upright this roll can ever reach and the point where the
+    // eye is level and looking the way the ball was travelling. It is the
+    // fallback rather than the whole rule, because asking only for a fixed
+    // attitude would spin forever whenever the axis had drifted far enough
+    // that the attitude was never on the way round.
+    if (on_deck && horiz < STOP_SPEED) {
+        // The first frame down here has nothing to compare against, and
+        // taking the sentinel for a climb would read the very next frame as
+        // a peak and stop wherever the ball happened to be
+        // f11 > 0 as well as the tilt: a frame rolled right over has its
+        // right vector horizontal again, and would otherwise pass
+        let held = f21 >= STOP_EYE_LO && f21 <= STOP_EYE_HI
+                   && f01.abs() <= STOP_TILT_MAX && f11 > 0.0;
+        if (prev_up > -1.5) {
+            if (held || (up_rising && f11 < prev_up)) {
+                ball_vx = 0.0;
+                ball_vz = 0.0;
+                spin_rate = 0.0;
+            }
+            up_rising = f11 > prev_up;
+        }
+        prev_up = f11;
+    }
+    spin_camera(spin_ax, 0.0, spin_az, spin_rate * dt);
+
+    cam_x = ball_x;
+    cam_y = ball_y;
+    cam_z = ball_z;
+}
+
 fun update_drive(dt) {
     let drag = DRAG_K * ride_speed * ride_speed;
     if (key_accel) {
@@ -2017,9 +2277,15 @@ fun update_drive(dt) {
 
     // The lean is the steering. Faster means it bites harder, which is why
     // the bike gets twitchy at the top end.
-    lane_x = lane_x + lean_base * LEAN_SLIDE * (ride_speed / 48.0) * dt;
-    let limit = ROAD_HALF - 1.4;
-    lane_x = lane_x.max(-limit).min(limit);
+    let lat = lean_base * LEAN_SLIDE * (ride_speed / 48.0);
+    lane_x = lane_x + lat * dt;
+
+    // Below the crash speed the bike scrubs along the barrier; above, the
+    // rider goes over the top, carrying that lateral speed into it.
+    if (lane_x.abs() > LANE_LIMIT) {
+        lane_x = lane_x.max(-LANE_LIMIT).min(LANE_LIMIT);
+        if (ride_speed > CRASH_SPEED) start_crash(lat);
+    }
 }
 
 // --- Instruments ---
@@ -2246,11 +2512,15 @@ let ENG_ASYM = 0.68;
 // between one buffer and the next.
 let ENG_RPM_GLIDE = 0.00055;    // about 40ms
 let ENG_LOAD_GLIDE = 0.000060;  // about 380ms, a throttle body opening
+let ENG_GAIN_GLIDE = 0.0004;    // about 55ms, the bike going out from under
 
 class EngineState {
-    init(self, rpm, load, top, stop) {
+    init(self, rpm, load, top, stop, gain) {
         self.rpm = rpm;
         self.load = load;
+        // Master level. Goes to zero the moment the rider is off the bike:
+        // the engine is still running, but it is leaving at 200km/h.
+        self.gain = gain;
         // In top gear, where there is nowhere left to shift. The limiter is
         // suppressed there: it is the one gear the engine can sit against
         // the stop indefinitely, and a warble that never ends is far more
@@ -2270,13 +2540,15 @@ let var eng_dc = 0.0;
 let var eng_rpm_cur = 0.0;  let var eng_rpm_tgt = 0.0;
 let var eng_load_cur = 0.0; let var eng_load_tgt = 0.0;
 let var eng_top = false;
+let var eng_gain_cur = 1.0; let var eng_gain_tgt = 1.0;
 
 // Only records what was asked for. Everything is derived from the smoothed
 // values inside the fill, so nothing downstream can step.
-fun engine_set(rpm, load, top) {
+fun engine_set(rpm, load, top, gain) {
     eng_rpm_tgt = rpm;
     eng_load_tgt = load;
     eng_top = top;
+    eng_gain_tgt = gain;
 }
 
 fun engine_fill(buf, n) {
@@ -2363,7 +2635,9 @@ fun engine_fill(buf, n) {
         eng_dc = eng_dc * 0.9995 + d * 0.0005;
         d = d - eng_dc;
 
-        buf.set_f32(i, d * amp);
+        eng_gain_cur = eng_gain_cur
+                     + (eng_gain_tgt - eng_gain_cur) * ENG_GAIN_GLIDE;
+        buf.set_f32(i, d * amp * eng_gain_cur);
     }
 }
 
@@ -2380,7 +2654,7 @@ fun audio_actor() {
         if (msg == nil) break;
         if (msg instanceof EngineState) {
             if (msg.stop) break;
-            engine_set(msg.rpm, msg.load, msg.top);
+            engine_set(msg.rpm, msg.load, msg.top, msg.gain);
             continue;
         }
         if (!(msg instanceof AudioNeeded)) continue;
@@ -2589,7 +2863,11 @@ fun generate_lamps(list, side, z0, z1) {
 // behind those, and so on outward. Its sign is the side of the road and its
 // magnitude is how far back the band sits.
 
-let CHUNK_BEHIND = 1;      // kept behind us, so glancing back is not empty
+// Kept behind us, so glancing back is not empty. One chunk covers the ride,
+// which never turns round; a tumbling crash widens it to reach CULL_BEHIND
+// and pays one rebuild for it.
+let CHUNK_BEHIND = 1;
+let CHUNK_BEHIND_CRASH = (CULL_BEHIND / CHUNK_LEN).ceil();
 
 // Scrambles a chunk's coordinates into a seed. Adjacent chunks have to land
 // on unrelated seeds, otherwise neighbouring blocks come out looking alike.
@@ -2670,7 +2948,9 @@ let var live_hi = 0;
 // The window only moves once every CHUNK_LEN of road, so almost every frame
 // leaves here on the first compare.
 fun ensure_chunks() {
-    let iz_lo = (cam_z / CHUNK_LEN).floor() - CHUNK_BEHIND;
+    let var behind = CHUNK_BEHIND;
+    if (crashed) behind = CHUNK_BEHIND_CRASH;
+    let iz_lo = (cam_z / CHUNK_LEN).floor() - behind;
     // One chunk past the cull distance. A chunk is 384m long, so building
     // only as far as CULL_FAR lets its near edge arrive well inside the fade
     // band, and everything in it switches on at full strength.
@@ -2718,6 +2998,26 @@ let FOV_TAN = ((CX * CX + CY * CY).sqrt() / FOCAL) * 1.15;
 fun collect_scene() {
     let near = cam_z + NEAR_Z;
     let far = cam_z + CULL_FAR;
+
+    // A tumbling camera faces back down the road for part of every turn, so
+    // a crash takes what is behind us as well and sorts on distance either
+    // way. The ride itself never looks back and keeps the cheaper test.
+    if (crashed) {
+        let behind = cam_z - CULL_BEHIND;
+        for (let var i = 0; i < scene.len; ++i) {
+            let o = scene[i];
+            if (o.zn > far) break;
+            if (o.zf <= behind) continue;
+            let dn = (o.zn - cam_z).max(cam_z - o.zf).max(0.0);
+            // Shallowest bearing is at whichever end is further off, which
+            // behind us is the near one in Z rather than the far one
+            let df = (o.zf - cam_z).abs().max((o.zn - cam_z).abs());
+            if ((o.xf - cam_x).abs() > df * FOV_TAN) continue;
+            draw_push(o, dn);
+        }
+        return;
+    }
+
     for (let var i = 0; i < scene.len; ++i) {
         let o = scene[i];
         if (o.zn > far) break;
@@ -2727,7 +3027,7 @@ fun collect_scene() {
         // it can be on screen. Most of a city spread this wide sits outside
         // the frame at any moment, so this is the cheapest cull there is.
         if ((o.xf - cam_x).abs() > (o.zf - cam_z) * FOV_TAN) continue;
-        draw_push(o);
+        draw_push(o, o.zn - cam_z);
     }
 }
 
@@ -2754,7 +3054,8 @@ fun render_frame(fb) {
     // exact rather than a fudge.
     road.render(fb);
 
-    draw_hud(fb);
+    // The instruments went down the road with the bike
+    if (!crashed) draw_hud(fb);
 }
 
 // Both offline modes step the clock at a fixed rate, so a capture is
@@ -2829,7 +3130,7 @@ loop {
         }
     }
     if (quit) {
-        $actor_send(audio_id, EngineState(0.0, 0.0, false, true));
+        $actor_send(audio_id, EngineState(0.0, 0.0, false, true, 0.0));
         break;
     }
 
@@ -2839,14 +3140,21 @@ loop {
 
     let step = dt.min(0.1);
     if (!paused) {
-        update_drive(step);
-        let var load = 0.0;
-        if (key_accel) load = 1.0;
-        $actor_send(audio_id, EngineState(engine_rpm(), load,
-                                          cur_gear == GEAR_TOP.len - 1, false));
-        cam_z = cam_z + ride_speed * step;
         frame_dt = step;
-        update_ride(step, ride_speed / 48.0);
+        if (!crashed) update_drive(step);
+        if (crashed) {
+            // The bike is gone, so the engine idles off behind us
+            update_crash(step);
+            $actor_send(audio_id, EngineState(RPM_IDLE, 0.0, false, false, 0.0));
+        } else {
+            let var load = 0.0;
+            if (key_accel) load = 1.0;
+            $actor_send(audio_id, EngineState(engine_rpm(), load,
+                                              cur_gear == GEAR_TOP.len - 1,
+                                              false, 1.0));
+            cam_z = cam_z + ride_speed * step;
+            update_ride(step, ride_speed / 48.0);
+        }
         update_scene(step);
     }
 
