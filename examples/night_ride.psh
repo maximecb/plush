@@ -1782,7 +1782,7 @@ let DRAG_K = THROTTLE_ACC / (SPEED_MAX * SPEED_MAX);
 
 let MAX_LEAN = 26.0 * PI / 180.0;
 let LEAN_RATE = 2.6;          // radians per second toward the held angle
-let LEAN_SLIDE = 3.5;         // metres per second of drift per radian of lean
+let LEAN_SLIDE = 18.0;        // metres per second of drift per radian of lean
 
 let var key_accel = false;
 let var key_left = false;
@@ -1840,7 +1840,7 @@ let DIG_GAP = HUD_H * 0.13;
 
 let SEG_LIT = 0xFFFF2A22;
 let SEG_OFF = 0xFF2A0A08;
-let LABEL_COL = 0xFFB8B0C8;
+let LABEL_COL = 0xFFFF2A22;
 
 // Which of the seven segments each numeral lights, a through g in bits 0..6
 let SEG_MASK = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
@@ -1925,9 +1925,9 @@ let RPM_R0 = HUD_H * 0.60;
 let RPM_R1 = HUD_H * 1.02;
 
 fun rpm_color(t) {
-    if (t < 0.62) return color_lerp(0xFF30E060, 0xFFC8E028, t / 0.62);
-    if (t < 0.84) return color_lerp(0xFFC8E028, 0xFFFF9018, (t - 0.62) / 0.22);
-    return color_lerp(0xFFFF9018, 0xFFFF2820, (t - 0.84) / 0.16);
+    if (t < 0.44) return color_lerp(0xFF30E060, 0xFFC8E028, t / 0.44);
+    if (t < 0.74) return color_lerp(0xFFC8E028, 0xFFFF9018, (t - 0.44) / 0.30);
+    return color_lerp(0xFFFF9018, 0xFFFF2820, (t - 0.74) / 0.26);
 }
 
 fun draw_rpm(fb, cx, cy, frac) {
@@ -1953,13 +1953,10 @@ let RPM_CHARS = ["R", "P", "M"];
 fun draw_hud(fb) {
     let kmh = (ride_speed * 3.6).floor().max(0).min(999);
 
-    // Always three slots, with the leading ones left empty rather than
-    // shown as zeros. A field that changes width would shift the whole
-    // panel sideways every time the speed crossed ten or a hundred.
+    // Always three digits, leading zeros and all. A field that changed
+    // width would shift the whole panel sideways every time the speed
+    // crossed ten or a hundred.
     let digits = 3;
-    let var lead = 2;
-    if (kmh >= 10) lead = 1;
-    if (kmh >= 100) lead = 0;
 
     let lab_size = HUD_H * 0.42;
     let speed_w = digits.to_f() * (DIG_W + DIG_GAP) - DIG_GAP;
@@ -1976,7 +1973,7 @@ fun draw_hud(fb) {
     let var div = 1;
     for (let var i = 1; i < digits; ++i) div = div * 10;
     for (let var i = 0; i < digits; ++i) {
-        if (i >= lead) seg_digit(fb, x, top, (kmh _/ div) % 10, SEG_LIT, SEG_OFF);
+        seg_digit(fb, x, top, (kmh _/ div) % 10, SEG_LIT, SEG_OFF);
         x = x + DIG_W + DIG_GAP;
         div = div _/ 10;
     }
