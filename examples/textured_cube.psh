@@ -1,25 +1,20 @@
-// Textured triangle rasterization benchmark
+// Rotating texture-mapped cube
 //
-// Splits a 1024x1024 frame buffer into 8192 equal-area triangles and
-// rasterizes all of them with a nearest-neighbor texture lookup, once per
-// frame. This is the same grid that benchmarks/rasterize.psh covers with
-// flat-shaded triangles, so the two timings are directly comparable and the
-// difference is the cost of the per-pixel texturing.
+// Draws a crate spinning in perspective at 800x600, with nearest-neighbor
+// texture sampling and directional lighting. The rasterizer is the one from
+// benchmarks/raster_tex.psh: affine mapping, with u and v interpolated in
+// fixed point and packed into one integer so that a single add steps both.
 //
-// Texture mapping is affine: the triangles are given in screen space with no
-// depth, so u and v are linear in x and y over the whole triangle and their
-// gradients only need to be computed once per triangle.
-// Usage: plush benchmarks/raster_tex.psh [num_frames]
+// Usage: plush examples/textured_cube.psh
 
-let FRAME_WIDTH = 1024;
-let FRAME_HEIGHT = 1024;
+let FRAME_WIDTH = 800;
+let FRAME_HEIGHT = 600;
+let BG_COLOR = 0xFF101418;
 
-// Grid of cells, each split into two triangles: 64 * 64 * 2 = 8192 triangles
-let GRID_COLS = 64;
-let GRID_ROWS = 64;
+let TEX_PATH = "examples/crate_128.tga";
 
 // Power-of-two texture, so that wrapping is a bitwise and
-let TEX_SHIFT = 8;
+let TEX_SHIFT = 7;
 let TEX_SIZE = 1 << TEX_SHIFT;
 let TEX_MASK = TEX_SIZE - 1;
 
@@ -58,11 +53,30 @@ let U_MASK = TEX_MASK;
 let V_SHIFT = 32 + FP_BITS - TEX_SHIFT;
 let V_MASK = TEX_MASK << TEX_SHIFT;
 
-// Command-line argument for the number of frames to render
-let num_frames = $cmd_get_arg_or(1, "50").parse_int(10);
-if (num_frames == nil) {
-    $println("expected an integer number of frames");
-    $exit(1);
+// Camera. The cube never comes near the eye, so no near-plane clipping is
+// needed: every projected vertex has a positive z.
+let CAM_DIST = 5.0;
+let FOCAL = 650.0;
+let CENTER_X = FRAME_WIDTH / 2;
+let CENTER_Y = FRAME_HEIGHT / 2;
+
+// Each cube face is drawn as a grid of this many quads per side. Affine
+// mapping is only correct per triangle, so subdividing the face keeps the
+// perspective from visibly shearing across it.
+let SUBDIV = 4;
+let GRID_PITCH = SUBDIV + 1;
+
+// Directional lighting is baked into copies of the texture, one per shade
+// level, so that the span loop stays a plain texel copy
+let NUM_SHADES = 16;
+let AMBIENT = 0.35;
+
+class Vec3 {
+    init(self, x, y, z) {
+        self.x = x;
+        self.y = y;
+        self.z = z;
+    }
 }
 
 // Screen position and texture coordinates of one vertex. The texture
@@ -78,51 +92,70 @@ class Vertex {
 
 // --- Texture ---
 
-// Color-coded texture, in the same u32 pixel format as the frame buffer.
-// Each quadrant has its own hue, the tiles are outlined, and the top-left
-// corner is marked with a white square and a white bar running right along
-// the top edge, so that any flip, rotation or swap of u and v is visible
-// at a glance:
-//
-//   [] ====        white corner square, white bar along the top edge
-//   red     green
-//   blue    yellow
-fun make_texture() {
-    let tex = ByteArray.with_size(TEX_SIZE * TEX_SIZE * 4);
-    let half = TEX_SIZE >> 1;
+// Reads an uncompressed 32-bit TGA. Its BGRA byte order is the pixel format
+// the frame buffer uses, so the pixels only need to be copied out.
+fun load_tga(path) {
+    let data = $read_file(path);
+    if (data == nil) {
+        $println("could not read " + path);
+        $exit(1);
+    }
 
-    for (let var y = 0; y < TEX_SIZE; ++y) {
-        for (let var x = 0; x < TEX_SIZE; ++x) {
-            // Quadrant hue, brightened towards the bottom right of each
-            // quadrant so that the gradient direction is readable too
-            let shade = 96 + (((x & (half - 1)) + (y & (half - 1))) >> 1);
-            let var r = 0; let var g = 0; let var b = 0;
-            if (y < half) {
-                if (x < half) { r = shade; }
-                else { g = shade; }
-            } else {
-                if (x < half) { b = shade; }
-                else { r = shade; g = shade; }
-            }
+    let img_type = data[2];
+    let width = data.load_u16(12);
+    let height = data.load_u16(14);
+    let bpp = data[16];
+    let top_down = (data[17] & 0x20) != 0;
+    let start = 18 + data[0];
 
-            // Dark outline on the 32x32 tile borders, which shows up any
-            // stretching or seam in the mapping
-            if ((x & 31) == 0 || (y & 31) == 0) {
-                r = r >> 2; g = g >> 2; b = b >> 2;
-            }
+    if (img_type != 2 || bpp != 32) {
+        $println(path + ": expected an uncompressed 32-bit TGA");
+        $exit(1);
+    }
 
-            // Top-left corner markers
-            if (x < 24 && y < 24) { r = 255; g = 255; b = 255; }
-            if (x < 96 && y < 8) { r = 255; g = 255; b = 255; }
-
-            tex.set_u32(y * TEX_SIZE + x, 0xFF000000 | (r << 16) | (g << 8) | b);
+    let pixels = ByteArray.with_size(width * height * 4);
+    let pitch = width * 4;
+    if (top_down) {
+        pixels.memcpy(0, data, start, height * pitch);
+    } else {
+        for (let var y = 0; y < height; ++y) {
+            pixels.memcpy(y * pitch, data, start + (height - 1 - y) * pitch, pitch);
         }
     }
 
-    return tex;
+    return [pixels, width, height];
 }
 
-let texture = make_texture();
+// One darkened copy of the texture per shade level. Lighting a face is then
+// picking a texture, instead of blending every pixel it covers.
+fun make_shade_table(tex) {
+    let num_texels = TEX_SIZE * TEX_SIZE;
+    let table = [];
+
+    for (let var s = 0; s < NUM_SHADES; ++s) {
+        let scale = (s + 1) / NUM_SHADES;
+        let shaded = ByteArray.with_size(num_texels * 4);
+
+        for (let var i = 0; i < num_texels; ++i) {
+            let p = tex.get_u32(i);
+            let r = ((((p >> 16) & 0xFF).to_f()) * scale).floor();
+            let g = ((((p >> 8) & 0xFF).to_f()) * scale).floor();
+            let b = (((p & 0xFF).to_f()) * scale).floor();
+            shaded.set_u32(i, 0xFF000000 | (r << 16) | (g << 8) | b);
+        }
+
+        table.push(shaded);
+    }
+
+    return table;
+}
+
+let tga = load_tga(TEX_PATH);
+if (tga[1] != TEX_SIZE || tga[2] != TEX_SIZE) {
+    $println(TEX_PATH + ": expected a " + TEX_SIZE.to_s() + "x" + TEX_SIZE.to_s() + " texture");
+    $exit(1);
+}
+let shade_table = make_shade_table(tga[0]);
 
 // --- Rasterization ---
 
@@ -310,61 +343,179 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
     }
 }
 
-// --- Pre-generated geometry ---
+// --- Cube ---
 
-// Grid of vertices, GRID_COLS + 1 of them per row. The texture is stretched
-// over the whole frame, so the sampling stays local from one cell to the next.
-let vertices = [];
-for (let var r = 0; r <= GRID_ROWS; ++r) {
-    for (let var c = 0; c <= GRID_COLS; ++c) {
-        vertices.push(Vertex(
-            (c * FRAME_WIDTH) / GRID_COLS,
-            (r * FRAME_HEIGHT) / GRID_ROWS,
-            (c * TEX_SIZE) / GRID_COLS,
-            (r * TEX_SIZE) / GRID_ROWS
-        ));
-    }
+// Corners of the cube: 0..3 are the front face, 4..7 the back one
+let corners = [
+    Vec3(-1.0,  1.0, -1.0),
+    Vec3( 1.0,  1.0, -1.0),
+    Vec3( 1.0, -1.0, -1.0),
+    Vec3(-1.0, -1.0, -1.0),
+    Vec3(-1.0,  1.0,  1.0),
+    Vec3( 1.0,  1.0,  1.0),
+    Vec3( 1.0, -1.0,  1.0),
+    Vec3(-1.0, -1.0,  1.0)
+];
+
+// Each face lists its corners starting at the one the texture's top left
+// lands on and running around the face, so the crate is upright on all six
+let faces = [
+    [0, 1, 2, 3],   // front
+    [5, 4, 7, 6],   // back
+    [1, 5, 6, 2],   // right
+    [4, 0, 3, 7],   // left
+    [4, 5, 1, 0],   // top
+    [3, 2, 6, 7]    // bottom
+];
+
+let normals = [
+    Vec3( 0.0,  0.0, -1.0),
+    Vec3( 0.0,  0.0,  1.0),
+    Vec3( 1.0,  0.0,  0.0),
+    Vec3(-1.0,  0.0,  0.0),
+    Vec3( 0.0,  1.0,  0.0),
+    Vec3( 0.0, -1.0,  0.0)
+];
+
+// Direction from a surface towards the light, normalized
+let LIGHT_X = -0.357;
+let LIGHT_Y = 0.625;
+let LIGHT_Z = -0.694;
+
+// Corners and normals rotated into view space, refilled every frame
+let view = [];
+let view_normals = [];
+for (let var i = 0; i < 8; ++i) view.push(Vec3(0.0, 0.0, 0.0));
+for (let var i = 0; i < 6; ++i) view_normals.push(Vec3(0.0, 0.0, 0.0));
+
+// Projected vertices of the face being drawn. Reused so that drawing a
+// frame allocates nothing.
+let grid = [];
+for (let var i = 0; i < GRID_PITCH * GRID_PITCH; ++i) grid.push(Vertex(0.0, 0.0, 0.0, 0.0));
+
+// Rotate a point by yaw then pitch, and move it away from the eye
+fun to_view(p, dst, sy, cy, sp, cp) {
+    let x = p.x * cy + p.z * sy;
+    let z = p.z * cy - p.x * sy;
+    dst.x = x;
+    dst.y = p.y * cp - z * sp;
+    dst.z = z * cp + p.y * sp;
 }
 
-// Two triangles per cell, as indices into the vertex array
-let indices = [];
-for (let var r = 0; r < GRID_ROWS; ++r) {
-    for (let var c = 0; c < GRID_COLS; ++c) {
-        let i00 = r * (GRID_COLS + 1) + c;
-        let i11 = i00 + GRID_COLS + 2;
+// Split a face into SUBDIV x SUBDIV quads, project their corners, and draw
+// each quad as two triangles. The subdivision happens in view space, before
+// the projection, which is what keeps the mapping true in perspective.
+fun draw_face(face, fb, tex) {
+    let c0 = view[face[0]];
+    let c1 = view[face[1]];
+    let c2 = view[face[2]];
+    let c3 = view[face[3]];
 
-        indices.push(i00); indices.push(i00 + 1); indices.push(i11);
-        indices.push(i00); indices.push(i11); indices.push(i11 - 1);
+    for (let var r = 0; r < GRID_PITCH; ++r) {
+        let tr = r / SUBDIV;
+
+        // Ends of this row of the grid, on the two side edges of the face
+        let lx = c0.x + (c3.x - c0.x) * tr;
+        let ly = c0.y + (c3.y - c0.y) * tr;
+        let lz = c0.z + (c3.z - c0.z) * tr;
+        let rx = c1.x + (c2.x - c1.x) * tr;
+        let ry = c1.y + (c2.y - c1.y) * tr;
+        let rz = c1.z + (c2.z - c1.z) * tr;
+
+        let row = r * GRID_PITCH;
+        for (let var c = 0; c < GRID_PITCH; ++c) {
+            let tc = c / SUBDIV;
+            let z = lz + (rz - lz) * tc;
+            let inv_z = FOCAL / z;
+
+            let vert = grid[row + c];
+            vert.x = CENTER_X + (lx + (rx - lx) * tc) * inv_z;
+            vert.y = CENTER_Y - (ly + (ry - ly) * tc) * inv_z;
+            vert.u = tc * TEX_SIZE;
+            vert.v = tr * TEX_SIZE;
+        }
+    }
+
+    for (let var r = 0; r < SUBDIV; ++r) {
+        let top = r * GRID_PITCH;
+        let bot = top + GRID_PITCH;
+        for (let var c = 0; c < SUBDIV; ++c) {
+            let v00 = grid[top + c];
+            let v10 = grid[top + c + 1];
+            let v11 = grid[bot + c + 1];
+            let v01 = grid[bot + c];
+            rasterize_tri_tex(v00, v10, v11, fb, tex);
+            rasterize_tri_tex(v00, v11, v01, fb, tex);
+        }
     }
 }
-
-let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
-let num_tris = indices.len / 3;
 
 // --- Rendering ---
 
-// The triangles tile the whole frame, so there is no need to clear it
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Rotating textured cube", 0);
+
+// Rendering is timed on its own, without the wait for vsync that
+// $window_draw_frame ends a frame with, and averaged over each report
 let start_ms = $time_current_ms();
+let var frame_count = 0;
+let var render_ms_total = 0;
+let var last_report_ms = start_ms;
 
-for (let var frame = 0; frame < num_frames; ++frame) {
-    let var i = 0;
-    for (let var t = 0; t < num_tris; ++t) {
-        rasterize_tri_tex(
-            vertices[indices[i]],
-            vertices[indices[i + 1]],
-            vertices[indices[i + 2]],
-            frame_buffer,
-            texture
-        );
-        i += 3;
+loop {
+    let now_ms = $time_current_ms();
+    let time_s = (now_ms - start_ms).to_f() * 0.001;
+
+    let yaw = time_s * 0.7;
+    let pitch = time_s * 0.43;
+    let sy = yaw.sin(); let cy = yaw.cos();
+    let sp = pitch.sin(); let cp = pitch.cos();
+
+    for (let var i = 0; i < 8; ++i) {
+        to_view(corners[i], view[i], sy, cy, sp, cp);
+        view[i].z = view[i].z + CAM_DIST;
     }
+    for (let var i = 0; i < 6; ++i) {
+        to_view(normals[i], view_normals[i], sy, cy, sp, cp);
+    }
+
+    frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, BG_COLOR);
+
+    for (let var f = 0; f < 6; ++f) {
+        let face = faces[f];
+        let n = view_normals[f];
+        let c = view[face[0]];
+
+        // The cube is convex, so culling the faces pointing away from the eye
+        // is all the visibility it needs, with no depth buffer
+        if (n.x * c.x + n.y * c.y + n.z * c.z >= 0.0) continue;
+
+        let lit = AMBIENT + (1.0 - AMBIENT)
+                * (n.x * LIGHT_X + n.y * LIGHT_Y + n.z * LIGHT_Z).max(0.0);
+        let var shade = (lit * NUM_SHADES).floor() - 1;
+        if (shade < 0) shade = 0;
+        if (shade >= NUM_SHADES) shade = NUM_SHADES - 1;
+
+        draw_face(face, frame_buffer, shade_table[shade]);
+    }
+
+    render_ms_total = render_ms_total + ($time_current_ms() - now_ms);
+
+    $window_draw_frame(window, frame_buffer);
+
+    ++frame_count;
+    if (now_ms - last_report_ms >= 1000) {
+        let render_ms = render_ms_total.to_f() / frame_count.to_f();
+        let fps = 1000.0 / render_ms.max(0.001);
+        $println("render: " + render_ms.format_decimals(1) + "ms (" + fps.format_decimals(1) + " fps)");
+        frame_count = 0;
+        render_ms_total = 0;
+        last_report_ms = now_ms;
+    }
+
+    let msg = $actor_poll();
+    if (msg == nil) continue;
+    if (!(msg instanceof UIEvent)) continue;
+    if (msg.kind == 'CLOSE_WINDOW') break;
+    if (msg.kind == 'KEY_DOWN' && (msg.key == 'ESCAPE' || msg.key == 'Q')) break;
 }
-
-let total_ms = $time_current_ms() - start_ms;
-let fps = (num_frames * 1000) / total_ms;
-let mpix = (num_frames * FRAME_WIDTH * FRAME_HEIGHT) / (total_ms * 1000);
-
-$println(num_frames.to_s() + " frames of " + num_tris.to_s() + " textured triangles");
-$println("total time: " + total_ms.to_s() + "ms");
-$println("fps: " + fps.format_decimals(1));
-$println("Mpixels/s: " + mpix.format_decimals(1));
