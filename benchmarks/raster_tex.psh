@@ -1,0 +1,336 @@
+// Textured triangle rasterization benchmark
+//
+// Splits a 1024x1024 frame buffer into 8192 equal-area triangles and
+// rasterizes all of them with a nearest-neighbor texture lookup, once per
+// frame. This is the same grid that benchmarks/rasterize.psh covers with
+// flat-shaded triangles, so the two timings are directly comparable and the
+// difference is the cost of the per-pixel texturing.
+//
+// Texture mapping is affine: the triangles are given in screen space with no
+// depth, so u and v are linear in x and y over the whole triangle and their
+// gradients only need to be computed once per triangle.
+// Usage: plush benchmarks/raster_tex.psh [num_frames]
+
+let FRAME_WIDTH = 1024;
+let FRAME_HEIGHT = 1024;
+
+// Grid of cells, each split into two triangles: 64 * 64 * 2 = 8192 triangles
+let GRID_COLS = 64;
+let GRID_ROWS = 64;
+
+// Power-of-two texture, so that wrapping is a bitwise and
+let TEX_SHIFT = 8;
+let TEX_SIZE = 1 << TEX_SHIFT;
+let TEX_MASK = TEX_SIZE - 1;
+
+// The span loop interpolates texture coordinates in fixed point, with u and v
+// packed into the two halves of one integer so that a single add steps both:
+//
+//   bits 63..32: v, as 16.16 fixed point
+//   bits 31..0:  u, as 16.16 fixed point
+//
+// Both halves are biased by FP_BIAS so that the u half never borrows from the
+// v half when u steps backwards. The bias is a whole number of texture widths,
+// so the wrap-around mask below removes it again.
+let FP_BITS = 16;
+let FP_ONE = 65536.0;
+let FP_BIAS = 1 << 27;
+let FP_BIAS_F = 134217728.0;
+
+// Extracting the texel index from the packed value: shift each half down so
+// that its integer part lands where the texture index wants it, then mask.
+// The v mask keeps the fractional bits of v out of the row index.
+let U_SHIFT = FP_BITS;
+let U_MASK = TEX_MASK;
+let V_SHIFT = 32 + FP_BITS - TEX_SHIFT;
+let V_MASK = TEX_MASK << TEX_SHIFT;
+
+// Command-line argument for the number of frames to render
+let num_frames = $cmd_get_arg_or(1, "50").parse_int(10);
+if (num_frames == nil) {
+    $println("expected an integer number of frames");
+    $exit(1);
+}
+
+// Screen position and texture coordinates of one vertex. The texture
+// coordinates are in texels, not normalized.
+class Vertex {
+    init(self, x, y, u, v) {
+        self.x = x;
+        self.y = y;
+        self.u = u;
+        self.v = v;
+    }
+}
+
+// --- Texture ---
+
+// Color-coded texture, in the same u32 pixel format as the frame buffer.
+// Each quadrant has its own hue, the tiles are outlined, and the top-left
+// corner is marked with a white square and a white bar running right along
+// the top edge, so that any flip, rotation or swap of u and v is visible
+// at a glance:
+//
+//   [] ====        white corner square, white bar along the top edge
+//   red     green
+//   blue    yellow
+fun make_texture() {
+    let tex = ByteArray.with_size(TEX_SIZE * TEX_SIZE * 4);
+    let half = TEX_SIZE >> 1;
+
+    for (let var y = 0; y < TEX_SIZE; ++y) {
+        for (let var x = 0; x < TEX_SIZE; ++x) {
+            // Quadrant hue, brightened towards the bottom right of each
+            // quadrant so that the gradient direction is readable too
+            let shade = 96 + (((x & (half - 1)) + (y & (half - 1))) >> 1);
+            let var r = 0; let var g = 0; let var b = 0;
+            if (y < half) {
+                if (x < half) { r = shade; }
+                else { g = shade; }
+            } else {
+                if (x < half) { b = shade; }
+                else { r = shade; g = shade; }
+            }
+
+            // Dark outline on the 32x32 tile borders, which shows up any
+            // stretching or seam in the mapping
+            if ((x & 31) == 0 || (y & 31) == 0) {
+                r = r >> 2; g = g >> 2; b = b >> 2;
+            }
+
+            // Top-left corner markers
+            if (x < 24 && y < 24) { r = 255; g = 255; b = 255; }
+            if (x < 96 && y < 8) { r = 255; g = 255; b = 255; }
+
+            tex.set_u32(y * TEX_SIZE + x, 0xFF000000 | (r << 16) | (g << 8) | b);
+        }
+    }
+
+    return tex;
+}
+
+let texture = make_texture();
+
+// --- Rasterization ---
+
+// This function expects the coordinates to be floats such that
+// x is in [0, FRAME_WIDTH] and +x points right
+// y is in [0, FRAME_HEIGHT] and +y points down
+//
+// Texture coordinates are in texels and wrap around the texture.
+fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
+    let var p0 = v0;
+    let var p1 = v1;
+    let var p2 = v2;
+    if (p0.y > p1.y) { let tmp = p0; p0 = p1; p1 = tmp; }
+    if (p0.y > p2.y) { let tmp = p0; p0 = p2; p2 = tmp; }
+    if (p1.y > p2.y) { let tmp = p1; p1 = p2; p2 = tmp; }
+
+    let py0 = p0.y;
+    let py1 = p1.y;
+    let py2 = p2.y;
+
+    let y0 = py0.floor();
+    let y1 = py1.floor();
+    let y2 = py2.floor();
+
+    if (y0 == y2) return;
+
+    let x0 = p0.x;
+    let x1 = p1.x;
+    let x2 = p2.x;
+
+    // Texture gradients. With no perspective, u and v are affine in screen
+    // space, so these hold for the whole triangle.
+    let e1x = x1 - x0; let e1y = py1 - py0;
+    let e2x = x2 - x0; let e2y = py2 - py0;
+    let det = e1x * e2y - e2x * e1y;
+    if (det == 0.0) return;
+    let inv_det = 1.0 / det;
+
+    let u0 = p0.u; let e1u = p1.u - u0; let e2u = p2.u - u0;
+    let v0t = p0.v; let e1v = p1.v - v0t; let e2v = p2.v - v0t;
+
+    let dudx = (e1u * e2y - e2u * e1y) * inv_det;
+    let dudy = (e2u * e1x - e1u * e2x) * inv_det;
+    let dvdx = (e1v * e2y - e2v * e1y) * inv_det;
+    let dvdy = (e2v * e1x - e1v * e2x) * inv_det;
+
+    // The same two gradients, packed. dt steps one pixel right, dt_row steps
+    // one scanline down. Steps carry no bias, so they can be negative and
+    // still add correctly: the packed value is just an integer.
+    let dt = ((dvdx * FP_ONE).floor() << 32) + (dudx * FP_ONE).floor();
+    let dt_row = ((dvdy * FP_ONE).floor() << 32) + (dudy * FP_ONE).floor();
+
+    // Texture coordinates at the center of pixel 0 of scanline 0, which the
+    // two halves below offset to their own first scanline
+    let u_org = u0 + (0.5 - x0) * dudx + (0.5 - py0) * dudy;
+    let v_org = v0t + (0.5 - x0) * dvdx + (0.5 - py0) * dvdy;
+    let t_org = ((v_org * FP_ONE + FP_BIAS_F).floor() << 32)
+              + (u_org * FP_ONE + FP_BIAS_F).floor();
+
+    // The edges are walked in 16.16 fixed point as well, so that a scanline
+    // start is a shift rather than a call to floor()
+    let var inv_slope1 = 0.0;
+    if (py1 > py0) inv_slope1 = (x1 - x0) / (py1 - py0);
+    let slope1_fx = (inv_slope1 * FP_ONE).floor();
+
+    let var inv_slope2 = 0.0;
+    if (py2 > py0) inv_slope2 = (x2 - x0) / (py2 - py0);
+    let slope2_fx = (inv_slope2 * FP_ONE).floor();
+
+    let start_scanline_y_top = y0.max(0);
+    let end_scanline_y_top = y1.min(FRAME_HEIGHT);
+
+    // Top half of triangle
+    if (start_scanline_y_top < end_scanline_y_top) {
+        let dy = start_scanline_y_top + 1 - py0;
+        let xa = ((x0 + dy * inv_slope1) * FP_ONE).floor();
+        let xb = ((x0 + dy * inv_slope2) * FP_ONE).floor();
+
+        // Both edges radiate from p0, so which of the two is the left one
+        // is fixed for the whole half and can be decided once
+        let var cur_xl = xa; let var slope_l = slope1_fx;
+        let var cur_xr = xb; let var slope_r = slope2_fx;
+        if (xb < xa) {
+            cur_xl = xb; slope_l = slope2_fx;
+            cur_xr = xa; slope_r = slope1_fx;
+        }
+
+        // Packed texture coordinates at x = 0 of the current scanline, and
+        // the frame buffer index of that same pixel. Both step by a constant.
+        // The scanline number itself is no longer needed inside the loop, so
+        // the loop runs on the row index directly.
+        let var t_row = t_org + start_scanline_y_top * dt_row;
+        let var row = start_scanline_y_top * FRAME_WIDTH;
+        let end_row = end_scanline_y_top * FRAME_WIDTH;
+
+        while (row < end_row) {
+            // Clamping with a branch rather than min/max, which are method
+            // calls, and the branch is almost never taken
+            let var start_x = cur_xl >> FP_BITS;
+            if (start_x < 0) start_x = 0;
+            let var end_x = cur_xr >> FP_BITS;
+            if (end_x > FRAME_WIDTH) end_x = FRAME_WIDTH;
+            if (start_x < end_x) {
+                let var t = t_row + start_x * dt;
+                let var i = row + start_x;
+                let end_i = row + end_x;
+                while (i < end_i) {
+                    fb.set_u32(i, tex.get_u32(((t >> V_SHIFT) & V_MASK) | ((t >> U_SHIFT) & U_MASK)));
+                    t = t + dt;
+                    ++i;
+                }
+            }
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
+            t_row = t_row + dt_row;
+            row = row + FRAME_WIDTH;
+        }
+    }
+
+    let var inv_slope3 = 0.0;
+    if (py2 > py1) inv_slope3 = (x2 - x1) / (py2 - py1);
+    let slope3_fx = (inv_slope3 * FP_ONE).floor();
+
+    let start_scanline_y_bot = y1.max(0);
+    let end_scanline_y_bot = y2.min(FRAME_HEIGHT);
+
+    // Bottom half of triangle
+    if (start_scanline_y_bot < end_scanline_y_bot) {
+        let xa = ((x1 + (start_scanline_y_bot + 1 - py1) * inv_slope3) * FP_ONE).floor();
+        let xb = ((x0 + (start_scanline_y_bot + 1 - py0) * inv_slope2) * FP_ONE).floor();
+
+        // Both edges converge on p2, so the left/right order is fixed here too
+        let var cur_xl = xa; let var slope_l = slope3_fx;
+        let var cur_xr = xb; let var slope_r = slope2_fx;
+        if (xb < xa) {
+            cur_xl = xb; slope_l = slope2_fx;
+            cur_xr = xa; slope_r = slope3_fx;
+        }
+
+        let var t_row = t_org + start_scanline_y_bot * dt_row;
+        let var row = start_scanline_y_bot * FRAME_WIDTH;
+        let end_row = end_scanline_y_bot * FRAME_WIDTH;
+
+        while (row < end_row) {
+            let var start_x = cur_xl >> FP_BITS;
+            if (start_x < 0) start_x = 0;
+            let var end_x = cur_xr >> FP_BITS;
+            if (end_x > FRAME_WIDTH) end_x = FRAME_WIDTH;
+            if (start_x < end_x) {
+                let var t = t_row + start_x * dt;
+                let var i = row + start_x;
+                let end_i = row + end_x;
+                while (i < end_i) {
+                    fb.set_u32(i, tex.get_u32(((t >> V_SHIFT) & V_MASK) | ((t >> U_SHIFT) & U_MASK)));
+                    t = t + dt;
+                    ++i;
+                }
+            }
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
+            t_row = t_row + dt_row;
+            row = row + FRAME_WIDTH;
+        }
+    }
+}
+
+// --- Pre-generated geometry ---
+
+// Grid of vertices, GRID_COLS + 1 of them per row. The texture is stretched
+// over the whole frame, so the sampling stays local from one cell to the next.
+let vertices = [];
+for (let var r = 0; r <= GRID_ROWS; ++r) {
+    for (let var c = 0; c <= GRID_COLS; ++c) {
+        vertices.push(Vertex(
+            (c * FRAME_WIDTH) / GRID_COLS,
+            (r * FRAME_HEIGHT) / GRID_ROWS,
+            (c * TEX_SIZE) / GRID_COLS,
+            (r * TEX_SIZE) / GRID_ROWS
+        ));
+    }
+}
+
+// Two triangles per cell, as indices into the vertex array
+let indices = [];
+for (let var r = 0; r < GRID_ROWS; ++r) {
+    for (let var c = 0; c < GRID_COLS; ++c) {
+        let i00 = r * (GRID_COLS + 1) + c;
+        let i11 = i00 + GRID_COLS + 2;
+
+        indices.push(i00); indices.push(i00 + 1); indices.push(i11);
+        indices.push(i00); indices.push(i11); indices.push(i11 - 1);
+    }
+}
+
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+let num_tris = indices.len / 3;
+
+// --- Rendering ---
+
+// The triangles tile the whole frame, so there is no need to clear it
+let start_ms = $time_current_ms();
+
+for (let var frame = 0; frame < num_frames; ++frame) {
+    let var i = 0;
+    for (let var t = 0; t < num_tris; ++t) {
+        rasterize_tri_tex(
+            vertices[indices[i]],
+            vertices[indices[i + 1]],
+            vertices[indices[i + 2]],
+            frame_buffer,
+            texture
+        );
+        i += 3;
+    }
+}
+
+let total_ms = $time_current_ms() - start_ms;
+let fps = (num_frames * 1000) / total_ms;
+let mpix = (num_frames * FRAME_WIDTH * FRAME_HEIGHT) / (total_ms * 1000);
+
+$println(num_frames.to_s() + " frames of " + num_tris.to_s() + " textured triangles");
+$println("total time: " + total_ms.to_s() + "ms");
+$println("fps: " + fps.format_decimals(1));
+$println("Mpixels/s: " + mpix.format_decimals(1));
