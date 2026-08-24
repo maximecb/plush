@@ -67,8 +67,12 @@ let SUBDIV = 4;
 let GRID_PITCH = SUBDIV + 1;
 
 // Directional lighting is baked into copies of the texture, one per shade
-// level, so that the span loop stays a plain texel copy
-let NUM_SHADES = 16;
+// level, so that the span loop stays a plain texel copy. The levels cover
+// only the range the lighting actually produces, from fully shadowed to
+// fully lit, so none of them go to waste. Faces are flat shaded, which means
+// a level is a visible step: too few and a face jumps from one shade to the
+// next as the cube turns.
+let NUM_SHADES = 64;
 let AMBIENT = 0.35;
 
 class Vec3 {
@@ -127,21 +131,28 @@ fun load_tga(path) {
 }
 
 // One darkened copy of the texture per shade level. Lighting a face is then
-// picking a texture, instead of blending every pixel it covers.
+// picking a texture, instead of blending every pixel it covers. Level s
+// stands for a diffuse term of s / (NUM_SHADES - 1), so level 0 is a face
+// facing away from the light and the last level one facing straight at it.
 fun make_shade_table(tex) {
     let num_texels = TEX_SIZE * TEX_SIZE;
     let table = [];
 
     for (let var s = 0; s < NUM_SHADES; ++s) {
-        let scale = (s + 1) / NUM_SHADES;
-        let shaded = ByteArray.with_size(num_texels * 4);
+        let scale = AMBIENT + (1.0 - AMBIENT) * (s / (NUM_SHADES - 1));
 
+        // Scaling the 256 possible channel values once beats doing the same
+        // multiply for every texel
+        let ramp = [];
+        for (let var c = 0; c < 256; ++c) ramp.push((c.to_f() * scale).floor());
+
+        let shaded = ByteArray.with_size(num_texels * 4);
         for (let var i = 0; i < num_texels; ++i) {
             let p = tex.get_u32(i);
-            let r = ((((p >> 16) & 0xFF).to_f()) * scale).floor();
-            let g = ((((p >> 8) & 0xFF).to_f()) * scale).floor();
-            let b = (((p & 0xFF).to_f()) * scale).floor();
-            shaded.set_u32(i, 0xFF000000 | (r << 16) | (g << 8) | b);
+            shaded.set_u32(i, 0xFF000000
+                | (ramp[(p >> 16) & 0xFF] << 16)
+                | (ramp[(p >> 8) & 0xFF] << 8)
+                | ramp[p & 0xFF]);
         }
 
         table.push(shaded);
@@ -490,10 +501,9 @@ loop {
         // is all the visibility it needs, with no depth buffer
         if (n.x * c.x + n.y * c.y + n.z * c.z >= 0.0) continue;
 
-        let lit = AMBIENT + (1.0 - AMBIENT)
-                * (n.x * LIGHT_X + n.y * LIGHT_Y + n.z * LIGHT_Z).max(0.0);
-        let var shade = (lit * NUM_SHADES).floor() - 1;
-        if (shade < 0) shade = 0;
+        // Diffuse term, straight to the nearest shade level
+        let lit = (n.x * LIGHT_X + n.y * LIGHT_Y + n.z * LIGHT_Z).max(0.0);
+        let var shade = (lit * (NUM_SHADES - 1) + 0.5).floor();
         if (shade >= NUM_SHADES) shade = NUM_SHADES - 1;
 
         draw_face(face, frame_buffer, shade_table[shade]);
