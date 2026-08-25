@@ -2124,6 +2124,11 @@ let var spin_rate = 0.0;
 let var prev_up = -2.0;
 let var up_rising = false;
 
+// Seconds since the ball came to rest, negative while it is still moving.
+// The death screen runs off this, so it only starts once the camera is
+// finally still.
+let var dead_time = -1.0;
+
 // The axis is up x velocity over radius, so it follows the XZ motion: down
 // the road it is lateral and the ball goes end over end, sideways off a
 // barrier it lines up with travel and the ball rolls about it.
@@ -2247,12 +2252,15 @@ fun update_crash(dt) {
                 ball_vx = 0.0;
                 ball_vz = 0.0;
                 spin_rate = 0.0;
+                if (dead_time < 0.0) dead_time = 0.0;
             }
             up_rising = f11 > prev_up;
         }
         prev_up = f11;
     }
     spin_camera(spin_ax, 0.0, spin_az, spin_rate * dt);
+
+    if (dead_time >= 0.0) dead_time = dead_time + dt;
 
     cam_x = ball_x;
     cam_y = ball_y;
@@ -2464,6 +2472,190 @@ fun draw_hud(fb) {
     draw_rpm(fb, x + RPM_R1, HUD_BOT, tacho_reading());
     x = x + rpm_w + pad;
     draw_label(fb, RPM_CHARS, x, HUD_BOT, lab_size, LABEL_COL);
+}
+
+// --- Death screen ---
+//
+// Once the ball has settled and the camera is finally still, the message
+// goes up and the frame drowns in red from the top down.
+//
+// The message has its own lettering rather than the labels' stroke font,
+// which is monospaced: an ellipsis and a sideways smiley set on a capital's
+// advance come out as scattered marks. Every character carries its own
+// width instead, so the dots and the face close up into single units. The
+// letters are built from rectangles, with the chamfer at each round corner
+// as one slanted quad, which keeps the stems even and the joints clean.
+
+let DEAD_MSG = ["Y", "O", "U", " ", "D", "E", "D", ".", ".", ".", " ",
+                ":", "'", "("];
+let DEAD_COL = 0xFFFF2A22;
+
+let DEAD_T = 0.15;            // stroke thickness, as a fraction of cap height
+let DEAD_C = 0.20;            // and the corner chamfer
+let DEAD_GAP = 0.13;          // between characters
+let DEAD_FILL = 0.80;         // of the frame width the line spans
+
+// The mouth is a circular arc, chord the full cap height. No asin here, so
+// the half-angle that gives it is worked out once: asin(0.5 / DEAD_MOUTH_R).
+let DEAD_MOUTH_R = 0.54;
+let DEAD_MOUTH_HALF = 1.1815;
+let DEAD_MOUTH_SEGS = 8;
+
+let FLOOD_DELAY = 1.2;        // seconds of message before the red starts
+let FLOOD_TIME = 12.0;        // and how long it takes to reach the bottom
+let FLOOD_COL = 0xFF6E0000;
+let FLOOD_EDGE = 0xFFB01010;  // a brighter line on the leading edge
+let FLOOD_EDGE_H = 3;
+
+// Ink width of a character at cap height s. The punctuation is a single
+// stem wide, which is what pulls it in tight.
+fun dead_char_w(ch, s) {
+    if (ch == "Y") return s * 0.72;
+    if (ch == "O") return s * 0.72;
+    if (ch == "U") return s * 0.68;
+    if (ch == "D") return s * 0.70;
+    if (ch == "E") return s * 0.60;
+    if (ch == "(") return s * 0.38;
+    if (ch == " ") return s * 0.22;
+    if (ch == "'") return s * 0.22;
+    return s * DEAD_T;
+}
+
+// The chamfer at a rounded corner, as one quad that meets the ends of the
+// upright and of the horizontal exactly, so neither square end pokes out
+// past it. (px, py) is the corner of the box and (sx, sy) points from there
+// into the letter.
+fun dead_corner(fb, px, py, sx, sy, t, c, col) {
+    fill_quad(fb, px, py + sy * c,
+                  px + sx * c, py,
+                  px + sx * c, py + sy * t,
+                  px + sx * t, py + sy * c, col);
+}
+
+// One character, x at its left edge and y on its baseline
+fun draw_dead_char(fb, ch, x, y, s, col) {
+    let t = s * DEAD_T;
+    let c = s * DEAD_C;
+    let w = dead_char_w(ch, s);
+    let top = y - s;
+    let mid = y - s * 0.5;
+
+    // The arms are cut square on the cap line, so they are a touch wider
+    // there than the stem: that is the width a 45 degree arm needs to carry
+    // the stem's thickness across it.
+    if (ch == "Y") {
+        let xc = x + w * 0.5;
+        let jy = y - s * 0.42;
+        let ta = t * 1.3;
+        fill_quad(fb, x, top, x + ta, top,
+                      xc + t * 0.5, jy, xc - t * 0.5, jy, col);
+        fill_quad(fb, x + w - ta, top, x + w, top,
+                      xc + t * 0.5, jy, xc - t * 0.5, jy, col);
+        hud_rect(fb, xc - t * 0.5, jy, xc + t * 0.5, y, col);
+        return;
+    }
+    if (ch == "O") {
+        hud_rect(fb, x, top + c, x + t, y - c, col);
+        hud_rect(fb, x + w - t, top + c, x + w, y - c, col);
+        hud_rect(fb, x + c, top, x + w - c, top + t, col);
+        hud_rect(fb, x + c, y - t, x + w - c, y, col);
+        dead_corner(fb, x, top, 1.0, 1.0, t, c, col);
+        dead_corner(fb, x + w, top, -1.0, 1.0, t, c, col);
+        dead_corner(fb, x, y, 1.0, -1.0, t, c, col);
+        dead_corner(fb, x + w, y, -1.0, -1.0, t, c, col);
+        return;
+    }
+    if (ch == "U") {
+        hud_rect(fb, x, top, x + t, y - c, col);
+        hud_rect(fb, x + w - t, top, x + w, y - c, col);
+        hud_rect(fb, x + c, y - t, x + w - c, y, col);
+        dead_corner(fb, x, y, 1.0, -1.0, t, c, col);
+        dead_corner(fb, x + w, y, -1.0, -1.0, t, c, col);
+        return;
+    }
+    if (ch == "D") {
+        hud_rect(fb, x, top, x + t, y, col);
+        hud_rect(fb, x, top, x + w - c, top + t, col);
+        hud_rect(fb, x, y - t, x + w - c, y, col);
+        hud_rect(fb, x + w - t, top + c, x + w, y - c, col);
+        dead_corner(fb, x + w, top, -1.0, 1.0, t, c, col);
+        dead_corner(fb, x + w, y, -1.0, -1.0, t, c, col);
+        return;
+    }
+    if (ch == "E") {
+        hud_rect(fb, x, top, x + t, y, col);
+        hud_rect(fb, x, top, x + w, top + t, col);
+        hud_rect(fb, x, mid - t * 0.5, x + w * 0.82, mid + t * 0.5, col);
+        hud_rect(fb, x, y - t, x + w, y, col);
+        return;
+    }
+    if (ch == ".") {
+        hud_rect(fb, x, y - t, x + w, y, col);
+        return;
+    }
+    // The eyes, set in from the ends of the box so the face reads at a glance
+    if (ch == ":") {
+        hud_rect(fb, x, top + s * 0.16, x + w, top + s * 0.16 + t, col);
+        hud_rect(fb, x, y - s * 0.16 - t, x + w, y - s * 0.16, col);
+        return;
+    }
+    // The tear: pointed where it left the eye, round where it hangs. Two
+    // quads, the taper and the belly, which is as round as flat edges get.
+    if (ch == "'") {
+        let xc = x + w * 0.5;
+        let ya = top + s * 0.30;
+        let yb = top + s * 0.46;
+        fill_quad(fb, xc - w * 0.05, top, xc + w * 0.05, top,
+                      xc + w * 0.5, ya, xc - w * 0.5, ya, col);
+        fill_quad(fb, xc - w * 0.5, ya, xc + w * 0.5, ya,
+                      xc + w * 0.32, yb, xc - w * 0.32, yb, col);
+        return;
+    }
+    if (ch == "(") {
+        // The mouth, bulging left, its leftmost point on x
+        let r = s * DEAD_MOUTH_R;
+        let cx = x + t * 0.5 + r;
+        let r0 = r - t * 0.5;
+        let r1 = r + t * 0.5;
+        let step = 2.0 * DEAD_MOUTH_HALF / DEAD_MOUTH_SEGS.to_f();
+        for (let var i = 0; i < DEAD_MOUTH_SEGS; ++i) {
+            let a0 = PI - DEAD_MOUTH_HALF + i.to_f() * step;
+            let a1 = a0 + step;
+            fill_quad(fb,
+                cx + r0 * a0.cos(), mid + r0 * a0.sin(),
+                cx + r1 * a0.cos(), mid + r1 * a0.sin(),
+                cx + r1 * a1.cos(), mid + r1 * a1.sin(),
+                cx + r0 * a1.cos(), mid + r0 * a1.sin(),
+                col);
+        }
+        return;
+    }
+}
+
+fun draw_death(fb) {
+    let frac = ((dead_time - FLOOD_DELAY) / FLOOD_TIME).max(0.0).min(1.0);
+    let h = (frac * FRAME_HEIGHT.to_f()).floor();
+    for (let var y = 0; y < h; ++y) {
+        let var c = FLOOD_COL;
+        if (frac < 1.0 && y >= h - FLOOD_EDGE_H) c = FLOOD_EDGE;
+        fb.fill_u32(y * FRAME_WIDTH, FRAME_WIDTH, c);
+    }
+
+    // Measured at unit height, which gives the cap height that fits: every
+    // width here is a multiple of it, so the line scales as one piece
+    let var unit = -DEAD_GAP;
+    for (let var i = 0; i < DEAD_MSG.len; ++i) {
+        unit = unit + dead_char_w(DEAD_MSG[i], 1.0) + DEAD_GAP;
+    }
+    let s = FRAME_WIDTH.to_f() * DEAD_FILL / unit;
+
+    // Over the flood, so the message stays readable once it is under
+    let var x = (FRAME_WIDTH.to_f() - unit * s) * 0.5;
+    let base = FRAME_HEIGHT.to_f() * 0.5 + s * 0.5;
+    for (let var i = 0; i < DEAD_MSG.len; ++i) {
+        draw_dead_char(fb, DEAD_MSG[i], x, base, s, DEAD_COL);
+        x = x + dead_char_w(DEAD_MSG[i], s) + DEAD_GAP * s;
+    }
 }
 
 // --- Engine audio ---
@@ -3056,6 +3248,8 @@ fun render_frame(fb) {
 
     // The instruments went down the road with the bike
     if (!crashed) draw_hud(fb);
+
+    if (dead_time >= 0.0) draw_death(fb);
 }
 
 // Both offline modes step the clock at a fixed rate, so a capture is
