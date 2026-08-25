@@ -1,7 +1,7 @@
 # The Plush Programming Language
 
 <p align="center">
-    <img src="media/city.png" height=180>&nbsp;
+    <img src="media/night_ride.png" height=180>&nbsp;
     <img src="media/mondrian.png" height=180>&nbsp;
     <img src="media/amigaball.png" height=180>
 </p>
