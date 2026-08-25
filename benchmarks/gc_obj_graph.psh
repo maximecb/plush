@@ -1,0 +1,90 @@
+// Builds a large random object graph and traverses it.
+// The edge lists are arrays, so this stresses array reads and object
+// field accesses on a heap that is too big to fit in cache.
+
+from ./lib/random import *;
+
+let num_nodes = 1_500_000;
+let num_edges = 4;
+
+class Node
+{
+    init(self)
+    {
+        self.visited = 0;
+        self.edges = Array.with_size(num_edges, nil);
+    }
+}
+
+rand_init(1337);
+
+// Allocate every node first so that edges can point at any of them
+let var nodes = Array.with_size(num_nodes, nil);
+for (let var i = 0; i < num_nodes; ++i)
+{
+    nodes[i] = Node();
+}
+
+// The first edge of each node points to its successor, which keeps the
+// whole graph reachable from the root. The rest point at random nodes.
+for (let var i = 0; i < num_nodes; ++i)
+{
+    let edges = nodes[i].edges;
+    edges[0] = nodes[(i + 1) % num_nodes];
+    for (let var j = 1; j < num_edges; ++j)
+    {
+        edges[j] = nodes[rand_int(0, num_nodes)];
+    }
+}
+
+// Drop the node array so that the root is the only thing keeping the
+// graph alive, then collect the garbage left over from building it
+let root = nodes[0];
+nodes = nil;
+
+// Trigger a few GC cycles in a loop. We want the steady-state time it
+// takes to trace the graph, not the cost of the first collection.
+let num_reps = 5;
+let var gc_ms = 0;
+for (let var i = 0; i < num_reps; ++i)
+{
+    let start_ms = $time_current_ms();
+    $vm_gc_collect();
+    gc_ms = gc_ms + ($time_current_ms() - start_ms);
+}
+
+// Depth-first traversal of the graph, using an explicit stack so that
+// the traversal depth is not limited by the call stack. Each repetition
+// uses a new marker value, which avoids having to clear the old marks.
+let var dfs_ms = 0;
+for (let var rep = 1; rep <= num_reps; ++rep)
+{
+    let start_ms = $time_current_ms();
+
+    let stack = [root];
+    root.visited = rep;
+    let var num_visited = 0;
+
+    while (stack.len > 0)
+    {
+        let node = stack.pop();
+        num_visited = num_visited + 1;
+
+        let edges = node.edges;
+        for (let var i = 0; i < edges.len; ++i)
+        {
+            let succ = edges[i];
+            if (succ.visited != rep)
+            {
+                succ.visited = rep;
+                stack.push(succ);
+            }
+        }
+    }
+
+    dfs_ms = dfs_ms + ($time_current_ms() - start_ms);
+    assert(num_visited == num_nodes);
+}
+
+$println("avg collection time: " + (gc_ms / num_reps).format_decimals(1) + "ms");
+$println("avg traversal time: " + (dfs_ms / num_reps).format_decimals(1) + "ms");

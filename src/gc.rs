@@ -188,6 +188,13 @@ impl<'a> Copier<'a>
         set_forwarded(p, new_p);
 
         self.num_blocks += 1;
+
+        // Only these own a table, and copy is hot enough that the
+        // blocks that do not should not pay for a call to find out
+        if matches!(hdr.tag(), Tag::Array | Tag::Dict) {
+            self.chase(new_p, hdr.tag());
+        }
+
         new_p
     }
 
@@ -233,6 +240,44 @@ impl<'a> Copier<'a>
         }
     }
 
+    /// Copy the table an array or dict owns as soon as its owner is
+    /// copied, so that the two land next to each other in the
+    /// destination instead of wherever the scan pointer has got to by
+    /// the time it reaches the owner. Walking from an array to its
+    /// elements is then a step forward in the heap rather than a jump.
+    ///
+    /// Nothing here can start another chase: the tables copied are
+    /// tagged as tables, not as the arrays and dicts that own them.
+    fn chase(&mut self, new_p: *mut u8, tag: Tag)
+    {
+        match tag {
+            // Arrays hold spare capacity, which the copy drops. Keeping
+            // room to grow into means that pushing again does not
+            // immediately have to reallocate the table: doubling never
+            // leaves more than this, so a growing array keeps its
+            // capacity and only one shrunk by pop or remove gives any
+            // of it back.
+            Tag::Array => {
+                let arr = unsafe { &mut *(new_p as *mut Array) };
+
+                let capacity = (2 * arr.len()).min(arr.capacity());
+                let elems = self.copy_table_prefix(arr.elems, capacity, Tag::ValueTable);
+                arr.elems = elems;
+            }
+
+            // A dict keeps its capacity: its table has to stay bigger
+            // than its entry count for lookups to terminate
+            Tag::Dict => {
+                let dict = unsafe { &mut *(new_p as *mut Dict) };
+
+                let table = self.copy_table(dict.table);
+                dict.table = table;
+            }
+
+            _ => unreachable!("only arrays and dicts own a table"),
+        }
+    }
+
     /// Copy everything reachable from the values forwarded so far
     pub fn run(&mut self)
     {
@@ -275,33 +320,16 @@ impl<'a> Copier<'a>
                 *cell = self.forward(*cell);
             }
 
-            // Arrays and bytearrays hold spare capacity, which the copy
-            // drops. A dict keeps its capacity: its table has to stay
-            // bigger than its entry count for lookups to terminate.
-            Tag::Array => {
-                let arr = unsafe { &mut *(p as *mut Array) };
+            // The table an array or dict owns is relocated by the
+            // chase when the owner is copied, leaving nothing to do here
+            Tag::Array | Tag::Dict => {}
 
-                // Keep room to grow into, so that pushing again does not
-                // immediately have to reallocate the table. Doubling
-                // never leaves more than this, so a growing array keeps
-                // its capacity and only one shrunk by pop or remove
-                // gives any of it back.
-                let capacity = (2 * arr.len()).min(arr.capacity());
-                let elems = self.copy_table_prefix(arr.elems, capacity, Tag::ValueTable);
-                arr.elems = elems;
-            }
-
+            // Bytearrays hold spare capacity, which the copy drops
             Tag::ByteArray => {
                 let ba = unsafe { &mut *(p as *mut ByteArray) };
                 let num_bytes = ba.num_bytes();
                 let bytes = self.copy_table_prefix(ba.bytes, num_bytes, Tag::Bytes);
                 ba.bytes = bytes;
-            }
-
-            Tag::Dict => {
-                let dict = unsafe { &mut *(p as *mut Dict) };
-                let table = self.copy_table(dict.table);
-                dict.table = table;
             }
 
             Tag::ValueTable => {
