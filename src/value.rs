@@ -43,8 +43,9 @@
 //! exponents, 1024 apart. Since 1023 + 1024 == 2047, centering one band on
 //! 1.0 puts the other one across the zero/infinity wrap, which fixes BIAS.
 //! Covered: +-0.0, all subnormals, |x| in [2^-128, 2^128), |x| >= 2^896,
-//! +-inf and all NaNs. Only |x| in [1e-270, 2.9e-39) and [3.4e38, 1e270)
-//! is boxed, so nothing in the float32 range and no special value allocates.
+//! +-inf and all NaNs. Only |x| in [2^-896, 2^-128) and [2^128, 2^896) is
+//! boxed, so every special value and every normal float32 stays inline.
+//! Only float32 subnormals below 2^-128 box.
 //!
 //! # Invariants
 //!
