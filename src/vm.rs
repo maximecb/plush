@@ -2275,7 +2275,8 @@ impl Actor
                         return ret_val;
                     }
 
-                    assert!(self.frames.len() > 0);
+                    // The pop below already panics on an empty frame stack
+                    debug_assert!(self.frames.len() > 0);
                     let top_frame = self.frames.pop().unwrap();
 
                     // Pop all local variables and arguments
