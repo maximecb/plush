@@ -5,8 +5,19 @@ use std::io::{self, Write};
 use std::process::Command;
 use std::sync::Once;
 
-/// Where the interpreter the tests run scripts through is built
+// The interpreter under test is built in the same profile as this test
+// crate, so that `cargo test --release` exercises the release
+// configuration rather than testing a debug build twice. Debug
+// assertions are the flag that tells the two profiles apart.
+#[cfg(debug_assertions)]
 const BIN_PATH: &str = "target/verify_gc/debug/plush";
+#[cfg(debug_assertions)]
+const PROFILE_ARGS: &[&str] = &[];
+
+#[cfg(not(debug_assertions))]
+const BIN_PATH: &str = "target/verify_gc/release/plush";
+#[cfg(not(debug_assertions))]
+const PROFILE_ARGS: &[&str] = &["--release"];
 
 /// Build an interpreter with heap verification turned on, so that every
 /// collection a test triggers checks the heap it produced.
@@ -27,6 +38,7 @@ fn verify_gc_binary() -> &'static str
                 "--features", "verify_gc",
                 "--target-dir", "target/verify_gc",
             ])
+            .args(PROFILE_ARGS)
             .status()
             .unwrap();
 

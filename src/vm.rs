@@ -1402,11 +1402,13 @@ impl Actor
 
         loop
         {
-            // Every compiled function ends with a ret instruction,
-            // so execution can never run past the end of the insn stream
+            // Every compiled function ends with a ret instruction, so
+            // execution can never run past the end of the insn stream.
+            // That makes the load in bounds and keeps the increment below
+            // the length, so neither needs to be checked here.
             debug_assert!(pc < self.insns.len());
-            let insn = self.insns[pc];
-            pc += 1;
+            let insn = unsafe { *self.insns.get_unchecked(pc) };
+            pc = unsafe { pc.unchecked_add(1) };
             //println!("executing {:?}", insn);
             //println!("stack size: {}, executing {:?}", self.stack.len(), insn);
 

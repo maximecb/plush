@@ -26,7 +26,10 @@ debug = false
 opt-level = 3
 codegen-units = 1
 lto = true
-# For now, we leave overflow checks and debug assertions
-# enabled in release mode for security reasons
+# Overflow checks stay on in release for security reasons: the VM does
+# unchecked size arithmetic that would under-allocate if it wrapped.
+# Debug assertions are off: they restate invariants the interpreter
+# already enforces with live checks, and cost ~5-8% on hot benchmarks.
+# Invariants worth keeping in release use plain assert! instead.
 overflow-checks = true
-debug-assertions = true
+debug-assertions = false

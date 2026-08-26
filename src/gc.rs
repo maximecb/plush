@@ -213,11 +213,14 @@ impl<'a> Copier<'a>
     /// to the block left behind for the shorter copy to invalidate.
     fn copy_table_prefix<T>(&mut self, table: *mut [T], len: usize, tag: Tag) -> *mut [T]
     {
-        debug_assert!(len <= table.len());
+        // Both of these guard the copy below, so they stay on in release:
+        // a short table would read past its end, and a forwarded one would
+        // be copied twice and silently corrupt the heap
+        assert!(len <= table.len());
 
         let p = table as *mut T as *mut u8;
         let hdr = header_of(p);
-        debug_assert!(!hdr.is_forwarded(), "table reachable from two owners");
+        assert!(!hdr.is_forwarded(), "table reachable from two owners");
 
         let new_table = self.dst.alloc_table::<T>(len, tag);
         unsafe { std::ptr::copy_nonoverlapping(
