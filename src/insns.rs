@@ -406,6 +406,7 @@ def_opcodes! {
     bit_and { dst: out_reg, a: reg, b: reg },
     bit_or { dst: out_reg, a: reg, b: reg },
     bit_xor { dst: out_reg, a: reg, b: reg },
+    bit_not { dst: out_reg, src: reg },
 
     add { dst: out_reg, a: reg, b: reg },
     sub { dst: out_reg, a: reg, b: reg },
@@ -419,7 +420,7 @@ def_opcodes! {
     sub_imm16 { dst: out_reg, a: reg, imm: i16 },
     mul_imm16 { dst: out_reg, a: reg, imm: i16 },
 
-    // Logical and bitwise negation
+    // Logical negation of a boolean
     not { dst: out_reg, src: reg },
 
     // Closure operations.
@@ -616,7 +617,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 65);
+        assert_eq!(NUM_OPCODES, 66);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
