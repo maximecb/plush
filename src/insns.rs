@@ -343,7 +343,14 @@ macro_rules! def_opcodes {
 // - Calls:
 //   - The design uses register windows like Lua
 //   - The callee's frame base is caller_bp + start_reg
+//   - The return value is written to the callee's frame base, which is
+//     start_reg in the caller. Calls therefore need no destination operand
 //   - Future tail calls can just mutate the frame in-place
+// - Field and method names are NameIds, indices into an interned name
+//   table that lives outside the heap. Instructions hold no heap pointers,
+//   so the instruction stream is not scanned by the collector
+// - Sites that cache a lookup hold a CacheIdx instead of the cached data,
+//   which keeps them within one word and lets cache entries grow later
 def_opcodes! {
     // Halt execution and produce an error
     // Panic is zero so that jumping to uninitialized memory causes panic
@@ -362,9 +369,8 @@ def_opcodes! {
     // Copy a value from one register to another
     mov { dst: out_reg, src: reg },
 
-    // FIXME: not fully clear how this will work yet. May want a 32-bit index?
     // Load a constant from a constant slot into a register
-    load_const { dst: out_reg, slot: u16 },
+    load_const { dst: out_reg, slot: u32 },
 
     // Note: we might want to be able to use a constant slot for the base?
     load_u8 { dst: out_reg, base: reg, offset: u16 },
@@ -415,18 +421,16 @@ def_opcodes! {
     cell_get { dst: out_reg, cell: reg },
 
     // Creating a class instance runs a constructor, so it is a call
-    new { class_id: u24, argc: u8 },
+    new { class_id: u24, start_reg: reg, argc: u8 },
     //new_known_ctor { class_id: ClassId, argc: u8, num_slots: u16, ctor_pc: u32, fun_id: FunId, num_locals: u16 },
 
     // Check if instance of class
-    instanceof { dst: out_reg, val: reg, class_id: u16 },
+    instanceof { dst: out_reg, val: reg, class_id: u24 },
 
-    // FIXME: figure out solution wrt string operands
-    // These name the field with a string pointer
-    //
-    // The class id and slot_idx values are cached by the instruction
-    //get_field { obj: reg, field: Value, class_id: u24, slot_idx: u16 },
-    //set_field { obj, reg, field: Value, class_id: u24, slot_idx: u16 },
+    // The field name, class id and slot index all live in the PropCache
+    // entry, which is what keeps these within one word
+    get_field { dst: out_reg, obj: reg, cache: u24 },
+    set_field { obj: reg, src: reg, cache: u24 },
 
     // Get/set indexed element
     get_index { dst: out_reg, arr: reg, idx: reg },
@@ -436,7 +440,7 @@ def_opcodes! {
     dict_new { dst: out_reg },
 
     // Array operations
-    arr_new { dst: out_reg, capacity: u16 },
+    arr_new { dst: out_reg, capacity: u32 },
     arr_push { arr: reg, val: reg },
 
     // Clone a bytearray
@@ -458,25 +462,32 @@ def_opcodes! {
     // Unconditional jump
     jmp { disp: disp32 },
 
-    // Call a function operand (dynamic call)
-    call { fun: reg,  start_reg: reg, argc: u8 },
+    // Call a function operand (dynamic call). The callee is not known, so
+    // the site caches the last one it resolved and guards on it
+    call_opnd { start_reg: reg, argc: u8, cache: u24 },
 
-    // Call a host function provided by the VM
-    call_host { host_fn: u16, start_reg: reg, num_args: u8 },
+    // Call a known host function provided by the VM
+    call_host { host_fn: u16, start_reg: reg, argc: u8 },
 
-    // Call a known function by id
-    call_direct { fun: u24, start_reg: reg, num_args: u8 },
+    // Call a known function by its id
+    call_direct { fun: u24, start_reg: reg, argc: u8 },
 
-    // Call an already compiled function with a known pc
-    // If we can't encode this call, we simply don't use this specialized instruction
-    call_pc { entry_pc: u24, fun_id: u16, num_locals: u8, argc: u8 },
+    // FIXME: here we don't have a function id to produce stack traces...
+    // Ideally we'd have a map of bytecode positions to source locations?
+    // Currently our stack frames expect a function id
+    //
+    // Call an already compiled function by jumping to its entry point.
+    // The callee is statically known, so there is nothing to guard on and
+    // no cache entry. The argument count was checked when the call was
+    // specialized, and register windows do not need it at runtime, so it
+    // is not encoded here. The function id is not either: a stack trace can
+    // map an entry pc back to a function on the cold path.
+    // If a call cannot be specialized, the unoptimized form is used instead
+    call_pc { entry_pc: u24, start_reg: reg, num_locals: u16 },
 
-    // Call encodings still to be figured out. Brought over from the old VM
-    // as-is. The inline caches need somewhere to live, and the method calls
-    // name the method with a string pointer.
-    //call_method { name: Value, argc: u8 },
-    //call_method_pc { name: Value, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
-    //call_method_host { name: Value, argc: u8, type_tag: Type, host_fn: &'static HostFn },
+    // Call a method on the object in start_reg. The method name, and the
+    // class it was last looked up on, live in the CallCache entry
+    call_method { start_reg: reg, argc: u8, cache: u24 },
 
     // Return the value found in a register
     ret { src: reg },
@@ -487,6 +498,45 @@ def_opcodes! {
     // Return a sign-extended immediate as the raw bits of a value.
     // Covers nil, undef, booleans and fixnums in the +/- 2^29 range
     ret_imm32 { imm: i32 },
+}
+
+// Sketch of the side tables the instructions above index into. These will
+// likely move next to the code they are used by once the VM is written.
+
+/// Index into the program's interned name table, which holds field and
+/// method names. Names are immortal and live outside the heap, so they
+/// never move and never need to be traced
+pub type NameId = u32;
+
+/// Index into a function's array of inline cache entries
+pub type CacheIdx = u32;
+
+/// Cache for a field access site
+pub struct PropCache
+{
+    pub name: NameId,
+
+    // Class the field was last looked up on, and where it was found.
+    // The slot index is only valid for objects of that class
+    pub class_id: u32,
+    pub slot_idx: u32,
+}
+
+/// Cache for a call site whose callee is not statically known. Dynamic
+/// calls guard on the function they last resolved to, method calls on the
+/// class they last looked the name up on. A statically known callee needs
+/// no entry here: it becomes a call_pc instead
+pub struct CallCache
+{
+    pub name: NameId,
+    pub class_id: u32,
+
+    // Callee the site resolved to. The function id is both the guard and
+    // what the stack frame records, and the frame needs the entry point
+    // and its own size
+    pub fun_id: u32,
+    pub entry_pc: u32,
+    pub num_locals: u16,
 }
 
 /// Interpreter instruction
@@ -560,7 +610,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 58);
+        assert_eq!(NUM_OPCODES, 64);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
@@ -652,10 +702,17 @@ mod tests
     fn operands_do_not_overlap()
     {
         // Each operand set on its own must leave the others zero
-        assert_eq!(call::decode(Insn::call(u16::MAX, 0, 0)).start_reg, 0);
-        assert_eq!(call::decode(Insn::call(0, u16::MAX, 0)).fun, 0);
-        assert_eq!(call::decode(Insn::call(0, 0, u8::MAX)).fun, 0);
-        assert_eq!(call::decode(Insn::call(1, 2, 3)), call { fun: 1, start_reg: 2, num_args: 3 });
+        assert_eq!(call_host::decode(Insn::call_host(u16::MAX, 0, 0)).start_reg, 0);
+        assert_eq!(call_host::decode(Insn::call_host(0, u16::MAX, 0)).host_fn, 0);
+        assert_eq!(call_host::decode(Insn::call_host(0, 0, u8::MAX)).host_fn, 0);
+        assert_eq!(
+            call_host::decode(Insn::call_host(1, 2, 3)),
+            call_host { host_fn: 1, start_reg: 2, argc: 3 }
+        );
+
+        // A top-aligned u24 sitting above a u8
+        assert_eq!(call_opnd::decode(Insn::call_opnd(0, 0, (1 << 24) - 1)).argc, 0);
+        assert_eq!(call_opnd::decode(Insn::call_opnd(0, u8::MAX, 0)).cache, 0);
     }
 
     #[test]
@@ -714,6 +771,6 @@ mod tests
         assert_eq!(Insn::add_imm16(1, 2, -3).to_string(), "add_imm16 r1, r2, -3");
         assert_eq!(Insn::jlt(4, 5, -6).to_string(), "jlt r4, r5, -6");
         assert_eq!(Insn::ret_nil().to_string(), "ret_nil");
-        assert_eq!(Insn::call(7, 8, 9).to_string(), "call 7, r8, 9");
+        assert_eq!(Insn::call_host(7, 8, 9).to_string(), "call_host 7, r8, 9");
     }
 }
