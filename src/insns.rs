@@ -470,20 +470,14 @@ def_opcodes! {
     call_host { host_fn: u16, start_reg: reg, argc: u8 },
 
     // Call a known function by its id
+    // This gets optimized into call_pc once the callee has been compiled
     call_direct { fun: u24, start_reg: reg, argc: u8 },
 
-    // FIXME: here we don't have a function id to produce stack traces...
-    // Ideally we'd have a map of bytecode positions to source locations?
-    // Currently our stack frames expect a function id
-    //
-    // Call an already compiled function by jumping to its entry point.
-    // The callee is statically known, so there is nothing to guard on and
-    // no cache entry. The argument count was checked when the call was
-    // specialized, and register windows do not need it at runtime, so it
-    // is not encoded here. The function id is not either: a stack trace can
-    // map an entry pc back to a function on the cold path.
-    // If a call cannot be specialized, the unoptimized form is used instead
-    call_pc { entry_pc: u24, start_reg: reg, num_locals: u16 },
+    // The callee is statically known, so there is nothing to guard on.
+    // We still use a cache entry because we can't fit all of the parameters
+    // directly into one 64-bit instruction, but this instruction will
+    // not deoptimize.
+    call_pc { start_reg: reg, num_locals: u16, cache: u24 },
 
     // Call a method on the object in start_reg. The method name, and the
     // class it was last looked up on, live in the CallCache entry
