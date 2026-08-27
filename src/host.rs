@@ -48,15 +48,202 @@ impl HostFn
     }
 }
 
+/// Pick the `FnPtr` variant for an arity. The table states the arity as
+/// a number, and the compiler checks it against the signature of the
+/// function it is paired with
+macro_rules! host_fn_ptr {
+    (0, $f:path) => { FnPtr::Fn0($f) };
+    (1, $f:path) => { FnPtr::Fn1($f) };
+    (2, $f:path) => { FnPtr::Fn2($f) };
+    (3, $f:path) => { FnPtr::Fn3($f) };
+    (4, $f:path) => { FnPtr::Fn4($f) };
+    (5, $f:path) => { FnPtr::Fn5($f) };
+    (8, $f:path) => { FnPtr::Fn8($f) };
+}
+
+/// Declare the table of host functions, in two groups. An entry names
+/// the Rust function that implements it, along with its arity.
+///
+/// Plush code knows a global by that same name. A method's name carries
+/// a type prefix, and several of them answer to the same bare name, so
+/// each method gives the name it is called by.
+///
+/// Generating the id enum, the table and the name lookup from one list
+/// is what keeps them in step: an id is always a valid index, and only
+/// the globals are reachable by name.
+macro_rules! def_host_fns {
+    (
+        globals { $($g_id:ident($g_argc:tt),)* }
+        methods { $($m_name:ident: $m_id:ident($m_argc:tt),)* }
+    ) => {
+        pub const NUM_HOST_FNS: usize =
+            0 $(+ { let _ = stringify!($g_id); 1 })*
+              $(+ { let _ = stringify!($m_name); 1 })*;
+
+        // Ids are stored in u16 instruction operands
+        const _: () = assert!(NUM_HOST_FNS <= u16::MAX as usize);
+
+        /// Identifies a host function by its position in `HOST_FNS`.
+        /// Narrow enough to sit in an instruction operand.
+        #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+        #[allow(non_camel_case_types)]
+        #[repr(u16)]
+        pub enum HostFnId
+        {
+            $($g_id,)*
+            $($m_id,)*
+        }
+
+        /// Every host function the VM provides, in `HostFnId` order.
+        /// The table is immutable and shared by every actor, so looking
+        /// one up costs an indexed load and no locking.
+        pub static HOST_FNS: [HostFn; NUM_HOST_FNS] = [
+            $(HostFn { name: stringify!($g_id), f: host_fn_ptr!($g_argc, $g_id) },)*
+            $(HostFn { name: stringify!($m_name), f: host_fn_ptr!($m_argc, $m_id) },)*
+        ];
+
+        impl HostFnId
+        {
+            /// Look up a host function that Plush code can name directly.
+            /// Methods are deliberately not reachable this way: they are
+            /// found by the type they are defined on instead
+            pub fn from_name(name: &str) -> Option<HostFnId>
+            {
+                match name {
+                    $(stringify!($g_id) => Some(HostFnId::$g_id),)*
+                    _ => None
+                }
+            }
+        }
+    };
+}
+
+impl HostFnId
+{
+    /// Get the host function this id refers to
+    pub fn get(self) -> &'static HostFn
+    {
+        &HOST_FNS[self as usize]
+    }
+}
+
+use crate::array::*;
+use crate::audio::*;
+use crate::bytearray::*;
+use crate::runtime::*;
+use crate::window::*;
+
+def_host_fns! {
+    // Functions Plush code names directly
+    globals {
+        time_current_ms(0),
+        cmd_num_args(0),
+        cmd_get_arg(1),
+        cmd_get_arg_or(2),
+        print(1),
+        println(1),
+        readln(0),
+        read_file(1),
+        read_file_utf8(1),
+        write_file(2),
+        make_dir(1),
+        vm_shrink_heap(1),
+        vm_gc_collect(0),
+        actor_id(0),
+        actor_parent(0),
+        actor_sleep(1),
+        actor_spawn(1),
+        actor_join(1),
+        actor_send(2),
+        actor_recv(0),
+        actor_poll(0),
+        window_create(4),
+        window_draw_frame(2),
+        audio_open_output(2),
+        audio_write_samples(2),
+        audio_open_input(2),
+        audio_read_samples(4),
+        exit(1),
+    }
+
+    // Methods on primitive types, found through `runtime::get_method`
+    methods {
+        to_s: true_to_s(1),
+        to_s: false_to_s(1),
+        to_s: nil_to_s(1),
+
+        abs: int64_abs(1),
+        min: int64_min(2),
+        max: int64_max(2),
+        to_f: int64_to_f(1),
+        to_s: int64_to_s(1),
+        to_hex: int64_to_hex(2),
+
+        abs: float64_abs(1),
+        ceil: float64_ceil(1),
+        floor: float64_floor(1),
+        trunc: float64_trunc(1),
+        sin: float64_sin(1),
+        cos: float64_cos(1),
+        tan: float64_tan(1),
+        atan: float64_atan(1),
+        sqrt: float64_sqrt(1),
+        min: float64_min(2),
+        max: float64_max(2),
+        clip: float64_clip(3),
+        pow: float64_pow(2),
+        exp: float64_exp(1),
+        ln: float64_ln(1),
+        to_f: float64_to_f(1),
+        to_s: float64_to_s(1),
+        format_decimals: float64_format_decimals(2),
+
+        from_codepoint: string_from_codepoint(2),
+        byte_at: string_byte_at(2),
+        char_at: string_char_at(2),
+        parse_int: string_parse_int(2),
+        parse_float: string_parse_float(1),
+        trim: string_trim(1),
+        upper: string_upper(1),
+        lower: string_lower(1),
+        split: string_split(2),
+        to_s: string_to_s(1),
+
+        with_size: array_with_size(3),
+        push: array_push(2),
+        pop: array_pop(1),
+        remove: array_remove(2),
+        insert: array_insert(3),
+        append: array_append(2),
+        resize: array_resize(3),
+
+        with_size: ba_with_size(2),
+        load_u32: ba_load_u32(2),
+        store_u32: ba_store_u32(3),
+        load_u16: ba_load_u16(2),
+        store_u16: ba_store_u16(3),
+        load_f32: ba_load_f32(2),
+        store_f32: ba_store_f32(3),
+        get_u32: ba_get_u32(2),
+        set_u32: ba_set_u32(3),
+        get_f32: ba_get_f32(2),
+        set_f32: ba_set_f32(3),
+        num_u32: ba_num_u32(1),
+        memcpy: ba_memcpy(5),
+        resize: ba_resize(2),
+        zero_fill: ba_zero_fill(1),
+        fill_u32: ba_fill_u32(4),
+        blit_bgra32: ba_blit_bgra32(8),
+
+        has: dict_has(2),
+    }
+}
+
 /// Get a host constant by name
 /// Returns an AST expression node for the constant,
 /// because we want host constants to be resolved early
 pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
 {
-    use FnPtr::*;
-    use crate::window::*;
-    use crate::audio::*;
-
     // This constant is only true inside the main unit
     if name == "MAIN_UNIT" {
         if fun.id == prog.main_fn {
@@ -66,77 +253,10 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
         }
     }
 
-    static TIME_CURRENT_MS: HostFn = HostFn { name: "time_current_ms", f: Fn0(time_current_ms) };
-    static CMD_NUM_ARGS: HostFn = HostFn { name: "cmd_num_args", f: Fn0(cmd_num_args) };
-    static CMD_GET_ARG: HostFn = HostFn { name: "cmd_get_arg", f: Fn1(cmd_get_arg) };
-    static CMD_GET_ARG_OR: HostFn = HostFn { name: "cmd_get_arg_or", f: Fn2(cmd_get_arg_or) };
-    static PRINT: HostFn = HostFn { name: "print", f: Fn1(print) };
-    static PRINTLN: HostFn = HostFn { name: "println", f: Fn1(println) };
-    static READLN: HostFn = HostFn { name: "readln", f: Fn0(readln) };
-    static READ_FILE: HostFn = HostFn { name: "read_file", f: Fn1(read_file) };
-    static READ_FILE_UTF8: HostFn = HostFn { name: "read_file_utf8", f: Fn1(read_file_utf8) };
-    static WRITE_FILE: HostFn = HostFn { name: "write_file", f: Fn2(write_file) };
-    static MAKE_DIR: HostFn = HostFn { name: "make_dir", f: Fn1(make_dir) };
-    static VM_SHRINK_HEAP: HostFn = HostFn { name: "vm_shrink_heap", f: Fn1(vm_shrink_heap) };
-    static VM_GC_COLLECT: HostFn = HostFn { name: "vm_gc_collect", f: Fn0(vm_gc_collect) };
-    static ACTOR_ID: HostFn = HostFn { name: "actor_id", f: Fn0(actor_id) };
-    static ACTOR_PARENT: HostFn = HostFn { name: "actor_parent", f: Fn0(actor_parent) };
-    static ACTOR_SLEEP: HostFn = HostFn { name: "actor_sleep", f: Fn1(actor_sleep) };
-    static ACTOR_SPAWN: HostFn = HostFn { name: "actor_spawn", f: Fn1(actor_spawn) };
-    static ACTOR_JOIN: HostFn = HostFn { name: "actor_join", f: Fn1(actor_join) };
-    static ACTOR_SEND: HostFn = HostFn { name: "actor_send", f: Fn2(actor_send) };
-    static ACTOR_RECV: HostFn = HostFn { name: "actor_recv", f: Fn0(actor_recv) };
-    static ACTOR_POLL: HostFn = HostFn { name: "actor_poll", f: Fn0(actor_poll) };
-    static WINDOW_CREATE: HostFn = HostFn { name: "window_create", f: Fn4(window_create) };
-    static WINDOW_DRAW_FRAME: HostFn = HostFn { name: "window_draw_frame", f: Fn2(window_draw_frame) };
-    static AUDIO_OPEN_OUTPUT: HostFn = HostFn { name: "audio_open_output", f: Fn2(audio_open_output) };
-    static AUDIO_WRITE_SAMPLES: HostFn = HostFn { name: "audio_write_samples", f: Fn2(audio_write_samples) };
-    static AUDIO_OPEN_INPUT: HostFn = HostFn { name: "audio_open_input", f: Fn2(audio_open_input) };
-    static AUDIO_READ_SAMPLES: HostFn = HostFn { name: "audio_read_samples", f: Fn4(audio_read_samples) };
-    static EXIT: HostFn = HostFn { name: "exit", f: Fn1(exit) };
-
-    let fn_ref = match name
-    {
-        "time_current_ms" => &TIME_CURRENT_MS,
-
-        "cmd_num_args" => &CMD_NUM_ARGS,
-        "cmd_get_arg" => &CMD_GET_ARG,
-        "cmd_get_arg_or" => &CMD_GET_ARG_OR,
-
-        "print" => &PRINT,
-        "println" => &PRINTLN,
-        "readln" => &READLN,
-        "read_file" => &READ_FILE,
-        "read_file_utf8" => &READ_FILE_UTF8,
-        "write_file" => &WRITE_FILE,
-        "make_dir" => &MAKE_DIR,
-
-        "vm_shrink_heap" => &VM_SHRINK_HEAP,
-        "vm_gc_collect" => &VM_GC_COLLECT,
-        "actor_id" => &ACTOR_ID,
-        "actor_parent" => &ACTOR_PARENT,
-        "actor_sleep" => &ACTOR_SLEEP,
-        "actor_spawn" => &ACTOR_SPAWN,
-        "actor_join" => &ACTOR_JOIN,
-        "actor_send" => &ACTOR_SEND,
-        "actor_recv" => &ACTOR_RECV,
-        "actor_poll" => &ACTOR_POLL,
-
-        "window_create" => &WINDOW_CREATE,
-        "window_draw_frame" => &WINDOW_DRAW_FRAME,
-
-        "audio_open_output" => &AUDIO_OPEN_OUTPUT,
-        "audio_write_samples" => &AUDIO_WRITE_SAMPLES,
-
-        "audio_open_input" => &AUDIO_OPEN_INPUT,
-        "audio_read_samples" => &AUDIO_READ_SAMPLES,
-
-        "exit" => &EXIT,
-
-        _ => panic!("unknown host constant `{name}`")
-    };
-
-    Expr::HostFn(fn_ref)
+    match HostFnId::from_name(name) {
+        Some(host_fn) => Expr::HostFn(host_fn.get()),
+        None => panic!("unknown host constant `{name}`")
+    }
 }
 
 /// Get the current time stamp in milliseconds
@@ -414,6 +534,26 @@ mod tests
         assert!(is_safe_path("foo.txt"));
         assert!(is_safe_path("data.csv"));
         assert!(is_safe_path("docs/language.md"));
+    }
+
+    #[test]
+    fn host_fn_ids()
+    {
+        use crate::host::HostFnId;
+
+        // The id enum and the table are generated from one list, so an
+        // id has to land on the entry it was declared with
+        assert_eq!(HostFnId::print.get().name, "print");
+        assert_eq!(HostFnId::ba_blit_bgra32.get().name, "blit_bgra32");
+        assert_eq!(HostFnId::float64_clip.get().num_params(), 3);
+
+        assert_eq!(HostFnId::from_name("println"), Some(HostFnId::println));
+        assert_eq!(HostFnId::from_name("nope"), None);
+
+        // Methods are not reachable as globals, even though they sit in
+        // the same table
+        assert_eq!(HostFnId::from_name("to_s"), None);
+        assert_eq!(HostFnId::from_name("int64_abs"), None);
     }
 }
 
