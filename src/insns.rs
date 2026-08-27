@@ -21,7 +21,10 @@ macro_rules! opnd_width {
     (u5) => { 5 };
     (u6) => { 6 };
     (u8) => { 8 };
+    (u12) => { 12 };
     (u16) => { 16 };
+    (u24) => { 24 };
+    (u32) => { 32 };
     (i16) => { 16 };
     (i32) => { 32 };
     (disp16) => { 16 };
@@ -40,7 +43,10 @@ macro_rules! opnd_type {
     (u5) => { u8 };
     (u6) => { u8 };
     (u8) => { u8 };
+    (u12) => { u16 };
     (u16) => { u16 };
+    (u24) => { u32 };
+    (u32) => { u32 };
     (i16) => { i16 };
     (i32) => { i32 };
     (disp16) => { i16 };
@@ -341,13 +347,13 @@ macro_rules! def_opcodes {
 def_opcodes! {
     // Halt execution and produce an error
     // Panic is zero so that jumping to uninitialized memory causes panic
-    panic = 0 { },
+    panic = 0 {},
 
     // Debugger breakpoint
-    breakpoint { },
+    breakpoint {},
 
     // Can be used for code patching, or to disable breakpoints
-    nop { },
+    nop {},
 
     // Load a sign-extended immediate into a register as the raw bits of a
     // value. Covers nil, undef, booleans and fixnums in the +/- 2^29 range
@@ -356,6 +362,7 @@ def_opcodes! {
     // Copy a value from one register to another
     mov { dst: out_reg, src: reg },
 
+    // FIXME: not fully clear how this will work yet. May want a 32-bit index?
     // Load a constant from a constant slot into a register
     load_const { dst: out_reg, slot: u16 },
 
@@ -371,24 +378,71 @@ def_opcodes! {
     store_u32 { src: reg, base: reg, offset: u16 },
     store_u64 { src: reg, base: reg, offset: u16 },
 
-    // bitwise operations
-    //not,
+    // Global variable access.
+    get_global { dst: out_reg, idx: u32 },
+    set_global { src: reg, idx: u32 },
+
+    // Bitwise operations
     lshift { dst: out_reg, a: reg, b: reg },
     rshift { dst: out_reg, a: reg, b: reg },
-    and { dst: out_reg, a: reg, b: reg },
-    or { dst: out_reg, a: reg, b: reg },
-    xor { dst: out_reg, a: reg, b: reg },
+    bit_and { dst: out_reg, a: reg, b: reg },
+    bit_or { dst: out_reg, a: reg, b: reg },
+    bit_xor { dst: out_reg, a: reg, b: reg },
 
     add { dst: out_reg, a: reg, b: reg },
     sub { dst: out_reg, a: reg, b: reg },
     mul { dst: out_reg, a: reg, b: reg },
     div { dst: out_reg, a: reg, b: reg },
+    div_int { dst: out_reg, a: reg, b: reg },
     modulo { dst: out_reg, a: reg, b: reg },
 
     // Arithmetic ops with fixnum immediates
     add_imm16 { dst: out_reg, a: reg, imm: i16 },
     sub_imm16 { dst: out_reg, a: reg, imm: i16 },
     mul_imm16 { dst: out_reg, a: reg, imm: i16 },
+
+    // Logical and bitwise negation
+    not { dst: out_reg, src: reg },
+
+    // Closure operations.
+    clos_new { dst: out_reg, fun_id: u24, num_slots: u12 },
+    clos_set { clos: reg, src: reg, idx: u12 },
+    clos_get { dst: out_reg, idx: u12 },
+
+    // Mutable cell operations. A new cell starts out holding nil.
+    cell_new { dst: out_reg },
+    cell_set { cell: reg, src: reg },
+    cell_get { dst: out_reg, cell: reg },
+
+    // Creating a class instance runs a constructor, so it is a call
+    new { class_id: u24, argc: u8 },
+    //new_known_ctor { class_id: ClassId, argc: u8, num_slots: u16, ctor_pc: u32, fun_id: FunId, num_locals: u16 },
+
+    // Check if instance of class
+    instanceof { dst: out_reg, val: reg, class_id: u16 },
+
+    // FIXME: figure out solution wrt string operands
+    // These name the field with a string pointer
+    //get_field { field: Value, class_id: ClassId, slot_idx: u32 },
+    //set_field { field: Value, class_id: ClassId, slot_idx: u32 },
+
+    // Get/set indexed element
+    get_index { dst: out_reg, arr: reg, idx: reg },
+    set_index { arr: reg, idx: reg, src: reg },
+
+    // Create a new dictionary
+    dict_new { dst: out_reg },
+
+    // Array operations
+    arr_new { dst: out_reg, capacity: u16 },
+    arr_push { arr: reg, val: reg },
+
+    // Clone a bytearray
+    ba_clone { dst: out_reg, src: reg },
+
+    // Jump if true/false
+    if_true { val: reg, disp: disp32 },
+    if_false { val: reg, disp: disp32 },
 
     // The displacement takes the 24 bits left over by the two registers,
     // which is more range than any function will need
@@ -402,11 +456,27 @@ def_opcodes! {
     // Unconditional jump
     jmp { disp: disp32 },
 
-    call { fun: u16, start_reg: reg, num_args: u8 },
+    // Call a function operand (dynamic call)
+    call { fun: reg,  start_reg: reg, argc: u8 },
 
+    // Call a host function provided by the VM
     call_host { host_fn: u16, start_reg: reg, num_args: u8 },
 
-    // Return the value in a register
+    // Call a known function by id
+    call_direct { fun: u24, start_reg: reg, num_args: u8 },
+
+    // Call an already compiled function with a known pc
+    // If we can't encode this call, we simply don't use this specialized instruction
+    call_pc { entry_pc: u24, fun_id: u16, num_locals: u8, argc: u8 },
+
+    // Call encodings still to be figured out. Brought over from the old VM
+    // as-is. The inline caches need somewhere to live, and the method calls
+    // name the method with a string pointer.
+    //call_method { name: Value, argc: u8 },
+    //call_method_pc { name: Value, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
+    //call_method_host { name: Value, argc: u8, type_tag: Type, host_fn: &'static HostFn },
+
+    // Return the value found in a register
     ret { src: reg },
 
     // Return nil, as functions with no explicit return value do
@@ -488,7 +558,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 39);
+        assert_eq!(NUM_OPCODES, 58);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
@@ -601,8 +671,19 @@ mod tests
         assert!(!Insn::fits(32, 5, false));
         assert!(Insn::fits(63, 6, false));
         assert!(!Insn::fits(64, 6, false));
+        assert!(Insn::fits(4095, 12, false));
+        assert!(!Insn::fits(4096, 12, false));
+        assert!(Insn::fits((1 << 24) - 1, 24, false));
+        assert!(!Insn::fits(1 << 24, 24, false));
         assert!(Insn::fits(-8, 4, true));
         assert!(!Insn::fits(-9, 4, true));
+    }
+
+    #[test]
+    fn u32_operand()
+    {
+        let insn = Insn::get_global(3, u32::MAX);
+        assert_eq!(get_global::decode(insn), get_global { dst: 3, idx: u32::MAX });
     }
 
     #[test]
