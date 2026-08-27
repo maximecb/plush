@@ -384,18 +384,6 @@ def_opcodes! {
     // Load a constant from a constant slot into a register
     load_const { dst: out_reg, slot: u32 },
 
-    // Note: we might want to be able to use a constant slot for the base?
-    load_u8 { dst: out_reg, base: reg, offset: u16 },
-    load_u16 { dst: out_reg, base: reg, offset: u16 },
-    load_u32 { dst: out_reg, base: reg, offset: u16 },
-    load_u64 { dst: out_reg, base: reg, offset: u16 },
-
-    // Store is encoded the same way as load for simplicity
-    store_u8 { src: reg, base: reg, offset: u16 },
-    store_u16 { src: reg, base: reg, offset: u16 },
-    store_u32 { src: reg, base: reg, offset: u16 },
-    store_u64 { src: reg, base: reg, offset: u16 },
-
     // Global variable access.
     get_global { dst: out_reg, idx: u32 },
     set_global { src: reg, idx: u32 },
@@ -617,7 +605,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 66);
+        assert_eq!(NUM_OPCODES, 58);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
@@ -784,7 +772,6 @@ mod tests
         assert_eq!(Opcode::add.num_outs(), 1);
         assert_eq!(Opcode::jlt.num_opnds(), 3);
         assert_eq!(Opcode::jlt.num_outs(), 0);
-        assert_eq!(Opcode::store_u64.num_outs(), 0);
         assert_eq!(Opcode::ret_nil.num_opnds(), 0);
     }
 
