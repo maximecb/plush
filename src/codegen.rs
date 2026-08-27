@@ -323,6 +323,8 @@ impl ExprBox
             Expr::Nil => actor.insns.push(Insn::push { val: Value::NIL }),
             Expr::True => actor.insns.push(Insn::push { val: Value::TRUE }),
             Expr::False => actor.insns.push(Insn::push { val: Value::FALSE }),
+
+            // FIXME: for host calls, emit call_host directly, don't push a host function id
             Expr::HostFn(f) => actor.insns.push(Insn::push { val: Value::host_fn(*f) }),
 
             // Constants that don't fit in an immediate are boxed in the

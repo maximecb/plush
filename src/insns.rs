@@ -353,6 +353,9 @@ macro_rules! def_opcodes {
 //   - The callee's frame base is caller_bp + start_reg
 //   - The return value is written to the callee's frame base, which is
 //     start_reg in the caller. Calls therefore need no destination operand
+//   - argc counts every register the call occupies from start_reg on.
+//     For a method call, self is the first of those, so it lands in the
+//     callee's r0 and is counted in argc
 //   - Future tail calls can just mutate the frame in-place
 // - Field and method names are NameIds, indices into an interned name
 //   table that lives outside the heap. Instructions hold no heap pointers,
@@ -480,6 +483,11 @@ def_opcodes! {
     // class it was last looked up on, live in the CallCache entry
     call_method { start_reg: reg, argc: u8, cache: u24 },
 
+    // Call a host method, cached on the object type tag.
+    // This is used for primitive types such as Int64, Float64 and String.
+    // The method name can also be recovered from the host function for deopt.
+    call_method_host { start_reg: reg, argc: u8, type_tag: u8, host_fn: u16 },
+
     // Creating a class instance runs a constructor, so it is a call
     new { class_id: u24, start_reg: reg, argc: u8 },
     new_known_ctor { start_reg: reg, argc: u8, cache: u24 },
@@ -488,7 +496,7 @@ def_opcodes! {
     ret { src: reg },
 
     // Return nil, as functions with no explicit return value do
-    ret_nil { },
+    ret_nil {},
 
     // Return a sign-extended immediate as the raw bits of a value.
     // Covers nil, undef, booleans and fixnums in the +/- 2^29 range
@@ -605,7 +613,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 58);
+        assert_eq!(NUM_OPCODES, 59);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
