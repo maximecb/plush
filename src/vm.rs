@@ -148,9 +148,6 @@ pub enum Insn
     // Unconditional jump
     jump { target_ofs: i32 },
 
-    // Call a host function
-    //call_host { host_fn: HostFn, argc: u8 },
-
     // Call a function using the call stack
     // call (arg0, arg1, ..., argN)
     call { argc: u8 },

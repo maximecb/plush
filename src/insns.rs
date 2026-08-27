@@ -23,6 +23,7 @@ macro_rules! opnd_width {
     (u8) => { 8 };
     (u12) => { 12 };
     (u16) => { 16 };
+    (u20) => { 20 };
     (u24) => { 24 };
     (u32) => { 32 };
     (i16) => { 16 };
@@ -45,6 +46,7 @@ macro_rules! opnd_type {
     (u8) => { u8 };
     (u12) => { u16 };
     (u16) => { u16 };
+    (u20) => { u32 };
     (u24) => { u32 };
     (u32) => { u32 };
     (i16) => { i16 };
@@ -146,10 +148,13 @@ macro_rules! gen_encode {
     };
 }
 
-// Check that an operand value is in range for the field it is encoded into
+// Check that an operand value is in range for the field it is encoded
+// into. This is a hard assert because encoding happens at compile time,
+// not in the interpreter loop, and an operand that silently gets truncated
+// here produces a wrong instruction rather than a crash
 macro_rules! check_opnd {
     ($fname:ident, $kind:ident) => {
-        debug_assert!(
+        assert!(
             Insn::fits($fname as i64, opnd_width!($kind), opnd_signed!($kind)),
             concat!("operand `", stringify!($fname), "` does not fit in ", stringify!($kind))
         );
@@ -292,7 +297,10 @@ macro_rules! def_opcodes {
             }
 
             /// Replace the branch displacement of a jump instruction.
-            /// Instructions with no displacement are returned unchanged.
+            /// The displacement is counted in instructions, relative to the
+            /// one following the branch, so a displacement of zero falls
+            /// through. Instructions with no displacement are returned
+            /// unchanged.
             #[allow(unused_variables)]
             pub fn with_branch_disp(self, disp: i32) -> Insn
             {
@@ -352,9 +360,13 @@ macro_rules! def_opcodes {
 // - Sites that cache a lookup hold a CacheIdx instead of the cached data,
 //   which keeps them within one word and lets cache entries grow later
 def_opcodes! {
-    // Halt execution and produce an error
+    // Halt execution and produce an error. The source position is packed
+    // into the operands so that the error can be reported without a side
+    // table. The fields are wider than any real source file needs, but a
+    // generated one could overflow them, so the caller saturates rather
+    // than letting the encoding assert fire.
     // Panic is zero so that jumping to uninitialized memory causes panic
-    panic = 0 {},
+    panic = 0 { file_id: u12, line_no: u24, col_no: u20 },
 
     // Debugger breakpoint
     breakpoint {},
@@ -624,7 +636,32 @@ mod tests
     #[test]
     fn panic_is_zero()
     {
-        assert_eq!(Insn::panic().word_u64(), 0);
+        assert_eq!(Insn::panic(0, 0, 0).word_u64(), 0);
+    }
+
+    #[test]
+    fn panic_src_pos()
+    {
+        // The three fields fill the word exactly, so each one has to come
+        // back out without disturbing the others
+        let insn = Insn::panic((1 << 12) - 1, (1 << 24) - 1, (1 << 20) - 1);
+        assert_eq!(
+            panic::decode(insn),
+            panic { file_id: (1 << 12) - 1, line_no: (1 << 24) - 1, col_no: (1 << 20) - 1 }
+        );
+        assert_eq!(insn.word_u64(), u64::MAX & !0xFF);
+
+        assert_eq!(panic::decode(Insn::panic(3, 0, 0)), panic { file_id: 3, line_no: 0, col_no: 0 });
+        assert_eq!(panic::decode(Insn::panic(0, 3, 0)), panic { file_id: 0, line_no: 3, col_no: 0 });
+        assert_eq!(panic::decode(Insn::panic(0, 0, 3)), panic { file_id: 0, line_no: 0, col_no: 3 });
+    }
+
+    #[test]
+    #[should_panic(expected = "does not fit")]
+    fn out_of_range_operand()
+    {
+        // Range checks are hard asserts, so this fires in release too
+        Insn::panic(1 << 12, 0, 0);
     }
 
     #[test]
