@@ -61,8 +61,16 @@ macro_rules! def_opcodes {
     }
 }
 
-// Note: no instructions should directly handle system resources such as
-// input and output devices in order to enable sandboxing.
+// Notes:
+// - No instructions should directly handle system resources such as
+//   input and output devices in order to enable sandboxing. This should be
+//   done through host functions instead.
+// - Future rest arguments will be handled by allocating an array,
+//   which avoids the complexity of frames with variable arg counts
+// - Calls:
+//   - The design uses register windows like Lua
+//   - The callee's frame base is caller_bp + start_reg
+//   - Future tail calls can just mutate the frame in-place
 def_opcodes! {
     // Halt execution and produce an error
     // Panic is zero so that jumping to uninitialized memory causes panic
@@ -74,9 +82,10 @@ def_opcodes! {
     // Can be used for code patching, or to disable breakpoints
     nop { num_opnds = 0 },
 
-    // Load a sign-extended i32 immediate into a register
-    // load_const | dst_reg: u16 | imm: i32
-    imm_i32 { num_opnds = 2, num_outs = 1 },
+    // Load a sign-extended immediate into a register as the raw bits of a value.
+    // Covers nil, undef, booleans and fixnums in the +/- 2^29 range
+    // load_imm32 | dst_reg: u16 | imm: i32
+    load_imm32 { num_opnds = 2, num_outs = 1 },
 
     // Copy a value from one register to another
     // mov | dst_reg: u16 | src_reg: u16
@@ -141,23 +150,26 @@ def_opcodes! {
     // jmp | offset: i32
     jmp { num_opnds = 1 },
 
-    // call | slot_idx: u16 | start_reg: u16 | num_args: u8 | num_ret: u8
-    call { num_opnds = 4 },
+    // call | slot_idx: u16 | start_reg: u16 | num_args: u8
+    call { num_opnds = 3 },
 
-    // call_host | host_fn_id: u16 | start_reg: u16 | num_args: u8 | num_ret: u8
-    call_host { num_opnds = 4 },
+    // call_host | host_fn_id: u16 | start_reg: u16 | num_args: u8
+    call_host { num_opnds = 3 },
 
     // TODO: we need to be able to call function pointers for doom
     // call_ptr {}
 
-    // Return zero values
-    ret0 { num_opnds = 0 },
+    // Return the value in a register
+    // ret | src_reg: u16
+    ret { num_opnds = 1 },
 
-    // Return one value
-    ret1 { num_opnds = 1 },
+    // Return nil, as functions with no explicit return value do
+    ret_nil { num_opnds = 0 },
 
-    // Return an int32 constant
-    ret_i32 { num_opnds = 1 },
+    // Return a sign-extended immediate as the raw bits of a value.
+    // Covers nil, undef, booleans and fixnums in the +/- 2^29 range
+    // ret_imm32 | imm: i32
+    ret_imm32 { num_opnds = 1 },
 }
 
 /// Interpreter instruction
@@ -298,15 +310,14 @@ impl Insn
         )
     }
 
-    // call | slot_idx: u16 | start_reg: u16 | num_args: u8 | num_ret: u8
-    pub fn encode_call(op: Opcode, slot_idx: u16, start_reg: u16, num_args: u8, num_ret: u8) -> Self
+    // call | slot_idx: u16 | start_reg: u16 | num_args: u8
+    pub fn encode_call(op: Opcode, slot_idx: u16, start_reg: u16, num_args: u8) -> Self
     {
         Insn(
             (op as u64) |
             (slot_idx as u64) << 16 |
             (start_reg as u64) << 32 |
-            (num_args as u64) << 48 |
-            (num_ret as u64) << 56
+            (num_args as u64) << 48
         )
     }
 }
