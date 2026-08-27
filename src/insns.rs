@@ -423,8 +423,10 @@ def_opcodes! {
 
     // FIXME: figure out solution wrt string operands
     // These name the field with a string pointer
-    //get_field { field: Value, class_id: ClassId, slot_idx: u32 },
-    //set_field { field: Value, class_id: ClassId, slot_idx: u32 },
+    //
+    // The class id and slot_idx values are cached by the instruction
+    //get_field { obj: reg, field: Value, class_id: u24, slot_idx: u16 },
+    //set_field { obj, reg, field: Value, class_id: u24, slot_idx: u16 },
 
     // Get/set indexed element
     get_index { dst: out_reg, arr: reg, idx: reg },
