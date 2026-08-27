@@ -109,42 +109,33 @@ def_opcodes! {
     store_u32 { num_opnds = 3 },
     store_u64 { num_opnds = 3 },
 
-    // 32-bit bitwise operations
-    //not_u32,
-    lshift_u32 { num_opnds = 3, num_outs = 1 },
-    rshift_u32 { num_opnds = 3, num_outs = 1 },
-    rshift_i32 { num_opnds = 3, num_outs = 1 },
-    and_u32 { num_opnds = 3, num_outs = 1 },
-    or_u32 { num_opnds = 3, num_outs = 1 },
-    xor_u32 { num_opnds = 3, num_outs = 1 },
+    // bitwise operations
+    //not,
+    lshift { num_opnds = 3, num_outs = 1 },
+    rshift { num_opnds = 3, num_outs = 1 },
+    and { num_opnds = 3, num_outs = 1 },
+    or { num_opnds = 3, num_outs = 1 },
+    xor { num_opnds = 3, num_outs = 1 },
 
     // op | dst_reg | reg0 | reg1
-    add_i32 { num_opnds = 3, num_outs = 1 },
-    sub_i32 { num_opnds = 3, num_outs = 1 },
-    mul_i32 { num_opnds = 3, num_outs = 1 },
-    div_i32 { num_opnds = 3, num_outs = 1 },
-    mod_i32 { num_opnds = 3, num_outs = 1 },
-    div_u32 { num_opnds = 3, num_outs = 1 },
-    mod_u32 { num_opnds = 3, num_outs = 1 },
+    add { num_opnds = 3, num_outs = 1 },
+    sub { num_opnds = 3, num_outs = 1 },
+    mul { num_opnds = 3, num_outs = 1 },
+    div { num_opnds = 3, num_outs = 1 },
+    modulo { num_opnds = 3, num_outs = 1 },
 
     // op | dst_reg:u16 | reg0:u16 | imm:i16
-    add_i32_imm { num_opnds = 3, num_outs = 1 },
-    sub_i32_imm { num_opnds = 3, num_outs = 1 },
-    mul_i32_imm { num_opnds = 3, num_outs = 1 },
-    div_i32_imm { num_opnds = 3, num_outs = 1 },
-    mod_i32_imm { num_opnds = 3, num_outs = 1 },
+    add_imm16 { num_opnds = 3, num_outs = 1 },
+    sub_imm16 { num_opnds = 3, num_outs = 1 },
+    mul_imm16 { num_opnds = 3, num_outs = 1 },
 
     // jxx | r0: u16 | r1: u16 | offset: i16
-    jeq_i32 { num_opnds = 3 },
-    jne_i32 { num_opnds = 3 },
-    jlt_i32 { num_opnds = 3 },
-    jle_i32 { num_opnds = 3 },
-    jgt_i32 { num_opnds = 3 },
-    jge_i32 { num_opnds = 3 },
-    //jlt_u32 { num_opnds = 3 },
-    //jle_u32 { num_opnds = 3 },
-    //jgt_u32 { num_opnds = 3 },
-    //jge_u32 { num_opnds = 3 },
+    jeq { num_opnds = 3 },
+    jne { num_opnds = 3 },
+    jlt { num_opnds = 3 },
+    jle { num_opnds = 3 },
+    jgt { num_opnds = 3 },
+    jge { num_opnds = 3 },
 
     // Unconditional jump
     // jmp | offset: i32
@@ -155,9 +146,6 @@ def_opcodes! {
 
     // call_host | host_fn_id: u16 | start_reg: u16 | num_args: u8
     call_host { num_opnds = 3 },
-
-    // TODO: we need to be able to call function pointers for doom
-    // call_ptr {}
 
     // Return the value in a register
     // ret | src_reg: u16

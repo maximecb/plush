@@ -3,7 +3,6 @@ use std::thread;
 use std::sync::{Arc, Weak, Mutex, mpsc};
 use std::time::Duration;
 use crate::dict::Dict;
-// Only the GC logging below formats numbers this way
 #[cfg(feature = "log_gc")]
 use crate::utils::thousands_sep;
 use crate::lexer::SrcPos;
@@ -61,16 +60,6 @@ pub enum Insn
     // getn 0 is equivalent to dup
     getn { idx: u16 },
 
-    /*
-    // Pop the stack top and set the nth stack slot from the top to this value
-    // setn 0 is equivalent to removing the value below the current stack top
-    // setn <idx:u8>
-    setn,
-
-    // Get the argument count for the current stack frame
-    get_argc,
-    */
-
     // Get the function argument at a given index
     get_arg { idx: u32 },
 
@@ -114,12 +103,6 @@ pub enum Insn
 
     // Logical negation
     not,
-
-    // Type check operations
-    //is_nil,
-    //is_int64,
-    //is_object,
-    //is_array,
 
     // Closure operations
     clos_new { fun_id: FunId, num_slots: u32 },
