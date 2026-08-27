@@ -420,10 +420,6 @@ def_opcodes! {
     cell_set { cell: reg, src: reg },
     cell_get { dst: out_reg, cell: reg },
 
-    // Creating a class instance runs a constructor, so it is a call
-    new { class_id: u24, start_reg: reg, argc: u8 },
-    //new_known_ctor { class_id: ClassId, argc: u8, num_slots: u16, ctor_pc: u32, fun_id: FunId, num_locals: u16 },
-
     // Check if instance of class
     instanceof { dst: out_reg, val: reg, class_id: u24 },
 
@@ -477,11 +473,15 @@ def_opcodes! {
     // We still use a cache entry because we can't fit all of the parameters
     // directly into one 64-bit instruction, but this instruction will
     // not deoptimize.
-    call_pc { start_reg: reg, num_locals: u16, cache: u24 },
+    call_pc { start_reg: reg, argc: u8, cache: u24 },
 
     // Call a method on the object in start_reg. The method name, and the
     // class it was last looked up on, live in the CallCache entry
     call_method { start_reg: reg, argc: u8, cache: u24 },
+
+    // Creating a class instance runs a constructor, so it is a call
+    new { class_id: u24, start_reg: reg, argc: u8 },
+    new_known_ctor { start_reg: reg, argc: u8, cache: u24 },
 
     // Return the value found in a register
     ret { src: reg },
@@ -604,7 +604,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 64);
+        assert_eq!(NUM_OPCODES, 65);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
