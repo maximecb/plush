@@ -128,8 +128,8 @@ fn gen_value(actor: &mut Actor, dst: u16, val: Value)
 {
     let raw = val.raw_bits();
 
-    if fits_imm32(val) {
-        emit(actor, Insn::load_imm32(dst, raw as i32));
+    if fits_imm40(val) {
+        emit(actor, Insn::load_imm40(dst, raw as i64));
     } else {
         let slot = actor.push_const(val);
         emit(actor, Insn::load_const(dst, slot));
@@ -144,15 +144,15 @@ fn gen_value(actor: &mut Actor, dst: u16, val: Value)
 /// through the constant pool, which is a root the collector does trace.
 ///
 /// Otherwise the field sign-extends, so a value round-trips only if its
-/// top bits are already the sign extension of the low 32
-fn fits_imm32(val: Value) -> bool
+/// top bits are already the sign extension of the low 40
+fn fits_imm40(val: Value) -> bool
 {
     if val.is_heap() {
         return false;
     }
 
     let raw = val.raw_bits();
-    (raw as i32 as i64 as u64) == raw
+    (((raw << 24) as i64 >> 24) as u64) == raw
 }
 
 /// The value an expression is known to hold at the time it is compiled.
@@ -225,7 +225,7 @@ impl Function
                 // which is its first argument
                 actor.insns.push(Insn::ret(0));
             } else {
-                actor.insns.push(Insn::ret_imm32(Value::NIL.raw_bits() as i32));
+                actor.insns.push(Insn::ret_imm40(Value::NIL.raw_bits() as i64));
             }
         }
 
@@ -283,9 +283,9 @@ impl StmtBox
             Stmt::Return(expr) => {
                 // Returning a constant carries it in the instruction,
                 // rather than loading it into a register first
-                match const_value(expr, actor).filter(|val| fits_imm32(*val)) {
+                match const_value(expr, actor).filter(|val| fits_imm40(*val)) {
                     Some(val) => {
-                        actor.insns.push(Insn::ret_imm32(val.raw_bits() as i32));
+                        actor.insns.push(Insn::ret_imm40(val.raw_bits() as i64));
                     }
 
                     None => {
@@ -1156,7 +1156,7 @@ fn gen_var_read(
             // An immutable global the unit has already initialized holds
             // the same value the compiled code will see
             match if mutable { None } else { actor.global_value(idx) } {
-                Some(val) if fits_imm32(val) => gen_value(actor, d, val),
+                Some(val) if fits_imm40(val) => gen_value(actor, d, val),
                 _ => actor.insns.push(Insn::get_global(d, idx)),
             }
 

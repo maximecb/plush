@@ -710,14 +710,14 @@ impl Actor
         match insn.opcode() {
             // The immediate is the tagged word, not the number the source
             // wrote, so the value it stands for is worth spelling out
-            Opcode::load_imm32 => {
-                let imm = insns::load_imm32::decode(insn).imm;
-                Some(format!("{:?}", Value::from_raw_bits(imm as i64 as u64)))
+            Opcode::load_imm40 => {
+                let imm = insns::load_imm40::decode(insn).imm;
+                Some(format!("{:?}", Value::from_raw_bits(imm as u64)))
             }
 
-            Opcode::ret_imm32 => {
-                let imm = insns::ret_imm32::decode(insn).imm;
-                Some(format!("{:?}", Value::from_raw_bits(imm as i64 as u64)))
+            Opcode::ret_imm40 => {
+                let imm = insns::ret_imm40::decode(insn).imm;
+                Some(format!("{:?}", Value::from_raw_bits(imm as u64)))
             }
 
             Opcode::load_const => {
@@ -1731,9 +1731,9 @@ impl Actor
                     );
                 }
 
-                Opcode::load_imm32 => {
-                    let opnds = insns::load_imm32::decode(insn);
-                    set_reg!(opnds.dst, Value::from_raw_bits(opnds.imm as i64 as u64));
+                Opcode::load_imm40 => {
+                    let opnds = insns::load_imm40::decode(insn);
+                    set_reg!(opnds.dst, Value::from_raw_bits(opnds.imm as u64));
                 }
 
                 Opcode::load_const => {
@@ -2462,9 +2462,9 @@ impl Actor
                     do_return!(ret_val);
                 }
 
-                Opcode::ret_imm32 => {
-                    let opnds = insns::ret_imm32::decode(insn);
-                    do_return!(Value::from_raw_bits(opnds.imm as i64 as u64));
+                Opcode::ret_imm40 => {
+                    let opnds = insns::ret_imm40::decode(insn);
+                    do_return!(Value::from_raw_bits(opnds.imm as u64));
                 }
             }
         }

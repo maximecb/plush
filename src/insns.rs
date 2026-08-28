@@ -29,6 +29,7 @@ macro_rules! opnd_width {
     (u32) => { 32 };
     (i16) => { 16 };
     (i32) => { 32 };
+    (i40) => { 40 };
     (disp16) => { 16 };
     (disp24) => { 24 };
     (disp32) => { 32 };
@@ -52,6 +53,7 @@ macro_rules! opnd_type {
     (u32) => { u32 };
     (i16) => { i16 };
     (i32) => { i32 };
+    (i40) => { i64 };
     (disp16) => { i16 };
     (disp24) => { i32 };
     (disp32) => { i32 };
@@ -61,6 +63,7 @@ macro_rules! opnd_type {
 macro_rules! opnd_signed {
     (i16) => { true };
     (i32) => { true };
+    (i40) => { true };
     (disp16) => { true };
     (disp24) => { true };
     (disp32) => { true };
@@ -379,8 +382,11 @@ def_opcodes! {
     nop {},
 
     // Load a sign-extended immediate into a register as the raw bits of a
-    // value. Covers nil, undef, booleans and fixnums in the +/- 2^29 range
-    load_imm32 { dst: out_reg, imm: i32 },
+    // value. Covers nil, undef, booleans and fixnums in the +/- 2^37
+    // range, which is what is left once the destination register has its
+    // 16 bits. A value is tagged two bits wider than the number it holds,
+    // so this is what it takes to carry a 32-bit mask
+    load_imm40 { dst: out_reg, imm: i40 },
 
     // Copy a value from one register to another
     mov { dst: out_reg, src: reg },
@@ -505,9 +511,9 @@ def_opcodes! {
     // Return the value found in a register
     ret { src: reg },
 
-    // Return a sign-extended immediate as the raw bits of a value.
-    // Covers nil, undef, booleans and fixnums in the +/- 2^29 range
-    ret_imm32 { imm: i32 },
+    // Return a sign-extended immediate as the raw bits of a value,
+    // covering the same range load_imm40 does
+    ret_imm40 { imm: i40 },
 }
 
 // Sketch of the side tables the instructions above index into. These will
@@ -629,7 +635,7 @@ mod tests
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
         assert!(NUM_OPCODES - 1 < 255);
-        assert_eq!(Opcode::ret_imm32 as usize, NUM_OPCODES - 1);
+        assert_eq!(Opcode::ret_imm40 as usize, NUM_OPCODES - 1);
     }
 
     #[test]
@@ -695,18 +701,20 @@ mod tests
             assert_eq!(add_imm16::decode(insn), add_imm16 { dst: 7, a: 8, imm });
         }
 
-        for imm in [0, 1, -1, i32::MAX, i32::MIN] {
-            assert_eq!(ret_imm32::decode(Insn::ret_imm32(imm)), ret_imm32 { imm });
-            assert_eq!(load_imm32::decode(Insn::load_imm32(3, imm)), load_imm32 { dst: 3, imm });
+        // The widest immediate is 40 bits, which is what is left once the
+        // opcode and destination register have theirs
+        for imm in [0, 1, -1, (1 << 39) - 1, -(1 << 39), 0xFFFF_FFFF << 2] {
+            assert_eq!(ret_imm40::decode(Insn::ret_imm40(imm)), ret_imm40 { imm });
+            assert_eq!(load_imm40::decode(Insn::load_imm40(3, imm)), load_imm40 { dst: 3, imm });
         }
     }
 
     #[test]
     fn last_operand_is_top_aligned()
     {
-        // The branch displacement occupies the top 24 bits, the imm32 the top 32
+        // The branch displacement occupies the top 24 bits, the imm40 the top 40
         assert_eq!((Insn::jlt(1, 2, -3).word_u64() as i64 >> 40) as i32, -3);
-        assert_eq!((Insn::load_imm32(1, -7).word_u64() >> 32) as i32, -7);
+        assert_eq!(Insn::load_imm40(1, -7).word_u64() as i64 >> 24, -7);
     }
 
     #[test]
@@ -818,7 +826,7 @@ mod tests
         assert_eq!(Insn::add(1, 2, 3).to_string(), "add r1, r2, r3");
         assert_eq!(Insn::add_imm16(1, 2, -3).to_string(), "add_imm16 r1, r2, -3");
         assert_eq!(Insn::jlt(4, 5, -6).to_string(), "jlt r4, r5, -6");
-        assert_eq!(Insn::ret_imm32(5).to_string(), "ret_imm32 5");
+        assert_eq!(Insn::ret_imm40(5).to_string(), "ret_imm40 5");
         assert_eq!(Insn::call_host(7, 8, 9).to_string(), "call_host 7, r8, 9");
     }
 }
