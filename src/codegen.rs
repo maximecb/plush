@@ -364,11 +364,16 @@ impl StmtBox
                 let mut break_idxs = Vec::new();
                 let mut cont_idxs = Vec::new();
 
-                // Evaluate the test expression
-                let test_idx = actor.insns.len();
-
-                // If the test fails, jump after the loop
-                break_idxs.append(&mut gen_branch(test_expr, fun, regs, actor, false)?);
+                // The test sits at the bottom of the loop, so a continuing
+                // iteration takes one branch rather than a test and a jump
+                // back. Entry jumps down to it, which also means the test
+                // still runs before the body the first time round.
+                //
+                // Testing at the bottom asks whether to go round again,
+                // which is the sense a comparison already branches on, so
+                // the loop needs no negated test
+                let entry_idx = emit(actor, Insn::jmp(0));
+                let body_idx = actor.insns.len();
 
                 body_stmt.gen_code(fun, regs, &mut break_idxs, &mut cont_idxs, actor)?;
 
@@ -383,22 +388,18 @@ impl StmtBox
                     regs.free_to(top);
                 }
 
-                // Jump back to the loop test
-                let jmp_idx = emit(actor, Insn::jmp(0));
-                patch_jump(actor, jmp_idx, test_idx);
+                // Evaluate the test, and go round again if it holds
+                let test_idx = actor.insns.len();
+                patch_jump(actor, entry_idx, test_idx);
+
+                let back_idxs = gen_branch(test_expr, fun, regs, actor, true)?;
+                patch_jumps(actor, &back_idxs, body_idx);
 
                 // Break will jump here
                 let break_idx = actor.insns.len();
 
-                // Patch continue jumps
-                for branch_idx in cont_idxs.iter() {
-                    patch_jump(actor, *branch_idx, cont_idx);
-                }
-
-                // Patch break jumps
-                for branch_idx in break_idxs.iter() {
-                    patch_jump(actor, *branch_idx, break_idx);
-                }
+                patch_jumps(actor, &cont_idxs, cont_idx);
+                patch_jumps(actor, &break_idxs, break_idx);
             }
 
             Stmt::Assert { test_expr } => {
@@ -807,21 +808,7 @@ fn gen_branch(
             let b = rhs.gen_code(fun, regs, actor, None)?;
             regs.free_to(top);
 
-            let (build, invert) = cmp_branch_insn(op, jump_if_true).unwrap();
-
-            // An ordered comparison has no negation to branch on, because
-            // NaN is unordered: `a < b` and `a >= b` are both false for it.
-            // Those tests jump on the sense they were written in, and a
-            // second jump carries the other case
-            if invert {
-                let taken = emit(actor, build(a, b, 0));
-                let not_taken = emit(actor, Insn::jmp(0));
-
-                let dst_idx = actor.insns.len();
-                patch_jump(actor, taken, dst_idx);
-                return Ok(vec![not_taken]);
-            }
-
+            let build = cmp_branch_insn(op, jump_if_true).unwrap();
             return Ok(vec![emit(actor, build(a, b, 0))]);
         }
 
@@ -838,14 +825,13 @@ fn gen_branch(
     Ok(vec![idx])
 }
 
-/// The branch a comparison compiles to, along with whether the code has to
-/// jump around it because the operator has no usable negation.
+/// The branch a comparison compiles to, for either sense of the test.
 ///
-/// Equality inverts exactly, including for NaN, so `!=` is a real negation
-/// of `==`. The ordered comparisons do not, so branching on the negated
-/// operator would send NaN down the wrong path.
-fn cmp_branch_insn(op: &BinOp, jump_if_true: bool)
-    -> Option<(fn(u16, u16, i32) -> Insn, bool)>
+/// NaN is unordered, so an ordered comparison and its opposite are both
+/// false for it, and neither is the negation of the other. Each sense
+/// therefore has its own instruction. Equality does invert exactly, NaN
+/// included, so `!=` serves as the negation of `==`
+fn cmp_branch_insn(op: &BinOp, jump_if_true: bool) -> Option<fn(u16, u16, i32) -> Insn>
 {
     use BinOp::*;
 
@@ -853,17 +839,20 @@ fn cmp_branch_insn(op: &BinOp, jump_if_true: bool)
         (Eq, true) | (Ne, false) => Insn::jeq,
         (Ne, true) | (Eq, false) => Insn::jne,
 
-        (Lt, _) => Insn::jlt,
-        (Le, _) => Insn::jle,
-        (Gt, _) => Insn::jgt,
-        (Ge, _) => Insn::jge,
+        (Lt, true) => Insn::jlt,
+        (Le, true) => Insn::jle,
+        (Gt, true) => Insn::jgt,
+        (Ge, true) => Insn::jge,
+
+        (Lt, false) => Insn::jnlt,
+        (Le, false) => Insn::jnle,
+        (Gt, false) => Insn::jngt,
+        (Ge, false) => Insn::jnge,
 
         _ => return None,
     };
 
-    let invert = !jump_if_true && matches!(op, Lt | Le | Gt | Ge);
-
-    Some((insn, invert))
+    Some(insn)
 }
 
 /// Generate an expression into a specific register

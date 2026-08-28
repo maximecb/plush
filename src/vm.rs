@@ -1624,7 +1624,7 @@ impl Actor
         // Compare and branch. Tagged fixnums order like the integers they
         // hold, and inline doubles are decoded and compared directly.
         macro_rules! cmp_branch {
-            ($insn_word: expr, $insn: literal, $opnds: ident, $op: tt, $slow_path: ident) => {{
+            ($insn_word: expr, $insn: literal, $opnds: ident, $op: tt, $slow_path: ident, $negate: literal) => {{
                 let opnds = insns::$opnds::decode($insn_word);
                 let v0 = get_reg!(opnds.a);
                 let v1 = get_reg!(opnds.b);
@@ -1637,7 +1637,8 @@ impl Actor
                     slow!($insn, $slow_path(v0, v1))
                 };
 
-                if taken {
+                // `$negate` is a literal, so this settles at compile time
+                if taken != $negate {
                     pc = ((pc as i64) + (opnds.disp as i64)) as usize;
                 }
             }}
@@ -2292,10 +2293,15 @@ impl Actor
                     }
                 }
 
-                Opcode::jlt => cmp_branch!(insn, "lt", jlt, <, cmp_lt),
-                Opcode::jle => cmp_branch!(insn, "le", jle, <=, cmp_le),
-                Opcode::jgt => cmp_branch!(insn, "gt", jgt, >, cmp_gt),
-                Opcode::jge => cmp_branch!(insn, "ge", jge, >=, cmp_ge),
+                Opcode::jlt => cmp_branch!(insn, "lt", jlt, <, cmp_lt, false),
+                Opcode::jle => cmp_branch!(insn, "le", jle, <=, cmp_le, false),
+                Opcode::jgt => cmp_branch!(insn, "gt", jgt, >, cmp_gt, false),
+                Opcode::jge => cmp_branch!(insn, "ge", jge, >=, cmp_ge, false),
+
+                Opcode::jnlt => cmp_branch!(insn, "lt", jnlt, <, cmp_lt, true),
+                Opcode::jnle => cmp_branch!(insn, "le", jnle, <=, cmp_le, true),
+                Opcode::jngt => cmp_branch!(insn, "gt", jngt, >, cmp_gt, true),
+                Opcode::jnge => cmp_branch!(insn, "ge", jnge, >=, cmp_ge, true),
 
                 Opcode::jeq => {
                     let opnds = insns::jeq::decode(insn);

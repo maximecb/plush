@@ -1,0 +1,304 @@
+// Plots five sine waves of equal amplitude with phase offsets of 45
+// degrees, styled like a figure printed on paper: warm off-white stock
+// with a bit of grain, muted printing inks, and monogram for the labels.
+//
+// Usage: plush examples/plot_graph.psh
+
+from ./image import Image, rgb, color_r, color_g, color_b;
+from ./monogram_font import Font;
+from ./random import rand_init, rand_int, rand_float;
+
+let PI = 3.141592653589793;
+
+let WIDTH = 1000;
+let HEIGHT = 720;
+
+// Plot area, in pixels
+let PLOT_X = 110;
+let PLOT_Y = 160;
+let PLOT_W = 830;
+let PLOT_H = 430;
+
+// Ranges the two axes cover
+let T_MIN = 0.0;
+let T_MAX = 2.0;
+let V_MIN = -1.25;
+let V_MAX = 1.25;
+
+let FREQ = 1.0;
+
+// Half the stroke width of a curve, in pixels
+let HALF_STROKE = 1.2;
+
+// Paper stock and the inks printed on it
+let PAPER       = rgb(243, 238, 227);
+let INK         = rgb(38, 35, 32);
+let INK_MID     = rgb(92, 86, 78);
+let INK_LIGHT   = rgb(134, 126, 114);
+let GRID_MAJOR  = rgb(212, 204, 188);
+let GRID_MINOR  = rgb(228, 222, 208);
+let GRID_ZERO   = rgb(178, 170, 154);
+let GRAIN_DARK  = rgb(118, 102, 78);
+let GRAIN_LIGHT = rgb(255, 253, 246);
+
+// One curve per phase offset, in quarter-pi steps
+let curve_colors = [
+    rgb(176, 58, 46),
+    rgb(43, 84, 148),
+    rgb(72, 122, 78),
+    rgb(198, 138, 42),
+    rgb(120, 72, 132),
+];
+let curve_labels = ["0°", "45°", "90°", "135°", "180°"];
+
+// --- Small helpers ---
+
+fun round_i(f) {
+    return (f + 0.5).floor();
+}
+
+// Map a time value to a horizontal pixel position
+fun t_to_px(t) {
+    return PLOT_X + ((t - T_MIN) / (T_MAX - T_MIN)) * PLOT_W;
+}
+
+// Map an amplitude to a vertical pixel position, +y pointing down
+fun v_to_py(v) {
+    return PLOT_Y + ((V_MAX - v) / (V_MAX - V_MIN)) * PLOT_H;
+}
+
+// Blend a color into one pixel at a coverage in [0, 1]
+fun blend_px(img, x, y, color, cov) {
+    if (x < 0 || x >= img.width || y < 0 || y >= img.height) return;
+
+    let a = cov.clip(0.0, 1.0);
+    if (a < 0.004) return;
+    let b = 1.0 - a;
+
+    let dst = img.get_pixel(x, y);
+    img.set_pixel(x, y, rgb(
+        (color_r(color) * a + color_r(dst) * b).floor(),
+        (color_g(color) * a + color_g(dst) * b).floor(),
+        (color_b(color) * a + color_b(dst) * b).floor()
+    ));
+}
+
+// Vertical span with fractional ends, which is what keeps the curves
+// from looking like a staircase
+fun draw_vspan(img, x, top, bot, color) {
+    let y_first = top.floor();
+    let y_last = bot.ceil();
+
+    for (let var y = y_first; y < y_last; ++y) {
+        let cov = bot.min((y + 1).to_f()) - top.max(y.to_f());
+        blend_px(img, x, y, color, cov);
+    }
+}
+
+// --- Text ---
+
+// Characters are indexed by byte, and the middle of a multi-byte one
+// reads back as nil, so only real characters advance the pen
+fun num_chars(text) {
+    let var n = 0;
+    for (let var i = 0; i < text.len; ++i) {
+        if (text.char_at(i) != nil) ++n;
+    }
+    return n;
+}
+
+fun text_width(font, text) {
+    return num_chars(text) * font.char_w;
+}
+
+fun draw_text(font, img, x, y, text) {
+    let var cx = x;
+    for (let var i = 0; i < text.len; ++i) {
+        let ch = text.char_at(i);
+        if (ch == nil) continue;
+        font.draw_char(img, cx, y, ch);
+        cx = cx + font.char_w;
+    }
+}
+
+fun draw_text_centered(font, img, cx, y, text) {
+    draw_text(font, img, cx - text_width(font, text) _/ 2, y, text);
+}
+
+fun draw_text_right(font, img, right_x, y, text) {
+    draw_text(font, img, right_x - text_width(font, text), y, text);
+}
+
+// Stacked characters, for the label running down the left margin
+fun draw_text_vertical(font, img, x, y, text) {
+    let var cy = y;
+    for (let var i = 0; i < text.len; ++i) {
+        let ch = text.char_at(i);
+        if (ch == nil) continue;
+        font.draw_char(img, x, cy, ch);
+        cy = cy + font.char_h;
+    }
+}
+
+// --- Drawing ---
+
+// Flecks and fibres pressed into the stock
+fun draw_grain(img) {
+    rand_init(20250828);
+
+    for (let var i = 0; i < 16000; ++i) {
+        let x = rand_int(0, WIDTH);
+        let y = rand_int(0, HEIGHT);
+
+        if ((i & 3) == 0) {
+            blend_px(img, x, y, GRAIN_LIGHT, rand_float(0.05, 0.20));
+        } else {
+            blend_px(img, x, y, GRAIN_DARK, rand_float(0.02, 0.07));
+        }
+    }
+}
+
+fun draw_grid(img) {
+    // Vertical lines, one every 0.25s, heavier on the half seconds
+    for (let var i = 0; i <= 8; ++i) {
+        let x = round_i(t_to_px(T_MIN + i * 0.25));
+        let color = ((i & 1) == 0 ? GRID_MAJOR : GRID_MINOR);
+        img.fill_rect(x, PLOT_Y, 1, PLOT_H, color);
+    }
+
+    // Horizontal lines, one every 0.25 of amplitude
+    for (let var i = 0; i <= 8; ++i) {
+        let v = -1.0 + i * 0.25;
+        let y = round_i(v_to_py(v));
+        let var color = ((i & 1) == 0 ? GRID_MAJOR : GRID_MINOR);
+        if (i == 4) color = GRID_ZERO;
+        img.fill_rect(PLOT_X, y, PLOT_W, 1, color);
+    }
+}
+
+fun draw_curve(img, phase, color) {
+    let top_limit = PLOT_Y.to_f();
+    let bot_limit = (PLOT_Y + PLOT_H).to_f();
+    let dt = (T_MAX - T_MIN) / PLOT_W;
+    let w = 2.0 * PI * FREQ;
+
+    let var prev_y = v_to_py((w * T_MIN + phase).sin());
+
+    for (let var px = 0; px < PLOT_W; ++px) {
+        let t = T_MIN + (px + 1) * dt;
+        let y = v_to_py((w * t + phase).sin());
+
+        let top = (prev_y.min(y) - HALF_STROKE).max(top_limit);
+        let bot = (prev_y.max(y) + HALF_STROKE).min(bot_limit);
+        if (bot > top) {
+            draw_vspan(img, PLOT_X + px, top, bot, color);
+        }
+
+        prev_y = y;
+    }
+}
+
+fun draw_axes(img, font) {
+    // Box around the plot area
+    img.fill_rect(PLOT_X - 1, PLOT_Y - 1, PLOT_W + 2, 1, INK);
+    img.fill_rect(PLOT_X - 1, PLOT_Y + PLOT_H, PLOT_W + 2, 1, INK);
+    img.fill_rect(PLOT_X - 1, PLOT_Y - 1, 1, PLOT_H + 2, INK);
+    img.fill_rect(PLOT_X + PLOT_W, PLOT_Y - 1, 1, PLOT_H + 2, INK);
+
+    // Ticks below the box, labelled on the half seconds
+    for (let var i = 0; i <= 8; ++i) {
+        let t = T_MIN + i * 0.25;
+        let x = round_i(t_to_px(t));
+        let major = ((i & 1) == 0);
+        img.fill_rect(x, PLOT_Y + PLOT_H + 1, 1, (major ? 7 : 4), INK_MID);
+
+        if (major) {
+            draw_text_centered(font, img, x, PLOT_Y + PLOT_H + 14, t.format_decimals(1));
+        }
+    }
+
+    // Ticks left of the box
+    for (let var i = 0; i <= 8; ++i) {
+        let v = -1.0 + i * 0.25;
+        let y = round_i(v_to_py(v));
+        let major = ((i & 1) == 0);
+        let len = (major ? 7 : 4);
+        img.fill_rect(PLOT_X - 1 - len, y, len, 1, INK_MID);
+
+        if (major) {
+            draw_text_right(font, img, PLOT_X - 14, y - font.char_h _/ 2, v.format_decimals(1));
+        }
+    }
+}
+
+// A row of ink samples above the plot, so no key sits over the curves
+fun draw_legend(img, font, y) {
+    let SWATCH_W = 26;
+    let GAP = 8;
+    let SPACING = 26;
+    let title = "phase offset";
+
+    let var width = text_width(font, title) + 20;
+    for (let var i = 0; i < curve_labels.len; ++i) {
+        width = width + SWATCH_W + GAP + text_width(font, curve_labels[i]);
+        if (i < curve_labels.len - 1) width = width + SPACING;
+    }
+
+    let var x = PLOT_X + (PLOT_W - width) _/ 2;
+    draw_text(font, img, x, y, title);
+    x = x + text_width(font, title) + 20;
+
+    for (let var i = 0; i < curve_labels.len; ++i) {
+        img.fill_rect(x, y + font.char_h _/ 2 - 1, SWATCH_W, 3, curve_colors[i]);
+        x = x + SWATCH_W + GAP;
+        draw_text(font, img, x, y, curve_labels[i]);
+        x = x + text_width(font, curve_labels[i]) + SPACING;
+    }
+}
+
+// --- Render the figure ---
+
+let frame_buffer = Image(WIDTH, HEIGHT);
+
+let font_title = Font(3, INK);
+let font_sub = Font(2, INK_MID);
+let font_label = Font(2, INK_MID);
+let font_caption = Font(2, INK_LIGHT);
+
+frame_buffer.clear(PAPER);
+draw_grain(frame_buffer);
+
+draw_text_centered(font_title, frame_buffer, WIDTH _/ 2, 30, "Phase-Shifted Sine Waves");
+draw_text_centered(font_sub, frame_buffer, WIDTH _/ 2, 76, "y = sin(2 pi f t + phase),  f = 1 Hz");
+draw_legend(frame_buffer, font_label, 112);
+
+draw_grid(frame_buffer);
+
+for (let var i = 0; i < curve_colors.len; ++i) {
+    draw_curve(frame_buffer, i * PI / 4.0, curve_colors[i]);
+}
+
+draw_axes(frame_buffer, font_label);
+
+draw_text_vertical(
+    font_label,
+    frame_buffer,
+    22,
+    PLOT_Y + PLOT_H _/ 2 - (9 * font_label.char_h) _/ 2,
+    "amplitude"
+);
+draw_text_centered(font_label, frame_buffer, PLOT_X + PLOT_W _/ 2, PLOT_Y + PLOT_H + 44, "t (seconds)");
+draw_text(font_caption, frame_buffer, PLOT_X, 668, "Fig. 1 — Five 1 Hz sine waves, phase offsets in 45° steps.");
+
+let window = $window_create(WIDTH, HEIGHT, "Sine Wave Plot", 0);
+$window_draw_frame(window, frame_buffer.bytes);
+
+loop {
+    let msg = $actor_recv();
+
+    if (msg instanceof UIEvent) {
+        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+            break;
+        }
+    }
+}
