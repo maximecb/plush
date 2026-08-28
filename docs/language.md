@@ -2,7 +2,7 @@
 
 This document provides a quick overview of the Plush programming language, its syntax, features, and built-in capabilities. It is intended for developers who want to get started with Plush and learn the basics of the language.
 
-Plush is an experimental toy programming language and virtual machine inspired by JavaScript, Lox, Lua, and Python. It features a simple, minimalistic design with a stack-based bytecode interpreter, actor-based parallelism, and an easily extensible set of host functions.
+Plush is an experimental toy programming language and virtual machine inspired by JavaScript, Lox, Lua, and Python. It features a simple, minimalistic design with a register-based bytecode interpreter, actor-based parallelism, and an easily extensible set of host functions.
 
 The Plush language has:
 - Dynamic typing
@@ -378,6 +378,8 @@ from ./font import *;
     -   `blit_bgra32(dst_width, dst_height, src, src_width, src_height, dst_x, dst_y)`: Copies a rectangular region from a source `ByteArray` into this `ByteArray` at a specified position, with alpha blending. This method assumes that both the source and destination buffers contain pixel data in the BGRA32 format.
 -   **Dict**
     -   `has(key)`: Check if the dictionary contains this key.
+-   **Function**
+    -   `dump_bytecode()`: Print the bytecode this function compiled to, as a debugging aid.
 
 ### Host Functions
 

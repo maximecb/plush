@@ -246,6 +246,8 @@ def_host_fns! {
         blit_bgra32: ba_blit_bgra32(8),
 
         has: dict_has(2),
+
+        dump_bytecode: fun_dump_bytecode(1),
     }
 }
 

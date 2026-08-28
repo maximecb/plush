@@ -630,6 +630,142 @@ impl Actor
         f(&self.classes[&class_id])
     }
 
+    /// Disassemble a function value, compiling it first if it has not run
+    /// yet. What comes back reflects any rewriting the sites in it have
+    /// done, so a function dumped after it has been called shows the
+    /// forms it settled on
+    pub fn dump_fun_bytecode(&mut self, fun: Value) -> Result<String, String>
+    {
+        let fun_id = match fun.to_fun_id() {
+            Some(fun_id) => fun_id,
+            None => return Err(format!("expected a function value but got {:?}", fun)),
+        };
+
+        // Compiling can collect, so the callee is held where the
+        // collector can see it
+        let mut fun = fun;
+        let entry = self.get_compiled_fun(&mut fun);
+
+        let name = {
+            let vm = self.vm.lock().unwrap();
+            let fun = &vm.prog.funs[&fun_id];
+
+            if fun.class_id != ClassId::default() {
+                format!("{}.{}", vm.prog.classes[&fun.class_id].name, fun.name)
+            } else {
+                fun.name.clone()
+            }
+        };
+
+        Ok(self.dump_bytecode(&name, &entry))
+    }
+
+    /// Disassemble one compiled function.
+    ///
+    /// The instruction's own formatting prints the operands, so this adds
+    /// what they cannot say on their own: what a cache index or constant
+    /// slot refers to, and where a branch actually lands
+    pub fn dump_bytecode(&self, name: &str, fun: &CompiledFun) -> String
+    {
+        use std::fmt::Write;
+
+        let mut out = String::new();
+
+        writeln!(
+            out,
+            "fun {}: {} param(s), {} register frame, {} instruction(s)",
+            name,
+            fun.num_params,
+            fun.frame_size,
+            fun.end_pc - fun.entry_pc,
+        ).unwrap();
+
+        for pc in fun.entry_pc..fun.end_pc {
+            let insn = self.insns[pc];
+
+            // Offsets are printed relative to the function's entry, so
+            // that a dump reads the same wherever the function landed
+            write!(out, "  {:>4}  {}", pc - fun.entry_pc, insn).unwrap();
+
+            if let Some(note) = self.insn_note(insn, pc, fun.entry_pc) {
+                write!(out, "  ; {}", note).unwrap();
+            }
+
+            out.push('\n');
+        }
+
+        out
+    }
+
+    /// What an instruction refers to through a side table, for the
+    /// disassembly to spell out
+    fn insn_note(&self, insn: Insn, pc: usize, entry_pc: usize) -> Option<String>
+    {
+        // A branch displacement counts from the instruction after it
+        if let Some(disp) = insn.branch_disp() {
+            let target = (pc as i64) + 1 + (disp as i64) - (entry_pc as i64);
+            return Some(format!("-> {}", target));
+        }
+
+        match insn.opcode() {
+            // The immediate is the tagged word, not the number the source
+            // wrote, so the value it stands for is worth spelling out
+            Opcode::load_imm32 => {
+                let imm = insns::load_imm32::decode(insn).imm;
+                Some(format!("{:?}", Value::from_raw_bits(imm as i64 as u64)))
+            }
+
+            Opcode::ret_imm32 => {
+                let imm = insns::ret_imm32::decode(insn).imm;
+                Some(format!("{:?}", Value::from_raw_bits(imm as i64 as u64)))
+            }
+
+            Opcode::load_const => {
+                let slot = insns::load_const::decode(insn).slot;
+                Some(format!("{:?}", self.consts[slot as usize]))
+            }
+
+            Opcode::get_field => {
+                let cache = insns::get_field::decode(insn).cache;
+                Some(format!(".{}", self.name_str(self.prop_caches[cache as usize].name)))
+            }
+
+            Opcode::set_field => {
+                let cache = insns::set_field::decode(insn).cache;
+                Some(format!(".{}", self.name_str(self.prop_caches[cache as usize].name)))
+            }
+
+            Opcode::call_method | Opcode::call_method_host => {
+                let cache = match insn.opcode() {
+                    Opcode::call_method => insns::call_method::decode(insn).cache,
+                    _ => insns::call_method_host::decode(insn).cache,
+                };
+                Some(format!(".{}()", self.name_str(self.call_caches[cache as usize].name)))
+            }
+
+            Opcode::call_host => {
+                let id = insns::call_host::decode(insn).host_fn;
+                Some(format!("${}", HostFnId::from_index(id).get().name))
+            }
+
+            Opcode::call_pc => {
+                let cache = insns::call_pc::decode(insn).cache;
+                let fun_id = self.call_caches[cache as usize].fun_id;
+                let vm = self.vm.lock().unwrap();
+                Some(format!("{}()", vm.prog.funs[&fun_id].name))
+            }
+
+            Opcode::call_direct => {
+                let fun_id = insns::call_direct::decode(insn).fun;
+                let vm = self.vm.lock().unwrap();
+                let fun_id = FunId::from(fun_id as usize);
+                Some(format!("{}()", vm.prog.funs[&fun_id].name))
+            }
+
+            _ => None
+        }
+    }
+
     /// Text of an interned field or method name
     pub fn name_str(&self, name: NameId) -> &str
     {

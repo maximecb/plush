@@ -13,6 +13,11 @@ use crate::vm::Actor;
 pub struct CompiledFun
 {
     pub entry_pc: usize,
+
+    /// One past the last instruction. Every function compiles into the
+    /// same instruction array, so this is what bounds one of them
+    pub end_pc: usize,
+
     pub num_params: usize,
 
     /// Registers the frame occupies. Arguments come first, then locals,
@@ -174,6 +179,7 @@ impl Function
 
         Ok(CompiledFun {
             entry_pc,
+            end_pc: actor.insns.len(),
             num_params: self.params.len(),
             frame_size: regs.max as usize,
         })

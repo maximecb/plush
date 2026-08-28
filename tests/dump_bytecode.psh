@@ -1,0 +1,75 @@
+// Exercise the bytecode dumper. The harness only checks the exit status,
+// so what this is really testing is that disassembling every kind of
+// instruction, and every side table an instruction indexes into, does not
+// fall over. The sites are dumped both before and after they have run,
+// since running them rewrites several of them into other forms.
+
+class Point
+{
+    init(self, x, y) { self.x = x; self.y = y; }
+    sum(self) { return self.x + self.y; }
+}
+
+// Touches as many instruction kinds as one function reasonably can:
+// constants, fields, indexing, calls of every sort, and branches
+fun everything(n)
+{
+    // Constants that fit an immediate, and ones that need the pool
+    let s = "hello";
+    let f = 1.5;
+    let big = 1234567890123;
+    let bytes = #[\aAB];
+
+    // Arrays and dictionaries
+    let arr = [1, 2, 3];
+    arr[0] = n;
+    let d = { a: 1, b: 2 };
+    d.a = n;
+
+    // Object allocation, field access and a method call
+    let p = Point(n, 2);
+    let total = p.sum() + p.x;
+
+    // A method on a primitive, which resolves to a host method
+    let text = n.to_s() + s;
+
+    // A call to a known function, and a dynamic call through a value
+    let g = |x| x + 1;
+    let dyn = g(n);
+
+    // Branches, and a comparison in value position
+    if (n < 0) {
+        return 0;
+    }
+    let cmp = n > 1;
+
+    return total + dyn + text.len + arr[0] + d.a + bytes.len +
+           f.floor() + (big & 0xFF) + (cmp? 1:0) + (p instanceof Point? 1:0);
+}
+
+// A closure over a mutable local, which compiles to cell instructions
+fun make_counter(start)
+{
+    let var count = start;
+    let bump = || ++count;
+    return bump;
+}
+
+// Dumping compiles the function if it has not run yet
+assert(everything.dump_bytecode() == nil);
+assert(make_counter.dump_bytecode() == nil);
+
+// Running rewrites call and field sites into their resolved forms, so the
+// same functions are dumped again to disassemble those
+let r = everything(3);
+assert(r != nil);
+
+let counter = make_counter(0);
+counter();
+assert(counter() == 2);
+
+assert(everything.dump_bytecode() == nil);
+assert(make_counter.dump_bytecode() == nil);
+
+// Closures dump too, and carry the code of the function they close over
+assert(counter.dump_bytecode() == nil);

@@ -390,6 +390,13 @@ pub(crate) fn dict_has(_actor: &mut Actor, d: Value, key: Value) -> Result<Value
     Ok(Value::from(d.has(key)))
 }
 
+pub(crate) fn fun_dump_bytecode(actor: &mut Actor, f: Value) -> Result<Value, String>
+{
+    let dump = actor.dump_fun_bytecode(f)?;
+    print!("{}", dump);
+    Ok(Value::NIL)
+}
+
 /// Get the method associated with a core value
 pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
 {
@@ -460,6 +467,9 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "blit_bgra32") => ba_blit_bgra32,
 
         (Type::Dict, "has") => dict_has,
+
+        (Type::Fun, "dump_bytecode") => fun_dump_bytecode,
+        (Type::Closure, "dump_bytecode") => fun_dump_bytecode,
 
         (Type::Bool, "to_s") => if val.as_bool() { true_to_s } else { false_to_s },
         (Type::Nil, "to_s") => nil_to_s,
