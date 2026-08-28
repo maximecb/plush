@@ -58,7 +58,8 @@
 //! # Assumptions
 //!
 //! - Heap blocks are 8-byte aligned (`alloc::ALIGN`), leaving 3 low bits.
-//! - Pointers fit in 56 bits, so a `&'static HostFn` fits an immediate.
+//! - Host functions are held as a table index, not a pointer, so that the
+//!   whole value fits the immediate range an instruction can carry.
 //! - A heap pointer is never null, so no tagged word collides with an
 //!   immediate or with `nil`.
 //! - Accessors hand out references into the heap. The collector moves
@@ -71,7 +72,8 @@ use crate::ast::{ClassId, FunId};
 use crate::bytearray::ByteArray;
 use crate::closure::Closure;
 use crate::dict::Dict;
-use crate::host::HostFn;
+use crate::host::{HostFn, HostFnId, NUM_HOST_FNS};
+use std::mem::transmute;
 use crate::object::Object;
 use crate::str::Str;
 
@@ -147,13 +149,13 @@ impl Value
     pub const FIXNUM_MIN: i64 = -(1 << 61);
 
     #[inline(always)]
-    pub const fn from_raw(bits: u64) -> Value
+    pub const fn from_raw_bits(bits: u64) -> Value
     {
         Value(bits)
     }
 
     #[inline(always)]
-    pub const fn raw(self) -> u64
+    pub const fn raw_bits(self) -> u64
     {
         self.0
     }
@@ -306,22 +308,31 @@ impl Value
         if self.is_class() { Some(self.as_class()) } else { None }
     }
 
+    /// Host functions are held by table index rather than by pointer, so
+    /// that the whole value fits in the immediate range an instruction
+    /// can carry
     #[inline(always)]
-    pub fn host_fn(f: &'static HostFn) -> Value
+    pub fn host_fn(id: HostFnId) -> Value
     {
-        let p = f as *const HostFn as u64;
-        debug_assert!(p >> (64 - IMM_SHIFT) == 0);
-        Value((p << IMM_SHIFT) | IMM_HOSTFN)
+        Value(((id as u64) << IMM_SHIFT) | IMM_HOSTFN)
     }
 
     #[inline(always)]
     pub fn is_host_fn(self) -> bool { self.0 as u8 as u64 == IMM_HOSTFN }
 
     #[inline(always)]
-    pub fn as_host_fn(self) -> &'static HostFn
+    pub fn as_host_fn_id(self) -> HostFnId
     {
         debug_assert!(self.is_host_fn());
-        unsafe { &*((self.0 >> IMM_SHIFT) as *const HostFn) }
+        let idx = (self.0 >> IMM_SHIFT) as u16;
+        debug_assert!((idx as usize) < NUM_HOST_FNS);
+        unsafe { transmute(idx) }
+    }
+
+    #[inline(always)]
+    pub fn as_host_fn(self) -> &'static HostFn
+    {
+        self.as_host_fn_id().get()
     }
 
     #[inline(always)]
@@ -684,7 +695,7 @@ impl Eq for Value {}
 fn slow_eq(a: Value, b: Value) -> bool
 {
     if a.is_string() && b.is_string() {
-        return a.raw() == b.raw() || a.as_str() == b.as_str();
+        return a.raw_bits() == b.raw_bits() || a.as_str() == b.as_str();
     }
 
     if a.is_num() && b.is_num() {
@@ -876,8 +887,8 @@ mod tests
         // Tagged words add directly and order like the integers they hold
         let a = Value::fixnum(7);
         let b = Value::fixnum(-3);
-        assert_eq!(Value::from_raw(a.raw().wrapping_add(b.raw())).as_fixnum(), 4);
-        assert!((a.raw() as i64) > (b.raw() as i64));
+        assert_eq!(Value::from_raw_bits(a.raw_bits().wrapping_add(b.raw_bits())).as_fixnum(), 4);
+        assert!((a.raw_bits() as i64) > (b.raw_bits() as i64));
     }
 
     #[test]

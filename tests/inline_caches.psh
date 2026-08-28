@@ -1,0 +1,49 @@
+// Exercise the inline caches by making each kind of site see more than
+// one thing, so that it has to re-resolve or deoptimize
+
+// A host method site that sees more than one type tag. Resolving turns
+// it into call_method_host, and each new tag deoptimizes it back
+fun show(x) { return x.to_s(); }
+let var acc = "";
+for (let var i = 0; i < 6; i = i + 1) {
+    if (i % 3 == 0) { acc = acc + show(7); }
+    else if (i % 3 == 1) { acc = acc + show(2.5); }
+    else { acc = acc + show("s"); }
+}
+assert(acc == "72.5s72.5s");
+
+// A dynamic call site that resolves to two different closures. They
+// share an entry point, so the guard is on the function they close over
+fun mk(n) { return |x| x + n; }
+fun pick(i, a, b) { if (i % 2 == 0) { return a; } return b; }
+let add10 = mk(10);
+let add100 = mk(100);
+let var total = 0;
+for (let var i = 0; i < 4; i = i + 1) {
+    let f = pick(i, add10, add100);
+    total = total + f(1);
+}
+assert(total == 2 * 11 + 2 * 101);
+
+// A field site that sees two classes, where the field is at a different
+// slot in each
+class P { init(s) { s.v = 1; } }
+class Q { init(s) { s.w = 0; s.v = 2; } }
+fun get_v(o) { return o.v; }
+fun set_v(o, x) { o.v = x; return o.v; }
+let var sum = 0;
+for (let var i = 0; i < 4; i = i + 1) {
+    let o = (i % 2 == 0)? P():Q();
+    sum = sum + get_v(o) + set_v(o, 10);
+}
+assert(sum == 6 + 40);
+
+// A method site that sees an object and then a primitive
+class R { init(s) {} to_s(s) { return "R"; } }
+assert(show(R()) == "R");
+assert(show(42) == "42");
+assert(show(R()) == "R");
+
+// Fields on the built-in types, which resolve by name rather than slot
+assert("abc".len == 3);
+assert([1, 2].len == 2);

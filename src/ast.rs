@@ -1,7 +1,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::lexer::SrcPos;
 use crate::symbols::Decl;
-use crate::host::HostFn;
+use crate::host::HostFnId;
 
 /// Unary operator
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -59,7 +59,7 @@ pub enum Expr
     String(String),
 
     // Host function
-    HostFn(&'static HostFn),
+    HostFn(HostFnId),
 
     // ByteArray literal
     ByteArray(Vec<u8>),

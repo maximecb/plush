@@ -7,6 +7,7 @@ mod parser;
 mod symbols;
 mod codegen;
 mod vm;
+mod insns;
 mod value;
 mod alloc;
 mod object;
