@@ -1,0 +1,112 @@
+// A comparison used as a condition compiles to a different shape than one
+// used as a value, so the two have to agree for every pair of operands.
+//
+// NaN is what makes this more than a formality: it is not ordered against
+// anything, so `a < b` and `a >= b` are both false. A branch that assumes
+// one is the negation of the other sends NaN down the wrong path.
+
+// Each operator twice: once as the condition of an `if`, and once
+// materialized into a value that is then tested
+fun lt_branch(a, b) { if (a < b) { return true; } return false; }
+fun lt_value(a, b) { let v = a < b; return v; }
+
+fun le_branch(a, b) { if (a <= b) { return true; } return false; }
+fun le_value(a, b) { let v = a <= b; return v; }
+
+fun gt_branch(a, b) { if (a > b) { return true; } return false; }
+fun gt_value(a, b) { let v = a > b; return v; }
+
+fun ge_branch(a, b) { if (a >= b) { return true; } return false; }
+fun ge_value(a, b) { let v = a >= b; return v; }
+
+fun eq_branch(a, b) { if (a == b) { return true; } return false; }
+fun eq_value(a, b) { let v = a == b; return v; }
+
+fun ne_branch(a, b) { if (a != b) { return true; } return false; }
+fun ne_value(a, b) { let v = a != b; return v; }
+
+// Negation, which a fused branch folds into the comparison
+fun not_lt_branch(a, b) { if (!(a < b)) { return true; } return false; }
+fun not_lt_value(a, b) { let v = !(a < b); return v; }
+
+fun not_ge_branch(a, b) { if (!(a >= b)) { return true; } return false; }
+fun not_ge_value(a, b) { let v = !(a >= b); return v; }
+
+// Short-circuiting conditions
+fun and_branch(a, b) { if (a < b && b < 100.0) { return true; } return false; }
+fun and_value(a, b) { let v = a < b && b < 100.0; return v; }
+
+fun or_branch(a, b) { if (a < b || b < 0.0) { return true; } return false; }
+fun or_value(a, b) { let v = a < b || b < 0.0; return v; }
+
+// A comparison in a loop test, which is where the fused form matters most
+fun count_below(limit)
+{
+    let var n = 0;
+    for (let var i = 0.0; i < limit; i = i + 1.0)
+        n = n + 1;
+    return n;
+}
+
+let nan = 0.0 / 0.0;
+let inf = 1.0 / 0.0;
+let neg_inf = -1.0 / 0.0;
+let big = 1234567890123456;
+
+let pairs = [
+    // Ordinary floats
+    [1.0, 2.0], [2.0, 1.0], [1.0, 1.0], [-1.0, 1.0],
+
+    // NaN is unordered, so every ordered comparison against it is false
+    [nan, 1.0], [1.0, nan], [nan, nan], [nan, inf],
+
+    // Infinities
+    [inf, 1.0], [1.0, inf], [neg_inf, inf], [inf, inf],
+
+    // Integers, including ones too large for a fixnum
+    [1, 2], [2, 1], [1, 1], [big, 1], [1, big], [big, big],
+
+    // Mixed integer and float, which compare across types
+    [1, 1.0], [1, 2.0], [2.0, 1],
+
+    // Strings compare structurally and order lexicographically
+    ["abc", "abd"], ["abd", "abc"], ["abc", "abc"], ["", "a"],
+];
+
+for (let var i = 0; i < pairs.len; ++i) {
+    let a = pairs[i][0];
+    let b = pairs[i][1];
+
+    assert(lt_branch(a, b) == lt_value(a, b));
+    assert(le_branch(a, b) == le_value(a, b));
+    assert(gt_branch(a, b) == gt_value(a, b));
+    assert(ge_branch(a, b) == ge_value(a, b));
+    assert(eq_branch(a, b) == eq_value(a, b));
+    assert(ne_branch(a, b) == ne_value(a, b));
+
+    assert(not_lt_branch(a, b) == not_lt_value(a, b));
+    assert(not_ge_branch(a, b) == not_ge_value(a, b));
+}
+
+// The short-circuiting forms only accept numbers on the right
+for (let var i = 0; i < 12; ++i) {
+    let a = pairs[i][0];
+    let b = pairs[i][1];
+
+    assert(and_branch(a, b) == and_value(a, b));
+    assert(or_branch(a, b) == or_value(a, b));
+}
+
+// NaN pinned down explicitly, since it is the case the shapes disagree on
+assert(lt_value(nan, 1.0) == false);
+assert(ge_value(nan, 1.0) == false);
+assert(lt_branch(nan, 1.0) == false);
+assert(ge_branch(nan, 1.0) == false);
+assert(not_lt_branch(nan, 1.0) == true);
+assert(eq_value(nan, nan) == false);
+assert(ne_value(nan, nan) == true);
+
+// A loop whose test is NaN runs zero times, rather than forever
+assert(count_below(4.0) == 4);
+assert(count_below(nan) == 0);
+assert(count_below(0.0) == 0);

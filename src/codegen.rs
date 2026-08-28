@@ -113,6 +113,15 @@ fn patch_jump(actor: &mut Actor, jmp_idx: usize, dst_idx: usize)
     actor.insns[jmp_idx] = actor.insns[jmp_idx].with_branch_disp(disp);
 }
 
+/// Point a set of jumps, as a test can produce more than one, at the same
+/// instruction index
+fn patch_jumps(actor: &mut Actor, jmp_idxs: &[usize], dst_idx: usize)
+{
+    for jmp_idx in jmp_idxs {
+        patch_jump(actor, *jmp_idx, dst_idx);
+    }
+}
+
 /// Load a value that needs no heap allocation. Immediates that fit the
 /// instruction go inline, the rest through the constant pool
 fn gen_value(actor: &mut Actor, dst: u16, val: Value)
@@ -265,21 +274,16 @@ impl StmtBox
             }
 
             Stmt::If { test_expr, then_stmt, else_stmt } => {
-                // Compile the test expression
-                let top = regs.top();
-                let test = test_expr.gen_code(fun, regs, actor, None)?;
-
                 // If false, jump to else stmt
-                let if_idx = emit(actor, Insn::if_false(test, 0));
-                regs.free_to(top);
+                let if_idxs = gen_branch(test_expr, fun, regs, actor, false)?;
 
                 if else_stmt.is_some() {
                     then_stmt.gen_code(fun, regs, break_idxs, cont_idxs, actor)?;
                     let jump_idx = emit(actor, Insn::jmp(0));
 
-                    // Patch the if_false to jump to the else clause
+                    // Patch the test to jump to the else clause
                     let dst_idx = actor.insns.len();
-                    patch_jump(actor, if_idx, dst_idx);
+                    patch_jumps(actor, &if_idxs, dst_idx);
 
                     else_stmt.as_ref().unwrap().gen_code(fun, regs, break_idxs, cont_idxs, actor)?;
 
@@ -292,7 +296,7 @@ impl StmtBox
                     then_stmt.gen_code(fun, regs, break_idxs, cont_idxs, actor)?;
 
                     let dst_idx = actor.insns.len();
-                    patch_jump(actor, if_idx, dst_idx);
+                    patch_jumps(actor, &if_idxs, dst_idx);
                 }
             }
 
@@ -305,12 +309,9 @@ impl StmtBox
 
                 // Evaluate the test expression
                 let test_idx = actor.insns.len();
-                let top = regs.top();
-                let test = test_expr.gen_code(fun, regs, actor, None)?;
 
                 // If the test fails, jump after the loop
-                break_idxs.push(emit(actor, Insn::if_false(test, 0)));
-                regs.free_to(top);
+                break_idxs.append(&mut gen_branch(test_expr, fun, regs, actor, false)?);
 
                 body_stmt.gen_code(fun, regs, &mut break_idxs, &mut cont_idxs, actor)?;
 
@@ -341,15 +342,12 @@ impl StmtBox
             }
 
             Stmt::Assert { test_expr } => {
-                let top = regs.top();
-                let test = test_expr.gen_code(fun, regs, actor, None)?;
-                let if_idx = emit(actor, Insn::if_true(test, 0));
-                regs.free_to(top);
+                let if_idxs = gen_branch(test_expr, fun, regs, actor, true)?;
 
                 gen_panic(actor, self.pos);
 
                 let dst_idx = actor.insns.len();
-                patch_jump(actor, if_idx, dst_idx);
+                patch_jumps(actor, &if_idxs, dst_idx);
             }
 
             // Variable declaration
@@ -589,6 +587,12 @@ impl ExprBox
             }
 
             Expr::Binary { op, lhs, rhs } => {
+                // A condition used as a value is built from the branch it
+                // would compile to, so that the two shapes agree
+                if is_cond_op(op) {
+                    return gen_cond_value(self, fun, regs, actor, dst);
+                }
+
                 return gen_bin_op(op, lhs, rhs, fun, regs, actor, dst);
             }
 
@@ -596,18 +600,15 @@ impl ExprBox
                 // Both arms have to land in the same register
                 let d = out!();
 
-                let top = regs.top();
-                let test = test_expr.gen_code(fun, regs, actor, None)?;
-                let if_idx = emit(actor, Insn::if_false(test, 0));
-                regs.free_to(top);
+                let if_idxs = gen_branch(test_expr, fun, regs, actor, false)?;
 
                 // Evaluate the then expression
                 gen_into(then_expr, fun, regs, actor, d)?;
                 let jump_idx = emit(actor, Insn::jmp(0));
 
-                // Patch the if_false to jump to the else clause
+                // Patch the test to jump to the else clause
                 let dst_idx = actor.insns.len();
-                patch_jump(actor, if_idx, dst_idx);
+                patch_jumps(actor, &if_idxs, dst_idx);
 
                 // Evaluate the else expression
                 gen_into(else_expr, fun, regs, actor, d)?;
@@ -647,6 +648,162 @@ impl ExprBox
 
         Ok(reg)
     }
+}
+
+/// Whether an operator produces a condition, which is generated as a
+/// branch and only turned back into a value where one is needed
+fn is_cond_op(op: &BinOp) -> bool
+{
+    use BinOp::*;
+    matches!(op, And | Or | Eq | Ne | Lt | Le | Gt | Ge)
+}
+
+/// Materialize a condition as a boolean value. The branch it compiles to
+/// is what decides the result, so a comparison costs no more here than it
+/// does as a test
+fn gen_cond_value(
+    expr: &ExprBox,
+    fun: &Function,
+    regs: &mut Regs,
+    actor: &mut Actor,
+    dst: Option<u16>,
+) -> Result<u16, ParseError>
+{
+    let d = match dst { Some(dst) => dst, None => regs.alloc() };
+
+    let jumps = gen_branch(expr, fun, regs, actor, true)?;
+    gen_value(actor, d, Value::FALSE);
+    let jmp_idx = emit(actor, Insn::jmp(0));
+
+    // The branch lands on the true case
+    let dst_idx = actor.insns.len();
+    patch_jumps(actor, &jumps, dst_idx);
+    gen_value(actor, d, Value::TRUE);
+
+    let dst_idx = actor.insns.len();
+    patch_jump(actor, jmp_idx, dst_idx);
+
+    Ok(d)
+}
+
+/// Emit a test that transfers control when `expr` evaluates to
+/// `jump_if_true`, and return the jumps that have to be patched to the
+/// target. A comparison compiles straight into a conditional branch here,
+/// rather than being materialized into a boolean that is then tested.
+fn gen_branch(
+    expr: &ExprBox,
+    fun: &Function,
+    regs: &mut Regs,
+    actor: &mut Actor,
+    jump_if_true: bool,
+) -> Result<Vec<usize>, ParseError>
+{
+    match expr.expr.as_ref() {
+        // Negation folds into the sense of the branch
+        Expr::Unary { op: UnOp::Not, child } => {
+            return gen_branch(child, fun, regs, actor, !jump_if_true);
+        }
+
+        // Short-circuiting operators branch directly, with no boolean
+        // in between. One of the two senses needs the first test to skip
+        // over the second, which is what the local patch below is for
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            if jump_if_true {
+                // Jump only if both hold
+                let skip = gen_branch(lhs, fun, regs, actor, false)?;
+                let jumps = gen_branch(rhs, fun, regs, actor, true)?;
+
+                let dst_idx = actor.insns.len();
+                patch_jumps(actor, &skip, dst_idx);
+                return Ok(jumps);
+            }
+
+            // Jump if either fails
+            let mut jumps = gen_branch(lhs, fun, regs, actor, false)?;
+            jumps.append(&mut gen_branch(rhs, fun, regs, actor, false)?);
+            return Ok(jumps);
+        }
+
+        Expr::Binary { op: BinOp::Or, lhs, rhs } => {
+            if jump_if_true {
+                // Jump if either holds
+                let mut jumps = gen_branch(lhs, fun, regs, actor, true)?;
+                jumps.append(&mut gen_branch(rhs, fun, regs, actor, true)?);
+                return Ok(jumps);
+            }
+
+            // Jump only if both fail
+            let skip = gen_branch(lhs, fun, regs, actor, true)?;
+            let jumps = gen_branch(rhs, fun, regs, actor, false)?;
+
+            let dst_idx = actor.insns.len();
+            patch_jumps(actor, &skip, dst_idx);
+            return Ok(jumps);
+        }
+
+        Expr::Binary { op, lhs, rhs } if cmp_branch_insn(op, jump_if_true).is_some() => {
+            let top = regs.top();
+            let a = lhs.gen_code(fun, regs, actor, None)?;
+            let b = rhs.gen_code(fun, regs, actor, None)?;
+            regs.free_to(top);
+
+            let (build, invert) = cmp_branch_insn(op, jump_if_true).unwrap();
+
+            // An ordered comparison has no negation to branch on, because
+            // NaN is unordered: `a < b` and `a >= b` are both false for it.
+            // Those tests jump on the sense they were written in, and a
+            // second jump carries the other case
+            if invert {
+                let taken = emit(actor, build(a, b, 0));
+                let not_taken = emit(actor, Insn::jmp(0));
+
+                let dst_idx = actor.insns.len();
+                patch_jump(actor, taken, dst_idx);
+                return Ok(vec![not_taken]);
+            }
+
+            return Ok(vec![emit(actor, build(a, b, 0))]);
+        }
+
+        _ => {}
+    }
+
+    // Anything else is evaluated and tested as a boolean
+    let top = regs.top();
+    let test = expr.gen_code(fun, regs, actor, None)?;
+    let insn = if jump_if_true { Insn::if_true(test, 0) } else { Insn::if_false(test, 0) };
+    let idx = emit(actor, insn);
+    regs.free_to(top);
+
+    Ok(vec![idx])
+}
+
+/// The branch a comparison compiles to, along with whether the code has to
+/// jump around it because the operator has no usable negation.
+///
+/// Equality inverts exactly, including for NaN, so `!=` is a real negation
+/// of `==`. The ordered comparisons do not, so branching on the negated
+/// operator would send NaN down the wrong path.
+fn cmp_branch_insn(op: &BinOp, jump_if_true: bool)
+    -> Option<(fn(u16, u16, i32) -> Insn, bool)>
+{
+    use BinOp::*;
+
+    let insn: fn(u16, u16, i32) -> Insn = match (op, jump_if_true) {
+        (Eq, true) | (Ne, false) => Insn::jeq,
+        (Ne, true) | (Eq, false) => Insn::jne,
+
+        (Lt, _) => Insn::jlt,
+        (Le, _) => Insn::jle,
+        (Gt, _) => Insn::jgt,
+        (Ge, _) => Insn::jge,
+
+        _ => return None,
+    };
+
+    let invert = !jump_if_true && matches!(op, Lt | Le | Gt | Ge);
+
+    Some((insn, invert))
 }
 
 /// Generate an expression into a specific register
@@ -804,41 +961,6 @@ fn gen_bin_op(
         return gen_assign(lhs, rhs, fun, regs, actor, true);
     }
 
-    // Logical AND (a && b), logical OR (a || b). Both operands have to be
-    // booleans, so the short-circuit value is the one that got us there
-    if *op == And || *op == Or {
-        let d = match dst { Some(dst) => dst, None => regs.alloc() };
-        let short = if *op == And { Value::FALSE } else { Value::TRUE };
-        let long = if *op == And { Value::TRUE } else { Value::FALSE };
-
-        // If a short-circuits, it decides the result
-        let top = regs.top();
-        let a = lhs.gen_code(fun, regs, actor, None)?;
-        let if0_idx = emit(actor, if *op == And { Insn::if_false(a, 0) } else { Insn::if_true(a, 0) });
-        regs.free_to(top);
-
-        // If b short-circuits, it decides the result
-        let b = rhs.gen_code(fun, regs, actor, None)?;
-        let if1_idx = emit(actor, if *op == And { Insn::if_false(b, 0) } else { Insn::if_true(b, 0) });
-        regs.free_to(top);
-
-        // Neither operand short-circuited
-        gen_value(actor, d, long);
-        let jmp_idx = emit(actor, Insn::jmp(0));
-
-        // Short-circuit lands here
-        let dst_idx = actor.insns.len();
-        patch_jump(actor, if0_idx, dst_idx);
-        patch_jump(actor, if1_idx, dst_idx);
-        gen_value(actor, d, short);
-
-        // Done label
-        let dst_idx = actor.insns.len();
-        patch_jump(actor, jmp_idx, dst_idx);
-
-        return Ok(d);
-    }
-
     // If the rhs is a constant integer that fits an immediate operand
     if let Expr::Int64(int_val) = rhs.expr.as_ref() {
         let imm: Result<i16, _> = (*int_val).try_into();
@@ -869,33 +991,6 @@ fn gen_bin_op(
     regs.free_to(top);
 
     let d = match dst { Some(dst) => dst, None => regs.alloc() };
-
-    // A comparison has no value-producing form, so it is materialized
-    // from the branch that tests it
-    let cmp = match op {
-        Eq => Some(Insn::jeq as fn(u16, u16, i32) -> Insn),
-        Ne => Some(Insn::jne as fn(u16, u16, i32) -> Insn),
-        Lt => Some(Insn::jlt as fn(u16, u16, i32) -> Insn),
-        Le => Some(Insn::jle as fn(u16, u16, i32) -> Insn),
-        Gt => Some(Insn::jgt as fn(u16, u16, i32) -> Insn),
-        Ge => Some(Insn::jge as fn(u16, u16, i32) -> Insn),
-        _ => None,
-    };
-
-    if let Some(cmp) = cmp {
-        let jcc_idx = emit(actor, cmp(a, b, 0));
-        gen_value(actor, d, Value::FALSE);
-        let jmp_idx = emit(actor, Insn::jmp(0));
-
-        let dst_idx = actor.insns.len();
-        patch_jump(actor, jcc_idx, dst_idx);
-        gen_value(actor, d, Value::TRUE);
-
-        let dst_idx = actor.insns.len();
-        patch_jump(actor, jmp_idx, dst_idx);
-
-        return Ok(d);
-    }
 
     let insn = match op {
         BitAnd => Insn::bit_and(d, a, b),
