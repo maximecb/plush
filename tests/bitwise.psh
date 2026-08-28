@@ -46,3 +46,21 @@ assert((-10 << 2) == -40);
 assert((-10 >> 2) == -3);
 
 $println("all bitwise tests passed");
+
+// A shift by a constant amount folds into the instruction, while a shift
+// by a variable one does not. The two forms have to agree everywhere,
+// including at the top of the range, where the result no longer fits a
+// fixnum and has to be boxed
+fun shift_l(x, n) { return x << n; }
+fun shift_r(x, n) { return x >> n; }
+
+assert((1 << 0) == shift_l(1, 0));
+assert((1 << 8) == shift_l(1, 8));
+assert((255 << 8) == shift_l(255, 8));
+assert((1 << 61) == shift_l(1, 61));
+assert((1 << 62) == shift_l(1, 62));
+assert((1 << 63) == shift_l(1, 63));
+
+assert((256 >> 8) == shift_r(256, 8));
+assert((12345 >> 62) == shift_r(12345, 62));
+assert((0 - 1 >> 63) == shift_r(0 - 1, 63));

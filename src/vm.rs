@@ -1907,6 +1907,40 @@ impl Actor
                     set_reg!(opnds.dst, r);
                 }
 
+                // Shift by a constant. The amount is below the word size
+                // by construction, so only the operand has to be checked
+                Opcode::lshift_imm => {
+                    let opnds = insns::lshift_imm::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+
+                    if v0.is_fixnum() {
+                        if let Some(r) = Value::try_fixnum(v0.as_fixnum() << opnds.shift) {
+                            set_reg!(opnds.dst, r);
+                            continue;
+                        }
+                    }
+
+                    let amount = Value::fixnum(opnds.shift as i64);
+                    let r = slow!("lshift", self.lshift_slow(v0, amount));
+                    set_reg!(opnds.dst, r);
+                }
+
+                Opcode::rshift_imm => {
+                    let opnds = insns::rshift_imm::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+
+                    // Shifting a fixnum right keeps it in range, so only
+                    // the bits the tag occupies have to be cleared
+                    if v0.is_fixnum() {
+                        set_reg!(opnds.dst, Value::fixnum(v0.as_fixnum() >> opnds.shift));
+                        continue;
+                    }
+
+                    let amount = Value::fixnum(opnds.shift as i64);
+                    let r = slow!("rshift", self.rshift_slow(v0, amount));
+                    set_reg!(opnds.dst, r);
+                }
+
                 // Logical negation
                 Opcode::not => {
                     let opnds = insns::not::decode(insn);

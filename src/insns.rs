@@ -401,6 +401,13 @@ def_opcodes! {
     // Bitwise operations
     lshift { dst: out_reg, a: reg, b: reg },
     rshift { dst: out_reg, a: reg, b: reg },
+
+    // Shift by a constant amount. Codegen only emits these for an amount
+    // below the word size, so the instruction needs no range check. A
+    // shift that overflows a fixnum still falls through to the slow path,
+    // which boxes the result
+    lshift_imm { dst: out_reg, a: reg, shift: u6 },
+    rshift_imm { dst: out_reg, a: reg, shift: u6 },
     bit_and { dst: out_reg, a: reg, b: reg },
     bit_or { dst: out_reg, a: reg, b: reg },
     bit_xor { dst: out_reg, a: reg, b: reg },
@@ -630,7 +637,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 58);
+        assert_eq!(NUM_OPCODES, 60);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.

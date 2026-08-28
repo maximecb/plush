@@ -1021,6 +1021,32 @@ fn gen_bin_op(
         return gen_assign(lhs, rhs, fun, regs, actor, true);
     }
 
+    // A shift by a constant amount folds into the instruction. Anything
+    // below the word size is accepted, which is what lets the instruction
+    // itself skip checking the amount
+    if matches!(op, LShift | RShift) {
+        let shift = const_value(rhs, actor)
+            .filter(|v| v.is_fixnum())
+            .map(|v| v.as_fixnum())
+            .filter(|s| *s >= 0 && *s < 64);
+
+        if let Some(shift) = shift {
+            let top = regs.top();
+            let a = lhs.gen_code(fun, regs, actor, None)?;
+            regs.free_to(top);
+
+            let d = match dst { Some(dst) => dst, None => regs.alloc() };
+            let shift = shift as u8;
+
+            actor.insns.push(match op {
+                LShift => Insn::lshift_imm(d, a, shift),
+                _ => Insn::rshift_imm(d, a, shift),
+            });
+
+            return Ok(d);
+        }
+    }
+
     // If the rhs is a constant integer that fits an immediate operand
     if let Some(imm) = const_value(rhs, actor).filter(|v| v.is_fixnum()) {
         let imm: Result<i16, _> = imm.as_fixnum().try_into();
