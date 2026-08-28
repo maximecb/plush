@@ -136,17 +136,31 @@ fn gen_value(actor: &mut Actor, dst: u16, val: Value)
     }
 }
 
-/// Whether a value fits the immediate an instruction can carry.
-/// The field sign-extends, so a value round-trips only if its top bits
-/// are already the sign extension of the low 32
+/// Whether a value can be carried in an instruction's immediate field.
+///
+/// A heap pointer never can, whatever its bits happen to be. The
+/// collector does not walk the instruction stream, so a pointer baked
+/// into one would not be updated when the object moves. Heap values go
+/// through the constant pool, which is a root the collector does trace.
+///
+/// Otherwise the field sign-extends, so a value round-trips only if its
+/// top bits are already the sign extension of the low 32
 fn fits_imm32(val: Value) -> bool
 {
+    if val.is_heap() {
+        return false;
+    }
+
     let raw = val.raw_bits();
     (raw as i32 as i64 as u64) == raw
 }
 
-/// The value a literal expression stands for, if it is one
-fn literal_value(expr: &ExprBox) -> Option<Value>
+/// The value an expression is known to hold at the time it is compiled.
+///
+/// Callers that need the value to fit in an instruction check that
+/// themselves, since whether it has to is a property of what they are
+/// emitting rather than of the expression
+fn const_value(expr: &ExprBox, actor: &Actor) -> Option<Value>
 {
     match expr.expr.as_ref() {
         Expr::Nil => Some(Value::NIL),
@@ -154,6 +168,15 @@ fn literal_value(expr: &ExprBox) -> Option<Value>
         Expr::False => Some(Value::FALSE),
         Expr::Int64(v) => Value::try_fixnum(*v),
         Expr::Float64(v) => Value::try_flonum(*v),
+
+        // Codegen runs when a function is first called, so a global the
+        // unit has already initialized holds the value the compiled code
+        // will see. A mutable one can change after this point, so only
+        // immutable globals are constants
+        Expr::Ref { decl: Decl::Global { idx, mutable: false }, .. } => {
+            actor.global_value(*idx)
+        }
+
         _ => None
     }
 }
@@ -260,7 +283,7 @@ impl StmtBox
             Stmt::Return(expr) => {
                 // Returning a constant carries it in the instruction,
                 // rather than loading it into a register first
-                match literal_value(expr).filter(|val| fits_imm32(*val)) {
+                match const_value(expr, actor).filter(|val| fits_imm32(*val)) {
                     Some(val) => {
                         actor.insns.push(Insn::ret_imm32(val.raw_bits() as i32));
                     }
@@ -999,8 +1022,8 @@ fn gen_bin_op(
     }
 
     // If the rhs is a constant integer that fits an immediate operand
-    if let Expr::Int64(int_val) = rhs.expr.as_ref() {
-        let imm: Result<i16, _> = (*int_val).try_into();
+    if let Some(imm) = const_value(rhs, actor).filter(|v| v.is_fixnum()) {
+        let imm: Result<i16, _> = imm.as_fixnum().try_into();
 
         if let Ok(imm) = imm {
             let build = match op {
@@ -1127,9 +1150,16 @@ fn gen_var_read(
             d
         }
 
-        Decl::Global { idx, .. } => {
+        Decl::Global { idx, mutable } => {
             let d = out!();
-            actor.insns.push(Insn::get_global(d, idx));
+
+            // An immutable global the unit has already initialized holds
+            // the same value the compiled code will see
+            match if mutable { None } else { actor.global_value(idx) } {
+                Some(val) if fits_imm32(val) => gen_value(actor, d, val),
+                _ => actor.insns.push(Insn::get_global(d, idx)),
+            }
+
             d
         }
 

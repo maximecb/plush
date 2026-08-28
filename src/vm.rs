@@ -766,6 +766,17 @@ impl Actor
         }
     }
 
+    /// Value a global holds right now, or `None` if it has not been
+    /// initialized. Codegen reads immutable globals through this: it runs
+    /// when a function is first called, by which point the unit that sets
+    /// them has usually run
+    pub fn global_value(&self, idx: u32) -> Option<Value>
+    {
+        let val = *self.globals.get(idx as usize)?;
+
+        if val.is_undef() { None } else { Some(val) }
+    }
+
     /// Text of an interned field or method name
     pub fn name_str(&self, name: NameId) -> &str
     {
