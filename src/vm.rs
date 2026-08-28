@@ -176,6 +176,12 @@ pub struct Actor
     // the pool and never walks the instruction stream
     consts: Vec<Value>,
 
+    // Slots of the constants that can be shared, keyed by their bits.
+    // Heap values are left out on purpose: their bits are an address the
+    // collector can change, and a later allocation landing on a freed one
+    // would match a slot holding something else
+    const_idxs: HashMap<u64, u32>,
+
     // Interned field and method names. Instructions name a field or a
     // method by id; `name_strs` holds the matching heap string, which the
     // dictionary paths need as a key
@@ -301,6 +307,7 @@ impl Actor
             classes: HashMap::default(),
             funs: HashMap::default(),
             consts: Vec::default(),
+            const_idxs: HashMap::default(),
             names: Vec::default(),
             name_ids: HashMap::default(),
             name_strs: Vec::default(),
@@ -975,8 +982,24 @@ impl Actor
     /// a constant is safe to hold from the moment it lands here
     pub fn push_const(&mut self, val: Value) -> u32
     {
+        // The same constant written twice can share one slot, which keeps
+        // the pool dense for both the collector and the cache
+        let shareable = !val.is_heap();
+
+        if shareable {
+            if let Some(idx) = self.const_idxs.get(&val.raw_bits()) {
+                return *idx;
+            }
+        }
+
         self.consts.push(val);
-        (self.consts.len() - 1) as u32
+        let idx = (self.consts.len() - 1) as u32;
+
+        if shareable {
+            self.const_idxs.insert(val.raw_bits(), idx);
+        }
+
+        idx
     }
 
     /// Intern a field or method name. The heap string a name needs as a
