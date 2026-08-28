@@ -2451,10 +2451,6 @@ impl Actor
                     do_return!(ret_val);
                 }
 
-                Opcode::ret_nil => {
-                    do_return!(Value::NIL);
-                }
-
                 Opcode::ret_imm32 => {
                     let opnds = insns::ret_imm32::decode(insn);
                     do_return!(Value::from_raw_bits(opnds.imm as i64 as u64));

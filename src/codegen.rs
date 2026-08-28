@@ -128,13 +128,33 @@ fn gen_value(actor: &mut Actor, dst: u16, val: Value)
 {
     let raw = val.raw_bits();
 
-    // load_imm32 sign-extends, so a value round-trips only if its top
-    // bits are already the sign extension of the low 32
-    if (raw as i32 as i64 as u64) == raw {
+    if fits_imm32(val) {
         emit(actor, Insn::load_imm32(dst, raw as i32));
     } else {
         let slot = actor.push_const(val);
         emit(actor, Insn::load_const(dst, slot));
+    }
+}
+
+/// Whether a value fits the immediate an instruction can carry.
+/// The field sign-extends, so a value round-trips only if its top bits
+/// are already the sign extension of the low 32
+fn fits_imm32(val: Value) -> bool
+{
+    let raw = val.raw_bits();
+    (raw as i32 as i64 as u64) == raw
+}
+
+/// The value a literal expression stands for, if it is one
+fn literal_value(expr: &ExprBox) -> Option<Value>
+{
+    match expr.expr.as_ref() {
+        Expr::Nil => Some(Value::NIL),
+        Expr::True => Some(Value::TRUE),
+        Expr::False => Some(Value::FALSE),
+        Expr::Int64(v) => Value::try_fixnum(*v),
+        Expr::Float64(v) => Value::try_flonum(*v),
+        _ => None
     }
 }
 
@@ -182,7 +202,7 @@ impl Function
                 // which is its first argument
                 actor.insns.push(Insn::ret(0));
             } else {
-                actor.insns.push(Insn::ret_nil());
+                actor.insns.push(Insn::ret_imm32(Value::NIL.raw_bits() as i32));
             }
         }
 
@@ -211,6 +231,10 @@ impl StmtBox
                 let top = regs.top();
 
                 match expr.expr.as_ref() {
+                    // An omitted clause, as a while loop has in place of
+                    // the init and increment a for loop would carry
+                    Expr::Nil => {}
+
                     // For assignment expressions as statements, the
                     // assigned value itself is not needed
                     Expr::Binary { op: BinOp::Assign, lhs, rhs } => {
@@ -234,10 +258,20 @@ impl StmtBox
             }
 
             Stmt::Return(expr) => {
-                let top = regs.top();
-                let src = expr.gen_code(fun, regs, actor, None)?;
-                actor.insns.push(Insn::ret(src));
-                regs.free_to(top);
+                // Returning a constant carries it in the instruction,
+                // rather than loading it into a register first
+                match literal_value(expr).filter(|val| fits_imm32(*val)) {
+                    Some(val) => {
+                        actor.insns.push(Insn::ret_imm32(val.raw_bits() as i32));
+                    }
+
+                    None => {
+                        let top = regs.top();
+                        let src = expr.gen_code(fun, regs, actor, None)?;
+                        actor.insns.push(Insn::ret(src));
+                        regs.free_to(top);
+                    }
+                }
             }
 
             Stmt::Block(stmts) => {
@@ -318,10 +352,13 @@ impl StmtBox
                 // Continue will jump here
                 let cont_idx = actor.insns.len();
 
-                // Evaluate the increment expression
-                let top = regs.top();
-                incr_expr.gen_code(fun, regs, actor, None)?;
-                regs.free_to(top);
+                // Evaluate the increment expression, which a while loop
+                // does not have
+                if !matches!(incr_expr.expr.as_ref(), Expr::Nil) {
+                    let top = regs.top();
+                    incr_expr.gen_code(fun, regs, actor, None)?;
+                    regs.free_to(top);
+                }
 
                 // Jump back to the loop test
                 let jmp_idx = emit(actor, Insn::jmp(0));

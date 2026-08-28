@@ -505,9 +505,6 @@ def_opcodes! {
     // Return the value found in a register
     ret { src: reg },
 
-    // Return nil, as functions with no explicit return value do
-    ret_nil {},
-
     // Return a sign-extended immediate as the raw bits of a value.
     // Covers nil, undef, booleans and fixnums in the +/- 2^29 range
     ret_imm32 { imm: i32 },
@@ -627,7 +624,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 59);
+        assert_eq!(NUM_OPCODES, 58);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
@@ -804,7 +801,7 @@ mod tests
         assert_eq!(Opcode::add.num_outs(), 1);
         assert_eq!(Opcode::jlt.num_opnds(), 3);
         assert_eq!(Opcode::jlt.num_outs(), 0);
-        assert_eq!(Opcode::ret_nil.num_opnds(), 0);
+        assert_eq!(Opcode::ret.num_opnds(), 1);
     }
 
     #[test]
@@ -821,7 +818,7 @@ mod tests
         assert_eq!(Insn::add(1, 2, 3).to_string(), "add r1, r2, r3");
         assert_eq!(Insn::add_imm16(1, 2, -3).to_string(), "add_imm16 r1, r2, -3");
         assert_eq!(Insn::jlt(4, 5, -6).to_string(), "jlt r4, r5, -6");
-        assert_eq!(Insn::ret_nil().to_string(), "ret_nil");
+        assert_eq!(Insn::ret_imm32(5).to_string(), "ret_imm32 5");
         assert_eq!(Insn::call_host(7, 8, 9).to_string(), "call_host 7, r8, 9");
     }
 }
