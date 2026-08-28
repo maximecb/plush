@@ -316,6 +316,7 @@ from ./font import *;
     -   `abs()`: Get the absolute value of this number.
     -   `min(other)`: Returns the minimum of this number and `other`.
     -   `max(other)`: Returns the maximum of this number and `other`.
+    -   `clip(min, max)`: Restrict the value if it's outside the range defined by `min` and `max`.
     -   `to_f()`: Converts the integer to a 64-bit float.
     -   `to_s()`: Converts the integer to a string.
     -   `to_hex(digits)`: Get a zero-padded and capitalized hexadecimal string representation of this integer.`
@@ -334,7 +335,7 @@ from ./font import *;
     -   `ln()`: Returns the natural logarithm of the number.
     -   `min(other)`: Returns the minimum of this number and `other`.
     -   `max(other)`: Returns the maximum of this number and `other`.
-    -   `clip(min, max)`: Restrict the value of if it's outside the range defined by `min` and `max`.
+    -   `clip(min, max)`: Restrict the value if it's outside the range defined by `min` and `max`.
     -   `to_f()`: Returns the float itself. Provided so that code can accept both integers and floats.
     -   `to_s()`: Returns a string representation of the float.
     -   `format_decimals(n)`: Produce a string representation with a given number of decimals.

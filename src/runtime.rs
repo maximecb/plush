@@ -51,6 +51,19 @@ pub(crate) fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Val
     Ok(actor.int64(v.max(other)))
 }
 
+pub(crate) fn int64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> Result<Value, String>
+{
+    let v = unwrap_i64!(v);
+    let min = unwrap_i64!(min);
+    let max = unwrap_i64!(max);
+
+    if min > max {
+        return Err("min must be less than or equal to max in clip()".into());
+    }
+
+    Ok(actor.int64(v.clamp(min, max)))
+}
+
 pub(crate) fn int64_to_f(actor: &mut Actor, v: Value) -> Result<Value, String>
 {
     let v = unwrap_i64!(v);
@@ -408,6 +421,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::Int64, "abs") => int64_abs,
         (Type::Int64, "min") => int64_min,
         (Type::Int64, "max") => int64_max,
+        (Type::Int64, "clip") => int64_clip,
         (Type::Int64, "to_f") => int64_to_f,
         (Type::Int64, "to_s") => int64_to_s,
         (Type::Int64, "to_hex") => int64_to_hex,

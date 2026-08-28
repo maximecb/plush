@@ -185,6 +185,7 @@ def_host_fns! {
         abs: int64_abs(1),
         min: int64_min(2),
         max: int64_max(2),
+        clip: int64_clip(3),
         to_f: int64_to_f(1),
         to_s: int64_to_s(1),
         to_hex: int64_to_hex(2),
