@@ -250,11 +250,15 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
         let xa = ((x0 + dy * inv_slope1).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
         let xb = ((x0 + dy * inv_slope2).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
 
-        // Both edges radiate from p0, so which of the two is the left one
-        // is fixed for the whole half and can be decided once
+        // Both edges radiate from p0, so which of the two is the left one is
+        // fixed for the whole half and the winding decides it: a positive
+        // determinant puts p1 right of p0p2, making the edge to p2 the left
+        // one. Comparing the two edge positions instead would tie whenever
+        // they are still less than a fixed-point step apart, just below p0,
+        // and drop the whole half by walking the edges crossed over.
         let var cur_xl = xa; let var slope_l = slope1_fx;
         let var cur_xr = xb; let var slope_r = slope2_fx;
-        if (xb < xa) {
+        if (det > 0.0) {
             cur_xl = xb; slope_l = slope2_fx;
             cur_xr = xa; slope_r = slope1_fx;
         }
@@ -309,10 +313,11 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
         let xa = ((x1 + (start_scanline_y_bot + 1 - py1) * inv_slope3).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
         let xb = ((x0 + (start_scanline_y_bot + 1 - py0) * inv_slope2).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
 
-        // Both edges converge on p2, so the left/right order is fixed here too
+        // Both edges converge on p2, so the left/right order is fixed here
+        // too, and the same determinant decides it
         let var cur_xl = xa; let var slope_l = slope3_fx;
         let var cur_xr = xb; let var slope_r = slope2_fx;
-        if (xb < xa) {
+        if (det > 0.0) {
             cur_xl = xb; slope_l = slope2_fx;
             cur_xr = xa; slope_r = slope3_fx;
         }
