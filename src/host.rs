@@ -254,7 +254,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
     }
 
     match HostFnId::from_name(name) {
-        Some(host_fn) => Expr::HostFn(host_fn.get()),
+        Some(host_fn) => Expr::HostFn(host_fn),
         None => panic!("unknown host constant `{name}`")
     }
 }

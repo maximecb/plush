@@ -4,6 +4,7 @@ use crate::vm::Actor;
 use crate::value::*;
 use crate::str::Str;
 use crate::*;
+use crate::host::HostFnId;
 
 pub(crate) fn identity_method(_actor: &mut Actor, self_val: Value) -> Result<Value, String>
 {
@@ -390,10 +391,9 @@ pub(crate) fn dict_has(_actor: &mut Actor, d: Value, key: Value) -> Result<Value
 }
 
 /// Get the method associated with a core value
-pub fn get_method(val: Value, method_name: &str) -> Value
+pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
 {
     use crate::host::HostFnId::*;
-
 
     // Dispatch on the language-level type first, so that a value that
     // has no methods at all costs one branch and no string compares
@@ -469,14 +469,14 @@ pub fn get_method(val: Value, method_name: &str) -> Value
             (STRING_ID, "from_codepoint") => string_from_codepoint,
             (ARRAY_ID, "with_size") => array_with_size,
             (BYTEARRAY_ID, "with_size") => ba_with_size,
-            _ => return Value::NIL,
+            _ => return None,
         }
 
         // Method not defined on type
-        _ => return Value::NIL,
+        _ => return None,
     };
 
-    Value::host_fn(f.get())
+    Some(f)
 }
 
 pub fn get_class_id(val: Value) -> ClassId

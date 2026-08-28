@@ -13,6 +13,7 @@ use crate::closure::Closure;
 use crate::array::Array;
 use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
+use crate::insns::NameId;
 use crate::gc::{undo_forwarding, Copier, StrTable, UndoLog};
 use crate::host::*;
 use crate::str::Str;
@@ -45,7 +46,9 @@ pub enum Insn
     #[allow(dead_code)]
     nop,
 
-    // Push a value to the stack
+    // Push an immediate value to the stack. Heap values go through
+    // push_const instead, so that the instruction stream holds no
+    // pointers for the collector to chase
     push { val: Value },
 
     // Stack manipulation
@@ -124,8 +127,8 @@ pub enum Insn
     instanceof { class_id: ClassId },
 
     // Get/set field
-    get_field { field: Value, class_id: ClassId, slot_idx: u32 },
-    set_field { field: Value, class_id: ClassId, slot_idx: u32 },
+    get_field { name: NameId, class_id: ClassId, slot_idx: u32 },
+    set_field { name: NameId, class_id: ClassId, slot_idx: u32 },
 
     // Get/set indexed element
     get_index,
@@ -160,16 +163,19 @@ pub enum Insn
 
     // Call a method on an object
     // call_method (self, arg0, ..., argN)
-    call_method { name: Value, argc: u8 },
+    call_method { name: NameId, argc: u8 },
 
     // Call a method with a previously known pc
-    call_method_pc { name: Value, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
+    call_method_pc { name: NameId, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
 
     // Call a host method on a primitive, guarded on the type tag
-    call_method_host { name: Value, argc: u8, type_tag: Type, host_fn: &'static HostFn },
+    call_method_host { name: NameId, argc: u8, type_tag: Type, host_fn: HostFnId },
 
     // Return
     ret,
+
+    // Push a heap constant from the actor's constant pool
+    push_const { idx: u32 },
 }
 
 // This error macro is to be used inside host functions
@@ -267,6 +273,18 @@ pub struct Actor
 
     // Array of compiled instructions
     pub(crate) insns: Vec<Insn>,
+
+    // Heap constants the compiled code refers to. Instructions hold an
+    // index into this rather than a heap pointer, so the collector traces
+    // the pool and never walks the instruction stream
+    consts: Vec<Value>,
+
+    // Interned field and method names. Instructions name a field or a
+    // method by id; `name_strs` holds the matching heap string, which the
+    // dictionary paths need as a key
+    names: Vec<String>,
+    name_ids: HashMap<String, NameId>,
+    name_strs: Vec<Value>,
 }
 
 /// Why an integer operation produced no result
@@ -379,6 +397,10 @@ impl Actor
             insns: Vec::default(),
             classes: HashMap::default(),
             funs: HashMap::default(),
+            consts: Vec::default(),
+            names: Vec::default(),
+            name_ids: HashMap::default(),
+            name_strs: Vec::default(),
         }
     }
 
@@ -662,36 +684,221 @@ impl Actor
         entry
     }
 
+    /// Cache a copy of a class in this actor, copying it from the parent
+    /// VM the first time it is asked for. Splitting this out from
+    /// `with_class` lets a caller borrow the class alongside something
+    /// else the actor owns, such as an interned name
+    fn load_class(&mut self, class_id: ClassId)
+    {
+        if !self.classes.contains_key(&class_id) {
+            self.copy_class(class_id);
+        }
+    }
+
+    /// Copy a class out of the parent VM. This locks the VM and clones,
+    /// and happens once per class, so it is kept out of line rather than
+    /// inlined into the interpreter at every site that touches a class
+    #[cold]
+    #[inline(never)]
+    fn copy_class(&mut self, class_id: ClassId)
+    {
+        // Borrow the VM and clone the class
+        let vm = self.vm.lock().unwrap();
+
+        // Class ids come from the compiler and from the runtime itself,
+        // so a missing class means we are at fault, not the running program
+        let class = match vm.prog.classes.get(&class_id) {
+            Some(class) => class.clone(),
+            None => panic!("internal error: could not find class with id={:?}", class_id),
+        };
+        drop(vm);
+
+        self.classes.insert(class_id, class);
+    }
+
     /// Compute something requiring access to a class, lazily
     /// copying the class from the parent VM as needed
     pub fn with_class<F, T>(&mut self, class_id: ClassId, f: F) -> T
     where F: FnOnce(&Class) -> T
     {
-        if let Some(class) = self.classes.get(&class_id) {
-            return f(class);
+        self.load_class(class_id);
+        f(&self.classes[&class_id])
+    }
+
+    /// Text of an interned field or method name
+    pub fn name_str(&self, name: NameId) -> &str
+    {
+        &self.names[name as usize]
+    }
+
+    /// Get the slot index for a field named by an interned name
+    fn get_slot_idx_of(&mut self, class_id: ClassId, name: NameId) -> Option<usize>
+    {
+        self.load_class(class_id);
+        self.classes[&class_id].fields.get(self.name_str(name)).copied()
+    }
+
+    /// Get the function id of a method named by an interned name
+    fn get_method_of(&mut self, class_id: ClassId, name: NameId) -> Option<FunId>
+    {
+        self.load_class(class_id);
+        self.classes[&class_id].methods.get(self.name_str(name)).copied()
+    }
+
+    /// Resolve a field read the cached path did not handle: a dict, an
+    /// array, a string, or an object of a class this site has not seen.
+    /// Kept out of line so that the interpreter loop carries only the
+    /// cached case
+    #[inline(never)]
+    fn get_field_slow(&mut self, obj: Value, name: NameId, insn_pc: usize) -> Result<Value, String>
+    {
+        if !obj.is_heap() {
+            return Err(format!("get_field on non-object value {:?}", obj));
         }
 
-        // Borrow the VM and clone the class
-        let vm = self.vm.lock().unwrap();
+        // The block header says what the value points at, so one load
+        // and one switch settle the type
+        match obj.heap_tag() {
+            Tag::Object => {
+                let o = obj.as_obj();
 
-        let class = vm.prog.classes.get(&class_id);
+                let slot_idx = match self.get_slot_idx_of(o.class_id, name) {
+                    Some(slot_idx) => slot_idx,
+                    None => {
+                        let class_name = self.get_class_name(o.class_id);
+                        let field_names = self.get_field_names(o.class_id);
+                        return Err(format!(
+                            "class `{}` has no field `{}`, known fields are: {}",
+                            class_name,
+                            self.name_str(name),
+                            field_names,
+                        ));
+                    }
+                };
 
-        // Class ids come from the compiler and from the runtime itself,
-        // so a missing class means we are at fault, not the running program
-        if class.is_none() {
-            panic!("internal error: could not find class with id={:?}", class_id);
+                // Update the cache
+                self.insns[insn_pc] = Insn::get_field {
+                    name,
+                    class_id: o.class_id,
+                    slot_idx: slot_idx as u32,
+                };
+
+                let val = o.get(slot_idx);
+
+                if val.is_undef() {
+                    return Err(format!("object field not initialized `{}`", self.name_str(name)));
+                }
+
+                Ok(val)
+            }
+
+            Tag::Dict => {
+                let key = self.name_str(name);
+
+                match obj.as_dict().get(key) {
+                    Some(v) => Ok(v),
+                    None => Err(format!("key '{}' not found in dict", key))
+                }
+            }
+
+            Tag::Array => {
+                match self.name_str(name) {
+                    "len" => Ok(Value::fixnum(obj.as_arr().len() as i64)),
+                    _ => Err("field not found on array".to_string())
+                }
+            }
+
+            Tag::ByteArray => {
+                match self.name_str(name) {
+                    "len" => Ok(Value::fixnum(obj.as_ba().num_bytes() as i64)),
+                    _ => Err("field not found on bytearray".to_string())
+                }
+            }
+
+            Tag::Str => {
+                match self.name_str(name) {
+                    "len" => Ok(Value::fixnum(obj.as_str().len() as i64)),
+                    _ => Err("field not found on string".to_string())
+                }
+            }
+
+            _ => Err(format!("get_field on non-object value {:?}", obj))
+        }
+    }
+
+    /// Resolve a field write the cached path did not handle: a dict, or
+    /// an object of a class this site has not seen
+    #[inline(never)]
+    fn set_field_slow(&mut self, mut obj: Value, mut val: Value, name: NameId, insn_pc: usize)
+        -> Result<(), String>
+    {
+        if let Some(o) = obj.to_obj() {
+            let slot_idx = match self.get_slot_idx_of(o.class_id, name) {
+                Some(slot_idx) => slot_idx,
+                None => {
+                    let class_name = self.get_class_name(o.class_id);
+                    let field_names = self.get_field_names(o.class_id);
+                    return Err(format!(
+                        "class `{}` has no field `{}`, known fields are: {}",
+                        class_name,
+                        self.name_str(name),
+                        field_names,
+                    ));
+                }
+            };
+
+            // Update the cache
+            self.insns[insn_pc] = Insn::set_field {
+                name,
+                class_id: o.class_id,
+                slot_idx: slot_idx as u32,
+            };
+
+            o.set(slot_idx, val);
+            return Ok(());
         }
 
-        let class = class.unwrap().clone();
-        drop(vm);
+        if obj.is_dict() {
+            let alloc_size = obj.as_dict().will_allocate();
+            self.gc_check(alloc_size, &mut [&mut obj, &mut val]);
 
-        let ret = f(&class);
+            // Read after the check: the collector moves the interned
+            // name along with everything else
+            let key = self.name_strs[name as usize];
+            obj.as_dict().set(key.as_string() as *const Str, val, &mut self.alloc);
+            return Ok(());
+        }
 
-        // Save a cached copy of the class to avoid
-        // locking if needed again
-        self.classes.insert(class_id, class);
+        Err("set_field on non-object/dict value".to_string())
+    }
 
-        ret
+    /// Add a heap constant to this actor's pool and return its index.
+    /// The pool is a GC root, so a constant is safe to hold from the
+    /// moment it lands here
+    pub fn push_const(&mut self, val: Value) -> u32
+    {
+        debug_assert!(val.is_heap());
+        self.consts.push(val);
+        (self.consts.len() - 1) as u32
+    }
+
+    /// Intern a field or method name. The heap string a name needs as a
+    /// dict key is allocated once, when the name is first seen, and is
+    /// rooted from then on
+    pub fn intern_name(&mut self, name: &str) -> NameId
+    {
+        if let Some(id) = self.name_ids.get(name) {
+            return *id;
+        }
+
+        self.gc_check(Str::alloc_size(name.len()), &mut []);
+        let val = Str::new(name, &mut self.alloc);
+
+        let id = self.names.len() as NameId;
+        self.names.push(name.to_string());
+        self.name_ids.insert(name.to_string(), id);
+        self.name_strs.push(val);
+        id
     }
 
     /// Get the class name for a given class
@@ -850,20 +1057,14 @@ impl Actor
                 frame.fun = copier.forward(frame.fun);
             }
 
-            // Heap values referenced in instructions
-            for insn in &mut self.insns {
-                match insn {
-                    Insn::push { val } |
-                    Insn::get_field { field: val, .. } |
-                    Insn::set_field { field: val, .. } |
-                    Insn::call_method { name: val, .. } |
-                    Insn::call_method_pc { name: val, .. } |
-                    Insn::call_method_host { name: val, .. } => {
-                        *val = copier.forward(*val);
-                    }
-
-                    _ => {}
-                }
+            // Constants and interned names the compiled code refers to.
+            // Instructions index into these, so the instruction stream
+            // itself holds nothing the collector has to look at
+            for val in &mut self.consts {
+                *val = copier.forward(*val);
+            }
+            for val in &mut self.name_strs {
+                *val = copier.forward(*val);
             }
 
             // Extra roots supplied by the user
@@ -1400,7 +1601,13 @@ impl Actor
                 }
 
                 Insn::push { val } => {
+                   debug_assert!(!val.is_heap());
                    self.stack.push(val);
+                }
+
+                Insn::push_const { idx } => {
+                    let val = self.consts[idx as usize];
+                    self.stack.push(val);
                 }
 
                 Insn::dup => {
@@ -1730,52 +1937,22 @@ impl Actor
                 }
 
                 // Set object field
-                Insn::set_field { field, class_id, slot_idx } => {
-                    let mut val = pop!();
-                    let mut obj = pop!();
+                Insn::set_field { name, class_id, slot_idx } => {
+                    let val = pop!();
+                    let obj = pop!();
 
-                    if let Some(obj) = obj.to_obj() {
-                        if class_id == obj.class_id {
-                            obj.set(slot_idx as usize, val);
-                        } else {
-                            let slot_idx = match self.get_slot_idx(obj.class_id, field.as_str()) {
-                                Some(slot_idx) => slot_idx,
-                                None => error!(
-                                    "set_field",
-                                    "class `{}` has no field `{}`, known fields are: {}",
-                                    self.get_class_name(obj.class_id),
-                                    field.as_str(),
-                                    self.get_field_names(obj.class_id),
-                                )
-                            };
-                            let class_id = obj.class_id;
-
-                            // Update the cache
-                            self.insns[pc - 1] = Insn::set_field {
-                                field,
-                                class_id,
-                                slot_idx: slot_idx as u32,
-                            };
-
-                            obj.set(slot_idx, val);
+                    // Fast path: an object of the class this site last
+                    // resolved. Everything else goes out of line, so that
+                    // the interpreter loop carries only this
+                    if let Some(o) = obj.to_obj() {
+                        if class_id == o.class_id {
+                            o.set(slot_idx as usize, val);
+                            continue;
                         }
                     }
-                    else if obj.is_dict() {
-                        let alloc_size = obj.as_dict().will_allocate();
 
-                        // The field name is reachable from the instruction
-                        // stream, which the collector updates, so it has to
-                        // be read back after the check
-                        let mut field = field;
-                        self.gc_check(
-                            alloc_size,
-                            &mut [&mut obj, &mut val, &mut field]
-                        );
-
-                        obj.as_dict().set(field.as_string() as *const Str, val, &mut self.alloc);
-                    }
-                    else {
-                        error!("set_field", "set_field on non-object/dict value")
+                    if let Err(msg) = self.set_field_slow(obj, val, name, pc - 1) {
+                        error!("set_field", "{}", msg);
                     }
                 }
 
@@ -1855,85 +2032,27 @@ impl Actor
                 }
 
                 // Get object field
-                Insn::get_field { field, class_id, slot_idx } => {
+                Insn::get_field { name, class_id, slot_idx } => {
                     let obj = pop!();
 
-                    if !obj.is_heap() {
-                        error!("get_field", "get_field on non-object value {:?}", obj);
+                    // Fast path: an object of the class this site last
+                    // resolved. Everything else goes out of line, so that
+                    // the interpreter loop carries only this
+                    if let Some(o) = obj.to_obj() {
+                        if class_id == o.class_id {
+                            let val = o.get(slot_idx as usize);
+
+                            if !val.is_undef() {
+                                push!(val);
+                                continue;
+                            }
+                        }
                     }
 
-                    // The block header says what the value points at, so
-                    // one load and one switch settle the type
-                    let val = match obj.heap_tag() {
-                        Tag::Object => {
-                            let obj = obj.as_obj();
-
-                            // If the class id doesn't match the cache, update it
-                            let val = if class_id == obj.class_id {
-                                obj.get(slot_idx as usize)
-                            } else {
-                                let slot_idx = match self.get_slot_idx(obj.class_id, field.as_str()) {
-                                    Some(slot_idx) => slot_idx,
-                                    None => error!(
-                                        "get_field",
-                                        "class `{}` has no field `{}`, known fields are: {}",
-                                        self.get_class_name(obj.class_id),
-                                        field.as_str(),
-                                        self.get_field_names(obj.class_id),
-                                    )
-                                };
-                                let class_id = obj.class_id;
-
-                                // Update the cache
-                                self.insns[pc - 1] = Insn::get_field {
-                                    field,
-                                    class_id,
-                                    slot_idx: slot_idx as u32,
-                                };
-
-                                obj.get(slot_idx as usize)
-                            };
-
-                            if val.is_undef() {
-                                error!("get_field", "object field not initialized `{}`", field.as_str());
-                            }
-
-                            val
-                        }
-
-                        Tag::Dict => {
-                            let key = field.as_str();
-
-                            match obj.as_dict().get(key) {
-                                Some(v) => v,
-                                None => error!("get_field", "key '{}' not found in dict", key)
-                            }
-                        }
-
-                        Tag::Array => {
-                            match field.as_str() {
-                                "len" => Value::fixnum(obj.as_arr().len() as i64),
-                                _ => error!("get_field", "field not found on array")
-                            }
-                        }
-
-                        Tag::ByteArray => {
-                            match field.as_str() {
-                                "len" => Value::fixnum(obj.as_ba().num_bytes() as i64),
-                                _ => error!("get_field", "field not found on bytearray")
-                            }
-                        }
-
-                        Tag::Str => {
-                            match field.as_str() {
-                                "len" => Value::fixnum(obj.as_str().len() as i64),
-                                _ => error!("get_field", "field not found on string")
-                            }
-                        }
-
-                        _ => error!("get_field", "get_field on non-object value {:?}", obj)
+                    let val = match self.get_field_slow(obj, name, pc - 1) {
+                        Ok(val) => val,
+                        Err(msg) => error!("get_field", "{}", msg),
                     };
-
                     push!(val);
                 }
 
@@ -2120,10 +2239,10 @@ impl Actor
                             // the callee and collect, leaving obj behind
                             let class_id = obj.class_id;
 
-                            let fun_id = match self.get_method(class_id, name.as_str()) {
+                            let fun_id = match self.get_method_of(class_id, name) {
                                 None => error!(
                                     "call to method `{}`, not found on class `{}`",
-                                    name.as_str(),
+                                    self.name_str(name).to_string(),
                                     self.get_class_name(class_id)
                                 ),
                                 Some(fun_id) => fun_id,
@@ -2132,15 +2251,8 @@ impl Actor
                             let this_pc = pc - 1;
                             let fun_entry = call_fun!(Value::fun(fun_id), argc + 1);
 
-                            // Patch this instruction to avoid the method lookup
-                            // next time. The name is read back out of the
-                            // instruction rather than reused, since a collection
-                            // in the call above would have moved the string.
-                            let name = match self.insns[this_pc] {
-                                Insn::call_method { name, .. } => name,
-                                _ => panic!("call_method instruction expected")
-                            };
-
+                            // Patch this instruction to avoid the method
+                            // lookup next time
                             self.insns[this_pc] = Insn::call_method_pc {
                                 name,
                                 argc: argc.try_into().unwrap(),
@@ -2154,11 +2266,9 @@ impl Actor
                         // Call to a primitive e.g. Int64/Float64/immediate (not an object)
                         None => {
                             // Lookup the method to call
-                            let fun = crate::runtime::get_method(self_val, name.as_str());
-
-                            let host_fn = match fun.to_host_fn() {
-                                None => error!("call to unknown method `{}`", name.as_str()),
-                                Some(f) => f,
+                            let host_fn = match crate::runtime::get_method(self_val, self.name_str(name)) {
+                                None => error!("call to unknown method `{}`", self.name_str(name)),
+                                Some(id) => id,
                             };
 
                             if argc as usize + 1 > self.stack.len() - bp {
@@ -2180,7 +2290,7 @@ impl Actor
                                 };
                             }
 
-                            if let Err(msg) = self.call_host(host_fn, argc as usize + 1) {
+                            if let Err(msg) = self.call_host(host_fn.get(), argc as usize + 1) {
                                 error!("{}", msg);
                             }
                         }
@@ -2228,7 +2338,7 @@ impl Actor
 
                     // Guard that self still has the type the method was found on
                     if self_val.type_of() == type_tag {
-                        if let Err(msg) = self.call_host(host_fn, argc as usize + 1) {
+                        if let Err(msg) = self.call_host(host_fn.get(), argc as usize + 1) {
                             error!("{}", msg);
                         }
 

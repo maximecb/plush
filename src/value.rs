@@ -58,7 +58,8 @@
 //! # Assumptions
 //!
 //! - Heap blocks are 8-byte aligned (`alloc::ALIGN`), leaving 3 low bits.
-//! - Pointers fit in 56 bits, so a `&'static HostFn` fits an immediate.
+//! - Host functions are held as a table index, not a pointer, so that the
+//!   whole value fits the immediate range an instruction can carry.
 //! - A heap pointer is never null, so no tagged word collides with an
 //!   immediate or with `nil`.
 //! - Accessors hand out references into the heap. The collector moves
@@ -71,7 +72,8 @@ use crate::ast::{ClassId, FunId};
 use crate::bytearray::ByteArray;
 use crate::closure::Closure;
 use crate::dict::Dict;
-use crate::host::HostFn;
+use crate::host::{HostFn, HostFnId, NUM_HOST_FNS};
+use std::mem::transmute;
 use crate::object::Object;
 use crate::str::Str;
 
@@ -306,22 +308,31 @@ impl Value
         if self.is_class() { Some(self.as_class()) } else { None }
     }
 
+    /// Host functions are held by table index rather than by pointer, so
+    /// that the whole value fits in the immediate range an instruction
+    /// can carry
     #[inline(always)]
-    pub fn host_fn(f: &'static HostFn) -> Value
+    pub fn host_fn(id: HostFnId) -> Value
     {
-        let p = f as *const HostFn as u64;
-        debug_assert!(p >> (64 - IMM_SHIFT) == 0);
-        Value((p << IMM_SHIFT) | IMM_HOSTFN)
+        Value(((id as u64) << IMM_SHIFT) | IMM_HOSTFN)
     }
 
     #[inline(always)]
     pub fn is_host_fn(self) -> bool { self.0 as u8 as u64 == IMM_HOSTFN }
 
     #[inline(always)]
-    pub fn as_host_fn(self) -> &'static HostFn
+    pub fn as_host_fn_id(self) -> HostFnId
     {
         debug_assert!(self.is_host_fn());
-        unsafe { &*((self.0 >> IMM_SHIFT) as *const HostFn) }
+        let idx = (self.0 >> IMM_SHIFT) as u16;
+        debug_assert!((idx as usize) < NUM_HOST_FNS);
+        unsafe { transmute(idx) }
+    }
+
+    #[inline(always)]
+    pub fn as_host_fn(self) -> &'static HostFn
+    {
+        self.as_host_fn_id().get()
     }
 
     #[inline(always)]

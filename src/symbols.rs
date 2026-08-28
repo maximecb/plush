@@ -689,6 +689,7 @@ impl ExprBox
 
                     // If the callee is a host function, check the arity
                     Expr::HostFn(host_fn) => {
+                        let host_fn = host_fn.get();
                         if host_fn.num_params() != args.len() {
                             return ParseError::with_pos(
                                 &format!(

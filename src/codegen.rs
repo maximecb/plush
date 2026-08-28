@@ -17,6 +17,15 @@ pub struct CompiledFun
     pub num_locals: usize,
 }
 
+/// Emit a push of a heap constant. The value moves into the actor's
+/// constant pool, which roots it, so nothing later in codegen has to
+/// keep it alive across an allocation
+fn gen_const(val: Value, actor: &mut Actor)
+{
+    let idx = actor.push_const(val);
+    actor.insns.push(Insn::push_const { idx });
+}
+
 // Patch a jump instruction
 fn patch_jump(code: &mut Vec<Insn>, jmp_idx: usize, dst_idx: usize)
 {
@@ -328,33 +337,34 @@ impl ExprBox
             Expr::HostFn(f) => actor.insns.push(Insn::push { val: Value::host_fn(*f) }),
 
             // Constants that don't fit in an immediate are boxed in the
-            // heap the code is compiled for, and traced from there
+            // heap the code is compiled for, and held by the constant
+            // pool, which is what the collector traces them from
             Expr::Int64(v) => {
-                let val = match Value::try_fixnum(*v) {
-                    Some(val) => val,
+                match Value::try_fixnum(*v) {
+                    Some(val) => actor.insns.push(Insn::push { val }),
                     None => {
                         actor.gc_check(HEADER_SIZE + size_of::<i64>(), &mut []);
-                        actor.alloc.heap_int64(*v)
+                        let val = actor.alloc.heap_int64(*v);
+                        gen_const(val, actor);
                     }
-                };
-                actor.insns.push(Insn::push { val });
+                }
             }
 
             Expr::Float64(v) => {
-                let val = match Value::try_flonum(*v) {
-                    Some(val) => val,
+                match Value::try_flonum(*v) {
+                    Some(val) => actor.insns.push(Insn::push { val }),
                     None => {
                         actor.gc_check(HEADER_SIZE + size_of::<f64>(), &mut []);
-                        actor.alloc.heap_float64(*v)
+                        let val = actor.alloc.heap_float64(*v);
+                        gen_const(val, actor);
                     }
-                };
-                actor.insns.push(Insn::push { val });
+                }
             }
 
             Expr::String(s) => {
                 actor.gc_check(Str::alloc_size(s.len()), &mut []);
                 let val = Str::new(&s, &mut actor.alloc);
-                actor.insns.push(Insn::push { val });
+                gen_const(val, actor);
             }
 
             Expr::ByteArray(bytes) => {
@@ -362,7 +372,7 @@ impl ExprBox
                 actor.gc_check(ByteArray::alloc_size(bytes.len()), &mut []);
                 let ba = ByteArray::with_size(bytes.len(), &mut actor.alloc);
                 unsafe { ba.as_ba().get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-                actor.insns.push(Insn::push { val: ba });
+                gen_const(ba, actor);
                 actor.insns.push(Insn::ba_clone);
             }
 
@@ -394,10 +404,9 @@ impl ExprBox
 
             Expr::Member { base, field } => {
                 base.gen_code(fun, actor)?;
-                actor.gc_check(Str::alloc_size(field.len()), &mut []);
-                let field = Str::new(&field, &mut actor.alloc);
+                let name = actor.intern_name(field);
                 actor.insns.push(Insn::get_field {
-                    field,
+                    name,
                     class_id: Default::default(),
                     slot_idx: Default::default(),
                 });
@@ -476,8 +485,7 @@ impl ExprBox
                             arg.gen_code(fun, actor)?;
                         }
 
-                        actor.gc_check(Str::alloc_size(field.len()), &mut []);
-                        let name = Str::new(&field, &mut actor.alloc);
+                        let name = actor.intern_name(field);
                         actor.insns.push(Insn::call_method { name, argc });
                     }
 
@@ -570,11 +578,10 @@ fn gen_dict_expr(
 
         expr.gen_code(fun, actor)?;
 
-        actor.gc_check(Str::alloc_size(name.len()), &mut []);
-        let field_name = Str::new(&name, &mut actor.alloc);
+        let field_name = actor.intern_name(name);
 
         actor.insns.push(Insn::set_field {
-            field: field_name,
+            name: field_name,
             class_id: Default::default(),
             slot_idx: Default::default(),
         });
@@ -829,13 +836,10 @@ fn gen_assign(
                 rhs.gen_code(fun, actor)?;
             }
 
-            // Allocated after the operands: generating them can collect,
-            // and a name held across that would be left dangling
-            actor.gc_check(Str::alloc_size(field.len()), &mut []);
-            let field = Str::new(&field, &mut actor.alloc);
+            let name = actor.intern_name(field);
 
             actor.insns.push(Insn::set_field {
-                field,
+                name,
                 class_id: Default::default(),
                 slot_idx: Default::default(),
             });

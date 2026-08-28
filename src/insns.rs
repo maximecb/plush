@@ -2,6 +2,7 @@
 #![allow(non_camel_case_types)]
 use std::fmt;
 use std::mem::transmute;
+use crate::host::HostFnId;
 
 // Instructions are one 64-bit word. The opcode occupies the low 8 bits.
 // Operands are packed from bit 8 upwards, except the last one, which is
@@ -483,10 +484,14 @@ def_opcodes! {
     // class it was last looked up on, live in the CallCache entry
     call_method { start_reg: reg, argc: u8, cache: u24 },
 
-    // Call a host method, cached on the object type tag.
-    // This is used for primitive types such as Int64, Float64 and String.
-    // The method name can also be recovered from the host function for deopt.
-    call_method_host { start_reg: reg, argc: u8, type_tag: u8, host_fn: u16 },
+    // Call a host method, guarded on the type tag of the value in
+    // start_reg. This is used for primitive types such as Int64, Float64
+    // and String. The guard is an immediate, so a miss costs no loads.
+    // The host function itself lives in the CallCache entry, which leaves
+    // room for the cache index: this site deoptimizes back into
+    // call_method, and the two forms take the same operands so that the
+    // switch is a write of the opcode byte
+    call_method_host { start_reg: reg, argc: u8, type_tag: u8, cache: u24 },
 
     // Creating a class instance runs a constructor, so it is a call
     new { class_id: u24, start_reg: reg, argc: u8 },
@@ -540,6 +545,10 @@ pub struct CallCache
     pub fun_id: u32,
     pub entry_pc: u32,
     pub num_locals: u16,
+
+    // Host function a call_method_host site resolved to. That site guards
+    // on the type tag in the instruction, so this is only read on a hit
+    pub host_fn: HostFnId,
 }
 
 /// Interpreter instruction
@@ -741,6 +750,16 @@ mod tests
         // A top-aligned u24 sitting above a u8
         assert_eq!(call_opnd::decode(Insn::call_opnd(0, 0, (1 << 24) - 1)).argc, 0);
         assert_eq!(call_opnd::decode(Insn::call_opnd(0, u8::MAX, 0)).cache, 0);
+
+        // call_method_host fills the word exactly, and deoptimizes into
+        // call_method, so the operands the two share have to line up
+        let host = Insn::call_method_host(1, 2, 3, 4);
+        assert_eq!(
+            call_method_host::decode(host),
+            call_method_host { start_reg: 1, argc: 2, type_tag: 3, cache: 4 }
+        );
+        let opnds = call_method::decode(Insn::call_method(1, 2, 4));
+        assert_eq!((opnds.start_reg, opnds.argc, opnds.cache), (1, 2, 4));
     }
 
     #[test]
