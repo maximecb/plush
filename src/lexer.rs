@@ -38,7 +38,7 @@ fn get_file_id(name: &str) -> u32
 }
 
 /// Get the file name associated with a unique id
-fn name_from_id(id: u32) -> String
+pub fn name_from_id(id: u32) -> String
 {
     let id = id as usize;
     let map = get_file_id_map().lock().unwrap();
@@ -60,6 +60,10 @@ impl SrcPos
     {
         name_from_id(self.file_id)
     }
+
+    pub fn file_id(&self) -> u32 { self.file_id }
+    pub fn line_no(&self) -> u32 { self.line_no }
+    pub fn col_no(&self) -> u32 { self.col_no }
 }
 
 impl fmt::Display for SrcPos

@@ -5,7 +5,6 @@ use std::time::Duration;
 use crate::dict::Dict;
 #[cfg(feature = "log_gc")]
 use crate::utils::thousands_sep;
-use crate::lexer::SrcPos;
 use crate::ast::{Program, FunId, ClassId, Class};
 use crate::alloc::{Alloc, Tag, HEADER_SIZE, INIT_SIZE, MSG_INIT_SIZE};
 use crate::object::Object;
@@ -13,7 +12,7 @@ use crate::closure::Closure;
 use crate::array::Array;
 use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
-use crate::insns::NameId;
+use crate::insns::{self, NameId, Opcode};
 use crate::gc::{undo_forwarding, Copier, StrTable, UndoLog};
 use crate::host::*;
 use crate::str::Str;
@@ -31,152 +30,48 @@ use std::ops::{Add, Sub, Mul};
 /// the buffer without bound.
 const MSG_BACKLOG_LIMIT: usize = 64 * 1024 * 1024;
 
-/// Instruction opcodes
-/// Note: commonly used upcodes should be in the [0, 127] range (one byte)
-///       less frequently used opcodes can take multiple bytes if necessary.
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Debug)]
-pub enum Insn
+/// Interpreter instructions, one 64-bit word each. The opcode occupies
+/// the low bits and the operands are packed above it, so an instruction
+/// holds no heap pointers and the collector never walks the code
+pub use crate::insns::Insn;
+
+/// Cache for a field access site. The name is what the site was compiled
+/// for; the class and slot are what it last resolved to
+struct PropCache
 {
-    // Halt execution and produce an error
-    panic { pos: SrcPos },
-
-    // No-op
-    // Not currently emitted by codegen, kept as a building block
-    #[allow(dead_code)]
-    nop,
-
-    // Push an immediate value to the stack. Heap values go through
-    // push_const instead, so that the instruction stream holds no
-    // pointers for the collector to chase
-    push { val: Value },
-
-    // Stack manipulation
-    pop,
-    dup,
-
-    // Not currently emitted by codegen, kept as a building block
-    #[allow(dead_code)]
-    swap,
-
-    // Push the nth-value (indexed from the stack top) on top of the stack
-    // getn 0 is equivalent to dup
-    getn { idx: u16 },
-
-    // Get the function argument at a given index
-    get_arg { idx: u32 },
-
-    // Get the local variable at a given stack slot index
-    // The index is relative to the base of the stack frame
-    get_local { idx: u32 },
-
-    // Set the local variable at a given stack slot index
-    // The index is relative to the base of the stack frame
-    set_local { idx: u32 },
-
-    // Global variable access
-    get_global { idx: u32 },
-    set_global { idx: u32 },
-
-    // Arithmetic
-    add,
-    sub,
-    mul,
-    div,
-    div_int,
-    modulo,
-
-    // Add an int64 constant
-    add_i64 { val: i64 },
-
-    // Bitwise operations
-    bit_and,
-    bit_or,
-    bit_xor,
-    lshift,
-    rshift,
-
-    // Comparisons
-    lt,
-    le,
-    gt,
-    ge,
-    eq,
-    ne,
-
-    // Logical negation
-    not,
-
-    // Closure operations
-    clos_new { fun_id: FunId, num_slots: u32 },
-    clos_set { idx: u32 },
-    clos_get { idx: u32 },
-
-    // Mutable cell operations
-    cell_new,
-    cell_set,
-    cell_get,
-
-    // Create class instance
-    new { class_id: ClassId, argc: u8 },
-
-    // Create a class instance with a known number of slots and constructor
-    new_known_ctor { class_id: ClassId, argc: u8, num_slots: u16, ctor_pc: u32, fun_id: FunId, num_locals: u16 },
-
-    // Check if instance of class
-    instanceof { class_id: ClassId },
-
-    // Get/set field
-    get_field { name: NameId, class_id: ClassId, slot_idx: u32 },
-    set_field { name: NameId, class_id: ClassId, slot_idx: u32 },
-
-    // Get/set indexed element
-    get_index,
-    set_index,
-
-    // Create a new dictionary
-    dict_new,
-
-    // Array operations
-    arr_new { capacity: u32 },
-    arr_push,
-
-    // Clone a bytearray
-    ba_clone,
-
-    // Jump if true/false
-    if_true { target_ofs: i32 },
-    if_false { target_ofs: i32 },
-
-    // Unconditional jump
-    jump { target_ofs: i32 },
-
-    // Call a function using the call stack
-    // call (arg0, arg1, ..., argN)
-    call { argc: u8 },
-
-    // Call a known function using its function id
-    call_direct { fun_id: FunId, argc: u8 },
-
-    // Call a known function by directly jumping to its entry point
-    call_pc { entry_pc: u32, fun_id: FunId, num_locals: u16, argc: u8 },
-
-    // Call a method on an object
-    // call_method (self, arg0, ..., argN)
-    call_method { name: NameId, argc: u8 },
-
-    // Call a method with a previously known pc
-    call_method_pc { name: NameId, argc: u8, class_id: ClassId, entry_pc: u32, fun_id: FunId, num_locals: u16 },
-
-    // Call a host method on a primitive, guarded on the type tag
-    call_method_host { name: NameId, argc: u8, type_tag: Type, host_fn: HostFnId },
-
-    // Return
-    ret,
-
-    // Push a heap constant from the actor's constant pool
-    push_const { idx: u32 },
+    name: NameId,
+    class_id: ClassId,
+    slot_idx: u32,
 }
+
+/// Cache for a call site whose callee is not statically known.
+///
+/// A dynamic call guards on the function value it last resolved to, a
+/// method call on the class it last looked the name up on, and a host
+/// method on the type tag in the instruction. A site that has resolved
+/// records everything the frame needs, so the call itself is a push and
+/// a jump
+#[derive(Default)]
+struct CallCache
+{
+    name: NameId,
+
+    // Class the site last looked the method up on, which is what a
+    // method call guards against
+    class_id: ClassId,
+
+    // Callee the site resolved to
+    fun_id: FunId,
+    entry_pc: u32,
+    frame_size: u16,
+
+    // Set for a constructor site, which allocates before it calls
+    num_slots: u16,
+
+    // Set for a host method site, which the type tag guards
+    host_fn: HostFnId,
+}
+
 
 // This error macro is to be used inside host functions
 #[macro_export]
@@ -211,11 +106,13 @@ struct StackFrame
     // Function currently executing
     fun: Value,
 
-    // Argument count (number of args supplied)
-    argc: u8,
-
     // Previous base pointer at the time of call
     prev_bp: usize,
+
+    // How far the stack reached in the caller's frame, which is what a
+    // return restores. The callee's frame starts inside the caller's, so
+    // this is what tells the two apart
+    prev_top: usize,
 
     // Return address
     ret_addr: usize,
@@ -285,6 +182,12 @@ pub struct Actor
     names: Vec<String>,
     name_ids: HashMap<String, NameId>,
     name_strs: Vec<Value>,
+
+    // Inline caches, one entry per site that can resolve to more than one
+    // thing. Holding the payload out of line is what keeps an instruction
+    // within a single word
+    prop_caches: Vec<PropCache>,
+    call_caches: Vec<CallCache>,
 }
 
 /// Why an integer operation produced no result
@@ -401,6 +304,8 @@ impl Actor
             names: Vec::default(),
             name_ids: HashMap::default(),
             name_strs: Vec::default(),
+            prop_caches: Vec::default(),
+            call_caches: Vec::default(),
         }
     }
 
@@ -750,8 +655,10 @@ impl Actor
     /// Kept out of line so that the interpreter loop carries only the
     /// cached case
     #[inline(never)]
-    fn get_field_slow(&mut self, obj: Value, name: NameId, insn_pc: usize) -> Result<Value, String>
+    fn get_field_slow(&mut self, obj: Value, cache: u32) -> Result<Value, String>
     {
+        let name = self.prop_caches[cache as usize].name;
+
         if !obj.is_heap() {
             return Err(format!("get_field on non-object value {:?}", obj));
         }
@@ -777,11 +684,9 @@ impl Actor
                 };
 
                 // Update the cache
-                self.insns[insn_pc] = Insn::get_field {
-                    name,
-                    class_id: o.class_id,
-                    slot_idx: slot_idx as u32,
-                };
+                let entry = &mut self.prop_caches[cache as usize];
+                entry.class_id = o.class_id;
+                entry.slot_idx = slot_idx as u32;
 
                 let val = o.get(slot_idx);
 
@@ -829,9 +734,11 @@ impl Actor
     /// Resolve a field write the cached path did not handle: a dict, or
     /// an object of a class this site has not seen
     #[inline(never)]
-    fn set_field_slow(&mut self, mut obj: Value, mut val: Value, name: NameId, insn_pc: usize)
+    fn set_field_slow(&mut self, mut obj: Value, mut val: Value, cache: u32)
         -> Result<(), String>
     {
+        let name = self.prop_caches[cache as usize].name;
+
         if let Some(o) = obj.to_obj() {
             let slot_idx = match self.get_slot_idx_of(o.class_id, name) {
                 Some(slot_idx) => slot_idx,
@@ -848,11 +755,9 @@ impl Actor
             };
 
             // Update the cache
-            self.insns[insn_pc] = Insn::set_field {
-                name,
-                class_id: o.class_id,
-                slot_idx: slot_idx as u32,
-            };
+            let entry = &mut self.prop_caches[cache as usize];
+            entry.class_id = o.class_id;
+            entry.slot_idx = slot_idx as u32;
 
             o.set(slot_idx, val);
             return Ok(());
@@ -872,12 +777,47 @@ impl Actor
         Err("set_field on non-object/dict value".to_string())
     }
 
-    /// Add a heap constant to this actor's pool and return its index.
-    /// The pool is a GC root, so a constant is safe to hold from the
-    /// moment it lands here
+    /// Create a cache entry for a field access site
+    pub fn new_prop_cache(&mut self, name: &str) -> u32
+    {
+        let name = self.intern_name(name);
+
+        // The class id no real object has, so a fresh site always misses
+        self.prop_caches.push(PropCache {
+            name,
+            class_id: ClassId::default(),
+            slot_idx: 0,
+        });
+
+        (self.prop_caches.len() - 1) as u32
+    }
+
+    /// Create a cache entry for a call site
+    pub fn new_call_cache(&mut self, name: &str) -> u32
+    {
+        let name = if name.is_empty() { 0 } else { self.intern_name(name) };
+
+        self.new_call_cache_entry(CallCache {
+            name,
+            ..CallCache::default()
+        })
+    }
+
+    /// Add a call cache entry and return its index. A site that is
+    /// rewritten into a cached form allocates its entry the first time it
+    /// runs, which happens once
+    fn new_call_cache_entry(&mut self, cache: CallCache) -> u32
+    {
+        self.call_caches.push(cache);
+        (self.call_caches.len() - 1) as u32
+    }
+
+    /// Add a constant to this actor's pool and return its index. The
+    /// pool holds the heap constants the code refers to, along with the
+    /// immediates too wide to sit in an instruction. It is a GC root, so
+    /// a constant is safe to hold from the moment it lands here
     pub fn push_const(&mut self, val: Value) -> u32
     {
-        debug_assert!(val.is_heap());
         self.consts.push(val);
         (self.consts.len() - 1) as u32
     }
@@ -1227,14 +1167,13 @@ impl Actor
     /// Call a host function
     /// Kept out of line so its arity dispatch doesn't bloat the interpreter loop
     #[inline(never)]
-    fn call_host(&mut self, host_fn: &HostFn, argc: usize) -> Result<(), String>
+    /// Call a host function. Its arguments sit in consecutive registers
+    /// starting at `base`, and the value it returns is written back over
+    /// the first of them, which is where a call leaves its result
+    fn call_host(&mut self, host_fn: &HostFn, base: usize, argc: usize) -> Result<(), String>
     {
-        macro_rules! pop {
-            () => { self.stack.pop().unwrap() }
-        }
-
-        macro_rules! push {
-            ($val: expr) => { self.stack.push($val) }
+        macro_rules! arg {
+            ($idx: expr) => { self.stack[base + $idx] }
         }
 
         if host_fn.num_params() != argc {
@@ -1246,6 +1185,8 @@ impl Actor
             ));
         }
 
+        debug_assert!(base + argc <= self.stack.len());
+
         let result = match host_fn.f
         {
             FnPtr::Fn0(fun) => {
@@ -1253,55 +1194,41 @@ impl Actor
             }
 
             FnPtr::Fn1(fun) => {
-                let a0 = pop!();
+                let a0 = arg!(0);
                 fun(self, a0)
             }
 
             FnPtr::Fn2(fun) => {
-                let a1 = pop!();
-                let a0 = pop!();
+                let (a0, a1) = (arg!(0), arg!(1));
                 fun(self, a0, a1)
             }
 
             FnPtr::Fn3(fun) => {
-                let a2 = pop!();
-                let a1 = pop!();
-                let a0 = pop!();
+                let (a0, a1, a2) = (arg!(0), arg!(1), arg!(2));
                 fun(self, a0, a1, a2)
             }
 
             FnPtr::Fn4(fun) => {
-                let a3 = pop!();
-                let a2 = pop!();
-                let a1 = pop!();
-                let a0 = pop!();
+                let (a0, a1, a2, a3) = (arg!(0), arg!(1), arg!(2), arg!(3));
                 fun(self, a0, a1, a2, a3)
             }
 
             FnPtr::Fn5(fun) => {
-                let a4 = pop!();
-                let a3 = pop!();
-                let a2 = pop!();
-                let a1 = pop!();
-                let a0 = pop!();
+                let (a0, a1, a2, a3, a4) = (arg!(0), arg!(1), arg!(2), arg!(3), arg!(4));
                 fun(self, a0, a1, a2, a3, a4)
             }
 
             FnPtr::Fn8(fun) => {
-                let a7 = pop!();
-                let a6 = pop!();
-                let a5 = pop!();
-                let a4 = pop!();
-                let a3 = pop!();
-                let a2 = pop!();
-                let a1 = pop!();
-                let a0 = pop!();
+                let (a0, a1, a2, a3) = (arg!(0), arg!(1), arg!(2), arg!(3));
+                let (a4, a5, a6, a7) = (arg!(4), arg!(5), arg!(6), arg!(7));
                 fun(self, a0, a1, a2, a3, a4, a5, a6, a7)
             }
         };
 
         match result {
-            Ok(v) => { push!(v); Ok(()) },
+            // A host function can collect, so the result is written back
+            // by index rather than through a reference taken beforehand
+            Ok(v) => { self.stack[base] = v; Ok(()) },
             Err(e) => Err(format!("error during call to host function `{}`:\n{}", host_fn.name, e)),
         }
     }
@@ -1371,8 +1298,9 @@ impl Actor
             self.report_error("", &format!("expected function value but got {:?}", fun));
         }
 
-        // Push the arguments on the stack. Compiling below can collect,
-        // and the stack is where the collector looks for them.
+        // The arguments become the first registers of the frame.
+        // Compiling below can collect, and the stack is where the
+        // collector looks for them.
         for arg in args {
             self.stack.push(*arg);
         }
@@ -1393,41 +1321,40 @@ impl Actor
         // Push a new stack frame
         self.frames.push(StackFrame {
             fun,
-            argc: args.len().try_into().unwrap(),
             prev_bp: usize::MAX,
+            prev_top: 0,
             ret_addr: usize::MAX,
         });
 
-        // The base pointer will point at the first local
-        let mut bp = self.stack.len();
+        // The frame of the outermost call starts at the bottom of the stack
+        let mut bp = 0;
 
-        // Allocate stack slots for the local variables
-        self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::NIL);
+        // Every register the frame covers has to hold a value the
+        // collector can look at, so the ones past the arguments start nil
+        self.stack.resize(fun_entry.frame_size, Value::NIL);
 
-        macro_rules! pop {
-            () => { self.stack.pop().unwrap() }
+        // Read a register of the current frame. Codegen sizes every frame
+        // to the registers its function uses, so the index is in bounds.
+        macro_rules! get_reg {
+            ($reg: expr) => {{
+                let idx = bp + ($reg as usize);
+                debug_assert!(idx < self.stack.len());
+                unsafe { *self.stack.get_unchecked(idx) }
+            }}
         }
 
-        macro_rules! push {
-            ($val: expr) => { self.stack.push($val) }
+        // Write a register of the current frame
+        macro_rules! set_reg {
+            ($reg: expr, $val: expr) => {{
+                let idx = bp + ($reg as usize);
+                let val = $val;
+                debug_assert!(idx < self.stack.len());
+                unsafe { *self.stack.get_unchecked_mut(idx) = val; }
+            }}
         }
 
-        macro_rules! push_bool {
-            ($b: expr) => { push!(Value::bool_val($b)) }
-        }
-
-        // Fast path for two inline doubles: decode, apply and re-encode.
-        // Falls through when either operand is not one, or when the
-        // result is a double that has to be boxed.
-        macro_rules! flonum_op {
-            ($v0: expr, $v1: expr, $op: tt) => {
-                if $v0.is_flonum() && $v1.is_flonum() {
-                    if let Some(r) = Value::try_flonum($v0.as_flonum() $op $v1.as_flonum()) {
-                        push!(r);
-                        continue;
-                    }
-                }
-            }
+        macro_rules! set_reg_bool {
+            ($reg: expr, $b: expr) => { set_reg!($reg, Value::bool_val($b)) }
         }
 
         // Take the result of a slow path, reporting a type error the
@@ -1446,15 +1373,16 @@ impl Actor
         // and sub want, and `as_fixnum` drops it, so that a product comes
         // out tagged exactly once.
         macro_rules! arith_insn {
-            ($insn: literal, $checked_op: ident, $rhs: ident, $float_op: path, $slow_path: ident) => {{
-                let v1 = pop!();
-                let v0 = pop!();
+            ($insn_word: expr, $insn: literal, $opnds: ident, $checked_op: ident, $rhs: ident, $float_op: path, $slow_path: ident) => {{
+                let opnds = insns::$opnds::decode($insn_word);
+                let v0 = get_reg!(opnds.a);
+                let v1 = get_reg!(opnds.b);
 
                 // A 64-bit overflow is exactly the case where the result
                 // no longer fits in a fixnum
                 if v0.is_fixnum() && v1.is_fixnum() {
-                    if let Some(r) = (v0.raw() as i64).$checked_op(v1.$rhs() as i64) {
-                        push!(Value::from_raw(r as u64));
+                    if let Some(r) = (v0.raw_bits() as i64).$checked_op(v1.$rhs() as i64) {
+                        set_reg!(opnds.dst, Value::from_raw_bits(r as u64));
                         continue;
                     }
                 }
@@ -1463,79 +1391,142 @@ impl Actor
                     let f = $float_op(v0.as_flonum(), v1.as_flonum());
 
                     if let Some(r) = Value::try_flonum(f) {
-                        push!(r);
+                        set_reg!(opnds.dst, r);
                         continue;
                     }
                 }
 
                 let r = slow!($insn, self.$slow_path(v0, v1));
-                push!(r);
+                set_reg!(opnds.dst, r);
+            }}
+        }
+
+        // Arithmetic against a fixnum immediate
+        macro_rules! arith_imm_insn {
+            ($insn_word: expr, $insn: literal, $opnds: ident, $checked_op: ident, $rhs: ident, $slow_path: ident) => {{
+                let opnds = insns::$opnds::decode($insn_word);
+                let v0 = get_reg!(opnds.a);
+
+                // The immediate always fits a fixnum, so the tagged words
+                // can be combined directly
+                let cst = Value::fixnum(opnds.imm as i64);
+
+                if v0.is_fixnum() {
+                    if let Some(r) = (v0.raw_bits() as i64).$checked_op(cst.$rhs() as i64) {
+                        set_reg!(opnds.dst, Value::from_raw_bits(r as u64));
+                        continue;
+                    }
+                }
+
+                let r = slow!($insn, self.$slow_path(v0, cst));
+                set_reg!(opnds.dst, r);
             }}
         }
 
         // Bitwise ops. Fixnum tags are zero, so the op keeps them that
         // way and the result needs no retagging.
         macro_rules! bitop_insn {
-            ($insn: literal, $op: tt, $slow_path: ident) => {{
-                let v1 = pop!();
-                let v0 = pop!();
+            ($insn_word: expr, $insn: literal, $opnds: ident, $op: tt, $slow_path: ident) => {{
+                let opnds = insns::$opnds::decode($insn_word);
+                let v0 = get_reg!(opnds.a);
+                let v1 = get_reg!(opnds.b);
 
                 if v0.is_fixnum() && v1.is_fixnum() {
-                    push!(Value::from_raw(v0.raw() $op v1.raw()));
+                    set_reg!(opnds.dst, Value::from_raw_bits(v0.raw_bits() $op v1.raw_bits()));
                     continue;
                 }
 
                 let r = slow!($insn, self.$slow_path(v0, v1));
-                push!(r);
+                set_reg!(opnds.dst, r);
             }}
         }
 
-        // Comparisons. Tagged fixnums order like the integers they hold,
-        // and inline doubles are decoded and compared directly.
-        macro_rules! cmp_insn {
-            ($insn: literal, $op: tt, $slow_path: ident) => {{
-                let v1 = pop!();
-                let v0 = pop!();
+        // Compare and branch. Tagged fixnums order like the integers they
+        // hold, and inline doubles are decoded and compared directly.
+        macro_rules! cmp_branch {
+            ($insn_word: expr, $insn: literal, $opnds: ident, $op: tt, $slow_path: ident) => {{
+                let opnds = insns::$opnds::decode($insn_word);
+                let v0 = get_reg!(opnds.a);
+                let v1 = get_reg!(opnds.b);
 
-                if v0.is_fixnum() && v1.is_fixnum() {
-                    push_bool!((v0.raw() as i64) $op (v1.raw() as i64));
+                let taken = if v0.is_fixnum() && v1.is_fixnum() {
+                    (v0.raw_bits() as i64) $op (v1.raw_bits() as i64)
                 } else if v0.is_flonum() && v1.is_flonum() {
-                    push_bool!(v0.as_flonum() $op v1.as_flonum());
+                    v0.as_flonum() $op v1.as_flonum()
                 } else {
-                    push_bool!(slow!($insn, $slow_path(v0, v1)));
+                    slow!($insn, $slow_path(v0, v1))
+                };
+
+                if taken {
+                    pc = ((pc as i64) + (opnds.disp as i64)) as usize;
                 }
             }}
         }
 
-        // Set up a new frame for a function call
-        macro_rules! call_fun {
-            ($fun: expr, $argc: expr) => {{
-                if $argc as usize > self.stack.len() - bp {
-                    error!("not enough call arguments on stack");
+        // Set up a new frame and jump into a callee. The callee's frame
+        // starts at the caller's `start_reg`, which is where its
+        // arguments already sit and where its return value will land.
+        macro_rules! push_frame {
+            ($fun_val: expr, $start_reg: expr, $entry_pc: expr, $frame_size: expr) => {{
+                let new_bp = bp + ($start_reg as usize);
+
+                self.frames.push(StackFrame {
+                    fun: $fun_val,
+                    prev_bp: bp,
+                    prev_top: self.stack.len(),
+                    ret_addr: pc,
+                });
+
+                bp = new_bp;
+                pc = $entry_pc as usize;
+
+                // Registers the callee has not written yet still have to
+                // hold something the collector can look at
+                self.stack.resize(bp + ($frame_size as usize), Value::NIL);
+            }}
+        }
+
+        // Hand a value back to the caller and drop this frame. The
+        // value goes to the callee's frame base, which is the register
+        // the caller set the call up in
+        macro_rules! do_return {
+            ($val: expr) => {{
+                let ret_val = $val;
+
+                // If this is a top-level return
+                if self.frames.len() == 1 {
+                    self.stack.clear();
+                    self.frames.clear();
+                    return ret_val;
                 }
 
-                // The callee can be a closure, and compiling below can
-                // collect, so it is held where it can be rooted
-                let mut fun_val = $fun;
+                let frame = self.frames.pop().unwrap();
+                self.stack[bp] = ret_val;
+
+                // Restoring the caller's frame drops whatever the callee
+                // used above it, and refills what it left short
+                self.stack.resize(frame.prev_top, Value::NIL);
+
+                bp = frame.prev_bp;
+                pc = frame.ret_addr;
+            }}
+        }
+
+        // Resolve a callee that is not statically known, checking its
+        // argument count. This can compile the callee and therefore
+        // collect, so the callee is held where the collector can see it.
+        macro_rules! resolve_callee {
+            ($fun_val: expr, $argc: expr) => {{
+                let mut fun_val = $fun_val;
 
                 let fun_id = match fun_val.to_fun_id() {
                     Some(id) => id,
-
-                    None => match fun_val.to_host_fn() {
-                        Some(f) => {
-                            match self.call_host(f, $argc.into()) {
-                                Err(msg) => error!("{}", msg),
-                                Ok(()) => continue
-                            }
-                        }
-                        None => error!("call to non-function value: `{:?}`", fun_val)
-                    }
+                    None => error!("call to non-function value: `{:?}`", fun_val)
                 };
 
-                // Get a compiled address for this function
-                let fun_entry = self.get_compiled_fun(&mut fun_val);
+                let entry = self.get_compiled_fun(&mut fun_val);
 
-                if $argc as usize != fun_entry.num_params {
+                if ($argc as usize) != entry.num_params {
                     let vm = self.vm.lock().unwrap();
                     let fun = &vm.prog.funs[&fun_id];
                     error!(
@@ -1543,25 +1534,11 @@ impl Actor
                         fun.name,
                         fun.pos,
                         $argc,
-                        fun_entry.num_params
+                        entry.num_params
                     );
                 }
 
-                self.frames.push(StackFrame {
-                    argc: $argc,
-                    fun: fun_val,
-                    prev_bp: bp,
-                    ret_addr: pc,
-                });
-
-                // The base pointer will point at the first local
-                bp = self.stack.len();
-                pc = fun_entry.entry_pc;
-
-                // Allocate stack slots for the local variables
-                self.stack.resize(self.stack.len() + fun_entry.num_locals, Value::NIL);
-
-                fun_entry
+                (fun_val, fun_id, entry)
             }}
         }
 
@@ -1583,99 +1560,49 @@ impl Actor
 
         loop
         {
-            // Every compiled function ends with a ret instruction, so
+            // Every compiled function ends with a return instruction, so
             // execution can never run past the end of the insn stream.
             // That makes the load in bounds and keeps the increment below
             // the length, so neither needs to be checked here.
             debug_assert!(pc < self.insns.len());
             let insn = unsafe { *self.insns.get_unchecked(pc) };
+            let this_pc = pc;
             pc = unsafe { pc.unchecked_add(1) };
-            //println!("executing {:?}", insn);
-            //println!("stack size: {}, executing {:?}", self.stack.len(), insn);
 
-            match insn {
-                Insn::nop => {},
+            match insn.opcode() {
+                Opcode::nop => {},
 
-                Insn::panic { pos } => {
-                    error!("explicit panic at: {}", pos);
+                Opcode::breakpoint => {},
+
+                Opcode::panic => {
+                    let opnds = insns::panic::decode(insn);
+                    error!(
+                        "explicit panic at: {}@{}:{}",
+                        crate::lexer::name_from_id(opnds.file_id as u32),
+                        opnds.line_no,
+                        opnds.col_no,
+                    );
                 }
 
-                Insn::push { val } => {
-                   debug_assert!(!val.is_heap());
-                   self.stack.push(val);
+                Opcode::load_imm32 => {
+                    let opnds = insns::load_imm32::decode(insn);
+                    set_reg!(opnds.dst, Value::from_raw_bits(opnds.imm as i64 as u64));
                 }
 
-                Insn::push_const { idx } => {
-                    let val = self.consts[idx as usize];
-                    self.stack.push(val);
+                Opcode::load_const => {
+                    let opnds = insns::load_const::decode(insn);
+                    let val = self.consts[opnds.slot as usize];
+                    set_reg!(opnds.dst, val);
                 }
 
-                Insn::dup => {
-                    let val = pop!();
-                    push!(val);
-                    push!(val);
+                Opcode::mov => {
+                    let opnds = insns::mov::decode(insn);
+                    set_reg!(opnds.dst, get_reg!(opnds.src));
                 }
 
-                Insn::pop => {
-                    pop!();
-                }
-
-                Insn::swap => {
-                    let a = pop!();
-                    let b = pop!();
-                    push!(a);
-                    push!(b);
-                }
-
-                Insn::getn { idx } => {
-                    let idx = idx as usize;
-                    let val = self.stack[self.stack.len() - (1 + idx)];
-                    push!(val);
-                }
-
-                Insn::get_arg { idx } => {
-                    let argc = self.frames[self.frames.len() - 1].argc as usize;
-                    let idx = idx as usize;
-
-                    if idx >= argc {
-                        error!(
-                            "invalid index in get_arg, idx={}, argc={}, stack depth: {}",
-                            idx,
-                            argc,
-                            self.frames.len()
-                        );
-                    }
-
-                    // Last argument is at bp - 1 (if there are arguments)
-                    let stack_idx = (bp - argc) + idx;
-                    let arg_val = self.stack[stack_idx];
-                    push!(arg_val);
-                    //println!("arg_val={:?}", arg_val);
-                }
-
-                Insn::get_local { idx } => {
-                    let idx = idx as usize;
-
-                    if bp + idx >= self.stack.len() {
-                        error!("invalid index {} in get_local", idx);
-                    }
-
-                    push!(self.stack[bp + idx]);
-                }
-
-                Insn::set_local { idx } => {
-                    let idx = idx as usize;
-                    let val = pop!();
-
-                    if bp + idx >= self.stack.len() {
-                        error!("invalid index in set_local");
-                    }
-
-                    self.stack[bp + idx] = val;
-                }
-
-                Insn::get_global { idx } => {
-                    let idx = idx as usize;
+                Opcode::get_global => {
+                    let opnds = insns::get_global::decode(insn);
+                    let idx = opnds.idx as usize;
 
                     if idx >= self.globals.len() {
                         error!("get_global", "invalid global index {}", idx);
@@ -1687,107 +1614,113 @@ impl Actor
                         error!("get_global", "attempting to read uninitialized global");
                     }
 
-                    push!(val);
+                    set_reg!(opnds.dst, val);
                 }
 
-                Insn::set_global { idx } => {
-                    let idx = idx as usize;
-                    let val = pop!();
+                Opcode::set_global => {
+                    let opnds = insns::set_global::decode(insn);
+                    let idx = opnds.idx as usize;
 
                     if idx >= self.globals.len() {
                         error!("set_global", "invalid global index {}", idx);
                     }
 
-                    self.globals[idx] = val;
+                    self.globals[idx] = get_reg!(opnds.src);
                 }
 
-                Insn::add => arith_insn!("add", checked_add, raw, f64::add, add_slow),
-                Insn::sub => arith_insn!("sub", checked_sub, raw, f64::sub, sub_slow),
-                Insn::mul => arith_insn!("mul", checked_mul, as_fixnum, f64::mul, mul_slow),
+                Opcode::add => arith_insn!(insn, "add", add, checked_add, raw_bits, f64::add, add_slow),
+                Opcode::sub => arith_insn!(insn, "sub", sub, checked_sub, raw_bits, f64::sub, sub_slow),
+                Opcode::mul => arith_insn!(insn, "mul", mul, checked_mul, as_fixnum, f64::mul, mul_slow),
+
+                Opcode::add_imm16 => arith_imm_insn!(insn, "add", add_imm16, checked_add, raw_bits, add_slow),
+                Opcode::sub_imm16 => arith_imm_insn!(insn, "sub", sub_imm16, checked_sub, raw_bits, sub_slow),
+                Opcode::mul_imm16 => arith_imm_insn!(insn, "mul", mul_imm16, checked_mul, as_fixnum, mul_slow),
 
                 // Division always produces a float
                 // Division by zero produces an infinity (this is intentional)
-                Insn::div => {
-                    let v1 = pop!();
-                    let v0 = pop!();
+                Opcode::div => {
+                    let opnds = insns::div::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+                    let v1 = get_reg!(opnds.b);
 
-                    flonum_op!(v0, v1, /);
+                    if v0.is_flonum() && v1.is_flonum() {
+                        if let Some(r) = Value::try_flonum(v0.as_flonum() / v1.as_flonum()) {
+                            set_reg!(opnds.dst, r);
+                            continue;
+                        }
+                    }
 
                     let r = slow!("div", self.div_num(v0, v1));
-                    push!(r);
+                    set_reg!(opnds.dst, r);
                 }
 
                 // Integer division
                 // Division by zero will cause a panic (this is intentional)
-                Insn::div_int => {
-                    let v1 = pop!();
-                    let v0 = pop!();
+                Opcode::div_int => {
+                    let opnds = insns::div_int::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+                    let v1 = get_reg!(opnds.b);
 
                     // Dividing shrinks the magnitude, so the quotient
                     // fits unless it is the one case that overflows
                     if v0.is_fixnum() && v1.is_fixnum() {
                         if let Some(q) = v0.as_fixnum().checked_div(v1.as_fixnum()) {
                             if let Some(r) = Value::try_fixnum(q) {
-                                push!(r);
+                                set_reg!(opnds.dst, r);
                                 continue;
                             }
                         }
                     }
 
                     let r = slow!("div_int", self.div_int_slow(v0, v1));
-                    push!(r);
+                    set_reg!(opnds.dst, r);
                 }
 
                 // Division by zero will cause a panic (this is intentional)
-                Insn::modulo => {
-                    let v1 = pop!();
-                    let v0 = pop!();
+                Opcode::modulo => {
+                    let opnds = insns::modulo::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+                    let v1 = get_reg!(opnds.b);
 
                     // A remainder is smaller than its divisor, so it
                     // always fits back into a fixnum
                     if v0.is_fixnum() && v1.is_fixnum() {
                         if let Some(rem) = v0.as_fixnum().checked_rem(v1.as_fixnum()) {
-                            push!(Value::fixnum(rem));
+                            set_reg!(opnds.dst, Value::fixnum(rem));
                             continue;
                         }
                     }
 
-                    flonum_op!(v0, v1, %);
+                    if v0.is_flonum() && v1.is_flonum() {
+                        if let Some(r) = Value::try_flonum(v0.as_flonum() % v1.as_flonum()) {
+                            set_reg!(opnds.dst, r);
+                            continue;
+                        }
+                    }
 
                     let r = slow!("modulo", self.modulo_slow(v0, v1));
-                    push!(r);
+                    set_reg!(opnds.dst, r);
                 }
 
-                // Add a constant int64 value
-                Insn::add_i64 { val } => {
-                    // The constant fits a fixnum, so the tagged words add
-                    let cst = Value::fixnum(val);
+                Opcode::bit_or => bitop_insn!(insn, "bit_or", bit_or, |, bit_or_slow),
+                Opcode::bit_and => bitop_insn!(insn, "bit_and", bit_and, &, bit_and_slow),
+                Opcode::bit_xor => bitop_insn!(insn, "bit_xor", bit_xor, ^, bit_xor_slow),
 
-                    let top = match self.stack.last_mut() {
-                        Some(top) => top,
-                        None => error!("add_i64", "stack is empty"),
-                    };
+                Opcode::bit_not => {
+                    let opnds = insns::bit_not::decode(insn);
+                    let v0 = get_reg!(opnds.src);
 
-                    if top.is_fixnum() {
-                        if let Some(sum) = (top.raw() as i64).checked_add(cst.raw() as i64) {
-                            *top = Value::from_raw(sum as u64);
-                            continue;
-                        }
+                    match v0.to_i64() {
+                        Some(v) => { let r = self.int64(!v); set_reg!(opnds.dst, r); }
+                        None => error!("bit_not", "unsupported type in bitwise not {:?}", v0)
                     }
-
-                    let v0 = pop!();
-                    let r = slow!("add_i64", self.add_slow(v0, cst));
-                    push!(r);
                 }
-
-                Insn::bit_or => bitop_insn!("bit_or", |, bit_or_slow),
-                Insn::bit_and => bitop_insn!("bit_and", &, bit_and_slow),
-                Insn::bit_xor => bitop_insn!("bit_xor", ^, bit_xor_slow),
 
                 // Integer left shift
-                Insn::lshift => {
-                    let v1 = pop!();
-                    let v0 = pop!();
+                Opcode::lshift => {
+                    let opnds = insns::lshift::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+                    let v1 = get_reg!(opnds.b);
 
                     // The shift can push bits out of fixnum range, so the
                     // result has to be checked rather than retagged
@@ -1796,20 +1729,21 @@ impl Actor
 
                         if shift >= 0 && shift < 62 {
                             if let Some(r) = Value::try_fixnum(v0.as_fixnum() << shift) {
-                                push!(r);
+                                set_reg!(opnds.dst, r);
                                 continue;
                             }
                         }
                     }
 
                     let r = slow!("lshift", self.lshift_slow(v0, v1));
-                    push!(r);
+                    set_reg!(opnds.dst, r);
                 }
 
                 // Integer right shift
-                Insn::rshift => {
-                    let v1 = pop!();
-                    let v0 = pop!();
+                Opcode::rshift => {
+                    let opnds = insns::rshift::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+                    let v1 = get_reg!(opnds.b);
 
                     // Shifting a fixnum right keeps it in range, so only
                     // the bits the tag occupies have to be cleared
@@ -1817,72 +1751,57 @@ impl Actor
                         let shift = v1.as_fixnum();
 
                         if shift >= 0 && shift < 62 {
-                            push!(Value::fixnum(v0.as_fixnum() >> shift));
+                            set_reg!(opnds.dst, Value::fixnum(v0.as_fixnum() >> shift));
                             continue;
                         }
                     }
 
                     let r = slow!("rshift", self.rshift_slow(v0, v1));
-                    push!(r);
-                }
-
-                Insn::lt => cmp_insn!("lt", <, cmp_lt),
-                Insn::le => cmp_insn!("le", <=, cmp_le),
-                Insn::gt => cmp_insn!("gt", >, cmp_gt),
-                Insn::ge => cmp_insn!("ge", >=, cmp_ge),
-
-                Insn::eq => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-                    push_bool!(v0 == v1);
-                }
-
-                Insn::ne => {
-                    let v1 = pop!();
-                    let v0 = pop!();
-                    push_bool!(v0 != v1);
+                    set_reg!(opnds.dst, r);
                 }
 
                 // Logical negation
-                Insn::not => {
-                    let v0 = pop!();
+                Opcode::not => {
+                    let opnds = insns::not::decode(insn);
+                    let v0 = get_reg!(opnds.src);
 
                     match v0.to_bool() {
-                        Some(b) => push_bool!(!b),
+                        Some(b) => set_reg_bool!(opnds.dst, !b),
                         None => error!("not", "unsupported type in logical not {:?}", v0)
                     }
                 }
 
                 // Create a new closure
-                Insn::clos_new { fun_id, num_slots } => {
-                    let num_slots = num_slots as usize;
+                Opcode::clos_new => {
+                    let opnds = insns::clos_new::decode(insn);
+                    let num_slots = opnds.num_slots as usize;
 
-                     self.gc_check(
-                        Closure::alloc_size(num_slots),
-                        &mut [],
-                    );
+                    self.gc_check(Closure::alloc_size(num_slots), &mut []);
 
+                    let fun_id = FunId::from(opnds.fun_id as usize);
                     let clos = Closure::new(fun_id, num_slots, &mut self.alloc);
-                    push!(clos);
+                    set_reg!(opnds.dst, clos);
                 }
 
                 // Set a closure slot
-                Insn::clos_set { idx } => {
-                    let val = pop!();
-                    let clos = pop!();
+                Opcode::clos_set => {
+                    let opnds = insns::clos_set::decode(insn);
+                    let clos = get_reg!(opnds.clos);
+                    let val = get_reg!(opnds.src);
 
                     match clos.to_clos() {
-                        Some(clos) => clos.set(idx as usize, val),
+                        Some(clos) => clos.set(opnds.idx as usize, val),
                         None => error!("clos_set", "expected closure")
                     }
                 }
 
                 // Get a closure slot for the function currently executing
-                Insn::clos_get { idx } => {
+                Opcode::clos_get => {
+                    let opnds = insns::clos_get::decode(insn);
                     let fun = self.frames[self.frames.len() - 1].fun;
 
                     let val = match fun.to_clos() {
-                        Some(clos) => clos.get(idx as usize),
+                        Some(clos) => clos.get(opnds.idx as usize),
                         None => error!("clos_get", "not a closure")
                     };
 
@@ -1890,24 +1809,24 @@ impl Actor
                         error!("clos_get", "executing uninitialized closure");
                     }
 
-                    push!(val);
+                    set_reg!(opnds.dst, val);
                 }
 
                 // Create a new mutable cell
-                Insn::cell_new => {
-                     self.gc_check(
-                        HEADER_SIZE + std::mem::size_of::<Value>(),
-                        &mut [],
-                    );
+                Opcode::cell_new => {
+                    let opnds = insns::cell_new::decode(insn);
+
+                    self.gc_check(HEADER_SIZE + size_of::<Value>(), &mut []);
 
                     let p_cell = self.alloc.alloc(Value::NIL, Tag::Cell);
-                    push!(Value::cell(p_cell));
+                    set_reg!(opnds.dst, Value::cell(p_cell));
                 }
 
                 // Set the value stored in a mutable cell
-                Insn::cell_set => {
-                    let cell = pop!();
-                    let val = pop!();
+                Opcode::cell_set => {
+                    let opnds = insns::cell_set::decode(insn);
+                    let cell = get_reg!(opnds.cell);
+                    let val = get_reg!(opnds.src);
 
                     match cell.to_cell() {
                         Some(p_cell) => *p_cell = val,
@@ -1916,149 +1835,116 @@ impl Actor
                 }
 
                 // Get the value stored in a mutable cell
-                Insn::cell_get => {
-                    let cell = pop!();
+                Opcode::cell_get => {
+                    let opnds = insns::cell_get::decode(insn);
+                    let cell = get_reg!(opnds.cell);
 
                     let val = match cell.to_cell() {
                         Some(p_cell) => *p_cell,
                         None => error!("cell_get", "invalid cell in cell_get")
                     };
 
-                    push!(val);
+                    set_reg!(opnds.dst, val);
+                }
+
+                Opcode::instanceof => {
+                    let opnds = insns::instanceof::decode(insn);
+                    let val = get_reg!(opnds.val);
+                    let class_id = ClassId::from(opnds.class_id as usize);
+                    set_reg_bool!(opnds.dst, crate::runtime::get_class_id(val) == class_id);
                 }
 
                 // Create new empty dictionary
-                Insn::dict_new => {
-                    self.gc_check(
-                        Dict::alloc_size(0),
-                        &mut []
-                    );
-                    push!(Dict::with_capacity(0, &mut self.alloc))
+                Opcode::dict_new => {
+                    let opnds = insns::dict_new::decode(insn);
+                    self.gc_check(Dict::alloc_size(0), &mut []);
+                    let dict = Dict::with_capacity(0, &mut self.alloc);
+                    set_reg!(opnds.dst, dict);
                 }
 
-                // Set object field
-                Insn::set_field { name, class_id, slot_idx } => {
-                    let val = pop!();
-                    let obj = pop!();
+                // Create new empty array
+                Opcode::arr_new => {
+                    let opnds = insns::arr_new::decode(insn);
+                    let capacity = opnds.capacity as usize;
 
-                    // Fast path: an object of the class this site last
-                    // resolved. Everything else goes out of line, so that
-                    // the interpreter loop carries only this
-                    if let Some(o) = obj.to_obj() {
-                        if class_id == o.class_id {
-                            o.set(slot_idx as usize, val);
-                            continue;
-                        }
-                    }
-
-                    if let Err(msg) = self.set_field_slow(obj, val, name, pc - 1) {
-                        error!("set_field", "{}", msg);
-                    }
+                    self.gc_check(Array::alloc_size(capacity), &mut []);
+                    let arr = Array::with_capacity(capacity, &mut self.alloc);
+                    set_reg!(opnds.dst, arr);
                 }
 
-                // Allocate a new class instance and call
-                // the constructor for the given class
-                Insn::new { class_id, argc } => {
-                    let num_slots = self.get_num_slots(class_id);
-
-                    self.gc_check(
-                        Object::alloc_size(num_slots),
-                        &mut [],
-                    );
-
-                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc);
-
-                    // If a constructor method is present
-                    let init_fun = self.get_method(class_id, "init");
-                    if let Some(fun_id) = init_fun {
-                        let this_pc = pc - 1;
-
-                        // The self value should be first argument to the constructor
-                        // The constructor also returns the allocated object
-                        self.stack.insert(self.stack.len() - argc as usize, obj_val);
-                        let ctor_entry = call_fun!(Value::fun(fun_id), argc + 1);
-
-                        // Patch the instruction to avoid lookups next time
-                        self.insns[this_pc] = Insn::new_known_ctor {
-                            class_id,
-                            argc,
-                            num_slots: num_slots.try_into().unwrap(),
-                            ctor_pc: ctor_entry.entry_pc as u32,
-                            fun_id,
-                            num_locals: ctor_entry.num_locals.try_into().unwrap(),
-                        };
-                    } else {
-                        // Return the allocated object
-                        push!(obj_val);
-                    }
+                // Append an element at the end of an array
+                // This instruction is used to construct array literals
+                Opcode::arr_push => {
+                    let opnds = insns::arr_push::decode(insn);
+                    let arr = get_reg!(opnds.arr);
+                    let val = get_reg!(opnds.val);
+                    crate::array::array_push(self, arr, val).unwrap();
                 }
 
-                Insn::new_known_ctor { class_id, argc, num_slots, ctor_pc, fun_id, num_locals } => {
-                    let num_slots = num_slots as usize;
+                // Clone a bytearray
+                Opcode::ba_clone => {
+                    let opnds = insns::ba_clone::decode(insn);
+                    let mut val = get_reg!(opnds.src);
+                    let ba = unwrap_ba!(val, "ba_clone");
 
-                    self.gc_check(
-                        Object::alloc_size(num_slots),
-                        &mut [],
-                    );
+                    self.gc_check(ByteArray::alloc_size(ba.num_bytes()), &mut [&mut val]);
 
-                    // Allocate the object
-                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc);
-
-                    // The self value should be first argument to the constructor
-                    // The constructor also returns the allocated object
-                    self.stack.insert(self.stack.len() - argc as usize, obj_val);
-
-                    // We add an extra argument for the self value
-                    self.frames.push(StackFrame {
-                        argc: argc + 1,
-                        fun: Value::fun(fun_id),
-                        prev_bp: bp,
-                        ret_addr: pc,
-                    });
-
-                    // The base pointer will point at the first local
-                    bp = self.stack.len();
-                    pc = ctor_pc as usize;
-
-                    // Allocate stack slots for the local variables
-                    self.stack.resize(self.stack.len() + num_locals as usize, Value::NIL);
-                }
-
-                Insn::instanceof { class_id } => {
-                    // Check that the class id matches
-                    let val = pop!();
-                    let id = crate::runtime::get_class_id(val);
-                    push_bool!(id == class_id);
+                    let ba_clone = val.as_ba().clone(&mut self.alloc);
+                    set_reg!(opnds.dst, ba_clone);
                 }
 
                 // Get object field
-                Insn::get_field { name, class_id, slot_idx } => {
-                    let obj = pop!();
+                Opcode::get_field => {
+                    let opnds = insns::get_field::decode(insn);
+                    let obj = get_reg!(opnds.obj);
+                    let cache = &self.prop_caches[opnds.cache as usize];
+                    let (class_id, slot_idx) = (cache.class_id, cache.slot_idx);
 
                     // Fast path: an object of the class this site last
                     // resolved. Everything else goes out of line, so that
                     // the interpreter loop carries only this
                     if let Some(o) = obj.to_obj() {
-                        if class_id == o.class_id {
+                        if o.class_id == class_id {
                             let val = o.get(slot_idx as usize);
 
                             if !val.is_undef() {
-                                push!(val);
+                                set_reg!(opnds.dst, val);
                                 continue;
                             }
                         }
                     }
 
-                    let val = match self.get_field_slow(obj, name, pc - 1) {
+                    let val = match self.get_field_slow(obj, opnds.cache) {
                         Ok(val) => val,
                         Err(msg) => error!("get_field", "{}", msg),
                     };
-                    push!(val);
+                    set_reg!(opnds.dst, val);
                 }
 
-                Insn::get_index => {
-                    let idx = pop!();
-                    let arr = pop!();
+                // Set object field
+                Opcode::set_field => {
+                    let opnds = insns::set_field::decode(insn);
+                    let obj = get_reg!(opnds.obj);
+                    let val = get_reg!(opnds.src);
+                    let cache = &self.prop_caches[opnds.cache as usize];
+                    let (class_id, slot_idx) = (cache.class_id, cache.slot_idx);
+
+                    if let Some(o) = obj.to_obj() {
+                        if o.class_id == class_id {
+                            o.set(slot_idx as usize, val);
+                            continue;
+                        }
+                    }
+
+                    if let Err(msg) = self.set_field_slow(obj, val, opnds.cache) {
+                        error!("set_field", "{}", msg);
+                    }
+                }
+
+                Opcode::get_index => {
+                    let opnds = insns::get_index::decode(insn);
+                    let arr = get_reg!(opnds.arr);
+                    let idx = get_reg!(opnds.idx);
 
                     if !arr.is_heap() {
                         error!("get_index", "expected array or dict type in get_index");
@@ -2087,13 +1973,14 @@ impl Actor
                         _ => error!("get_index", "expected array or dict type in get_index")
                     };
 
-                    push!(val);
+                    set_reg!(opnds.dst, val);
                 }
 
-                Insn::set_index => {
-                    let mut val = pop!();
-                    let mut idx = pop!();
-                    let mut arr = pop!();
+                Opcode::set_index => {
+                    let opnds = insns::set_index::decode(insn);
+                    let mut arr = get_reg!(opnds.arr);
+                    let mut idx = get_reg!(opnds.idx);
+                    let mut val = get_reg!(opnds.src);
 
                     if !arr.is_heap() {
                         error!("set_index", "expected array or dict type");
@@ -2130,108 +2017,154 @@ impl Actor
                     };
                 }
 
-                // Create new empty array
-                Insn::arr_new { capacity } => {
-                    let capacity = capacity as usize;
-
-                    self.gc_check(
-                        Array::alloc_size(capacity),
-                        &mut [],
-                    );
-
-                    push!(Array::with_capacity(capacity, &mut self.alloc))
-                }
-
-                // Append an element at the end of an array
-                // This instruction is used to construct array literals
-                Insn::arr_push => {
-                    let val = pop!();
-                    let array = pop!();
-                    crate::array::array_push(self, array, val).unwrap();
-                }
-
-                // Clone a bytearray
-                Insn::ba_clone => {
-                    let mut val = pop!();
-                    let ba = unwrap_ba!(val, "ba_clone");
-
-                    self.gc_check(
-                        ByteArray::alloc_size(ba.num_bytes()),
-                        &mut [&mut val],
-                    );
-
-                    let ba_clone = val.as_ba().clone(&mut self.alloc);
-                    push!(ba_clone);
-                }
-
                 // Jump if true
-                Insn::if_true { target_ofs } => {
-                    let v = pop!();
+                Opcode::if_true => {
+                    let opnds = insns::if_true::decode(insn);
+                    let v = get_reg!(opnds.val);
 
                     if v.is_true() {
-                        pc = ((pc as i64) + (target_ofs as i64)) as usize;
+                        pc = ((pc as i64) + (opnds.disp as i64)) as usize;
                     } else if !v.is_false() {
                         error!("if_true", "if_true instruction only accepts boolean values");
                     }
                 }
 
                 // Jump if false
-                Insn::if_false { target_ofs } => {
-                    let v = pop!();
+                Opcode::if_false => {
+                    let opnds = insns::if_false::decode(insn);
+                    let v = get_reg!(opnds.val);
 
                     if v.is_false() {
-                        pc = ((pc as i64) + (target_ofs as i64)) as usize;
+                        pc = ((pc as i64) + (opnds.disp as i64)) as usize;
                     } else if !v.is_true() {
                         error!("if_false", "if_false instruction only accepts boolean values");
                     }
                 }
 
+                Opcode::jlt => cmp_branch!(insn, "lt", jlt, <, cmp_lt),
+                Opcode::jle => cmp_branch!(insn, "le", jle, <=, cmp_le),
+                Opcode::jgt => cmp_branch!(insn, "gt", jgt, >, cmp_gt),
+                Opcode::jge => cmp_branch!(insn, "ge", jge, >=, cmp_ge),
+
+                Opcode::jeq => {
+                    let opnds = insns::jeq::decode(insn);
+
+                    if get_reg!(opnds.a) == get_reg!(opnds.b) {
+                        pc = ((pc as i64) + (opnds.disp as i64)) as usize;
+                    }
+                }
+
+                Opcode::jne => {
+                    let opnds = insns::jne::decode(insn);
+
+                    if get_reg!(opnds.a) != get_reg!(opnds.b) {
+                        pc = ((pc as i64) + (opnds.disp as i64)) as usize;
+                    }
+                }
+
                 // Unconditional jump
-                Insn::jump { target_ofs } => {
-                    pc = ((pc as i64) + (target_ofs as i64)) as usize
+                Opcode::jmp => {
+                    let opnds = insns::jmp::decode(insn);
+                    pc = ((pc as i64) + (opnds.disp as i64)) as usize;
                 }
 
-                // call (arg0, arg1, ..., argN, fun)
-                Insn::call { argc } => {
-                    let fun = pop!();
-                    call_fun!(fun, argc);
+                // Call a host function the VM provides
+                Opcode::call_host => {
+                    let opnds = insns::call_host::decode(insn);
+                    let host_fn = HostFnId::from_index(opnds.host_fn).get();
+                    let base = bp + opnds.start_reg as usize;
+
+                    if let Err(msg) = self.call_host(host_fn, base, opnds.argc as usize) {
+                        error!("{}", msg);
+                    }
                 }
 
-                // call_direct (arg0, arg1, ..., argN)
-                Insn::call_direct { fun_id, argc } => {
-                    let this_pc = pc - 1;
-                    let fun_entry = call_fun!(Value::fun(fun_id), argc);
+                // Call a function by id. The callee is statically known,
+                // so this resolves once and becomes a call_pc
+                Opcode::call_direct => {
+                    let opnds = insns::call_direct::decode(insn);
+                    let fun_id = FunId::from(opnds.fun as usize);
+                    let (fun_val, _, entry) = resolve_callee!(Value::fun(fun_id), opnds.argc);
 
-                    // Patch the instruction to jump directly to the entry point next time
-                    self.insns[this_pc] = Insn::call_pc {
-                        entry_pc: fun_entry.entry_pc.try_into().unwrap(),
+                    // The callee cannot change, so the site is rewritten
+                    // rather than guarded
+                    let cache = self.new_call_cache_entry(CallCache {
                         fun_id,
-                        num_locals: fun_entry.num_locals.try_into().unwrap(),
-                        argc
-                    };
-                }
-
-                // call_pc (arg0, arg1, ..., argN)
-                Insn::call_pc { entry_pc, fun_id, num_locals, argc } => {
-                    self.frames.push(StackFrame {
-                        argc,
-                        fun: Value::fun(fun_id),
-                        prev_bp: bp,
-                        ret_addr: pc,
+                        entry_pc: entry.entry_pc as u32,
+                        frame_size: entry.frame_size as u16,
+                        ..CallCache::default()
                     });
+                    self.insns[this_pc] = Insn::call_pc(opnds.start_reg, opnds.argc, cache);
 
-                    // The base pointer will point at the first local
-                    bp = self.stack.len();
-                    pc = entry_pc as usize;
-
-                    // Allocate stack slots for the local variables
-                    self.stack.resize(self.stack.len() + num_locals as usize, Value::NIL);
+                    push_frame!(fun_val, opnds.start_reg, entry.entry_pc, entry.frame_size);
                 }
 
-                // Call a method with a known name
-                // call_method (self, arg0, ..., argN)
-                Insn::call_method { name, argc } => {
-                    let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
+                // Call a function whose entry point is already known
+                Opcode::call_pc => {
+                    let opnds = insns::call_pc::decode(insn);
+                    let cache = &self.call_caches[opnds.cache as usize];
+                    let (fun_id, entry_pc, frame_size) =
+                        (cache.fun_id, cache.entry_pc, cache.frame_size);
+
+                    push_frame!(Value::fun(fun_id), opnds.start_reg, entry_pc, frame_size);
+                }
+
+                // Call a function value. The callee sits just past the
+                // arguments, where this frame will overwrite it
+                Opcode::call_opnd => {
+                    let opnds = insns::call_opnd::decode(insn);
+                    let fun_val = get_reg!(opnds.start_reg as usize + opnds.argc as usize);
+
+                    // A closure and the function it closes over share an
+                    // entry point, so the guard is on the function id and
+                    // the frame records the closure itself
+                    if let Some(fun_id) = fun_val.to_fun_id() {
+                        let cache = &self.call_caches[opnds.cache as usize];
+
+                        if cache.fun_id == fun_id {
+                            let (entry_pc, frame_size) = (cache.entry_pc, cache.frame_size);
+                            push_frame!(fun_val, opnds.start_reg, entry_pc, frame_size);
+                            continue;
+                        }
+                    } else if let Some(f) = fun_val.to_host_fn() {
+                        let base = bp + opnds.start_reg as usize;
+
+                        if let Err(msg) = self.call_host(f, base, opnds.argc as usize) {
+                            error!("{}", msg);
+                        }
+
+                        continue;
+                    }
+
+                    let (fun_val, fun_id, entry) = resolve_callee!(fun_val, opnds.argc);
+
+                    let cache = &mut self.call_caches[opnds.cache as usize];
+                    cache.fun_id = fun_id;
+                    cache.entry_pc = entry.entry_pc as u32;
+                    cache.frame_size = entry.frame_size as u16;
+
+                    push_frame!(fun_val, opnds.start_reg, entry.entry_pc, entry.frame_size);
+                }
+
+                // Call a method on the value in start_reg
+                Opcode::call_method => {
+                    let opnds = insns::call_method::decode(insn);
+                    let self_val = get_reg!(opnds.start_reg);
+
+                    let cache = &self.call_caches[opnds.cache as usize];
+                    let (name, class_id) = (cache.name, cache.class_id);
+
+                    // Guard that self is an object of the class this site
+                    // last looked the method up on
+                    if let Some(obj) = self_val.to_obj() {
+                        if obj.class_id == class_id {
+                            let cache = &self.call_caches[opnds.cache as usize];
+                            let (fun_id, entry_pc, frame_size) =
+                                (cache.fun_id, cache.entry_pc, cache.frame_size);
+                            push_frame!(Value::fun(fun_id), opnds.start_reg, entry_pc, frame_size);
+                            continue;
+                        }
+                    }
 
                     match self_val.to_obj() {
                         Some(obj) => {
@@ -2240,149 +2173,156 @@ impl Actor
                             let class_id = obj.class_id;
 
                             let fun_id = match self.get_method_of(class_id, name) {
-                                None => error!(
-                                    "call to method `{}`, not found on class `{}`",
-                                    self.name_str(name).to_string(),
-                                    self.get_class_name(class_id)
-                                ),
+                                None => {
+                                    let method = self.name_str(name).to_string();
+                                    let class = self.get_class_name(class_id);
+                                    error!("call to method `{}`, not found on class `{}`", method, class)
+                                }
                                 Some(fun_id) => fun_id,
                             };
 
-                            let this_pc = pc - 1;
-                            let fun_entry = call_fun!(Value::fun(fun_id), argc + 1);
+                            let (fun_val, _, entry) = resolve_callee!(Value::fun(fun_id), opnds.argc);
 
-                            // Patch this instruction to avoid the method
-                            // lookup next time
-                            self.insns[this_pc] = Insn::call_method_pc {
-                                name,
-                                argc: argc.try_into().unwrap(),
-                                class_id,
-                                entry_pc: fun_entry.entry_pc.try_into().unwrap(),
-                                fun_id,
-                                num_locals: fun_entry.num_locals.try_into().unwrap(),
-                            };
+                            let cache = &mut self.call_caches[opnds.cache as usize];
+                            cache.class_id = class_id;
+                            cache.fun_id = fun_id;
+                            cache.entry_pc = entry.entry_pc as u32;
+                            cache.frame_size = entry.frame_size as u16;
+
+                            push_frame!(fun_val, opnds.start_reg, entry.entry_pc, entry.frame_size);
                         }
 
                         // Call to a primitive e.g. Int64/Float64/immediate (not an object)
                         None => {
-                            // Lookup the method to call
                             let host_fn = match crate::runtime::get_method(self_val, self.name_str(name)) {
-                                None => error!("call to unknown method `{}`", self.name_str(name)),
+                                None => {
+                                    let method = self.name_str(name).to_string();
+                                    error!("call to unknown method `{}`", method)
+                                }
                                 Some(id) => id,
                             };
-
-                            if argc as usize + 1 > self.stack.len() - bp {
-                                error!("not enough call arguments on stack");
-                            }
 
                             // Patch this instruction to avoid the method
                             // lookup next time. Bools and classes are left
                             // alone because their methods depend on more
-                            // than the type tag. Nothing has allocated since
-                            // the name was read, so it hasn't moved.
+                            // than the type tag.
                             let type_tag = self_val.type_of();
                             if !matches!(type_tag, Type::Bool | Type::Class) {
-                                self.insns[pc - 1] = Insn::call_method_host {
-                                    name,
-                                    argc,
-                                    type_tag,
-                                    host_fn,
-                                };
+                                self.call_caches[opnds.cache as usize].host_fn = host_fn;
+                                self.insns[this_pc] = Insn::call_method_host(
+                                    opnds.start_reg,
+                                    opnds.argc,
+                                    type_tag as u8,
+                                    opnds.cache,
+                                );
                             }
 
-                            if let Err(msg) = self.call_host(host_fn.get(), argc as usize + 1) {
+                            let base = bp + opnds.start_reg as usize;
+
+                            if let Err(msg) = self.call_host(host_fn.get(), base, opnds.argc as usize) {
                                 error!("{}", msg);
                             }
                         }
-                    };
-                }
-
-                Insn::call_method_pc { name, argc, class_id, entry_pc, fun_id, num_locals } => {
-                    let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
-
-                    // Guard that self is an object with a matching class id
-                    if let Some(obj) = self_val.to_obj() {
-                        if obj.class_id == class_id {
-                            let argc: u8 = argc.into();
-                            self.frames.push(StackFrame {
-                                argc: argc + 1,
-                                fun: Value::fun(fun_id),
-                                prev_bp: bp,
-                                ret_addr: pc,
-                            });
-
-                            // The base pointer will point at the first local
-                            bp = self.stack.len();
-                            pc = entry_pc as usize;
-
-                            // Allocate stack slots for the local variables
-                            self.stack.resize(self.stack.len() + num_locals as usize, Value::NIL);
-
-                            // Proceed with the call
-                            continue;
-                        }
                     }
-
-                    // The guard fail, deoptimize this instruction and try again
-                    pc -= 1;
-                    self.insns[pc] = Insn::call_method {
-                        name,
-                        argc: argc.into(),
-                    };
                 }
 
-                Insn::call_method_host { name, argc, type_tag, host_fn } => {
-                    // Checked when the instruction was patched in
-                    debug_assert!(argc as usize + 1 <= self.stack.len() - bp);
-                    let self_val = self.stack[self.stack.len() - (1 + argc as usize)];
+                // Call a host method, guarded on the receiver's type tag
+                Opcode::call_method_host => {
+                    let opnds = insns::call_method_host::decode(insn);
+                    let self_val = get_reg!(opnds.start_reg);
 
                     // Guard that self still has the type the method was found on
-                    if self_val.type_of() == type_tag {
-                        if let Err(msg) = self.call_host(host_fn.get(), argc as usize + 1) {
+                    if self_val.type_of() as u8 == opnds.type_tag {
+                        let host_fn = self.call_caches[opnds.cache as usize].host_fn.get();
+                        let base = bp + opnds.start_reg as usize;
+
+                        if let Err(msg) = self.call_host(host_fn, base, opnds.argc as usize) {
                             error!("{}", msg);
                         }
 
                         continue;
                     }
 
-                    // The guard failed, deoptimize this instruction and try again
-                    pc -= 1;
-                    self.insns[pc] = Insn::call_method { name, argc };
+                    // The guard failed. Both forms take the same operands,
+                    // so deoptimizing is a write of the opcode
+                    self.insns[this_pc] = Insn::call_method(
+                        opnds.start_reg,
+                        opnds.argc,
+                        opnds.cache,
+                    );
+                    pc = this_pc;
                 }
 
-                Insn::ret => {
-                    if self.stack.len() <= bp {
-                        error!("ret", "no return value on stack");
+                // Allocate a class instance and run its constructor
+                Opcode::new => {
+                    let opnds = insns::new::decode(insn);
+                    let class_id = ClassId::from(opnds.class_id as usize);
+                    let num_slots = self.get_num_slots(class_id);
+
+                    self.gc_check(Object::alloc_size(num_slots), &mut []);
+
+                    // The object is the constructor's self argument, and
+                    // also what the call leaves behind as its result
+                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc);
+                    set_reg!(opnds.start_reg, obj_val);
+
+                    let init_fun = self.get_method(class_id, "init");
+
+                    if let Some(fun_id) = init_fun {
+                        let (fun_val, _, entry) = resolve_callee!(Value::fun(fun_id), opnds.argc);
+
+                        // The class is statically known, so the site is
+                        // rewritten rather than guarded
+                        let cache = self.new_call_cache_entry(CallCache {
+                            class_id,
+                            fun_id,
+                            entry_pc: entry.entry_pc as u32,
+                            frame_size: entry.frame_size as u16,
+                            num_slots: num_slots as u16,
+                            ..CallCache::default()
+                        });
+                        self.insns[this_pc] = Insn::new_known_ctor(opnds.start_reg, opnds.argc, cache);
+
+                        push_frame!(fun_val, opnds.start_reg, entry.entry_pc, entry.frame_size);
+                    } else if opnds.argc != 1 {
+                        error!(
+                            "class `{}` has no constructor but was given {} argument(s)",
+                            self.get_class_name(class_id),
+                            opnds.argc - 1,
+                        );
                     }
-
-                    let ret_val = pop!();
-                    //println!("ret_val={:?}", ret_val);
-
-                    // If this is a top-level return
-                    if self.frames.len() == 1 {
-                        self.stack.clear();
-                        self.frames.clear();
-                        return ret_val;
-                    }
-
-                    // The pop below already panics on an empty frame stack
-                    debug_assert!(self.frames.len() > 0);
-                    let top_frame = self.frames.pop().unwrap();
-
-                    // Pop all local variables and arguments
-                    // We pop arguments in the callee so we can support tail calls
-                    let argc = top_frame.argc as usize;
-                    assert!(self.stack.len() >= bp - argc);
-                    self.stack.truncate(bp - argc);
-
-                    pc = top_frame.ret_addr;
-                    bp = top_frame.prev_bp;
-
-                    push!(ret_val);
                 }
 
-                #[allow(unreachable_patterns)]
-                _ => error!("unknown opcode {:?}", insn)
+                // Allocate a class instance whose constructor is known
+                Opcode::new_known_ctor => {
+                    let opnds = insns::new_known_ctor::decode(insn);
+                    let cache = &self.call_caches[opnds.cache as usize];
+                    let (class_id, num_slots) = (cache.class_id, cache.num_slots as usize);
+                    let (fun_id, entry_pc, frame_size) =
+                        (cache.fun_id, cache.entry_pc, cache.frame_size);
+
+                    self.gc_check(Object::alloc_size(num_slots), &mut []);
+
+                    let obj_val = Object::new(class_id, num_slots, &mut self.alloc);
+                    set_reg!(opnds.start_reg, obj_val);
+
+                    push_frame!(Value::fun(fun_id), opnds.start_reg, entry_pc, frame_size);
+                }
+
+                Opcode::ret => {
+                    let opnds = insns::ret::decode(insn);
+                    let ret_val = get_reg!(opnds.src);
+                    do_return!(ret_val);
+                }
+
+                Opcode::ret_nil => {
+                    do_return!(Value::NIL);
+                }
+
+                Opcode::ret_imm32 => {
+                    let opnds = insns::ret_imm32::decode(insn);
+                    do_return!(Value::from_raw_bits(opnds.imm as i64 as u64));
+                }
             }
         }
     }

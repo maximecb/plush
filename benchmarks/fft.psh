@@ -16,13 +16,13 @@ fun fft(real_parts, imag_parts, inverse) {
         if (j > i) {
             // Swap real parts
             let temp_re = real_parts.get_f32(i);
-            real_parts.store_f32(i, real_parts.get_f32(j));
-            real_parts.store_f32(j, temp_re);
+            real_parts.set_f32(i, real_parts.get_f32(j));
+            real_parts.set_f32(j, temp_re);
 
             // Swap imaginary parts
             let temp_im = imag_parts.get_f32(i);
-            imag_parts.store_f32(i, imag_parts.get_f32(j));
-            imag_parts.store_f32(j, temp_im);
+            imag_parts.set_f32(i, imag_parts.get_f32(j));
+            imag_parts.set_f32(j, temp_im);
         }
         let var m = n _/ 2;
         while (m >= 1 && j >= m) {
@@ -60,12 +60,12 @@ fun fft(real_parts, imag_parts, inverse) {
                 let v_im = x_half_re * w_im + x_half_im * w_re;
 
                 // x[i + j] = u + v
-                real_parts.store_f32(i + j, u_re + v_re);
-                imag_parts.store_f32(i + j, u_im + v_im);
+                real_parts.set_f32(i + j, u_re + v_re);
+                imag_parts.set_f32(i + j, u_im + v_im);
 
                 // x[i + j + len / 2] = u - v
-                real_parts.store_f32(i + j + len _/ 2, u_re - v_re);
-                imag_parts.store_f32(i + j + len _/ 2, u_im - v_im);
+                real_parts.set_f32(i + j + len _/ 2, u_re - v_re);
+                imag_parts.set_f32(i + j + len _/ 2, u_im - v_im);
 
                 // w = w * wlen
                 let next_w_re = w_re * wlen_re - w_im * wlen_im;
@@ -83,8 +83,8 @@ fun fft(real_parts, imag_parts, inverse) {
     // Apply 1/N factor for inverse FFT
     if (inverse) {
         for (let var k = 0; k < n; ++k) {
-            real_parts.store_f32(k, real_parts.get_f32(k) / n);
-            imag_parts.store_f32(k, imag_parts.get_f32(k) / n);
+            real_parts.set_f32(k, real_parts.get_f32(k) / n);
+            imag_parts.set_f32(k, imag_parts.get_f32(k) / n);
         }
     }
 }
@@ -102,17 +102,44 @@ fun main() {
     for (let var i = 0; i < N; ++i) {
         // Generate a sine wave
         let value = (2.0 * PI * frequency * (i / sample_rate)).sin();
-        real_parts.store_f32(i, value);
-        imag_parts.store_f32(i, 0.0);
+        real_parts.set_f32(i, value);
+        imag_parts.set_f32(i, 0.0);
     }
 
-    // --- Benchmark FFT ---
-    let start_time = $time_current_ms();
-    fft(real_parts, imag_parts, false); // Compute forward FFT
-    let end_time = $time_current_ms();
-    let fft_time = end_time - start_time;
+    // One transform is short enough that process startup would dominate a
+    // wall clock measurement, so the timed section repeats it. Each
+    // iteration is a forward transform followed by its inverse, which
+    // brings the data back to where it started instead of letting the
+    // magnitudes grow without the 1/N factor the inverse applies
+    let NUM_ITERS = 1470;
 
-    $println("FFT of " + N.to_s() + " samples took: " + fft_time.to_s() + " ms");
+    let start_time = $time_current_ms();
+
+    for (let var iter = 0; iter < NUM_ITERS; ++iter) {
+        fft(real_parts, imag_parts, false); // Compute forward FFT
+        fft(real_parts, imag_parts, true);  // Compute inverse FFT
+    }
+
+    let end_time = $time_current_ms();
+    let total_time = end_time - start_time;
+    let per_iter = total_time.to_f() / NUM_ITERS.to_f();
+
+    $println(
+        "FFT of " + N.to_s() + " samples took: " + total_time.to_s() + " ms for " +
+        NUM_ITERS.to_s() + " forward/inverse pairs, " +
+        per_iter.format_decimals(3) + " ms per pair"
+    );
+
+    // The round trip should reproduce the input, so this is a check that
+    // the transform did not drift into nonsense over the iterations
+    let value0 = (2.0 * PI * frequency * (0 / sample_rate)).sin();
+    let value1 = (2.0 * PI * frequency * (1 / sample_rate)).sin();
+    $println(
+        "round trip check: " + real_parts.get_f32(0).format_decimals(4) +
+        " (expected " + value0.format_decimals(4) + "), " +
+        real_parts.get_f32(1).format_decimals(4) +
+        " (expected " + value1.format_decimals(4) + ")"
+    );
 
     /*
     // Optional: Print first few FFT results (magnitude)
@@ -125,23 +152,6 @@ fun main() {
     }
     */
 
-    // --- Benchmark Inverse FFT ---
-    // Re-initialize input for IFFT if you want to test it independently
-    // For now, we'll just run IFFT on the result of the forward FFT
-    let start_time_ifft = $time_current_ms();
-    fft(real_parts, imag_parts, true); // Compute inverse FFT
-    let end_time_ifft = $time_current_ms();
-    let ifft_time = end_time_ifft - start_time_ifft;
-
-    $println("Inverse FFT of " + N.to_s() + " samples took: " + ifft_time.to_s() + " ms");
-
-    /*
-    // Optional: Print first few IFFT results (real part)
-    $println("First 20 IFFT real parts:");
-    for (let var i = 0; i < 20; ++i) {
-        $println("  " + i.to_f().to_s() + ": " + real_parts.get_f32(i).format_decimals(4));
-    }
-    */
 }
 
 main();

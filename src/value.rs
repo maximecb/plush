@@ -149,13 +149,13 @@ impl Value
     pub const FIXNUM_MIN: i64 = -(1 << 61);
 
     #[inline(always)]
-    pub const fn from_raw(bits: u64) -> Value
+    pub const fn from_raw_bits(bits: u64) -> Value
     {
         Value(bits)
     }
 
     #[inline(always)]
-    pub const fn raw(self) -> u64
+    pub const fn raw_bits(self) -> u64
     {
         self.0
     }
@@ -695,7 +695,7 @@ impl Eq for Value {}
 fn slow_eq(a: Value, b: Value) -> bool
 {
     if a.is_string() && b.is_string() {
-        return a.raw() == b.raw() || a.as_str() == b.as_str();
+        return a.raw_bits() == b.raw_bits() || a.as_str() == b.as_str();
     }
 
     if a.is_num() && b.is_num() {
@@ -887,8 +887,8 @@ mod tests
         // Tagged words add directly and order like the integers they hold
         let a = Value::fixnum(7);
         let b = Value::fixnum(-3);
-        assert_eq!(Value::from_raw(a.raw().wrapping_add(b.raw())).as_fixnum(), 4);
-        assert!((a.raw() as i64) > (b.raw() as i64));
+        assert_eq!(Value::from_raw_bits(a.raw_bits().wrapping_add(b.raw_bits())).as_fixnum(), 4);
+        assert!((a.raw_bits() as i64) > (b.raw_bits() as i64));
     }
 
     #[test]

@@ -85,11 +85,14 @@ macro_rules! def_host_fns {
 
         /// Identifies a host function by its position in `HOST_FNS`.
         /// Narrow enough to sit in an instruction operand.
-        #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+        #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
         #[allow(non_camel_case_types)]
         #[repr(u16)]
         pub enum HostFnId
         {
+            // The first entry stands in for "not resolved yet", which is
+            // what a call cache holds until its site has run
+            #[default]
             $($g_id,)*
             $($m_id,)*
         }
@@ -120,6 +123,13 @@ macro_rules! def_host_fns {
 
 impl HostFnId
 {
+    /// Recover an id from its index, as an instruction operand holds it
+    pub fn from_index(idx: u16) -> HostFnId
+    {
+        assert!((idx as usize) < NUM_HOST_FNS);
+        unsafe { std::mem::transmute(idx) }
+    }
+
     /// Get the host function this id refers to
     pub fn get(self) -> &'static HostFn
     {

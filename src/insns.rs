@@ -370,7 +370,7 @@ def_opcodes! {
     // generated one could overflow them, so the caller saturates rather
     // than letting the encoding assert fire.
     // Panic is zero so that jumping to uninitialized memory causes panic
-    panic = 0 { file_id: u12, line_no: u24, col_no: u20 },
+    panic = 0 { file_id: u16, line_no: u20, col_no: u20 },
 
     // Debugger breakpoint
     breakpoint {},
@@ -464,7 +464,12 @@ def_opcodes! {
     jmp { disp: disp32 },
 
     // Call a function operand (dynamic call). The callee is not known, so
-    // the site caches the last one it resolved and guards on it
+    // the site caches the last one it resolved and guards on it.
+    // The callee sits in start_reg + argc, just past the arguments, which
+    // is where the callee's own frame overwrites it once the call is
+    // under way. Naming it there rather than in an operand is what leaves
+    // room for the cache, and it keeps the return value in start_reg like
+    // every other call
     call_opnd { start_reg: reg, argc: u8, cache: u24 },
 
     // Call a known host function provided by the VM
@@ -650,10 +655,10 @@ mod tests
     {
         // The three fields fill the word exactly, so each one has to come
         // back out without disturbing the others
-        let insn = Insn::panic((1 << 12) - 1, (1 << 24) - 1, (1 << 20) - 1);
+        let insn = Insn::panic(u16::MAX, (1 << 20) - 1, (1 << 20) - 1);
         assert_eq!(
             panic::decode(insn),
-            panic { file_id: (1 << 12) - 1, line_no: (1 << 24) - 1, col_no: (1 << 20) - 1 }
+            panic { file_id: u16::MAX, line_no: (1 << 20) - 1, col_no: (1 << 20) - 1 }
         );
         assert_eq!(insn.word_u64(), u64::MAX & !0xFF);
 
@@ -667,7 +672,7 @@ mod tests
     fn out_of_range_operand()
     {
         // Range checks are hard asserts, so this fires in release too
-        Insn::panic(1 << 12, 0, 0);
+        Insn::panic(0, 1 << 20, 0);
     }
 
     #[test]
