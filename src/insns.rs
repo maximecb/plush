@@ -409,6 +409,12 @@ def_opcodes! {
     lshift_imm { dst: out_reg, a: reg, shift: u6 },
     rshift_imm { dst: out_reg, a: reg, shift: u6 },
     bit_and { dst: out_reg, a: reg, b: reg },
+
+    // And with a constant mask, given as a run of `len` set bits starting
+    // at bit `lo`. Encoding the run rather than the value is what lets a
+    // 32-bit mask fit alongside two registers. Codegen keeps the run
+    // inside a fixnum, so the mask never has to be boxed
+    bit_and_mask { dst: out_reg, a: reg, lo: u6, len: u6 },
     bit_or { dst: out_reg, a: reg, b: reg },
     bit_xor { dst: out_reg, a: reg, b: reg },
     bit_not { dst: out_reg, src: reg },
@@ -637,7 +643,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 60);
+        assert_eq!(NUM_OPCODES, 61);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.

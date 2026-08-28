@@ -1021,6 +1021,44 @@ fn gen_bin_op(
         return gen_assign(lhs, rhs, fun, regs, actor, true);
     }
 
+    // A mask that is one run of set bits, as the position of its lowest
+    // set bit and the length of the run. Runs that reach past what a
+    // fixnum holds are rejected, so the mask never needs boxing
+    fn bit_run(mask: i64) -> Option<(u8, u8)>
+    {
+        if mask <= 0 {
+            return None;
+        }
+
+        let lo = mask.trailing_zeros();
+        let len = (mask >> lo).trailing_ones();
+
+        // Anything left above the run means the set bits are not contiguous
+        if (mask >> lo) >> (len - 1) >> 1 != 0 || lo + len > 62 {
+            return None;
+        }
+
+        Some((lo as u8, len as u8))
+    }
+
+    // And with a constant mask folds into the instruction when the mask is
+    // a single run of bits, which is what every mask worth folding is
+    if *op == BitAnd {
+        let run = const_value(rhs, actor)
+            .filter(|v| v.is_fixnum())
+            .and_then(|v| bit_run(v.as_fixnum()));
+
+        if let Some((lo, len)) = run {
+            let top = regs.top();
+            let a = lhs.gen_code(fun, regs, actor, None)?;
+            regs.free_to(top);
+
+            let d = match dst { Some(dst) => dst, None => regs.alloc() };
+            actor.insns.push(Insn::bit_and_mask(d, a, lo, len));
+            return Ok(d);
+        }
+    }
+
     // A shift by a constant amount folds into the instruction. Anything
     // below the word size is accepted, which is what lets the instruction
     // itself skip checking the amount

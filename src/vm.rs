@@ -720,6 +720,11 @@ impl Actor
                 Some(format!("{:?}", Value::from_raw_bits(imm as u64)))
             }
 
+            Opcode::bit_and_mask => {
+                let opnds = insns::bit_and_mask::decode(insn);
+                Some(format!("& {:#x}", ((1i64 << opnds.len) - 1) << opnds.lo))
+            }
+
             Opcode::load_const => {
                 let slot = insns::load_const::decode(insn).slot;
                 Some(format!("{:?}", self.consts[slot as usize]))
@@ -1852,6 +1857,23 @@ impl Actor
                 Opcode::bit_or => bitop_insn!(insn, "bit_or", bit_or, |, bit_or_slow),
                 Opcode::bit_and => bitop_insn!(insn, "bit_and", bit_and, &, bit_and_slow),
                 Opcode::bit_xor => bitop_insn!(insn, "bit_xor", bit_xor, ^, bit_xor_slow),
+
+                Opcode::bit_and_mask => {
+                    let opnds = insns::bit_and_mask::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+                    let mask = ((1i64 << opnds.len) - 1) << opnds.lo;
+
+                    // A fixnum's tag is zero, so masking the tagged word
+                    // leaves a correctly tagged result
+                    if v0.is_fixnum() {
+                        let tagged = Value::fixnum(mask).raw_bits();
+                        set_reg!(opnds.dst, Value::from_raw_bits(v0.raw_bits() & tagged));
+                        continue;
+                    }
+
+                    let r = slow!("bit_and", self.bit_and_slow(v0, Value::fixnum(mask)));
+                    set_reg!(opnds.dst, r);
+                }
 
                 Opcode::bit_not => {
                     let opnds = insns::bit_not::decode(insn);
