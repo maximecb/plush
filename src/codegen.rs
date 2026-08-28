@@ -1049,12 +1049,36 @@ fn gen_bin_op(
             .and_then(|v| bit_run(v.as_fixnum()));
 
         if let Some((lo, len)) = run {
+            // A constant shift feeding the mask folds in as well, which is
+            // what pulling a field out of a packed word looks like
+            let shifted = match lhs.expr.as_ref() {
+                Expr::Binary { op: RShift, lhs: inner, rhs: amount } => {
+                    const_value(amount, actor)
+                        .filter(|v| v.is_fixnum())
+                        .map(|v| v.as_fixnum())
+                        .filter(|sh| *sh >= 0 && *sh < 64)
+                        .map(|sh| (inner, sh as u8))
+                }
+
+                _ => None
+            };
+
             let top = regs.top();
-            let a = lhs.gen_code(fun, regs, actor, None)?;
+
+            let a = match shifted {
+                Some((inner, _)) => inner.gen_code(fun, regs, actor, None)?,
+                None => lhs.gen_code(fun, regs, actor, None)?,
+            };
+
             regs.free_to(top);
 
             let d = match dst { Some(dst) => dst, None => regs.alloc() };
-            actor.insns.push(Insn::bit_and_mask(d, a, lo, len));
+
+            actor.insns.push(match shifted {
+                Some((_, sh)) => Insn::rshift_mask(d, a, sh, lo, len),
+                None => Insn::bit_and_mask(d, a, lo, len),
+            });
+
             return Ok(d);
         }
     }

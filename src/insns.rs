@@ -415,6 +415,10 @@ def_opcodes! {
     // 32-bit mask fit alongside two registers. Codegen keeps the run
     // inside a fixnum, so the mask never has to be boxed
     bit_and_mask { dst: out_reg, a: reg, lo: u6, len: u6 },
+
+    // Shift right by a constant, then mask the result. Extracting a field
+    // out of a packed word is common enough to be worth one instruction
+    rshift_mask { dst: out_reg, a: reg, shift: u6, lo: u6, len: u6 },
     bit_or { dst: out_reg, a: reg, b: reg },
     bit_xor { dst: out_reg, a: reg, b: reg },
     bit_not { dst: out_reg, src: reg },
@@ -643,7 +647,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 61);
+        assert_eq!(NUM_OPCODES, 62);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.

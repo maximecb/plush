@@ -720,6 +720,11 @@ impl Actor
                 Some(format!("{:?}", Value::from_raw_bits(imm as u64)))
             }
 
+            Opcode::rshift_mask => {
+                let opnds = insns::rshift_mask::decode(insn);
+                Some(format!(">> {} & {:#x}", opnds.shift, ((1i64 << opnds.len) - 1) << opnds.lo))
+            }
+
             Opcode::bit_and_mask => {
                 let opnds = insns::bit_and_mask::decode(insn);
                 Some(format!("& {:#x}", ((1i64 << opnds.len) - 1) << opnds.lo))
@@ -1872,6 +1877,26 @@ impl Actor
                     }
 
                     let r = slow!("bit_and", self.bit_and_slow(v0, Value::fixnum(mask)));
+                    set_reg!(opnds.dst, r);
+                }
+
+                Opcode::rshift_mask => {
+                    let opnds = insns::rshift_mask::decode(insn);
+                    let v0 = get_reg!(opnds.a);
+                    let mask = ((1i64 << opnds.len) - 1) << opnds.lo;
+
+                    // Shifting a fixnum right keeps it in range, and its
+                    // tag is zero, so both steps stay on the tagged word
+                    if v0.is_fixnum() {
+                        let shifted = Value::fixnum(v0.as_fixnum() >> opnds.shift);
+                        let tagged = Value::fixnum(mask).raw_bits();
+                        set_reg!(opnds.dst, Value::from_raw_bits(shifted.raw_bits() & tagged));
+                        continue;
+                    }
+
+                    let amount = Value::fixnum(opnds.shift as i64);
+                    let shifted = slow!("rshift", self.rshift_slow(v0, amount));
+                    let r = slow!("bit_and", self.bit_and_slow(shifted, Value::fixnum(mask)));
                     set_reg!(opnds.dst, r);
                 }
 
