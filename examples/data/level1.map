@@ -1,0 +1,220 @@
+// The Sunken Vault, a level for examples/level_walk.psh
+//
+// Brushes are convex solids; the space you walk through is what is left
+// between them. One unit is one texel, so a 256 texture repeats every 256
+// units. Rooms are sized in multiples of 64.
+//
+//   tex   <index> <name>
+//   start <x> <y> <z> <yaw degrees>
+//   light <x> <y> <z> <radius> <brightness>
+//   box   <x0> <y0> <z0> <x1> <y1> <z1> [keys]
+//   ramp  <x0> <y0> <z0> <x1> <y1> <z1> <px|nx|pz|nz> [keys]
+//   prism <cx> <cz> <radius> <y0> <y1> <sides> <rot degrees> [keys]
+//   arch  <x|z> <a0> <a1> <c0> <c1> <ybase> <ytop> <segments> [keys]
+//
+// Keys: all= side= top= bottom= nx= px= ny= py= nz= pz= to place textures,
+// light=<0..15> to force a light level instead of baking one, scale=<f>,
+// fit to stretch a texture once across each face, flow to make it swim.
+//
+// Nothing here is lit by hand except the fixtures themselves: every other
+// surface takes its light from the lamps below, so the rooms go dark wherever
+// the lamps do not reach.
+
+tex  0 stone_blocks
+tex  1 brick_tan
+tex  2 stone_large
+tex  3 floor_stone
+tex  4 sandstone_brick
+tex  5 rock_craggy
+tex  6 lava
+tex  7 lava_swirl
+tex  8 metal_riveted
+tex  9 floor_tread
+tex 10 iron_brick
+tex 11 light_bank
+tex 12 light_square
+tex 13 floor_checker
+tex 14 brick_blue
+tex 15 metal_bolted
+tex 16 door_grate
+tex 17 floor_dirt
+tex 18 metal_dark
+tex 19 crate_wood
+
+start 0 56 -520 0
+
+// ===========================================================================
+// Entry crypt: interior x -192..192, z -704..-256, floor 0, ceiling 224
+// ===========================================================================
+
+box -256 -32 -768   256    0 -192   all=3
+box -256 224 -768   256  256 -192   all=2
+box -256   0 -768   256  224 -704   all=0
+
+// West wall, with a torch niche cut into it at z -560..-496
+box -256   0 -768  -192  224 -560   all=0
+box -256   0 -496  -192  224 -192   all=0
+box -256   0 -560  -192   96 -496   all=0
+box -256 160 -560  -192  224 -496   all=0
+box -256  96 -560  -224  160 -496   all=0 px=11 light=15 fit
+
+// East wall, with the same niche mirrored
+box  192   0 -768   256  224 -560   all=0
+box  192   0 -496   256  224 -192   all=0
+box  192   0 -560   256   96 -496   all=0
+box  192 160 -560   256  224 -496   all=0
+box  224  96 -560   256  160 -496   all=0 nx=11 light=15 fit
+
+light -212 128 -528 340 1.0
+light  212 128 -528 340 1.0
+
+// South wall of the crypt, with an arched doorway at x -96..96
+box -256   0 -256   -96  224 -192   all=0
+box   96   0 -256   256  224 -192   all=0
+box  -96 224 -256    96  256 -192   all=0
+arch z -256 -192   -96   96  144  224  5   all=4 bottom=4
+
+// ===========================================================================
+// Passage down to the vault: x -96..96, z -192..0, ceiling 224
+// ===========================================================================
+
+box -160 -32 -192   160    0    0   all=3
+box -160 224 -192   160  256    0   all=2
+box -160   0 -192   -96  224    0   all=1
+box   96   0 -192   160  224    0   all=1
+
+light 0 170 -96 240 0.45
+
+// ===========================================================================
+// The vault: interior x -576..576, z 0..1280. The lava lake sits at y -176,
+// the stone bridge crosses it at y 0, and the ceiling is up at 640.
+// ===========================================================================
+
+// The lake, and the ledges at either end of it
+box -576 -256  128   576 -176 1088   all=6 light=15 flow
+box -576 -256    0   576    0  128   all=3 top=3 scale=0.5
+box -576 -256 1088   576    0 1280   all=3 top=3 scale=0.5
+
+// The bridge across the lake
+box  -96 -256  128    96    0 1088   all=8 top=3 scale=0.5
+
+// Ceiling, and the walls behind everything else
+box -640 640    0   640  672 1344   all=2
+box -640 -256    0  -576  640 1344   all=0
+box  576 -256    0   640  640 1344   all=0
+
+// North wall, with the arched way back to the passage
+box -640 -256  -64   -96  640    0   all=0
+box   96 -256  -64   640  640    0   all=0
+box  -96 224  -64    96  640    0   all=0
+arch z  -64    0   -96   96  144  224  5   all=4 bottom=4
+
+// South wall, with the arched way on to the reliquary. The doorway needs its
+// own floor: the wall pieces either side of it stop at the opening.
+box -128  -96 1280   128    0 1344   all=3 top=3 scale=0.5
+box -640 -256 1280  -128  640 1344   all=0
+box  128 -256 1280   640  640 1344   all=0
+box -128 288 1280   128  640 1344   all=0
+arch z 1280 1344  -128  128  192  288  5   all=4 bottom=4
+
+// --- The west arcade: three arched alcoves, each with a lamp in it ---
+
+box -576   0  256  -528  256  416   all=1
+box -640 256  256  -576  640  416   all=0
+arch x -640 -576   256  416  176  256  4   all=4 bottom=4
+prism -548  336  30    0   76  8  0   all=4 top=6 light=15 flow
+
+box -576   0  560  -528  256  720   all=1
+box -640 256  560  -576  640  720   all=0
+arch x -640 -576   560  720  176  256  4   all=4 bottom=4
+prism -548  640  30    0   76  8  0   all=4 top=6 light=15 flow
+
+box -576   0  864  -528  256 1024   all=1
+box -640 256  864  -576  640 1024   all=0
+arch x -640 -576   864 1024  176  256  4   all=4 bottom=4
+prism -548  944  30    0   76  8  0   all=4 top=6 light=15 flow
+
+light -548 110  336 360 0.6
+light -548 110  640 360 0.6
+light -548 110  944 360 0.6
+
+// --- Buttresses along the west wall, angled where they meet it ---
+
+ramp -576 -176  180  -496  180  260 px   all=4
+ramp -576 -176  484  -496  180  564 px   all=4
+ramp -576 -176  788  -496  180  868 px   all=4
+
+// --- The east side: a plinth, a ramp climbing it, and the gallery above ---
+
+box  384 -256 1088   576    0 1280   all=0 top=3
+ramp 384    0  512   576  256 1088 nz   all=0 top=3 scale=0.5
+box  384 -256  128   576  256  512   all=0 top=3 scale=0.5
+
+// The parapet along the gallery, with a gap to see over
+box  352 256  128   384  320  296   all=4
+box  352 256  424   384  320  512   all=4
+box  352 256  296   384  288  424   all=4
+
+// Lamps set into the east wall above the gallery
+box  568 320  240   576  384  296   all=1 nx=12 light=15 fit
+box  568 320  392   576  384  448   all=1 nx=12 light=15 fit
+light 552 350 268 300 0.85
+light 552 350 420 300 0.85
+
+// A crate or two left on the gallery
+box  420 256  180   516  352  276   all=19 fit
+box  432 352  204   504  424  268   all=19 fit
+
+// --- What the lava throws up into the room ---
+
+light    0 -130  300 560 0.42
+light    0 -130  700 560 0.42
+light    0 -130 1000 560 0.42
+light -400 -130  480 480 0.34
+light  400 -130  480 480 0.34
+light -400 -130  900 480 0.34
+light  400 -130  900 480 0.34
+
+// The glow the lake throws up onto the bridge and the ledges. These sit above
+// the deck on purpose: a floor takes nothing from a lamp underneath it.
+light    0   90  300 560 0.45
+light    0   90  600 560 0.45
+light    0   90  900 560 0.45
+light -300  420  480 620 0.16
+light  300  420  820 620 0.16
+light -260  120  110 380 0.32
+light  260  120  110 380 0.32
+light -260  120 1180 380 0.32
+light  260  120 1180 380 0.32
+
+// ===========================================================================
+// The reliquary: interior x -256..256, z 1344..1792, ceiling 288. A sunken
+// pool of lava in the middle of the floor lights the room from below.
+// ===========================================================================
+
+box -320 288 1344   320  320 1856   all=2
+box -320   0 1344  -256  288 1856   all=14
+box  256   0 1344   320  288 1856   all=14
+box -320   0 1792   320  288 1856   all=14
+
+// The floor, in four pieces around the pool
+box -320 -96 1344   320    0 1504   all=13
+box -320 -96 1696   320    0 1856   all=13
+box -320 -96 1504  -128    0 1696   all=13
+box  128 -96 1504   320    0 1696   all=13
+
+// The pool itself, and the rough rock it has eaten into
+box -128 -160 1504   128  -96 1696   all=7 light=15 flow
+box -128 -168 1496   128 -160 1704   all=5
+
+// An eight-sided pedestal standing in the pool
+prism 0 1600 72 -96 96 8 22.5   all=4 top=4
+
+light 0 -40 1600 460 0.85
+light 0 210 1430 260 0.3
+
+// Torch niches either side of the door back out
+box -256  96 1360  -224  160 1416   all=14 px=11 light=15 fit
+box  224  96 1360   256  160 1416   all=14 nx=11 light=15 fit
+light -212 128 1388 320 0.9
+light  212 128 1388 320 0.9
