@@ -1,15 +1,16 @@
-// Textured triangle rasterization benchmark
+// Textured triangle rasterization with per-vertex lighting
 //
-// Splits a 1024x1024 frame buffer into 8192 equal-area triangles and
-// rasterizes all of them with a nearest-neighbor texture lookup, once per
-// frame. This is the same grid that benchmarks/rasterize.psh covers with
-// flat-shaded triangles, so the two timings are directly comparable and the
-// difference is the cost of the per-pixel texturing.
+// The same grid and frame buffer as benchmarks/raster_tex.psh, so the two
+// timings are directly comparable and the difference is the cost of the
+// Gouraud shading. Each vertex carries a light level as well as texture
+// coordinates, and the level is interpolated across the triangle rather
+// than being fixed for the whole face.
 //
-// Texture mapping is affine: the triangles are given in screen space with no
-// depth, so u and v are linear in x and y over the whole triangle and their
-// gradients only need to be computed once per triangle.
-// Usage: plush benchmarks/raster_tex.psh [num_frames]
+// examples/level_walk.psh bakes one light level per face and subdivides a
+// face until its lighting is even enough to get away with that. Per-vertex
+// lighting is what removes the subdivision, so this is the loop that has to
+// pay for it.
+// Usage: plush benchmarks/raster_light.psh [num_frames]
 
 let FRAME_WIDTH = 1024;
 let FRAME_HEIGHT = 1024;
@@ -22,6 +23,24 @@ let GRID_ROWS = 32;
 let TEX_SHIFT = 8;
 let TEX_SIZE = 1 << TEX_SHIFT;
 let TEX_MASK = TEX_SIZE - 1;
+
+// Light is quantized to this many levels, matching level_walk.psh.
+//
+// Four bits rather than eight is what makes the shading free per pixel: the
+// levels are pre-multiplied into the texture, so a shaded texel is one
+// lookup at (level, v, u) instead of three channel multiplies. That costs
+// NUM_LEVELS copies of the texture, which is 4MB at 16 levels and 256 texels
+// square. Eight bits would be 64MB per texture, which is why the level count
+// is the thing that stays small and the texture is free to grow.
+let LIGHT_BITS = 4;
+let NUM_LEVELS = 1 << LIGHT_BITS;
+
+// How dark an unlit surface goes and how bright a fully lit one gets, and the
+// level everything starts from before any lamp reaches it. Same values
+// level_walk.psh uses, so the shading ramp is representative.
+let MIN_SHADE = 0.09;
+let MAX_SHADE = 1.0;
+let AMBIENT = 0.13;
 
 // The span loop interpolates texture coordinates in fixed point, with u and v
 // packed into the two halves of one integer so that a single add steps both:
@@ -38,6 +57,10 @@ let TEX_MASK = TEX_SIZE - 1;
 // gradient limit below are both sized to keep the packed value well inside
 // that range: the v half reaches about 2^25, so the packed value stays near
 // 2^57.
+//
+// The light level walks in a second accumulator rather than a third field of
+// the same word. There is room for one above v, but only a few bits of it,
+// and getting the widths right costs more than the one add it would save.
 let FP_BITS = 16;
 let FP_ONE = 65536.0;
 let FP_BIAS_F = 16777216.0;
@@ -58,6 +81,21 @@ let U_MASK = TEX_MASK;
 let V_SHIFT = 32 + FP_BITS - TEX_SHIFT;
 let V_MASK = TEX_MASK << TEX_SHIFT;
 
+// The light accumulator carries 20 fractional bits, which puts its integer
+// part four bits above where the level belongs in the texel index. Extracting
+// it is then the same shift-and-mask the other two need, and no level can
+// index outside the table: the mask keeps four bits whatever the shift
+// produced, negative values included.
+let L_FRAC = 20;
+let L_ONE = 1048576.0;
+let L_SHIFT = L_FRAC - 2 * TEX_SHIFT;
+let L_MASK = (NUM_LEVELS - 1) << (2 * TEX_SHIFT);
+
+// Past this much light change per pixel a triangle is degenerate enough that
+// the level would run away from the table, the same way the texture gradients
+// are limited below
+let L_LIMIT = 64.0;
+
 // Command-line argument for the number of frames to render
 let num_frames = $cmd_get_arg_or(1, "50").parse_int(10);
 if (num_frames == nil) {
@@ -65,14 +103,16 @@ if (num_frames == nil) {
     $exit(1);
 }
 
-// Screen position and texture coordinates of one vertex. The texture
-// coordinates are in texels, not normalized.
+// Screen position, texture coordinates and light level of one vertex. The
+// texture coordinates are in texels, not normalized, and the light level is
+// in [0, NUM_LEVELS - 1] as a float so that it interpolates.
 class Vertex {
-    init(self, x, y, u, v) {
+    init(self, x, y, u, v, l) {
         self.x = x;
         self.y = y;
         self.u = u;
         self.v = v;
+        self.l = l;
     }
 }
 
@@ -122,7 +162,38 @@ fun make_texture() {
     return tex;
 }
 
-let texture = make_texture();
+// Every light level of the texture in one array, so that a shaded texel is a
+// single lookup: the level occupies the index bits above v, which makes the
+// per-pixel cost of Gouraud shading one more shift and or, not a multiply per
+// channel. The curve bends towards the dark end, where a level is worth more
+// to the eye than it is up in the light.
+fun make_shaded_texture(base) {
+    let num_texels = TEX_SIZE * TEX_SIZE;
+    let out = ByteArray.with_size(num_texels * NUM_LEVELS * 4);
+
+    for (let var level = 0; level < NUM_LEVELS; ++level) {
+        let t = level.to_f() / (NUM_LEVELS - 1).to_f();
+        let scale = MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt();
+
+        // Scaling the 256 possible channel values once beats doing the same
+        // multiply for every texel
+        let ramp = [];
+        for (let var c = 0; c < 256; ++c) ramp.push((c.to_f() * scale).floor());
+
+        let level_base = level * num_texels;
+        for (let var i = 0; i < num_texels; ++i) {
+            let p = base.get_u32(i);
+            out.set_u32(level_base + i, 0xFF000000
+                | (ramp[(p >> 16) & 0xFF] << 16)
+                | (ramp[(p >> 8) & 0xFF] << 8)
+                | ramp[p & 0xFF]);
+        }
+    }
+
+    return out;
+}
+
+let texture = make_shaded_texture(make_texture());
 
 // --- Rasterization ---
 
@@ -130,8 +201,9 @@ let texture = make_texture();
 // x is in [0, FRAME_WIDTH] and +x points right
 // y is in [0, FRAME_HEIGHT] and +y points down
 //
-// Texture coordinates are in texels and wrap around the texture.
-fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
+// Texture coordinates are in texels and wrap around the texture. Light levels
+// are in [0, NUM_LEVELS - 1] and interpolate across the triangle.
+fun rasterize_tri_light(v0, v1, v2, fb, tex) {
     let var p0 = v0;
     let var p1 = v1;
     let var p2 = v2;
@@ -153,8 +225,9 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
     let x1 = p1.x;
     let x2 = p2.x;
 
-    // Texture gradients. With no perspective, u and v are affine in screen
-    // space, so these hold for the whole triangle.
+    // Texture and light gradients. With no perspective, u, v and the light
+    // level are all affine in screen space, so these hold for the whole
+    // triangle and only have to be computed once.
     let e1x = x1 - x0; let e1y = py1 - py0;
     let e2x = x2 - x0; let e2y = py2 - py0;
     let det = e1x * e2y - e2x * e1y;
@@ -163,22 +236,27 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
 
     let u0 = p0.u; let e1u = p1.u - u0; let e2u = p2.u - u0;
     let v0t = p0.v; let e1v = p1.v - v0t; let e2v = p2.v - v0t;
+    let l0 = p0.l; let e1l = p1.l - l0; let e2l = p2.l - l0;
 
     let dudx = (e1u * e2y - e2u * e1y) * inv_det;
     let dudy = (e2u * e1x - e1u * e2x) * inv_det;
     let dvdx = (e1v * e2y - e2v * e1y) * inv_det;
     let dvdy = (e2v * e1x - e1v * e2x) * inv_det;
+    let dldx = (e1l * e2y - e2l * e1y) * inv_det;
+    let dldy = (e2l * e1x - e1l * e2x) * inv_det;
 
     // Past this many texels per pixel the packed step leaves the fixnum range.
     // Only a sliver a small fraction of a pixel wide gets there, and skipping
     // it costs nothing visible.
     if (dudx.abs() >= FP_LIMIT || dvdx.abs() >= FP_LIMIT) return;
     if (dudy.abs() >= FP_LIMIT || dvdy.abs() >= FP_LIMIT) return;
+    if (dldx.abs() >= L_LIMIT || dldy.abs() >= L_LIMIT) return;
 
     // The x gradient, packed: dt steps the span one pixel right. It carries no
     // bias, so it can be negative and still add correctly, the packed value
-    // being just an integer.
+    // being just an integer. dl steps the light level the same way.
     let dt = ((dvdx * FP_ONE).floor() << 32) + (dudx * FP_ONE).floor();
+    let dl = (dldx * L_ONE).floor();
 
     // The gradients again, pre-scaled to fixed point, for stepping the span
     // start from one scanline to the next
@@ -186,6 +264,8 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
     let dudy_fx = dudy * FP_ONE;
     let dvdx_fx = dvdx * FP_ONE;
     let dvdy_fx = dvdy * FP_ONE;
+    let dldx_fx = dldx * L_ONE;
+    let dldy_fx = dldy * L_ONE;
 
     // The edges are walked in 16.16 fixed point as well, so that a scanline
     // start is a shift rather than a call to floor()
@@ -219,13 +299,15 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
             cur_xr = xa; slope_r = slope1_fx;
         }
 
-        // Texture coordinates at x = 0 of the current scanline, pre-scaled and
-        // biased. These stay floats: at x = 0 the value can sit far outside
-        // the triangle, which a float carries without losing the precision
-        // that matters once a span start brings it back inside.
+        // Texture coordinates and light level at x = 0 of the current
+        // scanline, pre-scaled and biased. These stay floats: at x = 0 the
+        // value can sit far outside the triangle, which a float carries
+        // without losing the precision that matters once a span start brings
+        // it back inside.
         let y_off = start_scanline_y_top + 0.5 - py0;
         let var u_row_fx = (u0 + (0.5 - x0) * dudx + y_off * dudy) * FP_ONE + FP_BIAS_F;
         let var v_row_fx = (v0t + (0.5 - x0) * dvdx + y_off * dvdy) * FP_ONE + FP_BIAS_F;
+        let var l_row_fx = (l0 + (0.5 - x0) * dldx + y_off * dldy) * L_ONE;
         let var row = start_scanline_y_top * FRAME_WIDTH;
         let end_row = end_scanline_y_top * FRAME_WIDTH;
 
@@ -241,11 +323,15 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
                 // triangle, so both halves of the value stay small
                 let var t = ((v_row_fx + start_x * dvdx_fx).floor() << 32)
                           + (u_row_fx + start_x * dudx_fx).floor();
+                let var l = (l_row_fx + start_x * dldx_fx).floor();
                 let var i = row + start_x;
                 let end_i = row + end_x;
                 while (i < end_i) {
-                    fb.set_u32(i, tex.get_u32(((t >> V_SHIFT) & V_MASK) | ((t >> U_SHIFT) & U_MASK)));
+                    fb.set_u32(i, tex.get_u32(((l >> L_SHIFT) & L_MASK)
+                                            | ((t >> V_SHIFT) & V_MASK)
+                                            | ((t >> U_SHIFT) & U_MASK)));
                     t = t + dt;
+                    l = l + dl;
                     ++i;
                 }
             }
@@ -253,6 +339,7 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
             cur_xr = cur_xr + slope_r;
             u_row_fx = u_row_fx + dudy_fx;
             v_row_fx = v_row_fx + dvdy_fx;
+            l_row_fx = l_row_fx + dldy_fx;
             row = row + FRAME_WIDTH;
         }
     }
@@ -278,13 +365,15 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
             cur_xr = xa; slope_r = slope3_fx;
         }
 
-        // Texture coordinates at x = 0 of the current scanline, pre-scaled and
-        // biased. These stay floats: at x = 0 the value can sit far outside
-        // the triangle, which a float carries without losing the precision
-        // that matters once a span start brings it back inside.
+        // Texture coordinates and light level at x = 0 of the current
+        // scanline, pre-scaled and biased. These stay floats: at x = 0 the
+        // value can sit far outside the triangle, which a float carries
+        // without losing the precision that matters once a span start brings
+        // it back inside.
         let y_off = start_scanline_y_bot + 0.5 - py0;
         let var u_row_fx = (u0 + (0.5 - x0) * dudx + y_off * dudy) * FP_ONE + FP_BIAS_F;
         let var v_row_fx = (v0t + (0.5 - x0) * dvdx + y_off * dvdy) * FP_ONE + FP_BIAS_F;
+        let var l_row_fx = (l0 + (0.5 - x0) * dldx + y_off * dldy) * L_ONE;
         let var row = start_scanline_y_bot * FRAME_WIDTH;
         let end_row = end_scanline_y_bot * FRAME_WIDTH;
 
@@ -298,11 +387,15 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
                 // triangle, so both halves of the value stay small
                 let var t = ((v_row_fx + start_x * dvdx_fx).floor() << 32)
                           + (u_row_fx + start_x * dudx_fx).floor();
+                let var l = (l_row_fx + start_x * dldx_fx).floor();
                 let var i = row + start_x;
                 let end_i = row + end_x;
                 while (i < end_i) {
-                    fb.set_u32(i, tex.get_u32(((t >> V_SHIFT) & V_MASK) | ((t >> U_SHIFT) & U_MASK)));
+                    fb.set_u32(i, tex.get_u32(((l >> L_SHIFT) & L_MASK)
+                                            | ((t >> V_SHIFT) & V_MASK)
+                                            | ((t >> U_SHIFT) & U_MASK)));
                     t = t + dt;
+                    l = l + dl;
                     ++i;
                 }
             }
@@ -310,9 +403,39 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
             cur_xr = cur_xr + slope_r;
             u_row_fx = u_row_fx + dudy_fx;
             v_row_fx = v_row_fx + dvdy_fx;
+            l_row_fx = l_row_fx + dldy_fx;
             row = row + FRAME_WIDTH;
         }
     }
+}
+
+// --- Lighting ---
+
+// A lamp's contribution at a point, falling off with distance
+fun lamp(x, y, lx, ly, reach, power) {
+    let dx = x - lx;
+    let dy = y - ly;
+    let dist = (dx * dx + dy * dy).sqrt();
+    if (dist >= reach) return 0.0;
+
+    let t = 1.0 - dist / reach;
+    return power * t * t;
+}
+
+// The light level at a vertex, as a float in [1, NUM_LEVELS - 2].
+//
+// Keeping a level of headroom at each end is what lets the span loop skip
+// clamping: interpolation stays inside the vertex range within the triangle,
+// and the fraction of a pixel a span start can sit outside it cannot push the
+// level past the ends of the table.
+fun vertex_light(x, y) {
+    let var lum = AMBIENT;
+    lum = lum + lamp(x, y, 300.0, 280.0, 460.0, 0.95);
+    lum = lum + lamp(x, y, 800.0, 760.0, 400.0, 0.80);
+    lum = lum + lamp(x, y, 150.0, 880.0, 300.0, 0.60);
+
+    let top = (NUM_LEVELS - 2).to_f();
+    return (lum * (NUM_LEVELS - 1).to_f()).clip(1.0, top);
 }
 
 // --- Pre-generated geometry ---
@@ -322,11 +445,15 @@ fun rasterize_tri_tex(v0, v1, v2, fb, tex) {
 let vertices = [];
 for (let var r = 0; r <= GRID_ROWS; ++r) {
     for (let var c = 0; c <= GRID_COLS; ++c) {
+        let x = (c * FRAME_WIDTH) / GRID_COLS;
+        let y = (r * FRAME_HEIGHT) / GRID_ROWS;
+
         vertices.push(Vertex(
-            (c * FRAME_WIDTH) / GRID_COLS,
-            (r * FRAME_HEIGHT) / GRID_ROWS,
+            x,
+            y,
             (c * TEX_SIZE) / GRID_COLS,
-            (r * TEX_SIZE) / GRID_ROWS
+            (r * TEX_SIZE) / GRID_ROWS,
+            vertex_light(x.to_f(), y.to_f())
         ));
     }
 }
@@ -354,7 +481,7 @@ let start_ms = $time_current_ms();
 for (let var frame = 0; frame < num_frames; ++frame) {
     let var i = 0;
     for (let var t = 0; t < num_tris; ++t) {
-        rasterize_tri_tex(
+        rasterize_tri_light(
             vertices[indices[i]],
             vertices[indices[i + 1]],
             vertices[indices[i + 2]],
@@ -369,7 +496,18 @@ let total_ms = $time_current_ms() - start_ms;
 let fps = (num_frames * 1000) / total_ms;
 let mpix = (num_frames * FRAME_WIDTH * FRAME_HEIGHT) / (total_ms * 1000);
 
-$println(num_frames.to_s() + " frames of " + num_tris.to_s() + " textured triangles");
+// Checksum of the finished frame, so that an optimization of the span loop
+// can be shown to leave the output alone
+let var sum = 0;
+let var unlit = 0;
+for (let var p = 0; p < FRAME_WIDTH * FRAME_HEIGHT; ++p) {
+    let px = frame_buffer.get_u32(p);
+    sum = (sum * 31 + px) & 0xFFFFFFFF;
+    if ((px & 0xFFFFFF) == 0) unlit = unlit + 1;
+}
+
+$println(num_frames.to_s() + " frames of " + num_tris.to_s() + " lit textured triangles");
 $println("total time: " + total_ms.to_s() + "ms");
 $println("fps: " + fps.format_decimals(1));
 $println("Mpixels/s: " + mpix.format_decimals(1));
+$println("checksum: " + sum.to_s() + ", unwritten pixels: " + unlit.to_s());

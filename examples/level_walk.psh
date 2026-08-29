@@ -73,7 +73,14 @@ let GRAD_LIMIT = 64.0;
 // --- Lighting ---
 
 // Light is quantized to this many levels, each a darkened copy of a texture.
-// Only the (texture, level) pairs the level actually uses are ever built.
+// The copies live end to end in one array with the level in the index bits
+// above v, so a shaded texel is the same single lookup an unshaded one was.
+// That is what lets the level vary per pixel: it costs a shift, a mask and an
+// or, rather than a multiply per colour channel.
+//
+// Four bits is what keeps that affordable. The table is NUM_LEVELS copies of
+// the texture, so eight bits would be sixteen times the memory for a
+// difference the eye can barely find.
 let NUM_LEVELS = 16;
 
 // How dark an unlit surface goes and how bright a fully lit one gets. Quake's
@@ -82,10 +89,31 @@ let NUM_LEVELS = 16;
 let MIN_SHADE = 0.09;
 let MAX_SHADE = 1.0;
 
-// A face is cut up until its light is even, but never into pieces smaller than
-// this, and never more than LIGHT_DEPTH halvings deep
+// The light level is baked per vertex and interpolated across the face, in an
+// accumulator carrying this many fractional bits. Twenty puts the integer part
+// above where the level belongs in the texel index for every texture size the
+// loader accepts, so extracting it is one shift and mask.
+let L_FRAC = 20;
+let L_ONE = 1048576.0;
+
+// Half a level, added to the accumulator so that truncating it to an index
+// rounds to the nearest level rather than always down. Flat shading rounded
+// the same way, and without this every surface sits half a level too dark.
+let L_HALF = 524288;
+
+// The accumulator is clamped to this before it is used as an index, which is
+// what lets a vertex carry the ends of the range and the interpolation
+// overshoot a span end without wrapping the level around
+let L_MAX_FX = NUM_LEVELS * 1048576 - 1;
+
+// A face is cut until interpolation reproduces the light across it, but never
+// into pieces smaller than this, and never more than LIGHT_DEPTH halvings deep
 let LIGHT_GRID = 56.0;
 let LIGHT_DEPTH = 4;
+
+// How far the interpolated level may sit from the real one, in levels, before
+// the face is worth cutting
+let LIGHT_TOL = 0.6;
 
 // The level everything starts from, before any lamp reaches it
 let AMBIENT = 0.13;
@@ -137,12 +165,14 @@ let var aY = Array.with_size(MAX_VERTS, 0.0);
 let var aZ = Array.with_size(MAX_VERTS, 0.0);
 let var aU = Array.with_size(MAX_VERTS, 0.0);
 let var aV = Array.with_size(MAX_VERTS, 0.0);
+let var aL = Array.with_size(MAX_VERTS, 0.0);
 
 let var bX = Array.with_size(MAX_VERTS, 0.0);
 let var bY = Array.with_size(MAX_VERTS, 0.0);
 let var bZ = Array.with_size(MAX_VERTS, 0.0);
 let var bU = Array.with_size(MAX_VERTS, 0.0);
 let var bV = Array.with_size(MAX_VERTS, 0.0);
+let var bL = Array.with_size(MAX_VERTS, 0.0);
 
 // Projected vertices: screen position, and u/z, v/z, 1/z, which are the three
 // quantities that are linear in screen space
@@ -150,6 +180,7 @@ let pX = Array.with_size(MAX_VERTS, 0.0);
 let pY = Array.with_size(MAX_VERTS, 0.0);
 let pUZ = Array.with_size(MAX_VERTS, 0.0);
 let pVZ = Array.with_size(MAX_VERTS, 0.0);
+let pLZ = Array.with_size(MAX_VERTS, 0.0);
 let pW = Array.with_size(MAX_VERTS, 0.0);
 
 // Reciprocals of the sub-span lengths, so the per-sub-span gradient is a
@@ -162,12 +193,20 @@ let var g_duzdx = 0.0; let var g_duzdy = 0.0;
 let var g_dvzdx = 0.0; let var g_dvzdy = 0.0;
 let var g_dwdx = 0.0;  let var g_dwdy = 0.0;
 let var g_uz0 = 0.0;   let var g_vz0 = 0.0;   let var g_w0 = 0.0;
+
+// The level rides through the projection the same way u and v do. Screen space
+// interpolation would be the usual Gouraud approximation, but it is not what
+// the corners agree on: only level over z is affine on screen, so only that
+// gives the same answer whichever three corners the gradient is built from
+let var g_dlzdx = 0.0; let var g_dlzdy = 0.0; let var g_lz0 = 0.0;
 let var g_ref_x = 0.0; let var g_ref_y = 0.0;
 let var g_pix = nil;
 let var g_umask = 0;
 let var g_vshift = 0;
 let var g_vmask = 0;
 let var g_wrap = 0;
+let var g_lmask = 0;
+let var g_lshift = 0;
 
 let var bsp_root = nil;
 
@@ -330,33 +369,44 @@ class Texture {
         self.vshift = 32 + FP_BITS - shift;
         self.vmask = (self.size - 1) << shift;
         self.wrap = (self.size << FP_BITS) - 1;
-        self.levels = Array.with_size(NUM_LEVELS, nil);
+
+        // Where the level sits in the texel index, and what the accumulator
+        // has to shift down by to land its integer part there
+        self.lmask = (NUM_LEVELS - 1) << (2 * shift);
+        self.lshift = L_FRAC - 2 * shift;
+
+        self.lit = nil;
     }
 
-    // The copy of this texture for one light level, built the first time it is
-    // asked for. Scaling the 256 possible channel values once beats doing the
-    // same multiply for every texel. The curve bends towards the dark end,
-    // where a level is worth more to the eye than it is up in the light.
-    shade(self, level) {
-        if (self.levels[level] != nil) return self.levels[level];
-
-        let t = level.to_f() / (NUM_LEVELS - 1).to_f();
-        let scale = MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt();
-
-        let ramp = [];
-        for (let var c = 0; c < 256; ++c) ramp.push((c.to_f() * scale).floor());
+    // Every light level of this texture, end to end in one array indexed by
+    // (level, v, u), built the first time the texture is drawn. Scaling the
+    // 256 possible channel values once per level beats doing the same multiply
+    // for every texel. The curve bends towards the dark end, where a level is
+    // worth more to the eye than it is up in the light.
+    shaded(self) {
+        if (self.lit != nil) return self.lit;
 
         let num_texels = self.size * self.size;
-        let out = ByteArray.with_size(num_texels * 4);
-        for (let var i = 0; i < num_texels; ++i) {
-            let p = self.base.get_u32(i);
-            out.set_u32(i, 0xFF000000
-                | (ramp[(p >> 16) & 0xFF] << 16)
-                | (ramp[(p >> 8) & 0xFF] << 8)
-                | ramp[p & 0xFF]);
+        let out = ByteArray.with_size(num_texels * NUM_LEVELS * 4);
+
+        for (let var level = 0; level < NUM_LEVELS; ++level) {
+            let t = level.to_f() / (NUM_LEVELS - 1).to_f();
+            let scale = MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt();
+
+            let ramp = [];
+            for (let var c = 0; c < 256; ++c) ramp.push((c.to_f() * scale).floor());
+
+            let base = level * num_texels;
+            for (let var i = 0; i < num_texels; ++i) {
+                let p = self.base.get_u32(i);
+                out.set_u32(base + i, 0xFF000000
+                    | (ramp[(p >> 16) & 0xFF] << 16)
+                    | (ramp[(p >> 8) & 0xFF] << 8)
+                    | ramp[p & 0xFF]);
+            }
         }
 
-        self.levels[level] = out;
+        self.lit = out;
         return out;
     }
 }
@@ -426,6 +476,11 @@ class Face {
         self.vshift = 0;
         self.vmask = 0;
         self.wrap = 0;
+        self.lmask = 0;
+        self.lshift = 0;
+
+        // One light level per vertex, as a float so that it interpolates
+        self.vl = nil;
     }
 }
 
@@ -940,68 +995,183 @@ fun light_at(px, py, pz, nx, ny, nz) {
         lum = lum + L[4] * atten * (0.35 + 0.65 * ndotl);
     }
 
-    return (lum * (NUM_LEVELS - 1).to_f() + 0.5).floor().clip(0, NUM_LEVELS - 1);
+    // Left unquantized: a vertex level is interpolated across the face, so
+    // rounding it here would put a step at every corner
+    return (lum * (NUM_LEVELS - 1).to_f()).clip(0.0, (NUM_LEVELS - 1).to_f());
 }
 
-// Where the middle of a face is
-fun face_center_x(f) {
+// The light level at each corner of a face. A face given an explicit level in
+// the map keeps it at every corner, which shades it flat the way it used to be.
+//
+// Corners are sampled where they are, not pulled in towards the middle: two
+// faces meeting at an edge then agree on the level along it, and the shading
+// runs across the seam without a visible join.
+//
+// The samples are then replaced by a plane fitted through them. The rasterizer
+// builds the level gradient from three corners, and four samples of a light
+// field do not generally lie on a plane, so which three it picked would decide
+// the shading. It picks them by screen area, which changes as the camera moves,
+// and the face would jump as the choice flipped. Fitting first makes every
+// triple agree. What the fit leaves behind is exactly the curvature
+// `light_curves` measures, so subdivision already bounds it.
+fun bake_vertex_light(f) {
     let n = f.v.len _/ 3;
-    let var c = 0.0;
-    for (let var i = 0; i < n; ++i) c = c + f.v[i * 3];
-    return c / n.to_f();
-}
+    let out = Array.with_size(n, 0.0);
+    let top = (NUM_LEVELS - 1).to_f();
 
-fun face_center_y(f) {
-    let n = f.v.len _/ 3;
-    let var c = 0.0;
-    for (let var i = 0; i < n; ++i) c = c + f.v[i * 3 + 1];
-    return c / n.to_f();
-}
-
-fun face_center_z(f) {
-    let n = f.v.len _/ 3;
-    let var c = 0.0;
-    for (let var i = 0; i < n; ++i) c = c + f.v[i * 3 + 2];
-    return c / n.to_f();
-}
-
-// A face is flat lit, at the level found in the middle of it
-fun bake_face_light(f) {
-    if (f.light >= 0) return f.light;
-    return light_at(face_center_x(f), face_center_y(f), face_center_z(f), f.nx, f.ny, f.nz);
-}
-
-// Does the light change across this face? Sampling the middle and the corners
-// answers it cheaply. A face that comes out the same shade all over is left
-// whole, and in a room lit by a few lamps that is most of the surface: the dark
-// upper walls and ceilings would otherwise be cut into hundreds of identical
-// pieces, each one costing a setup every frame.
-fun light_varies(f) {
-    if (f.light >= 0) return false;
-
-    let cx = face_center_x(f);
-    let cy = face_center_y(f);
-    let cz = face_center_z(f);
-
-    let var lo = light_at(cx, cy, cz, f.nx, f.ny, f.nz);
-    let var hi = lo;
-
-    let n = f.v.len _/ 3;
-    for (let var i = 0; i < n; ++i) {
-        // Just inside the corner, so the sample sits on the face rather than on
-        // the seam it shares with its neighbour
-        let sx = cx + (f.v[i * 3] - cx) * 0.9;
-        let sy = cy + (f.v[i * 3 + 1] - cy) * 0.9;
-        let sz = cz + (f.v[i * 3 + 2] - cz) * 0.9;
-        let l = light_at(sx, sy, sz, f.nx, f.ny, f.nz);
-        if (l < lo) lo = l;
-        if (l > hi) hi = l;
+    if (f.light >= 0) {
+        let fixed = f.light.to_f().clip(0.0, top);
+        for (let var i = 0; i < n; ++i) out[i] = fixed;
+        return out;
     }
 
-    return hi - lo > 1;
+    // The two world axes the face has extent on, which parametrize its plane
+    let var ax0 = 0; let var ax1 = 1;
+    if (f.taxis == 0) { ax0 = 1; ax1 = 2; }
+    else if (f.taxis == 1) { ax0 = 0; ax1 = 2; }
+
+    let sv = Array.with_size(n, 0.0);
+    let tv = Array.with_size(n, 0.0);
+    let lv = Array.with_size(n, 0.0);
+    let var sc = 0.0; let var tc = 0.0; let var lc = 0.0;
+
+    for (let var i = 0; i < n; ++i) {
+        sv[i] = f.v[i * 3 + ax0];
+        tv[i] = f.v[i * 3 + ax1];
+        lv[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2], f.nx, f.ny, f.nz);
+        sc = sc + sv[i]; tc = tc + tv[i]; lc = lc + lv[i];
+    }
+
+    let inv_n = 1.0 / n.to_f();
+    sc = sc * inv_n; tc = tc * inv_n; lc = lc * inv_n;
+
+    // Centred, so that the fit is a two by two solve and world coordinates in
+    // the thousands do not swamp it
+    let var Sss = 0.0; let var Sst = 0.0; let var Stt = 0.0;
+    let var Sls = 0.0; let var Slt = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let ds = sv[i] - sc;
+        let dt = tv[i] - tc;
+        let dl = lv[i] - lc;
+        Sss = Sss + ds * ds; Sst = Sst + ds * dt; Stt = Stt + dt * dt;
+        Sls = Sls + dl * ds; Slt = Slt + dl * dt;
+    }
+
+    let den = Sss * Stt - Sst * Sst;
+    if (den.abs() < 0.000001) {
+        // Degenerate: every corner takes the average
+        for (let var i = 0; i < n; ++i) out[i] = lc.clip(0.0, top);
+        return out;
+    }
+
+    let ga = (Sls * Stt - Slt * Sst) / den;
+    let gb = (Slt * Sss - Sls * Sst) / den;
+    for (let var i = 0; i < n; ++i) {
+        out[i] = (lc + ga * (sv[i] - sc) + gb * (tv[i] - tc)).clip(0.0, top);
+    }
+
+    return out;
 }
 
 // --- Cutting faces up for lighting ---
+
+// Does interpolating the corner levels miss the light inside the face?
+//
+// This is a weaker test than flat shading needed, and that is the whole point.
+// Flat shading had to cut wherever the light changed at all, because one level
+// had to serve the whole piece. Interpolation reproduces any light that runs
+// linearly across a face exactly, so only curvature is worth a cut: a wall
+// fading evenly from one end to the other is left whole, and only a lamp pool
+// sitting in the middle of a surface asks for pieces.
+fun light_curves(f) {
+    if (f.light >= 0) return false;
+
+    let n = f.v.len _/ 3;
+    let vl = Array.with_size(n, 0.0);
+    let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+    let var mean = 0.0;
+
+    for (let var i = 0; i < n; ++i) {
+        let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
+        vl[i] = light_at(x, y, z, f.nx, f.ny, f.nz);
+        cx = cx + x; cy = cy + y; cz = cz + z;
+        mean = mean + vl[i];
+    }
+
+    let inv_n = 1.0 / n.to_f();
+    cx = cx * inv_n; cy = cy * inv_n; cz = cz * inv_n;
+    mean = mean * inv_n;
+
+    // The middle, where a lamp pool that the corners all miss shows up
+    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz) - mean).abs() > LIGHT_TOL) return true;
+
+    // And the edge midpoints, where interpolation is the mean of two corners.
+    // A pool sitting against one edge misses the centre test but not this one.
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+
+        let mx = (f.v[i * 3] + f.v[j * 3]) * 0.5;
+        let my = (f.v[i * 3 + 1] + f.v[j * 3 + 1]) * 0.5;
+        let mz = (f.v[i * 3 + 2] + f.v[j * 3 + 2]) * 0.5;
+        let interp = (vl[i] + vl[j]) * 0.5;
+        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz) - interp).abs() > LIGHT_TOL) return true;
+    }
+
+    return false;
+}
+
+// Halve a face across its longer side until the light across each piece is one
+// interpolation can carry
+fun subdivide_face(f, out, depth) {
+    if (depth <= 0 || !light_curves(f)) {
+        out.push(f);
+        return;
+    }
+
+    let n = f.v.len _/ 3;
+    let var axis = 0;
+    let var span = 0.0 - 1.0;
+    let var cut = 0.0;
+
+    for (let var a = 0; a < 3; ++a) {
+        if (a == f.taxis) continue;
+
+        let var lo = f.v[a];
+        let var hi = lo;
+        for (let var j = 1; j < n; ++j) {
+            let c = f.v[j * 3 + a];
+            if (c < lo) lo = c;
+            if (c > hi) hi = c;
+        }
+
+        if (hi - lo > span) {
+            span = hi - lo;
+            axis = a;
+            cut = (lo + hi) * 0.5;
+        }
+    }
+
+    if (span < LIGHT_GRID) {
+        out.push(f);
+        return;
+    }
+
+    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+    if (axis == 0) nx = 1.0;
+    else if (axis == 1) ny = 1.0;
+    else nz = 1.0;
+
+    let parts = split_face(f, nx, ny, nz, cut);
+    if (parts.len < 2) {
+        out.push(f);
+        return;
+    }
+
+    for (let var i = 0; i < parts.len; ++i) subdivide_face(parts[i], out, depth - 1);
+}
+
+// --- Cutting faces up ---
 
 // Split a face in two at a plane, returning the pieces that survive. Both keep
 // everything else about the face they came from.
@@ -1072,64 +1242,6 @@ fun subdivide_grid(f, grid, out) {
     }
 
     for (let var i = 0; i < work.len; ++i) out.push(work[i]);
-}
-
-// Cut a face up until each piece is lit evenly enough to take a single level,
-// halving the piece across its longer side each time and stopping as soon as
-// the light across it no longer varies.
-//
-// Cutting on a fixed grid instead would spend pieces everywhere, including on
-// the large dark surfaces that make up most of a room like this; refining only
-// where the light actually changes gets the same gradients for a fraction of
-// the faces, and every face costs a setup in every frame it is in view.
-fun subdivide_face(f, out, depth) {
-    if (depth <= 0 || !light_varies(f)) {
-        out.push(f);
-        return;
-    }
-
-    // How far the piece runs along each of the two axes it has extent on
-    let n = f.v.len _/ 3;
-    let var axis = 0;
-    let var span = 0.0 - 1.0;
-    let var cut = 0.0;
-
-    for (let var a = 0; a < 3; ++a) {
-        if (a == f.taxis) continue;
-
-        let var lo = f.v[a];
-        let var hi = lo;
-        for (let var j = 1; j < n; ++j) {
-            let c = f.v[j * 3 + a];
-            if (c < lo) lo = c;
-            if (c > hi) hi = c;
-        }
-
-        if (hi - lo > span) {
-            span = hi - lo;
-            axis = a;
-            cut = (lo + hi) * 0.5;
-        }
-    }
-
-    // Below this a piece is smaller than the light gradient across it is worth
-    if (span < LIGHT_GRID) {
-        out.push(f);
-        return;
-    }
-
-    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
-    if (axis == 0) nx = 1.0;
-    else if (axis == 1) ny = 1.0;
-    else nz = 1.0;
-
-    let parts = split_face(f, nx, ny, nz, cut);
-    if (parts.len < 2) {
-        out.push(f);
-        return;
-    }
-
-    for (let var i = 0; i < parts.len; ++i) subdivide_face(parts[i], out, depth - 1);
 }
 
 // --- BSP tree ---
@@ -1260,7 +1372,7 @@ fun clip_plane(n, ax, ay, az, aw) {
 
         if (di >= 0.0) {
             bX[m] = aX[i]; bY[m] = aY[i]; bZ[m] = aZ[i];
-            bU[m] = aU[i]; bV[m] = aV[i];
+            bU[m] = aU[i]; bV[m] = aV[i]; bL[m] = aL[i];
             m = m + 1;
         }
 
@@ -1271,6 +1383,7 @@ fun clip_plane(n, ax, ay, az, aw) {
             bZ[m] = aZ[i] + (aZ[j] - aZ[i]) * t;
             bU[m] = aU[i] + (aU[j] - aU[i]) * t;
             bV[m] = aV[i] + (aV[j] - aV[i]) * t;
+            bL[m] = aL[i] + (aL[j] - aL[i]) * t;
             m = m + 1;
         }
     }
@@ -1281,6 +1394,7 @@ fun clip_plane(n, ax, ay, az, aw) {
     let tz = aZ; aZ = bZ; bZ = tz;
     let tu = aU; aU = bU; bU = tu;
     let tv = aV; aV = bV; bV = tv;
+    let tl = aL; aL = bL; bL = tl;
     return m;
 }
 
@@ -1322,13 +1436,17 @@ fun raster_poly(m) {
     let var uz_row = g_uz0 + x_off * g_duzdx + y_off * g_duzdy;
     let var vz_row = g_vz0 + x_off * g_dvzdx + y_off * g_dvzdy;
     let var w_row = g_w0 + x_off * g_dwdx + y_off * g_dwdy;
+    let var lz_row = g_lz0 + x_off * g_dlzdx + y_off * g_dlzdy;
 
     let duzdx = g_duzdx; let dvzdx = g_dvzdx; let dwdx = g_dwdx;
+    let dlzdx = g_dlzdx;
     let pix = g_pix;
     let umask = g_umask;
     let vshift = g_vshift;
     let vmask = g_vmask;
     let wrap = g_wrap;
+    let lmask = g_lmask;
+    let lshift = g_lshift;
     let fb = frame_buffer;
 
     // Per chain: the corner reached so far, the current x, how far x moves per
@@ -1388,9 +1506,11 @@ fun raster_poly(m) {
                     let var uz = uz_row + x * duzdx;
                     let var vz = vz_row + x * dvzdx;
                     let var w = w_row + x * dwdx;
+                    let var lz = lz_row + x * dlzdx;
                     let var z = 1.0 / w;
                     let var u = uz * z;
                     let var v = vz * z;
+                    let var l = lz * z;
 
                     while (x < piece_end) {
                         let var xe = x + SUB_LEN;
@@ -1401,14 +1521,17 @@ fun raster_poly(m) {
                         // far end; in between the step is affine
                         let uz_e = uz + len * duzdx;
                         let vz_e = vz + len * dvzdx;
+                        let lz_e = lz + len * dlzdx;
                         let w_e = w + len * dwdx;
                         let z_e = 1.0 / w_e;
                         let u_e = uz_e * z_e;
                         let v_e = vz_e * z_e;
+                        let l_e = lz_e * z_e;
 
                         let inv_len = INV_N[len];
                         let var du = (u_e - u) * inv_len;
                         let var dv = (v_e - v) * inv_len;
+                        let dl = ((l_e - l) * inv_len * L_ONE).floor();
                         if (du > GRAD_LIMIT) du = GRAD_LIMIT;
                         else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
                         if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
@@ -1419,17 +1542,27 @@ fun raster_poly(m) {
                         let var t = (vfx << 32) + ufx;
                         let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
 
+                        // Half a level in, so that truncating to an index
+                        // rounds to nearest, and clamped so that a level can
+                        // sit at either end of the table without wrapping
+                        let var lfx = (l * L_ONE).floor() + L_HALF;
+                        if (lfx < 0) lfx = 0;
+                        else if (lfx > L_MAX_FX) lfx = L_MAX_FX;
+
                         let var i = row + x;
                         let end_i = row + xe;
                         pixels_drawn = pixels_drawn + (xe - x);
                         while (i < end_i) {
-                            fb.set_u32(i, pix.get_u32(((t >> vshift) & vmask) | ((t >> U_SHIFT) & umask)));
+                            fb.set_u32(i, pix.get_u32(((lfx >> lshift) & lmask)
+                                                    | ((t >> vshift) & vmask)
+                                                    | ((t >> U_SHIFT) & umask)));
                             t = t + dt;
+                            lfx = lfx + dl;
                             i = i + 1;
                         }
 
-                        uz = uz_e; vz = vz_e; w = w_e;
-                        u = u_e; v = v_e;
+                        uz = uz_e; vz = vz_e; lz = lz_e; w = w_e;
+                        u = u_e; v = v_e; l = l_e;
                         x = xe;
                     }
                 }
@@ -1440,6 +1573,7 @@ fun raster_poly(m) {
             uz_row = uz_row + g_duzdy;
             vz_row = vz_row + g_dvzdy;
             w_row = w_row + g_dwdy;
+            lz_row = lz_row + g_dlzdy;
             row = row + FRAME_WIDTH;
             scan_y = scan_y + 1;
         }
@@ -1493,6 +1627,7 @@ fun draw_face(f) {
         aZ[i] = rz * cos_pitch + dy * sin_pitch;
         aU[i] = u;
         aV[i] = v;
+        aL[i] = f.vl[i];
     }
 
     // Only the near plane needs clipping: it is what keeps the projection from
@@ -1510,6 +1645,7 @@ fun draw_face(f) {
         pW[i] = w;
         pUZ[i] = aU[i] * w;
         pVZ[i] = aV[i] * w;
+        pLZ[i] = aL[i] * w;
     }
 
     // u/z, v/z and 1/z are linear in screen space, so their gradients come from
@@ -1551,6 +1687,13 @@ fun draw_face(f) {
     g_dwdx = (d1w * e2y - d2w * e1y) * inv_det;
     g_dwdy = (d2w * e1x - d1w * e2x) * inv_det;
 
+    let lz0 = pLZ[0];
+    let d1l = pLZ[bi] - lz0;
+    let d2l = pLZ[bj] - lz0;
+    g_dlzdx = (d1l * e2y - d2l * e1y) * inv_det;
+    g_dlzdy = (d2l * e1x - d1l * e2x) * inv_det;
+    g_lz0 = lz0;
+
     g_uz0 = uz0; g_vz0 = vz0; g_w0 = w0;
     g_ref_x = x0; g_ref_y = y0;
     g_pix = f.pix;
@@ -1558,6 +1701,8 @@ fun draw_face(f) {
     g_vshift = f.vshift;
     g_vmask = f.vmask;
     g_wrap = f.wrap;
+    g_lmask = f.lmask;
+    g_lshift = f.lshift;
 
     raster_poly(m);
 }
@@ -1921,8 +2066,8 @@ fun prepare_node(node) {
         let f = node.on[i];
         let pieces = [];
         if (f.flow) {
-            // A moving surface is cut on a fixed grid instead: it needs corners
-            // to move, not light levels
+            // A moving surface is still cut on a fixed grid: it needs corners
+            // close enough together for the wave to read as a curve
             subdivide_grid(f, LAVA_GRID, pieces);
         } else {
             subdivide_face(f, pieces, LIGHT_DEPTH);
@@ -1931,11 +2076,14 @@ fun prepare_node(node) {
         for (let var k = 0; k < pieces.len; ++k) {
             let g = pieces[k];
             if (g.fit) set_fit(g);
-            g.pix = g.tex.shade(bake_face_light(g));
+            g.vl = bake_vertex_light(g);
+            g.pix = g.tex.shaded();
             g.umask = g.tex.umask;
             g.vshift = g.tex.vshift;
             g.vmask = g.tex.vmask;
             g.wrap = g.tex.wrap;
+            g.lmask = g.tex.lmask;
+            g.lshift = g.tex.lshift;
             out.push(g);
             num_lit_faces = num_lit_faces + 1;
         }
@@ -1952,12 +2100,13 @@ let var num_shaded = 0;
 let var tex_bytes = 0;
 for (let var i = 0; i < textures.len; ++i) {
     let t = textures[i];
-    let bytes = t.size * t.size * 4;
-    for (let var l = 0; l < NUM_LEVELS; ++l) {
-        if (t.levels[l] != nil) {
-            num_shaded = num_shaded + 1;
-            tex_bytes = tex_bytes + bytes;
-        }
+
+    // A level can now vary across a single face, so every texture drawn
+    // carries the whole table rather than the handful of levels a flat lit
+    // face used to pick from
+    if (t.lit != nil) {
+        num_shaded = num_shaded + NUM_LEVELS;
+        tex_bytes = tex_bytes + t.size * t.size * 4 * NUM_LEVELS;
     }
 
     // The unlit original is only ever read to build the shaded copies, and every
