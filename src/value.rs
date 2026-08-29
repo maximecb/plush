@@ -144,6 +144,11 @@ impl Value
     pub const FALSE: Value = Value(IMM_FALSE);
     pub const UNDEF: Value = Value(IMM_UNDEF);
 
+    /// The fixnum tag is zero, so this is the all-zero word. That makes it
+    /// the cheapest value to store: nil and friends have to be materialized
+    /// into a register first, where zero is already there
+    pub const FIXNUM_ZERO: Value = Value(TAG_FIXNUM);
+
     /// Largest and smallest integers representable without boxing
     pub const FIXNUM_MAX: i64 = (1 << 61) - 1;
     pub const FIXNUM_MIN: i64 = -(1 << 61);

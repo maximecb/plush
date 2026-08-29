@@ -1662,8 +1662,11 @@ impl Actor
                 pc = $entry_pc as usize;
 
                 // Registers the callee has not written yet still have to
-                // hold something the collector can look at
-                self.stack.resize(bp + ($frame_size as usize), Value::NIL);
+                // hold something the collector can look at. Filling with
+                // zero rather than nil is measurably faster, and codegen
+                // writes every register before it reads one, so nothing
+                // but the collector ever sees these
+                self.stack.resize(bp + ($frame_size as usize), Value::FIXNUM_ZERO);
             }}
         }
 
@@ -1686,7 +1689,7 @@ impl Actor
 
                 // Restoring the caller's frame drops whatever the callee
                 // used above it, and refills what it left short
-                self.stack.resize(frame.prev_top, Value::NIL);
+                self.stack.resize(frame.prev_top, Value::FIXNUM_ZERO);
 
                 bp = frame.prev_bp;
                 pc = frame.ret_addr;
