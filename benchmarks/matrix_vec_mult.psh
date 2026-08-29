@@ -51,7 +51,13 @@ let end_time = $time_current_ms();
 let elapsed_ms = end_time - start_time;
 let per_iter = elapsed_ms.to_f() / NUM_ITERS.to_f();
 
+// Each step of the inner loop is a multiply and an add, which is how a
+// matrix-vector product is normally counted
+let flops = (2 * NUM_ITERS * num_outputs * num_inputs).to_f();
+let mflops = flops / (elapsed_ms.max(1).to_f() * 1000.0);
+
 $println(
     "Matrix-vector multiplication took " + elapsed_ms.to_s() + " ms for " +
     NUM_ITERS.to_s() + " iterations, " + per_iter.format_decimals(3) + " ms per iteration."
 );
+$println(mflops.format_decimals(1) + " MFLOPS");

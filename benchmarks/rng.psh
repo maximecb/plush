@@ -1,0 +1,37 @@
+// Random number generation throughput
+//
+// Every other benchmark that pulls in lib/random calls it only to build its
+// input, outside the timed section, so nothing measures the generator itself.
+// Anything that makes noise, dither or procedural placement while it runs is
+// paying this cost in its inner loop, so it is worth a number.
+//
+// `rand_int` is what the benchmarks that do use the generator reach for:
+// quicksort fills its array with it, gc_obj_graph picks its edges with it.
+// The range here matches quicksort's.
+
+from ./lib/random import *;
+
+let NUM_INTS = 50000000;
+let RANGE = 1000000;
+
+// Folded into a sink and printed, so the loop is not doing work nothing
+// looks at
+let var sink = 0;
+
+rand_init(12345);
+
+let start_time = $time_current_ms();
+
+for (let var i = 0; i < NUM_INTS; ++i) {
+    sink = sink ^ rand_int(0, RANGE);
+}
+
+let elapsed_ms = $time_current_ms() - start_time;
+let rate = NUM_INTS.to_f() / (elapsed_ms.max(1).to_f() * 1000.0);
+
+$println(
+    (NUM_INTS / 1000000).format_decimals(0) + "M ints in [0, " + RANGE.to_s() + ") took " +
+    elapsed_ms.to_s() + " ms"
+);
+$println(rate.format_decimals(1) + " M ints/second");
+$println("checksum: " + sink.to_s());
