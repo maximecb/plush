@@ -85,7 +85,7 @@ let MAX_SHADE = 1.0;
 // A face is cut up until its light is even, but never into pieces smaller than
 // this, and never more than LIGHT_DEPTH halvings deep
 let LIGHT_GRID = 56.0;
-let LIGHT_DEPTH = 5;
+let LIGHT_DEPTH = 4;
 
 // The level everything starts from, before any lamp reaches it
 let AMBIENT = 0.13;
@@ -171,10 +171,14 @@ let var g_wrap = 0;
 
 let var bsp_root = nil;
 
-// Lava warp: how far the texture swims, how tight the ripples are, and how far
-// along the animation is
-let WARP_AMP = 9.0;
-let WARP_FREQ = 0.0245;
+// Lava swell. The surface is cut into small quads at load and their corners
+// ride a pair of sine waves, one running along x and one along z, so the lava
+// actually moves rather than having its texture slid across it. The waves are
+// a function of world position, so neighbouring quads agree along the edge they
+// share and the surface stays watertight.
+let WAVE_AMP = 6.0;
+let WAVE_FREQ = 0.0245;
+let LAVA_GRID = 40.0;
 let var warp_phase = 0.0;
 
 let var pixels_drawn = 0;
@@ -955,6 +959,62 @@ fun split_face(f, nx, ny, nz, d) {
     return out;
 }
 
+// Slice a face along one axis at every grid line it crosses. Each cut takes
+// the piece below the line off the front and carries the remainder forward, so
+// this costs one split per piece rather than rescanning the whole list.
+fun slice_axis(f, axis, grid, out) {
+    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+    if (axis == 0) nx = 1.0;
+    else if (axis == 1) ny = 1.0;
+    else nz = 1.0;
+
+    let var rest = f;
+    loop {
+        let n = rest.v.len _/ 3;
+        let var lo = rest.v[axis];
+        let var hi = lo;
+        for (let var j = 1; j < n; ++j) {
+            let c = rest.v[j * 3 + axis];
+            if (c < lo) lo = c;
+            if (c > hi) hi = c;
+        }
+
+        if (hi - lo <= grid + 0.5) { out.push(rest); return; }
+
+        // Cut on the grid line just past the low edge, so that the quads of
+        // neighbouring faces line up. A cut landing within the clipper's
+        // epsilon of an edge would hand back a piece identical to the one it
+        // came from and this loop would never end, so keep clear of both ends.
+        let var cut = (lo / grid).floor().to_f() * grid + grid;
+        if (cut - lo < 1.0) cut = cut + grid;
+        if (cut > hi - 1.0) { out.push(rest); return; }
+
+        let parts = split_face(rest, nx, ny, nz, cut);
+        if (parts.len < 2) { out.push(rest); return; }
+
+        out.push(parts[0]);
+        rest = parts[1];
+    }
+}
+
+// Cut a face into a grid of pieces no larger than `grid` across. The lava uses
+// this: its corners have to be close enough together for a sine wave running
+// through them to read as a curve rather than as a fold.
+fun subdivide_grid(f, grid, out) {
+    let var work = [f];
+
+    for (let var axis = 0; axis < 3; ++axis) {
+        // A face has no extent along the axis it faces
+        if (axis == f.taxis) continue;
+
+        let next = [];
+        for (let var i = 0; i < work.len; ++i) slice_axis(work[i], axis, grid, next);
+        work = next;
+    }
+
+    for (let var i = 0; i < work.len; ++i) out.push(work[i]);
+}
+
 // Cut a face up until each piece is lit evenly enough to take a single level,
 // halving the piece across its longer side each time and stopping as soon as
 // the light across it no longer varies.
@@ -1339,22 +1399,19 @@ fun draw_face(f) {
 
     for (let var i = 0; i < n; ++i) {
         let wx = f.v[i * 3];
-        let wy = f.v[i * 3 + 1];
+        let var wy = f.v[i * 3 + 1];
         let wz = f.v[i * 3 + 2];
+
+        // Lava swells: the corner itself rides two sine waves, one along x and
+        // one along z. The texture of a floor comes from x and z, so lifting y
+        // moves the surface without touching the mapping, and nothing seams.
+        if (f.flow) {
+            wy = wy + WAVE_AMP * (wx * WAVE_FREQ + warp_phase).sin()
+                    + WAVE_AMP * (wz * WAVE_FREQ + warp_phase * 0.83).sin();
+        }
 
         let var u = face_u(taxis, wx, wy, wz);
         let var v = face_v(taxis, wx, wy, wz);
-
-        // Lava swims: a pair of sines running across the surface push the
-        // texture coordinates around, the way Quake warps water and lava. The
-        // vertices themselves never move, so nothing can crack apart, and
-        // because the offset comes from the world position, the pieces a
-        // surface is cut into stay stitched together.
-        if (f.flow) {
-            let su = u;
-            u = u + WARP_AMP * (v * WARP_FREQ + warp_phase).sin();
-            v = v + WARP_AMP * (su * WARP_FREQ + warp_phase * 0.83).sin();
-        }
 
         if (f.fit) {
             u = u * f.su + f.ou;
@@ -1796,8 +1853,15 @@ fun prepare_node(node) {
 
     let out = [];
     for (let var i = 0; i < node.on.len; ++i) {
+        let f = node.on[i];
         let pieces = [];
-        subdivide_face(node.on[i], pieces, LIGHT_DEPTH);
+        if (f.flow) {
+            // A moving surface is cut on a fixed grid instead: it needs corners
+            // to move, not light levels
+            subdivide_grid(f, LAVA_GRID, pieces);
+        } else {
+            subdivide_face(f, pieces, LIGHT_DEPTH);
+        }
 
         for (let var k = 0; k < pieces.len; ++k) {
             let g = pieces[k];
