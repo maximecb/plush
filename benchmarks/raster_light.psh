@@ -6,6 +6,12 @@
 // coordinates, and the level is interpolated across the triangle rather
 // than being fixed for the whole face.
 //
+// The texel is scaled as it is read, rather than read from a pre-darkened
+// copy of the texture. A table of darkened copies makes shading free per
+// pixel, but it quantizes: sixteen copies show a gradient as sixteen bands.
+// Scaling costs arithmetic on every pixel and gives a continuous level, and
+// it leaves the texture at its own size instead of sixteen times it.
+//
 // examples/level_walk.psh bakes one light level per face and subdivides a
 // face until its lighting is even enough to get away with that. Per-vertex
 // lighting is what removes the subdivision, so this is the loop that has to
@@ -24,16 +30,11 @@ let TEX_SHIFT = 8;
 let TEX_SIZE = 1 << TEX_SHIFT;
 let TEX_MASK = TEX_SIZE - 1;
 
-// Light is quantized to this many levels, matching level_walk.psh.
-//
-// Four bits rather than eight is what makes the shading free per pixel: the
-// levels are pre-multiplied into the texture, so a shaded texel is one
-// lookup at (level, v, u) instead of three channel multiplies. That costs
-// NUM_LEVELS copies of the texture, which is 4MB at 16 levels and 256 texels
-// square. Eight bits would be 64MB per texture, which is why the level count
-// is the thing that stays small and the texture is free to grow.
-let LIGHT_BITS = 4;
-let NUM_LEVELS = 1 << LIGHT_BITS;
+// The scale a texel is multiplied by, running 0..255. Stopping at 255 rather
+// than 256 keeps a channel product at most 255 * 255, which stays off the
+// sixteenth bit, so an eight bit mask on the scale makes spilling one channel
+// into the next impossible rather than merely unlikely.
+let SHADE_MAX = 255.0;
 
 // How dark an unlit surface goes and how bright a fully lit one gets, and the
 // level everything starts from before any lamp reaches it. Same values
@@ -41,6 +42,12 @@ let NUM_LEVELS = 1 << LIGHT_BITS;
 let MIN_SHADE = 0.09;
 let MAX_SHADE = 1.0;
 let AMBIENT = 0.13;
+
+// Red and blue sit sixteen bits apart in a pixel, which is what lets them
+// share a multiply with green once green is moved out of the way
+let MASK_RB = 0x00FF00FF;
+let MASK_G = 0x0000FF00;
+let ALPHA = 0xFF000000;
 
 // The span loop interpolates texture coordinates in fixed point, with u and v
 // packed into the two halves of one integer so that a single add steps both:
@@ -58,9 +65,9 @@ let AMBIENT = 0.13;
 // that range: the v half reaches about 2^25, so the packed value stays near
 // 2^57.
 //
-// The light level walks in a second accumulator rather than a third field of
-// the same word. There is room for one above v, but only a few bits of it,
-// and getting the widths right costs more than the one add it would save.
+// The scale walks in a second accumulator rather than a third field of the
+// same word. It needs eight bits of scale over sixteen of fraction, and what
+// is left above v is nothing like that much.
 let FP_BITS = 16;
 let FP_ONE = 65536.0;
 let FP_BIAS_F = 16777216.0;
@@ -81,19 +88,22 @@ let U_MASK = TEX_MASK;
 let V_SHIFT = 32 + FP_BITS - TEX_SHIFT;
 let V_MASK = TEX_MASK << TEX_SHIFT;
 
-// The light accumulator carries 20 fractional bits, which puts its integer
-// part four bits above where the level belongs in the texel index. Extracting
-// it is then the same shift-and-mask the other two need, and no level can
-// index outside the table: the mask keeps four bits whatever the shift
-// produced, negative values included.
-let L_FRAC = 20;
-let L_ONE = 1048576.0;
-let L_SHIFT = L_FRAC - 2 * TEX_SHIFT;
-let L_MASK = (NUM_LEVELS - 1) << (2 * TEX_SHIFT);
+// The scale is baked per vertex and interpolated across the triangle in an
+// accumulator carrying this many fractional bits
+let L_FRAC = 16;
+let L_ONE = 65536.0;
+let L_SHIFT = L_FRAC;
+let L_MASK = 0xFF;
 
-// Past this much light change per pixel a triangle is degenerate enough that
-// the level would run away from the table, the same way the texture gradients
-// are limited below
+// Both ends of a span are clamped to this range before the step between them
+// is taken, which is what keeps every pixel along it in range too. The floor
+// is one whole scale step rather than zero because the step is itself floored,
+// so walking a span can undershoot its far end by a fixed point unit a pixel.
+let L_MIN_FX = 65536;
+let L_MAX_FX = 16711680;
+
+// Past this much scale change per pixel a triangle is degenerate enough to
+// skip, the same way the texture gradients are limited below
 let L_LIMIT = 64.0;
 
 // Command-line argument for the number of frames to render
@@ -103,9 +113,9 @@ if (num_frames == nil) {
     $exit(1);
 }
 
-// Screen position, texture coordinates and light level of one vertex. The
-// texture coordinates are in texels, not normalized, and the light level is
-// in [0, NUM_LEVELS - 1] as a float so that it interpolates.
+// Screen position, texture coordinates and light of one vertex. The texture
+// coordinates are in texels, not normalized, and the light is the 0..255 scale
+// the texel is multiplied by, as a float so that it interpolates.
 class Vertex {
     init(self, x, y, u, v, l) {
         self.x = x;
@@ -162,38 +172,7 @@ fun make_texture() {
     return tex;
 }
 
-// Every light level of the texture in one array, so that a shaded texel is a
-// single lookup: the level occupies the index bits above v, which makes the
-// per-pixel cost of Gouraud shading one more shift and or, not a multiply per
-// channel. The curve bends towards the dark end, where a level is worth more
-// to the eye than it is up in the light.
-fun make_shaded_texture(base) {
-    let num_texels = TEX_SIZE * TEX_SIZE;
-    let out = ByteArray.with_size(num_texels * NUM_LEVELS * 4);
-
-    for (let var level = 0; level < NUM_LEVELS; ++level) {
-        let t = level.to_f() / (NUM_LEVELS - 1).to_f();
-        let scale = MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt();
-
-        // Scaling the 256 possible channel values once beats doing the same
-        // multiply for every texel
-        let ramp = [];
-        for (let var c = 0; c < 256; ++c) ramp.push((c.to_f() * scale).floor());
-
-        let level_base = level * num_texels;
-        for (let var i = 0; i < num_texels; ++i) {
-            let p = base.get_u32(i);
-            out.set_u32(level_base + i, 0xFF000000
-                | (ramp[(p >> 16) & 0xFF] << 16)
-                | (ramp[(p >> 8) & 0xFF] << 8)
-                | ramp[p & 0xFF]);
-        }
-    }
-
-    return out;
-}
-
-let texture = make_shaded_texture(make_texture());
+let texture = make_texture();
 
 // --- Rasterization ---
 
@@ -201,9 +180,15 @@ let texture = make_shaded_texture(make_texture());
 // x is in [0, FRAME_WIDTH] and +x points right
 // y is in [0, FRAME_HEIGHT] and +y points down
 //
-// Texture coordinates are in texels and wrap around the texture. Light levels
-// are in [0, NUM_LEVELS - 1] and interpolate across the triangle.
+// Texture coordinates are in texels and wrap around the texture. Light is a
+// 0..255 scale and interpolates across the triangle.
 fun rasterize_tri_light(v0, v1, v2, fb, tex) {
+    // Held in locals: a global folds to a literal that codegen puts back at
+    // every use, and every use here is a pixel
+    let mask_rb = MASK_RB;
+    let mask_g = MASK_G;
+    let alpha = ALPHA;
+
     let var p0 = v0;
     let var p1 = v1;
     let var p2 = v2;
@@ -256,7 +241,6 @@ fun rasterize_tri_light(v0, v1, v2, fb, tex) {
     // bias, so it can be negative and still add correctly, the packed value
     // being just an integer. dl steps the light level the same way.
     let dt = ((dvdx * FP_ONE).floor() << 32) + (dudx * FP_ONE).floor();
-    let dl = (dldx * L_ONE).floor();
 
     // The gradients again, pre-scaled to fixed point, for stepping the span
     // start from one scanline to the next
@@ -323,13 +307,40 @@ fun rasterize_tri_light(v0, v1, v2, fb, tex) {
                 // triangle, so both halves of the value stay small
                 let var t = ((v_row_fx + start_x * dvdx_fx).floor() << 32)
                           + (u_row_fx + start_x * dudx_fx).floor();
+                // Both ends of the span are clamped and the step taken
+                // between the clamped pair, so every pixel along it is in
+                // range as well. Clamping only the start would leave the step
+                // free to run the scale off the end of a channel, which
+                // overflows red into green and shows as a flash of colour.
                 let var l = (l_row_fx + start_x * dldx_fx).floor();
+                if (l < L_MIN_FX) l = L_MIN_FX;
+                else if (l > L_MAX_FX) l = L_MAX_FX;
+
+                let var l_e = (l_row_fx + end_x * dldx_fx).floor();
+                if (l_e < L_MIN_FX) l_e = L_MIN_FX;
+                else if (l_e > L_MAX_FX) l_e = L_MAX_FX;
+
+                let dl = ((l_e - l).to_f() / (end_x - start_x).to_f()).floor();
+
                 let var i = row + start_x;
                 let end_i = row + end_x;
                 while (i < end_i) {
-                    fb.set_u32(i, tex.get_u32(((l >> L_SHIFT) & L_MASK)
-                                            | ((t >> V_SHIFT) & V_MASK)
-                                            | ((t >> U_SHIFT) & U_MASK)));
+                    let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
+                                      | ((t >> U_SHIFT) & U_MASK));
+
+                    // Red and blue are already sixteen bits apart; moving
+                    // green up to bit 32 puts all three that far apart, so one
+                    // multiply scales them without their products running into
+                    // each other. Sixty-two bit fixnums are what make the third
+                    // channel fit: in thirty-two bits this takes two multiplies.
+                    let x = ((c & mask_rb) | ((c & mask_g) << 24))
+                          * ((l >> L_SHIFT) & L_MASK);
+
+                    // Red and blue come back out together: they are still
+                    // sixteen apart after the shift, so the mask that separated
+                    // them separates the products too
+                    fb.set_u32(i, alpha | ((x >> 8) & mask_rb)
+                                        | ((x >> 32) & 0xFF00));
                     t = t + dt;
                     l = l + dl;
                     ++i;
@@ -387,13 +398,40 @@ fun rasterize_tri_light(v0, v1, v2, fb, tex) {
                 // triangle, so both halves of the value stay small
                 let var t = ((v_row_fx + start_x * dvdx_fx).floor() << 32)
                           + (u_row_fx + start_x * dudx_fx).floor();
+                // Both ends of the span are clamped and the step taken
+                // between the clamped pair, so every pixel along it is in
+                // range as well. Clamping only the start would leave the step
+                // free to run the scale off the end of a channel, which
+                // overflows red into green and shows as a flash of colour.
                 let var l = (l_row_fx + start_x * dldx_fx).floor();
+                if (l < L_MIN_FX) l = L_MIN_FX;
+                else if (l > L_MAX_FX) l = L_MAX_FX;
+
+                let var l_e = (l_row_fx + end_x * dldx_fx).floor();
+                if (l_e < L_MIN_FX) l_e = L_MIN_FX;
+                else if (l_e > L_MAX_FX) l_e = L_MAX_FX;
+
+                let dl = ((l_e - l).to_f() / (end_x - start_x).to_f()).floor();
+
                 let var i = row + start_x;
                 let end_i = row + end_x;
                 while (i < end_i) {
-                    fb.set_u32(i, tex.get_u32(((l >> L_SHIFT) & L_MASK)
-                                            | ((t >> V_SHIFT) & V_MASK)
-                                            | ((t >> U_SHIFT) & U_MASK)));
+                    let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
+                                      | ((t >> U_SHIFT) & U_MASK));
+
+                    // Red and blue are already sixteen bits apart; moving
+                    // green up to bit 32 puts all three that far apart, so one
+                    // multiply scales them without their products running into
+                    // each other. Sixty-two bit fixnums are what make the third
+                    // channel fit: in thirty-two bits this takes two multiplies.
+                    let x = ((c & mask_rb) | ((c & mask_g) << 24))
+                          * ((l >> L_SHIFT) & L_MASK);
+
+                    // Red and blue come back out together: they are still
+                    // sixteen apart after the shift, so the mask that separated
+                    // them separates the products too
+                    fb.set_u32(i, alpha | ((x >> 8) & mask_rb)
+                                        | ((x >> 32) & 0xFF00));
                     t = t + dt;
                     l = l + dl;
                     ++i;
@@ -422,20 +460,18 @@ fun lamp(x, y, lx, ly, reach, power) {
     return power * t * t;
 }
 
-// The light level at a vertex, as a float in [1, NUM_LEVELS - 2].
-//
-// Keeping a level of headroom at each end is what lets the span loop skip
-// clamping: interpolation stays inside the vertex range within the triangle,
-// and the fraction of a pixel a span start can sit outside it cannot push the
-// level past the ends of the table.
+// The scale a vertex multiplies its texel by, on the same curve level_walk.psh
+// uses. It bends towards the dark end, where a step is worth more to the eye
+// than it is up in the light.
 fun vertex_light(x, y) {
     let var lum = AMBIENT;
     lum = lum + lamp(x, y, 300.0, 280.0, 460.0, 0.95);
     lum = lum + lamp(x, y, 800.0, 760.0, 400.0, 0.80);
     lum = lum + lamp(x, y, 150.0, 880.0, 300.0, 0.60);
 
-    let top = (NUM_LEVELS - 2).to_f();
-    return (lum * (NUM_LEVELS - 1).to_f()).clip(1.0, top);
+    let t = lum.clip(0.0, 1.0);
+    return ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+        .clip(0.0, SHADE_MAX);
 }
 
 // --- Pre-generated geometry ---

@@ -72,15 +72,23 @@ let GRAD_LIMIT = 64.0;
 
 // --- Lighting ---
 
-// Light is quantized to this many levels, each a darkened copy of a texture.
-// The copies live end to end in one array with the level in the index bits
-// above v, so a shaded texel is the same single lookup an unshaded one was.
-// That is what lets the level vary per pixel: it costs a shift, a mask and an
-// or, rather than a multiply per colour channel.
+// Light is applied per pixel, by scaling the texel as it is read rather than
+// by reading it from a pre-darkened copy of the texture.
 //
-// Four bits is what keeps that affordable. The table is NUM_LEVELS copies of
-// the texture, so eight bits would be sixteen times the memory for a
-// difference the eye can barely find.
+// A table of darkened copies makes shading free per pixel, but it quantizes:
+// with sixteen copies a gradient shows sixteen bands. Scaling instead costs
+// arithmetic on every pixel and gives a continuous level, and it drops the
+// table, so a texture is its own size again rather than sixteen times it.
+//
+// The scale runs 0..255, so a channel product is at most 255 * 255 and stays
+// inside sixteen bits. That is what lets one multiply carry all three
+// channels: see the span loop. Stopping at 255 rather than 256 keeps the
+// product off the sixteenth bit, so an eight bit mask on the scale makes
+// spilling one channel into the next impossible rather than merely unlikely.
+let SHADE_MAX = 255.0;
+
+// Levels a map may ask for by name, which are turned into a scale on the same
+// curve everything else uses
 let NUM_LEVELS = 16;
 
 // How dark an unlit surface goes and how bright a fully lit one gets. Quake's
@@ -89,31 +97,37 @@ let NUM_LEVELS = 16;
 let MIN_SHADE = 0.09;
 let MAX_SHADE = 1.0;
 
-// The light level is baked per vertex and interpolated across the face, in an
-// accumulator carrying this many fractional bits. Twenty puts the integer part
-// above where the level belongs in the texel index for every texture size the
-// loader accepts, so extracting it is one shift and mask.
-let L_FRAC = 20;
-let L_ONE = 1048576.0;
+// The scale is baked per vertex and interpolated across the face, in an
+// accumulator carrying this many fractional bits
+let L_FRAC = 16;
+let L_ONE = 65536.0;
+let L_SHIFT = L_FRAC;
+let L_MASK = 0xFF;
 
-// Half a level, added to the accumulator so that truncating it to an index
-// rounds to the nearest level rather than always down. Flat shading rounded
-// the same way, and without this every surface sits half a level too dark.
-let L_HALF = 524288;
+// Both ends of a sub-span are clamped to this range before the step between
+// them is taken, which is what keeps every pixel along it in range too.
+//
+// The floor is one whole scale step rather than zero because the step is
+// itself floored, so walking a sub-span can undershoot its far end by up to
+// one fixed point unit per pixel. Nothing is ever this dark in practice: the
+// dimmest a surface goes is MIN_SHADE of the way up.
+let L_MIN_FX = 65536;
+let L_MAX_FX = 16711680;
 
-// The accumulator is clamped to this before it is used as an index, which is
-// what lets a vertex carry the ends of the range and the interpolation
-// overshoot a span end without wrapping the level around
-let L_MAX_FX = NUM_LEVELS * 1048576 - 1;
+// Red and blue sit sixteen bits apart in a pixel, which is what lets them
+// share a multiply with green once green is moved out of the way
+let MASK_RB = 0x00FF00FF;
+let MASK_G = 0x0000FF00;
+let ALPHA = 0xFF000000;
 
 // A face is cut until interpolation reproduces the light across it, but never
 // into pieces smaller than this, and never more than LIGHT_DEPTH halvings deep
 let LIGHT_GRID = 56.0;
 let LIGHT_DEPTH = 4;
 
-// How far the interpolated level may sit from the real one, in levels, before
-// the face is worth cutting
-let LIGHT_TOL = 0.6;
+// How far the interpolated scale may sit from the real one, on the 0..256
+// scale, before the face is worth cutting
+let LIGHT_TOL = 16.0;
 
 // The level everything starts from, before any lamp reaches it
 let AMBIENT = 0.13;
@@ -205,8 +219,6 @@ let var g_umask = 0;
 let var g_vshift = 0;
 let var g_vmask = 0;
 let var g_wrap = 0;
-let var g_lmask = 0;
-let var g_lshift = 0;
 
 let var bsp_root = nil;
 
@@ -370,44 +382,13 @@ class Texture {
         self.vmask = (self.size - 1) << shift;
         self.wrap = (self.size << FP_BITS) - 1;
 
-        // Where the level sits in the texel index, and what the accumulator
-        // has to shift down by to land its integer part there
-        self.lmask = (NUM_LEVELS - 1) << (2 * shift);
-        self.lshift = L_FRAC - 2 * shift;
-
         self.lit = nil;
     }
 
-    // Every light level of this texture, end to end in one array indexed by
-    // (level, v, u), built the first time the texture is drawn. Scaling the
-    // 256 possible channel values once per level beats doing the same multiply
-    // for every texel. The curve bends towards the dark end, where a level is
-    // worth more to the eye than it is up in the light.
+    // The texture as loaded. Shading happens per pixel now, so there is
+    // nothing to prepare and nothing to keep sixteen copies of.
     shaded(self) {
-        if (self.lit != nil) return self.lit;
-
-        let num_texels = self.size * self.size;
-        let out = ByteArray.with_size(num_texels * NUM_LEVELS * 4);
-
-        for (let var level = 0; level < NUM_LEVELS; ++level) {
-            let t = level.to_f() / (NUM_LEVELS - 1).to_f();
-            let scale = MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt();
-
-            let ramp = [];
-            for (let var c = 0; c < 256; ++c) ramp.push((c.to_f() * scale).floor());
-
-            let base = level * num_texels;
-            for (let var i = 0; i < num_texels; ++i) {
-                let p = self.base.get_u32(i);
-                out.set_u32(base + i, 0xFF000000
-                    | (ramp[(p >> 16) & 0xFF] << 16)
-                    | (ramp[(p >> 8) & 0xFF] << 8)
-                    | ramp[p & 0xFF]);
-            }
-        }
-
-        self.lit = out;
-        return out;
+        return self.base;
     }
 }
 
@@ -476,8 +457,6 @@ class Face {
         self.vshift = 0;
         self.vmask = 0;
         self.wrap = 0;
-        self.lmask = 0;
-        self.lshift = 0;
 
         // One light level per vertex, as a float so that it interpolates
         self.vl = nil;
@@ -995,9 +974,13 @@ fun light_at(px, py, pz, nx, ny, nz) {
         lum = lum + L[4] * atten * (0.35 + 0.65 * ndotl);
     }
 
-    // Left unquantized: a vertex level is interpolated across the face, so
-    // rounding it here would put a step at every corner
-    return (lum * (NUM_LEVELS - 1).to_f()).clip(0.0, (NUM_LEVELS - 1).to_f());
+    // The curve is applied here rather than per level, so what gets
+    // interpolated across a face is the finished scale. It bends towards the
+    // dark end, where a step is worth more to the eye than it is up in the
+    // light.
+    let t = lum.clip(0.0, 1.0);
+    return ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+        .clip(0.0, SHADE_MAX);
 }
 
 // The light level at each corner of a face. A face given an explicit level in
@@ -1017,10 +1000,13 @@ fun light_at(px, py, pz, nx, ny, nz) {
 fun bake_vertex_light(f) {
     let n = f.v.len _/ 3;
     let out = Array.with_size(n, 0.0);
-    let top = (NUM_LEVELS - 1).to_f();
+    let top = SHADE_MAX;
 
     if (f.light >= 0) {
-        let fixed = f.light.to_f().clip(0.0, top);
+        // A level named in the map, put on the same curve
+        let t = f.light.to_f() / (NUM_LEVELS - 1).to_f();
+        let fixed = ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+            .clip(0.0, top);
         for (let var i = 0; i < n; ++i) out[i] = fixed;
         return out;
     }
@@ -1445,8 +1431,9 @@ fun raster_poly(m) {
     let vshift = g_vshift;
     let vmask = g_vmask;
     let wrap = g_wrap;
-    let lmask = g_lmask;
-    let lshift = g_lshift;
+    let mask_rb = MASK_RB;
+    let mask_g = MASK_G;
+    let alpha = ALPHA;
     let fb = frame_buffer;
 
     // Per chain: the corner reached so far, the current x, how far x moves per
@@ -1531,7 +1518,6 @@ fun raster_poly(m) {
                         let inv_len = INV_N[len];
                         let var du = (u_e - u) * inv_len;
                         let var dv = (v_e - v) * inv_len;
-                        let dl = ((l_e - l) * inv_len * L_ONE).floor();
                         if (du > GRAD_LIMIT) du = GRAD_LIMIT;
                         else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
                         if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
@@ -1542,20 +1528,44 @@ fun raster_poly(m) {
                         let var t = (vfx << 32) + ufx;
                         let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
 
-                        // Half a level in, so that truncating to an index
-                        // rounds to nearest, and clamped so that a level can
-                        // sit at either end of the table without wrapping
-                        let var lfx = (l * L_ONE).floor() + L_HALF;
-                        if (lfx < 0) lfx = 0;
+                        // Both ends of the sub-span are clamped and the step
+                        // is taken between the clamped pair, so every pixel
+                        // along it is in range as well. Clamping only the start
+                        // would leave the step free to run the scale off the
+                        // end of a channel: a face seen almost edge on is a
+                        // sliver a pixel or two wide carrying the whole
+                        // perspective range, and its step is enormous.
+                        let var lfx = (l * L_ONE).floor();
+                        if (lfx < L_MIN_FX) lfx = L_MIN_FX;
                         else if (lfx > L_MAX_FX) lfx = L_MAX_FX;
+
+                        let var lfx_e = (l_e * L_ONE).floor();
+                        if (lfx_e < L_MIN_FX) lfx_e = L_MIN_FX;
+                        else if (lfx_e > L_MAX_FX) lfx_e = L_MAX_FX;
+
+                        let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
 
                         let var i = row + x;
                         let end_i = row + xe;
                         pixels_drawn = pixels_drawn + (xe - x);
                         while (i < end_i) {
-                            fb.set_u32(i, pix.get_u32(((lfx >> lshift) & lmask)
-                                                    | ((t >> vshift) & vmask)
-                                                    | ((t >> U_SHIFT) & umask)));
+                            let c = pix.get_u32(((t >> vshift) & vmask)
+                                              | ((t >> U_SHIFT) & umask));
+
+                            // Red and blue are already sixteen bits apart;
+                            // moving green up to bit 32 puts all three that far
+                            // apart, so one multiply scales them without their
+                            // products running into each other. Sixty-two bit
+                            // fixnums are what make the third channel fit: in
+                            // thirty-two bits this takes two multiplies.
+                            let x = ((c & mask_rb) | ((c & mask_g) << 24))
+                                  * ((lfx >> L_SHIFT) & L_MASK);
+
+                            // Red and blue come back out together: they are
+                            // still sixteen apart after the shift, so the mask
+                            // that separated them separates the products too
+                            fb.set_u32(i, alpha | ((x >> 8) & mask_rb)
+                                                | ((x >> 32) & 0xFF00));
                             t = t + dt;
                             lfx = lfx + dl;
                             i = i + 1;
@@ -1701,8 +1711,6 @@ fun draw_face(f) {
     g_vshift = f.vshift;
     g_vmask = f.vmask;
     g_wrap = f.wrap;
-    g_lmask = f.lmask;
-    g_lshift = f.lshift;
 
     raster_poly(m);
 }
@@ -2082,8 +2090,6 @@ fun prepare_node(node) {
             g.vshift = g.tex.vshift;
             g.vmask = g.tex.vmask;
             g.wrap = g.tex.wrap;
-            g.lmask = g.tex.lmask;
-            g.lshift = g.tex.lshift;
             out.push(g);
             num_lit_faces = num_lit_faces + 1;
         }
@@ -2096,30 +2102,17 @@ fun prepare_node(node) {
 prepare_node(bsp_root);
 compute_bounds(bsp_root);
 
-let var num_shaded = 0;
 let var tex_bytes = 0;
 for (let var i = 0; i < textures.len; ++i) {
     let t = textures[i];
-
-    // A level can now vary across a single face, so every texture drawn
-    // carries the whole table rather than the handful of levels a flat lit
-    // face used to pick from
-    if (t.lit != nil) {
-        num_shaded = num_shaded + NUM_LEVELS;
-        tex_bytes = tex_bytes + t.size * t.size * 4 * NUM_LEVELS;
-    }
-
-    // The unlit original is only ever read to build the shaded copies, and every
-    // level the map asks for exists by now, so let it go
-    t.base = nil;
+    tex_bytes = tex_bytes + t.size * t.size * 4;
 }
 
 $println(textures.len.to_s() + " textures, " + brushes.len.to_s() + " brushes, "
     + num_input_faces.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
     + lights.len.to_s() + " lights");
 $println("bsp: " + bsp_nodes.to_s() + " nodes, " + bsp_splits.to_s() + " splits");
-$println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB in "
-    + num_shaded.to_s() + " shaded copies");
+$println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB, shaded per pixel");
 
 cam_x = start_x;
 cam_z = start_z;
