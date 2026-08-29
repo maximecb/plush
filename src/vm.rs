@@ -1644,6 +1644,27 @@ impl Actor
             }}
         }
 
+        // The same against an integer literal. The immediate is a fixnum
+        // by construction, so the pair can only be two fixnums or a case
+        // the slow path has to look at
+        macro_rules! cmp_branch_imm {
+            ($insn_word: expr, $insn: literal, $opnds: ident, $op: tt, $slow_path: ident, $negate: literal) => {{
+                let opnds = insns::$opnds::decode($insn_word);
+                let v0 = get_reg!(opnds.a);
+                let v1 = Value::fixnum(opnds.imm as i64);
+
+                let taken = if v0.is_fixnum() {
+                    (v0.raw_bits() as i64) $op (v1.raw_bits() as i64)
+                } else {
+                    slow!($insn, $slow_path(v0, v1))
+                };
+
+                if taken != $negate {
+                    pc = ((pc as i64) + (opnds.disp as i64)) as usize;
+                }
+            }}
+        }
+
         // Set up a new frame and jump into a callee. The callee's frame
         // starts at the caller's `start_reg`, which is where its
         // arguments already sit and where its return value will land.
@@ -2318,6 +2339,32 @@ impl Actor
                     let opnds = insns::jne::decode(insn);
 
                     if get_reg!(opnds.a) != get_reg!(opnds.b) {
+                        pc = ((pc as i64) + (opnds.disp as i64)) as usize;
+                    }
+                }
+
+                Opcode::jlt_imm16 => cmp_branch_imm!(insn, "lt", jlt_imm16, <, cmp_lt, false),
+                Opcode::jle_imm16 => cmp_branch_imm!(insn, "le", jle_imm16, <=, cmp_le, false),
+                Opcode::jgt_imm16 => cmp_branch_imm!(insn, "gt", jgt_imm16, >, cmp_gt, false),
+                Opcode::jge_imm16 => cmp_branch_imm!(insn, "ge", jge_imm16, >=, cmp_ge, false),
+
+                Opcode::jnlt_imm16 => cmp_branch_imm!(insn, "lt", jnlt_imm16, <, cmp_lt, true),
+                Opcode::jnle_imm16 => cmp_branch_imm!(insn, "le", jnle_imm16, <=, cmp_le, true),
+                Opcode::jngt_imm16 => cmp_branch_imm!(insn, "gt", jngt_imm16, >, cmp_gt, true),
+                Opcode::jnge_imm16 => cmp_branch_imm!(insn, "ge", jnge_imm16, >=, cmp_ge, true),
+
+                Opcode::jeq_imm16 => {
+                    let opnds = insns::jeq_imm16::decode(insn);
+
+                    if get_reg!(opnds.a) == Value::fixnum(opnds.imm as i64) {
+                        pc = ((pc as i64) + (opnds.disp as i64)) as usize;
+                    }
+                }
+
+                Opcode::jne_imm16 => {
+                    let opnds = insns::jne_imm16::decode(insn);
+
+                    if get_reg!(opnds.a) != Value::fixnum(opnds.imm as i64) {
                         pc = ((pc as i64) + (opnds.disp as i64)) as usize;
                     }
                 }

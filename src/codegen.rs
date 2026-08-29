@@ -803,6 +803,30 @@ fn gen_branch(
         }
 
         Expr::Binary { op, lhs, rhs } if cmp_branch_insn(op, jump_if_true).is_some() => {
+            // An integer literal small enough to encode goes in the
+            // instruction rather than a register. A literal on the left is
+            // mirrored to the right, which is what swapping the comparison
+            // around does. Literals have no side effects, so dropping one
+            // leaves the order the other operand is evaluated in untouched
+            let imm_form = if let Some(imm) = as_imm16(rhs) {
+                Some((*op, lhs, imm))
+            } else if let Some(imm) = as_imm16(lhs) {
+                Some((mirror_cmp(op), rhs, imm))
+            } else {
+                None
+            };
+
+            if let Some((imm_op, tested, imm)) = imm_form {
+                let top = regs.top();
+                let a = tested.gen_code(fun, regs, actor, None)?;
+                regs.free_to(top);
+
+                // The guard accepted this operator and mirroring keeps it
+                // in the same set, so an immediate form exists for it
+                let insn = cmp_branch_imm(&imm_op, jump_if_true, a, imm).unwrap();
+                return Ok(vec![emit(actor, insn)]);
+            }
+
             let top = regs.top();
             let a = lhs.gen_code(fun, regs, actor, None)?;
             let b = rhs.gen_code(fun, regs, actor, None)?;
@@ -826,6 +850,8 @@ fn gen_branch(
 }
 
 /// The branch a comparison compiles to, for either sense of the test.
+/// The constructor handed back takes the two registers to compare and the
+/// branch displacement, which is patched in once the target is known.
 ///
 /// NaN is unordered, so an ordered comparison and its opposite are both
 /// false for it, and neither is the negation of the other. Each sense
@@ -853,6 +879,68 @@ fn cmp_branch_insn(op: &BinOp, jump_if_true: bool) -> Option<fn(u16, u16, i32) -
     };
 
     Some(insn)
+}
+
+/// Compare register `reg_a` against the literal `imm` and branch, for
+/// either sense of the test. Covers the same operators `cmp_branch_insn`
+/// does.
+///
+/// That one hands back a constructor because the match guard calls it to
+/// ask whether an operator branches at all, before there are any operands
+/// to give it. Here the operands are in hand, so this builds the
+/// instruction. The displacement is filled in later, when the jump is
+/// patched to its target
+fn cmp_branch_imm(op: &BinOp, jump_if_true: bool, reg_a: u16, imm: i16) -> Option<Insn>
+{
+    use BinOp::*;
+
+    let insn = match (op, jump_if_true) {
+        (Eq, true) | (Ne, false) => Insn::jeq_imm16(reg_a, imm, 0),
+        (Ne, true) | (Eq, false) => Insn::jne_imm16(reg_a, imm, 0),
+
+        (Lt, true) => Insn::jlt_imm16(reg_a, imm, 0),
+        (Le, true) => Insn::jle_imm16(reg_a, imm, 0),
+        (Gt, true) => Insn::jgt_imm16(reg_a, imm, 0),
+        (Ge, true) => Insn::jge_imm16(reg_a, imm, 0),
+
+        (Lt, false) => Insn::jnlt_imm16(reg_a, imm, 0),
+        (Le, false) => Insn::jnle_imm16(reg_a, imm, 0),
+        (Gt, false) => Insn::jngt_imm16(reg_a, imm, 0),
+        (Ge, false) => Insn::jnge_imm16(reg_a, imm, 0),
+
+        _ => return None,
+    };
+
+    Some(insn)
+}
+
+/// An integer literal that fits the immediate a compare and branch carries
+fn as_imm16(expr: &ExprBox) -> Option<i16>
+{
+    match expr.expr.as_ref() {
+        Expr::Int64(v) => i16::try_from(*v).ok(),
+        _ => None,
+    }
+}
+
+/// The comparison that holds when the operands are swapped, for a literal
+/// sitting on the left of a compare and branch.
+///
+/// Swapping is exact even for NaN: `a < b` and `b > a` are both false when
+/// either side is unordered. It is negating a comparison that NaN breaks,
+/// which is what the jn* instructions are for. So this holds for any
+/// operands, not just the integer literal it is used with here
+fn mirror_cmp(op: &BinOp) -> BinOp
+{
+    use BinOp::*;
+
+    match op {
+        Lt => Gt,
+        Gt => Lt,
+        Le => Ge,
+        Ge => Le,
+        other => *other,
+    }
 }
 
 /// Generate an expression into a specific register

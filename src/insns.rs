@@ -492,6 +492,21 @@ def_opcodes! {
     jngt { a: reg, b: reg, disp: disp24 },
     jnge { a: reg, b: reg, disp: disp24 },
 
+    // The same comparisons against an integer literal, which saves the
+    // load of the constant into a register. The immediate takes the room
+    // the second register operand leaves, so the word is no bigger.
+    // A literal on the left is mirrored into one of these by codegen
+    jeq_imm16 { a: reg, imm: i16, disp: disp24 },
+    jne_imm16 { a: reg, imm: i16, disp: disp24 },
+    jlt_imm16 { a: reg, imm: i16, disp: disp24 },
+    jle_imm16 { a: reg, imm: i16, disp: disp24 },
+    jgt_imm16 { a: reg, imm: i16, disp: disp24 },
+    jge_imm16 { a: reg, imm: i16, disp: disp24 },
+    jnlt_imm16 { a: reg, imm: i16, disp: disp24 },
+    jnle_imm16 { a: reg, imm: i16, disp: disp24 },
+    jngt_imm16 { a: reg, imm: i16, disp: disp24 },
+    jnge_imm16 { a: reg, imm: i16, disp: disp24 },
+
     // Unconditional jump
     jmp { disp: disp32 },
 
@@ -656,7 +671,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 66);
+        assert_eq!(NUM_OPCODES, 76);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
