@@ -85,6 +85,17 @@ impl Regs
         self.max = std::cmp::max(self.max, self.next);
         reg
     }
+
+    /// Reserve a run starting at a register that is already handed out, so
+    /// that a call can put its frame there. Only the registers above it are
+    /// taken, so nothing living in them may still be needed
+    fn alloc_from(&mut self, start: u16, n: u16)
+    {
+        debug_assert!(start <= self.next);
+        let end = start.checked_add(n).expect("frame is too large");
+        self.next = std::cmp::max(self.next, end);
+        self.max = std::cmp::max(self.max, self.next);
+    }
 }
 
 /// Register an argument or local variable lives in
@@ -682,7 +693,7 @@ impl ExprBox
             }
 
             Expr::Call { callee, args } => {
-                return gen_call(callee, args, fun, regs, actor);
+                return gen_call(callee, args, fun, regs, actor, None);
             }
 
             // Function expression
@@ -991,12 +1002,18 @@ fn gen_captures(
 /// Generate a call, whose arguments have to land in consecutive registers
 /// starting at the callee's frame base. The return value comes back in
 /// that same register
+/// Generate a call. `window` names a register to start the callee's frame
+/// at, which is how a call that is itself an operand of another call gets
+/// its return value into the slot that call wants it in. It has to be a
+/// register whose successors are all free, since the callee's frame runs
+/// over them
 fn gen_call(
     callee: &ExprBox,
     args: &Vec<ExprBox>,
     fun: &Function,
     regs: &mut Regs,
     actor: &mut Actor,
+    window: Option<u16>,
 ) -> Result<u16, ParseError>
 {
     let n_args: u16 = args.len().try_into().expect("too many call arguments");
@@ -1017,7 +1034,12 @@ fn gen_call(
     // A call with no arguments still needs the register its return value
     // comes back in
     let top = regs.top();
-    let start = regs.alloc_n(std::cmp::max(argc as u16 + extra_slot, 1));
+    let n_regs = std::cmp::max(argc as u16 + extra_slot, 1);
+
+    let start = match window {
+        Some(reg) => { regs.alloc_from(reg, n_regs); reg }
+        None => regs.alloc_n(n_regs),
+    };
 
     match callee.expr.as_ref() {
         // New class instance. The object is created into the callee's
@@ -1025,7 +1047,7 @@ fn gen_call(
         Expr::Ref { decl: Decl::Class { id }, .. } => {
             // Evaluate the arguments
             for (i, arg) in args.iter().enumerate() {
-                gen_into(arg, fun, regs, actor, start + 1 + i as u16)?;
+                gen_call_opnd(arg, fun, regs, actor, start + 1 + i as u16)?;
             }
 
             actor.insns.push(Insn::new(usize::from(*id) as u32, start, argc));
@@ -1034,10 +1056,10 @@ fn gen_call(
         // Callee has form a.b
         Expr::Member { base, field } => {
             // Evaluate the self argument
-            gen_into(base, fun, regs, actor, start)?;
+            gen_call_opnd(base, fun, regs, actor, start)?;
 
             for (i, arg) in args.iter().enumerate() {
-                gen_into(arg, fun, regs, actor, start + 1 + i as u16)?;
+                gen_call_opnd(arg, fun, regs, actor, start + 1 + i as u16)?;
             }
 
             let cache = actor.new_call_cache(field);
@@ -1047,7 +1069,7 @@ fn gen_call(
         // Call to a known function
         Expr::Ref { decl: Decl::Fun { id }, .. } => {
             for (i, arg) in args.iter().enumerate() {
-                gen_into(arg, fun, regs, actor, start + i as u16)?;
+                gen_call_opnd(arg, fun, regs, actor, start + i as u16)?;
             }
 
             actor.insns.push(Insn::call_direct(usize::from(*id) as u32, start, argc));
@@ -1056,7 +1078,7 @@ fn gen_call(
         // Call to a host function, which the VM provides
         Expr::HostFn(host_fn) => {
             for (i, arg) in args.iter().enumerate() {
-                gen_into(arg, fun, regs, actor, start + i as u16)?;
+                gen_call_opnd(arg, fun, regs, actor, start + i as u16)?;
             }
 
             actor.insns.push(Insn::call_host(*host_fn as u16, start, argc));
@@ -1065,10 +1087,10 @@ fn gen_call(
         // Plain regular call
         _ => {
             for (i, arg) in args.iter().enumerate() {
-                gen_into(arg, fun, regs, actor, start + i as u16)?;
+                gen_call_opnd(arg, fun, regs, actor, start + i as u16)?;
             }
 
-            gen_into(callee, fun, regs, actor, start + argc as u16)?;
+            gen_call_opnd(callee, fun, regs, actor, start + argc as u16)?;
 
             let cache = actor.new_call_cache("");
             actor.insns.push(Insn::call_opnd(start, argc, cache));
@@ -1077,7 +1099,36 @@ fn gen_call(
 
     // The return value comes back in the callee's frame base
     regs.free_to(top);
-    Ok(regs.alloc())
+
+    // A frame placed in a caller's register sits below what this call had
+    // to hand out, so there is nothing left to reserve for the result
+    match window {
+        Some(reg) => Ok(reg),
+        None => Ok(regs.alloc()),
+    }
+}
+
+/// Generate one operand of a call into the register it has to occupy.
+///
+/// An operand that is itself a call has its frame started at that register,
+/// so its return value lands there rather than being copied down. Operands
+/// are generated in order, so everything above the register belongs to an
+/// operand that has not been evaluated yet and is free for the callee to
+/// run over
+fn gen_call_opnd(
+    expr: &ExprBox,
+    fun: &Function,
+    regs: &mut Regs,
+    actor: &mut Actor,
+    dst: u16,
+) -> Result<(), ParseError>
+{
+    if let Expr::Call { callee, args } = expr.expr.as_ref() {
+        gen_call(callee, args, fun, regs, actor, Some(dst))?;
+        return Ok(());
+    }
+
+    gen_into(expr, fun, regs, actor, dst)
 }
 
 fn gen_bin_op(
