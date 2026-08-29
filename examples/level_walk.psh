@@ -377,6 +377,7 @@ class Plane {
         self.fit = false;
         self.flow = false;
         self.scale = 1.0;
+        self.turn = false;
     }
 }
 
@@ -396,7 +397,7 @@ class Brush {
 // axis the normal is most nearly parallel to, which is what Quake does too, and
 // what makes neighbouring brushes line up with no authoring.
 class Face {
-    init(self, verts, nx, ny, nz, d, tex, light, fit, flow, scale) {
+    init(self, verts, nx, ny, nz, d, tex, light, fit, flow, scale, turn) {
         self.v = verts;
         self.nx = nx;
         self.ny = ny;
@@ -407,6 +408,7 @@ class Face {
         self.fit = fit;
         self.flow = flow;
         self.scale = scale;
+        self.turn = turn;
 
         let ax = nx.abs();
         let ay = ny.abs();
@@ -440,14 +442,26 @@ let var start_yaw = 0.0;
 
 // The texture coordinates of a point on a face, before fit and flow. A wall
 // takes v from -y so that the texture is the right way up.
-fun face_u(taxis, x, y, z) {
+fun axis_u(taxis, x, y, z) {
     if (taxis == 0) return z;
     return x;
 }
 
-fun face_v(taxis, x, y, z) {
+fun axis_v(taxis, x, y, z) {
     if (taxis == 1) return z;
     return 0.0 - y;
+}
+
+// `turn` gives the face a quarter turn, u' = v and v' = -u, which is what lays
+// the grain of a texture along a beam instead of across it
+fun face_u(taxis, turn, x, y, z) {
+    if (turn) return axis_v(taxis, x, y, z);
+    return axis_u(taxis, x, y, z);
+}
+
+fun face_v(taxis, turn, x, y, z) {
+    if (turn) return 0.0 - axis_u(taxis, x, y, z);
+    return axis_v(taxis, x, y, z);
 }
 
 // A big quad lying on the plane, ready to be cut down by the other planes of
@@ -530,7 +544,7 @@ fun brush_to_faces(planes) {
         }
 
         if (poly.len < 9) continue;
-        out.push(Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale));
+        out.push(Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale, p.turn));
     }
     return out;
 }
@@ -545,8 +559,8 @@ fun set_fit(f) {
     let var v0 = 0.0; let var v1 = 0.0;
     for (let var i = 0; i < n; ++i) {
         let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
-        let u = face_u(f.taxis, x, y, z);
-        let v = face_v(f.taxis, x, y, z);
+        let u = face_u(f.taxis, f.turn, x, y, z);
+        let v = face_v(f.taxis, f.turn, x, y, z);
         if (i == 0) { u0 = u; u1 = u; v0 = v; v1 = v; }
         if (u < u0) u0 = u;
         if (u > u1) u1 = u;
@@ -595,6 +609,7 @@ class BrushOpts {
         self.fit = false;
         self.flow = false;
         self.scale = 1.0;
+        self.turn = false;
     }
 }
 
@@ -604,6 +619,7 @@ fun parse_opts(tok, first) {
         let t = tok[i];
         if (t == "fit") { o.fit = true; continue; }
         if (t == "flow") { o.flow = true; continue; }
+        if (t == "turn") { o.turn = true; continue; }
 
         let kv = t.split("=");
         if (kv.len != 2) {
@@ -646,6 +662,7 @@ fun make_plane(nx, ny, nz, d, tex, o) {
     p.fit = o.fit;
     p.flow = o.flow;
     p.scale = o.scale;
+    p.turn = o.turn;
     return p;
 }
 
@@ -993,10 +1010,10 @@ fun split_face(f, nx, ny, nz, d) {
     let front = clip_poly(f.v, 0.0 - nx, 0.0 - ny, 0.0 - nz, 0.0 - d);
     let out = [];
     if (back.len >= 9) {
-        out.push(Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale));
+        out.push(Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn));
     }
     if (front.len >= 9) {
-        out.push(Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale));
+        out.push(Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn));
     }
     return out;
 }
@@ -1435,6 +1452,7 @@ fun draw_face(f) {
     if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return;
 
     let taxis = f.taxis;
+    let turn = f.turn;
     let scale = f.scale;
     let n = f.v.len _/ 3;
     if (n > MAX_VERTS - 8) return;
@@ -1452,8 +1470,8 @@ fun draw_face(f) {
                     + WAVE_AMP * (wz * WAVE_FREQ + warp_phase * 0.83).sin();
         }
 
-        let var u = face_u(taxis, wx, wy, wz);
-        let var v = face_v(taxis, wx, wy, wz);
+        let var u = face_u(taxis, turn, wx, wy, wz);
+        let var v = face_v(taxis, turn, wx, wy, wz);
 
         if (f.fit) {
             u = u * f.su + f.ou;
