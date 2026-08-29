@@ -380,10 +380,14 @@ class Plane {
     }
 }
 
-// A convex solid, kept for collision and as the source of its own faces
+// A convex solid, kept for collision and as the source of its own faces. The
+// box around it is worth having: it rejects most brushes outright, and it is
+// exact where the plane test below is not.
 class Brush {
     init(self, planes) {
         self.planes = planes;
+        self.x0 = 0.0; self.y0 = 0.0; self.z0 = 0.0;
+        self.x1 = 0.0; self.y1 = 0.0; self.z1 = 0.0;
     }
 }
 
@@ -653,8 +657,46 @@ fun pick(specific, role, o) {
     return o.all;
 }
 
+// The box around a brush, from the corners of every plane cut down by the rest.
+// This walks all the planes rather than only the textured ones, so that a brush
+// with hidden faces still gets the bounds of the whole solid.
+fun set_brush_bounds(b, planes) {
+    let var any = false;
+
+    for (let var i = 0; i < planes.len; ++i) {
+        let var poly = plane_quad(planes[i]);
+        for (let var j = 0; j < planes.len; ++j) {
+            if (j == i) continue;
+            let q = planes[j];
+            poly = clip_poly(poly, q.nx, q.ny, q.nz, q.d);
+            if (poly.len < 9) break;
+        }
+        if (poly.len < 9) continue;
+
+        let n = poly.len _/ 3;
+        for (let var k = 0; k < n; ++k) {
+            let x = poly[k * 3];
+            let y = poly[k * 3 + 1];
+            let z = poly[k * 3 + 2];
+            if (!any) {
+                b.x0 = x; b.x1 = x; b.y0 = y; b.y1 = y; b.z0 = z; b.z1 = z;
+                any = true;
+            }
+            if (x < b.x0) b.x0 = x;
+            if (x > b.x1) b.x1 = x;
+            if (y < b.y0) b.y0 = y;
+            if (y > b.y1) b.y1 = y;
+            if (z < b.z0) b.z0 = z;
+            if (z > b.z1) b.z1 = z;
+        }
+    }
+}
+
 fun add_brush(planes) {
-    brushes.push(Brush(planes));
+    let b = Brush(planes);
+    set_brush_bounds(b, planes);
+    brushes.push(b);
+
     let new_faces = brush_to_faces(planes);
     for (let var i = 0; i < new_faces.len; ++i) faces.push(new_faces[i]);
 }
@@ -1696,10 +1738,15 @@ fun brush_top(b, x, z) {
     return hi;
 }
 
-// Does the player box run into this brush? A box against a convex solid is one
-// plane test per face, with the plane pushed out by the box's reach along its
-// own normal.
+// Does the player box run into this brush? The boxes are compared first: the
+// plane test below pushes each plane out by the box's reach along its normal,
+// which rounds the solid outward around its edges, and near the top of a ramp
+// that reads as a hit for a player standing clear above the slope.
 fun brush_hits(b, cx, cy, cz, hx, hy, hz) {
+    if (cx + hx <= b.x0 || cx - hx >= b.x1) return false;
+    if (cy + hy <= b.y0 || cy - hy >= b.y1) return false;
+    if (cz + hz <= b.z0 || cz - hz >= b.z1) return false;
+
     let planes = b.planes;
     for (let var i = 0; i < planes.len; ++i) {
         let p = planes[i];
