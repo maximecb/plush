@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 
 # Compare plush against CPython on the fib benchmark.
-# Runs the two interleaved N times and reports the best time for each.
+# Runs the two interleaved N times and reports the median time for each.
 
 import argparse
 import os
+import statistics
 import subprocess
 import sys
 import time
 
-NUM_RUNS = 3
+NUM_RUNS = 5
 
 def repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -51,7 +52,7 @@ def main():
         (py_version, ["python3", "benchmarks/fib.py"]),
     ]
 
-    best = {name: float("inf") for name, _ in contenders}
+    times = {name: [] for name, _ in contenders}
     outputs = {}
 
     for run_idx in range(args.num_runs):
@@ -59,7 +60,7 @@ def main():
 
         for name, cmd in contenders:
             elapsed, output = time_run(cmd)
-            best[name] = min(best[name], elapsed)
+            times[name].append(elapsed)
             outputs.setdefault(name, output)
             print(f"  {name}: {elapsed:.3f}s")
 
@@ -70,12 +71,14 @@ def main():
     if len(distinct) > 1:
         print(f"\nwarning: implementations disagree: {outputs}", file=sys.stderr)
 
-    print(f"\nBest of {args.num_runs}:")
-    for name, _ in contenders:
-        print(f"  {name}: {best[name]:.3f}s")
+    median = {name: statistics.median(times[name]) for name, _ in contenders}
 
-    plush_time = best[contenders[0][0]]
-    py_time = best[contenders[1][0]]
+    print(f"\nMedian of {args.num_runs}:")
+    for name, _ in contenders:
+        print(f"  {name}: {median[name]:.3f}s")
+
+    plush_time = median[contenders[0][0]]
+    py_time = median[contenders[1][0]]
 
     if plush_time <= py_time:
         ratio = py_time / plush_time
