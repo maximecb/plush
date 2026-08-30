@@ -70,11 +70,13 @@ jobs:
           libwayland-dev wayland-protocols libxkbcommon-dev \
           libasound2-dev libpulse-dev libudev-dev libdbus-1-dev
 
-    # Oldest macOS we support. The SDK is newer, but this caps the
-    # symbol versions so the binary also runs on older systems.
+    # Oldest macOS we support. Must stay above 11.3: SDL's joystick code has
+    # an "@available(macOS 11.3)" check, and below that floor clang emits a
+    # runtime __isPlatformVersionAtLeast call that lives in compiler-rt, which
+    # rustc's -nodefaultlibs then keeps out of the link.
     - name: Set macOS deployment target
       if: runner.os == 'macOS'
-      run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+      run: echo "MACOSX_DEPLOYMENT_TARGET=12.0" >> "$GITHUB_ENV"
 
     - name: Build
       run: cargo build --release --locked --features static-sdl --target ${{ matrix.target }}
