@@ -25,6 +25,7 @@ mod dict;
 
 extern crate sdl2;
 use std::env;
+use std::path::PathBuf;
 use std::process::exit;
 use std::sync::Mutex;
 use crate::vm::VM;
@@ -93,12 +94,23 @@ pub fn parse_args(args: Vec<String>) -> Options
 
         // Try to match this argument as an option
         match arg.as_str() {
+            "--version" => {
+                println!("plush {}", env!("CARGO_PKG_VERSION"));
+                exit(0);
+            }
+
             "--no-exec" => {
                 opts.no_exec = true;
             }
 
             "--eval" | "-e" => {
                 opts.eval_str = Some(read_arg!(arg));
+            }
+
+            "--run-example" => {
+                opts.input_file = Some(find_example(&read_arg!(arg)));
+                opts.rest = args[idx..].to_vec();
+                break;
             }
 
             _ => panic!("unknown option {}", arg)
@@ -108,6 +120,81 @@ pub fn parse_args(args: Vec<String>) -> Options
     opts
 }
 
+// Examples refer to their data files as "examples/data/...", so running one
+// means entering the directory that contains the examples directory, not the
+// examples directory itself
+fn find_example(name: &str) -> String
+{
+    let mut dirs = Vec::new();
+
+    // Set by the installer, and lets people point at their own collection
+    if let Ok(dir) = env::var("PLUSH_EXAMPLES_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+
+    // Installed layout, where <root>/bin/plush sits next to <root>/examples
+    if let Ok(exe) = env::current_exe() {
+        if let Some(root) = exe.parent().and_then(|p| p.parent()) {
+            dirs.push(root.join("examples"));
+        }
+    }
+
+    // Running out of a source checkout
+    if let Ok(cwd) = env::current_dir() {
+        dirs.push(cwd.join("examples"));
+    }
+
+    for dir in &dirs {
+        if !dir.join(format!("{}.psh", name)).exists() {
+            continue;
+        }
+
+        let (root, sub) = match (dir.parent(), dir.file_name()) {
+            (Some(root), Some(sub)) => (root, sub.to_string_lossy().into_owned()),
+            _ => continue,
+        };
+
+        if let Err(err) = env::set_current_dir(root) {
+            println!("Error: could not enter {}: {}", root.display(), err);
+            exit(-1);
+        }
+
+        return format!("{}/{}.psh", sub, name);
+    }
+
+    println!("Error: no example named \"{}\"", name);
+    list_examples(&dirs);
+    exit(-1);
+}
+
+fn list_examples(dirs: &[PathBuf])
+{
+    for dir in dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter_map(|n| n.strip_suffix(".psh").map(str::to_string))
+            .collect();
+
+        if names.is_empty() {
+            continue;
+        }
+
+        names.sort();
+        println!("\nAvailable examples:");
+        for name in names {
+            println!("  {}", name);
+        }
+        return;
+    }
+}
+
+/// Parse an input file or eval string
 fn parse_input(opts: &Options) -> Program
 {
     if let Some(eval_str) = &opts.eval_str {

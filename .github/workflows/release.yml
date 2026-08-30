@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    # Not 'v*', which would also match the vsix-* tags the VSCode
+    # extension workflow creates
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: plush-x86_64-linux
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: plush-aarch64-linux
+          # Intel runners are on GitHub's deprecation path. When macos-13
+          # goes away, switch this to macos-15-intel.
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: plush-x86_64-macos
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: plush-aarch64-macos
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: plush-x86_64-windows
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.tag || github.ref }}
+
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    # SDL is compiled from source here, so it needs the dev headers for
+    # every backend it should support. Without these it configures itself
+    # with no video or audio driver and fails only at runtime.
+    - name: Install SDL build dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update -y -qq
+        sudo apt-get install -y --no-install-recommends \
+          cmake \
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+          libxfixes-dev libxss-dev \
+          libwayland-dev wayland-protocols libxkbcommon-dev \
+          libasound2-dev libpulse-dev libudev-dev libdbus-1-dev
+
+    # Oldest macOS we support. The SDK is newer, but this caps the
+    # symbol versions so the binary also runs on older systems.
+    - name: Set macOS deployment target
+      if: runner.os == 'macOS'
+      run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+
+    - name: Build
+      run: cargo build --release --locked --features static-sdl --target ${{ matrix.target }}
+
+    # Only checks that the binary starts and runs code. The runners are
+    # headless, so this does not exercise the SDL video path.
+    - name: Smoke test
+      run: cargo run --release --locked --features static-sdl --target ${{ matrix.target }} -- --eval '$println("ok");'
+
+    # Layout matches what the installer drops into ~/.plush
+    - name: Package
+      if: runner.os != 'Windows'
+      run: |
+        root="dist/${{ matrix.asset }}"
+        mkdir -p "$root/bin"
+        cp "target/${{ matrix.target }}/release/plush" "$root/bin/"
+        cp README.md LICENSE "$root/"
+        cp -r examples "$root/examples"
+        tar -czf "${{ matrix.asset }}.tar.gz" -C dist "${{ matrix.asset }}"
+
+    - name: Package
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $root = "dist/${{ matrix.asset }}"
+        New-Item -ItemType Directory -Force -Path "$root/bin" | Out-Null
+        Copy-Item "target/${{ matrix.target }}/release/plush.exe" "$root/bin/"
+        Copy-Item README.md, LICENSE "$root/"
+        Copy-Item -Recurse examples "$root/examples"
+        Compress-Archive -Path $root -DestinationPath "${{ matrix.asset }}.zip"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset }}
+        path: |
+          ${{ matrix.asset }}.tar.gz
+          ${{ matrix.asset }}.zip
+        if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.tag || github.ref }}
+
+    - uses: actions/download-artifact@v4
+      with:
+        path: dist
+        merge-multiple: true
+
+    # Mirror of the copy served from GitHub Pages, so the installer is
+    # also reachable at releases/latest/download/install
+    - name: Include the install script
+      run: cp pages/install dist/install
+
+    - name: Generate checksums
+      working-directory: dist
+      run: sha256sum * > SHA256SUMS
+
+    - name: Publish
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: gh release create "$TAG" --title "$TAG" --generate-notes dist/*
