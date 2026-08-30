@@ -135,9 +135,11 @@ if [ "$SKIP_TESTS" = 0 ]; then
     say "Running tests (release)"
     RUST_BACKTRACE=1 cargo test --release
 
-    # The release build is what ships, so make sure it links statically too
+    # The release build is what ships, so make sure it links statically too.
+    # SDL 2 asks for cmake_minimum_required(VERSION 3.0.0), which CMake 4
+    # rejects outright, so allow the old policy version.
     say "Checking the static-sdl release build"
-    cargo build --release --locked --features static-sdl
+    CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --release --locked --features static-sdl
 fi
 
 # --- Tag and push ----------------------------------------------------------
