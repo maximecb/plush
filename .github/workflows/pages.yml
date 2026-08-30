@@ -6,6 +6,9 @@ on:
     paths:
       - 'pages/**'
       - '.github/workflows/pages.yml'
+  # Republish so the version shown on the page follows the newest release
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -28,6 +31,26 @@ jobs:
     - uses: actions/checkout@v4
 
     - uses: actions/configure-pages@v5
+
+    # Stamp the newest release into the page. Only v<number> tags count, so a
+    # vsix-* extension release never becomes the advertised plush version.
+    - name: Set the version shown on the page
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        version="$(gh api 'repos/{owner}/{repo}/releases?per_page=30' \
+          --jq '[.[] | select(.tag_name | test("^v[0-9]")) | .tag_name] | first')"
+        version="${version#v}"
+
+        if [ -z "$version" ] || [ "$version" = null ]; then
+          echo "No plush release found, dropping the version from the heading"
+          sed -i 's| <span class="version">__PLUSH_VERSION__</span>||' pages/index.html
+        else
+          echo "Advertising version $version"
+          sed -i "s|__PLUSH_VERSION__|$version|" pages/index.html
+        fi
+
+        grep -o '<h2>Install Plush[^<]*\(<span[^>]*>[^<]*</span>\)\?' pages/index.html
 
     # Deploying from Actions lets us serve any directory. Branch-based
     # Pages only supports the repo root or /docs.
