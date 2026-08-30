@@ -1,0 +1,274 @@
+#!/bin/sh
+# Plush installer.
+#
+#   curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh
+#
+# Install and immediately run an example:
+#
+#   curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s run-example tremor
+#
+# Installs into ~/.plush, replacing any previous install, and adds
+# ~/.plush/bin to PATH via your shell profile.
+#
+# Options:
+#   --run-example NAME   run this example once the install finishes
+#   --force              reinstall even if the same version is present
+#
+# Environment variables:
+#   PLUSH_HOME      install directory (default: ~/.plush)
+#   PLUSH_VERSION   release tag to install (default: latest)
+#   PLUSH_NO_PATH   set to 1 to leave shell profiles untouched
+
+set -eu
+
+REPO="maximecb/plush"
+PLUSH_HOME="${PLUSH_HOME:-$HOME/.plush}"
+VERSION="${PLUSH_VERSION:-latest}"
+
+RUN_EXAMPLE=""
+FORCE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        run-example | --run-example)
+            [ $# -ge 2 ] || { echo "plush: error: $1 needs an example name" >&2; exit 1; }
+            RUN_EXAMPLE="$2"
+            shift 2
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        -*)
+            echo "plush: error: unknown option $1" >&2
+            exit 1
+            ;;
+        *)
+            # Bare example name, so the piped form needs no "--" separator
+            [ -z "$RUN_EXAMPLE" ] \
+                || { echo "plush: error: unexpected argument $1" >&2; exit 1; }
+            RUN_EXAMPLE="$1"
+            shift
+            ;;
+    esac
+done
+
+say() { printf 'plush: %s\n' "$1"; }
+err() { printf 'plush: error: %s\n' "$1" >&2; exit 1; }
+
+# Resolve the platform to a release asset name
+detect_target() {
+    os="$(uname -s)"
+    arch="$(uname -m)"
+
+    case "$os" in
+        Linux)  os=linux ;;
+        Darwin) os=macos ;;
+        *) err "unsupported operating system: $os (Windows users: download the .zip from https://github.com/$REPO/releases)" ;;
+    esac
+
+    case "$arch" in
+        x86_64 | amd64)  arch=x86_64 ;;
+        arm64 | aarch64) arch=aarch64 ;;
+        *) err "unsupported architecture: $arch" ;;
+    esac
+
+    printf 'plush-%s-%s' "$arch" "$os"
+}
+
+# $1 = url, $2 = destination path
+download() {
+    if command -v curl >/dev/null 2>&1; then
+        # --proto '=https' also applies to the redirect GitHub sends us to
+        curl --proto '=https' -fsSL "$1" -o "$2"
+    else
+        wget --https-only -qO "$2" "$1"
+    fi
+}
+
+# Newest release whose tag looks like v<number>, so we can tell what we would
+# install before downloading it.
+#
+# releases/latest is deliberately not used: the VSCode extension workflow
+# publishes vsix-* releases that carry no plush binaries, and any of those
+# would otherwise be picked as "latest".
+resolve_latest_version() {
+    api="https://api.github.com/repos/$REPO/releases?per_page=30"
+
+    if command -v curl >/dev/null 2>&1; then
+        body="$(curl --proto '=https' -fsSL "$api" 2>/dev/null || true)"
+    else
+        body="$(wget --https-only -qO- "$api" 2>/dev/null || true)"
+    fi
+
+    # Releases come back newest first
+    printf '%s\n' "$body" \
+        | sed -n 's/.*"tag_name"[ ]*:[ ]*"\(v[0-9][^"]*\)".*/\1/p' \
+        | head -1
+}
+
+# Prints the version of an already installed plush, if there is one
+installed_version() {
+    if [ -x "$PLUSH_HOME/bin/plush" ]; then
+        plush_bin="$PLUSH_HOME/bin/plush"
+    elif command -v plush >/dev/null 2>&1; then
+        plush_bin="$(command -v plush)"
+    else
+        return 0
+    fi
+
+    # Output looks like "plush 0.3.0"
+    "$plush_bin" --version 2>/dev/null | awk '/^plush /{print $2}' || true
+}
+
+verify_checksum() {
+    asset="$1"
+    dir="$2"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        sum="$(sha256sum "$dir/$asset" | cut -d' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        sum="$(shasum -a 256 "$dir/$asset" | cut -d' ' -f1)"
+    else
+        say "no sha256 tool found, skipping checksum verification"
+        return 0
+    fi
+
+    expected="$(grep " $asset\$" "$dir/SHA256SUMS" | cut -d' ' -f1)"
+    [ -n "$expected" ] || err "no checksum listed for $asset"
+    [ "$sum" = "$expected" ] || err "checksum mismatch for $asset (expected $expected, got $sum)"
+}
+
+# Shell profile to append to, chosen from the user's login shell
+profile_file() {
+    case "$(basename "${SHELL:-/bin/sh}")" in
+        zsh)
+            printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc"
+            ;;
+        bash)
+            # macOS reads .bash_profile for login shells, Linux .bashrc
+            if [ "$(uname -s)" = Darwin ]; then
+                printf '%s\n' "$HOME/.bash_profile"
+            else
+                printf '%s\n' "$HOME/.bashrc"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$HOME/.profile"
+            ;;
+    esac
+}
+
+update_profile() {
+    bin_dir="$PLUSH_HOME/bin"
+
+    if [ "${PLUSH_NO_PATH:-0}" = 1 ]; then
+        say "add $bin_dir to your PATH to finish"
+        return 0
+    fi
+
+    profile="$(profile_file)"
+
+    # Already added by a previous install
+    if [ -f "$profile" ] && grep -qF "$bin_dir" "$profile"; then
+        return 0
+    fi
+
+    {
+        printf '\n# Added by the plush installer\n'
+        printf 'export PLUSH_EXAMPLES_DIR="%s/examples"\n' "$PLUSH_HOME"
+        printf 'export PATH="%s:$PATH"\n' "$bin_dir"
+    } >> "$profile"
+
+    say "added $bin_dir to PATH in $profile"
+    NEEDS_RELOAD="$profile"
+}
+
+install_plush() {
+    target="$(detect_target)"
+    asset="$target.tar.gz"
+
+    # Always an explicit tag, never releases/latest
+    base="https://github.com/$REPO/releases/download/$RELEASE_TAG"
+
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+
+    say "downloading $target ($RELEASE_TAG)"
+    download "$base/$asset" "$tmp/$asset" \
+        || err "download failed. Does release $RELEASE_TAG have an asset named $asset?"
+
+    if download "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
+        verify_checksum "$asset" "$tmp"
+    else
+        say "SHA256SUMS not available, skipping checksum verification"
+    fi
+
+    tar -xzf "$tmp/$asset" -C "$tmp"
+    [ -x "$tmp/$target/bin/plush" ] || err "release archive is missing bin/plush"
+
+    # Check the binary runs before we touch the existing install, so a bad
+    # download or a wrong-architecture build can't leave the user broken
+    version="$("$tmp/$target/bin/plush" --version 2>/dev/null || true)"
+    [ -n "$version" ] || err "the downloaded binary did not run. Wrong architecture?"
+
+    if [ -d "$PLUSH_HOME" ]; then
+        say "removing previous install at $PLUSH_HOME"
+        rm -rf "$PLUSH_HOME"
+    fi
+
+    mkdir -p "$(dirname "$PLUSH_HOME")"
+    mv "$tmp/$target" "$PLUSH_HOME"
+
+    say "installed $version to $PLUSH_HOME"
+}
+
+main() {
+    command -v tar >/dev/null 2>&1 || err "'tar' is required but was not found"
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
+        || err "either curl or wget is required"
+
+    # Guard against wiping something important if PLUSH_HOME is set oddly
+    case "$PLUSH_HOME" in
+        "" | "/" | "$HOME" | "$HOME/") err "refusing to install to '$PLUSH_HOME'" ;;
+    esac
+
+    # Skip the download entirely when the wanted version is already here
+    have="$(installed_version)"
+
+    if [ "$VERSION" = latest ]; then
+        RELEASE_TAG="$(resolve_latest_version)"
+        [ -n "$RELEASE_TAG" ] \
+            || err "could not find a plush release. Pass PLUSH_VERSION=<tag> to pick one."
+    else
+        RELEASE_TAG="$VERSION"
+    fi
+
+    want="${RELEASE_TAG#v}"
+
+    if [ "$FORCE" = 0 ] && [ -n "$have" ] && [ "$have" = "$want" ]; then
+        say "plush $have is already installed, skipping download"
+    else
+        install_plush
+    fi
+
+    NEEDS_RELOAD=""
+    update_profile
+
+    if [ -n "$RUN_EXAMPLE" ]; then
+        say "running example: $RUN_EXAMPLE"
+        exec "$PLUSH_HOME/bin/plush" --run-example "$RUN_EXAMPLE"
+    fi
+
+    say ""
+    say "Try an example:"
+    say "    plush --run-example tremor"
+    say ""
+
+    if [ -n "$NEEDS_RELOAD" ]; then
+        say "Open a new terminal, or run: . $NEEDS_RELOAD"
+        say ""
+    fi
+}
+
+main
