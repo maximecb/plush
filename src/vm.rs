@@ -1344,18 +1344,13 @@ impl Actor
     int_slow_path!(lshift_slow, "lshift", |a: i64, b: i64| Some(a << b));
     int_slow_path!(rshift_slow, "rshift", |a: i64, b: i64| Some(a >> b));
 
-    /// Call a host function
-    /// Kept out of line so its arity dispatch doesn't bloat the interpreter loop
+    /// Call a host function, checking that it takes the number of
+    /// arguments the call site passes. Only the dynamic method lookup
+    /// comes through here: it is the one path that picks the callee at
+    /// run time, so it is the one place the count is still unknown.
     #[inline(never)]
-    /// Call a host function. Its arguments sit in consecutive registers
-    /// starting at `base`, and the value it returns is written back over
-    /// the first of them, which is where a call leaves its result
-    fn call_host(&mut self, host_fn: &HostFn, base: usize, argc: usize) -> Result<(), String>
+    fn call_host(&mut self, host_fn: &HostFn, base_reg: usize, argc: usize) -> Result<(), String>
     {
-        macro_rules! arg {
-            ($idx: expr) => { self.stack[base + $idx] }
-        }
-
         if host_fn.num_params() != argc {
             return Err(format!(
                 "incorrect argument count for host function `{}`, got {}, expected {}",
@@ -1365,7 +1360,33 @@ impl Actor
             ));
         }
 
-        debug_assert!(base + argc <= self.stack.len());
+        self.call_host_unchecked(host_fn, base_reg, argc)
+    }
+
+    /// Call a host function whose arity already matches. Its arguments sit
+    /// in consecutive registers starting at `base_reg`, and the value it
+    /// returns is written back over the first of them, which is where a
+    /// call leaves its result.
+    ///
+    /// Two things are taken on trust. The arity is checked when the
+    /// program is compiled for a direct call, and by `call_method` for a
+    /// guarded one, which only patches a site after a call that matched.
+    /// The registers are in bounds because codegen sizes every frame to
+    /// cover the ones its function uses, which is the same premise
+    /// `get_reg!` and `set_reg!` rest on.
+    ///
+    /// Kept out of line so its arity dispatch doesn't bloat the interpreter loop
+    #[inline(never)]
+    fn call_host_unchecked(&mut self, host_fn: &HostFn, base_reg: usize, argc: usize) -> Result<(), String>
+    {
+        debug_assert_eq!(host_fn.num_params(), argc);
+        debug_assert!(base_reg + argc <= self.stack.len());
+
+        // Every argument is read before the host function runs, so no
+        // collection it triggers can happen part way through reading them
+        macro_rules! arg {
+            ($idx: expr) => { unsafe { *self.stack.get_unchecked(base_reg + $idx) } }
+        }
 
         let result = match host_fn.f
         {
@@ -1408,7 +1429,7 @@ impl Actor
         match result {
             // A host function can collect, so the result is written back
             // by index rather than through a reference taken beforehand
-            Ok(v) => { self.stack[base] = v; Ok(()) },
+            Ok(v) => { unsafe { *self.stack.get_unchecked_mut(base_reg) = v; } Ok(()) },
             Err(e) => Err(format!("error during call to host function `{}`:\n{}", host_fn.name, e)),
         }
     }
@@ -2379,9 +2400,11 @@ impl Actor
                 Opcode::call_host => {
                     let opnds = insns::call_host::decode(insn);
                     let host_fn = HostFnId::from_index(opnds.host_fn).get();
-                    let base = bp + opnds.start_reg as usize;
+                    let base_reg = bp + opnds.start_reg as usize;
 
-                    if let Err(msg) = self.call_host(host_fn, base, opnds.argc as usize) {
+                    // The callee is named in the instruction, so the arity
+                    // was settled when the program was compiled
+                    if let Err(msg) = self.call_host_unchecked(host_fn, base_reg, opnds.argc as usize) {
                         error!("{}", msg);
                     }
                 }
@@ -2434,9 +2457,9 @@ impl Actor
                             continue;
                         }
                     } else if let Some(f) = fun_val.to_host_fn() {
-                        let base = bp + opnds.start_reg as usize;
+                        let base_reg = bp + opnds.start_reg as usize;
 
-                        if let Err(msg) = self.call_host(f, base, opnds.argc as usize) {
+                        if let Err(msg) = self.call_host(f, base_reg, opnds.argc as usize) {
                             error!("{}", msg);
                         }
 
@@ -2524,9 +2547,9 @@ impl Actor
                                 );
                             }
 
-                            let base = bp + opnds.start_reg as usize;
+                            let base_reg = bp + opnds.start_reg as usize;
 
-                            if let Err(msg) = self.call_host(host_fn.get(), base, opnds.argc as usize) {
+                            if let Err(msg) = self.call_host(host_fn.get(), base_reg, opnds.argc as usize) {
                                 error!("{}", msg);
                             }
                         }
@@ -2541,9 +2564,11 @@ impl Actor
                     // Guard that self still has the type the method was found on
                     if self_val.type_of() as u8 == opnds.type_tag {
                         let host_fn = self.call_caches[opnds.cache as usize].host_fn.get();
-                        let base = bp + opnds.start_reg as usize;
+                        let base_reg = bp + opnds.start_reg as usize;
 
-                        if let Err(msg) = self.call_host(host_fn, base, opnds.argc as usize) {
+                        // This site only became `call_method_host` after a
+                        // call the unspecialized form checked the arity of
+                        if let Err(msg) = self.call_host_unchecked(host_fn, base_reg, opnds.argc as usize) {
                             error!("{}", msg);
                         }
 
