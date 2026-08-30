@@ -159,29 +159,46 @@ profile_file() {
     esac
 }
 
-update_profile() {
-    bin_dir="$PLUSH_HOME/bin"
+# A sourceable file holding everything plush needs in the environment. This
+# installer runs as a child process and cannot touch the calling shell, so
+# sourcing this is what makes plush work without opening a new terminal.
+write_env_file() {
+    cat > "$PLUSH_HOME/env" <<EOF
+#!/bin/sh
+# Puts plush in the current shell. Source it:
+#
+#     . "$PLUSH_HOME/env"
 
+case ":\${PATH}:" in
+    *":$PLUSH_HOME/bin:"*) ;;
+    *) PATH="$PLUSH_HOME/bin:\$PATH" ;;
+esac
+
+export PATH
+export PLUSH_EXAMPLES_DIR="$PLUSH_HOME/examples"
+EOF
+}
+
+update_profile() {
     if [ "${PLUSH_NO_PATH:-0}" = 1 ]; then
-        say "add $bin_dir to your PATH to finish"
+        say "source $PLUSH_HOME/env from your shell profile to finish"
         return 0
     fi
 
     profile="$(profile_file)"
 
-    # Already added by a previous install
-    if [ -f "$profile" ] && grep -qF "$bin_dir" "$profile"; then
+    # Already added by a previous install, in either the current form or the
+    # older one that exported PATH directly
+    if [ -f "$profile" ] && grep -qF "$PLUSH_HOME" "$profile"; then
         return 0
     fi
 
     {
         printf '\n# Added by the plush installer\n'
-        printf 'export PLUSH_EXAMPLES_DIR="%s/examples"\n' "$PLUSH_HOME"
-        printf 'export PATH="%s:$PATH"\n' "$bin_dir"
+        printf '[ -f "%s/env" ] && . "%s/env"\n' "$PLUSH_HOME" "$PLUSH_HOME"
     } >> "$profile"
 
-    say "added $bin_dir to PATH in $profile"
-    NEEDS_RELOAD="$profile"
+    say "set up $profile to load plush in new shells"
 }
 
 install_plush() {
@@ -252,7 +269,7 @@ main() {
         install_plush
     fi
 
-    NEEDS_RELOAD=""
+    write_env_file
     update_profile
 
     if [ -n "$RUN_EXAMPLE" ]; then
@@ -260,15 +277,17 @@ main() {
         exec "$PLUSH_HOME/bin/plush" --run-example "$RUN_EXAMPLE"
     fi
 
+    # An installer runs in a child process and cannot change the shell that
+    # started it, so this is the one step that has to be done by hand
     say ""
-    say "Try an example:"
+    say "To use plush in this shell right now, run:"
+    say ""
+    say "    . \"$PLUSH_HOME/env\""
+    say ""
+    say "New shells pick it up automatically. Then try:"
+    say ""
     say "    plush --run-example tremor"
     say ""
-
-    if [ -n "$NEEDS_RELOAD" ]; then
-        say "Open a new terminal, or run: . $NEEDS_RELOAD"
-        say ""
-    fi
 }
 
 main

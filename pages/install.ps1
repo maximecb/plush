@@ -214,7 +214,9 @@ if ($env:PLUSH_NO_PATH -eq '1') {
 if ($RunExample) {
     Say "running example: $RunExample"
     & (Join-Path $PlushHome 'bin\plush.exe') --run-example $RunExample
-    exit $LASTEXITCODE
+    # Deliberately not "exit": piping this script into iex runs it in the
+    # caller's session, and exit would close their PowerShell window
+    return
 }
 
 Say ''
