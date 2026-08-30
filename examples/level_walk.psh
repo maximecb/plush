@@ -12,8 +12,10 @@
 //
 // The span loop is the one from examples/textured_cube.psh: u and v are packed
 // into the two halves of one integer so a single add steps both. Here it runs
-// over 16-pixel sub-spans, with the perspective divide done once per sub-span,
-// which is what keeps long walls and floors from shearing.
+// over sub-spans, with the perspective divide done once per sub-span, which is
+// what keeps long walls and floors from shearing. How long a sub-span runs
+// follows how fast 1/z is changing, so a wall square to the eye is covered in
+// one piece and only a surface seen edge on pays for a divide every few pixels.
 //
 // Light is baked per face at load time from the point lights in the map, into
 // darkened copies of each texture, so the span loop stays a plain texel copy.
@@ -63,12 +65,22 @@ let FP_BITS = 16;
 let FP_ONE = 65536.0;
 let U_SHIFT = FP_BITS;
 let BIAS_TEXELS = 8192.0;
-let EXC_FX = 1024 << FP_BITS;
 
-// The sub-span length, and the matching cap on how far u or v may travel in
-// one pixel. Together they bound the backwards step the bias has to cover.
-let SUB_LEN = 16;
+// The longest a sub-span may run, and the matching cap on how far u or v may
+// travel in one pixel. Their product is the backwards step the bias has to
+// cover, and the bias in turn bounds how large the packed pair can grow: at a
+// length of 64 the packed value passes the 62-bit fixnum limit, and every
+// pixel would box.
+let SUB_MAX = 32;
+let GRAD_LIMIT_FX = 64;
 let GRAD_LIMIT = 64.0;
+let EXC_FX = (SUB_MAX * GRAD_LIMIT_FX) << FP_BITS;
+
+// How far 1/z may swing across one sub-span, as a fraction of itself. The
+// affine step between the ends of a sub-span is exact wherever 1/z holds
+// still, so this is what sets the length rather than a fixed count: a wall
+// square to the eye runs in one piece, a floor seen edge on is cut fine.
+let PERSP_TOL = 0.04;
 
 // --- Lighting ---
 
@@ -199,8 +211,8 @@ let pW = Array.with_size(MAX_VERTS, 0.0);
 
 // Reciprocals of the sub-span lengths, so the per-sub-span gradient is a
 // multiply rather than a divide
-let INV_N = Array.with_size(SUB_LEN + 1, 0.0);
-for (let var i = 1; i <= SUB_LEN; ++i) INV_N[i] = 1.0 / i.to_f();
+let INV_N = Array.with_size(SUB_MAX + 1, 0.0);
+for (let var i = 1; i <= SUB_MAX; ++i) INV_N[i] = 1.0 / i.to_f();
 
 // Gradients of the face being drawn, and its texture
 let var g_duzdx = 0.0; let var g_duzdy = 0.0;
@@ -241,15 +253,20 @@ let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 // One covered interval of a scanline. The intervals of a scanline are kept
 // sorted, disjoint and coalesced, so what is left between them is exactly what
 // is still visible.
-class Span {
-    init(self, x0, x1, next) {
-        self.x0 = x0;
-        self.x1 = x1;
-        self.next = next;
-    }
-}
+//
+// They live in parallel arrays and link by index rather than being objects.
+// The whole structure is thrown away and rebuilt each frame, so handing them
+// out of a bump allocator that resets with it means drawing a frame allocates
+// nothing at all, and the collector never runs inside one.
+let MAX_SPANS = 16384;
+let NO_SPAN = 0 - 1;
 
-let sb_head = Array.with_size(FRAME_HEIGHT, nil);
+let sp_x0 = Array.with_size(MAX_SPANS, 0);
+let sp_x1 = Array.with_size(MAX_SPANS, 0);
+let sp_next = Array.with_size(MAX_SPANS, NO_SPAN);
+let var sp_top = 0;
+
+let sb_head = Array.with_size(FRAME_HEIGHT, NO_SPAN);
 let sb_full = ByteArray.with_size(FRAME_HEIGHT * 4);
 let var sb_num_full = 0;
 let var screen_done = false;
@@ -259,9 +276,10 @@ let vis_x0 = Array.with_size(MAX_VIS, 0);
 let vis_x1 = Array.with_size(MAX_VIS, 0);
 
 fun sbuf_reset() {
-    for (let var y = 0; y < FRAME_HEIGHT; ++y) sb_head[y] = nil;
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) sb_head[y] = NO_SPAN;
     sb_full.zero_fill();
     sb_num_full = 0;
+    sp_top = 0;
     screen_done = false;
 }
 
@@ -271,14 +289,14 @@ fun sbuf_insert(y, x0, x1) {
     if (sb_full.get_u32(y) != 0) return 0;
 
     let var n_vis = 0;
-    let var prev = nil;
+    let var prev = NO_SPAN;
     let var cur = sb_head[y];
 
     // Skip the intervals entirely left of x0. One ending exactly at x0 touches
     // it, so it joins the run below and the two coalesce.
-    while (cur != nil && cur.x1 < x0) {
+    while (cur != NO_SPAN && sp_x1[cur] < x0) {
         prev = cur;
-        cur = cur.next;
+        cur = sp_next[cur];
     }
 
     // Walk the overlapped run: the gaps in it are what is visible, and the
@@ -287,16 +305,20 @@ fun sbuf_insert(y, x0, x1) {
     let var mx1 = x1;
     let var cx = x0;
     let var scan = cur;
-    while (scan != nil && scan.x0 <= x1) {
-        if (scan.x0 > cx && n_vis < MAX_VIS) {
+    while (scan != NO_SPAN) {
+        let sx0 = sp_x0[scan];
+        if (sx0 > x1) break;
+        let sx1 = sp_x1[scan];
+
+        if (sx0 > cx && n_vis < MAX_VIS) {
             vis_x0[n_vis] = cx;
-            vis_x1[n_vis] = scan.x0;
+            vis_x1[n_vis] = sx0;
             n_vis = n_vis + 1;
         }
-        if (scan.x1 > cx) cx = scan.x1;
-        if (scan.x0 < mx0) mx0 = scan.x0;
-        if (scan.x1 > mx1) mx1 = scan.x1;
-        scan = scan.next;
+        if (sx1 > cx) cx = sx1;
+        if (sx0 < mx0) mx0 = sx0;
+        if (sx1 > mx1) mx1 = sx1;
+        scan = sp_next[scan];
     }
     if (cx < x1 && n_vis < MAX_VIS) {
         vis_x0[n_vis] = cx;
@@ -309,14 +331,28 @@ fun sbuf_insert(y, x0, x1) {
 
     if (cur == scan) {
         // Nothing overlapped: link in a new interval
-        let s = Span(mx0, mx1, scan);
-        if (prev == nil) sb_head[y] = s; else prev.next = s;
+        if (sp_top >= MAX_SPANS) {
+            // The pool is spent. Retiring the scanline keeps what is already
+            // on it, which is the nearest geometry, and stops anything behind
+            // that from being let through out of order.
+            sb_full.set_u32(y, 1);
+            sb_num_full = sb_num_full + 1;
+            if (sb_num_full >= FRAME_HEIGHT) screen_done = true;
+            return 0;
+        }
+
+        let s = sp_top;
+        sp_top = sp_top + 1;
+        sp_x0[s] = mx0;
+        sp_x1[s] = mx1;
+        sp_next[s] = scan;
+        if (prev == NO_SPAN) sb_head[y] = s; else sp_next[prev] = s;
     } else {
         // Widen the first interval of the run over the whole of it and drop the
-        // rest, which become garbage until the frame ends
-        cur.x0 = mx0;
-        cur.x1 = mx1;
-        cur.next = scan;
+        // rest, which stay in the pool unused until the frame ends
+        sp_x0[cur] = mx0;
+        sp_x1[cur] = mx1;
+        sp_next[cur] = scan;
     }
 
     if (mx0 <= 0 && mx1 >= FRAME_WIDTH) {
@@ -1442,6 +1478,10 @@ fun raster_poly(m) {
     let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = scan_y;
     let var row = scan_y * FRAME_WIDTH;
 
+    // Counted locally and handed to the global once the polygon is done, so
+    // the inner loops touch a register rather than a global per sub-span
+    let var span_px = 0;
+
     while (scan_y < end_y) {
         // Step either chain the current scanline has run past. Edges too short
         // to cover a scanline are skipped by the same loop.
@@ -1475,7 +1515,7 @@ fun raster_poly(m) {
         // Both edges hold for this band, so it runs with no further checks
         let var band_end = end_l;
         if (end_r < band_end) band_end = end_r;
-        if (band_end <= scan_y) return;
+        if (band_end <= scan_y) { pixels_drawn = pixels_drawn + span_px; return; }
 
         while (scan_y < band_end) {
             let var xa = xl.floor();
@@ -1497,10 +1537,34 @@ fun raster_poly(m) {
                     let var z = 1.0 / w;
                     let var u = uz * z;
                     let var v = vz * z;
-                    let var l = lz * z;
+                    let l = lz * z;
+
+                    // 1/z is what makes the affine step inside a sub-span
+                    // drift, so the length follows it: the longest run with
+                    // run * |dwdx| <= PERSP_TOL * w. The divide is hoisted
+                    // here, leaving a multiply per sub-span. A face square to
+                    // the eye has no swing at all and runs at full length.
+                    let var wscale = 0.0;
+                    let adw = dwdx.abs();
+                    if (adw > 0.0) wscale = PERSP_TOL / adw;
+
+                    // The light at the near end of the run, clamped. Each
+                    // sub-span ends where the next one begins, so the far end
+                    // worked out below carries over instead of being floored
+                    // and clamped a second time.
+                    let var lfx = (l * L_ONE).floor();
+                    if (lfx < L_MIN_FX) lfx = L_MIN_FX;
+                    else if (lfx > L_MAX_FX) lfx = L_MAX_FX;
 
                     while (x < piece_end) {
-                        let var xe = x + SUB_LEN;
+                        let var run = SUB_MAX;
+                        if (wscale > 0.0) {
+                            let n = (w * wscale).floor();
+                            if (n < run) run = n;
+                            if (run < 1) run = 1;
+                        }
+
+                        let var xe = x + run;
                         if (xe > piece_end) xe = piece_end;
                         let len = xe - x;
 
@@ -1535,19 +1599,16 @@ fun raster_poly(m) {
                         // end of a channel: a face seen almost edge on is a
                         // sliver a pixel or two wide carrying the whole
                         // perspective range, and its step is enormous.
-                        let var lfx = (l * L_ONE).floor();
-                        if (lfx < L_MIN_FX) lfx = L_MIN_FX;
-                        else if (lfx > L_MAX_FX) lfx = L_MAX_FX;
-
                         let var lfx_e = (l_e * L_ONE).floor();
                         if (lfx_e < L_MIN_FX) lfx_e = L_MIN_FX;
                         else if (lfx_e > L_MAX_FX) lfx_e = L_MAX_FX;
 
                         let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
 
+                        let var lp = lfx;
                         let var i = row + x;
                         let end_i = row + xe;
-                        pixels_drawn = pixels_drawn + (xe - x);
+                        span_px = span_px + len;
                         while (i < end_i) {
                             let c = pix.get_u32(((t >> vshift) & vmask)
                                               | ((t >> U_SHIFT) & umask));
@@ -1559,7 +1620,7 @@ fun raster_poly(m) {
                             // fixnums are what make the third channel fit: in
                             // thirty-two bits this takes two multiplies.
                             let x = ((c & mask_rb) | ((c & mask_g) << 24))
-                                  * ((lfx >> L_SHIFT) & L_MASK);
+                                  * ((lp >> L_SHIFT) & L_MASK);
 
                             // Red and blue come back out together: they are
                             // still sixteen apart after the shift, so the mask
@@ -1567,12 +1628,13 @@ fun raster_poly(m) {
                             fb.set_u32(i, alpha | ((x >> 8) & mask_rb)
                                                 | ((x >> 32) & 0xFF00));
                             t = t + dt;
-                            lfx = lfx + dl;
+                            lp = lp + dl;
                             i = i + 1;
                         }
 
+                        lfx = lfx_e;
                         uz = uz_e; vz = vz_e; lz = lz_e; w = w_e;
-                        u = u_e; v = v_e; l = l_e;
+                        u = u_e; v = v_e;
                         x = xe;
                     }
                 }
@@ -1588,6 +1650,8 @@ fun raster_poly(m) {
             scan_y = scan_y + 1;
         }
     }
+
+    pixels_drawn = pixels_drawn + span_px;
 }
 
 // Cull, transform, clip, project and draw one face
