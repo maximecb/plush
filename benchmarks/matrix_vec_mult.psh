@@ -14,37 +14,128 @@ if ($cmd_num_args() > 2) {
 
 $println("Matrix size: " + num_outputs.to_s() + "x" + num_inputs.to_s());
 
-// Initialize matrix and vector with random values
-let matrix = Array.with_size(num_outputs, 0);
-for (let var i = 0; i < num_outputs; ++i) {
-    matrix[i] = Array.with_size(num_inputs, 0);
-    for (let var j = 0; j < num_inputs; ++j) {
-        matrix[i][j] = rand_float(-1.0, 1.0);
+// How many output rows one pass of the inner loop carries at once. Blocking
+// this way is what makes the product fast: an element of the vector is read
+// once for the whole block instead of once per row, so the work per multiply
+// falls from two array reads to one and a fraction.
+//
+// The gain flattens out between four and seven and then falls off a cliff at
+// eight, which is not where the bytecode says it should: the eight-row loop is
+// 27 instructions for 8 products against the six-row loop's 21 for 6, so it
+// does strictly less work per multiply. Shrinking the rows until they fit in
+// L1 does not move it either. What is left is the interpreter's own dispatch,
+// whose indirect branch appears to stop predicting this loop once the body
+// grows past roughly two dozen instructions. Four is taken from the flat part
+// of that range, well clear of the edge.
+let BLOCK = 4;
+
+// A dense matrix of num_outputs rows, each num_inputs long.
+//
+// The rows are separate arrays rather than one flat run. A flat matrix has to
+// carry an index of its own and step it once per element, and that add costs
+// more than the single lookup per row that fetching the row costs.
+class Matrix
+{
+    init(self, num_outputs, num_inputs)
+    {
+        let rows = Array.with_size(num_outputs, 0);
+        for (let var i = 0; i < num_outputs; ++i) {
+            rows[i] = Array.with_size(num_inputs, 0.0);
+        }
+
+        self.rows = rows;
+        self.num_outputs = num_outputs;
+        self.num_inputs = num_inputs;
+    }
+
+    // Fill every entry with a random value in [-1, 1)
+    randomize(self)
+    {
+        let rows = self.rows;
+        let n = self.num_inputs;
+
+        for (let var i = 0; i < self.num_outputs; ++i) {
+            let row = rows[i];
+            for (let var j = 0; j < n; ++j) {
+                row[j] = rand_float(-1.0, 1.0);
+            }
+        }
+    }
+
+    // out[i] = sum over j of self[i][j] * vec[j]
+    //
+    // The shape of the fields is read into locals up front. Everything the
+    // inner loop touches is then a register: a field is an inline-cached
+    // lookup, and a name declared at the top level of the program is a global,
+    // so either one inside the loop would be paid for on every element.
+    mul_vec(self, vec, out)
+    {
+        let rows = self.rows;
+        let n = self.num_inputs;
+        let m = self.num_outputs;
+
+        // Rows taken BLOCK at a time, sharing each vec[j] between them
+        let mb = m - (BLOCK - 1);
+        let var i = 0;
+        while (i < mb) {
+            let r0 = rows[i];
+            let r1 = rows[i + 1];
+            let r2 = rows[i + 2];
+            let r3 = rows[i + 3];
+
+            let var s0 = 0.0;
+            let var s1 = 0.0;
+            let var s2 = 0.0;
+            let var s3 = 0.0;
+
+            for (let var j = 0; j < n; ++j) {
+                let vj = vec[j];
+                s0 = s0 + r0[j] * vj;
+                s1 = s1 + r1[j] * vj;
+                s2 = s2 + r2[j] * vj;
+                s3 = s3 + r3[j] * vj;
+            }
+
+            out[i] = s0;
+            out[i + 1] = s1;
+            out[i + 2] = s2;
+            out[i + 3] = s3;
+            i = i + BLOCK;
+        }
+
+        // The rows left over when the count is not a multiple of the block
+        while (i < m) {
+            let row = rows[i];
+            let var sum = 0.0;
+            for (let var j = 0; j < n; ++j) {
+                sum = sum + row[j] * vec[j];
+            }
+            out[i] = sum;
+            i = i + 1;
+        }
     }
 }
 
-let vector = Array.with_size(num_inputs, 0);
+// Initialize matrix and vector with random values
+let matrix = Matrix(num_outputs, num_inputs);
+matrix.randomize();
+
+let vector = Array.with_size(num_inputs, 0.0);
 for (let var i = 0; i < num_inputs; ++i) {
     vector[i] = rand_float(-1.0, 1.0);
 }
 
-let result = Array.with_size(num_outputs, 0);
+let result = Array.with_size(num_outputs, 0.0);
 
 // One multiplication is short enough that process startup would dominate
 // a wall clock measurement, so the timed section repeats it
-let NUM_ITERS = 340;
+let NUM_ITERS = 1000;
 
 // Perform matrix-vector multiplication
 let start_time = $time_current_ms();
 
 for (let var iter = 0; iter < NUM_ITERS; ++iter) {
-    for (let var i = 0; i < num_outputs; ++i) {
-        let var sum = 0.0;
-        for (let var j = 0; j < num_inputs; ++j) {
-            sum = sum + matrix[i][j] * vector[j];
-        }
-        result[i] = sum;
-    }
+    matrix.mul_vec(vector, result);
 }
 
 let end_time = $time_current_ms();
