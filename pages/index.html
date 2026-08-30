@@ -5,22 +5,70 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plush</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --code-bg: rgba(127, 127, 127, 0.14);
+    --code-border: rgba(127, 127, 127, 0.28);
+  }
+
   body {
     margin: 0 auto;
     padding: 3rem 1.25rem;
     max-width: 40rem;
     font: 16px/1.6 system-ui, -apple-system, sans-serif;
   }
+
   h1 { margin-bottom: 0.25rem; }
   .tagline { margin-top: 0; opacity: 0.7; }
-  pre {
-    padding: 0.85rem 1rem;
+
+  .code {
+    position: relative;
+    margin: 1rem 0;
+  }
+
+  /* Widen the code blocks past the text column, but only once the
+     viewport is wide enough to hold them */
+  @media (min-width: 64rem) {
+    .code {
+      width: 150%;
+      margin-left: -25%;
+    }
+  }
+
+  .code pre {
+    margin: 0;
+    padding: 0.85rem 3.25rem 0.85rem 1rem;
     overflow-x: auto;
     border-radius: 6px;
-    background: rgba(127, 127, 127, 0.14);
+    background: var(--code-bg);
   }
+
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .copy {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    color: inherit;
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 5px;
+    opacity: 0.55;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+
+  .copy:hover, .copy:focus-visible { opacity: 1; }
+  .copy svg { width: 1rem; height: 1rem; }
+  .copy .check { display: none; }
+  .copy.copied .clip { display: none; }
+  .copy.copied .check { display: block; color: #22a06b; }
 </style>
 </head>
 <body>
@@ -30,23 +78,89 @@
 
 <h2>Install</h2>
 <p>On macOS and Linux:</p>
-<pre><code>curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh</code></pre>
+<div class="code"><pre><code>curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh</code></pre></div>
+
+<p>On Windows, in PowerShell:</p>
+<div class="code"><pre><code>irm https://maximecb.github.io/plush/install.ps1 | iex</code></pre></div>
+
 <p>
-  This installs into <code>~/.plush</code> and adds <code>~/.plush/bin</code> to your
-  <code>PATH</code>. Windows builds are on the
-  <a href="https://github.com/maximecb/plush/releases">releases page</a>.
+  This installs into <code>~/.plush</code> and puts <code>plush</code> on your
+  <code>PATH</code>.
 </p>
 
 <h2>Try it</h2>
-<pre><code>plush --run-example tremor</code></pre>
+<div class="code"><pre><code>plush --run-example tremor</code></pre></div>
+
 <p>Or install and run a demo in one go:</p>
-<pre><code>curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s run-example tremor</code></pre>
+<div class="code"><pre><code>curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s run-example tremor</code></pre></div>
 
 <h2>Links</h2>
 <ul>
   <li><a href="https://github.com/maximecb/plush">Source on GitHub</a></li>
   <li><a href="https://github.com/maximecb/plush/blob/main/docs/language.md">Language reference</a></li>
 </ul>
+
+<script>
+const ICONS = `
+<svg class="clip" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <rect x="9" y="9" width="12" height="12" rx="2"/>
+  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+</svg>
+<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+     stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M20 6 9 17l-5-5"/>
+</svg>`;
+
+// Falls back to execCommand when the clipboard API is unavailable, which
+// happens outside secure contexts such as opening this file locally
+async function copy(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+
+  try {
+    document.execCommand('copy');
+  } finally {
+    area.remove();
+  }
+}
+
+for (const block of document.querySelectorAll('.code')) {
+  const button = document.createElement('button');
+  button.className = 'copy';
+  button.type = 'button';
+  button.innerHTML = ICONS;
+  button.setAttribute('aria-label', 'Copy to clipboard');
+  button.title = 'Copy';
+
+  button.addEventListener('click', async () => {
+    try {
+      await copy(block.querySelector('code').textContent);
+    } catch {
+      button.title = 'Copying failed, select the text instead';
+      return;
+    }
+
+    button.classList.add('copied');
+    button.setAttribute('aria-label', 'Copied');
+    setTimeout(() => {
+      button.classList.remove('copied');
+      button.setAttribute('aria-label', 'Copy to clipboard');
+    }, 1500);
+  });
+
+  block.appendChild(button);
+}
+</script>
 
 </body>
 </html>

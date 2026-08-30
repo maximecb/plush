@@ -14,6 +14,11 @@ SKIP_CI=0
 SKIP_TESTS=0
 TAG=""
 
+# Workflow that gates a release, and how long to wait on it
+CI_WORKFLOW="test.yml"
+CI_POLL_SECONDS="${CI_POLL_SECONDS:-30}"
+CI_TIMEOUT_SECONDS="${CI_TIMEOUT_SECONDS:-1800}"
+
 for arg in "$@"; do
     case "$arg" in
         --skip-ci)    SKIP_CI=1 ;;
@@ -80,24 +85,45 @@ if [ "$SKIP_CI" = 0 ]; then
         err "gh CLI not found, needed to check CI status. Install it, or pass --skip-ci"
     fi
 
-    say "Checking CI status for $SHA"
+    say "Waiting for CI to pass on $SHA"
 
-    # Only the test workflow gates a release; the release workflow's own
-    # runs against this commit are irrelevant here
-    runs="$(gh run list --commit "$SHA" --workflow test.yml \
-              --json status,conclusion --jq '.[]' 2>/dev/null || true)"
+    waited=0
 
-    [ -n "$runs" ] || err "no CI run found for $SHA. Wait for it to start, or pass --skip-ci"
+    while true; do
+        # Queried through the REST API rather than "gh run list --commit",
+        # which only exists in newer versions of gh. Errors are deliberately
+        # not swallowed here: a broken query must not look like a missing run.
+        runs="$(gh api \
+            "repos/{owner}/{repo}/actions/workflows/$CI_WORKFLOW/runs?head_sha=$SHA&per_page=20" \
+            --jq '.workflow_runs[] | "\(.status) \(.conclusion)"')" \
+            || err "could not query CI status. Is gh authenticated? Try: gh auth status"
 
-    if printf '%s' "$runs" | grep -qv '"status":"completed"'; then
-        err "CI is still running for $SHA. Wait for it to finish."
-    fi
+        if [ -z "$runs" ]; then
+            state="no run registered for this commit yet"
+        elif printf '%s\n' "$runs" | grep -qv '^completed '; then
+            state="still running"
+        else
+            failed="$(printf '%s\n' "$runs" | grep -vE ' (success|skipped)$' || true)"
 
-    if printf '%s' "$runs" | grep -qv '"conclusion":"success"'; then
-        err "CI did not pass for $SHA. See: gh run list --commit $SHA"
-    fi
+            if [ -n "$failed" ]; then
+                err "CI did not pass for $SHA:
+  $failed
+See: gh run list --workflow $CI_WORKFLOW"
+            fi
 
-    echo "CI passed."
+            echo "CI passed."
+            break
+        fi
+
+        waited=$((waited + CI_POLL_SECONDS))
+
+        if [ "$waited" -ge "$CI_TIMEOUT_SECONDS" ]; then
+            err "gave up after ${waited}s waiting for CI ($state). Pass --skip-ci to bypass."
+        fi
+
+        echo "  $state, checking again in ${CI_POLL_SECONDS}s (waited ${waited}s)"
+        sleep "$CI_POLL_SECONDS"
+    done
 fi
 
 # --- Local tests -----------------------------------------------------------
