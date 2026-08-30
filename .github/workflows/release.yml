@@ -43,9 +43,13 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             asset: plush-aarch64-macos
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            asset: plush-x86_64-windows
+          # Windows is disabled until src/alloc.rs stops depending on
+          # mmap/mprotect/sysconf, which do not exist on windows-msvc.
+          # Re-enable this entry, the Package step and the .zip upload path
+          # below, plus install.ps1 in the publish job, once it compiles.
+          #- os: windows-latest
+          #  target: x86_64-pc-windows-msvc
+          #  asset: plush-x86_64-windows
 
     steps:
     - uses: actions/checkout@v4
@@ -97,23 +101,22 @@ jobs:
         cp -r examples "$root/examples"
         tar -czf "${{ matrix.asset }}.tar.gz" -C dist "${{ matrix.asset }}"
 
-    - name: Package
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        $root = "dist/${{ matrix.asset }}"
-        New-Item -ItemType Directory -Force -Path "$root/bin" | Out-Null
-        Copy-Item "target/${{ matrix.target }}/release/plush.exe" "$root/bin/"
-        Copy-Item README.md, LICENSE "$root/"
-        Copy-Item -Recurse examples "$root/examples"
-        Compress-Archive -Path $root -DestinationPath "${{ matrix.asset }}.zip"
+    #- name: Package
+    #  if: runner.os == 'Windows'
+    #  shell: pwsh
+    #  run: |
+    #    $root = "dist/${{ matrix.asset }}"
+    #    New-Item -ItemType Directory -Force -Path "$root/bin" | Out-Null
+    #    Copy-Item "target/${{ matrix.target }}/release/plush.exe" "$root/bin/"
+    #    Copy-Item README.md, LICENSE "$root/"
+    #    Copy-Item -Recurse examples "$root/examples"
+    #    Compress-Archive -Path $root -DestinationPath "${{ matrix.asset }}.zip"
 
     - uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.asset }}
-        path: |
-          ${{ matrix.asset }}.tar.gz
-          ${{ matrix.asset }}.zip
+        # When Windows returns, this becomes a block listing the .zip too
+        path: ${{ matrix.asset }}.tar.gz
         if-no-files-found: error
 
   publish:
@@ -132,8 +135,11 @@ jobs:
 
     # Mirror of the copy served from GitHub Pages, so the installer is
     # also reachable at releases/latest/download/install
-    - name: Include the install scripts
-      run: cp pages/install pages/install.ps1 dist/
+    # install.ps1 is deliberately not shipped yet: it would download a
+    # Windows asset this release does not contain. Restore it with:
+    #   cp pages/install pages/install.ps1 dist/
+    - name: Include the install script
+      run: cp pages/install dist/install
 
     - name: Generate checksums
       working-directory: dist
@@ -144,3 +150,15 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ inputs.tag || github.ref_name }}
       run: gh release create "$TAG" --title "$TAG" --generate-notes dist/*
+
+  # Restamp the website with the version just published. Called directly
+  # rather than relying on the release event, which GitHub does not raise
+  # for releases created with the default GITHUB_TOKEN.
+  pages:
+    name: Update the website
+    needs: publish
+    uses: ./.github/workflows/pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
