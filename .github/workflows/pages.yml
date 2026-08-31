@@ -9,6 +9,11 @@ on:
   # Called by release.yml once a release is published, so the version shown
   # on the page follows the newest release
   workflow_call:
+    inputs:
+      version:
+        description: 'Tag to show on the page. Looked up when not given.'
+        type: string
+        required: false
   # Only fires for releases published by hand: GitHub suppresses events
   # raised by workflows using the default GITHUB_TOKEN
   release:
@@ -41,9 +46,18 @@ jobs:
     - name: Set the version shown on the page
       env:
         GH_TOKEN: ${{ github.token }}
+        # Supplied by release.yml. Looking it up there would race the releases
+        # API, which can still report the previous release seconds after a
+        # publish, and the page would advertise a stale version.
+        GIVEN_VERSION: ${{ inputs.version }}
       run: |
-        version="$(gh api 'repos/{owner}/{repo}/releases?per_page=30' \
-          --jq '[.[] | select(.tag_name | test("^v[0-9]")) | .tag_name] | first')"
+        version="$GIVEN_VERSION"
+
+        if [ -z "$version" ]; then
+          version="$(gh api 'repos/{owner}/{repo}/releases?per_page=30' \
+            --jq '[.[] | select(.tag_name | test("^v[0-9]")) | .tag_name] | first')"
+        fi
+
         version="${version#v}"
 
         if [ -z "$version" ] || [ "$version" = null ]; then
