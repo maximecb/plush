@@ -148,7 +148,15 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ inputs.tag || github.ref_name }}
-      run: gh release create "$TAG" --title "$TAG" --generate-notes dist/*
+      # Create-or-update, so a re-run after a partial failure replaces the
+      # assets instead of failing on an existing release
+      run: |
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          echo "Release $TAG already exists, replacing its assets"
+          gh release upload "$TAG" dist/* --clobber
+        else
+          gh release create "$TAG" --title "$TAG" --generate-notes dist/*
+        fi
 
   # Restamp the website with the version just published. Called directly
   # rather than relying on the release event, which GitHub does not raise

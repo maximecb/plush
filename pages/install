@@ -159,6 +159,23 @@ profile_file() {
     esac
 }
 
+# Path to the env file for humans to read, using ~ when it is under $HOME
+env_display() {
+    case "$PLUSH_HOME" in
+        "$HOME"/*) printf '~/%s/env' "${PLUSH_HOME#"$HOME"/}" ;;
+        *) printf '%s/env' "$PLUSH_HOME" ;;
+    esac
+}
+
+# Same path for writing into a shell profile, keeping $HOME symbolic so the
+# line survives the home directory moving
+env_profile_ref() {
+    case "$PLUSH_HOME" in
+        "$HOME"/*) printf '$HOME/%s/env' "${PLUSH_HOME#"$HOME"/}" ;;
+        *) printf '%s/env' "$PLUSH_HOME" ;;
+    esac
+}
+
 # A sourceable file holding everything plush needs in the environment. This
 # installer runs as a child process and cannot touch the calling shell, so
 # sourcing this is what makes plush work without opening a new terminal.
@@ -186,16 +203,19 @@ update_profile() {
     fi
 
     profile="$(profile_file)"
+    ref="$(env_profile_ref)"
 
-    # Already added by a previous install, in either the current form or the
-    # older one that exported PATH directly
-    if [ -f "$profile" ] && grep -qF "$PLUSH_HOME" "$profile"; then
+    # Already added by a previous install, whether as the $HOME-relative line
+    # written below or one of the older absolute-path forms
+    if [ -f "$profile" ] \
+        && { grep -qF "$ref" "$profile" || grep -qF "$PLUSH_HOME" "$profile"; }; then
         return 0
     fi
 
+    # printf does not expand $HOME, so the profile keeps it symbolic
     {
         printf '\n# Added by the plush installer\n'
-        printf '[ -f "%s/env" ] && . "%s/env"\n' "$PLUSH_HOME" "$PLUSH_HOME"
+        printf '[ -f "%s" ] && . "%s"\n' "$ref" "$ref"
     } >> "$profile"
 
     say "set up $profile to load plush in new shells"
@@ -282,7 +302,7 @@ main() {
     say ""
     say "To use plush in this shell right now, run:"
     say ""
-    say "    . \"$PLUSH_HOME/env\""
+    say "    source $(env_display)"
     say ""
     say "New shells pick it up automatically. Then try:"
     say ""
