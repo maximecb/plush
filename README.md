@@ -15,7 +15,43 @@ missing features.
 
 To get a feel for what Plush code looks like, have a look at the programs in the [/examples](/examples) directory. For a detailed guide to the Plush language, please see the [Plush Language Guide](docs/language.md).
 
-## Build Instructions
+## Installation
+
+On macOS and Linux, install the latest release with:
+```sh
+curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh
+```
+
+This downloads a prebuilt binary into `~/.plush` and adds it to your `PATH`. You
+don't need Rust or SDL2 to run it. Windows is not supported yet, but you can
+still [build from source](#building-from-source) there.
+
+Once installed, open a new terminal (or run `source ~/.plush/env`) and try one of
+the bundled examples:
+```sh
+plush --run-example tremor
+plush --run-example
+```
+
+Running `plush --run-example` with no name lists every example that ships with the
+release. To install Plush and start a demo in a single command:
+```sh
+curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s run-example tremor
+```
+
+To run your own program, just pass it a file:
+```sh
+plush myprogram.psh
+```
+
+To upgrade, run the install command again. It skips the download if you already
+have the latest version. To uninstall, delete `~/.plush` and remove the line
+sourcing `~/.plush/env` from your shell profile.
+
+## Building from Source
+
+Building from source is what you want if you'd like to hack on the VM itself, or
+to run Plush on a platform without a prebuilt release.
 
 Dependencies:
 - The [Rust toolchain](https://www.rust-lang.org/tools/install)

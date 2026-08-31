@@ -108,6 +108,12 @@ pub fn parse_args(args: Vec<String>) -> Options
             }
 
             "--run-example" => {
+                // With no name given, show what is available instead of failing
+                if idx >= args.len() {
+                    list_examples(&example_dirs());
+                    exit(0);
+                }
+
                 opts.input_file = Some(find_example(&read_arg!(arg)));
                 opts.rest = args[idx..].to_vec();
                 break;
@@ -120,10 +126,8 @@ pub fn parse_args(args: Vec<String>) -> Options
     opts
 }
 
-// Examples refer to their data files as "examples/data/...", so running one
-// means entering the directory that contains the examples directory, not the
-// examples directory itself
-fn find_example(name: &str) -> String
+// Places an example may live, in search order
+fn example_dirs() -> Vec<PathBuf>
 {
     let mut dirs = Vec::new();
 
@@ -143,6 +147,16 @@ fn find_example(name: &str) -> String
     if let Ok(cwd) = env::current_dir() {
         dirs.push(cwd.join("examples"));
     }
+
+    dirs
+}
+
+// Examples refer to their data files as "examples/data/...", so running one
+// means entering the directory that contains the examples directory, not the
+// examples directory itself
+fn find_example(name: &str) -> String
+{
+    let dirs = example_dirs();
 
     for dir in &dirs {
         if !dir.join(format!("{}.psh", name)).exists() {
@@ -186,7 +200,7 @@ fn list_examples(dirs: &[PathBuf])
         }
 
         names.sort();
-        println!("\nAvailable examples:");
+        println!("\n{} examples available:", names.len());
         for name in names {
             println!("  {}", name);
         }
