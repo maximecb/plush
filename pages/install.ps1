@@ -223,6 +223,9 @@ Say ''
 Say 'Try an example:'
 Say '    plush --run-example tremor'
 Say ''
+Say 'To list all available examples:'
+Say '    plush --run-example'
+Say ''
 
 if ($NeedsNewShell) {
     Say 'Open a new terminal for the PATH change to take effect.'
