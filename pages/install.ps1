@@ -224,7 +224,7 @@ Say 'Try an example:'
 Say '    plush --run-example tremor'
 Say ''
 Say 'To list all available examples:'
-Say '    plush --run-example'
+Say '    plush --list-examples'
 Say ''
 
 if ($NeedsNewShell) {
