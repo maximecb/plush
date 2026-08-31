@@ -478,7 +478,6 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "resize") => ba_resize,
         (Type::ByteArray, "zero_fill") => ba_zero_fill,
         (Type::ByteArray, "fill_u32") => ba_fill_u32,
-        (Type::ByteArray, "blit_bgra32") => ba_blit_bgra32,
 
         (Type::Dict, "has") => dict_has,
 

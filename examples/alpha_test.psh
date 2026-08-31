@@ -1,4 +1,4 @@
-// Alpha Blending Test for blit_bgra32()
+// Alpha blending test: source-over compositing written in Plush
 
 let WIDTH = 800;
 let HEIGHT = 600;
@@ -6,6 +6,56 @@ let HEIGHT = 600;
 // Helper to create a 32-bit BGRA color value
 fun bgra32(r, g, b, a) {
     return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+// Composite a BGRA32 source over a BGRA32 destination that is already opaque,
+// which is the usual case when drawing onto a background.
+//
+//     out = (src * a + dst * (255 - a)) / 255
+//
+// Both products are at most 255 * 255, so their sum plus the rounding term
+// stays inside 16 bits and the divide by 255 becomes a shift and an add:
+// (t + (t >> 8)) >> 8 equals (t + 127) / 255 over that range.
+fun blit_over(dst, dst_w, dst_h, src, src_w, src_h, dst_x, dst_y) {
+    // Clip the destination rectangle against the destination image
+    let x0 = (0).max(dst_x);
+    let y0 = (0).max(dst_y);
+    let x1 = dst_w.min(dst_x + src_w);
+    let y1 = dst_h.min(dst_y + src_h);
+    if (x1 <= x0) return;
+
+    for (let var y = y0; y < y1; ++y) {
+        let var dst_idx = y * dst_w + x0;
+        let var src_idx = (y - dst_y) * src_w + (x0 - dst_x);
+
+        for (let var x = x0; x < x1; ++x) {
+            let s = src.get_u32(src_idx);
+            let a = (s >> 24) & 0xFF;
+
+            // Opaque and transparent pixels need no arithmetic at all, and
+            // in a gradient like this one they are a good share of the row
+            if (a == 255) {
+                dst.set_u32(dst_idx, s);
+            }
+            else if (a > 0) {
+                let d = dst.get_u32(dst_idx);
+                let inv = 255 - a;
+
+                let tb = (s & 0xFF) * a + (d & 0xFF) * inv + 128;
+                let tg = ((s >> 8) & 0xFF) * a + ((d >> 8) & 0xFF) * inv + 128;
+                let tr = ((s >> 16) & 0xFF) * a + ((d >> 16) & 0xFF) * inv + 128;
+
+                let b = (tb + (tb >> 8)) >> 8;
+                let g = (tg + (tg >> 8)) >> 8;
+                let r = (tr + (tr >> 8)) >> 8;
+
+                dst.set_u32(dst_idx, 0xFF000000 | (r << 16) | (g << 8) | b);
+            }
+
+            dst_idx = dst_idx + 1;
+            src_idx = src_idx + 1;
+        }
+    }
 }
 
 // Helper function to draw a filled rectangle
@@ -48,32 +98,13 @@ for (let var j = 0; j < FG_HEIGHT; ++j) {
 }
 
 // --- 3. Blit the foreground onto the background ---
-// The user mentioned this is a method on ByteArray
-// The arguments are: dst_width, dst_height, src_buf, src_width, src_height, dst_x, dst_y
-bg_buf.blit_bgra32(
-    WIDTH, HEIGHT,
-    fg_buf, FG_WIDTH, FG_HEIGHT,
-    ((WIDTH - FG_WIDTH) / 2).floor(), ((HEIGHT - FG_HEIGHT) / 2).floor()
-);
+let BLIT_X = ((WIDTH - FG_WIDTH) / 2).floor();
+let BLIT_Y = ((HEIGHT - FG_HEIGHT) / 2).floor();
 
-/*
-// --- 4. Performance Test ---
-let NUM_BLITS = 1000;
-let start_time = $time_current_ms();
-for (let var i = 0; i < NUM_BLITS; ++i) {
-    bg_buf.blit_bgra32(
-        WIDTH, HEIGHT,
-        fg_buf, FG_WIDTH, FG_HEIGHT,
-        ((WIDTH - FG_WIDTH) / 2).floor(), ((HEIGHT - FG_HEIGHT) / 2).floor()
-    );
-}
-let end_time = $time_current_ms();
-let total_time = end_time - start_time;
-let avg_time = total_time / NUM_BLITS;
-$println("Blit performance test:");
-$println("Total time for " + NUM_BLITS.to_s() + " blits: " + total_time.to_s() + " ms");
-$println("Average time per blit: " + avg_time.to_s() + " ms");
-*/
+let blit_start = $time_current_ms();
+blit_over(bg_buf, WIDTH, HEIGHT, fg_buf, FG_WIDTH, FG_HEIGHT, BLIT_X, BLIT_Y);
+$println("Blended " + (FG_WIDTH * FG_HEIGHT).to_s() + " pixels in " +
+         ($time_current_ms() - blit_start).to_s() + " ms");
 
 // --- 5. Create a window and draw the result ---
 let window = $window_create(WIDTH, HEIGHT, "Alpha Blending Test", 0);

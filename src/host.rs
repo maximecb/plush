@@ -18,7 +18,6 @@ pub enum FnPtr
     Fn3(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value) -> Result<Value, String>),
     Fn4(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> Result<Value, String>),
     Fn5(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> Result<Value, String>),
-    Fn8(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value, a7: Value) -> Result<Value, String>),
 }
 
 // This struct is needed in part because Rust doesn't allow direct
@@ -43,7 +42,6 @@ impl HostFn
             Fn3(_) => 3,
             Fn4(_) => 4,
             Fn5(_) => 5,
-            Fn8(_) => 8,
         }
     }
 }
@@ -58,7 +56,6 @@ macro_rules! host_fn_ptr {
     (3, $f:path) => { FnPtr::Fn3($f) };
     (4, $f:path) => { FnPtr::Fn4($f) };
     (5, $f:path) => { FnPtr::Fn5($f) };
-    (8, $f:path) => { FnPtr::Fn8($f) };
 }
 
 /// Declare the table of host functions, in two groups. An entry names
@@ -244,7 +241,6 @@ def_host_fns! {
         resize: ba_resize(2),
         zero_fill: ba_zero_fill(1),
         fill_u32: ba_fill_u32(4),
-        blit_bgra32: ba_blit_bgra32(8),
 
         has: dict_has(2),
 
@@ -557,7 +553,7 @@ mod tests
         // The id enum and the table are generated from one list, so an
         // id has to land on the entry it was declared with
         assert_eq!(HostFnId::print.get().name, "print");
-        assert_eq!(HostFnId::ba_blit_bgra32.get().name, "blit_bgra32");
+        assert_eq!(HostFnId::ba_fill_u32.get().name, "fill_u32");
         assert_eq!(HostFnId::float64_clip.get().num_params(), 3);
 
         assert_eq!(HostFnId::from_name("println"), Some(HostFnId::println));

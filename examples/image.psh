@@ -54,18 +54,24 @@ class Image
         self.bytes.set_u32(idx, color);
     }
 
-    // Copy a source image into this image at a given position
+    // Copy a source image into this image at a given position, one
+    // contiguous row at a time
     blit(self, src_img, dst_x, dst_y)
     {
-        self.bytes.blit_bgra32(
-            self.width,
-            self.height,
-            src_img.bytes,
-            src_img.width,
-            src_img.height,
-            dst_x,
-            dst_y
-        );
+        // Clip the destination rectangle against this image
+        let x0 = (0).max(dst_x);
+        let y0 = (0).max(dst_y);
+        let x1 = self.width.min(dst_x + src_img.width);
+        let y1 = self.height.min(dst_y + src_img.height);
+
+        let row_bytes = (x1 - x0) * 4;
+        if (row_bytes <= 0) return;
+
+        for (let var y = y0; y < y1; ++y) {
+            let dst_idx = (y * self.width + x0) * 4;
+            let src_idx = ((y - dst_y) * src_img.width + (x0 - dst_x)) * 4;
+            self.bytes.memcpy(dst_idx, src_img.bytes, src_idx, row_bytes);
+        }
     }
 
     // Bresenham's algorithm

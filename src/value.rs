@@ -629,6 +629,9 @@ impl Value
     #[inline(always)]
     pub fn to_u8(self) -> Option<u8> { self.to_i64().and_then(|v| u8::try_from(v).ok()) }
 
+    // Kept for symmetry with the other width conversions, though no host
+    // function currently takes an i32 parameter
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn to_i32(self) -> Option<i32> { self.to_i64().and_then(|v| i32::try_from(v).ok()) }
 
@@ -781,6 +784,9 @@ macro_rules! unwrap_u8 {
     ($val: expr) => { $crate::value::unwrap_val!(to_u8, "byte-sized integer", $val, "") };
 }
 
+// Kept for symmetry with the other numeric unwrappers, though nothing
+// currently takes an i32 parameter
+#[allow(unused_macros)]
 macro_rules! unwrap_i32 {
     ($val: expr, $req: literal) => { $crate::value::unwrap_val!(to_i32, "i32-sized integer", $val, $req) };
     ($val: expr) => { $crate::value::unwrap_val!(to_i32, "i32-sized integer", $val, "") };
