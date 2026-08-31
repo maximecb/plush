@@ -38,7 +38,7 @@ to modify them. `plush --list-examples`, or `plush --run-example` with no name, 
 example that ships with the release. To install Plush and start a demo in a single command:
 
 ```sh
-curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s run-example tremor
+curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s -- --run-example tremor
 ```
 
 To run your own program, just pass it a file:

@@ -3,16 +3,19 @@
 #
 #   curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh
 #
-# Install and immediately run an example:
+# Anything after "-s --" is handed to plush once the install finishes, so
+# installing and running an example in one go looks like:
 #
-#   curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s run-example tremor
+#   curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s -- --run-example tremor
 #
 # Installs into ~/.plush, replacing any previous install, and adds
 # ~/.plush/bin to PATH via your shell profile.
 #
 # Options:
-#   --run-example NAME   run this example once the install finishes
 #   --force              reinstall even if the same version is present
+#
+# Every other argument is forwarded to plush verbatim, e.g. --run-example
+# NAME, --list-examples, or a path to a .psh file.
 #
 # Environment variables:
 #   PLUSH_HOME      install directory (default: ~/.plush)
@@ -25,30 +28,34 @@ REPO="maximecb/plush"
 PLUSH_HOME="${PLUSH_HOME:-$HOME/.plush}"
 VERSION="${PLUSH_VERSION:-latest}"
 
-RUN_EXAMPLE=""
 FORCE=0
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        run-example | --run-example)
-            [ $# -ge 2 ] || { echo "plush: error: $1 needs an example name" >&2; exit 1; }
-            RUN_EXAMPLE="$2"
-            shift 2
-            ;;
+# "sh -s -- ..." already eats one "--", so drop a second one rather than
+# passing it on to plush
+if [ "${1:-}" = "--" ]; then
+    shift
+fi
+
+# Options the installer handles itself are taken out here. Every other
+# argument is pushed back onto "$@" to be forwarded to plush, so the installer
+# never has to know which options plush accepts.
+remaining=$#
+
+while [ "$remaining" -gt 0 ]; do
+    arg="$1"
+    shift
+    remaining=$((remaining - 1))
+
+    case "$arg" in
         --force)
             FORCE=1
-            shift
             ;;
-        -*)
-            echo "plush: error: unknown option $1" >&2
-            exit 1
+        run-example)
+            # Spelling the older installer accepted, kept working
+            set -- "$@" --run-example
             ;;
         *)
-            # Bare example name, so the piped form needs no "--" separator
-            [ -z "$RUN_EXAMPLE" ] \
-                || { echo "plush: error: unexpected argument $1" >&2; exit 1; }
-            RUN_EXAMPLE="$1"
-            shift
+            set -- "$@" "$arg"
             ;;
     esac
 done
@@ -283,7 +290,10 @@ main() {
 
     want="${RELEASE_TAG#v}"
 
-    if [ "$FORCE" = 0 ] && [ -n "$have" ] && [ "$have" = "$want" ]; then
+    # The binary under PLUSH_HOME has to be the one we found, otherwise there
+    # is nothing there to run the forwarded arguments with
+    if [ "$FORCE" = 0 ] && [ -x "$PLUSH_HOME/bin/plush" ] \
+        && [ -n "$have" ] && [ "$have" = "$want" ]; then
         say "plush $have is already installed, skipping download"
     else
         install_plush
@@ -292,9 +302,9 @@ main() {
     write_env_file
     update_profile
 
-    if [ -n "$RUN_EXAMPLE" ]; then
-        say "running example: $RUN_EXAMPLE"
-        exec "$PLUSH_HOME/bin/plush" --run-example "$RUN_EXAMPLE"
+    if [ $# -gt 0 ]; then
+        say "running: plush $*"
+        exec "$PLUSH_HOME/bin/plush" "$@"
     fi
 
     # An installer runs in a child process and cannot change the shell that
@@ -314,4 +324,4 @@ main() {
     say ""
 }
 
-main
+main "$@"
