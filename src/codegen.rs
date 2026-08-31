@@ -1279,7 +1279,6 @@ fn gen_bin_op(
         Sub => Insn::sub(d, a, b),
         Mul => Insn::mul(d, a, b),
         Div => Insn::div(d, a, b),
-        IntDiv => Insn::div_int(d, a, b),
         Mod => Insn::modulo(d, a, b),
 
         _ => todo!("{:?}", op),

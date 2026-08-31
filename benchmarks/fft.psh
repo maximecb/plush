@@ -24,10 +24,10 @@ fun fft(real_parts, imag_parts, inverse) {
             imag_parts.set_f32(i, imag_parts.get_f32(j));
             imag_parts.set_f32(j, temp_im);
         }
-        let var m = n _/ 2;
+        let var m = n.idiv(2);
         while (m >= 1 && j >= m) {
             j = j - m;
-            m = m _/ 2;
+            m = m.idiv(2);
         }
         j = j + m;
         i = i + 1;
@@ -49,13 +49,13 @@ fun fft(real_parts, imag_parts, inverse) {
             let var w_re = 1.0;
             let var w_im = 0.0;
             let var j = 0;
-            while (j < len _/ 2) {
+            while (j < len.idiv(2)) {
                 let u_re = real_parts.get_f32(i + j);
                 let u_im = imag_parts.get_f32(i + j);
 
                 // v = x[i + j + len / 2] * w
-                let x_half_re = real_parts.get_f32(i + j + len _/ 2);
-                let x_half_im = imag_parts.get_f32(i + j + len _/ 2);
+                let x_half_re = real_parts.get_f32(i + j + len.idiv(2));
+                let x_half_im = imag_parts.get_f32(i + j + len.idiv(2));
                 let v_re = x_half_re * w_re - x_half_im * w_im;
                 let v_im = x_half_re * w_im + x_half_im * w_re;
 
@@ -64,8 +64,8 @@ fun fft(real_parts, imag_parts, inverse) {
                 imag_parts.set_f32(i + j, u_im + v_im);
 
                 // x[i + j + len / 2] = u - v
-                real_parts.set_f32(i + j + len _/ 2, u_re - v_re);
-                imag_parts.set_f32(i + j + len _/ 2, u_im - v_im);
+                real_parts.set_f32(i + j + len.idiv(2), u_re - v_re);
+                imag_parts.set_f32(i + j + len.idiv(2), u_im - v_im);
 
                 // w = w * wlen
                 let next_w_re = w_re * wlen_re - w_im * wlen_im;

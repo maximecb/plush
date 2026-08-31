@@ -804,7 +804,7 @@ fun render(segs)
 
 fun write_wav(path, samples)
 {
-    let num_samples = samples.len _/ 4;
+    let num_samples = samples.len.idiv(4);
     let data_size = num_samples * 2;
     let buf = ByteArray.with_size(44 + data_size);
 
@@ -856,14 +856,14 @@ fun main()
     let samples = render(segs);
     let gen_ms = $time_current_ms() - t0;
 
-    let num_samples = samples.len _/ 4;
-    let duration_ms = (num_samples * 1000) _/ SAMPLE_RATE;
+    let num_samples = samples.len.idiv(4);
+    let duration_ms = (num_samples * 1000).idiv(SAMPLE_RATE);
 
     // Ratio kept in tenths so it can be printed without float formatting
-    let ratio = (duration_ms * 10) _/ gen_ms.max(1);
+    let ratio = (duration_ms * 10).idiv(gen_ms.max(1));
     $println(
         "Generated " + duration_ms.to_s() + "ms of audio in " + gen_ms.to_s() + "ms " +
-        "(" + (ratio _/ 10).to_s() + "." + (ratio % 10).to_s() + "x realtime)"
+        "(" + (ratio.idiv(10)).to_s() + "." + (ratio % 10).to_s() + "x realtime)"
     );
 
     if (out_path != nil) {

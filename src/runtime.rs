@@ -51,6 +51,20 @@ pub(crate) fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Val
     Ok(actor.int64(v.max(other)))
 }
 
+/// Truncated integer division. The `/` operator always yields a float, so
+/// this is how integer code divides without leaving the integer domain.
+pub(crate) fn int64_idiv(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
+{
+    let v = unwrap_i64!(v);
+    let other = unwrap_i64!(other);
+
+    match v.checked_div(other) {
+        Some(q) => Ok(actor.int64(q)),
+        None if other == 0 => Err("division by zero in idiv()".into()),
+        None => Err("integer overflow in idiv()".into()),
+    }
+}
+
 pub(crate) fn int64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> Result<Value, String>
 {
     let v = unwrap_i64!(v);
@@ -422,6 +436,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::Int64, "min") => int64_min,
         (Type::Int64, "max") => int64_max,
         (Type::Int64, "clip") => int64_clip,
+        (Type::Int64, "idiv") => int64_idiv,
         (Type::Int64, "to_f") => int64_to_f,
         (Type::Int64, "to_s") => int64_to_s,
         (Type::Int64, "to_hex") => int64_to_hex,

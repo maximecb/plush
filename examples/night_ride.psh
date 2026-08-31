@@ -219,10 +219,10 @@ fun lod_fade(d, fade_from, gone_at) {
 
 // Widest a neon halo may spread, in pixels, scaled so it looks the same at
 // any frame size
-let GLOW_MAX = (FRAME_HEIGHT _/ 180).max(2);
+let GLOW_MAX = (FRAME_HEIGHT.idiv(180)).max(2);
 
 // Individual windows want a much tighter halo than the big neon bands do
-let WIN_GLOW_MAX = (GLOW_MAX _/ 2).max(1);
+let WIN_GLOW_MAX = (GLOW_MAX.idiv(2)).max(1);
 
 // --- Palettes ---
 
@@ -787,9 +787,9 @@ class Facade {
         let cols = self.cols;
 
         // One column span for the whole building, so the strips stack cleanly
-        let c0 = rand_int(0, (cols _/ 5).max(1));
+        let c0 = rand_int(0, (cols.idiv(5)).max(1));
         // Clamped so the range stays non-empty on narrow walls
-        let lo = ((cols * 4) _/ 5).max(c0 + 1).min(cols - 1);
+        let lo = ((cols * 4).idiv(5)).max(c0 + 1).min(cols - 1);
         let c1 = rand_int(lo, cols);
 
         let var r = 0;
@@ -1472,10 +1472,10 @@ fun sky_row(y) {
 // where the old fixed screen position had it.
 let MOON_AZ = 0.107;       // radians right of straight ahead
 let MOON_EL = 0.4054;      // radians above the horizon
-let MOON_R = (FRAME_HEIGHT _/ 29).max(6);
+let MOON_R = (FRAME_HEIGHT.idiv(29)).max(6);
 let MOON_HALO_R = MOON_R * 4;
 // One step every couple of pixels, otherwise the falloff shows as rings
-let MOON_HALO_STEPS = (MOON_HALO_R _/ 2).max(8);
+let MOON_HALO_STEPS = (MOON_HALO_R.idiv(2)).max(8);
 let MOON_COLOR = 0xFFF2F5FF;
 let MOON_GLOW = 0xFFA8C4FF;
 
@@ -1546,12 +1546,12 @@ fun draw_moon(fb) {
     // They lean with the camera, so the disc turns rather than sliding.
     let cr = cam_roll.cos(); let sr = cam_roll.sin();
     let m = color_scale(MOON_COLOR, 0.90);
-    let ax = -(MOON_R _/ 3).to_f(); let ay = -(MOON_R _/ 4).to_f();
-    let bx = (MOON_R _/ 4).to_f();  let by = (MOON_R _/ 3).to_f();
+    let ax = -(MOON_R.idiv(3)).to_f(); let ay = -(MOON_R.idiv(4)).to_f();
+    let bx = (MOON_R.idiv(4)).to_f();  let by = (MOON_R.idiv(3)).to_f();
     fill_disc(fb, mx + (ax * cr - ay * sr).floor(),
-                  my + (ax * sr + ay * cr).floor(), MOON_R _/ 3, m);
+                  my + (ax * sr + ay * cr).floor(), MOON_R.idiv(3), m);
     fill_disc(fb, mx + (bx * cr - by * sr).floor(),
-                  my + (bx * sr + by * cr).floor(), MOON_R _/ 4, m);
+                  my + (bx * sr + by * cr).floor(), MOON_R.idiv(4), m);
 }
 
 // Stars, as world directions since the sky is effectively at infinity
@@ -2461,9 +2461,9 @@ fun draw_hud(fb) {
     let var div = 1;
     for (let var i = 1; i < digits; ++i) div = div * 10;
     for (let var i = 0; i < digits; ++i) {
-        seg_digit(fb, x, top, (kmh _/ div) % 10, SEG_LIT, SEG_OFF);
+        seg_digit(fb, x, top, (kmh.idiv(div)) % 10, SEG_LIT, SEG_OFF);
         x = x + DIG_W + DIG_GAP;
-        div = div _/ 10;
+        div = div.idiv(10);
     }
     x = x - DIG_GAP + pad;
     x = x + draw_label(fb, KMH_CHARS, x, HUD_BOT, lab_size, LABEL_COL);

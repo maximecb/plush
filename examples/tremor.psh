@@ -44,8 +44,8 @@ let MAP_PATH = $cmd_get_arg_or(1, "examples/data/level1.map");
 // Projection. FOCAL is half the frame width over the tangent of half the
 // horizontal field of view, so this is a 90 degree view.
 let FOCAL = 400.0;
-let CENTER_X = (FRAME_WIDTH _/ 2).to_f();
-let CENTER_Y = (FRAME_HEIGHT _/ 2).to_f();
+let CENTER_X = (FRAME_WIDTH.idiv(2)).to_f();
+let CENTER_Y = (FRAME_HEIGHT.idiv(2)).to_f();
 let NEAR = 8.0;
 
 // The span loop interpolates texture coordinates in fixed point, with u and v
@@ -571,7 +571,7 @@ fun plane_quad(p) {
 // Cut a polygon down to the part of it inside a plane, that is the part with
 // nx*x + ny*y + nz*z <= d. Returns a new vertex list.
 fun clip_poly(poly, nx, ny, nz, d) {
-    let n = poly.len _/ 3;
+    let n = poly.len.idiv(3);
     let out = [];
     for (let var i = 0; i < n; ++i) {
         let var j = i + 1;
@@ -622,7 +622,7 @@ fun brush_to_faces(planes) {
 // doors, screens and light fixtures want
 fun set_fit(f) {
     let size = f.tex.size.to_f();
-    let n = f.v.len _/ 3;
+    let n = f.v.len.idiv(3);
 
     let var u0 = 0.0; let var u1 = 0.0;
     let var v0 = 0.0; let var v1 = 0.0;
@@ -759,7 +759,7 @@ fun set_brush_bounds(b, planes) {
         }
         if (poly.len < 9) continue;
 
-        let n = poly.len _/ 3;
+        let n = poly.len.idiv(3);
         for (let var k = 0; k < n; ++k) {
             let x = poly[k * 3];
             let y = poly[k * 3 + 1];
@@ -1033,7 +1033,7 @@ fun light_at(px, py, pz, nx, ny, nz) {
 // triple agree. What the fit leaves behind is exactly the curvature
 // `light_curves` measures, so subdivision already bounds it.
 fun bake_vertex_light(f) {
-    let n = f.v.len _/ 3;
+    let n = f.v.len.idiv(3);
     let out = Array.with_size(n, 0.0);
     let top = SHADE_MAX;
 
@@ -1107,7 +1107,7 @@ fun bake_vertex_light(f) {
 fun light_curves(f) {
     if (f.light >= 0) return false;
 
-    let n = f.v.len _/ 3;
+    let n = f.v.len.idiv(3);
     let vl = Array.with_size(n, 0.0);
     let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
     let var mean = 0.0;
@@ -1150,7 +1150,7 @@ fun subdivide_face(f, out, depth) {
         return;
     }
 
-    let n = f.v.len _/ 3;
+    let n = f.v.len.idiv(3);
     let var axis = 0;
     let var span = 0.0 - 1.0;
     let var cut = 0.0;
@@ -1220,7 +1220,7 @@ fun slice_axis(f, axis, grid, out) {
 
     let var rest = f;
     loop {
-        let n = rest.v.len _/ 3;
+        let n = rest.v.len.idiv(3);
         let var lo = rest.v[axis];
         let var hi = lo;
         for (let var j = 1; j < n; ++j) {
@@ -1292,7 +1292,7 @@ let var bsp_nodes = 0;
 // Where a face sits relative to a plane: 0 on it, 1 in front, 2 behind, 3
 // across it
 fun classify(f, nx, ny, nz, d) {
-    let n = f.v.len _/ 3;
+    let n = f.v.len.idiv(3);
     let var lo = 0.0;
     let var hi = 0.0;
     for (let var i = 0; i < n; ++i) {
@@ -1334,7 +1334,7 @@ fun bsp_build(face_list) {
     // Candidate planes are the face planes themselves. Trying every one of them
     // is quadratic, so a long list is sampled instead.
     let var step = 1;
-    if (face_list.len > 24) step = face_list.len _/ 24;
+    if (face_list.len > 24) step = face_list.len.idiv(24);
 
     let f0 = face_list[0];
     let var best_i = 0;
@@ -1661,7 +1661,7 @@ fun draw_face(f) {
     let taxis = f.taxis;
     let turn = f.turn;
     let scale = f.scale;
-    let n = f.v.len _/ 3;
+    let n = f.v.len.idiv(3);
     if (n > MAX_VERTS - 8) return;
 
     for (let var i = 0; i < n; ++i) {
@@ -1850,7 +1850,7 @@ fun compute_bounds(node) {
 
     for (let var i = 0; i < node.on.len; ++i) {
         let f = node.on[i];
-        let n = f.v.len _/ 3;
+        let n = f.v.len.idiv(3);
         for (let var k = 0; k < n; ++k) {
             let x = f.v[k * 3];
             let y = f.v[k * 3 + 1];

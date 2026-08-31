@@ -42,10 +42,10 @@ fun fft(real_parts, imag_parts, inverse) {
             imag_parts.set_f32(i, imag_parts.get_f32(j));
             imag_parts.set_f32(j, temp_im);
         }
-        let var m = n _/ 2;
+        let var m = n.idiv(2);
         while (m >= 1 && j >= m) {
             j = j - m;
-            m = m _/ 2;
+            m = m.idiv(2);
         }
         j = j + m;
         i = i + 1;
@@ -66,20 +66,20 @@ fun fft(real_parts, imag_parts, inverse) {
             let var w_re = 1.0;
             let var w_im = 0.0;
             let var j = 0;
-            while (j < len _/ 2) {
+            while (j < len.idiv(2)) {
                 let u_re = real_parts.get_f32(i + j);
                 let u_im = imag_parts.get_f32(i + j);
 
-                let x_half_re = real_parts.get_f32(i + j + len _/ 2);
-                let x_half_im = imag_parts.get_f32(i + j + len _/ 2);
+                let x_half_re = real_parts.get_f32(i + j + len.idiv(2));
+                let x_half_im = imag_parts.get_f32(i + j + len.idiv(2));
                 let v_re = x_half_re * w_re - x_half_im * w_im;
                 let v_im = x_half_re * w_im + x_half_im * w_re;
 
                 real_parts.set_f32(i + j, u_re + v_re);
                 imag_parts.set_f32(i + j, u_im + v_im);
 
-                real_parts.set_f32(i + j + len _/ 2, u_re - v_re);
-                imag_parts.set_f32(i + j + len _/ 2, u_im - v_im);
+                real_parts.set_f32(i + j + len.idiv(2), u_re - v_re);
+                imag_parts.set_f32(i + j + len.idiv(2), u_im - v_im);
 
                 let next_w_re = w_re * wlen_re - w_im * wlen_im;
                 let next_w_im = w_re * wlen_im + w_im * wlen_re;
@@ -179,7 +179,7 @@ fun main() {
         $println("Audio analysis time: " + (end_time - start_time).to_s() + "ms (/" + AUDIO_FRAME_TIME.format_decimals(1) + "ms)");
 
         frame_buffer.zero_fill();
-        let bar_width_total = WINDOW_WIDTH _/ NUM_FREQUENCY_BANDS;
+        let bar_width_total = WINDOW_WIDTH.idiv(NUM_FREQUENCY_BANDS);
         let bar_width_drawn = (bar_width_total - BAR_HORIZONTAL_GAP).max(1);
         let max_magnitude = 10.0;
 
@@ -194,7 +194,7 @@ fun main() {
             }
 
             let current_display_height = band_heights[band_idx];
-            let x_draw = band_idx * bar_width_total + (BAR_HORIZONTAL_GAP _/ 2);
+            let x_draw = band_idx * bar_width_total + (BAR_HORIZONTAL_GAP.idiv(2));
             let y_start_drawing = WINDOW_HEIGHT - current_display_height.trunc();
 
             let color = rgb32(255, 0, 0);

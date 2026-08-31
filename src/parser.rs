@@ -659,11 +659,10 @@ struct OpInfo
 /// https://en.cppreference.com/w/c/language/operator_precedence
 /// Note that operators that share some prefix (e.g. &, &&) must be ordered
 /// with the longer operator first.
-const BIN_OPS: [OpInfo; 31] = [
+const BIN_OPS: [OpInfo; 29] = [
     // Arithmetic assignment operators
     OpInfo { op_str: "*=",  prec: 3, op: BinOp::Mul, assign: true },
     OpInfo { op_str: "/=",  prec: 3, op: BinOp::Div, assign: true },
-    OpInfo { op_str: "_/=", prec: 3, op: BinOp::IntDiv, assign: true },
     OpInfo { op_str: "%=",  prec: 3, op: BinOp::Mod, assign: true },
     OpInfo { op_str: "+=",  prec: 4, op: BinOp::Add, assign: true },
     OpInfo { op_str: "-=",  prec: 4, op: BinOp::Sub, assign: true },
@@ -678,7 +677,6 @@ const BIN_OPS: [OpInfo; 31] = [
     // Arithmetic operators
     OpInfo { op_str: "*", prec: 3, op: BinOp::Mul, assign: false },
     OpInfo { op_str: "/", prec: 3, op: BinOp::Div, assign: false },
-    OpInfo { op_str: "_/", prec: 3, op: BinOp::IntDiv, assign: false },
     OpInfo { op_str: "%", prec: 3, op: BinOp::Mod, assign: false },
     OpInfo { op_str: "+", prec: 4, op: BinOp::Add, assign: false },
     OpInfo { op_str: "-", prec: 4, op: BinOp::Sub, assign: false },
@@ -1680,6 +1678,19 @@ mod tests
         parse_ok("let f = 4.567;");
         parse_ok("let f = 4.56e78;");
         parse_ok("let f = 4.5_6e8_;");
+
+        // A dot only starts a fractional part when a digit follows it, so
+        // that a method can be called on an integer literal directly
+        parse_ok("let g = 10.idiv(3);");
+        parse_ok("let g = 3.max(7);");
+        parse_ok("let g = 255.to_hex(2);");
+        parse_ok("let g = 10.idiv(3).max(0);");
+        parse_ok("let g = 400_000.idiv(7);");
+        parse_ok("let g = -7.idiv(2);");
+
+        // Floats keep their methods too, and the fractional part still wins
+        parse_ok("let f = 4.5.floor();");
+        parse_ok("let f = 4.56e78.floor();");
 
         // Invalid format
         parse_fails("let f = 4..5;");

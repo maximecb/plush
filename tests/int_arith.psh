@@ -21,9 +21,36 @@ assert((-10 * -5) == 50);
 assert((10 * 0) == 0);
 
 // Integer division (truncated division)
-assert(10 _/ 3 == 3);
-assert(10 _/ 2 == 5);
-assert(-7 _/ 2 == -3);
+assert(10.idiv(3) == 3);
+assert(10.idiv(2) == 5);
+assert((-7).idiv(2) == -3);
+assert(7.idiv(-2) == -3);
+assert((-7).idiv(-2) == 3);
+assert(0.idiv(5) == 0);
+
+// idiv specializes the call site, so exercise it on a variable receiver and
+// on one that alternates between an integer and an object
+let var q = 100;
+q = q.idiv(4);
+assert(q == 25);
+
+class Divisor { init(self, v) { self.v = v; } idiv(self, k) { return self.v + k; } }
+fun apply(x, k) { return x.idiv(k); }
+assert(apply(9, 2) == 4);
+assert(apply(Divisor(10), 2) == 12);   // deoptimizes to a real method call
+assert(apply(9, 2) == 4);              // and specializes again
+
+// A dot only begins a fraction when a digit follows, so methods can be
+// called on an integer literal without wrapping it in parentheses
+assert(3.max(7) == 7);
+assert(3.min(7) == 3);
+assert(255.to_hex(2) == "FF");
+assert(10.idiv(3).max(0) == 3);
+assert(400_000.idiv(7) == 57142);
+
+// Float literals are unaffected: the fractional part still wins
+assert(4.5.floor() == 4);
+assert(0.2 + 0.3 > 0.49);
 
 // Modulo
 assert((10 % 3) == 1);
@@ -68,7 +95,7 @@ assert(a        == 800);
 assert((a /= 4) == 200);
 assert(a        == 200);
 a = 200; // division makes a float, reset to int
-assert((a _/= 3) == 66);
+assert((a = a.idiv(3)) == 66);
 assert(a         == 66);
 assert((a %= 7) == 3);
 assert(a        == 3);

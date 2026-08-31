@@ -207,6 +207,17 @@ impl Lexer
         return self.input[self.idx];
     }
 
+    /// Peek at a character further ahead in the input
+    pub fn peek_ch_at(&self, offset: usize) -> char
+    {
+        if self.idx + offset >= self.input.len()
+        {
+            return '\0';
+        }
+
+        return self.input[self.idx + offset];
+    }
+
     /// Consume a character from the input
     pub fn eat_ch(&mut self) -> char
     {
@@ -476,8 +487,11 @@ impl Lexer
         // Read decimal part
         read_digits(self);
 
-        // Fractional part
-        if self.match_char('.') {
+        // Fractional part. A digit has to follow the dot, otherwise the dot
+        // belongs to a method call: `10.idiv(3)` is an integer with a method
+        // on it, not the float `10.` followed by a stray name
+        if self.peek_ch() == '.' && self.peek_ch_at(1).is_ascii_digit() {
+            self.eat_ch();
             read_digits(self);
         }
 

@@ -427,7 +427,6 @@ def_opcodes! {
     sub { dst: out_reg, a: reg, b: reg },
     mul { dst: out_reg, a: reg, b: reg },
     div { dst: out_reg, a: reg, b: reg },
-    div_int { dst: out_reg, a: reg, b: reg },
     modulo { dst: out_reg, a: reg, b: reg },
 
     // Arithmetic ops with fixnum immediates
@@ -544,6 +543,13 @@ def_opcodes! {
     // call_method, and the two forms take the same operands so that the
     // switch is a write of the opcode byte
     call_method_host { start_reg: reg, argc: u8, type_tag: u8, cache: u24 },
+
+    // Integer division, specialized from a `call_method` site whose receiver
+    // turned out to be an integer. Takes the same operands as call_method so
+    // that deoptimizing is a write of the opcode: a receiver that is not an
+    // integer, such as a class defining its own `idiv`, goes back to a real
+    // method call
+    call_idiv_int { start_reg: reg, argc: u8, cache: u24 },
 
     // Creating a class instance runs a constructor, so it is a call
     new { class_id: u24, start_reg: reg, argc: u8 },

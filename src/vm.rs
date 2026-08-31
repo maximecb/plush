@@ -1337,7 +1337,6 @@ impl Actor
     num_slow_path!(mul_slow, "mul", checked_mul, *);
     num_slow_path!(modulo_slow, "modulo", checked_rem, %);
 
-    int_slow_path!(div_int_slow, "div_int", |a: i64, b: i64| a.checked_div(b));
     int_slow_path!(bit_and_slow, "bit_and", |a: i64, b: i64| Some(a & b));
     int_slow_path!(bit_or_slow, "bit_or", |a: i64, b: i64| Some(a | b));
     int_slow_path!(bit_xor_slow, "bit_xor", |a: i64, b: i64| Some(a ^ b));
@@ -1872,28 +1871,6 @@ impl Actor
                     }
 
                     let r = slow!("div", self.div_num(v0, v1));
-                    set_reg!(opnds.dst, r);
-                }
-
-                // Integer division
-                // Division by zero will cause a panic (this is intentional)
-                Opcode::div_int => {
-                    let opnds = insns::div_int::decode(insn);
-                    let v0 = get_reg!(opnds.a);
-                    let v1 = get_reg!(opnds.b);
-
-                    // Dividing shrinks the magnitude, so the quotient
-                    // fits unless it is the one case that overflows
-                    if v0.is_fixnum() && v1.is_fixnum() {
-                        if let Some(q) = v0.as_fixnum().checked_div(v1.as_fixnum()) {
-                            if let Some(r) = Value::try_fixnum(q) {
-                                set_reg!(opnds.dst, r);
-                                continue;
-                            }
-                        }
-                    }
-
-                    let r = slow!("div_int", self.div_int_slow(v0, v1));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2532,7 +2509,16 @@ impl Actor
                             // alone because their methods depend on more
                             // than the type tag.
                             let type_tag = self_val.type_of();
-                            if !matches!(type_tag, Type::Bool | Type::Class) {
+                            if host_fn == HostFnId::int64_idiv {
+                                // Integer division is common enough in hot
+                                // loops to be worth its own instruction
+                                self.insns[this_pc] = Insn::call_idiv_int(
+                                    opnds.start_reg,
+                                    opnds.argc,
+                                    opnds.cache,
+                                );
+                            }
+                            else if !matches!(type_tag, Type::Bool | Type::Class) {
                                 self.call_caches[opnds.cache as usize].host_fn = host_fn;
                                 self.insns[this_pc] = Insn::call_method_host(
                                     opnds.start_reg,
@@ -2549,6 +2535,47 @@ impl Actor
                             }
                         }
                     }
+                }
+
+                // Integer division, specialized from a call_method site.
+                // Saves the whole host-call sequence: no cache load, no
+                // arity dispatch, no unwrapping and re-boxing of Values
+                Opcode::call_idiv_int => {
+                    let opnds = insns::call_idiv_int::decode(insn);
+                    let v0 = get_reg!(opnds.start_reg);
+                    let v1 = get_reg!(opnds.start_reg as usize + 1);
+
+                    if v0.is_fixnum() && v1.is_fixnum() {
+                        if let Some(q) = v0.as_fixnum().checked_div(v1.as_fixnum()) {
+                            if let Some(r) = Value::try_fixnum(q) {
+                                set_reg!(opnds.start_reg, r);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // An integer receiver that missed the fast path: a boxed
+                    // int64, a division by zero, or the one quotient that
+                    // overflows. The method itself settles those, and it is
+                    // a plain Rust call, not a dispatch
+                    if v0.type_of() == Type::Int64 {
+                        match crate::runtime::int64_idiv(self, v0, v1) {
+                            Ok(r) => { set_reg!(opnds.start_reg, r); }
+                            Err(msg) => error!("error during call to host function `idiv`:\n{}", msg),
+                        }
+
+                        continue;
+                    }
+
+                    // Not an integer at all, so this site has to go back to a
+                    // real method call. Both forms take the same operands, so
+                    // deoptimizing is a write of the opcode
+                    self.insns[this_pc] = Insn::call_method(
+                        opnds.start_reg,
+                        opnds.argc,
+                        opnds.cache,
+                    );
+                    pc = this_pc;
                 }
 
                 // Call a host method, guarded on the receiver's type tag

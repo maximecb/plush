@@ -75,12 +75,12 @@ for (let var i = 0; i < 10; ++i)
 
 Plush supports a range of arithmetic, comparison, and logical operators:
 
--   **Arithmetic**: `+`, `-`, `*`, `/`, `_/`, `%`
+-   **Arithmetic**: `+`, `-`, `*`, `/`, `%`
 -   **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`.
 -   **Logical**: `&&`, `||`, `!`
 
-The `_/` operator performs integer division, that is, truncated division which only accepts integer inputs and yields
-an integer output, whereas the division operator `/` yields a floating-point value as output.
+The division operator `/` always yields a floating-point value. To divide integers and stay in the integer
+domain, use the [`idiv`](#methods) method, which performs truncated division: `10.idiv(3)` is `3`.
 
 Note that unlike in JavaScript, the `==` operator performs reference equality for objects, arrays and
 dictionaries, not structural equality.
@@ -314,6 +314,7 @@ from ./font import *;
 
 -   **Int64**
     -   `abs()`: Get the absolute value of this number.
+    -   `idiv(other)`: Truncated integer division. Both operands must be integers, and the result is an integer, whereas the `/` operator yields a float. Dividing by zero is an error.
     -   `min(other)`: Returns the minimum of this number and `other`.
     -   `max(other)`: Returns the maximum of this number and `other`.
     -   `clip(min, max)`: Restrict the value if it's outside the range defined by `min` and `max`.
