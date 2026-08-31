@@ -17,24 +17,26 @@ To get a feel for what Plush code looks like, have a look at the programs in the
 
 ## Installation
 
-On macOS and Linux, install the latest release with:
+On macOS and Linux, you can install the latest release with one shell command:
 ```sh
 curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh
 ```
 
 This downloads a prebuilt binary into `~/.plush` and adds it to your `PATH`. You
 don't need Rust or SDL2 to run it. Windows is not supported yet, but you can
-still [build from source](#building-from-source) there.
-
-Once installed, open a new terminal (or run `source ~/.plush/env`) and try one of
+still [build from source](#building-from-source) there. Once installed, open
+a new terminal (or run `source ~/.plush/env`) and try one of
 the bundled examples:
+
 ```sh
 plush --run-example tremor
 plush --run-example
 ```
 
-Running `plush --run-example` with no name lists every example that ships with the
+The source code for these examples can be found in `~/.plush/examples` if you want
+to modify them. Running `plush --run-example` with no name lists every example that ships with the
 release. To install Plush and start a demo in a single command:
+
 ```sh
 curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s run-example tremor
 ```
@@ -114,7 +116,7 @@ cargo run examples/plasma.psh
 
 ## Open Source License
 
-The code for Plush, its VM and associated tools is shared under the [Apache-2.0 license](https://github.com/maximecb/plush/blob/main/LICENSE). The example code in the `/examples` directory is shared under the [Creative Commons CC0](https://creativecommons.org/publicdomain/zero/1.0/) license to encourage sharing and remixing.
+The code for Plush, its VM and associated tools is shared under the [Apache-2.0 license](https://github.com/maximecb/plush/blob/main/LICENSE). All the example code in the `/examples` directory, as well as its accompanying input data under the same directory is shared under the [Creative Commons CC0](https://creativecommons.org/publicdomain/zero/1.0/) license to encourage sharing and remixing.
 
 ## Contributing
 
