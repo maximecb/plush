@@ -107,6 +107,11 @@ pub fn parse_args(args: Vec<String>) -> Options
                 opts.eval_str = Some(read_arg!(arg));
             }
 
+            "--list-examples" => {
+                list_examples(&example_dirs());
+                exit(0);
+            }
+
             "--run-example" => {
                 // With no name given, show what is available instead of failing
                 if idx >= args.len() {
@@ -199,13 +204,19 @@ fn list_examples(dirs: &[PathBuf])
             continue;
         }
 
+        // Resolve the path so the location shown is unambiguous
+        let path = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+
         names.sort();
-        println!("\n{} examples available:", names.len());
+        println!("\n{} examples available in {}:", names.len(), path.display());
         for name in names {
             println!("  {}", name);
         }
+
         return;
     }
+
+    println!("\nNo examples found. Set PLUSH_EXAMPLES_DIR to point at a directory of .psh files.");
 }
 
 /// Parse an input file or eval string

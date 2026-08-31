@@ -30,12 +30,12 @@ the bundled examples:
 
 ```sh
 plush --run-example tremor
-plush --run-example
+plush --list-examples
 ```
 
 The source code for these examples can be found in `~/.plush/examples` if you want
-to modify them. Running `plush --run-example` with no name lists every example that ships with the
-release. To install Plush and start a demo in a single command:
+to modify them. `plush --list-examples`, or `plush --run-example` with no name, lists every
+example that ships with the release. To install Plush and start a demo in a single command:
 
 ```sh
 curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh -s run-example tremor
