@@ -1,3 +1,19 @@
+// Spoken word detector.
+//
+// Records short clips from your microphone and trains a small neural net, in
+// the background, to recognize one spoken word. Once the net is confident
+// enough, hearing that word plays a beep.
+//
+// Controls:
+//   SPACE  start recording, press again to stop
+//   P      save the recording as a positive example (the word to detect)
+//   N      save it as a negative example (silence, noise, other words)
+//   Close the window to quit
+//
+// A red dot in the top-right corner shows while recording. Record a dozen or
+// so examples of each kind, keeping them short. Training runs continuously and
+// prints its loss and example counts to the console.
+
 from ./random import *;
 
 // Constants
@@ -601,7 +617,22 @@ fun beep_actor() {
     }
 }
 
+fun print_usage() {
+    $println("Word detector");
+    $println("");
+    $println("  SPACE  start recording, press again to stop");
+    $println("  P      save the recording as a positive example (the word to detect)");
+    $println("  N      save it as a negative example (silence, noise, other words)");
+    $println("  Close the window to quit");
+    $println("");
+    $println("Record a dozen or so short examples of each kind. Training runs");
+    $println("continuously, and a beep plays once the word is detected.");
+    $println("");
+}
+
 fun main() {
+    print_usage();
+
     let beep_actor_id = $actor_spawn(beep_actor);
     let detector_id = $actor_spawn(|| detection_actor(beep_actor_id));
     let trainer_id = $actor_spawn(|| training_actor(detector_id));

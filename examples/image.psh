@@ -149,3 +149,81 @@ class Image
         }
     }
 }
+
+// Demo showcasing the drawing primitives above. Everything lives inside
+// main() so that units importing this one only pick up the image code.
+fun main()
+{
+    let PI = 3.1415926535;
+    let WIDTH = 640;
+    let HEIGHT = 480;
+
+    let palette = [
+        COLOR_RED, COLOR_ORANGE, COLOR_YELLOW, COLOR_GREEN,
+        COLOR_TURQUOISE, COLOR_BLUE, COLOR_PURPLE, COLOR_MAGENTA
+    ];
+
+    // A small sprite, painted one pixel at a time and then blitted each frame
+    let sprite = Image(48, 48);
+    for (let var y = 0; y < sprite.height; ++y) {
+        for (let var x = 0; x < sprite.width; ++x) {
+            sprite.set_pixel(x, y, rgb(255 - 4 * y, 40 + 4 * x, 200));
+        }
+    }
+
+    let frame_buffer = Image(WIDTH, HEIGHT);
+    let window = $window_create(WIDTH, HEIGHT, "Plush Image", 0);
+
+    let var frame = 0;
+
+    loop {
+        let t = frame / 60.0;
+        ++frame;
+
+        frame_buffer.clear(COLOR_C64_BLUE);
+
+        // Palette swatches along the top
+        for (let var i = 0; i < palette.len; ++i) {
+            frame_buffer.fill_rect(32 + i * 72, 32, 64, 64, palette[i]);
+        }
+
+        // Fan of lines sweeping around a hub
+        let cx = 180;
+        let cy = 280;
+        for (let var i = 0; i < 12; ++i) {
+            let angle = t + i * 2.0 * PI / 12.0;
+            let x = cx + (120.0 * angle.cos()).floor();
+            let y = cy + (120.0 * angle.sin()).floor();
+            frame_buffer.draw_line(cx, cy, x, y, palette[i % palette.len]);
+        }
+        frame_buffer.fill_circle(cx, cy, 24, COLOR_WHITE);
+
+        // Circle with a radius pulsing over time
+        let radius = 40 + (30.0 * (2.0 * t).sin()).floor();
+        frame_buffer.fill_circle(460, 280, radius, COLOR_TURQUOISE);
+        frame_buffer.fill_circle(460, 280, radius.idiv(2), COLOR_GREY);
+
+        // The sprite travels past both edges, where blit clips it
+        let sx = (320.0 + 350.0 * (0.7 * t).sin()).floor() - sprite.width.idiv(2);
+        frame_buffer.blit(sprite, sx, 400);
+
+        $window_draw_frame(window, frame_buffer.bytes);
+
+        $actor_sleep(10); // Limit the frame rate
+
+        // --- Event Handling ---
+        let msg = $actor_poll();
+
+        if (!(msg instanceof UIEvent)) {
+            continue;
+        }
+        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+            break;
+        }
+    }
+}
+
+// Only run the demo if this is the main unit, not when this unit is imported
+if ($MAIN_UNIT) {
+    main();
+}

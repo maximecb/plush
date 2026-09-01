@@ -414,13 +414,17 @@ let char_map = {
 
 class Font
 {
-    init(self, scale, color)
+    // Characters are blitted opaquely, so bg_color should match the
+    // background the text is drawn on
+    init(self, scale, color, bg_color)
     {
         assert(scale instanceof Int64);
         assert(color instanceof Int64);
+        assert(bg_color instanceof Int64);
 
         self.scale = scale;
         self.color = color;
+        self.bg_color = bg_color;
         self.char_w = CHAR_W * scale;
         self.char_h = CHAR_H * scale;
 
@@ -442,6 +446,7 @@ class Font
         }
 
         let img = Image(CHAR_W * self.scale, CHAR_H * self.scale);
+        img.clear(self.bg_color);
 
         for (let var j = 0; j < CHAR_H; ++j) {
             let row = bitmap[j];
@@ -469,4 +474,80 @@ class Font
         let ch = self.render_char(ch);
         dst.blit(ch, x, y);
     }
+}
+
+// Demo showing every character the font defines. Everything lives inside
+// main() so that units importing this one only pick up the font code.
+fun main()
+{
+    let SCALE = 2;
+    let CHARS_PER_LINE = 40;
+    let MARGIN = 20;
+
+    // Collect the characters in codepoint order. The font covers Latin,
+    // Latin-1, Cyrillic and a few symbols, so the whole BMP is scanned.
+    let chars = [];
+    for (let var cp = 0x20; cp <= 0xFF3F; ++cp) {
+        // Surrogates are not characters, and constructing one is an error
+        if (cp >= 0xD800 && cp <= 0xDFFF) {
+            continue;
+        }
+
+        let ch = String.from_codepoint(cp);
+        if (char_map.has(ch)) {
+            chars.push(ch);
+        }
+    }
+
+    let num_lines = (chars.len + CHARS_PER_LINE - 1).idiv(CHARS_PER_LINE);
+    let line_h = CHAR_H * SCALE + 8;
+    let width = 2 * MARGIN + CHARS_PER_LINE * CHAR_W * SCALE;
+    let height = 2 * MARGIN + num_lines * line_h;
+
+    // One font per row color, all drawn on a black background
+    let fonts = [
+        Font(SCALE, COLOR_RED, COLOR_BLACK),
+        Font(SCALE, COLOR_GREEN, COLOR_BLACK),
+        Font(SCALE, COLOR_BLUE, COLOR_BLACK),
+        Font(SCALE, COLOR_WHITE, COLOR_BLACK)
+    ];
+
+    $println("Monogram font: " + chars.len.to_s() + " characters");
+
+    let frame_buffer = Image(width, height);
+    frame_buffer.clear(COLOR_BLACK);
+
+    for (let var i = 0; i < chars.len; ++i) {
+        let line = i.idiv(CHARS_PER_LINE);
+        let col = i % CHARS_PER_LINE;
+        let font = fonts[line % fonts.len];
+
+        font.draw_char(
+            frame_buffer,
+            MARGIN + col * font.char_w,
+            MARGIN + line * line_h,
+            chars[i]
+        );
+    }
+
+    let window = $window_create(width, height, "Monogram Font", 0);
+
+    loop {
+        $window_draw_frame(window, frame_buffer.bytes);
+        $actor_sleep(50);
+
+        let msg = $actor_poll();
+
+        if (!(msg instanceof UIEvent)) {
+            continue;
+        }
+        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+            break;
+        }
+    }
+}
+
+// Only run the demo if this is the main unit, not when this unit is imported
+if ($MAIN_UNIT) {
+    main();
 }

@@ -35,8 +35,10 @@ the bundled examples:
 
 ```sh
 plush --run-example tremor
+plush --run-example night_ride
 plush --list-examples
 ```
+
 To run your own program, just pass it a file:
 ```sh
 plush myprogram.psh
