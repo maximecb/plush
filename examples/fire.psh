@@ -1,0 +1,173 @@
+// Demoscene-style fire effect
+// Based on a tutorial by Lode Vandevenne:
+// https://lodev.org/cgtutor/fire.html
+
+let FRAME_WIDTH = 512;
+let FRAME_HEIGHT = 512;
+
+// Time budget per frame, as in the original's animation loop
+let FRAME_TIME_MS = 40;
+
+// Heat kept from one row to the next, in 4096ths. The update rule sums
+// four samples, so 1024 conserves heat exactly and the flame would never
+// cool. How far below 1024 this sits is what sets the height of the
+// fire. 1008 is the 63/256 of the original, which burns out a fifth of
+// the way up a screen this tall; at 1021 and above the flame runs off
+// the top and the screen never goes dark.
+let HEAT_RETAINED = 1020;
+
+// Bits of precision the fire values carry below what the palette shows.
+// The scaling above rounds down, which costs up to a full unit per row,
+// and with no room underneath the visible range that loss alone snuffs
+// the flame out long before HEAT_RETAINED gets any say in it.
+let HEAT_BITS = 4;
+
+// Convert RGB values in the range [0, 255] to a u32 encoding
+fun rgb32(r, g, b)
+{
+    return 0xFF_00_00_00 | (r << 16) | (g << 8) | b;
+}
+
+// Converts a hue to r, g or b. Returns a float in [0, 1].
+fun hue2rgb(p, q, t)
+{
+    let var t = t;
+
+    if (t < 0.0)
+        t = t + 1.0;
+    if (t > 1.0)
+        t = t - 1.0;
+
+    if (t < 1.0 / 6.0)
+        return p + (q - p) * 6.0 * t;
+    if (t < 1.0 / 2.0)
+        return q;
+    if (t < 2.0 / 3.0)
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+
+    return p;
+}
+
+// Converts an HSL color value to RGB. Conversion formula adapted from
+// http://en.wikipedia.org/wiki/HSL_color_space. Assumes h, s and l are
+// in [0, 1] and returns RGB in [0, 255].
+fun hsl_to_rgb(h, s, l)
+{
+    if (s == 0.0)
+    {
+        // Achromatic
+        let c = (255.0 * l).floor();
+        return rgb32(c, c, c);
+    }
+
+    let q = l < 0.5? l * (1.0 + s):l + s - l * s;
+    let p = 2.0 * l - q;
+
+    return rgb32(
+        (hue2rgb(p, q, h + 1.0 / 3.0) * 255.0).floor(),
+        (hue2rgb(p, q, h) * 255.0).floor(),
+        (hue2rgb(p, q, h - 1.0 / 3.0) * 255.0).floor()
+    );
+}
+
+// Linear congruential generator, as in examples/random.psh. Seeded from
+// the clock so that the flame differs from one run to the next.
+let var lcg_seed = $time_current_ms() & 0x7FFFFFFF;
+
+// Returns a random integer in [0, 256)
+fun rand_byte()
+{
+    lcg_seed = (lcg_seed * 1073716837 + 12345) & 0x7FFFFFFF;
+
+    // The lowest bits of an LCG are the least random, so we drop them
+    return (lcg_seed >> 8) & 0xFF;
+}
+
+// Generate the palette
+let palette = [];
+for (let var i = 0; i < 256; ++i)
+{
+    // Vary the hue through the palette
+    // Hue should be between orange and red
+    let x = i.to_f() / 255.0;
+    let var l = x + 0.3;
+    l = (l * l).min(1.0);
+    palette.push(hsl_to_rgb(x * 0.33, 1.0, l));
+}
+
+// Greyscale fire values, one row of intensities per scanline
+let fire = [];
+for (let var y = 0; y < FRAME_HEIGHT; ++y)
+{
+    fire.push(Array.with_size(FRAME_WIDTH, 0));
+}
+
+// RGBA pixels
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Demoscene Fire Effect", 0);
+
+loop
+{
+    let frame_start_time = $time_current_ms();
+
+    // Randomize the bottom row, which is what feeds the flame
+    let bottom_row = fire[FRAME_HEIGHT - 1];
+    for (let var x = 0; x < FRAME_WIDTH; ++x)
+    {
+        bottom_row[x] = rand_byte() << HEAT_BITS;
+    }
+
+    // Apply the update rule, from top to bottom. Each row is read by the
+    // row above it before being overwritten, so a single buffer is enough.
+    for (let var y = 0; y < FRAME_HEIGHT - 1; ++y)
+    {
+        let dst = fire[y];
+        let src = fire[y + 1];
+
+        // Two rows down, wrapping around to the top on the last row
+        let below = fire[(y + 2) % FRAME_HEIGHT];
+
+        // The leftmost and rightmost columns are left at zero, which is
+        // what keeps the flame from wrapping around the screen edges
+        for (let var x = 1; x < FRAME_WIDTH - 1; ++x)
+        {
+            let sum = src[x] + src[x - 1] + src[x + 1] + below[x];
+
+            // Averaging the four samples would carry the heat upward
+            // forever, so each row keeps slightly less than all of it
+            dst[x] = (sum * HEAT_RETAINED) >> 12;
+        }
+    }
+
+    // Draw the fire, mapping intensities through the palette
+    let var pixel_idx = 0;
+    for (let var y = 0; y < FRAME_HEIGHT; ++y)
+    {
+        let row = fire[y];
+        for (let var x = 0; x < FRAME_WIDTH; ++x)
+        {
+            frame_buffer.set_u32(pixel_idx, palette[row[x] >> HEAT_BITS]);
+            ++pixel_idx;
+        }
+    }
+
+    $window_draw_frame(window, frame_buffer);
+
+    // Check for window events
+    let msg = $actor_poll();
+
+    if (msg instanceof UIEvent)
+    {
+        if (msg.kind == 'CLOSE_WINDOW')
+            break;
+
+        if (msg.kind == 'KEY_DOWN' && (msg.key == 'ESCAPE' || msg.key == 'Q'))
+            break;
+    }
+
+    // Hold the frame rate to the time budget
+    let frame_ms = $time_current_ms() - frame_start_time;
+    if (frame_ms < FRAME_TIME_MS)
+        $actor_sleep(FRAME_TIME_MS - frame_ms);
+}
