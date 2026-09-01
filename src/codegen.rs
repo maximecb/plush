@@ -1016,12 +1016,12 @@ fn gen_call(
     window: Option<u16>,
 ) -> Result<u16, ParseError>
 {
-    let n_args: u16 = args.len().try_into().expect("too many call arguments");
+    let n_args = args.len();
 
     // A method call and a constructor both pass self as argument zero. A
     // dynamic call parks the callee just above the arguments, where the
     // callee's own frame overwrites it once the call is under way
-    let (argc, extra_slot) = match callee.expr.as_ref() {
+    let (argc, extra_slot): (usize, u16) = match callee.expr.as_ref() {
         Expr::Member { .. } => (n_args + 1, 0),
         Expr::Ref { decl: Decl::Class { .. }, .. } => (n_args + 1, 0),
         Expr::Ref { decl: Decl::Fun { .. }, .. } => (n_args, 0),
@@ -1029,7 +1029,16 @@ fn gen_call(
         _ => (n_args, 1),
     };
 
-    let argc: u8 = argc.try_into().expect("too many call arguments");
+    // The count stays a usize until here so that adding the self argument
+    // above can't overflow. This is the exact limit the parser can only
+    // approximate, because whether a self is passed is known only here
+    let argc: u8 = match argc.try_into() {
+        Ok(argc) => argc,
+        Err(_) => return ParseError::with_pos(
+            "too many arguments in function call",
+            &callee.pos
+        )
+    };
 
     // A call with no arguments still needs the register its return value
     // comes back in
