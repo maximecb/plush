@@ -401,6 +401,10 @@ def_opcodes! {
     // Bitwise operations
     lshift { dst: out_reg, a: reg, b: reg },
     rshift { dst: out_reg, a: reg, b: reg },
+    bit_and { dst: out_reg, a: reg, b: reg },
+    bit_or { dst: out_reg, a: reg, b: reg },
+    bit_xor { dst: out_reg, a: reg, b: reg },
+    bit_not { dst: out_reg, src: reg },
 
     // Shift by a constant amount. Codegen only emits these for an amount
     // below the word size, so the instruction needs no range check. A
@@ -408,7 +412,6 @@ def_opcodes! {
     // which boxes the result
     lshift_imm { dst: out_reg, a: reg, shift: u6 },
     rshift_imm { dst: out_reg, a: reg, shift: u6 },
-    bit_and { dst: out_reg, a: reg, b: reg },
 
     // And with a constant mask, given as a run of `len` set bits starting
     // at bit `lo`. Encoding the run rather than the value is what lets a
@@ -419,10 +422,8 @@ def_opcodes! {
     // Shift right by a constant, then mask the result. Extracting a field
     // out of a packed word is common enough to be worth one instruction
     rshift_mask { dst: out_reg, a: reg, shift: u6, lo: u6, len: u6 },
-    bit_or { dst: out_reg, a: reg, b: reg },
-    bit_xor { dst: out_reg, a: reg, b: reg },
-    bit_not { dst: out_reg, src: reg },
 
+    // Arithmetic operations
     add { dst: out_reg, a: reg, b: reg },
     sub { dst: out_reg, a: reg, b: reg },
     mul { dst: out_reg, a: reg, b: reg },
