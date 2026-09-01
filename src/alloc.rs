@@ -164,24 +164,150 @@ fn page_round_up(size: usize, page_size: usize) -> usize
     }
 }
 
-/// Reserve a range of address space. PROT_NONE means that none of
-/// it is accessible until it is committed.
+/// The virtual memory calls the allocator is built on. A range of
+/// address space is reserved up front, and pages within it are
+/// committed and decommitted as the heap grows and shrinks.
+#[cfg(unix)]
+mod sys
+{
+    /// Reserve address space without committing memory to it. None of
+    /// the range is accessible until it is committed. Returns null if
+    /// the reservation fails.
+    pub fn reserve(size: usize) -> *mut u8
+    {
+        let p = unsafe { libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0
+        )};
+
+        if p == libc::MAP_FAILED {
+            return std::ptr::null_mut();
+        }
+
+        p as *mut u8
+    }
+
+    /// Make a range inside a reservation readable and writable. The
+    /// pages it hands back are zero-filled.
+    pub fn commit(addr: *mut u8, size: usize) -> bool
+    {
+        let ret = unsafe { libc::mprotect(
+            addr as *mut libc::c_void,
+            size,
+            libc::PROT_READ | libc::PROT_WRITE
+        )};
+
+        ret == 0
+    }
+
+    /// Release the physical pages backing a range, leaving it reserved.
+    /// Replacing the mapping is what frees the pages.
+    pub fn decommit(addr: *mut u8, size: usize) -> bool
+    {
+        let p = unsafe { libc::mmap(
+            addr as *mut libc::c_void,
+            size,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+            -1,
+            0
+        )};
+
+        p != libc::MAP_FAILED
+    }
+
+    /// Give up a whole reservation, committed pages and all
+    pub fn release(addr: *mut u8, size: usize)
+    {
+        unsafe { libc::munmap(addr as *mut libc::c_void, size) };
+    }
+
+    pub fn page_size() -> usize
+    {
+        unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+    }
+}
+
+#[cfg(windows)]
+mod sys
+{
+    use core::ffi::c_void;
+    use windows_sys::Win32::System::Memory::{
+        VirtualAlloc,
+        VirtualFree,
+        MEM_COMMIT,
+        MEM_DECOMMIT,
+        MEM_RELEASE,
+        MEM_RESERVE,
+        PAGE_NOACCESS,
+        PAGE_READWRITE,
+    };
+    use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+
+    /// Reserve address space without committing memory to it. None of
+    /// the range is accessible until it is committed. Returns null if
+    /// the reservation fails.
+    pub fn reserve(size: usize) -> *mut u8
+    {
+        unsafe { VirtualAlloc(
+            std::ptr::null(),
+            size,
+            MEM_RESERVE,
+            PAGE_NOACCESS
+        ) as *mut u8 }
+    }
+
+    /// Make a range inside a reservation readable and writable. The
+    /// pages it hands back are zero-filled.
+    pub fn commit(addr: *mut u8, size: usize) -> bool
+    {
+        let p = unsafe { VirtualAlloc(
+            addr as *const c_void,
+            size,
+            MEM_COMMIT,
+            PAGE_READWRITE
+        )};
+
+        !p.is_null()
+    }
+
+    /// Release the physical pages backing a range, leaving it reserved
+    pub fn decommit(addr: *mut u8, size: usize) -> bool
+    {
+        unsafe { VirtualFree(addr as *mut c_void, size, MEM_DECOMMIT) != 0 }
+    }
+
+    /// Give up a whole reservation, committed pages and all. This only
+    /// works on the address the reservation started at, and the size
+    /// has to be zero.
+    pub fn release(addr: *mut u8, _size: usize)
+    {
+        unsafe { VirtualFree(addr as *mut c_void, 0, MEM_RELEASE) };
+    }
+
+    pub fn page_size() -> usize
+    {
+        let mut info = SYSTEM_INFO::default();
+        unsafe { GetSystemInfo(&mut info) };
+        info.dwPageSize as usize
+    }
+}
+
+/// Reserve a range of address space. None of it is accessible until
+/// it is committed.
 fn reserve_range(size: usize) -> *mut u8
 {
-    let p = unsafe { libc::mmap(
-        std::ptr::null_mut(),
-        size,
-        libc::PROT_NONE,
-        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-        -1,
-        0
-    )};
+    let p = sys::reserve(size);
 
-    if p == libc::MAP_FAILED {
+    if p.is_null() {
         panic!("could not reserve {} bytes of address space", size);
     }
 
-    p as *mut u8
+    p
 }
 
 impl Alloc
@@ -207,7 +333,7 @@ impl Alloc
 
     fn with_reserve(mem_size_bytes: usize, reserve_size: usize, growable: bool) -> Self
     {
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = sys::page_size();
         assert!(page_size % 8 == 0);
 
         let reserve_size = page_round_up(reserve_size, page_size);
@@ -270,7 +396,7 @@ impl Alloc
 
         // Release the old range. The allocator is empty, so the only thing
         // lost is memory we would have had to zero before reusing anyway.
-        unsafe { libc::munmap(self.mem_block as *mut libc::c_void, self.reserve_size) };
+        sys::release(self.mem_block, self.reserve_size);
 
         self.mem_block = mem_block;
         self.reserve_size = new_reserve;
@@ -296,13 +422,12 @@ impl Alloc
 
         // Make the new pages accessible. They are zero-filled by the
         // kernel on first touch, so there is nothing to clear here.
-        let ret = unsafe { libc::mprotect(
-            self.mem_block.add(self.mem_size) as *mut libc::c_void,
-            new_size - self.mem_size,
-            libc::PROT_READ | libc::PROT_WRITE
-        )};
+        let ok = sys::commit(
+            unsafe { self.mem_block.add(self.mem_size) },
+            new_size - self.mem_size
+        );
 
-        if ret != 0 {
+        if !ok {
             panic!("could not commit memory for the heap");
         }
 
@@ -323,18 +448,14 @@ impl Alloc
             return;
         }
 
-        // Replacing the mapping releases the physical pages. The range
-        // stays reserved, and reads back as zero if committed again.
-        let p = unsafe { libc::mmap(
-            self.mem_block.add(new_size) as *mut libc::c_void,
-            self.mem_size - new_size,
-            libc::PROT_NONE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
-            -1,
-            0
-        )};
+        // Decommitting releases the physical pages. The range stays
+        // reserved, and reads back as zero if committed again.
+        let ok = sys::decommit(
+            unsafe { self.mem_block.add(new_size) },
+            self.mem_size - new_size
+        );
 
-        if p == libc::MAP_FAILED {
+        if !ok {
             panic!("could not release memory from the heap");
         }
 
@@ -498,7 +619,7 @@ impl Drop for Alloc
     fn drop(&mut self)
     {
         // Release the whole reserved range
-        unsafe { libc::munmap(self.mem_block as *mut libc::c_void, self.reserve_size) };
+        sys::release(self.mem_block, self.reserve_size);
     }
 }
 
