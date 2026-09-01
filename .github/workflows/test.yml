@@ -55,3 +55,17 @@ jobs:
           echo "Running benchmark: $f"
           ./target/verify_gc/release/plush "$f"
         done
+
+    # The parser benchmark is generated instead of checked in, because the file
+    # it produces is some 30 MB. Generate it here and run it, to verify that the
+    # generator still produces a program the VM accepts.
+    - name: Generate and run the parser benchmark
+      run: |
+        python3 benchmarks/gen_parse_bench.py -o "$RUNNER_TEMP/parse_bench.psh"
+
+        # This is the mode the benchmark exists to measure: parse and compile
+        # every function, without running any of them
+        ./target/release/plush --no-exec "$RUNNER_TEMP/parse_bench.psh"
+
+        ./target/release/plush "$RUNNER_TEMP/parse_bench.psh" | tee "$RUNNER_TEMP/out.txt"
+        grep -qx done "$RUNNER_TEMP/out.txt"
