@@ -462,15 +462,16 @@ impl Lexer
     }
 
     /// Read the characters of a numeric value into a string
-    pub fn read_numeric(&mut self) -> String
+    pub fn read_numeric(&mut self) -> Result<String, ParseError>
     {
-        fn read_digits(input: &mut Lexer)
+        /// Read a run of digits, returns false if there is no digit to read
+        fn read_digits(input: &mut Lexer) -> bool
         {
             let ch = input.peek_ch();
 
             // The first char must be a digit
             if !ch.is_ascii_digit() {
-                return;
+                return false;
             }
 
             loop
@@ -481,6 +482,8 @@ impl Lexer
                 }
                 input.eat_ch();
             }
+
+            true
         }
 
         fn read_sign(input: &mut Lexer)
@@ -504,10 +507,15 @@ impl Lexer
             read_digits(self);
         }
 
-        // Exponent
+        // Exponent. Unlike the fractional part above, there is no valid
+        // syntax where an `e` follows a number, so rather than backtrack
+        // we report a missing exponent as an error
         if self.match_char('e') || self.match_char('E') {
             read_sign(self);
-            read_digits(self);
+
+            if !read_digits(self) {
+                return self.parse_error("expected digits in floating-point exponent");
+            }
         }
 
         let end_idx = self.idx;
@@ -516,7 +524,7 @@ impl Lexer
         // Remove any underscore separators
         let num_str = num_str.replace("_", "");
 
-        return num_str;
+        return Ok(num_str);
     }
 
     /// Parse a string literal

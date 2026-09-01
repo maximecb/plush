@@ -39,7 +39,7 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
 
     // Decimal numeric value
     if ch.is_digit(10) {
-        let num_str = input.read_numeric();
+        let num_str = input.read_numeric()?;
         //println!("{}", num_str);
 
         // If we can parse this value as an integer
@@ -51,7 +51,10 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         }
 
         // Parse this value as a floating-point number
-        let float_val: f64 = num_str.parse().unwrap();
+        let float_val: f64 = match num_str.parse() {
+            Ok(val) => val,
+            Err(_) => return input.parse_error("invalid numeric literal")
+        };
 
         return Ok(ExprBox::new(
             Expr::Float64(float_val),
@@ -1725,9 +1728,24 @@ mod tests
         parse_ok("let f = 4.5.floor();");
         parse_ok("let f = 4.56e78.floor();");
 
+        // An `e` only starts an exponent within the number itself, so a
+        // method starting with `e` can still be called on an int literal
+        parse_ok("let f = 5.exp();");
+        parse_ok("let f = 5.0.exp();");
+
         // Invalid format
         parse_fails("let f = 4..5;");
         parse_fails("let f = 4.5.;");
+
+        // An exponent must have digits, and can't be silently truncated
+        parse_fails("let f = 1e;");
+        parse_fails("let f = 0e;");
+        parse_fails("let f = 1E;");
+        parse_fails("let f = 1e+;");
+        parse_fails("let f = 1e-;");
+        parse_fails("let f = 1e_5;");
+        parse_fails("5exp;");
+        parse_fails("let f = 4.5e;");
     }
 
     #[test]
