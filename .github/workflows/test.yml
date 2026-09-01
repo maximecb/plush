@@ -69,3 +69,59 @@ jobs:
 
         ./target/release/plush "$RUNNER_TEMP/parse_bench.psh" | tee "$RUNNER_TEMP/out.txt"
         grep -qx done "$RUNNER_TEMP/out.txt"
+
+  # Windows has no mmap: the allocator reserves and commits address space
+  # through VirtualAlloc there, and this job is the only place that code
+  # gets compiled and run.
+  test-windows:
+    runs-on: windows-latest
+
+    # SDL 2 declares cmake_minimum_required(VERSION 3.0.0), which CMake 4
+    # refuses to configure. sdl2-sys drives cmake itself, so there is
+    # nowhere to pass -DCMAKE_POLICY_VERSION_MINIMUM; cmake reads it from
+    # the environment instead.
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      RUST_BACKTRACE: '1'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: dtolnay/rust-toolchain@stable
+
+    # SDL is built from source and linked in, so the runner needs no
+    # prebuilt SDL2 to be installed. This is also what the release build
+    # does, so it covers that link on Windows as well.
+    #
+    # Only the release profile is built. Building SDL twice would double
+    # the slowest part of this job, and release is what ships.
+    #
+    # verify_gc walks and checks the heap after every GC cycle, which is
+    # what makes this an actual test of the ported allocator rather than
+    # just a compile check.
+    - name: Build VM
+      run: cargo build --release --features "static-sdl verify_gc"
+
+    - name: Test VM (release)
+      run: cargo test --release --features "static-sdl verify_gc"
+
+    # Run under bash, as the Linux job does. The default shell here is
+    # pwsh, which only reports the exit status of the last command in a
+    # block, so a failure in the middle would go unnoticed.
+    - name: Test plush command-line arguments
+      shell: bash
+      run: |
+        ./target/release/plush.exe tests/fact.psh
+        ./target/release/plush.exe --eval '$println(1);'
+        ./target/release/plush.exe --no-exec examples/raytracer.psh
+
+    # The GC benchmarks are what put the allocator under real pressure:
+    # they grow the heap, collect repeatedly, and make the collector
+    # re-reserve its to-space.
+    - name: Run the GC benchmarks
+      shell: bash
+      run: |
+        for f in benchmarks/gc_*.psh; do
+          echo "Running benchmark: $f"
+          ./target/release/plush.exe "$f"
+        done
