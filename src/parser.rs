@@ -449,6 +449,10 @@ fn parse_dict(
             input.parse_ident()?
         };
 
+        if pairs.iter().any(|(name, _)| *name == field_name) {
+            return input.parse_error(&format!("duplicate field name \"{}\"", field_name));
+        }
+
         // Parse the field value
         let field_expr = if input.match_token(":")? {
             parse_expr(input, prog)?
@@ -807,6 +811,14 @@ fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
 
         // If the operator is some kind of assignment operator (=, +=, etc.)
         if new_op.assign == true {
+            // The lhs has to be a whole operand, so a pending operator
+            // means it is part of a larger expression, as in `a * b = c`
+            if !op_stack.is_empty() {
+                return input.parse_error(
+                    "the left-hand side of an assignment cannot be a binary expression"
+                );
+            }
+
             // Assignment operators evaluates right-to-left.
             // Recursively parse the rhs expression,
             // forcing it to be evaluated before the lhs
@@ -1310,6 +1322,11 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
         // Parse a method declaration
         let pos = input.get_pos();
         let method_name = input.parse_ident()?;
+
+        if methods.contains_key(&method_name) {
+            return input.parse_error(&format!("duplicate method name \"{}\"", method_name));
+        }
+
         let fun_id = parse_function(input, prog, method_name.clone(), pos)?;
 
         if method_name == "init" && prog.funs[&fun_id].params.len() == 0 {
@@ -1878,6 +1895,12 @@ mod tests
         // With quoted field names
         parse_ok("let o = { 'x': 1, \"y\": 2, 'z w': 3 };");
 
+        // A repeated field name silently overwrote the earlier one
+        parse_fails("let o = { x: 1, x: 2 };");
+        parse_fails("let o = { x: 1, y: 2, x: 3 };");
+        parse_fails("let o = { x: 1, 'x': 2 };");
+        parse_fails("let o = { A, B, A };");
+
         // Member operator
         parse_ok("let v = a.b;");
         parse_ok("a.b = c;");
@@ -1951,6 +1974,14 @@ mod tests
         parse_ok("class Foo { init(self) { self.x = 1; } inc(self) { ++self.x; } }");
         parse_ok("let o = Foo();");
         parse_ok("let o = Foo(1, 2, 3);");
+
+        // A repeated method name silently overwrote the earlier one
+        parse_fails("class Foo { m(self) {} m(self) {} }");
+        parse_fails("class Foo { m(self) {} n(self) {} m(self) {} }");
+        parse_fails("class Foo { init(self) {} init(self) {} }");
+
+        // Distinct names in the same class are fine
+        parse_ok("class Foo { init(self) {} m(self) {} n(self) {} }");
     }
 
     #[test]
@@ -2045,6 +2076,24 @@ mod tests
         parse_fails("++1;");
         parse_fails("--1;");
         parse_fails("++f();");
+
+        // The lhs can't be part of a larger binary expression, which is
+        // usually a `==` that was typed as `=`
+        parse_fails("a * b = c;");
+        parse_fails("a + b = c;");
+        parse_fails("a == b = c;");
+        parse_fails("a < b = c;");
+        parse_fails("a && b = c;");
+        parse_fails("a * b += c;");
+        parse_fails("a + b * c = d;");
+
+        // These still reach the assignment with a whole operand
+        parse_ok("let var a = 1; a = b + c;");
+        parse_ok("let var a = 1; a = b = c;");
+        parse_ok("let var a = 1; a += b + c;");
+        parse_ok("o.x[i + 1] = b * c;");
+        parse_ok("(a) = b;");
+        parse_ok("a ? b : c = d;");
     }
 
     #[test]
