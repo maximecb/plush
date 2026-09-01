@@ -906,11 +906,6 @@ fn parse_block_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, Pa
             break;
         }
 
-        if input.match_token(";")? {
-            // Empty statements are ignored
-            continue;
-        }
-
         stmts.push(parse_stmt(input, prog)?);
     }
 
@@ -1995,6 +1990,42 @@ mod tests
     {
         parse_ok("let var x = 1; x = 2;");
         parse_ok("let var x = 2; let var y = 3; x = 1; y = 2; x = x + y;");
+    }
+
+    #[test]
+    fn extraneous_semicolons()
+    {
+        // A stray semicolon is an error everywhere a statement can appear,
+        // not just at the top level of a unit
+        parse_fails(";");
+        parse_fails(";;;");
+        parse_fails("let x = 1;;");
+        parse_fails("{ ; }");
+        parse_fails("fun f() { ; }");
+        parse_fails("fun f() { ;;; }");
+        parse_fails("fun f() { let x = 1;; }");
+        parse_fails("fun f() { { ; } }");
+        parse_fails("class C { m(self) { ; } }");
+
+        // Including after statements that carry no semicolon of their own
+        parse_fails("fun f() {};");
+        parse_fails("if (1) {};");
+        parse_fails("fun g() { fun f() {}; }");
+        parse_fails("fun g() { if (1) {}; }");
+        parse_fails("fun g() { while (1) { break; }; }");
+
+        // An empty body still has to be written as a block
+        parse_fails("while (1);");
+        parse_fails("for (;;);");
+        parse_fails("if (1);");
+        parse_ok("while (1) {}");
+        parse_ok("for (;;) {}");
+        parse_ok("if (1) {}");
+        parse_ok("fun f() {}");
+        parse_ok("fun f() { {} }");
+
+        // The semicolons a for loop owns are still its own
+        parse_ok("for (let var i = 0; i < 10; ++i) {}");
     }
 
     #[test]
