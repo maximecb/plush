@@ -42,12 +42,18 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
         let num_str = input.read_numeric()?;
         //println!("{}", num_str);
 
-        // If we can parse this value as an integer
-        if let Ok(int_val) = num_str.parse::<i64>() {
-            return Ok(ExprBox::new(
-                Expr::Int64(int_val),
-                pos
-            ));
+        // read_numeric only ever adds '.', 'e' or 'E' to a run of digits,
+        // so their absence means this is an integer. Deciding that on the
+        // text rather than on whether an int64 parse succeeds is what
+        // keeps a value too large for int64 from becoming a float
+        if !num_str.contains(['.', 'e', 'E']) {
+            return match num_str.parse::<i64>() {
+                Ok(int_val) => Ok(ExprBox::new(
+                    Expr::Int64(int_val),
+                    pos
+                )),
+                Err(_) => input.parse_error("integer literal outside of int64 range")
+            };
         }
 
         // Parse this value as a floating-point number
@@ -84,26 +90,10 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
     }
 
     // String literal
+    // Adjacent literals are not implicitly concatenated, so that a
+    // missing comma in a list is an error and not a merged string
     if ch == '\"' || ch == '\'' {
-        let mut str_val = "".to_string();
-
-        // As a convenience feature, we concatenate multiple
-        // double-quoted strings in a row, but not single-quoted strings.
-        // This makes it less error-prone to write machine code with
-        // single-quoted VM instructions.
-        loop
-        {
-            str_val += &input.parse_str(ch)?;
-
-            if ch == '\'' {
-                break;
-            }
-
-            input.eat_ws()?;
-            if input.peek_ch() != ch {
-                break;
-            }
-        }
+        let str_val = input.parse_str(ch)?;
 
         return Ok(ExprBox::new(
             Expr::String(str_val),
@@ -1750,6 +1740,17 @@ mod tests
         parse_ok("let f = 5.exp();");
         parse_ok("let f = 5.0.exp();");
 
+        // An integer literal that doesn't fit in an int64 is an error,
+        // rather than silently turning into a float
+        parse_ok("let g = 9223372036854775807;");
+        parse_fails("let g = 9223372036854775808;");
+        parse_fails("let g = 10000000000000000000;");
+        parse_fails("let g = 9_223_372_036_854_775_808;");
+
+        // Too long to fit in any fixed-width accumulator either
+        parse_fails(&format!("let g = {};", "9".repeat(50)));
+        parse_fails(&format!("let g = {};", "9".repeat(400)));
+
         // Invalid format
         parse_fails("let f = 4..5;");
         parse_fails("let f = 4.5.;");
@@ -1771,13 +1772,17 @@ mod tests
         parse_ok("let c = 'f';");
         parse_ok("let c = '\n';");
         parse_ok("let s = \"foo\";");
+        parse_ok("let s = \"foo\" + \"bar\";");
 
-        // Double-quoted strings get concatenated
-        parse_ok("let s = \"foo\" \"bar\";");
-        parse_ok("let s = \"foo\"\n\"bar\";");
-
-        // Single-quoted strings do not get concatenated
+        // Adjacent string literals are not implicitly concatenated, so
+        // that a missing comma is an error and not a merged string
+        parse_fails("let s = \"foo\" \"bar\";");
+        parse_fails("let s = \"foo\"\n\"bar\";");
         parse_fails("let s = 'foo' 'bar';");
+        parse_fails("let a = [\"foo\" \"bar\"];");
+        parse_fails("let a = [\"foo\"\n\"bar\"];");
+        parse_fails("foo(\"a\" \"b\");");
+        parse_fails("let d = { x: \"a\" \"b\" };");
     }
 
     #[test]
