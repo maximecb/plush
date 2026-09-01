@@ -445,7 +445,16 @@ impl Lexer
                 break
             }
 
-            int_val = (radix as i128) * int_val + digit.unwrap() as i128;
+            // Guard against overflowing the accumulator, so that an
+            // absurdly long literal is a parse error and not a panic
+            int_val = match int_val
+                .checked_mul(radix as i128)
+                .and_then(|v| v.checked_add(digit.unwrap() as i128))
+            {
+                Some(v) => v,
+                None => return self.parse_error("integer literal is too large")
+            };
+
             self.eat_ch();
         }
 

@@ -236,7 +236,7 @@ fn parse_postfix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, Parse
         }
 
         // Instanceof operator
-        if input.match_token("instanceof")? {
+        if input.match_keyword("instanceof")? {
             input.eat_ws()?;
             let class_name = input.parse_ident()?;
 
@@ -274,6 +274,17 @@ fn parse_postfix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, Parse
     Ok(base_expr)
 }
 
+/// Check that an expression can be the target of an assignment.
+/// Codegen only knows how to write to variables, fields and indices,
+/// so anything else has to be rejected here.
+fn check_assign_target(expr: &ExprBox) -> Result<(), ParseError>
+{
+    match expr.expr.as_ref() {
+        Expr::Ident(_) | Expr::Member { .. } | Expr::Index { .. } => Ok(()),
+        _ => ParseError::with_pos("invalid assignment target", &expr.pos)
+    }
+}
+
 /// Parse an prefix expression
 /// Note: this function should only call parse_postfix directly
 /// to respect the priority of operations in C
@@ -300,6 +311,7 @@ fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseE
     // Pre-increment expression
     if input.match_token("++")? {
         let sub_expr = parse_prefix(input, prog)?;
+        check_assign_target(&sub_expr)?;
 
         // Transform into i = i + 1
         return ExprBox::new_ok(
@@ -322,6 +334,7 @@ fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseE
     // Pre-decrement expression
     if input.match_token("--")? {
         let sub_expr = parse_prefix(input, prog)?;
+        check_assign_target(&sub_expr)?;
 
         // Transform into i = i - 1
         return ExprBox::new_ok(
@@ -806,6 +819,7 @@ fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
             // forcing it to be evaluated before the lhs
             let rhs = parse_expr(input, prog)?;
             let lhs = expr_stack.pop().unwrap();
+            check_assign_target(&lhs)?;
 
             let pos = lhs.pos.clone();
 
@@ -1159,6 +1173,11 @@ fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcP
 
         // Parse one parameter
         let param_name = input.parse_ident()?;
+
+        if params.contains(&param_name) {
+            return input.parse_error(&format!("duplicate parameter name \"{}\"", param_name));
+        }
+
         params.push(param_name);
 
         if input.match_token(")")? {
@@ -1215,6 +1234,11 @@ fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<Fu
 
         // Parse one parameter
         let param_name = input.parse_ident()?;
+
+        if params.contains(&param_name) {
+            return input.parse_error(&format!("duplicate parameter name \"{}\"", param_name));
+        }
+
         params.push(param_name);
 
         if input.match_token("|")? {
@@ -1373,7 +1397,13 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         base_path.pop();
         let mut full_path = base_path.join(&import_path);
         full_path.set_extension("psh");
-        let full_path = std::fs::canonicalize(full_path).unwrap();
+        let full_path = match std::fs::canonicalize(&full_path) {
+            Ok(path) => path,
+            Err(_) => return ParseError::with_pos(
+                &format!("could not find imported file \"{}\"", full_path.display()),
+                &pos
+            )
+        };
 
         let mut symbols = Vec::new();
         let mut import_all = false;
@@ -1626,6 +1656,9 @@ mod tests
         //parse_ok("from ./csv import parse_csv;");
         //parse_ok("from ./foo/bar/bif import a, b, c;");
         //parse_ok("from audio import audio_open_device;");
+
+        // An import that doesn't resolve to a file is an error, not a panic
+        parse_fails("from ./no_such_file_anywhere import x;");
     }
 
     #[test]
@@ -1934,6 +1967,71 @@ mod tests
         parse_ok("return !a instanceof B;");
         parse_ok("return f() instanceof F;");
         parse_ok("return !f() instanceof F;");
+    }
+
+    #[test]
+    fn regress_instanceof_keyword()
+    {
+        parse_ok("a instanceof Foo;");
+        parse_ok("a instanceof\nFoo;");
+
+        // `instanceof` must not match an identifier that merely starts with it
+        parse_fails("a instanceofFoo;");
+        parse_fails("a instanceof_t;");
+        parse_fails("a instanceof2;");
+    }
+
+    #[test]
+    fn assign_targets()
+    {
+        parse_ok("let var x = 1; x = 2;");
+        parse_ok("let var x = 1; x += 2;");
+        parse_ok("o.x = 2;");
+        parse_ok("o.x.y += 2;");
+        parse_ok("a[0] = 2;");
+        parse_ok("a[0][1] <<= 2;");
+        parse_ok("let var i = 0; ++i;");
+        parse_ok("--o.x;");
+        parse_ok("++a[i];");
+
+        // Only variables, fields and indices can be assigned to
+        parse_fails("1 = 2;");
+        parse_fails("1 += 2;");
+        parse_fails("'foo' = 2;");
+        parse_fails("f() = 2;");
+        parse_fails("(a + b) = 2;");
+        parse_fails("nil = 2;");
+        parse_fails("$println = 2;");
+        parse_fails("++1;");
+        parse_fails("--1;");
+        parse_fails("++f();");
+    }
+
+    #[test]
+    fn dup_params()
+    {
+        parse_ok("fun f(a, b) {} fun g(a, b) {}");
+        parse_ok("let f = |a, b| {};");
+
+        parse_fails("fun f(a, a) {}");
+        parse_fails("fun f(a, b, a) {}");
+        parse_fails("let f = |a, a| {};");
+        parse_fails("class C { m(self, x, x) {} }");
+    }
+
+    #[test]
+    fn int_literal_overflow()
+    {
+        parse_ok("let x = 0x7FFFFFFFFFFFFFFF;");
+        parse_ok("let x = 0b111111111111111111111111111111111111111111111111111111111111111;");
+
+        // Just outside the int64 range
+        parse_fails("let x = 0x8000000000000000;");
+
+        // Literals too long for the accumulator must not overflow it
+        parse_fails("let x = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;");
+        parse_fails(&format!("let x = 0b{};", "1".repeat(200)));
+        parse_fails(&format!("let x = 0x{};", "F".repeat(1000)));
     }
 
     #[test]
