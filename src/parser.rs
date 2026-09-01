@@ -266,8 +266,8 @@ fn parse_postfix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, Parse
         // Postfix decrement expression
         if input.match_token("--")? {
             return input.parse_error(&concat!(
-                "the postfix increment operator (i.e. i++) is not supported, ",
-                "use prefix increment (i.e. ++i) instead."
+                "the postfix decrement operator (i.e. i--) is not supported, ",
+                "use prefix decrement (i.e. --i) instead."
             ));
         }
 
@@ -1348,11 +1348,28 @@ fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(St
     Ok((class_name, class_id))
 }
 
+/// Key under which a unit is registered in the program.
+/// Imports resolve to canonical paths, so units have to be keyed the same
+/// way. Keying them by the name the lexer was handed would let the entry
+/// file, usually named by a relative path, slip past the import cycle
+/// check and get parsed a second time under its canonical name.
+fn unit_key(src_name: &str) -> String
+{
+    match std::fs::canonicalize(src_name) {
+        Ok(path) => path.display().to_string(),
+
+        // Not a file on disk, as is the case for an eval string
+        Err(_) => src_name.to_string()
+    }
+}
+
 /// Parse a single unit of source code (e.g. one source file)
 pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseError>
 {
+    let unit_key = unit_key(&input.get_src_name());
+
     // Add a dummy unit to the map so we can avoid infinite import cycles
-    prog.units.insert(input.get_pos().get_src_name().clone(), Unit::default());
+    prog.units.insert(unit_key.clone(), Unit::default());
 
     input.eat_ws()?;
     let unit_pos = input.get_pos();
@@ -1534,7 +1551,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
     };
 
     // Add the unit to the program
-    prog.units.insert(unit_pos.get_src_name().clone(), unit);
+    prog.units.insert(unit_key, unit);
 
     Ok(unit_fn_id)
 }
@@ -2050,6 +2067,22 @@ mod tests
         parse_fails("let x = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;");
         parse_fails(&format!("let x = 0b{};", "1".repeat(200)));
         parse_fails(&format!("let x = 0x{};", "F".repeat(1000)));
+    }
+
+    #[test]
+    fn regress_import_cycle_parsed_once()
+    {
+        // The entry file is named by a relative path here, but the import
+        // that cycles back to it resolves to a canonical one. Both have to
+        // land on the same unit, otherwise it gets parsed twice and its
+        // top-level body runs twice.
+        let mut input = Lexer::from_file("tests/import_circ1.psh").unwrap();
+        let prog = parse_program(&mut input).unwrap();
+
+        assert!(prog.units.len() == 2);
+
+        // parse_program pops the main unit, leaving only the imported one
+        assert!(prog.init_order.len() == 1);
     }
 
     #[test]
