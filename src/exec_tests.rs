@@ -19,6 +19,14 @@ const BIN_PATH: &str = "target/verify_gc/release/plush";
 #[cfg(not(debug_assertions))]
 const PROFILE_ARGS: &[&str] = &["--release"];
 
+// SDL has to be linked the same way it was linked here. On Windows there
+// is no system SDL to link against, so a nested build that left this out
+// would fail outright.
+#[cfg(feature = "static-sdl")]
+const SDL_ARGS: &[&str] = &["--features", "static-sdl"];
+#[cfg(not(feature = "static-sdl"))]
+const SDL_ARGS: &[&str] = &[];
+
 /// Build an interpreter with heap verification turned on, so that every
 /// collection a test triggers checks the heap it produced.
 ///
@@ -39,6 +47,7 @@ fn verify_gc_binary() -> &'static str
                 "--target-dir", "target/verify_gc",
             ])
             .args(PROFILE_ARGS)
+            .args(SDL_ARGS)
             .status()
             .unwrap();
 

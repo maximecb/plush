@@ -95,15 +95,13 @@ jobs:
     #
     # Only the release profile is built. Building SDL twice would double
     # the slowest part of this job, and release is what ships.
-    #
-    # verify_gc walks and checks the heap after every GC cycle, which is
-    # what makes this an actual test of the ported allocator rather than
-    # just a compile check.
     - name: Build VM
-      run: cargo build --release --features "static-sdl verify_gc"
+      run: cargo build --release --features static-sdl
 
+    # The test harness builds its own interpreter with verify_gc, into
+    # target/verify_gc, and runs every test program through it
     - name: Test VM (release)
-      run: cargo test --release --features "static-sdl verify_gc"
+      run: cargo test --release --features static-sdl
 
     # Run under bash, as the Linux job does. The default shell here is
     # pwsh, which only reports the exit status of the last command in a
@@ -117,11 +115,13 @@ jobs:
 
     # The GC benchmarks are what put the allocator under real pressure:
     # they grow the heap, collect repeatedly, and make the collector
-    # re-reserve its to-space.
+    # re-reserve its to-space. Run through the verify_gc build the test
+    # harness already produced, so the heap is walked and checked after
+    # every cycle.
     - name: Run the GC benchmarks
       shell: bash
       run: |
         for f in benchmarks/gc_*.psh; do
           echo "Running benchmark: $f"
-          ./target/release/plush.exe "$f"
+          ./target/verify_gc/release/plush.exe "$f"
         done
