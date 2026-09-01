@@ -22,10 +22,15 @@ On macOS and Linux, you can install the latest release with one shell command:
 curl --proto '=https' -sSf https://maximecb.github.io/plush/install | sh
 ```
 
+On Windows, run this in PowerShell (press `Win`+`R`, type `powershell`, then
+hit `Enter`):
+```powershell
+irm https://maximecb.github.io/plush/install.ps1 | iex
+```
+
 This downloads a prebuilt binary into `~/.plush` and adds it to your `PATH`. You
-don't need Rust or SDL2 to run it. Windows is not supported yet, but you can
-still [build from source](#building-from-source) there. Once installed, open
-a new terminal (or run `source ~/.plush/env`) and try one of
+don't need Rust or SDL2 to run it. Once installed, open
+a new terminal (or run `source ~/.plush/env` on macOS and Linux) and try one of
 the bundled examples:
 
 ```sh
@@ -39,7 +44,8 @@ plush myprogram.psh
 
 To upgrade, run the install command again. It skips the download if you already
 have the latest version. To uninstall, delete `~/.plush` and remove the line
-sourcing `~/.plush/env` from your shell profile.
+sourcing `~/.plush/env` from your shell profile. On Windows, delete
+`%USERPROFILE%\.plush` and remove its `bin` directory from your user `PATH`.
 
 ## Building from Source
 
