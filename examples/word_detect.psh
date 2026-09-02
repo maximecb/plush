@@ -436,6 +436,13 @@ fun training_actor(detection_actor_id) {
     let LOSS_SMOOTHING = 0.01;
     let var avg_loss = nil;
 
+    // Training steps per second, counted over a window rather than timed one
+    // step at a time, so the number holds still long enough to read
+    let RATE_WINDOW_MS = 500;
+    let var rate_start_ms = $time_current_ms();
+    let var rate_count = 0;
+    let var itrs_per_sec = 0.0;
+
     for (let var training_itr = 1;; ++training_itr) {
         // A sample arrives as [frames, word]. An empty word means the clip is
         // a negative example: no output should fire for it.
@@ -464,7 +471,9 @@ fun training_actor(detection_actor_id) {
         }
 
         // Nothing to learn until at least one word has an output
-        if (training_data.len > 0 && mlp.output_size > 0) {
+        let can_train = training_data.len > 0 && mlp.output_size > 0;
+
+        if (can_train) {
             let idx = rand_int(0, training_data.len);
             let sample = training_data[idx];
             let frames = sample[0];
@@ -551,9 +560,18 @@ fun training_actor(detection_actor_id) {
                 avg_loss = avg_loss + LOSS_SMOOTHING * (loss - avg_loss);
             }
 
+            rate_count = rate_count + 1;
+            let rate_elapsed = $time_current_ms() - rate_start_ms;
+            if (rate_elapsed >= RATE_WINDOW_MS) {
+                itrs_per_sec = rate_count.to_f() * 1000.0 / rate_elapsed.to_f();
+                rate_start_ms = $time_current_ms();
+                rate_count = 0;
+            }
+
             if (iteration_count % 1 == 0) {
                 $println(
                     "Itr#" + training_itr.to_s() +
+                    ", " + itrs_per_sec.format_decimals(1) + " itr/s" +
                     ", loss: " + avg_loss.format_decimals(5) +
                     ", words: " + mlp.output_size.to_s() +
                     ", pos: " +
@@ -571,7 +589,13 @@ fun training_actor(detection_actor_id) {
             }
         }
 
-        $actor_sleep(10);
+        // Idle only when there is nothing to learn from. `$actor_poll` does
+        // not block, so without this the loop would spin before any sample
+        // has been recorded. Sleeping after every step instead would cap
+        // training near 90 steps a second, where a step costs about 1ms.
+        if (!can_train) {
+            $actor_sleep(10);
+        }
     }
 }
 
