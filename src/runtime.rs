@@ -93,6 +93,15 @@ pub(crate) fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
     Ok(Str::new(&s, &mut actor.alloc))
 }
 
+pub(crate) fn int64_comma_sep(actor: &mut Actor, v: Value) -> Result<Value, String>
+{
+    let v = unwrap_i64!(v);
+    let s = utils::thousands_sep(v);
+
+    actor.gc_check(Str::alloc_size(s.len()), &mut []);
+    Ok(Str::new(&s, &mut actor.alloc))
+}
+
 pub(crate) fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result<Value, String>
 {
     let v = unwrap_i64!(v);
@@ -439,6 +448,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::Int64, "idiv") => int64_idiv,
         (Type::Int64, "to_f") => int64_to_f,
         (Type::Int64, "to_s") => int64_to_s,
+        (Type::Int64, "comma_sep") => int64_comma_sep,
         (Type::Int64, "to_hex") => int64_to_hex,
 
         (Type::Float64, "abs") => float64_abs,

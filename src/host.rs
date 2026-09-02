@@ -186,6 +186,7 @@ def_host_fns! {
         idiv: int64_idiv(2),
         to_f: int64_to_f(1),
         to_s: int64_to_s(1),
+        comma_sep: int64_comma_sep(1),
         to_hex: int64_to_hex(2),
 
         abs: float64_abs(1),

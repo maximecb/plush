@@ -320,6 +320,7 @@ from ./font import *;
     -   `clip(min, max)`: Restrict the value if it's outside the range defined by `min` and `max`.
     -   `to_f()`: Converts the integer to a 64-bit float.
     -   `to_s()`: Converts the integer to a string.
+    -   `comma_sep()`: Converts the integer to a string with the digits grouped in threes by commas, e.g. `1000000` becomes `"1,000,000"`.
     -   `to_hex(digits)`: Get a zero-padded and capitalized hexadecimal string representation of this integer.`
 -   **Float64**
     -   `abs()`: Get the absolute value of this number.
