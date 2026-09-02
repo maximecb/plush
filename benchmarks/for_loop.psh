@@ -1,3 +1,29 @@
-for (let var i = 0; i < 100_000_000; i = i + 1)
+// Empty loop benchmark. It measures raw interpreter dispatch speed.
+// The loop is kept inside a function so that its bytecode can be dumped
+// and the instructions it executes counted exactly.
+
+let num_itrs = 100_000_000;
+
+fun for_loop(n)
 {
+    for (let var i = 0; i < n; i = i + 1)
+    {
+    }
 }
+
+let start_time = $time_current_ms();
+for_loop(num_itrs);
+let end_time = $time_current_ms();
+let time_ms = end_time - start_time;
+
+// Dumped after running so that the sites show the forms they settled on
+for_loop.dump_bytecode();
+
+// Each iteration runs the counter increment and the loop test. The four
+// remaining instructions are the counter's initial load, the jump into
+// the test, the test that ends the loop and the return.
+let num_insns = 2 * num_itrs + 4;
+let mips = num_insns.to_f() / (time_ms.to_f() * 1000.0);
+
+$println("time: " + time_ms.to_s() + " ms");
+$println("MIPS: " + ((mips * 10.0).floor().to_f() / 10.0).to_s());
