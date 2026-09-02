@@ -1,26 +1,31 @@
 // Spoken word detector.
 //
 // Records short clips from your microphone and trains a small neural net, in
-// the background, to recognize one spoken word. Once the net is confident
-// enough, hearing that word plays a beep.
+// the background, to recognize the words you name. Every word you teach it
+// gets its own output on the shared network. Hearing the wake word plays a
+// beep; every other word just lights up in the list.
 //
 // Controls:
-//   SPACE  start recording, press again to stop
-//   P      save the recording as a positive example (the word to detect)
-//   N      save it as a negative example (silence, noise, other words)
+//   Hold ENTER   record, release to stop. The clip plays straight back.
+//   Then type    the word that was just said, ENTER to save it
+//   "noise"      label a clip that is not a word at all
+//   Empty + ENTER  save as a negative sample, teaching no output at all
+//   BACKSPACE    delete a character, or discard the recording when empty
+//   ESC or the X button   discard the recording
 //   Close the window to quit
 //
-// A red dot in the top-right corner shows while recording. Record a dozen or
-// so examples of each kind, keeping them short. Training runs continuously and
-// prints its loss and example counts to the console.
+// Record a dozen or so examples of each word, keeping them short, plus a good
+// number of noise clips. Training runs continuously in the background.
 
 from ./random import *;
+from ./image import Image, rgb, COLOR_BLACK, COLOR_WHITE, COLOR_RED, COLOR_GREY;
+from ./monogram_font import Font;
 
 // Constants
 let SAMPLE_RATE = 44100;
 let NUM_CHANNELS = 1;
-let WINDOW_WIDTH = 400;
-let WINDOW_HEIGHT = 300;
+let WINDOW_WIDTH = 760;
+let WINDOW_HEIGHT = 560;
 let FFT_SIZE = 512; // Must be a power of 2
 let NUM_MEL_BINS = 32;
 let PI = 3.141592653589793;
@@ -32,17 +37,65 @@ let MAX_FRAMES = 64;
 let HIDDEN_SIZE = 64;
 let LEARNING_RATE = 0.01;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
-let OUTPUT_SIZE = 1;
 let DETECTION_THRESHOLD = 0.92;
 let NOISE_MAGNITUDE = 0.12;
 let GRADIENT_CLIP_THRESHOLD = 1.0;
 let MAX_ZERO_FRAMES_TO_ADD = 10;
 
-// Helper function to convert RGB values to a 32-bit color
-fun rgb32(r, g, b) {
-    // The alpha channel is set to 0xFF (fully opaque)
-    return 0xFF000000 | (r << 16) | (g << 8) | b;
-}
+// The one word that plays a beep. Every other word you teach is still
+// detected and shown, it just doesn't make a sound.
+let WAKE_WORD = "computer";
+
+// Label for sounds that are not a word at all. It is an ordinary output as
+// far as the network is concerned, and only the display treats it specially:
+// pinned to the bottom of the list and lit in red rather than green.
+let NOISE_WORD = "noise";
+
+// Longest clip that gets kept for playback
+let MAX_RECORD_SECS = 5;
+let MAX_RECORD_SAMPLES = SAMPLE_RATE * MAX_RECORD_SECS;
+
+// Longest label the input box accepts
+let MAX_LABEL_LEN = 16;
+
+// How long a detected word stays lit in the list
+let HIGHLIGHT_MS = 900;
+
+// How often the window is redrawn. Drawing once per block of audio would tie
+// the rate this loop reads the microphone to the rate it can paint, and the
+// reader has to keep up with the input device or the recording gets holes in
+// it. Audio is read every pass; only the painting is paced.
+let DRAW_INTERVAL_MS = 33;
+
+// --- Layout ---
+//
+// The body text is drawn at scale 2 (14x24 per character) and the label box
+// at scale 3, so every position here is in those units.
+let TEXT_SCALE = 2;
+let BOX_SCALE = 3;
+
+let MARGIN = 20;
+let TITLE_Y = 14;
+let STATUS_Y = 46;
+let BOX_Y = 84;
+let BOX_H = 46;
+let XBTN_W = 46;
+let BOX_W = WINDOW_WIDTH - 2 * MARGIN - XBTN_W - 8;
+let XBTN_X = MARGIN + BOX_W + 8;
+let HELP_Y = 142;
+let HELP_Y2 = 168;
+let LIST_Y = 236;
+let ROW_H = 28;
+
+// Where each column of a word's row starts, measured from the margin
+let COL_COUNT = 260;
+let COL_BEEPS = 440;
+let COL_CONF = 560;
+
+let COLOR_BOX = rgb(38, 38, 48);
+let COLOR_XBTN = rgb(170, 45, 45);
+let COLOR_HILITE = rgb(90, 220, 120);
+let COLOR_NOISE_HILITE = rgb(225, 80, 80);
 
 fun random_f32(size, lo, hi) {
     let ba = ByteArray.with_size(size * 4);
@@ -61,23 +114,76 @@ fun random_f32(size, lo, hi) {
 //
 // Both weight matrices are stored row-major in one flat run, so row `r` of W1
 // is the `input_size` floats starting at `r * input_size`.
+//
+// The network starts with no outputs at all and grows one for each word it is
+// taught. See `add_output` for why the words share a network rather than
+// getting one each.
 class MLP {
-    init(self, input_size, hidden_size, output_size) {
+    init(self, input_size, hidden_size) {
         self.input_size = input_size;
         self.hidden_size = hidden_size;
-        self.output_size = output_size;
+        self.output_size = 0;
+
+        // Names of the words, in the same order as the rows of W2
+        self.words = [];
 
         self.W1 = random_f32(hidden_size * input_size, -0.5, 0.5);
         self.b1 = random_f32(hidden_size, -0.5, 0.5);
-        self.W2 = random_f32(output_size * hidden_size, -0.5, 0.5);
-        self.b2 = random_f32(output_size, -0.5, 0.5);
+        self.W2 = ByteArray.with_size(0);
+        self.b2 = ByteArray.with_size(0);
 
         // Held on the model and written in place, so that a training step
         // allocates nothing
         self.z1 = ByteArray.with_size(hidden_size * 4);
         self.a1 = ByteArray.with_size(hidden_size * 4);
         self.d_z1 = ByteArray.with_size(hidden_size * 4);
-        self.d_loss = ByteArray.with_size(output_size * 4);
+        self.d_loss = ByteArray.with_size(0);
+    }
+
+    // Which output stands for a word, or -1 if it has no output yet
+    word_index(self, name) {
+        for (let var i = 0; i < self.words.len; ++i) {
+            if (self.words[i] == name) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // Teach the network one more word by giving it one more output.
+    //
+    // The words share the hidden layer rather than getting a network each,
+    // because that layer is the network: it holds hidden_size * input_size
+    // weights against an output row's hidden_size, so a network per word
+    // would copy 2048 weights to add 64 useful ones, and each copy would
+    // only ever see its own word's recordings. Sharing means every recording
+    // trains the features all the words are recognized from, and a sample of
+    // one word doubles as a negative for the others.
+    //
+    // Growing costs one row: the rows already there keep their weights, so a
+    // new word does not disturb the words already learned. Each output has
+    // its own sigmoid rather than a softmax across them, so hearing nothing
+    // is representable -- every output is simply low -- and the words don't
+    // compete for one pool of probability.
+    add_output(self, name) {
+        let h = self.hidden_size;
+        let o = self.output_size;
+
+        self.W2.resize((o + 1) * h * 4);
+        for (let var c = 0; c < h; ++c) {
+            self.W2.set_f32(o * h + c, rand_float(-0.5, 0.5));
+        }
+
+        self.b2.resize((o + 1) * 4);
+        self.b2.set_f32(o, rand_float(-0.5, 0.5));
+
+        self.d_loss.resize((o + 1) * 4);
+        self.d_loss.set_f32(o, 0.0);
+
+        self.words.push(name);
+        self.output_size = o + 1;
+
+        return o;
     }
 
     // `x` is a ByteArray of input_size float32 values
@@ -317,7 +423,7 @@ fun flatten_and_pad(frames, max_frames, num_bins) {
 
 fun training_actor(detection_actor_id) {
     rand_init($time_current_ms());
-    let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
+    let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE);
 
     let training_data = [];
     let var iteration_count = 0;
@@ -331,18 +437,34 @@ fun training_actor(detection_actor_id) {
     let var avg_loss = nil;
 
     for (let var training_itr = 1;; ++training_itr) {
+        // A sample arrives as [frames, word]. An empty word means the clip is
+        // a negative example: no output should fire for it.
         let msg = $actor_poll();
         if (msg != nil) {
             training_data.push(msg);
-            if (msg[1] == 1.0) {
-                positive_examples_count = positive_examples_count + 1;
-            } else {
+            let word = msg[1];
+
+            if (word == "") {
                 negative_examples_count = negative_examples_count + 1;
+            } else {
+                positive_examples_count = positive_examples_count + 1;
+
+                // A word heard for the first time gets an output of its own
+                if (mlp.word_index(word) < 0) {
+                    mlp.add_output(word);
+                    $println("Learning a new word: \"" + word + "\"");
+                }
             }
+
             $println("Positive samples: " + positive_examples_count.to_s() + ", negative samples: " + negative_examples_count.to_s());
+
+            // The detector needs the new output right away, so that a word
+            // just taught can be recognized before the next model update
+            $actor_send(detection_actor_id, mlp);
         }
 
-        if (training_data.len > 0) {
+        // Nothing to learn until at least one word has an output
+        if (training_data.len > 0 && mlp.output_size > 0) {
             let idx = rand_int(0, training_data.len);
             let sample = training_data[idx];
             let frames = sample[0];
@@ -351,7 +473,7 @@ fun training_actor(detection_actor_id) {
             let var current_frames = frames;
 
             // For negative examples, randomly truncate the frames
-            if (label == 0.0 && frames.len > 1) {
+            if (label == "" && frames.len > 1) {
                 let max_len = frames.len;
                 let var start_idx = rand_int(0, max_len);
                 let var end_idx = rand_int(start_idx, max_len);
@@ -370,7 +492,7 @@ fun training_actor(detection_actor_id) {
             }
 
             // For negative examples, randomly append zero frames
-            if (label == 0.0 && MAX_ZERO_FRAMES_TO_ADD > 0) {
+            if (label == "" && MAX_ZERO_FRAMES_TO_ADD > 0) {
                 let num_zero_frames = rand_int(0, MAX_ZERO_FRAMES_TO_ADD + 1);
                 if (num_zero_frames > 0) {
                     let zero_frame = Array.with_size(NUM_MEL_BINS, 0.0);
@@ -381,7 +503,7 @@ fun training_actor(detection_actor_id) {
             }
 
             // With a small probability, for negative examples only, randomly permute the frames
-            if (label == 0.0 && current_frames.len > 1 && rand_float(0.0, 1.0) < 0.30) {
+            if (label == "" && current_frames.len > 1 && rand_float(0.0, 1.0) < 0.30) {
                 let n = current_frames.len;
                 for (let var i = n - 1; i > 0; --i) {
                     let j = rand_int(0, i + 1);
@@ -399,15 +521,27 @@ fun training_actor(detection_actor_id) {
                 x.set_f32(i, x.get_f32(i) * scale_factor + rand_float(-0.5, 0.5) * NOISE_MAGNITUDE);
             }
 
-            let y_true = [label];
+            // One target per word: 1 for the word that was said, 0 for the
+            // rest. A negative sample leaves every target at 0, and a sample
+            // of one word is a negative for all the others.
+            let y_true = Array.with_size(mlp.output_size, 0.0);
+            let label_idx = mlp.word_index(label);
+            if (label_idx >= 0) {
+                y_true[label_idx] = 1.0;
+            }
 
             let y_pred = mlp.forward(x);
             mlp.backward(y_true, y_pred);
             mlp.update(x, LEARNING_RATE);
 
-            let p = y_pred[0].max(1e-9).min(1.0 - 1e-9);
-            let y = y_true[0];
-            let loss = -(y * p.ln() + (1.0 - y) * (1.0 - p).ln());
+            // Cross-entropy averaged over the outputs
+            let var loss = 0.0;
+            for (let var o = 0; o < mlp.output_size; ++o) {
+                let p = y_pred[o].max(1e-9).min(1.0 - 1e-9);
+                let y = y_true[o];
+                loss = loss - (y * p.ln() + (1.0 - y) * (1.0 - p).ln());
+            }
+            loss = loss / mlp.output_size.to_f();
 
             // The first example has nothing to average with, so it starts
             // the average off rather than being blended into zero
@@ -421,6 +555,7 @@ fun training_actor(detection_actor_id) {
                 $println(
                     "Itr#" + training_itr.to_s() +
                     ", loss: " + avg_loss.format_decimals(5) +
+                    ", words: " + mlp.output_size.to_s() +
                     ", pos: " +
                     positive_examples_count.to_s() +
                     ", neg: " +
@@ -441,11 +576,22 @@ fun training_actor(detection_actor_id) {
 }
 
 fun detection_actor(beep_actor_id) {
+    // The main actor draws what was heard, so it is told too
+    let main_id = $actor_parent();
+
     let var current_mlp = nil;
     let var frame_buffer = []; // To store recent magnitudes
 
     while (true) {
-        let msg = $actor_poll(); // Blocks until a message is received
+        let msg = $actor_poll(); // Returns nil when nothing is waiting
+
+        // With nothing to do, wait rather than spin. Predicting here instead
+        // would re-run the network over frames that have not changed, which
+        // burns a core for nothing and slows the actor that draws the window.
+        if (msg == nil) {
+            $actor_sleep(2);
+            continue;
+        }
 
         if (msg instanceof MLP) {
             // Received a new MLP model from the training actor
@@ -473,14 +619,35 @@ fun detection_actor(beep_actor_id) {
             assert(frame_buffer.len <= MAX_FRAMES);
         }
 
-        // Only make a prediction if we have enough frames
-        if (msg == nil && current_mlp != nil && frame_buffer.len == MAX_FRAMES) {
+        // One prediction per frame of audio that arrives, once there are
+        // enough frames to fill the window the network expects
+        if (msg instanceof Array && current_mlp != nil && frame_buffer.len == MAX_FRAMES) {
             let x = flatten_and_pad(frame_buffer, MAX_FRAMES, NUM_MEL_BINS);
             let y_pred = current_mlp.forward(x);
 
-            if (y_pred[0] > DETECTION_THRESHOLD) {
-                $println("DETECTED: " + y_pred[0].format_decimals(1));
-                $actor_send(beep_actor_id, "detected");
+            // Every output is its own detector, so the loudest one above the
+            // threshold wins rather than the outputs being compared as a
+            // distribution
+            let var best = -1;
+            let var best_conf = DETECTION_THRESHOLD;
+            for (let var o = 0; o < y_pred.len; ++o) {
+                if (y_pred[o] > best_conf) {
+                    best_conf = y_pred[o];
+                    best = o;
+                }
+            }
+
+            if (best >= 0) {
+                let word = current_mlp.words[best];
+
+                // Detections are shown by lighting the word up in the list
+                // rather than printed, since they arrive many times a second
+                $actor_send(main_id, [word, best_conf]);
+
+                // Only the wake word makes a sound
+                if (word == WAKE_WORD) {
+                    $actor_send(beep_actor_id, "detected");
+                }
             }
         }
     }
@@ -504,12 +671,23 @@ fun beep_actor() {
     let var samples_in_state = 0;
     let var time_in_beep = 0;
 
+    // A clip waiting to be played back, and how far through it we are
+    let var play_clip = nil;
+    let var play_pos = 0;
+
     loop {
         let msg = $actor_recv();
 
         if (msg == true || msg == false) {
             is_recording = msg;
             last_beep_time = $time_current_ms();
+            continue;
+        }
+
+        // The clip that was just recorded, to be played straight back
+        if (msg instanceof ByteArray) {
+            play_clip = msg;
+            play_pos = 0;
             continue;
         }
 
@@ -533,7 +711,15 @@ fun beep_actor() {
             for (let var i = 0; i < num_samples_needed; ++i) {
                 let var sample_val = 0.0;
 
-                if (beep_state == 1 || beep_state == 3 || beep_state == 5) { // Beeping
+                if (play_clip != nil) { // Playing back a recording
+                    sample_val = play_clip.get_f32(play_pos);
+                    play_pos = play_pos + 1;
+                    if (play_pos >= play_clip.num_f32()) {
+                        play_clip = nil;
+                        play_pos = 0;
+                    }
+                }
+                else if (beep_state == 1 || beep_state == 3 || beep_state == 5) { // Beeping
                     let period_samples = (SAMPLE_RATE.to_f() / beep_freq).trunc();
                     let pos_in_period = time_in_beep % period_samples;
                     let half_period = (period_samples / 2).trunc();
@@ -569,16 +755,47 @@ fun beep_actor() {
     }
 }
 
+// --- Drawing helpers ---
+
+fun draw_text(img, font, x, y, text) {
+    for (let var i = 0; i < text.len; ++i) {
+        font.draw_char(img, x + i * font.char_w, y, text.char_at(i));
+    }
+}
+
+// The label being typed is kept as an array of one-character strings,
+// because a string has no way to drop its last character
+fun draw_chars(img, font, x, y, chars) {
+    for (let var i = 0; i < chars.len; ++i) {
+        font.draw_char(img, x + i * font.char_w, y, chars[i]);
+    }
+}
+
+fun chars_to_str(chars) {
+    let var s = "";
+    for (let var i = 0; i < chars.len; ++i) {
+        s = s + chars[i];
+    }
+    return s;
+}
+
+fun point_in_rect(px, py, x, y, w, h) {
+    return px >= x && px < x + w && py >= y && py < y + h;
+}
+
 fun print_usage() {
     $println("Word detector");
     $println("");
-    $println("  SPACE  start recording, press again to stop");
-    $println("  P      save the recording as a positive example (the word to detect)");
-    $println("  N      save it as a negative example (silence, noise, other words)");
+    $println("  Hold ENTER to record, release to stop. The clip plays back.");
+    $println("  Then type the word that was said and press ENTER to save it");
+    $println("  Type \"" + NOISE_WORD + "\" for a clip that is not a word at all");
+    $println("  Press ENTER on an empty box to save a negative sample");
+    $println("  BACKSPACE deletes a character, or discards the clip when empty");
+    $println("  ESC or the X button discards the clip");
     $println("  Close the window to quit");
     $println("");
-    $println("Record a dozen or so short examples of each kind. Training runs");
-    $println("continuously, and a beep plays once the word is detected.");
+    $println("Every word you name gets its own output on one shared network.");
+    $println("Only \"" + WAKE_WORD + "\" plays a beep; the others just light up.");
     $println("");
 }
 
@@ -596,14 +813,53 @@ fun main() {
     let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
     imag_parts.zero_fill();
 
-    let frame_buffer = ByteArray.with_size(WINDOW_WIDTH * WINDOW_HEIGHT * 4);
+    let screen = Image(WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    // Characters are blitted opaquely, so each font carries the background it
+    // will be drawn on
+    let font = Font(TEXT_SCALE, COLOR_WHITE, COLOR_BLACK);
+    let font_dim = Font(TEXT_SCALE, COLOR_GREY, COLOR_BLACK);
+    let font_box = Font(BOX_SCALE, COLOR_WHITE, COLOR_BOX);
+    let font_btn = Font(BOX_SCALE, COLOR_WHITE, COLOR_XBTN);
+    let font_lit = Font(TEXT_SCALE, COLOR_BLACK, COLOR_HILITE);
+    let font_noise_lit = Font(TEXT_SCALE, COLOR_WHITE, COLOR_NOISE_HILITE);
 
     let var running = true;
     let var recording = false;
+
+    // A clip that has been recorded and is waiting to be named
+    let var labeling = false;
     let var recorded_frames = [];
+    let var label_chars = [];
+
+    // The raw samples of the clip, kept so it can be played back. Allocated
+    // once at its largest, with the part actually filled tracked alongside.
+    let recorded_audio = ByteArray.with_size(MAX_RECORD_SAMPLES * 4);
+    let var recorded_len = 0;
+
+    // Words that have samples, only for the display. The network keeps its
+    // own copy in output order.
+    let var words = [];
+    let var counts = [];
+    let var neg_count = 0;
+
+    // The word the detector reported last, and when it said so
+    let var last_word = nil;
+    let var last_conf = 0.0;
+    let var last_detect_ms = 0;
+
+    let var last_draw_ms = 0;
 
     while (running) {
         $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
+
+        // Keep the raw samples for playback. This has to happen before the
+        // window and the FFT below, which both rewrite real_parts in place.
+        if (recording && recorded_len + FFT_SIZE <= MAX_RECORD_SAMPLES) {
+            recorded_audio.memcpy(recorded_len * 4, real_parts, 0, FFT_SIZE * 4);
+            recorded_len = recorded_len + FFT_SIZE;
+        }
+
         imag_parts.zero_fill();
         hanning_window(real_parts);
         fft(real_parts, imag_parts, false);
@@ -615,54 +871,215 @@ fun main() {
             recorded_frames.push(magnitudes);
         }
 
-        frame_buffer.zero_fill();
-        if (recording) {
-            let cx = WINDOW_WIDTH - 30;
-            let cy = 30;
-            let radius = 20;
-            for (let var y = cy - radius; y < cy + radius; ++y) {
-                for (let var x = cx - radius; x < cx + radius; ++x) {
-                    let dx = x - cx;
-                    let dy = y - cy;
-                    if (dx*dx + dy*dy < radius*radius) {
-                        let pixel_idx = (y * WINDOW_WIDTH + x);
-                        frame_buffer.set_u32(pixel_idx, rgb32(255, 0, 0));
-                    }
+        let now = $time_current_ms();
+
+        // --- Draw ---
+        //
+        // Paced, so that reading the microphone is not tied to painting
+        if (now - last_draw_ms >= DRAW_INTERVAL_MS) {
+            last_draw_ms = now;
+
+            screen.clear(COLOR_BLACK);
+            draw_text(screen, font, MARGIN, TITLE_Y, "WORD DETECTOR");
+
+            if (recording) {
+                screen.fill_circle(WINDOW_WIDTH - 44, TITLE_Y + 12, 13, COLOR_RED);
+                draw_text(screen, font, MARGIN, STATUS_Y, "Recording, release ENTER to stop");
+            } else if (labeling) {
+                draw_text(screen, font, MARGIN, STATUS_Y, "What word was that? ENTER saves it");
+                draw_text(screen, font_dim, MARGIN, HELP_Y, "empty + ENTER = negative sample");
+                draw_text(screen, font_dim, MARGIN, HELP_Y2, "BACKSPACE / ESC / X = discard");
+            } else {
+                draw_text(screen, font, MARGIN, STATUS_Y, "Hold ENTER to record a sample");
+            }
+
+            if (labeling) {
+                screen.fill_rect(MARGIN, BOX_Y, BOX_W, BOX_H, COLOR_BOX);
+                draw_chars(screen, font_box, MARGIN + 8, BOX_Y + 5, label_chars);
+
+                // Caret
+                screen.fill_rect(
+                    MARGIN + 8 + label_chars.len * font_box.char_w, BOX_Y + 6,
+                    3, font_box.char_h, COLOR_WHITE
+                );
+
+                screen.fill_rect(XBTN_X, BOX_Y, XBTN_W, BOX_H, COLOR_XBTN);
+                font_btn.draw_char(screen, XBTN_X + 12, BOX_Y + 5, "X");
+            }
+
+            // The words that have samples, lit up while one is being heard
+            draw_text(screen, font_dim, MARGIN, LIST_Y - 30,
+                      "WORDS: " + words.len.to_s() + "   NEGATIVE SAMPLES: " + neg_count.to_s());
+
+            if (words.len == 0) {
+                draw_text(screen, font_dim, MARGIN, LIST_Y, "none yet");
+            }
+
+            // Noise is kept at the bottom, whenever it was first recorded
+            let order = [];
+            for (let var i = 0; i < words.len; ++i) {
+                if (words[i] != NOISE_WORD) order.push(i);
+            }
+            for (let var i = 0; i < words.len; ++i) {
+                if (words[i] == NOISE_WORD) order.push(i);
+            }
+
+            for (let var row = 0; row < order.len; ++row) {
+                let i = order[row];
+                let y = LIST_Y + row * ROW_H;
+                let noise = words[i] == NOISE_WORD;
+                let lit = (words[i] == last_word) && (now - last_detect_ms < HIGHLIGHT_MS);
+
+                if (lit) {
+                    screen.fill_rect(
+                        MARGIN - 6, y - 2, WINDOW_WIDTH - 2 * MARGIN + 12, ROW_H,
+                        noise? COLOR_NOISE_HILITE : COLOR_HILITE
+                    );
+                }
+
+                let var f = font;
+                if (lit) {
+                    f = noise? font_noise_lit : font_lit;
+                } else if (noise) {
+                    f = font_dim;
+                }
+
+                draw_text(screen, f, MARGIN, y, words[i]);
+                draw_text(screen, f, MARGIN + COL_COUNT, y, counts[i].to_s() + " samples");
+
+                if (words[i] == WAKE_WORD) {
+                    draw_text(screen, lit? font_lit : font_dim, MARGIN + COL_BEEPS, y, "beeps");
+                }
+                if (lit) {
+                    draw_text(screen, f, MARGIN + COL_CONF, y, last_conf.format_decimals(2));
                 }
             }
+
+            $window_draw_frame(window_id, screen.bytes);
         }
 
-        $window_draw_frame(window_id, frame_buffer);
-
-        let event = $actor_poll();
-        if (event instanceof UIEvent) {
-            if (event.kind == "CLOSE_WINDOW") {
-                running = false;
+        // --- Events ---
+        //
+        // Every event waiting is handled, not one per frame. This loop runs at
+        // the rate audio arrives, about 86 times a second, and moving the mouse
+        // over the window produces events faster than that. Taking one at a
+        // time leaves the rest queued, so the backlog grows without bound, the
+        // input falls further and further behind, and the window stops looking
+        // like it is responding at all.
+        loop {
+            let event = $actor_poll();
+            if (event == nil) {
+                break;
             }
 
-            if (event.kind == "KEY_DOWN") {
-                if (event.key == "SPACE") {
-                    recording = !recording;
-                    $actor_send(beep_actor_id, recording);
-                    if (!recording && recorded_frames.len > 0) {
-                        $println("Recording stopped. Press P for positive, N for negative.");
-                    } else if (recording) {
-                        $println("Recording started...");
+            // The detector reports what it heard, as [word, confidence]
+            if (event instanceof Array) {
+                last_word = event[0];
+                last_conf = event[1];
+                last_detect_ms = now;
+            }
+
+            if (event instanceof UIEvent) {
+                if (event.kind == "CLOSE_WINDOW") {
+                    running = false;
+                }
+
+                if (event.kind == "KEY_DOWN" && event.key == "RETURN") {
+                    if (labeling) {
+                        // Words are looked up by name, so the case and any
+                        // stray spaces have to be taken off first, or
+                        // "Computer" and "computer " would each get an
+                        // output of their own
+                        let word = chars_to_str(label_chars).trim().lower();
+                        $actor_send(trainer_id, [recorded_frames, word]);
+
+                        if (word == "") {
+                            neg_count = neg_count + 1;
+                            $println("Saved a negative sample.");
+                        } else {
+                            let var idx = -1;
+                            for (let var i = 0; i < words.len; ++i) {
+                                if (words[i] == word) idx = i;
+                            }
+                            if (idx < 0) {
+                                words.push(word);
+                                counts.push(1);
+                            } else {
+                                counts[idx] = counts[idx] + 1;
+                            }
+                            $println("Saved a sample of \"" + word + "\".");
+                        }
+
+                        labeling = false;
+                        recorded_frames = [];
+                        label_chars = [];
+                    }
+                    else if (!recording) {
+                        // Held down, so the repeats this produces are ignored
+                        recording = true;
+                        recorded_frames = [];
+                        recorded_len = 0;
+                        $actor_send(beep_actor_id, true);
+                        $println("Recording...");
+                    }
+                }
+
+                if (event.kind == "KEY_UP" && event.key == "RETURN" && recording) {
+                    recording = false;
+                    $actor_send(beep_actor_id, false);
+
+                    if (recorded_frames.len > 0) {
+                        labeling = true;
+                        label_chars = [];
+
+                        // Play the clip back, so you can hear what was caught.
+                        // Trimmed to what was filled, because the buffer is
+                        // sized for the longest clip allowed.
+                        if (recorded_len > 0) {
+                            let clip = ByteArray.with_size(recorded_len * 4);
+                            clip.memcpy(0, recorded_audio, 0, recorded_len * 4);
+                            $actor_send(beep_actor_id, clip);
+                        }
+                    } else {
                         recorded_frames = [];
                     }
-                } else if (recorded_frames.len > 0) {
-                    if (event.key == "P") {
-                        $println("Saved as positive example.");
-                        $actor_send(trainer_id, [recorded_frames, 1.0]);
+                }
+
+                if (labeling && event.kind == "KEY_DOWN") {
+                    // Backspace deletes a character, and discards the clip
+                    // once there is nothing left to delete
+                    if (event.key == "BACKSPACE") {
+                        if (label_chars.len > 0) {
+                            label_chars.pop();
+                        } else {
+                            labeling = false;
+                            recorded_frames = [];
+                            $println("Discarded the recording.");
+                        }
+                    }
+
+                    if (event.key == "ESCAPE") {
+                        labeling = false;
                         recorded_frames = [];
-                        recording = false; // Stop recording when labeled
-                        $actor_send(beep_actor_id, recording);
-                    } else if (event.key == "N") {
-                        $println("Saved as negative example.");
-                        $actor_send(trainer_id, [recorded_frames, 0.0]);
+                        label_chars = [];
+                        $println("Discarded the recording.");
+                    }
+                }
+
+                if (labeling && event.kind == "TEXT_INPUT") {
+                    for (let var i = 0; i < event.text.len; ++i) {
+                        if (label_chars.len < MAX_LABEL_LEN) {
+                            label_chars.push(event.text.char_at(i));
+                        }
+                    }
+                }
+
+                if (labeling && event.kind == "MOUSE_DOWN" && event.button == "LEFT") {
+                    if (point_in_rect(event.x, event.y, XBTN_X, BOX_Y, XBTN_W, BOX_H)) {
+                        labeling = false;
                         recorded_frames = [];
-                        recording = false; // Stop recording when labeled
-                        $actor_send(beep_actor_id, recording);
+                        label_chars = [];
+                        $println("Discarded the recording.");
                     }
                 }
             }
@@ -670,4 +1087,7 @@ fun main() {
     }
 }
 
-main();
+// Only run when this is the main unit, so that the network can be imported
+if ($MAIN_UNIT) {
+    main();
+}

@@ -8,6 +8,10 @@ use crate::ast::{AUDIO_NEEDED_ID, AUDIO_DATA_ID};
 use crate::window::with_sdl_context;
 use crate::*;
 
+/// Unread input to hold on to, in callbacks. About 190ms at the 1024-sample
+/// buffer the input device uses.
+const MAX_IN_QUEUE_BUFS: usize = 8;
+
 // --- Audio Output ---
 
 // SDL audio output callback
@@ -271,14 +275,17 @@ impl AudioCallback for InputCB
 
         let state = audio_state_lock.as_mut().unwrap();
 
-        // Clear the samples in the queue
-        // If the thread processing the input falls behind for some reason,
-        // we can't let samples infinitely accumulate in the queue, otherwise
-        // there is some risk that we will never catch up to the backlog
-        state.in_queue.clear();
-
-        // Write new samples to the input queue
+        // Queue the new samples, dropping the oldest once the backlog grows
+        // past the bound. Clearing outright would instead drop whatever the
+        // reader had not taken yet, which puts holes in a recording: readers
+        // take smaller blocks than arrive, 512 against this device's 1024.
         state.in_queue.extend_from_slice(input);
+
+        let max_queue_len = MAX_IN_QUEUE_BUFS * input_len;
+        if state.in_queue.len() > max_queue_len {
+            let excess = state.in_queue.len() - max_queue_len;
+            state.in_queue.drain(0..excess);
+        }
 
         // Send a message to the Plush actor that samples are available
         // For now, device_id is hardcoded to 1 for input
