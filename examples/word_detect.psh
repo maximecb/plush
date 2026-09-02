@@ -409,9 +409,13 @@ fun flatten_and_pad(frames, max_frames, num_bins) {
     let flat = ByteArray.with_size(max_frames * num_bins * 4);
     let num_frames = frames.len.min(max_frames);
 
-    // Write frames in reverse order, so the most recent frames are at the end of the flattened array
+    // Filled from the end backwards, so the most recent frame lands in the
+    // last slot. Counting back from `frames.len` rather than from
+    // `num_frames` matters when a recording is longer than the window: the
+    // detector's window always holds the newest frames, and a training clip
+    // has to be presented the same way round or the two never line up.
     for (let var i = 0; i < num_frames; ++i) {
-        let frame = frames[num_frames - 1 - i]; // Get frames in reverse chronological order
+        let frame = frames[frames.len - 1 - i]; // Get frames in reverse chronological order
         let flat_start_idx = (max_frames - 1 - i) * num_bins; // Calculate target index in flat array
         for (let var j = 0; j < num_bins; ++j) {
             flat.set_f32(flat_start_idx + j, frame[j]);
