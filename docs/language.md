@@ -373,6 +373,7 @@ from ./font import *;
     -   `set_u32(index, value)`: Treat the byte array as an array of u32 values and write the element at the given index.
     -   `get_f32(index)`: Treat the byte array as an array of f32 values and read the element at the given index.
     -   `set_f32(index, value)`: Treat the byte array as an array of f32 values and write the element at the given index.
+    -   `dot_f32(idx_a, stride_a, b, idx_b, stride_b, count)`: Dot product of two runs of `f32` values, `count` elements long. An `f64` accumulator is used, so the result is more accurate than the same sum done in `f32`.
     -   `num_u32()`: How many `u32` values can fit in this `ByteArray`. Size must be divisible by 4.
     -   `num_f32()`: How many `f32` values can fit in this `ByteArray`. Size must be divisible by 4.
     -   `memcpy(dst_idx, src_bytes, src_idx, len)`: Copies a block of memory from a source `ByteArray` to this one.

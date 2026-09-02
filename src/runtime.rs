@@ -497,6 +497,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "set_u32") => ba_set_u32,
         (Type::ByteArray, "get_f32") => ba_get_f32,
         (Type::ByteArray, "set_f32") => ba_set_f32,
+        (Type::ByteArray, "dot_f32") => ba_dot_f32,
         (Type::ByteArray, "num_u32") => ba_num_u32,
         (Type::ByteArray, "num_f32") => ba_num_u32,
         (Type::ByteArray, "memcpy") => ba_memcpy,

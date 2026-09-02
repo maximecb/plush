@@ -288,6 +288,135 @@ pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Resu
     Ok(Value::NIL)
 }
 
+/// How many independent accumulators the dot product kernel keeps.
+///
+/// One accumulator would make every add wait for the previous one. Splitting
+/// the sum into chains that only meet at the end removes that dependency, and
+/// shortens the chain each rounding error travels down. Eight measured 11%
+/// ahead of four on an 8192-element product, and sixteen fell back behind.
+///
+/// LLVM compiles this to eight scalar chains, not vector adds: it won't pack
+/// a widening f32-to-f64 accumulate on its own. That leaves four FP ops per
+/// element against four pipes, and the loop measures at the one element per
+/// cycle this predicts. It's the arithmetic that runs out first, not the
+/// loads -- the rate holds from a 2 KB working set to a 512 KB one.
+const DOT_UNROLL: usize = 8;
+
+// The accumulators are folded together in pairs, which needs a count that
+// halves evenly
+const _: () = assert!(DOT_UNROLL.is_power_of_two());
+
+/// Sum of the products of `num` pairs of f32 values, taken `stride` elements
+/// apart in each operand. Both slices start at the first element to be read
+/// and end at the last, so the indices below are in bounds.
+///
+/// The products are formed in f64. Two 24-bit significands multiply to 48
+/// bits, which an f64 holds exactly, so only the sums round, at f64
+/// precision. The accuracy is free: the loads have to widen either way.
+///
+/// `inline(always)` so that the unit-stride caller's literal strides fold
+/// the index arithmetic away into contiguous loads.
+#[inline(always)]
+fn dot_f32_kernel(a: &[f32], a_stride: usize, b: &[f32], b_stride: usize, num: usize) -> f64
+{
+    let mut acc = [0.0f64; DOT_UNROLL];
+
+    let mut i = 0;
+    while i + DOT_UNROLL <= num {
+        for k in 0..DOT_UNROLL {
+            acc[k] += a[(i + k) * a_stride] as f64 * b[(i + k) * b_stride] as f64;
+        }
+        i += DOT_UNROLL;
+    }
+
+    // Folded in pairs, halving the accumulators each round, which keeps the
+    // tree of additions shallow. Both bounds are constants, so it is free
+    let mut width = DOT_UNROLL;
+    while width > 1 {
+        width /= 2;
+        for k in 0..width {
+            acc[k] += acc[k + width];
+        }
+    }
+    let mut sum = acc[0];
+
+    // The elements left over when the count is not a multiple of the unroll
+    while i < num {
+        sum += a[i * a_stride] as f64 * b[i * b_stride] as f64;
+        i += 1;
+    }
+
+    sum
+}
+
+/// Dot product of two runs of f32 values, each described by a start index,
+/// a stride, and a shared element count. The two runs may live in the same
+/// bytearray, and are only read.
+pub fn ba_dot_f32(
+    actor: &mut Actor,
+    a: Value,
+    a_idx: Value,
+    a_stride: Value,
+    b: Value,
+    b_idx: Value,
+    b_stride: Value,
+    num: Value,
+) -> Result<Value, String>
+{
+    let a_ba = unwrap_ba!(a);
+    let b_ba = unwrap_ba!(b);
+    let a_idx = unwrap_usize!(a_idx);
+    let a_stride = unwrap_usize!(a_stride);
+    let b_idx = unwrap_usize!(b_idx);
+    let b_stride = unwrap_usize!(b_stride);
+    let num = unwrap_usize!(num);
+
+    if a_stride < 1 || b_stride < 1 {
+        return Err("expected strides to be at least 1".into());
+    }
+
+    if num == 0 {
+        return Ok(actor.float64(0.0));
+    }
+
+    // The span an operand covers, in f32 elements. Checked, because a large
+    // count times a large stride would otherwise wrap past the bounds test
+    fn span(idx: usize, stride: usize, num: usize) -> Option<usize>
+    {
+        (num - 1).checked_mul(stride)?.checked_add(idx)?.checked_add(1)
+    }
+
+    let a_span = span(a_idx, a_stride, num).ok_or("dot_f32 index range overflows")?;
+    let b_span = span(b_idx, b_stride, num).ok_or("dot_f32 index range overflows")?;
+
+    // Bounds are settled once here, for the whole run
+    let a_len = a_ba.num_bytes() / size_of::<f32>();
+    let b_len = b_ba.num_bytes() / size_of::<f32>();
+
+    if a_span > a_len || b_span > b_len {
+        return Err(format!(
+            "dot_f32 reads f32 elements up to {} and {}, past the ends at {} and {}",
+            a_span - 1, b_span - 1, a_len, b_len
+        ));
+    }
+
+    // Trimmed to exactly the elements that will be read, so that the
+    // unit-stride case gets a slice as long as the count and the kernel's
+    // bounds checks drop out
+    let a_slice = unsafe { a_ba.get_slice::<f32>(a_idx, a_span - a_idx) };
+    let b_slice = unsafe { b_ba.get_slice::<f32>(b_idx, b_span - b_idx) };
+
+    // Contiguous operands get their own copy of the kernel, with the strides
+    // as constants. This is the case worth being fast.
+    let sum = if a_stride == 1 && b_stride == 1 {
+        dot_f32_kernel(a_slice, 1, b_slice, 1, num)
+    } else {
+        dot_f32_kernel(a_slice, a_stride, b_slice, b_stride, num)
+    };
+
+    Ok(actor.float64(sum))
+}
+
 pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> Result<Value, String>
 {
     let ba = unwrap_ba!(ba);
@@ -331,3 +460,73 @@ pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: V
     Ok(Value::NIL)
 }
 
+
+#[cfg(test)]
+mod tests
+{
+    use super::*;
+
+    /// Values that are not exactly representable, so that a kernel which
+    /// summed them in the wrong precision would show it
+    fn sample(n: usize) -> (Vec<f32>, Vec<f32>)
+    {
+        let mut a = Vec::with_capacity(n);
+        let mut b = Vec::with_capacity(n);
+        for i in 0..n {
+            a.push((i as f32) * 0.1 - 3.7);
+            b.push(1.0 / ((i % 13) as f32 + 1.3));
+        }
+        (a, b)
+    }
+
+    /// The portable kernel against a plain running sum, at the same
+    /// precision. Only the order of the additions differs, so a length
+    /// this short leaves them equal.
+    #[test]
+    fn kernel_matches_simple_sum()
+    {
+        for n in [0usize, 1, 3, 7, 8, 9, 16, 31] {
+            let (a, b) = sample(n);
+
+            let mut expected = 0.0f64;
+            for i in 0..n {
+                expected += a[i] as f64 * b[i] as f64;
+            }
+
+            let got = dot_f32_kernel(&a, 1, &b, 1, n);
+            let err = (got - expected).abs();
+            assert!(err <= 1e-12 * expected.abs().max(1.0), "n={}, {} vs {}", n, got, expected);
+        }
+    }
+
+    /// Reading with a stride finds the same values as a contiguous read of
+    /// the elements it lands on
+    #[test]
+    fn strided_matches_contiguous()
+    {
+        for n in [1usize, 7, 8, 9, 100, 1013] {
+            let (a, b) = sample(n * 3);
+
+            let picked_a: Vec<f32> = (0..n).map(|i| a[i * 3]).collect();
+            let picked_b: Vec<f32> = (0..n).map(|i| b[i * 2]).collect();
+
+            let expected = dot_f32_kernel(&picked_a, 1, &picked_b, 1, n);
+            let got = dot_f32_kernel(&a, 3, &b, 2, n);
+
+            assert_eq!(got, expected, "n={}", n);
+        }
+    }
+
+    /// Accumulating in f64 keeps a sum that f32 could not hold. The
+    /// products here are exact, and so is their f64 sum, so this asks for
+    /// the exact answer.
+    #[test]
+    fn accumulates_in_f64()
+    {
+        // 2^24 + 1 is the first integer an f32 cannot represent
+        let a = [16777216.0f32, 1.0];
+        let b = [1.0f32, 1.0];
+
+        assert_eq!(dot_f32_kernel(&a, 1, &b, 1, 2), 16777217.0);
+    }
+}

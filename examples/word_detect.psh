@@ -44,182 +44,123 @@ fun rgb32(r, g, b) {
     return 0xFF000000 | (r << 16) | (g << 8) | b;
 }
 
-fun random_matrix(rows, cols) {
-    let m = Array.with_size(rows, nil);
-    for (let var r = 0; r < rows; ++r) {
-        let row = Array.with_size(cols, 0.0);
-        for (let var c = 0; c < cols; ++c) {
-            row[c] = rand_float(-0.5, 0.5);
-        }
-        m[r] = row;
-    }
-    return m;
-}
-
-fun random_vector(size) {
-    let v = Array.with_size(size, 0.0);
+fun random_f32(size, lo, hi) {
+    let ba = ByteArray.with_size(size * 4);
     for (let var i = 0; i < size; ++i) {
-        v[i] = rand_float(-0.5, 0.5);
+        ba.set_f32(i, rand_float(lo, hi));
     }
-    return v;
-}
-
-// --- Matrix/Vector Math ---
-fun mat_vec_mult(m, v) {
-    let rows = m.len;
-    let cols = m[0].len;
-    assert(cols == v.len);
-    let result = Array.with_size(rows, 0.0);
-    for (let var r = 0; r < rows; ++r) {
-        let var sum = 0.0;
-        for (let var c = 0; c < cols; ++c) {
-            sum = sum + m[r][c] * v[c];
-        }
-        result[r] = sum;
-    }
-    return result;
-}
-
-fun vec_add(v1, v2) {
-    assert(v1.len == v2.len);
-    let result = Array.with_size(v1.len, 0.0);
-    for (let var i = 0; i < v1.len; ++i) {
-        result[i] = v1[i] + v2[i];
-    }
-    return result;
-}
-
-fun vec_sub(v1, v2) {
-    assert(v1.len == v2.len);
-    let result = Array.with_size(v1.len, 0.0);
-    for (let var i = 0; i < v1.len; ++i) {
-        result[i] = v1[i] - v2[i];
-    }
-    return result;
-}
-
-fun vec_elem_mult(v1, v2) {
-    assert(v1.len == v2.len);
-    let result = Array.with_size(v1.len, 0.0);
-    for (let var i = 0; i < v1.len; ++i) {
-        result[i] = v1[i] * v2[i];
-    }
-    return result;
-}
-
-fun vec_outer_prod(v1, v2) {
-    let m = Array.with_size(v1.len, nil);
-    for (let var r = 0; r < v1.len; ++r) {
-        let row = Array.with_size(v2.len, 0.0);
-        for (let var c = 0; c < v2.len; ++c) {
-            row[c] = v1[r] * v2[c];
-        }
-        m[r] = row;
-    }
-    return m;
-}
-
-fun mat_transpose(m) {
-    let rows = m.len;
-    let cols = m[0].len;
-    let t = Array.with_size(cols, nil);
-    for (let var c = 0; c < cols; ++c) {
-        let row = Array.with_size(rows, 0.0);
-        for (let var r = 0; r < rows; ++r) {
-            row[r] = m[r][c];
-        }
-        t[c] = row;
-    }
-    return t;
-}
-
-fun mat_update(m, grad, learning_rate) {
-    let rows = m.len;
-    let cols = m[0].len;
-    for (let var r = 0; r < rows; ++r) {
-        for (let var c = 0; c < cols; ++c) {
-            m[r][c] = m[r][c] - learning_rate * grad[r][c];
-        }
-    }
-}
-
-fun vec_update(v, grad, learning_rate) {
-    for (let var i = 0; i < v.len; ++i) {
-        v[i] = v[i] - learning_rate * grad[i];
-    }
-}
-
-// --- Activation Functions ---
-fun relu(v) {
-    let result = Array.with_size(v.len, 0.0);
-    for (let var i = 0; i < v.len; ++i) {
-        result[i] = v[i].max(0.0);
-    }
-    return result;
-}
-
-fun relu_derivative(v) {
-    let result = Array.with_size(v.len, 0.0);
-    for (let var i = 0; i < v.len; ++i) {
-        if (v[i] > 0.0) {
-            result[i] = 1.0;
-        } else {
-            result[i] = 0.0;
-        }
-    }
-    return result;
-}
-
-fun sigmoid(v) {
-    let result = Array.with_size(v.len, 0.0);
-    for (let var i = 0; i < v.len; ++i) {
-        result[i] = 1.0 / (1.0 + (-v[i]).exp());
-    }
-    return result;
+    return ba;
 }
 
 // --- MLP Definition ---
+//
+// Every weight and activation lives in a ByteArray of float32 rather than an
+// array of boxed floats. That is what lets the layers be written as calls to
+// `dot_f32`, which sums a run of float32 products on the host instead of one
+// bytecode multiply and add at a time.
+//
+// Both weight matrices are stored row-major in one flat run, so row `r` of W1
+// is the `input_size` floats starting at `r * input_size`.
 class MLP {
     init(self, input_size, hidden_size, output_size) {
-        self.W1 = random_matrix(hidden_size, input_size);
-        self.b1 = random_vector(hidden_size);
-        self.W2 = random_matrix(output_size, hidden_size);
-        self.b2 = random_vector(output_size);
-        self.z1 = nil;
-        self.a1 = nil;
+        self.input_size = input_size;
+        self.hidden_size = hidden_size;
+        self.output_size = output_size;
+
+        self.W1 = random_f32(hidden_size * input_size, -0.5, 0.5);
+        self.b1 = random_f32(hidden_size, -0.5, 0.5);
+        self.W2 = random_f32(output_size * hidden_size, -0.5, 0.5);
+        self.b2 = random_f32(output_size, -0.5, 0.5);
+
+        // Held on the model and written in place, so that a training step
+        // allocates nothing
+        self.z1 = ByteArray.with_size(hidden_size * 4);
+        self.a1 = ByteArray.with_size(hidden_size * 4);
+        self.d_z1 = ByteArray.with_size(hidden_size * 4);
+        self.d_loss = ByteArray.with_size(output_size * 4);
     }
 
+    // `x` is a ByteArray of input_size float32 values
     forward(self, x) {
-        self.z1 = vec_add(mat_vec_mult(self.W1, x), self.b1);
-        self.a1 = relu(self.z1);
-        let z2 = vec_add(mat_vec_mult(self.W2, self.a1), self.b2);
-        let y_pred = sigmoid(z2);
+        let n = self.input_size;
+        let h = self.hidden_size;
+        let W1 = self.W1;
+        let b1 = self.b1;
+        let z1 = self.z1;
+        let a1 = self.a1;
+
+        // Hidden layer: one row of W1 against the input, then ReLU
+        for (let var r = 0; r < h; ++r) {
+            let z = W1.dot_f32(r * n, 1, x, 0, 1, n) + b1.get_f32(r);
+            z1.set_f32(r, z);
+            a1.set_f32(r, z.max(0.0));
+        }
+
+        // Output layer, then the sigmoid
+        let y_pred = Array.with_size(self.output_size, 0.0);
+        for (let var o = 0; o < self.output_size; ++o) {
+            let z = self.W2.dot_f32(o * h, 1, a1, 0, 1, h) + self.b2.get_f32(o);
+            y_pred[o] = 1.0 / (1.0 + (-z).exp());
+        }
+
         return y_pred;
     }
 
-    backward(self, x, y_true, y_pred) {
-        let d_loss = vec_sub(y_pred, y_true);
-        let d_W2 = vec_outer_prod(d_loss, self.a1);
-        let d_b2 = d_loss;
-        let W2_T = mat_transpose(self.W2);
-        let d_a1 = mat_vec_mult(W2_T, d_loss);
-        let d_z1 = vec_elem_mult(d_a1, relu_derivative(self.z1));
-        let d_W1 = vec_outer_prod(d_z1, x);
-        let d_b1 = d_z1;
-        return [d_W1, d_b1, d_W2, d_b2];
+    // Leaves the gradients of the pre-activations in d_loss and d_z1. The
+    // weight gradients themselves are outer products, and are never built:
+    // `update` uses each element once, where it is needed.
+    backward(self, y_true, y_pred) {
+        let h = self.hidden_size;
+        let d_loss = self.d_loss;
+
+        for (let var o = 0; o < self.output_size; ++o) {
+            d_loss.set_f32(o, y_pred[o] - y_true[o]);
+        }
+
+        // d_a1 is W2 transposed times d_loss. Column `r` of W2 is a run with
+        // a stride of hidden_size, which dot_f32 reads without transposing.
+        for (let var r = 0; r < h; ++r) {
+            let d_a1 = self.W2.dot_f32(r, h, d_loss, 0, 1, self.output_size);
+
+            // ReLU passes a gradient through only where it was active
+            if (self.z1.get_f32(r) > 0.0) {
+                self.d_z1.set_f32(r, d_a1);
+            } else {
+                self.d_z1.set_f32(r, 0.0);
+            }
+        }
     }
-}
 
-fun update(mlp, grads, learning_rate) {
-    let d_W1 = grads[0];
-    let d_b1 = grads[1];
-    let d_W2 = grads[2];
-    let d_b2 = grads[3];
+    update(self, x, learning_rate) {
+        let n = self.input_size;
+        let h = self.hidden_size;
+        let W1 = self.W1;
+        let b1 = self.b1;
 
-    mat_update(mlp.W1, d_W1, learning_rate);
-    vec_update(mlp.b1, d_b1, learning_rate);
-    mat_update(mlp.W2, d_W2, learning_rate);
-    vec_update(mlp.b2, d_b2, learning_rate);
+        for (let var r = 0; r < h; ++r) {
+            let g = learning_rate * self.d_z1.get_f32(r);
+
+            // ReLU leaves most rows with no gradient at all, and the row is
+            // the expensive part
+            if (g != 0.0) {
+                let row = r * n;
+                for (let var c = 0; c < n; ++c) {
+                    W1.set_f32(row + c, W1.get_f32(row + c) - g * x.get_f32(c));
+                }
+            }
+
+            b1.set_f32(r, b1.get_f32(r) - g);
+        }
+
+        for (let var o = 0; o < self.output_size; ++o) {
+            let g = learning_rate * self.d_loss.get_f32(o);
+            let row = o * h;
+            for (let var c = 0; c < h; ++c) {
+                self.W2.set_f32(row + c, self.W2.get_f32(row + c) - g * self.a1.get_f32(c));
+            }
+            self.b2.set_f32(o, self.b2.get_f32(o) - g);
+        }
+    }
 }
 
 // Function to perform in-place iterative FFT (Cooley-Tukey)
@@ -355,9 +296,11 @@ fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sam
     return magnitudes;
 }
 
+// Produces the network's input: one ByteArray of float32, which is what
+// `MLP.forward` reads. A new ByteArray is zeroed, so the padding is already
+// in place when there are fewer frames than fit.
 fun flatten_and_pad(frames, max_frames, num_bins) {
-    let input_size = max_frames * num_bins;
-    let flat = Array.with_size(input_size, 0.0);
+    let flat = ByteArray.with_size(max_frames * num_bins * 4);
     let num_frames = frames.len.min(max_frames);
 
     // Write frames in reverse order, so the most recent frames are at the end of the flattened array
@@ -365,7 +308,7 @@ fun flatten_and_pad(frames, max_frames, num_bins) {
         let frame = frames[num_frames - 1 - i]; // Get frames in reverse chronological order
         let flat_start_idx = (max_frames - 1 - i) * num_bins; // Calculate target index in flat array
         for (let var j = 0; j < num_bins; ++j) {
-            flat[flat_start_idx + j] = frame[j];
+            flat.set_f32(flat_start_idx + j, frame[j]);
         }
     }
 
@@ -380,6 +323,12 @@ fun training_actor(detection_actor_id) {
     let var iteration_count = 0;
     let var positive_examples_count = 0;
     let var negative_examples_count = 0;
+
+    // The loss of any one example swings too much to read anything from, so
+    // what gets printed is an exponential moving average of it. The weight
+    // gives it a memory of roughly the last hundred steps.
+    let LOSS_SMOOTHING = 0.01;
+    let var avg_loss = nil;
 
     for (let var training_itr = 1;; ++training_itr) {
         let msg = $actor_poll();
@@ -444,31 +393,34 @@ fun training_actor(detection_actor_id) {
 
             let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
 
-            // Apply random scaling for data augmentation
+            // Data augmentation: scale the whole example, then add noise
             let scale_factor = 1.0 + (rand_float(-0.5, 0.5) * 0.35);
-            for (let var i = 0; i < x.len; ++i) {
-                x[i] = x[i] * scale_factor;
-            }
-
-            // Add some noise for data augmentation
-            for (let var i = 0; i < x.len; ++i) {
-                x[i] = x[i] + rand_float(-0.5, 0.5) * NOISE_MAGNITUDE;
+            for (let var i = 0; i < INPUT_SIZE; ++i) {
+                x.set_f32(i, x.get_f32(i) * scale_factor + rand_float(-0.5, 0.5) * NOISE_MAGNITUDE);
             }
 
             let y_true = [label];
 
             let y_pred = mlp.forward(x);
-            let grads = mlp.backward(x, y_true, y_pred);
-            update(mlp, grads, LEARNING_RATE);
+            mlp.backward(y_true, y_pred);
+            mlp.update(x, LEARNING_RATE);
 
             let p = y_pred[0].max(1e-9).min(1.0 - 1e-9);
             let y = y_true[0];
-            let var loss = -(y * p.ln() + (1.0 - y) * (1.0 - p).ln());
+            let loss = -(y * p.ln() + (1.0 - y) * (1.0 - p).ln());
+
+            // The first example has nothing to average with, so it starts
+            // the average off rather than being blended into zero
+            if (avg_loss == nil) {
+                avg_loss = loss;
+            } else {
+                avg_loss = avg_loss + LOSS_SMOOTHING * (loss - avg_loss);
+            }
 
             if (iteration_count % 1 == 0) {
                 $println(
                     "Itr#" + training_itr.to_s() +
-                    ", loss: " + loss.format_decimals(9) +
+                    ", loss: " + avg_loss.format_decimals(5) +
                     ", pos: " +
                     positive_examples_count.to_s() +
                     ", neg: " +

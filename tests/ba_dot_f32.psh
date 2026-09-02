@@ -1,0 +1,78 @@
+// Two vectors laid out back to back in one bytearray:
+// a = [1, 2, 3, 4], b = [5, 6, 7, 8]
+let ba = ByteArray.with_size(8 * 4);
+for (let var i = 0; i < 4; ++i) {
+    ba.set_f32(i, (i + 1).to_f());
+    ba.set_f32(4 + i, (i + 5).to_f());
+}
+
+// 1*5 + 2*6 + 3*7 + 4*8
+assert(ba.dot_f32(0, 1, ba, 4, 1, 4) == 70.0);
+
+// A vector with itself, from the same bytearray
+assert(ba.dot_f32(0, 1, ba, 0, 1, 4) == 30.0);
+
+// Two separate bytearrays
+let other = ByteArray.with_size(4 * 4);
+for (let var i = 0; i < 4; ++i) {
+    other.set_f32(i, 2.0);
+}
+assert(ba.dot_f32(0, 1, other, 0, 1, 4) == 20.0);
+
+// Partial runs, so the tail past the unrolled body is exercised
+assert(ba.dot_f32(0, 1, ba, 4, 1, 0) == 0.0);
+assert(ba.dot_f32(0, 1, ba, 4, 1, 1) == 5.0);
+assert(ba.dot_f32(0, 1, ba, 4, 1, 2) == 17.0);
+assert(ba.dot_f32(0, 1, ba, 4, 1, 3) == 38.0);
+
+// Offset starts
+assert(ba.dot_f32(2, 1, ba, 6, 1, 2) == 3.0 * 7.0 + 4.0 * 8.0);
+
+// Strides: every other element of each half
+// a[0], a[2] = 1, 3 and b[0], b[2] = 5, 7
+assert(ba.dot_f32(0, 2, ba, 4, 2, 2) == 1.0 * 5.0 + 3.0 * 7.0);
+
+// Different strides on the two operands: a[0], a[1] against b[0], b[2]
+assert(ba.dot_f32(0, 1, ba, 4, 2, 2) == 1.0 * 5.0 + 2.0 * 7.0);
+
+// A stride that walks the whole array, one operand overlapping the other
+assert(ba.dot_f32(0, 4, ba, 0, 4, 2) == 1.0 * 1.0 + 5.0 * 5.0);
+
+// A run long enough to cross the unrolled body several times, checked
+// against the same sum computed one element at a time. The kernel adds
+// in a different order than this loop does, so the values are picked to
+// be exactly representable: both sums are then exact, and equal.
+let n = 1000;
+let u = ByteArray.with_size(n * 4);
+let v = ByteArray.with_size(n * 4);
+for (let var i = 0; i < n; ++i) {
+    u.set_f32(i, (i % 17).to_f() - 8.0);
+    v.set_f32(i, (i % 5).to_f() * 0.25);
+}
+
+let var expected = 0.0;
+for (let var i = 0; i < n; ++i) {
+    expected = expected + u.get_f32(i) * v.get_f32(i);
+}
+assert(u.dot_f32(0, 1, v, 0, 1, n) == expected);
+
+// The same values read with a stride of 2, against the loop that matches
+let var expected_strided = 0.0;
+for (let var i = 0; i < n.idiv(2); ++i) {
+    expected_strided = expected_strided + u.get_f32(2 * i) * v.get_f32(2 * i);
+}
+assert(u.dot_f32(0, 2, v, 0, 2, n.idiv(2)) == expected_strided);
+
+// Products are formed in float64, so a sum that would be lost to
+// rounding in float32 still comes out exactly. 2^24 + 1 is not
+// representable as an f32, but the products here are exact and their
+// float64 sum is too.
+let big = ByteArray.with_size(2 * 4);
+big.set_f32(0, 16777216.0);
+big.set_f32(1, 1.0);
+let ones = ByteArray.with_size(2 * 4);
+ones.set_f32(0, 1.0);
+ones.set_f32(1, 1.0);
+assert(big.dot_f32(0, 1, ones, 0, 1, 2) == 16777217.0);
+
+$println("ba_dot_f32 ok");

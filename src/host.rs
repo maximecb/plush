@@ -18,6 +18,9 @@ pub enum FnPtr
     Fn3(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value) -> Result<Value, String>),
     Fn4(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> Result<Value, String>),
     Fn5(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> Result<Value, String>),
+    // Arities are only listed once a host function needs them, which is
+    // why this jumps from five to seven
+    Fn7(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value) -> Result<Value, String>),
 }
 
 // This struct is needed in part because Rust doesn't allow direct
@@ -42,6 +45,7 @@ impl HostFn
             Fn3(_) => 3,
             Fn4(_) => 4,
             Fn5(_) => 5,
+            Fn7(_) => 7,
         }
     }
 }
@@ -56,6 +60,7 @@ macro_rules! host_fn_ptr {
     (3, $f:path) => { FnPtr::Fn3($f) };
     (4, $f:path) => { FnPtr::Fn4($f) };
     (5, $f:path) => { FnPtr::Fn5($f) };
+    (7, $f:path) => { FnPtr::Fn7($f) };
 }
 
 /// Declare the table of host functions, in two groups. An entry names
@@ -238,6 +243,7 @@ def_host_fns! {
         set_u32: ba_set_u32(3),
         get_f32: ba_get_f32(2),
         set_f32: ba_set_f32(3),
+        dot_f32: ba_dot_f32(7),
         num_u32: ba_num_u32(1),
         memcpy: ba_memcpy(5),
         resize: ba_resize(2),
