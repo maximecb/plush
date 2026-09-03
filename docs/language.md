@@ -360,6 +360,7 @@ from ./font import *;
     -   `insert(idx, val)`: Insert a new element at the given index, shifting elements from that index to the right.
     -   `append(other_array)`: Appends all elements from `other_array` to the end of this array.
     -   `resize(new_size, fill_val)`: Resizes the array. If the new size is larger, the new elements are set to `fill_val`, otherwise the extra elements are dropped.
+    -   `slice(start, end)`: Returns a new array holding a shallow copy of the elements from `start` (inclusive) to `end` (exclusive). Errors if `start > end` or `end` is past the end of the array.
 -   **ByteArray**
     -   `with_size(size)`: Creates a new `ByteArray` of the given size.
     -   `resize(new_size)`: Resizes the `ByteArray`. If the new size is larger, the new bytes are filled with zeros.

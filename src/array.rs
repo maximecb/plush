@@ -128,6 +128,16 @@ impl Array
         removed
     }
 
+    /// Copy the `[start, end)` range of this array into a new array
+    pub fn slice(&self, start: usize, end: usize, alloc: &mut Alloc) -> Value
+    {
+        let new_arr = Self::with_capacity(end - start, alloc);
+        let src = &self.items()[start..end];
+        unsafe { (&mut *new_arr.as_arr().elems)[..src.len()].copy_from_slice(src) };
+        new_arr.as_arr().len = end - start;
+        new_arr
+    }
+
     pub fn append(&mut self, other: &Array, alloc: &mut Alloc) {
         let other_elems = other.items();
         let cur_len = self.len();
@@ -279,4 +289,23 @@ pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: V
     let a1 = other_array.as_arr();
     a0.append(a1, &mut actor.alloc);
     Ok(Value::NIL)
+}
+
+/// Copy the `[start, end)` range of an array into a new array
+pub fn array_slice(actor: &mut Actor, mut array: Value, start: Value, end: Value) -> HostResult
+{
+    let start = unwrap_usize!(start);
+    let end = unwrap_usize!(end);
+    let len = unwrap_arr!(array).len();
+
+    if start > end || end > len {
+        error!("slice range {}..{} is out of bounds for an array of length {}", start, end, len);
+    }
+
+    actor.gc_check(
+        Array::alloc_size(end - start),
+        &mut [&mut array],
+    );
+
+    Ok(array.as_arr().slice(start, end, &mut actor.alloc))
 }

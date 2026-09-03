@@ -486,6 +486,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::Array, "insert") => array_insert,
         (Type::Array, "append") => array_append,
         (Type::Array, "resize") => array_resize,
+        (Type::Array, "slice") => array_slice,
 
         (Type::ByteArray, "load_u32") => ba_load_u32,
         (Type::ByteArray, "store_u32") => ba_store_u32,

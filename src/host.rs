@@ -237,6 +237,7 @@ def_host_fns! {
         insert: array_insert(3),
         append: array_append(2),
         resize: array_resize(3),
+        slice: array_slice(3),
 
         with_size: ba_with_size(2),
         load_u32: ba_load_u32(2),
