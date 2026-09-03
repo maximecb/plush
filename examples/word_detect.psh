@@ -6,7 +6,7 @@
 // beep; every other word just lights up in the list.
 //
 // Controls:
-//   Hold ENTER   record, release to stop. The clip plays straight back.
+//   Hold ENTER   record, release to stop. The clip plays back trimmed.
 //   Then type    the word that was just said, ENTER to save it
 //   "noise"      label a clip that is not a word at all
 //   Empty + ENTER  save as a negative sample, teaching no output at all
@@ -33,7 +33,7 @@ let PI = 3.141592653589793;
 let MIN_FREQ = 300.0;
 let MAX_FREQ = 3500.0;
 
-let MAX_FRAMES = 64;
+let MAX_FRAMES = 96;
 let HIDDEN_SIZE = 64;
 let LEARNING_RATE = 0.01;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
@@ -41,6 +41,9 @@ let DETECTION_THRESHOLD = 0.92;
 let NOISE_MAGNITUDE = 0.12;
 let GRADIENT_CLIP_THRESHOLD = 1.0;
 let MAX_ZERO_FRAMES_TO_ADD = 10;
+
+// Data augmentation: probability of dropping any given frame in training
+let FRAME_DROP_PROB = 0.05;
 
 // The one word that plays a beep. Every other word you teach is still
 // detected and shown, it just doesn't make a sound.
@@ -54,6 +57,12 @@ let NOISE_WORD = "noise";
 // Longest clip that gets kept for playback
 let MAX_RECORD_SECS = 5;
 let MAX_RECORD_SAMPLES = SAMPLE_RATE * MAX_RECORD_SECS;
+
+// Cut off both ends of every recording: first a fixed amount, to remove the
+// key press and release, then any silence left past that
+let TRIM_MS = 50;
+let TRIM_FRAMES = (SAMPLE_RATE * TRIM_MS).idiv(1000 * FFT_SIZE);
+let SILENCE_THRESHOLD = 0.05;
 
 // Longest label the input box accepts
 let MAX_LABEL_LEN = 16;
@@ -425,6 +434,50 @@ fun flatten_and_pad(frames, max_frames, num_bins) {
     return flat;
 }
 
+// True when a frame is quiet enough to be silence rather than speech. Frames
+// this quiet are left unscaled by `normalize_magnitudes`, so the threshold
+// sits on the same scale as a loud frame's peak of 1.0.
+fun frame_is_silent(frame, threshold) {
+    let var peak = 0.0;
+    for (let var i = 0; i < frame.len; ++i) {
+        if (frame[i] > peak) {
+            peak = frame[i];
+        }
+    }
+    return peak < threshold;
+}
+
+// Range [start, end) of `frames` to keep: a fixed number of frames off each
+// end, to cut the key press and release, then any silence left past that.
+// Falls back to the whole recording if trimming would leave nothing, rather
+// than throw away a short or quiet recording entirely.
+fun trim_range(frames, trim_frames, silence_threshold) {
+    let n = frames.len;
+    let var start = trim_frames.min(n);
+    let var end = (n - trim_frames).max(start);
+
+    while (start < end && frame_is_silent(frames[start], silence_threshold)) {
+        start = start + 1;
+    }
+    while (end > start && frame_is_silent(frames[end - 1], silence_threshold)) {
+        end = end - 1;
+    }
+
+    if (end <= start && n > 0) {
+        return [0, n];
+    }
+    return [start, end];
+}
+
+// Plush arrays have no slice, so this rebuilds one
+fun array_slice(arr, start, end) {
+    let out = Array.with_size(end - start, nil);
+    for (let var i = 0; i < end - start; ++i) {
+        out[i] = arr[start + i];
+    }
+    return out;
+}
+
 fun training_actor(detection_actor_id) {
     rand_init($time_current_ms());
     let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE);
@@ -523,6 +576,21 @@ fun training_actor(detection_actor_id) {
                     let temp = current_frames[i];
                     current_frames[i] = current_frames[j];
                     current_frames[j] = temp;
+                }
+            }
+
+            // Data augmentation: randomly drop a few frames, positive or
+            // negative, so the network isn't relying on every frame of a
+            // word being present
+            if (current_frames.len > 1) {
+                let kept_frames = [];
+                for (let var i = 0; i < current_frames.len; ++i) {
+                    if (rand_float(0.0, 1.0) >= FRAME_DROP_PROB) {
+                        kept_frames.push(current_frames[i]);
+                    }
+                }
+                if (kept_frames.len > 0) {
+                    current_frames = kept_frames;
                 }
             }
 
@@ -1057,15 +1125,26 @@ fun main() {
                     $actor_send(beep_actor_id, false);
 
                     if (recorded_frames.len > 0) {
+                        // Cut the key press/release and any leftover silence
+                        // off both ends, so this is what gets trained on
+                        let range = trim_range(recorded_frames, TRIM_FRAMES, SILENCE_THRESHOLD);
+                        let start_frame = range[0];
+                        let end_frame = range[1];
+                        recorded_frames = array_slice(recorded_frames, start_frame, end_frame);
+
                         labeling = true;
                         label_chars = [];
 
-                        // Play the clip back, so you can hear what was caught.
-                        // Trimmed to what was filled, because the buffer is
+                        // Play back the same range that was just trimmed to,
+                        // so what you hear is what the training loop gets.
+                        // Clamped to what was filled, because the buffer is
                         // sized for the longest clip allowed.
-                        if (recorded_len > 0) {
-                            let clip = ByteArray.with_size(recorded_len * 4);
-                            clip.memcpy(0, recorded_audio, 0, recorded_len * 4);
+                        let start_sample = start_frame * FFT_SIZE;
+                        let end_sample = (end_frame * FFT_SIZE).min(recorded_len);
+                        let clip_len = end_sample - start_sample;
+                        if (clip_len > 0) {
+                            let clip = ByteArray.with_size(clip_len * 4);
+                            clip.memcpy(0, recorded_audio, start_sample * 4, clip_len * 4);
                             $actor_send(beep_actor_id, clip);
                         }
                     } else {
