@@ -367,13 +367,11 @@ macro_rules! def_opcodes {
 // - Sites that cache a lookup hold a CacheIdx instead of the cached data,
 //   which keeps them within one word and lets cache entries grow later
 def_opcodes! {
-    // Halt execution and produce an error. The source position is packed
-    // into the operands so that the error can be reported without a side
-    // table. The fields are wider than any real source file needs, but a
-    // generated one could overflow them, so the caller saturates rather
-    // than letting the encoding assert fire.
+    // Halt execution and produce an error. The position it happened at
+    // comes from the actor's instruction position map, like any other
+    // instruction's, so nothing is packed into the operands here.
     // Panic is zero so that jumping to uninitialized memory causes panic
-    panic = 0 { file_id: u16, line_no: u20, col_no: u20 },
+    panic = 0 {},
 
     // Debugger breakpoint
     breakpoint {},
@@ -698,24 +696,8 @@ mod tests
     #[test]
     fn panic_is_zero()
     {
-        assert_eq!(Insn::panic(0, 0, 0).word_u64(), 0);
-    }
-
-    #[test]
-    fn panic_src_pos()
-    {
-        // The three fields fill the word exactly, so each one has to come
-        // back out without disturbing the others
-        let insn = Insn::panic(u16::MAX, (1 << 20) - 1, (1 << 20) - 1);
-        assert_eq!(
-            panic::decode(insn),
-            panic { file_id: u16::MAX, line_no: (1 << 20) - 1, col_no: (1 << 20) - 1 }
-        );
-        assert_eq!(insn.word_u64(), u64::MAX & !0xFF);
-
-        assert_eq!(panic::decode(Insn::panic(3, 0, 0)), panic { file_id: 3, line_no: 0, col_no: 0 });
-        assert_eq!(panic::decode(Insn::panic(0, 3, 0)), panic { file_id: 0, line_no: 3, col_no: 0 });
-        assert_eq!(panic::decode(Insn::panic(0, 0, 3)), panic { file_id: 0, line_no: 0, col_no: 3 });
+        assert_eq!(Insn::panic().word_u64(), 0);
+        assert_eq!(Opcode::panic.num_opnds(), 0);
     }
 
     #[test]
@@ -723,7 +705,7 @@ mod tests
     fn out_of_range_operand()
     {
         // Range checks are hard asserts, so this fires in release too
-        Insn::panic(0, 1 << 20, 0);
+        Insn::clos_get(0, 1 << 12);
     }
 
     #[test]

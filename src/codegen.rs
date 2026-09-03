@@ -8,6 +8,36 @@ use crate::symbols::Decl;
 use crate::value::Value;
 use crate::vm::Actor;
 
+/// State that lives for as long as one function is being compiled.
+///
+/// The actor owns the instruction stream being appended to; everything
+/// else here is codegen's own bookkeeping and is gone once the function
+/// is compiled
+struct CodeGen<'a>
+{
+    actor: &'a mut Actor,
+
+    /// Position stamped onto the instructions being emitted. An
+    /// expression sets this on the way in and puts back what it found on
+    /// the way out, so the instructions a parent emits after its children
+    /// are attributed to the parent and not to the last child
+    cur_pos: SrcPos,
+}
+
+impl<'a> CodeGen<'a>
+{
+    fn new(actor: &'a mut Actor) -> Self
+    {
+        Self { actor, cur_pos: SrcPos::default() }
+    }
+
+    /// Emit an instruction, tagged with the position being generated for
+    fn push_insn(&mut self, insn: Insn)
+    {
+        self.actor.push_insn(insn, self.cur_pos);
+    }
+}
+
 /// Compiled function object
 #[derive(Copy, Clone)]
 pub struct CompiledFun
@@ -109,41 +139,41 @@ fn decl_reg(decl: &Decl, fun: &Function) -> u16
 }
 
 /// Emit an instruction and return its index, for later patching
-fn emit(actor: &mut Actor, insn: Insn) -> usize
+fn emit(cg: &mut CodeGen, insn: Insn) -> usize
 {
-    actor.insns.push(insn);
-    actor.insns.len() - 1
+    cg.push_insn(insn);
+    cg.actor.insns.len() - 1
 }
 
 /// Point a previously emitted jump at an instruction index. Displacements
 /// count instructions from the one after the jump
-fn patch_jump(actor: &mut Actor, jmp_idx: usize, dst_idx: usize)
+fn patch_jump(cg: &mut CodeGen, jmp_idx: usize, dst_idx: usize)
 {
     let disp = (dst_idx as i64) - (jmp_idx as i64) - 1;
     let disp = disp.try_into().expect("jump is out of range");
-    actor.insns[jmp_idx] = actor.insns[jmp_idx].with_branch_disp(disp);
+    cg.actor.insns[jmp_idx] = cg.actor.insns[jmp_idx].with_branch_disp(disp);
 }
 
 /// Point a set of jumps, as a test can produce more than one, at the same
 /// instruction index
-fn patch_jumps(actor: &mut Actor, jmp_idxs: &[usize], dst_idx: usize)
+fn patch_jumps(cg: &mut CodeGen, jmp_idxs: &[usize], dst_idx: usize)
 {
     for jmp_idx in jmp_idxs {
-        patch_jump(actor, *jmp_idx, dst_idx);
+        patch_jump(cg, *jmp_idx, dst_idx);
     }
 }
 
 /// Load a value that needs no heap allocation. Immediates that fit the
 /// instruction go inline, the rest through the constant pool
-fn gen_value(actor: &mut Actor, dst: u16, val: Value)
+fn gen_value(cg: &mut CodeGen, dst: u16, val: Value)
 {
     let raw = val.raw_bits();
 
     if fits_imm40(val) {
-        emit(actor, Insn::load_imm40(dst, raw as i64));
+        emit(cg, Insn::load_imm40(dst, raw as i64));
     } else {
-        let slot = actor.push_const(val);
-        emit(actor, Insn::load_const(dst, slot));
+        let slot = cg.actor.push_const(val);
+        emit(cg, Insn::load_const(dst, slot));
     }
 }
 
@@ -193,10 +223,10 @@ fn const_value(expr: &ExprBox, actor: &Actor) -> Option<Value>
 }
 
 /// Load a heap constant, which always goes through the pool
-fn gen_const(actor: &mut Actor, dst: u16, val: Value)
+fn gen_const(cg: &mut CodeGen, dst: u16, val: Value)
 {
-    let slot = actor.push_const(val);
-    emit(actor, Insn::load_const(dst, slot));
+    let slot = cg.actor.push_const(val);
+    emit(cg, Insn::load_const(dst, slot));
 }
 
 impl Function
@@ -221,28 +251,34 @@ impl Function
         actor: &mut Actor,
     ) -> Result<CompiledFun, ParseError>
     {
+        // The context lives exactly as long as this one compilation, so
+        // nothing codegen tracks can outlive it or be reached from the VM
+        let cg = &mut CodeGen::new(actor);
+
         // Entry address of the compiled function
-        let entry_pc = actor.insns.len();
+        let entry_pc = cg.actor.insns.len();
+
+        cg.cur_pos = self.pos;
 
         let mut regs = Regs::new(self);
 
         // Compile the function body
-        self.body.gen_code(self, &mut regs, &mut vec![], &mut vec![], actor)?;
+        self.body.gen_code(self, &mut regs, &mut vec![], &mut vec![], cg)?;
 
         // If the body needs a final return
         if self.needs_final_return() {
             if self.is_ctor() {
                 // A constructor hands back the object it was called on,
                 // which is its first argument
-                actor.insns.push(Insn::ret(0));
+                cg.push_insn(Insn::ret(0));
             } else {
-                actor.insns.push(Insn::ret_imm40(Value::NIL.raw_bits() as i64));
+                cg.push_insn(Insn::ret_imm40(Value::NIL.raw_bits() as i64));
             }
         }
 
         Ok(CompiledFun {
             entry_pc,
-            end_pc: actor.insns.len(),
+            end_pc: cg.actor.insns.len(),
             num_params: self.params.len(),
             frame_size: regs.max as usize,
         })
@@ -257,7 +293,25 @@ impl StmtBox
         regs: &mut Regs,
         break_idxs: &mut Vec<usize>,
         cont_idxs: &mut Vec<usize>,
-        actor: &mut Actor,
+        cg: &mut CodeGen,
+    ) -> Result<(), ParseError>
+    {
+        let prev_pos = cg.cur_pos;
+        cg.cur_pos = self.pos;
+
+        let result = self.gen_code_inner(fun, regs, break_idxs, cont_idxs, cg);
+
+        cg.cur_pos = prev_pos;
+        result
+    }
+
+    fn gen_code_inner(
+        &self,
+        fun: &Function,
+        regs: &mut Regs,
+        break_idxs: &mut Vec<usize>,
+        cont_idxs: &mut Vec<usize>,
+        cg: &mut CodeGen,
     ) -> Result<(), ParseError>
     {
         match self.stmt.as_ref() {
@@ -272,11 +326,11 @@ impl StmtBox
                     // For assignment expressions as statements, the
                     // assigned value itself is not needed
                     Expr::Binary { op: BinOp::Assign, lhs, rhs } => {
-                        gen_assign(lhs, rhs, fun, regs, actor, false)?;
+                        gen_assign(lhs, rhs, fun, regs, cg, false)?;
                     }
 
                     _ => {
-                        expr.gen_code(fun, regs, actor, None)?;
+                        expr.gen_code(fun, regs, cg, None)?;
                     }
                 }
 
@@ -284,25 +338,25 @@ impl StmtBox
             }
 
             Stmt::Break => {
-                break_idxs.push(emit(actor, Insn::jmp(0)));
+                break_idxs.push(emit(cg, Insn::jmp(0)));
             }
 
             Stmt::Continue => {
-                cont_idxs.push(emit(actor, Insn::jmp(0)));
+                cont_idxs.push(emit(cg, Insn::jmp(0)));
             }
 
             Stmt::Return(expr) => {
                 // Returning a constant carries it in the instruction,
                 // rather than loading it into a register first
-                match const_value(expr, actor).filter(|val| fits_imm40(*val)) {
+                match const_value(expr, cg.actor).filter(|val| fits_imm40(*val)) {
                     Some(val) => {
-                        actor.insns.push(Insn::ret_imm40(val.raw_bits() as i64));
+                        cg.push_insn(Insn::ret_imm40(val.raw_bits() as i64));
                     }
 
                     None => {
                         let top = regs.top();
-                        let src = expr.gen_code(fun, regs, actor, None)?;
-                        actor.insns.push(Insn::ret(src));
+                        let src = expr.gen_code(fun, regs, cg, None)?;
+                        cg.push_insn(Insn::ret(src));
                         regs.free_to(top);
                     }
                 }
@@ -322,13 +376,13 @@ impl StmtBox
                                 // Create the closure. The slots are filled
                                 // in by the Let below
                                 let clos = write_target(decl, fun, regs);
-                                actor.insns.push(Insn::clos_new(
+                                cg.push_insn(Insn::clos_new(
                                     clos,
                                     usize::from(*fun_id) as u32,
                                     captured.len().try_into().unwrap(),
                                 ));
                                 // Initialize the local variable for this closure
-                                gen_var_write(decl, fun, regs, actor, clos);
+                                gen_var_write(decl, fun, regs, cg, clos);
 
                                 regs.free_to(top);
                             }
@@ -337,40 +391,40 @@ impl StmtBox
                 }
 
                 for stmt in stmts {
-                    stmt.gen_code(fun, regs, break_idxs, cont_idxs, actor)?;
+                    stmt.gen_code(fun, regs, break_idxs, cont_idxs, cg)?;
                 }
             }
 
             Stmt::If { test_expr, then_stmt, else_stmt } => {
                 // If false, jump to else stmt
-                let if_idxs = gen_branch(test_expr, fun, regs, actor, false)?;
+                let if_idxs = gen_branch(test_expr, fun, regs, cg, false)?;
 
                 if else_stmt.is_some() {
-                    then_stmt.gen_code(fun, regs, break_idxs, cont_idxs, actor)?;
-                    let jump_idx = emit(actor, Insn::jmp(0));
+                    then_stmt.gen_code(fun, regs, break_idxs, cont_idxs, cg)?;
+                    let jump_idx = emit(cg, Insn::jmp(0));
 
                     // Patch the test to jump to the else clause
-                    let dst_idx = actor.insns.len();
-                    patch_jumps(actor, &if_idxs, dst_idx);
+                    let dst_idx = cg.actor.insns.len();
+                    patch_jumps(cg, &if_idxs, dst_idx);
 
-                    else_stmt.as_ref().unwrap().gen_code(fun, regs, break_idxs, cont_idxs, actor)?;
+                    else_stmt.as_ref().unwrap().gen_code(fun, regs, break_idxs, cont_idxs, cg)?;
 
                     // Patch the jump instruction to jump after the else clause
-                    let dst_idx = actor.insns.len();
-                    patch_jump(actor, jump_idx, dst_idx);
+                    let dst_idx = cg.actor.insns.len();
+                    patch_jump(cg, jump_idx, dst_idx);
                 }
                 else
                 {
-                    then_stmt.gen_code(fun, regs, break_idxs, cont_idxs, actor)?;
+                    then_stmt.gen_code(fun, regs, break_idxs, cont_idxs, cg)?;
 
-                    let dst_idx = actor.insns.len();
-                    patch_jumps(actor, &if_idxs, dst_idx);
+                    let dst_idx = cg.actor.insns.len();
+                    patch_jumps(cg, &if_idxs, dst_idx);
                 }
             }
 
             Stmt::For { init_stmt, test_expr, incr_expr, body_stmt } => {
                 // Generate code for the init statement
-                init_stmt.gen_code(fun, regs, break_idxs, cont_idxs, actor)?;
+                init_stmt.gen_code(fun, regs, break_idxs, cont_idxs, cg)?;
 
                 let mut break_idxs = Vec::new();
                 let mut cont_idxs = Vec::new();
@@ -383,43 +437,43 @@ impl StmtBox
                 // Testing at the bottom asks whether to go round again,
                 // which is the sense a comparison already branches on, so
                 // the loop needs no negated test
-                let entry_idx = emit(actor, Insn::jmp(0));
-                let body_idx = actor.insns.len();
+                let entry_idx = emit(cg, Insn::jmp(0));
+                let body_idx = cg.actor.insns.len();
 
-                body_stmt.gen_code(fun, regs, &mut break_idxs, &mut cont_idxs, actor)?;
+                body_stmt.gen_code(fun, regs, &mut break_idxs, &mut cont_idxs, cg)?;
 
                 // Continue will jump here
-                let cont_idx = actor.insns.len();
+                let cont_idx = cg.actor.insns.len();
 
                 // Evaluate the increment expression, which a while loop
                 // does not have
                 if !matches!(incr_expr.expr.as_ref(), Expr::Nil) {
                     let top = regs.top();
-                    incr_expr.gen_code(fun, regs, actor, None)?;
+                    incr_expr.gen_code(fun, regs, cg, None)?;
                     regs.free_to(top);
                 }
 
                 // Evaluate the test, and go round again if it holds
-                let test_idx = actor.insns.len();
-                patch_jump(actor, entry_idx, test_idx);
+                let test_idx = cg.actor.insns.len();
+                patch_jump(cg, entry_idx, test_idx);
 
-                let back_idxs = gen_branch(test_expr, fun, regs, actor, true)?;
-                patch_jumps(actor, &back_idxs, body_idx);
+                let back_idxs = gen_branch(test_expr, fun, regs, cg, true)?;
+                patch_jumps(cg, &back_idxs, body_idx);
 
                 // Break will jump here
-                let break_idx = actor.insns.len();
+                let break_idx = cg.actor.insns.len();
 
-                patch_jumps(actor, &cont_idxs, cont_idx);
-                patch_jumps(actor, &break_idxs, break_idx);
+                patch_jumps(cg, &cont_idxs, cont_idx);
+                patch_jumps(cg, &break_idxs, break_idx);
             }
 
             Stmt::Assert { test_expr } => {
-                let if_idxs = gen_branch(test_expr, fun, regs, actor, true)?;
+                let if_idxs = gen_branch(test_expr, fun, regs, cg, true)?;
 
-                gen_panic(actor, self.pos);
+                cg.push_insn(Insn::panic());
 
-                let dst_idx = actor.insns.len();
-                patch_jumps(actor, &if_idxs, dst_idx);
+                let dst_idx = cg.actor.insns.len();
+                patch_jumps(cg, &if_idxs, dst_idx);
             }
 
             // Variable declaration
@@ -437,8 +491,8 @@ impl StmtBox
                         // Read the closure decl. The closure itself was
                         // created before the block, so this only fills in
                         // what it captures
-                        let clos = gen_var_read(decl, fun, regs, actor, None);
-                        gen_captures(captured, clos, fun, regs, actor);
+                        let clos = gen_var_read(decl, fun, regs, cg, None);
+                        gen_captures(captured, clos, fun, regs, cg);
                     }
 
                     _ => {
@@ -451,17 +505,17 @@ impl StmtBox
                             Some(write_target(decl, fun, regs))
                         };
 
-                        let src = init_expr.gen_code(fun, regs, actor, dst)?;
+                        let src = init_expr.gen_code(fun, regs, cg, dst)?;
 
                         // If this is an escaping mutable variable
                         if fun.escaping.contains(decl) {
                             // Allocate a mutable closure cell for this variable
                             let cell = decl_reg(decl, fun);
-                            actor.insns.push(Insn::cell_new(cell));
-                            actor.insns.push(Insn::cell_set(cell, src));
+                            cg.push_insn(Insn::cell_new(cell));
+                            cg.push_insn(Insn::cell_set(cell, src));
                         } else {
                             // Initialize the local variable
-                            gen_var_write(decl, fun, regs, actor, src);
+                            gen_var_write(decl, fun, regs, cg, src);
                         }
                     }
                 }
@@ -474,18 +528,6 @@ impl StmtBox
 
         Ok(())
     }
-}
-
-/// Emit a panic carrying the source position it happened at. The fields
-/// are wider than any real source file needs, but a generated one could
-/// overflow them, so this saturates rather than letting the encoding
-/// assert fire
-fn gen_panic(actor: &mut Actor, pos: SrcPos)
-{
-    let file_id = std::cmp::min(pos.file_id(), u16::MAX as u32) as u16;
-    let line_no = std::cmp::min(pos.line_no(), (1 << 20) - 1);
-    let col_no = std::cmp::min(pos.col_no(), (1 << 20) - 1);
-    actor.insns.push(Insn::panic(file_id, line_no, col_no));
 }
 
 impl ExprBox
@@ -501,7 +543,30 @@ impl ExprBox
         &self,
         fun: &Function,
         regs: &mut Regs,
-        actor: &mut Actor,
+        cg: &mut CodeGen,
+        dst: Option<u16>,
+    ) -> Result<u16, ParseError>
+    {
+        // Stamp this expression's position onto the instructions it
+        // generates, and put back the one the caller was using on the way
+        // out, so that an instruction the caller emits after this
+        // subexpression still points at the caller. Several cases below
+        // return early, which is why this wraps them rather than sitting
+        // inside the body
+        let prev_pos = cg.cur_pos;
+        cg.cur_pos = self.pos;
+
+        let result = self.gen_code_inner(fun, regs, cg, dst);
+
+        cg.cur_pos = prev_pos;
+        result
+    }
+
+    fn gen_code_inner(
+        &self,
+        fun: &Function,
+        regs: &mut Regs,
+        cg: &mut CodeGen,
         dst: Option<u16>,
     ) -> Result<u16, ParseError>
     {
@@ -511,13 +576,13 @@ impl ExprBox
         }
 
         let reg = match self.expr.as_ref() {
-            Expr::Nil => { let d = out!(); gen_value(actor, d, Value::NIL); d }
-            Expr::True => { let d = out!(); gen_value(actor, d, Value::TRUE); d }
-            Expr::False => { let d = out!(); gen_value(actor, d, Value::FALSE); d }
+            Expr::Nil => { let d = out!(); gen_value(cg, d, Value::NIL); d }
+            Expr::True => { let d = out!(); gen_value(cg, d, Value::TRUE); d }
+            Expr::False => { let d = out!(); gen_value(cg, d, Value::FALSE); d }
 
             Expr::HostFn(f) => {
                 let d = out!();
-                gen_value(actor, d, Value::host_fn(*f));
+                gen_value(cg, d, Value::host_fn(*f));
                 d
             }
 
@@ -528,11 +593,11 @@ impl ExprBox
                 let d = out!();
 
                 match Value::try_fixnum(*v) {
-                    Some(val) => gen_value(actor, d, val),
+                    Some(val) => gen_value(cg, d, val),
                     None => {
-                        actor.gc_check(HEADER_SIZE + size_of::<i64>(), &mut []);
-                        let val = actor.alloc.heap_int64(*v);
-                        gen_const(actor, d, val);
+                        cg.actor.gc_check(HEADER_SIZE + size_of::<i64>(), &mut []);
+                        let val = cg.actor.alloc.heap_int64(*v);
+                        gen_const(cg, d, val);
                     }
                 }
 
@@ -543,11 +608,11 @@ impl ExprBox
                 let d = out!();
 
                 match Value::try_flonum(*v) {
-                    Some(val) => gen_value(actor, d, val),
+                    Some(val) => gen_value(cg, d, val),
                     None => {
-                        actor.gc_check(HEADER_SIZE + size_of::<f64>(), &mut []);
-                        let val = actor.alloc.heap_float64(*v);
-                        gen_const(actor, d, val);
+                        cg.actor.gc_check(HEADER_SIZE + size_of::<f64>(), &mut []);
+                        let val = cg.actor.alloc.heap_float64(*v);
+                        gen_const(cg, d, val);
                     }
                 }
 
@@ -556,31 +621,31 @@ impl ExprBox
 
             Expr::String(s) => {
                 let d = out!();
-                actor.gc_check(Str::alloc_size(s.len()), &mut []);
-                let val = Str::new(&s, &mut actor.alloc);
-                gen_const(actor, d, val);
+                cg.actor.gc_check(Str::alloc_size(s.len()), &mut []);
+                let val = Str::new(&s, &mut cg.actor.alloc);
+                gen_const(cg, d, val);
                 d
             }
 
             Expr::ByteArray(bytes) => {
                 use crate::bytearray::ByteArray;
                 let d = out!();
-                actor.gc_check(ByteArray::alloc_size(bytes.len()), &mut []);
-                let ba = ByteArray::with_size(bytes.len(), &mut actor.alloc);
+                cg.actor.gc_check(ByteArray::alloc_size(bytes.len()), &mut []);
+                let ba = ByteArray::with_size(bytes.len(), &mut cg.actor.alloc);
                 unsafe { ba.as_ba().get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-                gen_const(actor, d, ba);
-                actor.insns.push(Insn::ba_clone(d, d));
+                gen_const(cg, d, ba);
+                cg.push_insn(Insn::ba_clone(d, d));
                 d
             }
 
             Expr::Array { exprs } => {
                 let d = out!();
-                actor.insns.push(Insn::arr_new(d, exprs.len() as u32));
+                cg.push_insn(Insn::arr_new(d, exprs.len() as u32));
 
                 for expr in exprs {
                     let top = regs.top();
-                    let val = expr.gen_code(fun, regs, actor, None)?;
-                    actor.insns.push(Insn::arr_push(d, val));
+                    let val = expr.gen_code(fun, regs, cg, None)?;
+                    cg.push_insn(Insn::arr_push(d, val));
                     regs.free_to(top);
                 }
 
@@ -589,14 +654,14 @@ impl ExprBox
 
             Expr::Dict { pairs } => {
                 let d = out!();
-                actor.insns.push(Insn::dict_new(d));
+                cg.push_insn(Insn::dict_new(d));
 
                 // For each field
                 for (name, expr) in pairs {
                     let top = regs.top();
-                    let val = expr.gen_code(fun, regs, actor, None)?;
-                    let cache = actor.new_prop_cache(name);
-                    actor.insns.push(Insn::set_field(d, val, cache));
+                    let val = expr.gen_code(fun, regs, cg, None)?;
+                    let cache = cg.actor.new_prop_cache(name);
+                    cg.push_insn(Insn::set_field(d, val, cache));
                     regs.free_to(top);
                 }
 
@@ -604,44 +669,44 @@ impl ExprBox
             }
 
             Expr::Ref { decl, .. } => {
-                gen_var_read(decl, fun, regs, actor, dst)
+                gen_var_read(decl, fun, regs, cg, dst)
             }
 
             Expr::Index { base, index } => {
                 let top = regs.top();
-                let arr = base.gen_code(fun, regs, actor, None)?;
-                let idx = index.gen_code(fun, regs, actor, None)?;
+                let arr = base.gen_code(fun, regs, cg, None)?;
+                let idx = index.gen_code(fun, regs, cg, None)?;
                 regs.free_to(top);
 
                 let d = out!();
-                actor.insns.push(Insn::get_index(d, arr, idx));
+                cg.push_insn(Insn::get_index(d, arr, idx));
                 d
             }
 
             Expr::Member { base, field } => {
                 let top = regs.top();
-                let obj = base.gen_code(fun, regs, actor, None)?;
+                let obj = base.gen_code(fun, regs, cg, None)?;
                 regs.free_to(top);
 
                 let d = out!();
-                let cache = actor.new_prop_cache(field);
-                actor.insns.push(Insn::get_field(d, obj, cache));
+                let cache = cg.actor.new_prop_cache(field);
+                cg.push_insn(Insn::get_field(d, obj, cache));
                 d
             }
 
             Expr::InstanceOf { val, class_id, .. } => {
                 let top = regs.top();
-                let v = val.gen_code(fun, regs, actor, None)?;
+                let v = val.gen_code(fun, regs, cg, None)?;
                 regs.free_to(top);
 
                 let d = out!();
-                actor.insns.push(Insn::instanceof(d, v, usize::from(*class_id) as u32));
+                cg.push_insn(Insn::instanceof(d, v, usize::from(*class_id) as u32));
                 d
             }
 
             Expr::Unary { op, child } => {
                 let top = regs.top();
-                let src = child.gen_code(fun, regs, actor, None)?;
+                let src = child.gen_code(fun, regs, cg, None)?;
                 regs.free_to(top);
 
                 let d = out!();
@@ -649,10 +714,10 @@ impl ExprBox
                 match op {
                     // Negation is a multiply, which keeps the numeric
                     // tower in one place
-                    UnOp::Minus => actor.insns.push(Insn::mul_imm16(d, src, -1)),
+                    UnOp::Minus => cg.push_insn(Insn::mul_imm16(d, src, -1)),
 
                     // Logical negation
-                    UnOp::Not => actor.insns.push(Insn::not(d, src)),
+                    UnOp::Not => cg.push_insn(Insn::not(d, src)),
                 }
 
                 d
@@ -662,38 +727,38 @@ impl ExprBox
                 // A condition used as a value is built from the branch it
                 // would compile to, so that the two shapes agree
                 if is_cond_op(op) {
-                    return gen_cond_value(self, fun, regs, actor, dst);
+                    return gen_cond_value(self, fun, regs, cg, dst);
                 }
 
-                return gen_bin_op(op, lhs, rhs, fun, regs, actor, dst);
+                return gen_bin_op(op, lhs, rhs, fun, regs, cg, dst);
             }
 
             Expr::Ternary { test_expr, then_expr, else_expr } => {
                 // Both arms have to land in the same register
                 let d = out!();
 
-                let if_idxs = gen_branch(test_expr, fun, regs, actor, false)?;
+                let if_idxs = gen_branch(test_expr, fun, regs, cg, false)?;
 
                 // Evaluate the then expression
-                gen_into(then_expr, fun, regs, actor, d)?;
-                let jump_idx = emit(actor, Insn::jmp(0));
+                gen_into(then_expr, fun, regs, cg, d)?;
+                let jump_idx = emit(cg, Insn::jmp(0));
 
                 // Patch the test to jump to the else clause
-                let dst_idx = actor.insns.len();
-                patch_jumps(actor, &if_idxs, dst_idx);
+                let dst_idx = cg.actor.insns.len();
+                patch_jumps(cg, &if_idxs, dst_idx);
 
                 // Evaluate the else expression
-                gen_into(else_expr, fun, regs, actor, d)?;
+                gen_into(else_expr, fun, regs, cg, d)?;
 
                 // Patch the jump over the else expression
-                let dst_idx = actor.insns.len();
-                patch_jump(actor, jump_idx, dst_idx);
+                let dst_idx = cg.actor.insns.len();
+                patch_jump(cg, jump_idx, dst_idx);
 
                 d
             }
 
             Expr::Call { callee, args } => {
-                return gen_call(callee, args, fun, regs, actor, None);
+                return gen_call(callee, args, fun, regs, cg, None);
             }
 
             // Function expression
@@ -702,16 +767,16 @@ impl ExprBox
 
                 // If this is not a closure
                 if captured.len() == 0 {
-                    gen_value(actor, d, Value::fun(*fun_id));
+                    gen_value(cg, d, Value::fun(*fun_id));
                     return Ok(d);
                 }
 
-                actor.insns.push(Insn::clos_new(
+                cg.push_insn(Insn::clos_new(
                     d,
                     usize::from(*fun_id) as u32,
                     captured.len().try_into().unwrap(),
                 ));
-                gen_captures(captured, d, fun, regs, actor);
+                gen_captures(captured, d, fun, regs, cg);
                 d
             }
 
@@ -737,23 +802,23 @@ fn gen_cond_value(
     expr: &ExprBox,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     dst: Option<u16>,
 ) -> Result<u16, ParseError>
 {
     let d = match dst { Some(dst) => dst, None => regs.alloc() };
 
-    let jumps = gen_branch(expr, fun, regs, actor, true)?;
-    gen_value(actor, d, Value::FALSE);
-    let jmp_idx = emit(actor, Insn::jmp(0));
+    let jumps = gen_branch(expr, fun, regs, cg, true)?;
+    gen_value(cg, d, Value::FALSE);
+    let jmp_idx = emit(cg, Insn::jmp(0));
 
     // The branch lands on the true case
-    let dst_idx = actor.insns.len();
-    patch_jumps(actor, &jumps, dst_idx);
-    gen_value(actor, d, Value::TRUE);
+    let dst_idx = cg.actor.insns.len();
+    patch_jumps(cg, &jumps, dst_idx);
+    gen_value(cg, d, Value::TRUE);
 
-    let dst_idx = actor.insns.len();
-    patch_jump(actor, jmp_idx, dst_idx);
+    let dst_idx = cg.actor.insns.len();
+    patch_jump(cg, jmp_idx, dst_idx);
 
     Ok(d)
 }
@@ -766,14 +831,14 @@ fn gen_branch(
     expr: &ExprBox,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     jump_if_true: bool,
 ) -> Result<Vec<usize>, ParseError>
 {
     match expr.expr.as_ref() {
         // Negation folds into the sense of the branch
         Expr::Unary { op: UnOp::Not, child } => {
-            return gen_branch(child, fun, regs, actor, !jump_if_true);
+            return gen_branch(child, fun, regs, cg, !jump_if_true);
         }
 
         // Short-circuiting operators branch directly, with no boolean
@@ -782,34 +847,34 @@ fn gen_branch(
         Expr::Binary { op: BinOp::And, lhs, rhs } => {
             if jump_if_true {
                 // Jump only if both hold
-                let skip = gen_branch(lhs, fun, regs, actor, false)?;
-                let jumps = gen_branch(rhs, fun, regs, actor, true)?;
+                let skip = gen_branch(lhs, fun, regs, cg, false)?;
+                let jumps = gen_branch(rhs, fun, regs, cg, true)?;
 
-                let dst_idx = actor.insns.len();
-                patch_jumps(actor, &skip, dst_idx);
+                let dst_idx = cg.actor.insns.len();
+                patch_jumps(cg, &skip, dst_idx);
                 return Ok(jumps);
             }
 
             // Jump if either fails
-            let mut jumps = gen_branch(lhs, fun, regs, actor, false)?;
-            jumps.append(&mut gen_branch(rhs, fun, regs, actor, false)?);
+            let mut jumps = gen_branch(lhs, fun, regs, cg, false)?;
+            jumps.append(&mut gen_branch(rhs, fun, regs, cg, false)?);
             return Ok(jumps);
         }
 
         Expr::Binary { op: BinOp::Or, lhs, rhs } => {
             if jump_if_true {
                 // Jump if either holds
-                let mut jumps = gen_branch(lhs, fun, regs, actor, true)?;
-                jumps.append(&mut gen_branch(rhs, fun, regs, actor, true)?);
+                let mut jumps = gen_branch(lhs, fun, regs, cg, true)?;
+                jumps.append(&mut gen_branch(rhs, fun, regs, cg, true)?);
                 return Ok(jumps);
             }
 
             // Jump only if both fail
-            let skip = gen_branch(lhs, fun, regs, actor, true)?;
-            let jumps = gen_branch(rhs, fun, regs, actor, false)?;
+            let skip = gen_branch(lhs, fun, regs, cg, true)?;
+            let jumps = gen_branch(rhs, fun, regs, cg, false)?;
 
-            let dst_idx = actor.insns.len();
-            patch_jumps(actor, &skip, dst_idx);
+            let dst_idx = cg.actor.insns.len();
+            patch_jumps(cg, &skip, dst_idx);
             return Ok(jumps);
         }
 
@@ -829,22 +894,22 @@ fn gen_branch(
 
             if let Some((imm_op, tested, imm)) = imm_form {
                 let top = regs.top();
-                let a = tested.gen_code(fun, regs, actor, None)?;
+                let a = tested.gen_code(fun, regs, cg, None)?;
                 regs.free_to(top);
 
                 // The guard accepted this operator and mirroring keeps it
                 // in the same set, so an immediate form exists for it
                 let insn = cmp_branch_imm(&imm_op, jump_if_true, a, imm).unwrap();
-                return Ok(vec![emit(actor, insn)]);
+                return Ok(vec![emit(cg, insn)]);
             }
 
             let top = regs.top();
-            let a = lhs.gen_code(fun, regs, actor, None)?;
-            let b = rhs.gen_code(fun, regs, actor, None)?;
+            let a = lhs.gen_code(fun, regs, cg, None)?;
+            let b = rhs.gen_code(fun, regs, cg, None)?;
             regs.free_to(top);
 
             let build = cmp_branch_insn(op, jump_if_true).unwrap();
-            return Ok(vec![emit(actor, build(a, b, 0))]);
+            return Ok(vec![emit(cg, build(a, b, 0))]);
         }
 
         _ => {}
@@ -852,9 +917,9 @@ fn gen_branch(
 
     // Anything else is evaluated and tested as a boolean
     let top = regs.top();
-    let test = expr.gen_code(fun, regs, actor, None)?;
+    let test = expr.gen_code(fun, regs, cg, None)?;
     let insn = if jump_if_true { Insn::if_true(test, 0) } else { Insn::if_false(test, 0) };
-    let idx = emit(actor, insn);
+    let idx = emit(cg, insn);
     regs.free_to(top);
 
     Ok(vec![idx])
@@ -959,15 +1024,15 @@ fn gen_into(
     expr: &ExprBox,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     dst: u16,
 ) -> Result<(), ParseError>
 {
     let top = regs.top();
-    let src = expr.gen_code(fun, regs, actor, Some(dst))?;
+    let src = expr.gen_code(fun, regs, cg, Some(dst))?;
 
     if src != dst {
-        actor.insns.push(Insn::mov(dst, src));
+        cg.push_insn(Insn::mov(dst, src));
     }
 
     regs.free_to(top);
@@ -980,7 +1045,7 @@ fn gen_captures(
     clos: u16,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
 )
 {
     // For each variable captured by the closure
@@ -991,10 +1056,10 @@ fn gen_captures(
         // A mutable local is captured by its cell, not by its value
         let src = match decl {
             Decl::Local { idx, mutable: true, .. } => fun.params.len() as u16 + *idx as u16,
-            _ => gen_var_read(decl, fun, regs, actor, None)
+            _ => gen_var_read(decl, fun, regs, cg, None)
         };
 
-        actor.insns.push(Insn::clos_set(clos, src, idx.try_into().unwrap()));
+        cg.push_insn(Insn::clos_set(clos, src, idx.try_into().unwrap()));
         regs.free_to(top);
     }
 }
@@ -1012,7 +1077,7 @@ fn gen_call(
     args: &Vec<ExprBox>,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     window: Option<u16>,
 ) -> Result<u16, ParseError>
 {
@@ -1056,53 +1121,53 @@ fn gen_call(
         Expr::Ref { decl: Decl::Class { id }, .. } => {
             // Evaluate the arguments
             for (i, arg) in args.iter().enumerate() {
-                gen_call_opnd(arg, fun, regs, actor, start + 1 + i as u16)?;
+                gen_call_opnd(arg, fun, regs, cg, start + 1 + i as u16)?;
             }
 
-            actor.insns.push(Insn::new(usize::from(*id) as u32, start, argc));
+            cg.push_insn(Insn::new(usize::from(*id) as u32, start, argc));
         }
 
         // Callee has form a.b
         Expr::Member { base, field } => {
             // Evaluate the self argument
-            gen_call_opnd(base, fun, regs, actor, start)?;
+            gen_call_opnd(base, fun, regs, cg, start)?;
 
             for (i, arg) in args.iter().enumerate() {
-                gen_call_opnd(arg, fun, regs, actor, start + 1 + i as u16)?;
+                gen_call_opnd(arg, fun, regs, cg, start + 1 + i as u16)?;
             }
 
-            let cache = actor.new_call_cache(field);
-            actor.insns.push(Insn::call_method(start, argc, cache));
+            let cache = cg.actor.new_call_cache(field);
+            cg.push_insn(Insn::call_method(start, argc, cache));
         }
 
         // Call to a known function
         Expr::Ref { decl: Decl::Fun { id }, .. } => {
             for (i, arg) in args.iter().enumerate() {
-                gen_call_opnd(arg, fun, regs, actor, start + i as u16)?;
+                gen_call_opnd(arg, fun, regs, cg, start + i as u16)?;
             }
 
-            actor.insns.push(Insn::call_direct(usize::from(*id) as u32, start, argc));
+            cg.push_insn(Insn::call_direct(usize::from(*id) as u32, start, argc));
         }
 
         // Call to a host function, which the VM provides
         Expr::HostFn(host_fn) => {
             for (i, arg) in args.iter().enumerate() {
-                gen_call_opnd(arg, fun, regs, actor, start + i as u16)?;
+                gen_call_opnd(arg, fun, regs, cg, start + i as u16)?;
             }
 
-            actor.insns.push(Insn::call_host(*host_fn as u16, start, argc));
+            cg.push_insn(Insn::call_host(*host_fn as u16, start, argc));
         }
 
         // Plain regular call
         _ => {
             for (i, arg) in args.iter().enumerate() {
-                gen_call_opnd(arg, fun, regs, actor, start + i as u16)?;
+                gen_call_opnd(arg, fun, regs, cg, start + i as u16)?;
             }
 
-            gen_call_opnd(callee, fun, regs, actor, start + argc as u16)?;
+            gen_call_opnd(callee, fun, regs, cg, start + argc as u16)?;
 
-            let cache = actor.new_call_cache("");
-            actor.insns.push(Insn::call_opnd(start, argc, cache));
+            let cache = cg.actor.new_call_cache("");
+            cg.push_insn(Insn::call_opnd(start, argc, cache));
         }
     }
 
@@ -1128,16 +1193,16 @@ fn gen_call_opnd(
     expr: &ExprBox,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     dst: u16,
 ) -> Result<(), ParseError>
 {
     if let Expr::Call { callee, args } = expr.expr.as_ref() {
-        gen_call(callee, args, fun, regs, actor, Some(dst))?;
+        gen_call(callee, args, fun, regs, cg, Some(dst))?;
         return Ok(());
     }
 
-    gen_into(expr, fun, regs, actor, dst)
+    gen_into(expr, fun, regs, cg, dst)
 }
 
 fn gen_bin_op(
@@ -1146,7 +1211,7 @@ fn gen_bin_op(
     rhs: &ExprBox,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     dst: Option<u16>,
 ) -> Result<u16, ParseError>
 {
@@ -1155,7 +1220,7 @@ fn gen_bin_op(
     // Assignments are different from other kinds of expressions
     // because we don't evaluate the lhs the same way
     if *op == Assign {
-        return gen_assign(lhs, rhs, fun, regs, actor, true);
+        return gen_assign(lhs, rhs, fun, regs, cg, true);
     }
 
     // A mask that is one run of set bits, as the position of its lowest
@@ -1181,7 +1246,7 @@ fn gen_bin_op(
     // And with a constant mask folds into the instruction when the mask is
     // a single run of bits, which is what every mask worth folding is
     if *op == BitAnd {
-        let run = const_value(rhs, actor)
+        let run = const_value(rhs, cg.actor)
             .filter(|v| v.is_fixnum())
             .and_then(|v| bit_run(v.as_fixnum()));
 
@@ -1190,7 +1255,7 @@ fn gen_bin_op(
             // what pulling a field out of a packed word looks like
             let shifted = match lhs.expr.as_ref() {
                 Expr::Binary { op: RShift, lhs: inner, rhs: amount } => {
-                    const_value(amount, actor)
+                    const_value(amount, cg.actor)
                         .filter(|v| v.is_fixnum())
                         .map(|v| v.as_fixnum())
                         .filter(|sh| *sh >= 0 && *sh < 64)
@@ -1203,15 +1268,15 @@ fn gen_bin_op(
             let top = regs.top();
 
             let a = match shifted {
-                Some((inner, _)) => inner.gen_code(fun, regs, actor, None)?,
-                None => lhs.gen_code(fun, regs, actor, None)?,
+                Some((inner, _)) => inner.gen_code(fun, regs, cg, None)?,
+                None => lhs.gen_code(fun, regs, cg, None)?,
             };
 
             regs.free_to(top);
 
             let d = match dst { Some(dst) => dst, None => regs.alloc() };
 
-            actor.insns.push(match shifted {
+            cg.push_insn(match shifted {
                 Some((_, sh)) => Insn::rshift_mask(d, a, sh, lo, len),
                 None => Insn::bit_and_mask(d, a, lo, len),
             });
@@ -1224,20 +1289,20 @@ fn gen_bin_op(
     // below the word size is accepted, which is what lets the instruction
     // itself skip checking the amount
     if matches!(op, LShift | RShift) {
-        let shift = const_value(rhs, actor)
+        let shift = const_value(rhs, cg.actor)
             .filter(|v| v.is_fixnum())
             .map(|v| v.as_fixnum())
             .filter(|s| *s >= 0 && *s < 64);
 
         if let Some(shift) = shift {
             let top = regs.top();
-            let a = lhs.gen_code(fun, regs, actor, None)?;
+            let a = lhs.gen_code(fun, regs, cg, None)?;
             regs.free_to(top);
 
             let d = match dst { Some(dst) => dst, None => regs.alloc() };
             let shift = shift as u8;
 
-            actor.insns.push(match op {
+            cg.push_insn(match op {
                 LShift => Insn::lshift_imm(d, a, shift),
                 _ => Insn::rshift_imm(d, a, shift),
             });
@@ -1247,7 +1312,7 @@ fn gen_bin_op(
     }
 
     // If the rhs is a constant integer that fits an immediate operand
-    if let Some(imm) = const_value(rhs, actor).filter(|v| v.is_fixnum()) {
+    if let Some(imm) = const_value(rhs, cg.actor).filter(|v| v.is_fixnum()) {
         let imm: Result<i16, _> = imm.as_fixnum().try_into();
 
         if let Ok(imm) = imm {
@@ -1260,19 +1325,19 @@ fn gen_bin_op(
 
             if let Some(build) = build {
                 let top = regs.top();
-                let a = lhs.gen_code(fun, regs, actor, None)?;
+                let a = lhs.gen_code(fun, regs, cg, None)?;
                 regs.free_to(top);
 
                 let d = match dst { Some(dst) => dst, None => regs.alloc() };
-                actor.insns.push(build(d, a, imm));
+                cg.push_insn(build(d, a, imm));
                 return Ok(d);
             }
         }
     }
 
     let top = regs.top();
-    let a = lhs.gen_code(fun, regs, actor, None)?;
-    let b = rhs.gen_code(fun, regs, actor, None)?;
+    let a = lhs.gen_code(fun, regs, cg, None)?;
+    let b = rhs.gen_code(fun, regs, cg, None)?;
     regs.free_to(top);
 
     let d = match dst { Some(dst) => dst, None => regs.alloc() };
@@ -1293,7 +1358,7 @@ fn gen_bin_op(
         _ => todo!("{:?}", op),
     };
 
-    actor.insns.push(insn);
+    cg.push_insn(insn);
     Ok(d)
 }
 
@@ -1315,13 +1380,13 @@ fn gen_var_write(
     decl: &Decl,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     src: u16,
 )
 {
     match *decl {
         Decl::Global { idx, .. } => {
-            actor.insns.push(Insn::set_global(src, idx));
+            cg.push_insn(Insn::set_global(src, idx));
         }
 
         Decl::Local { .. } | Decl::Arg { .. } => {
@@ -1329,17 +1394,17 @@ fn gen_var_write(
 
             // An escaping variable holds a cell, and the value goes in it
             if fun.escaping.contains(decl) {
-                actor.insns.push(Insn::cell_set(reg, src));
+                cg.push_insn(Insn::cell_set(reg, src));
             } else if reg != src {
-                actor.insns.push(Insn::mov(reg, src));
+                cg.push_insn(Insn::mov(reg, src));
             }
         }
 
         Decl::Captured { idx, mutable } => {
             assert!(mutable);
             let cell = regs.alloc();
-            actor.insns.push(Insn::clos_get(cell, idx.try_into().unwrap()));
-            actor.insns.push(Insn::cell_set(cell, src));
+            cg.push_insn(Insn::clos_get(cell, idx.try_into().unwrap()));
+            cg.push_insn(Insn::cell_set(cell, src));
         }
 
         _ => todo!()
@@ -1353,7 +1418,7 @@ fn gen_var_read(
     decl: &Decl,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     dst: Option<u16>,
 ) -> u16
 {
@@ -1364,13 +1429,13 @@ fn gen_var_read(
     match *decl {
         Decl::Fun { id } => {
             let d = out!();
-            gen_value(actor, d, Value::fun(id));
+            gen_value(cg, d, Value::fun(id));
             d
         }
 
         Decl::Class { id } => {
             let d = out!();
-            gen_value(actor, d, Value::class(id));
+            gen_value(cg, d, Value::class(id));
             d
         }
 
@@ -1379,9 +1444,9 @@ fn gen_var_read(
 
             // An immutable global the unit has already initialized holds
             // the same value the compiled code will see
-            match if mutable { None } else { actor.global_value(idx) } {
-                Some(val) if fits_imm40(val) => gen_value(actor, d, val),
-                _ => actor.insns.push(Insn::get_global(d, idx)),
+            match if mutable { None } else { cg.actor.global_value(idx) } {
+                Some(val) if fits_imm40(val) => gen_value(cg, d, val),
+                _ => cg.push_insn(Insn::get_global(d, idx)),
             }
 
             d
@@ -1394,7 +1459,7 @@ fn gen_var_read(
 
             if fun.escaping.contains(decl) {
                 let d = out!();
-                actor.insns.push(Insn::cell_get(d, reg));
+                cg.push_insn(Insn::cell_get(d, reg));
                 d
             } else {
                 reg
@@ -1403,10 +1468,10 @@ fn gen_var_read(
 
         Decl::Captured { idx, mutable } => {
             let d = out!();
-            actor.insns.push(Insn::clos_get(d, idx.try_into().unwrap()));
+            cg.push_insn(Insn::clos_get(d, idx.try_into().unwrap()));
 
             if mutable {
-                actor.insns.push(Insn::cell_get(d, d));
+                cg.push_insn(Insn::cell_get(d, d));
             }
 
             d
@@ -1419,7 +1484,7 @@ fn gen_assign(
     rhs: &ExprBox,
     fun: &Function,
     regs: &mut Regs,
-    actor: &mut Actor,
+    cg: &mut CodeGen,
     need_value: bool,
 ) -> Result<u16, ParseError>
 {
@@ -1428,8 +1493,8 @@ fn gen_assign(
             // Writing straight into the variable's own register is what
             // keeps a plain assignment down to the value's own code
             let target = write_target(decl, fun, regs);
-            let src = rhs.gen_code(fun, regs, actor, Some(target))?;
-            gen_var_write(decl, fun, regs, actor, src);
+            let src = rhs.gen_code(fun, regs, cg, Some(target))?;
+            gen_var_write(decl, fun, regs, cg, src);
             Ok(src)
         }
 
@@ -1439,15 +1504,15 @@ fn gen_assign(
             let d = if need_value { Some(regs.alloc()) } else { None };
 
             let top = regs.top();
-            let obj = base.gen_code(fun, regs, actor, None)?;
-            let src = rhs.gen_code(fun, regs, actor, d)?;
+            let obj = base.gen_code(fun, regs, cg, None)?;
+            let src = rhs.gen_code(fun, regs, cg, d)?;
 
-            let cache = actor.new_prop_cache(field);
-            actor.insns.push(Insn::set_field(obj, src, cache));
+            let cache = cg.actor.new_prop_cache(field);
+            cg.push_insn(Insn::set_field(obj, src, cache));
 
             if let Some(d) = d {
                 if d != src {
-                    actor.insns.push(Insn::mov(d, src));
+                    cg.push_insn(Insn::mov(d, src));
                 }
             }
 
@@ -1459,15 +1524,15 @@ fn gen_assign(
             let d = if need_value { Some(regs.alloc()) } else { None };
 
             let top = regs.top();
-            let arr = base.gen_code(fun, regs, actor, None)?;
-            let idx = index.gen_code(fun, regs, actor, None)?;
-            let src = rhs.gen_code(fun, regs, actor, d)?;
+            let arr = base.gen_code(fun, regs, cg, None)?;
+            let idx = index.gen_code(fun, regs, cg, None)?;
+            let src = rhs.gen_code(fun, regs, cg, d)?;
 
-            actor.insns.push(Insn::set_index(arr, idx, src));
+            cg.push_insn(Insn::set_index(arr, idx, src));
 
             if let Some(d) = d {
                 if d != src {
-                    actor.insns.push(Insn::mov(d, src));
+                    cg.push_insn(Insn::mov(d, src));
                 }
             }
 

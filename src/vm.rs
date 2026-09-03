@@ -12,6 +12,7 @@ use crate::closure::Closure;
 use crate::array::Array;
 use crate::bytearray::ByteArray;
 use crate::codegen::CompiledFun;
+use crate::lexer::SrcPos;
 use crate::insns::{self, NameId, Opcode};
 use crate::gc::{undo_forwarding, Copier, StrTable, UndoLog};
 use crate::host::*;
@@ -186,6 +187,11 @@ pub struct Actor
     // Array of compiled instructions
     pub(crate) insns: Vec<Insn>,
 
+    // Source position of each compiled instruction, parallel to `insns`.
+    // Bytecode is compiled per actor, and can be specialized on values
+    // only that actor knows, so the mapping belongs to the actor too
+    insn_pos: Vec<SrcPos>,
+
     // Heap constants the compiled code refers to. Instructions hold an
     // index into this rather than a heap pointer, so the collector traces
     // the pool and never walks the instruction stream
@@ -319,6 +325,7 @@ impl Actor
             stack: Vec::default(),
             frames: Vec::default(),
             insns: Vec::default(),
+            insn_pos: Vec::default(),
             classes: HashMap::default(),
             funs: HashMap::default(),
             consts: Vec::default(),
@@ -566,9 +573,25 @@ impl Actor
         vm.prog.funs[&fun_id].params.len()
     }
 
-    /// Get a compiled function entry for a given function id
-    /// Compile a function, if it has not been compiled yet.
+    /// Emit one compiled instruction, tagging it with the source position
+    /// it was generated from. This is the only place instructions are
+    /// appended, which is what keeps the position array the same length
+    /// as the instruction array
+    pub(crate) fn push_insn(&mut self, insn: Insn, pos: SrcPos)
+    {
+        self.insns.push(insn);
+        self.insn_pos.push(pos);
+    }
+
+    /// Source position an instruction was generated from
+    pub(crate) fn insn_pos(&self, pc: usize) -> Option<SrcPos>
+    {
+        self.insn_pos.get(pc).copied()
+    }
+
+    /// Get a compiled function entry for a given function id.
     ///
+    /// Compiles the function, if it has not been compiled yet.
     /// Compiling allocates the names and literals the function needs, so
     /// this can collect. That makes it a safepoint: callers must hold no
     /// heap value across it that the collector cannot reach.
@@ -1456,7 +1479,7 @@ impl Actor
     /// call this at many sites, stay out of the way of the hot code
     #[cold]
     #[inline(never)]
-    fn report_error(&self, insn_name: &str, msg: &str) -> !
+    fn report_error(&self, insn_name: &str, msg: &str, cur_pc: Option<usize>) -> !
     {
         eprintln!();
 
@@ -1464,12 +1487,28 @@ impl Actor
             eprintln!("Runtime error while executing `{}` instruction:", insn_name);
         }
 
-        // Print the error message to standard error
-        eprintln!("{}", msg);
+        // Print the error message to standard error, pointing at the
+        // expression that failed rather than at the enclosing function
+        match cur_pc.and_then(|pc| self.insn_pos(pc)) {
+            Some(pos) => eprintln!("{}: {}", pos, msg),
+            None => eprintln!("{}", msg),
+        }
+
         eprintln!();
 
-        // For each stack frame, from top to bottom
-        for frame in self.frames.clone().into_iter().rev() {
+        // For each stack frame, from top to bottom. The frame's own
+        // program counter is not on the frame: the innermost one is
+        // executing `cur_pc`, and an outer one is stopped at the call
+        // that pushed the frame above it, one instruction before the
+        // return address that frame recorded
+        let frames = self.frames.clone();
+
+        for (idx, frame) in frames.iter().enumerate().rev() {
+            let cur_pc = match frames.get(idx + 1) {
+                Some(callee) => callee.ret_addr.checked_sub(1),
+                None => cur_pc,
+            };
+
             // A frame we can't identify shouldn't keep us from
             // reporting the error that got us here
             let fun_id = match frame.fun.to_fun_id() {
@@ -1495,8 +1534,14 @@ impl Actor
                 fun_name
             };
 
+            drop(vm);
+
             eprintln!("{}", fun_name);
-            eprintln!("  defined at {}", fun_pos);
+
+            match cur_pc.and_then(|pc| self.insn_pos(pc)) {
+                Some(pos) => eprintln!("  at {}", pos),
+                None => eprintln!("  defined at {}", fun_pos),
+            }
         }
 
         // End program execution
@@ -1510,7 +1555,7 @@ impl Actor
         assert!(self.frames.len() == 0);
 
         if fun.to_fun_id().is_none() {
-            self.report_error("", &format!("expected function value but got {:?}", fun));
+            self.report_error("", &format!("expected function value but got {:?}", fun), None);
         }
 
         // The arguments become the first registers of the frame.
@@ -1530,7 +1575,7 @@ impl Actor
                 "function takes {} argument(s) but was called with {}",
                 fun_entry.num_params,
                 args.len()
-            ));
+            ), None);
         }
 
         // Push a new stack frame
@@ -1767,12 +1812,19 @@ impl Actor
                 let entry = self.get_compiled_fun(&mut fun_val);
 
                 if ($argc as usize) != entry.num_params {
-                    let vm = self.vm.lock().unwrap();
-                    let fun = &vm.prog.funs[&fun_id];
+                    // Reporting the error walks the frames, which locks
+                    // the VM again, so what it needs is copied out and the
+                    // lock released first
+                    let (fun_name, fun_pos) = {
+                        let vm = self.vm.lock().unwrap();
+                        let fun = &vm.prog.funs[&fun_id];
+                        (fun.name.clone(), fun.pos)
+                    };
+
                     error!(
                         "incorrect argument count in call to function \"{}\", defined at {}, received {} arguments, expected {}",
-                        fun.name,
-                        fun.pos,
+                        fun_name,
+                        fun_pos,
                         $argc,
                         entry.num_params
                     );
@@ -1780,22 +1832,6 @@ impl Actor
 
                 (fun_val, fun_id, entry)
             }}
-        }
-
-        // Handle a runtime error
-        // Print debug information including a stack trace
-        // and terminate the execution
-        macro_rules! error {
-            ($insn_name: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
-                // The message is formatted first because the arguments may
-                // need to borrow the actor
-                let msg = format!($format_str $(, $arg)*);
-                self.report_error($insn_name, &msg);
-            }};
-
-            ($format_str:literal $(, $arg:expr)* $(,)?) => {
-                error!("", $format_str $(, $arg)*)
-            };
         }
 
         loop
@@ -1809,19 +1845,35 @@ impl Actor
             let this_pc = pc;
             pc = unsafe { pc.unchecked_add(1) };
 
+            // Handle a runtime error: print debug information including a
+            // stack trace, and terminate the execution.
+            //
+            // Defined here rather than above the loop so that it can name
+            // `this_pc`, which is where the error happened: a macro body
+            // resolves locals where the macro is written, not where it is
+            // invoked
+            macro_rules! error {
+                ($insn_name: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
+                    // The message is formatted first because the arguments
+                    // may need to borrow the actor
+                    let msg = format!($format_str $(, $arg)*);
+                    self.report_error($insn_name, &msg, Some(this_pc));
+                }};
+
+                ($format_str:literal $(, $arg:expr)* $(,)?) => {
+                    error!("", $format_str $(, $arg)*)
+                };
+            }
+
             match insn.opcode() {
                 Opcode::nop => {},
 
                 Opcode::breakpoint => {},
 
+                // The position is reported from the instruction position
+                // map, like it is for any other instruction
                 Opcode::panic => {
-                    let opnds = insns::panic::decode(insn);
-                    error!(
-                        "explicit panic at: {}@{}:{}",
-                        crate::lexer::name_from_id(opnds.file_id as u32),
-                        opnds.line_no,
-                        opnds.col_no,
-                    );
+                    error!("explicit panic");
                 }
 
                 Opcode::load_imm40 => {
@@ -2845,7 +2897,7 @@ impl VM
                     "actor cannot return heap-allocated value of type {:?}, \
                     only primitive values can be returned",
                     ret_val.type_of()
-                ));
+                ), None);
             }
 
             ret_val
