@@ -38,12 +38,35 @@ let HIDDEN_SIZE = 64;
 let LEARNING_RATE = 0.01;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
 let DETECTION_THRESHOLD = 0.92;
+
+// Consecutive frames the same word must win before a detection counts, to
+// smooth out one-frame flickers on words that briefly cross the threshold
+let CONFIRM_FRAMES = 2;
+
+// Frames of enforced quiet after a detection fires, before another can
+let COOLDOWN_FRAMES = 12;
 let NOISE_MAGNITUDE = 0.12;
 let GRADIENT_CLIP_THRESHOLD = 1.0;
 let MAX_ZERO_FRAMES_TO_ADD = 10;
 
 // Data augmentation: probability of dropping any given frame in training
 let FRAME_DROP_PROB = 0.05;
+
+// For positive examples, randomly keep only a prefix, so the label is still
+// the full word but the window is caught mid-utterance, before it's over.
+// Nothing but this word should win on it either.
+let TRUNCATED_PREFIX_PROB = 0.3;
+
+// For positive examples otherwise, randomly append trailing silence,
+// anywhere up to a full detection window. Within a short grace period this
+// is still trained as the word, so a slight lag catching its end still
+// reads as a hit. Past the grace period the example is trained as
+// all-zeros: that much trailing silence means the word is gone, and
+// nothing -- including it -- should still be firing.
+let TRAILING_SILENCE_PROB = 0.5;
+let TRAILING_SILENCE_GRACE_MS = 150;
+let TRAILING_SILENCE_GRACE_FRAMES = (SAMPLE_RATE * TRAILING_SILENCE_GRACE_MS).idiv(1000 * FFT_SIZE);
+let TRAILING_SILENCE_MAX_FRAMES = MAX_FRAMES;
 
 // The one word that plays a beep. Every other word you teach is still
 // detected and shown, it just doesn't make a sound.
@@ -536,11 +559,13 @@ fun training_actor(detection_actor_id) {
             let frames = sample[0];
             let label = sample[1];
 
-            let var current_frames = frames;
+            // A private copy, since frames still belongs to training_data
+            // and the augmentation below pushes onto it in place
+            let var current_frames = array_slice(frames, 0, frames.len);
 
             // For negative examples, randomly truncate the frames
-            if (label == "" && frames.len > 1) {
-                let max_len = frames.len;
+            if (label == "" && current_frames.len > 1) {
+                let max_len = current_frames.len;
                 let var start_idx = rand_int(0, max_len);
                 let var end_idx = rand_int(start_idx, max_len);
                 if (start_idx == end_idx) {
@@ -548,13 +573,7 @@ fun training_actor(detection_actor_id) {
                     end_idx = start_idx + 1;
                     if (end_idx > max_len) end_idx = max_len;
                 }
-
-                let truncated_len = end_idx - start_idx;
-                let truncated_frames = Array.with_size(truncated_len, nil);
-                for (let var i = 0; i < truncated_len; ++i) {
-                    truncated_frames[i] = frames[start_idx + i];
-                }
-                current_frames = truncated_frames;
+                current_frames = array_slice(current_frames, start_idx, end_idx);
             }
 
             // For negative examples, randomly append zero frames
@@ -594,6 +613,24 @@ fun training_actor(detection_actor_id) {
                 }
             }
 
+            // For positive examples, one of two mutually exclusive shapes,
+            // mirroring the two ways the sliding window can catch an
+            // incomplete word: cut short mid-utterance, or trailing off
+            // after it. Kept last, after the frame drop above, so a prefix
+            // isn't itself further thinned and `num_silence_frames` stays
+            // accurate to what's actually appended.
+            let var num_silence_frames = 0;
+            if (label != "" && current_frames.len > 1 && rand_float(0.0, 1.0) < TRUNCATED_PREFIX_PROB) {
+                let cut_len = rand_int(1, current_frames.len);
+                current_frames = array_slice(current_frames, 0, cut_len);
+            } else if (label != "" && TRAILING_SILENCE_MAX_FRAMES > 0 && rand_float(0.0, 1.0) < TRAILING_SILENCE_PROB) {
+                num_silence_frames = rand_int(1, TRAILING_SILENCE_MAX_FRAMES + 1);
+                let silence_frame = Array.with_size(NUM_MEL_BINS, 0.0);
+                for (let var i = 0; i < num_silence_frames; ++i) {
+                    current_frames.push(silence_frame);
+                }
+            }
+
             let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
 
             // Data augmentation: scale the whole example, then add noise
@@ -604,10 +641,13 @@ fun training_actor(detection_actor_id) {
 
             // One target per word: 1 for the word that was said, 0 for the
             // rest. A negative sample leaves every target at 0, and a sample
-            // of one word is a negative for all the others.
+            // of one word is a negative for all the others. Past the
+            // trailing-silence grace period, the target is all-zeros too --
+            // that much silence means the word is gone, so nothing,
+            // including it, should still be firing.
             let y_true = Array.with_size(mlp.output_size, 0.0);
             let label_idx = mlp.word_index(label);
-            if (label_idx >= 0) {
+            if (label_idx >= 0 && num_silence_frames <= TRAILING_SILENCE_GRACE_FRAMES) {
                 y_true[label_idx] = 1.0;
             }
 
@@ -678,6 +718,15 @@ fun detection_actor(beep_actor_id) {
     let var current_mlp = nil;
     let var frame_buffer = []; // To store recent magnitudes
 
+    // Which word is winning and for how many frames running, for the
+    // consecutive-frame debounce below
+    let var pending_word = nil;
+    let var pending_count = 0;
+
+    // Frames left in the post-detection cooldown, during which nothing is
+    // classified at all
+    let var cooldown_remaining = 0;
+
     while (true) {
         let msg = $actor_poll(); // Returns nil when nothing is waiting
 
@@ -718,31 +767,61 @@ fun detection_actor(beep_actor_id) {
         // One prediction per frame of audio that arrives, once there are
         // enough frames to fill the window the network expects
         if (msg instanceof Array && current_mlp != nil && frame_buffer.len == MAX_FRAMES) {
-            let x = flatten_and_pad(frame_buffer, MAX_FRAMES, NUM_MEL_BINS);
-            let y_pred = current_mlp.forward(x);
+            // Nothing is classified during the post-detection cooldown
+            if (cooldown_remaining > 0) {
+                cooldown_remaining = cooldown_remaining - 1;
+            } else {
+                let x = flatten_and_pad(frame_buffer, MAX_FRAMES, NUM_MEL_BINS);
+                let y_pred = current_mlp.forward(x);
 
-            // Every output is its own detector, so the loudest one above the
-            // threshold wins rather than the outputs being compared as a
-            // distribution
-            let var best = -1;
-            let var best_conf = DETECTION_THRESHOLD;
-            for (let var o = 0; o < y_pred.len; ++o) {
-                if (y_pred[o] > best_conf) {
-                    best_conf = y_pred[o];
-                    best = o;
+                // Every output is its own detector, so the loudest one above
+                // the threshold wins rather than the outputs being compared
+                // as a distribution
+                let var best = -1;
+                let var best_conf = DETECTION_THRESHOLD;
+                for (let var o = 0; o < y_pred.len; ++o) {
+                    if (y_pred[o] > best_conf) {
+                        best_conf = y_pred[o];
+                        best = o;
+                    }
                 }
-            }
 
-            if (best >= 0) {
-                let word = current_mlp.words[best];
+                if (best >= 0) {
+                    let word = current_mlp.words[best];
 
-                // Detections are shown by lighting the word up in the list
-                // rather than printed, since they arrive many times a second
-                $actor_send(main_id, [word, best_conf]);
+                    if (word == pending_word) {
+                        pending_count = pending_count + 1;
+                    } else {
+                        pending_word = word;
+                        pending_count = 1;
+                    }
 
-                // Only the wake word makes a sound
-                if (word == WAKE_WORD) {
-                    $actor_send(beep_actor_id, "detected");
+                    // Require a few consecutive hits on the same word before
+                    // it counts, since a genuine detection keeps winning as
+                    // the window shifts one frame at a time, but a wrong
+                    // word triggered by a partial or trailing glimpse of
+                    // another tends to win for only a frame or two
+                    if (pending_count >= CONFIRM_FRAMES) {
+                        // Detections are shown by lighting the word up in
+                        // the list rather than printed, since they arrive
+                        // many times a second
+                        $actor_send(main_id, [word, best_conf]);
+
+                        // Only the wake word makes a sound
+                        if (word == WAKE_WORD) {
+                            $actor_send(beep_actor_id, "detected");
+                        }
+
+                        // Hold off on any further detection for a while, so
+                        // this one doesn't immediately re-trigger itself or
+                        // bleed into a false hit for another word
+                        cooldown_remaining = COOLDOWN_FRAMES;
+                        pending_word = nil;
+                        pending_count = 0;
+                    }
+                } else {
+                    pending_word = nil;
+                    pending_count = 0;
                 }
             }
         }
