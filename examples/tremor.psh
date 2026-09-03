@@ -979,13 +979,107 @@ fun parse_map(path) {
 
 // --- Lighting ---
 
-// The light level at one point on a surface facing a given way
-fun light_at(px, py, pz, nx, ny, nz) {
+// Does any brush stand between these two points? The segment is clipped
+// against the brush's half-spaces the way `plane_quad` clips a face, and the
+// brush bounds reject nearly all of them before that runs, which is what keeps
+// a linear walk over every brush cheap enough to do per sample.
+fun occluded(ax, ay, az, bx, by, bz) {
+    let dx = bx - ax; let dy = by - ay; let dz = bz - az;
+
+    let var lx = ax; let var hx = bx;
+    if (hx < lx) { lx = bx; hx = ax; }
+    let var ly = ay; let var hy = by;
+    if (hy < ly) { ly = by; hy = ay; }
+    let var lz = az; let var hz = bz;
+    if (hz < lz) { lz = bz; hz = az; }
+
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (hx < b.x0 || lx > b.x1) continue;
+        if (hy < b.y0 || ly > b.y1) continue;
+        if (hz < b.z0 || lz > b.z1) continue;
+
+        let planes = b.planes;
+        let var t0 = 0.0;
+        let var t1 = 1.0;
+        let var miss = false;
+
+        for (let var j = 0; j < planes.len; ++j) {
+            let p = planes[j];
+            let num = p.nx * ax + p.ny * ay + p.nz * az - p.d;
+            let den = p.nx * dx + p.ny * dy + p.nz * dz;
+
+            // Parallel to the plane: outside it rules the brush out, inside it
+            // says nothing
+            if (den > 0.0 - 0.000001 && den < 0.000001) {
+                if (num > 0.0) { miss = true; break; }
+                continue;
+            }
+
+            let t = (0.0 - num) / den;
+            if (den > 0.0) { if (t < t1) t1 = t; }
+            else { if (t > t0) t0 = t; }
+            if (t0 > t1) { miss = true; break; }
+        }
+
+        // A sample sits half a unit off its own surface, which is not enough to
+        // clear a wall its face runs into at a corner. Requiring the segment to
+        // pass through some thickness is what keeps those seams from reading as
+        // occlusions and drawing a dark line down every join.
+        if (!miss && t1 - t0 > 0.002) return true;
+    }
+
+    return false;
+}
+
+// Is this point strictly inside a brush? Boundaries do not count: a sample
+// lifted off one surface routinely lands exactly on another.
+fun in_solid(x, y, z) {
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (x <= b.x0 || x >= b.x1) continue;
+        if (y <= b.y0 || y >= b.y1) continue;
+        if (z <= b.z0 || z >= b.z1) continue;
+
+        let planes = b.planes;
+        let var inside = true;
+        for (let var j = 0; j < planes.len; ++j) {
+            let p = planes[j];
+            if (p.nx * x + p.ny * y + p.nz * z - p.d > 0.0 - 0.05) { inside = false; break; }
+        }
+        if (inside) return true;
+    }
+    return false;
+}
+
+// The light level at one point on a surface facing a given way. `tx, ty, tz`
+// is the middle of the face, which says which way is inward along it.
+fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     // Lift the sample off the surface, so that a fixture sitting flush against
     // a wall still counts as being in front of it
     let cx = px + nx * 0.5;
     let cy = py + ny * 0.5;
     let cz = pz + nz * 0.5;
+
+    // Most of a face is usually walled in by the brushes around it: an arcade
+    // pocket is a gap left between two wall boxes, so the face that shows in
+    // the gap runs the whole height of the wall with all but a window of it
+    // buried. A sample down in that buried part sees no lamp at all, and since
+    // its neighbours see none either there is nothing for `light_curves` to cut
+    // on, so the window bakes as dark as the stone around it.
+    //
+    // A buried sample has no visibility worth reporting, so it reports none and
+    // takes the light it would have had before shadows. Faces out in the open
+    // are untouched, and one standing in a real shadow still goes dark.
+    //
+    // The test is done a little inside the face rather than at the sample: a
+    // corner of a face is a corner of its brush too, and sits on the bounding
+    // planes of whatever it abuts rather than within them.
+    let mx = tx - cx; let my = ty - cy; let mz = tz - cz;
+    let span = (mx * mx + my * my + mz * mz).sqrt();
+    let var probe = 0.5;
+    if (span > 2.0) probe = 1.0 / span;
+    let buried = in_solid(cx + mx * probe, cy + my * probe, cz + mz * probe);
 
     let var lum = AMBIENT;
     for (let var i = 0; i < lights.len; ++i) {
@@ -1004,6 +1098,9 @@ fun light_at(px, py, pz, nx, ny, nz) {
         // keeps a little, which softens the falloff around corners
         let ndotl = (nx * dx + ny * dy + nz * dz) / dist;
         if (ndotl <= 0.0) continue;
+
+        // Anything solid in the way takes the lamp out entirely
+        if (!buried && occluded(cx, cy, cz, L[0], L[1], L[2])) continue;
 
         let atten = 1.0 - dist / radius;
         lum = lum + L[4] * atten * (0.35 + 0.65 * ndotl);
@@ -1037,6 +1134,13 @@ fun bake_vertex_light(f) {
     let out = Array.with_size(n, 0.0);
     let top = SHADE_MAX;
 
+    // Lava is its own light: it is as bright as the scale goes wherever it is,
+    // and nothing standing over it makes it any dimmer
+    if (f.flow) {
+        for (let var i = 0; i < n; ++i) out[i] = top;
+        return out;
+    }
+
     if (f.light >= 0) {
         // A level named in the map, put on the same curve
         let t = f.light.to_f() / (NUM_LEVELS - 1).to_f();
@@ -1051,6 +1155,13 @@ fun bake_vertex_light(f) {
     if (f.taxis == 0) { ax0 = 1; ax1 = 2; }
     else if (f.taxis == 1) { ax0 = 0; ax1 = 2; }
 
+    let var mx = 0.0; let var my = 0.0; let var mz = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        mx = mx + f.v[i * 3]; my = my + f.v[i * 3 + 1]; mz = mz + f.v[i * 3 + 2];
+    }
+    let inv_m = 1.0 / n.to_f();
+    mx = mx * inv_m; my = my * inv_m; mz = mz * inv_m;
+
     let sv = Array.with_size(n, 0.0);
     let tv = Array.with_size(n, 0.0);
     let lv = Array.with_size(n, 0.0);
@@ -1059,7 +1170,8 @@ fun bake_vertex_light(f) {
     for (let var i = 0; i < n; ++i) {
         sv[i] = f.v[i * 3 + ax0];
         tv[i] = f.v[i * 3 + ax1];
-        lv[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2], f.nx, f.ny, f.nz);
+        lv[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
+            f.nx, f.ny, f.nz, mx, my, mz);
         sc = sc + sv[i]; tc = tc + tv[i]; lc = lc + lv[i];
     }
 
@@ -1105,7 +1217,7 @@ fun bake_vertex_light(f) {
 // fading evenly from one end to the other is left whole, and only a lamp pool
 // sitting in the middle of a surface asks for pieces.
 fun light_curves(f) {
-    if (f.light >= 0) return false;
+    if (f.light >= 0 || f.flow) return false;
 
     let n = f.v.len.idiv(3);
     let vl = Array.with_size(n, 0.0);
@@ -1113,18 +1225,22 @@ fun light_curves(f) {
     let var mean = 0.0;
 
     for (let var i = 0; i < n; ++i) {
-        let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
-        vl[i] = light_at(x, y, z, f.nx, f.ny, f.nz);
-        cx = cx + x; cy = cy + y; cz = cz + z;
-        mean = mean + vl[i];
+        cx = cx + f.v[i * 3]; cy = cy + f.v[i * 3 + 1]; cz = cz + f.v[i * 3 + 2];
     }
-
     let inv_n = 1.0 / n.to_f();
     cx = cx * inv_n; cy = cy * inv_n; cz = cz * inv_n;
+
+    for (let var i = 0; i < n; ++i) {
+        vl[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
+            f.nx, f.ny, f.nz, cx, cy, cz);
+        mean = mean + vl[i];
+    }
     mean = mean * inv_n;
 
     // The middle, where a lamp pool that the corners all miss shows up
-    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz) - mean).abs() > LIGHT_TOL) return true;
+    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz, cx, cy, cz) - mean).abs() > LIGHT_TOL) {
+        return true;
+    }
 
     // And the edge midpoints, where interpolation is the mean of two corners.
     // A pool sitting against one edge misses the centre test but not this one.
@@ -1136,7 +1252,9 @@ fun light_curves(f) {
         let my = (f.v[i * 3 + 1] + f.v[j * 3 + 1]) * 0.5;
         let mz = (f.v[i * 3 + 2] + f.v[j * 3 + 2]) * 0.5;
         let interp = (vl[i] + vl[j]) * 0.5;
-        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz) - interp).abs() > LIGHT_TOL) return true;
+        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz, cx, cy, cz) - interp).abs() > LIGHT_TOL) {
+            return true;
+        }
     }
 
     return false;
@@ -2188,7 +2306,9 @@ fun prepare_node(node) {
     prepare_node(node.front);
     prepare_node(node.back);
 }
+let light_start_ms = $time_current_ms();
 prepare_node(bsp_root);
+let light_ms = $time_current_ms() - light_start_ms;
 compute_bounds(bsp_root);
 
 let var tex_bytes = 0;
@@ -2201,6 +2321,7 @@ $println(textures.len.to_s() + " textures, " + brushes.len.to_s() + " brushes, "
     + num_input_faces.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
     + lights.len.to_s() + " lights");
 $println("bsp: " + bsp_nodes.to_s() + " nodes, " + bsp_splits.to_s() + " splits");
+$println("lighting: " + light_ms.to_s() + " ms to cut and bake");
 $println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB, shaded per pixel");
 
 cam_x = start_x;
