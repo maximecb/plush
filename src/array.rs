@@ -2,6 +2,7 @@ use crate::vm::Actor;
 use crate::value::*;
 use crate::alloc::{Alloc, Tag, HEADER_SIZE};
 use crate::*;
+use crate::host::HostResult;
 
 pub struct Array
 {
@@ -188,7 +189,7 @@ impl Array
     }
 }
 
-pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fill_val: Value) -> Result<Value, String>
+pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fill_val: Value) -> HostResult
 {
     let num_elems = unwrap_usize!(num_elems);
 
@@ -200,7 +201,7 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fi
     Ok(Array::with_size(num_elems, fill_val, &mut actor.alloc))
 }
 
-pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result<Value, String>
+pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> HostResult
 {
     let arr = unwrap_arr!(array);
 
@@ -216,18 +217,18 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> Result
     Ok(Value::NIL)
 }
 
-pub fn array_pop(_actor: &mut Actor, array: Value) -> Result<Value, String>
+pub fn array_pop(_actor: &mut Actor, array: Value) -> HostResult
 {
     Ok(unwrap_arr!(array).pop())
 }
 
-pub fn array_remove(_actor: &mut Actor, array: Value, idx: Value) -> Result<Value, String>
+pub fn array_remove(_actor: &mut Actor, array: Value, idx: Value) -> HostResult
 {
     let idx = unwrap_usize!(idx);
     Ok(unwrap_arr!(array).remove(idx))
 }
 
-pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val: Value) -> Result<Value, String>
+pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val: Value) -> HostResult
 {
     let arr = unwrap_arr!(array);
 
@@ -244,7 +245,7 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val
     Ok(Value::NIL)
 }
 
-pub fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mut fill_val: Value) -> Result<Value, String>
+pub fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mut fill_val: Value) -> HostResult
 {
     let new_len = unwrap_usize!(new_size);
     let capacity = unwrap_arr!(array).capacity();
@@ -261,7 +262,7 @@ pub fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mu
     Ok(Value::NIL)
 }
 
-pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> Result<Value, String>
+pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> HostResult
 {
     let a0 = unwrap_arr!(self_array);
     let a1 = unwrap_arr!(other_array);

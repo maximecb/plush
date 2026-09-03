@@ -4,9 +4,9 @@ use crate::vm::Actor;
 use crate::value::*;
 use crate::str::Str;
 use crate::*;
-use crate::host::HostFnId;
+use crate::host::{HostFnId, HostResult};
 
-pub(crate) fn identity_method(_actor: &mut Actor, self_val: Value) -> Result<Value, String>
+pub(crate) fn identity_method(_actor: &mut Actor, self_val: Value) -> HostResult
 {
     Ok(self_val)
 }
@@ -16,35 +16,35 @@ pub(crate) fn identity_method(_actor: &mut Actor, self_val: Value) -> Result<Val
 pub(crate) use self::identity_method as float64_to_f;
 pub(crate) use self::identity_method as string_to_s;
 
-pub(crate) fn true_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
+pub(crate) fn true_to_s(actor: &mut Actor, _v: Value) -> HostResult
 {
     Ok(actor.intern_str("true"))
 }
 
-pub(crate) fn false_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
+pub(crate) fn false_to_s(actor: &mut Actor, _v: Value) -> HostResult
 {
     Ok(actor.intern_str("false"))
 }
 
-pub(crate) fn nil_to_s(actor: &mut Actor, _v: Value) -> Result<Value, String>
+pub(crate) fn nil_to_s(actor: &mut Actor, _v: Value) -> HostResult
 {
     Ok(actor.intern_str("nil"))
 }
 
-pub(crate) fn int64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn int64_abs(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     Ok(actor.int64(if v > 0 { v } else { -v }))
 }
 
-pub(crate) fn int64_min(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
+pub(crate) fn int64_min(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let other = unwrap_i64!(other);
     Ok(actor.int64(v.min(other)))
 }
 
-pub(crate) fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
+pub(crate) fn int64_max(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let other = unwrap_i64!(other);
@@ -53,38 +53,38 @@ pub(crate) fn int64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Val
 
 /// Truncated integer division. The `/` operator always yields a float, so
 /// this is how integer code divides without leaving the integer domain.
-pub(crate) fn int64_idiv(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
+pub(crate) fn int64_idiv(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let other = unwrap_i64!(other);
 
     match v.checked_div(other) {
         Some(q) => Ok(actor.int64(q)),
-        None if other == 0 => Err("division by zero in idiv()".into()),
-        None => Err("integer overflow in idiv()".into()),
+        None if other == 0 => error!("division by zero in idiv()"),
+        None => error!("integer overflow in idiv()"),
     }
 }
 
-pub(crate) fn int64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> Result<Value, String>
+pub(crate) fn int64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let min = unwrap_i64!(min);
     let max = unwrap_i64!(max);
 
     if min > max {
-        return Err("min must be less than or equal to max in clip()".into());
+        error!("min must be less than or equal to max in clip()");
     }
 
     Ok(actor.int64(v.clamp(min, max)))
 }
 
-pub(crate) fn int64_to_f(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn int64_to_f(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     Ok(actor.float64(v as f64))
 }
 
-pub(crate) fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn int64_to_s(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let s = format!("{}", v);
@@ -93,7 +93,7 @@ pub(crate) fn int64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
     Ok(Str::new(&s, &mut actor.alloc))
 }
 
-pub(crate) fn int64_comma_sep(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn int64_comma_sep(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let s = utils::thousands_sep(v);
@@ -102,7 +102,7 @@ pub(crate) fn int64_comma_sep(actor: &mut Actor, v: Value) -> Result<Value, Stri
     Ok(Str::new(&s, &mut actor.alloc))
 }
 
-pub(crate) fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result<Value, String>
+pub(crate) fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let digits = unwrap_usize!(digits);
@@ -112,13 +112,13 @@ pub(crate) fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> Result
     Ok(Str::new(&s, &mut actor.alloc))
 }
 
-pub(crate) fn float64_abs(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_abs(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     Ok(actor.float64(if v > 0.0 { v } else { -v }))
 }
 
-pub(crate) fn float64_ceil(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_ceil(actor: &mut Actor, v: Value) -> HostResult
 {
     // TODO: check that float value fits in integer range
     let v = unwrap_f64!(v);
@@ -126,7 +126,7 @@ pub(crate) fn float64_ceil(actor: &mut Actor, v: Value) -> Result<Value, String>
     Ok(actor.int64(int_val))
 }
 
-pub(crate) fn float64_floor(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_floor(actor: &mut Actor, v: Value) -> HostResult
 {
     // TODO: check that float value fits in integer range
     let v = unwrap_f64!(v);
@@ -134,7 +134,7 @@ pub(crate) fn float64_floor(actor: &mut Actor, v: Value) -> Result<Value, String
     Ok(actor.int64(int_val))
 }
 
-pub(crate) fn float64_trunc(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_trunc(actor: &mut Actor, v: Value) -> HostResult
 {
     // TODO: check that float value fits in integer range
     let v = unwrap_f64!(v);
@@ -142,51 +142,51 @@ pub(crate) fn float64_trunc(actor: &mut Actor, v: Value) -> Result<Value, String
     Ok(actor.int64(int_val))
 }
 
-pub(crate) fn float64_sin(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_sin(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     Ok(actor.float64(v.sin()))
 }
 
-pub(crate) fn float64_cos(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_cos(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     Ok(actor.float64(v.cos()))
 }
 
-pub(crate) fn float64_tan(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_tan(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     Ok(actor.float64(v.tan()))
 }
 
-pub(crate) fn float64_atan(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_atan(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     Ok(actor.float64(v.atan()))
 }
 
-pub(crate) fn float64_sqrt(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_sqrt(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     Ok(actor.float64(v.sqrt()))
 }
 
-pub(crate) fn float64_min(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
+pub(crate) fn float64_min(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     let other = unwrap_f64!(other);
     Ok(actor.float64(v.min(other)))
 }
 
-pub(crate) fn float64_max(actor: &mut Actor, v: Value, other: Value) -> Result<Value, String>
+pub(crate) fn float64_max(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     let other = unwrap_f64!(other);
     Ok(actor.float64(v.max(other)))
 }
 
-pub(crate) fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> Result<Value, String>
+pub(crate) fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     let min = unwrap_f64!(min);
@@ -194,26 +194,26 @@ pub(crate) fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) 
     Ok(actor.float64(v.clamp(min, max)))
 }
 
-pub(crate) fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> Result<Value, String>
+pub(crate) fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     let exponent = unwrap_f64!(exponent);
     Ok(actor.float64(v.powf(exponent)))
 }
 
-pub(crate) fn float64_exp(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_exp(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     Ok(actor.float64(v.exp()))
 }
 
-pub(crate) fn float64_ln(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_ln(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     Ok(actor.float64(v.ln()))
 }
 
-pub(crate) fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
+pub(crate) fn float64_to_s(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     let s = format!("{}", v);
@@ -221,7 +221,7 @@ pub(crate) fn float64_to_s(actor: &mut Actor, v: Value) -> Result<Value, String>
     Ok(Str::new(&s, &mut actor.alloc))
 }
 
-pub(crate) fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> Result<Value, String>
+pub(crate) fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> HostResult
 {
     let num = unwrap_f64!(v);
     let decimals = unwrap_usize!(decimals);
@@ -231,7 +231,7 @@ pub(crate) fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Val
 }
 
 /// Create a single-character string from a codepoint integer value
-pub(crate) fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> Result<Value, String>
+pub(crate) fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint: Value) -> HostResult
 {
     // TODO: eventually we can add caching for this,
     // at least for ASCII character values, we can
@@ -248,7 +248,7 @@ pub(crate) fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint:
 }
 
 /// Get the UTF-8 byte at the given index
-pub(crate) fn string_byte_at(_actor: &mut Actor, s: Value, idx: Value) -> Result<Value, String>
+pub(crate) fn string_byte_at(_actor: &mut Actor, s: Value, idx: Value) -> HostResult
 {
     let s = unwrap_str!(s);
     let idx = unwrap_usize!(idx);
@@ -258,13 +258,13 @@ pub(crate) fn string_byte_at(_actor: &mut Actor, s: Value, idx: Value) -> Result
 
 /// Get a string containing the single character at the given byte index
 /// Returns nil if not a valid character boundary or character
-pub(crate) fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Result<Value, String>
+pub(crate) fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> HostResult
 {
     let s = unwrap_str!(s);
     let byte_idx = unwrap_usize!(byte_idx);
 
     if byte_idx >= s.len() {
-        return Err("string byte index out of bounds".into());
+        error!("string byte index out of bounds");
     }
 
     // Indexing in the middle of a character
@@ -286,7 +286,7 @@ pub(crate) fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Re
 }
 
 /// Try to parse the string as an integer with the given radix
-pub(crate) fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Result<Value, String>
+pub(crate) fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> HostResult
 {
     let s = unwrap_str!(s);
     let radix = unwrap_u32!(radix);
@@ -298,7 +298,7 @@ pub(crate) fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Res
 }
 
 /// Try to parse the string as a float
-pub(crate) fn string_parse_float(actor: &mut Actor, s: Value) -> Result<Value, String>
+pub(crate) fn string_parse_float(actor: &mut Actor, s: Value) -> HostResult
 {
     let s = unwrap_str!(s);
 
@@ -309,7 +309,7 @@ pub(crate) fn string_parse_float(actor: &mut Actor, s: Value) -> Result<Value, S
 }
 
 /// Trim whitespace
-pub(crate) fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
+pub(crate) fn string_trim(actor: &mut Actor, s: Value) -> HostResult
 {
     let s = unwrap_str!(s);
     let s = s.trim().to_string();
@@ -318,7 +318,7 @@ pub(crate) fn string_trim(actor: &mut Actor, s: Value) -> Result<Value, String>
 }
 
 /// Uppercase a String
-pub(crate) fn string_upper(actor: &mut Actor, s: Value) -> Result<Value, String>
+pub(crate) fn string_upper(actor: &mut Actor, s: Value) -> HostResult
 {
     let s = unwrap_str!(s);
     let s = s.to_uppercase();
@@ -327,7 +327,7 @@ pub(crate) fn string_upper(actor: &mut Actor, s: Value) -> Result<Value, String>
 }
 
 /// Lowercase a String
-pub(crate) fn string_lower(actor: &mut Actor, s: Value) -> Result<Value, String>
+pub(crate) fn string_lower(actor: &mut Actor, s: Value) -> HostResult
 {
     let s = unwrap_str!(s);
     let s = s.to_lowercase();
@@ -336,7 +336,7 @@ pub(crate) fn string_lower(actor: &mut Actor, s: Value) -> Result<Value, String>
 }
 
 /// Split a string by a separator and return an array of strings
-pub(crate) fn string_split(actor: &mut Actor, input: Value, sep: Value) -> Result<Value, String>
+pub(crate) fn string_split(actor: &mut Actor, input: Value, sep: Value) -> HostResult
 {
     let s = unwrap_str!(input);
     let sep = unwrap_str!(sep);
@@ -419,14 +419,14 @@ pub fn init_runtime(prog: &mut Program)
     prog.reg_class(audio_data);
 }
 
-pub(crate) fn dict_has(_actor: &mut Actor, d: Value, key: Value) -> Result<Value, String>
+pub(crate) fn dict_has(_actor: &mut Actor, d: Value, key: Value) -> HostResult
 {
     let d = unwrap_dict!(d);
     let key = unwrap_str!(key);
     Ok(Value::from(d.has(key)))
 }
 
-pub(crate) fn fun_dump_bytecode(actor: &mut Actor, f: Value) -> Result<Value, String>
+pub(crate) fn fun_dump_bytecode(actor: &mut Actor, f: Value) -> HostResult
 {
     let dump = actor.dump_fun_bytecode(f)?;
     print!("{}", dump);

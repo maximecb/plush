@@ -13,6 +13,7 @@ use crate::vm::Actor;
 use crate::value::*;
 use crate::bytearray::ByteArray;
 use crate::str::Str;
+use crate::host::HostResult;
 use crate::ast::UIEVENT_ID;
 use crate::*;
 
@@ -82,15 +83,15 @@ pub fn window_create(
     height: Value,
     title: Value,
     _flags: Value
-) -> Result<Value, String>
+) -> HostResult
 {
     if actor.actor_id != 0 {
-        panic!("window functions should only be called from the main actor");
+        error!("window functions should only be called from the main actor");
     }
 
     let window = WINDOW.lock().unwrap();
     if window.is_some() {
-        panic!("for now, only one window supported");
+        error!("for now, only one window supported");
     }
     drop(window);
 
@@ -141,10 +142,10 @@ pub fn window_draw_frame(
     actor: &mut Actor,
     window_id: Value,
     frame: Value,
-) -> Result<Value, String>
+) -> HostResult
 {
     if actor.actor_id != 0 {
-        panic!("window functions should only be called from the main actor");
+        error!("window functions should only be called from the main actor");
     }
 
     let window_id = unwrap_u32!(window_id);

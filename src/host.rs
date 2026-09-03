@@ -6,21 +6,27 @@ use crate::ast::{Expr, Function, Program};
 use crate::str::Str;
 use crate::*;
 
+/// Result type for host functions. The error string is boxed so that a
+/// host call's return value stays one pointer wide instead of the three
+/// words a bare `String` needs, which matters because every host call
+/// pays for this on the success path too
+pub type HostResult = Result<Value, Box<String>>;
+
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
 ///       that we can JIT host calls efficiently
 #[derive(Copy, Clone, Debug)]
 pub enum FnPtr
 {
-    Fn0(fn(actor: &mut Actor) -> Result<Value, String>),
-    Fn1(fn(actor: &mut Actor, a0: Value) -> Result<Value, String>),
-    Fn2(fn(actor: &mut Actor, a0: Value, a1: Value) -> Result<Value, String>),
-    Fn3(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value) -> Result<Value, String>),
-    Fn4(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> Result<Value, String>),
-    Fn5(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> Result<Value, String>),
+    Fn0(fn(actor: &mut Actor) -> HostResult),
+    Fn1(fn(actor: &mut Actor, a0: Value) -> HostResult),
+    Fn2(fn(actor: &mut Actor, a0: Value, a1: Value) -> HostResult),
+    Fn3(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value) -> HostResult),
+    Fn4(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value) -> HostResult),
+    Fn5(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value) -> HostResult),
     // Arities are only listed once a host function needs them, which is
     // why this jumps from five to seven
-    Fn7(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value) -> Result<Value, String>),
+    Fn7(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value) -> HostResult),
 }
 
 // This struct is needed in part because Rust doesn't allow direct
@@ -285,20 +291,20 @@ pub fn get_time_ms() -> u64
 }
 
 /// Get the current time stamp in milliseconds since the unix epoch
-pub fn time_current_ms(actor: &mut Actor) -> Result<Value, String>
+pub fn time_current_ms(actor: &mut Actor) -> HostResult
 {
     Ok(actor.int64(get_time_ms() as i64))
 }
 
 /// Get the number of command-line arguments
-pub fn cmd_num_args(_actor: &mut Actor) -> Result<Value, String>
+pub fn cmd_num_args(_actor: &mut Actor) -> HostResult
 {
     let num_args = crate::REST_ARGS.lock().unwrap().len();
     Ok(Value::fixnum(num_args as i64))
 }
 
 /// Get a command-line argument string by index
-pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<Value, String>
+pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> HostResult
 {
     let idx = unwrap_usize!(idx);
 
@@ -319,13 +325,13 @@ pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> Result<V
 }
 
 /// Get a command-line argument string by index
-pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> Result<Value, String>
+pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> HostResult
 {
     cmd_get_arg_or(actor, idx, Value::NIL)
 }
 
 /// Print a value to stdout
-fn print(_actor: &mut Actor, v: Value) -> Result<Value, String>
+fn print(_actor: &mut Actor, v: Value) -> HostResult
 {
     match v.type_of() {
         Type::String => print!("{}", v.as_str()),
@@ -345,7 +351,7 @@ fn print(_actor: &mut Actor, v: Value) -> Result<Value, String>
 }
 
 /// Print a value to stdout, followed by a newline
-fn println(actor: &mut Actor, v: Value) -> Result<Value, String>
+fn println(actor: &mut Actor, v: Value) -> HostResult
 {
     print(actor, v)?;
     println!();
@@ -353,7 +359,7 @@ fn println(actor: &mut Actor, v: Value) -> Result<Value, String>
 }
 
 /// Read one line of input from stdin
-fn readln(actor: &mut Actor) -> Result<Value, String>
+fn readln(actor: &mut Actor) -> HostResult
 {
     let mut line = String::new();
 
@@ -575,14 +581,14 @@ mod tests
 }
 
 /// Read the contents of an entire file into a ByteArray object
-fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
+fn read_file(actor: &mut Actor, file_path: Value) -> HostResult
 {
     use crate::bytearray::ByteArray;
 
     let file_path = unwrap_str!(file_path);
 
     if !is_safe_path(&file_path) {
-        return Err(format!("requested file path breaks sandboxing rules: {}", file_path));
+        error!("requested file path breaks sandboxing rules: {}", file_path);
     }
 
     let bytes: Vec<u8> = match std::fs::read(file_path) {
@@ -601,12 +607,12 @@ fn read_file(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 }
 
 /// Read the contents of an entire file encoded as valid UTF-8
-fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
+fn read_file_utf8(actor: &mut Actor, file_path: Value) -> HostResult
 {
     let file_path = unwrap_str!(file_path);
 
     if !is_safe_path(&file_path) {
-        return Err(format!("requested file path breaks sandboxing rules: {}", file_path));
+        error!("requested file path breaks sandboxing rules: {}", file_path);
     }
 
     let s: String = match std::fs::read_to_string(file_path) {
@@ -623,14 +629,14 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> Result<Value, String>
 }
 
 /// Writes the contents of a ByteArray to a file
-fn write_file(_actor: &mut Actor, file_path: Value, bytes: Value) -> Result<Value, String>
+fn write_file(_actor: &mut Actor, file_path: Value, bytes: Value) -> HostResult
 {
     let file_path = unwrap_str!(file_path);
     let bytes = unwrap_ba!(bytes);
     let bytes = unsafe { bytes.get_slice(0, bytes.num_bytes()) };
 
     if !is_safe_path(&file_path) {
-        return Err(format!("requested file path breaks sandboxing rules: {}", file_path));
+        error!("requested file path breaks sandboxing rules: {}", file_path);
     }
 
     match std::fs::write(file_path, &bytes) {
@@ -641,12 +647,12 @@ fn write_file(_actor: &mut Actor, file_path: Value, bytes: Value) -> Result<Valu
 
 /// Create a directory, along with any missing parent directories.
 /// Succeeds if the directory already exists.
-fn make_dir(_actor: &mut Actor, dir_path: Value) -> Result<Value, String>
+fn make_dir(_actor: &mut Actor, dir_path: Value) -> HostResult
 {
     let dir_path = unwrap_str!(dir_path);
 
     if !is_safe_path(&dir_path) {
-        return Err(format!("requested file path breaks sandboxing rules: {}", dir_path));
+        error!("requested file path breaks sandboxing rules: {}", dir_path);
     }
 
     match std::fs::create_dir_all(dir_path) {
@@ -656,16 +662,16 @@ fn make_dir(_actor: &mut Actor, dir_path: Value) -> Result<Value, String>
 }
 
 /// Shrink the heap to a smaller size
-fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> Result<Value, String>
+fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> HostResult
 {
     let new_size = unwrap_usize!(new_size);
 
     if new_size > actor.alloc.mem_size() {
-        return Err("requested heap size is larger than the current heap size".into());
+        error!("requested heap size is larger than the current heap size");
     }
 
     if actor.alloc.bytes_used() > new_size {
-        return Err("requested heap size is smaller than bytes currently allocated".into());
+        error!("requested heap size is smaller than bytes currently allocated");
     }
 
     actor.alloc.shrink_to(new_size);
@@ -674,20 +680,20 @@ fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> Result<Value, String>
 }
 
 /// Manually trigger garbage collection in the current actor
-fn vm_gc_collect(actor: &mut Actor) -> Result<Value, String>
+fn vm_gc_collect(actor: &mut Actor) -> HostResult
 {
     actor.gc_collect(0, &mut []);
     Ok(Value::NIL)
 }
 
 /// Get the id of the current actor
-fn actor_id(actor: &mut Actor) -> Result<Value, String>
+fn actor_id(actor: &mut Actor) -> HostResult
 {
     Ok(actor.int64(actor.actor_id as i64))
 }
 
 /// Get the id of the parent actor
-fn actor_parent(actor: &mut Actor) -> Result<Value, String>
+fn actor_parent(actor: &mut Actor) -> HostResult
 {
     Ok(match actor.parent_id {
         Some(actor_id) => actor.int64(actor_id as i64),
@@ -696,7 +702,7 @@ fn actor_parent(actor: &mut Actor) -> Result<Value, String>
 }
 
 /// Make the current actor sleep
-fn actor_sleep(_actor: &mut Actor, msecs: Value) -> Result<Value, String>
+fn actor_sleep(_actor: &mut Actor, msecs: Value) -> HostResult
 {
     let msecs = unwrap_u64!(msecs);
     thread::sleep(Duration::from_millis(msecs));
@@ -706,10 +712,10 @@ fn actor_sleep(_actor: &mut Actor, msecs: Value) -> Result<Value, String>
 /// Spawn a new actor
 /// Takes a function to call as argument
 /// Returns an actor id
-fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
+fn actor_spawn(actor: &mut Actor, fun: Value) -> HostResult
 {
     if fun.to_clos().is_none() && !fun.is_fun() {
-        return Err("actor_spawn received non-function value".into());
+        error!("actor_spawn received non-function value");
     }
 
     // The new actor is started with no arguments. Checking here reports the
@@ -717,10 +723,10 @@ fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
     let fun_id = fun.to_fun_id().unwrap();
     let num_params = actor.get_num_params(fun_id);
     if num_params != 0 {
-        return Err(format!(
+        error!(
             "function passed to actor_spawn should take no arguments, but takes {}",
             num_params
-        ));
+        );
     }
 
     let actor_id = VM::new_actor(actor, fun, vec![]);
@@ -728,7 +734,7 @@ fn actor_spawn(actor: &mut Actor, fun: Value) -> Result<Value, String>
 }
 
 /// Wait for a thread to terminate, produce the return value
-fn actor_join(actor: &mut Actor, actor_id: Value) -> Result<Value, String>
+fn actor_join(actor: &mut Actor, actor_id: Value) -> HostResult
 {
     let id = unwrap_u64!(actor_id);
     Ok(VM::join_actor(&actor.vm, id))
@@ -736,7 +742,7 @@ fn actor_join(actor: &mut Actor, actor_id: Value) -> Result<Value, String>
 
 /// Send a message to an actor
 /// This will return false in case of failure
-fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Result<Value, String>
+fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> HostResult
 {
     let actor_id = unwrap_u64!(actor_id);
     let res = actor.send(actor_id, msg);
@@ -750,14 +756,14 @@ fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> Result<Value, S
 
 /// Receive a message from the current actor's queue
 /// This will block until a message is available
-fn actor_recv(actor: &mut Actor) -> Result<Value, String>
+fn actor_recv(actor: &mut Actor) -> HostResult
 {
     Ok(actor.recv())
 }
 
 /// Receive a message from the current actor's queue
 /// This will block until a message is available
-fn actor_poll(actor: &mut Actor) -> Result<Value, String>
+fn actor_poll(actor: &mut Actor) -> HostResult
 {
     Ok(match actor.try_recv() {
         Some(msg_val) => msg_val,
@@ -766,7 +772,7 @@ fn actor_poll(actor: &mut Actor) -> Result<Value, String>
 }
 
 /// End program execution
-fn exit(_actor: &mut Actor, val: Value) -> Result<Value, String>
+fn exit(_actor: &mut Actor, val: Value) -> HostResult
 {
     let val = (unwrap_i64!(val) & 0xFF) as i32;
     std::process::exit(val);

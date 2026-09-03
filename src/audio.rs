@@ -7,6 +7,7 @@ use crate::alloc::Alloc;
 use crate::ast::{AUDIO_NEEDED_ID, AUDIO_DATA_ID};
 use crate::window::with_sdl_context;
 use crate::*;
+use crate::host::HostResult;
 
 /// Unread input to hold on to, in callbacks. About 190ms at the 1024-sample
 /// buffer the input device uses.
@@ -112,13 +113,13 @@ unsafe impl Send for OutputState {}
 static AUDIO_OUT_PAIR: (Mutex<Option<OutputState>>, Condvar) = (Mutex::new(None), Condvar::new());
 
 /// Open an audio output device
-pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Result<Value, String>
+pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> HostResult
 {
     {
         let (lock, _) = &AUDIO_OUT_PAIR;
         let audio_state = lock.lock().unwrap();
         if audio_state.is_some() {
-            return Err("audio output device already open".into());
+            error!("audio output device already open");
         }
     }
 
@@ -126,11 +127,11 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     let num_channels = unwrap_u32!(num_channels);
 
     if sample_rate != 44100 && sample_rate != 8000 {
-        return Err("for now, only 44100Hz or 8000Hz sample rates supported".into());
+        error!("for now, only 44100Hz or 8000Hz sample rates supported");
     }
 
     if num_channels > 1 {
-        return Err("for now, only one output channel supported".into());
+        error!("for now, only one output channel supported");
     }
 
     let desired_spec = AudioSpecDesired {
@@ -168,23 +169,23 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
 
 /// Write samples to an audio device
 /// The samples must be a ByteArray containing float32 values
-pub fn audio_write_samples(_actor: &mut Actor, device_id: Value, samples: Value) -> Result<Value, String>
+pub fn audio_write_samples(_actor: &mut Actor, device_id: Value, samples: Value) -> HostResult
 {
     let device_id = unwrap_usize!(device_id);
 
     if device_id != 0 {
-        return Err("for now, only one audio output device is supported".into());
+        error!("for now, only one audio output device is supported");
     }
 
     let samples_ba = match samples.to_ba() {
         Some(ba) => ba,
-        None => return Err("expected a byte array of samples".into())
+        None => error!("expected a byte array of samples")
     };
 
     let (lock, cvar) = &AUDIO_OUT_PAIR;
     let mut audio_state = lock.lock().unwrap();
     if audio_state.is_none() {
-        return Err("audio output not open".into());
+        error!("audio output not open");
     }
     let state = audio_state.as_mut().unwrap();
 
@@ -310,13 +311,13 @@ unsafe impl Send for InputState {}
 static AUDIO_IN_PAIR: (Mutex<Option<InputState>>, Condvar) = (Mutex::new(None), Condvar::new());
 
 /// Open an audio input device
-pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> Result<Value, String>
+pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> HostResult
 {
     {
         let (lock, _) = &AUDIO_IN_PAIR;
         let audio_state = lock.lock().unwrap();
         if audio_state.is_some() {
-            return Err("audio input device already open".into());
+            error!("audio input device already open");
         }
     }
 
@@ -324,11 +325,11 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
     let num_channels = unwrap_u32!(num_channels);
 
     if sample_rate != 44100 {
-        return Err("for now, only 44100Hz sample rate supported".into());
+        error!("for now, only 44100Hz sample rate supported");
     }
 
     if num_channels > 1 {
-        return Err("for now, only one input channel supported".into());
+        error!("for now, only one input channel supported");
     }
 
     let desired_spec = AudioSpecDesired {
@@ -363,7 +364,7 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
 }
 
 /// Read samples from an audio input device into an existing ByteArray
-pub fn audio_read_samples(_actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> Result<Value, String>
+pub fn audio_read_samples(_actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> HostResult
 {
     let device_id = unwrap_usize!(device_id);
     let num_samples_to_read = unwrap_usize!(num_samples);
@@ -371,20 +372,20 @@ pub fn audio_read_samples(_actor: &mut Actor, device_id: Value, num_samples: Val
     let dst_ba = unwrap_ba!(dst_ba);
 
     if device_id != 0 {
-        return Err("for now, only one audio input device is supported".into());
+        error!("for now, only one audio input device is supported");
     }
 
     // Checked before waiting, so that a destination that could never hold
     // the samples is reported instead of blocking on them
     let dst_ba_len_f32 = dst_ba.num_bytes() / std::mem::size_of::<f32>();
     if dst_idx_f32 + num_samples_to_read > dst_ba_len_f32 {
-        return Err("destination byte array is too small to hold the samples".into());
+        error!("destination byte array is too small to hold the samples");
     }
 
     let (lock, cvar) = &AUDIO_IN_PAIR;
     let mut audio_state_lock = lock.lock().unwrap();
     if audio_state_lock.is_none() {
-        return Err("audio input not open".into());
+        error!("audio input not open");
     }
 
     // Wait until enough samples are available

@@ -3,6 +3,7 @@ use crate::vm::Actor;
 use crate::value::*;
 use crate::alloc::{Alloc, Tag, HEADER_SIZE};
 use crate::*;
+use crate::host::HostResult;
 
 pub struct ByteArray
 {
@@ -154,7 +155,7 @@ impl ByteArray
 }
 
 /// Create a new ByteArray instance
-pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result<Value, String>
+pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> HostResult
 {
     let num_bytes = unwrap_usize!(num_bytes);
 
@@ -166,7 +167,7 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> Result
     Ok(ByteArray::with_size(num_bytes, &mut actor.alloc))
 }
 
-pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Value, String>
+pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResult
 {
     let new_size = unwrap_usize!(new_size);
 
@@ -203,7 +204,7 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> Result<Va
     Ok(Value::NIL)
 }
 
-pub fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Value, String>
+pub fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -211,7 +212,7 @@ pub fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Val
     Ok(Value::from(val))
 }
 
-pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -220,7 +221,7 @@ pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     Ok(Value::NIL)
 }
 
-pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Value, String>
+pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -228,7 +229,7 @@ pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Val
     Ok(Value::from(val as u32))
 }
 
-pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -237,7 +238,7 @@ pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     Ok(Value::NIL)
 }
 
-pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Value, String>
+pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -245,7 +246,7 @@ pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> Result<Valu
     Ok(actor.float64(val as f64))
 }
 
-pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -254,7 +255,7 @@ pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     Ok(Value::NIL)
 }
 
-pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> Result<Value, String>
+pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -262,7 +263,7 @@ pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> Result<Value, St
     Ok(Value::from(val))
 }
 
-pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -271,7 +272,7 @@ pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Resu
     Ok(Value::NIL)
 }
 
-pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> Result<Value, String>
+pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -279,7 +280,7 @@ pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> Result<Value, Str
     Ok(actor.float64(val as f64))
 }
 
-pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Result<Value, String>
+pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -361,7 +362,7 @@ pub fn ba_dot_f32(
     b_idx: Value,
     b_stride: Value,
     num: Value,
-) -> Result<Value, String>
+) -> HostResult
 {
     let a_ba = unwrap_ba!(a);
     let b_ba = unwrap_ba!(b);
@@ -372,7 +373,7 @@ pub fn ba_dot_f32(
     let num = unwrap_usize!(num);
 
     if a_stride < 1 || b_stride < 1 {
-        return Err("expected strides to be at least 1".into());
+        error!("expected strides to be at least 1");
     }
 
     if num == 0 {
@@ -386,18 +387,24 @@ pub fn ba_dot_f32(
         (num - 1).checked_mul(stride)?.checked_add(idx)?.checked_add(1)
     }
 
-    let a_span = span(a_idx, a_stride, num).ok_or("dot_f32 index range overflows")?;
-    let b_span = span(b_idx, b_stride, num).ok_or("dot_f32 index range overflows")?;
+    let a_span = match span(a_idx, a_stride, num) {
+        Some(v) => v,
+        None => error!("dot_f32 index range overflows"),
+    };
+    let b_span = match span(b_idx, b_stride, num) {
+        Some(v) => v,
+        None => error!("dot_f32 index range overflows"),
+    };
 
     // Bounds are settled once here, for the whole run
     let a_len = a_ba.num_bytes() / size_of::<f32>();
     let b_len = b_ba.num_bytes() / size_of::<f32>();
 
     if a_span > a_len || b_span > b_len {
-        return Err(format!(
+        error!(
             "dot_f32 reads f32 elements up to {} and {}, past the ends at {} and {}",
             a_span - 1, b_span - 1, a_len, b_len
-        ));
+        );
     }
 
     // Trimmed to exactly the elements that will be read, so that the
@@ -417,19 +424,19 @@ pub fn ba_dot_f32(
     Ok(actor.float64(sum))
 }
 
-pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> Result<Value, String>
+pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let len = ba.len;
 
     if len % 4 != 0 {
-        return Err("expected ByteArray size to be divisible by 4".into());
+        error!("expected ByteArray size to be divisible by 4");
     }
 
     Ok(Value::fixnum((len / 4) as i64))
 }
 
-pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> Result<Value, String>
+pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> HostResult
 {
     let dst = unwrap_ba!(dst);
 
@@ -442,7 +449,7 @@ pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src
     Ok(Value::NIL)
 }
 
-pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> Result<Value, String>
+pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let slice = unsafe { ba.get_slice_mut(0, ba.len) };
@@ -450,7 +457,7 @@ pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> Result<Value, String>
     Ok(Value::NIL)
 }
 
-pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: Value) -> Result<Value, String>
+pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);

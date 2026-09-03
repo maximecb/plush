@@ -73,14 +73,29 @@ struct CallCache
 }
 
 
-// This error macro is to be used inside host functions
+// This error macro is used both inside host functions, whose error type
+// is boxed, and inside VM-internal slow paths, whose error type is a
+// plain `String`. `.into()` covers both: `Box<String>: From<String>` and
+// `String: From<String>` are both satisfied.
+//
+// A host function's own name is redundant here: `call_host_unchecked`
+// already prefixes it onto the message for every call it dispatches, so
+// call sites only need the two-argument form when they have some other
+// context worth keeping (e.g. the instruction name `unwrap_val!` passes
+// along for VM-internal errors)
 #[macro_export]
 macro_rules! error {
     ($requester: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
         return Err(
-            format!($format_str $(, $arg)*)
+            format!($format_str $(, $arg)*).into()
         );
-    }}
+    }};
+
+    ($format_str:literal $(, $arg:expr)* $(,)?) => {{
+        return Err(
+            format!($format_str $(, $arg)*).into()
+        );
+    }};
 }
 
 /// Mesage to be sent to an actor
