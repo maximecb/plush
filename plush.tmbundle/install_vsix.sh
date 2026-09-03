@@ -108,7 +108,13 @@ if [ ! -f "$VSIX" ]; then
 fi
 
 echo "Installing the extension into $CODE..."
-"$CODE" --install-extension "$VSIX" --force
+
+# The code CLI wrapper unsets NODE_OPTIONS before running, so a Node
+# deprecation warning from inside VSCode itself (unrelated to our extension)
+# cannot be silenced that way. Filtering it out here is the only way; the
+# exit status still comes from $CODE, not from this filtering.
+"$CODE" --install-extension "$VSIX" --force \
+    2> >(grep -v -e 'DeprecationWarning' -e 'trace-deprecation' >&2)
 
 if [ "$BUILT" -eq 1 ]; then
     if [ "$KEEP_VSIX" -eq 0 ]; then
