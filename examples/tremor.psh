@@ -1195,16 +1195,22 @@ fun subdivide_face(f, out, depth) {
 // --- Cutting faces up ---
 
 // Split a face in two at a plane, returning the pieces that survive. Both keep
-// everything else about the face they came from.
+// everything else about the face they came from, the fit mapping included: it
+// is an affine map from world position to texel, so a piece that inherits it
+// lands exactly where that part of the whole face did.
 fun split_face(f, nx, ny, nz, d) {
     let back = clip_poly(f.v, nx, ny, nz, d);
     let front = clip_poly(f.v, 0.0 - nx, 0.0 - ny, 0.0 - nz, 0.0 - d);
     let out = [];
     if (back.len >= 9) {
-        out.push(Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn));
+        let g = Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn);
+        g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        out.push(g);
     }
     if (front.len >= 9) {
-        out.push(Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn));
+        let g = Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn);
+        g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        out.push(g);
     }
     return out;
 }
@@ -1994,21 +2000,35 @@ fun brush_hits(b, cx, cy, cz, hx, hy, hz) {
 // the middle of them. Sampling only the middle would leave the foot of a ramp
 // unclimbable: the player's box reaches the slope a step before their centre
 // does, so the brush reads as a wall rather than as something to step onto.
+//
+// The samples have to cover the whole footprint that blocked() collides with,
+// corners and all. A brush the player's box overlaps but no sample lands inside
+// reads as having no top, and blocked() then takes it for a wall: sampling
+// short of the radius is what used to stop the climb one step up a flight, the
+// box catching the next tread while every sample fell just clear of it.
 fun brush_top_near(b, x, z) {
-    let r = PLAYER_RADIUS * 0.8;
+    let r = PLAYER_RADIUS;
+
+    // Nothing to sample if the footprint misses the brush altogether
+    if (x + r < b.x0 || x - r > b.x1) return nil;
+    if (z + r < b.z0 || z - r > b.z1) return nil;
+
     let var best = nil;
 
-    for (let var i = 0; i < 5; ++i) {
+    for (let var i = 0; i < 3; ++i) {
         let var sx = x;
-        let var sz = z;
         if (i == 1) sx = x - r;
         else if (i == 2) sx = x + r;
-        else if (i == 3) sz = z - r;
-        else if (i == 4) sz = z + r;
 
-        let t = brush_top(b, sx, sz);
-        if (t == nil) continue;
-        if (best == nil || t > best) best = t;
+        for (let var j = 0; j < 3; ++j) {
+            let var sz = z;
+            if (j == 1) sz = z - r;
+            else if (j == 2) sz = z + r;
+
+            let t = brush_top(b, sx, sz);
+            if (t == nil) continue;
+            if (best == nil || t > best) best = t;
+        }
     }
     return best;
 }
@@ -2119,6 +2139,14 @@ fun support_height(x, feet, z) {
 
 parse_map(MAP_PATH);
 
+// Fit each face while it is still whole. Everything below cuts faces up, for
+// the tree and again for the light, and a piece fitted to itself would squeeze
+// a whole texture into whatever the cut left it: that is what made the middle
+// of a tall lamp panel come out at a different scale from its ends.
+for (let var i = 0; i < faces.len; ++i) {
+    if (faces[i].fit) set_fit(faces[i]);
+}
+
 let num_input_faces = faces.len;
 bsp_root = bsp_build(faces);
 
@@ -2145,7 +2173,6 @@ fun prepare_node(node) {
 
         for (let var k = 0; k < pieces.len; ++k) {
             let g = pieces[k];
-            if (g.fit) set_fit(g);
             g.vl = bake_vertex_light(g);
             g.pix = g.tex.shaded();
             g.umask = g.tex.umask;
