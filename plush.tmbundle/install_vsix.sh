@@ -1,16 +1,30 @@
 #!/usr/bin/env bash
 #
-# Package the Plush extension into a .vsix and install/update it locally.
-# Works on macOS and Linux. Requires Node.js (for npx) and a VS Code CLI.
+# Install or update the Plush VSCode extension. Works on macOS and Linux.
 #
-# Usage: ./install_vsix.sh [--keep]
+# Two modes, picked automatically:
 #
-#   --keep   Don't delete the generated .vsix after installing
-#
-# Set CODE_CLI to point at a specific editor CLI, e.g.
-#   CODE_CLI=code-insiders ./install_vsix.sh
+#   - If a prebuilt plush.vsix sits next to this script, it is installed as
+#     is. This is how the release tarball ships, and needs no Node.js.
+#   - Otherwise the extension is packaged from this directory first, which
+#     does need Node.js. This is the mode used when developing the grammar.
 
 set -euo pipefail
+
+usage()
+{
+    cat <<'EOF'
+Usage: ./install_vsix.sh [--keep]
+
+Install or update the Plush VSCode extension.
+
+  --keep    Keep the generated .vsix instead of deleting it. Only applies
+            when the extension has to be built.
+
+Set CODE_CLI to point at a specific editor CLI, e.g.
+  CODE_CLI=code-insiders ./install_vsix.sh
+EOF
+}
 
 KEEP_VSIX=0
 
@@ -20,11 +34,12 @@ for arg in "$@"; do
             KEEP_VSIX=1
             ;;
         -h|--help)
-            sed -n '3,11p' "$0" | sed 's|^# \{0,1\}||'
+            usage
             exit 0
             ;;
         *)
             echo "error: unknown option: $arg" >&2
+            usage >&2
             exit 1
             ;;
     esac
@@ -33,7 +48,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Locate the VS Code command line tool
+# Locate the VSCode command line tool
 find_code_cli()
 {
     if [ -n "${CODE_CLI:-}" ]; then
@@ -66,32 +81,42 @@ find_code_cli()
     return 1
 }
 
-if ! command -v npx > /dev/null 2>&1; then
-    echo "error: npx not found, install Node.js first" >&2
-    exit 1
-fi
-
 if ! CODE="$(find_code_cli)"; then
-    echo "error: no VS Code CLI found" >&2
-    echo "On macOS, run 'Shell Command: Install code command in PATH' from the" >&2
-    echo "command palette, or set CODE_CLI to the CLI path." >&2
+    echo "error: no VSCode installation found" >&2
+    echo "If VSCode is installed, run 'Shell Command: Install 'code' command in PATH'" >&2
+    echo "from the command palette, or set CODE_CLI to the path of the CLI." >&2
     exit 1
 fi
 
-VERSION="$(node -p "require('./package.json').version")"
-VSIX="$SCRIPT_DIR/plush-$VERSION.vsix"
+# Shipped alongside this script in the release tarball
+VSIX="$SCRIPT_DIR/plush.vsix"
+BUILT=0
 
-echo "Packaging plush $VERSION..."
-npx --yes @vscode/vsce package --allow-missing-repository --out "$VSIX"
+if [ ! -f "$VSIX" ]; then
+    if ! command -v npx > /dev/null 2>&1; then
+        echo "error: no plush.vsix next to this script and npx was not found" >&2
+        echo "Install Node.js to build the extension from source." >&2
+        exit 1
+    fi
 
-echo "Installing into $CODE..."
+    VERSION="$(node -p "require('./package.json').version")"
+    VSIX="$SCRIPT_DIR/plush-$VERSION.vsix"
+    BUILT=1
+
+    echo "Packaging plush $VERSION..."
+    npx --yes @vscode/vsce package --allow-missing-repository --out "$VSIX"
+fi
+
+echo "Installing the extension into $CODE..."
 "$CODE" --install-extension "$VSIX" --force
 
-if [ "$KEEP_VSIX" -eq 0 ]; then
-    rm -f "$VSIX"
-else
-    echo "Kept $VSIX"
+if [ "$BUILT" -eq 1 ]; then
+    if [ "$KEEP_VSIX" -eq 0 ]; then
+        rm -f "$VSIX"
+    else
+        echo "Kept $VSIX"
+    fi
 fi
 
 echo
-echo "Done. Reload the window (Developer: Reload Window) to pick up the update."
+echo "Done. Restart VSCode to start using the extension."

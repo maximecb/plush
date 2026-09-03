@@ -33,6 +33,20 @@ $Repo = 'maximecb/plush'
 function Say  { param([string] $Message) Write-Host "plush: $Message" }
 function Fail { param([string] $Message) throw "plush: error: $Message" }
 
+# The VSCode extension ships inside the release archive. Releases made before
+# that was the case have no such file, so this stays quiet for them.
+function Say-VSCodeHint {
+    $script = Join-Path $PlushHome 'install_vsix.ps1'
+    if (-not (Test-Path $script)) {
+        return
+    }
+
+    Say ''
+    Say 'To install the VSCode extension, run this, then restart VSCode:'
+    Say ''
+    Say "    $script"
+}
+
 # We only publish an x64 Windows build. Windows on ARM runs it under
 # emulation, so it is offered there too.
 function Get-Target {
@@ -212,6 +226,9 @@ if ($env:PLUSH_NO_PATH -eq '1') {
 }
 
 if ($RunExample) {
+    # Ahead of the example, which takes over the session until it exits
+    Say-VSCodeHint
+    Say ''
     Say "running example: $RunExample"
     & (Join-Path $PlushHome 'bin\plush.exe') --run-example $RunExample
     # Deliberately not "exit": piping this script into iex runs it in the
@@ -225,6 +242,8 @@ Say '    plush --run-example tremor'
 Say ''
 Say 'To list all available examples:'
 Say '    plush --list-examples'
+
+Say-VSCodeHint
 Say ''
 
 if ($NeedsNewShell) {

@@ -166,12 +166,17 @@ profile_file() {
     esac
 }
 
-# Path to the env file for humans to read, using ~ when it is under $HOME
-env_display() {
+# Path to a file under PLUSH_HOME for humans to read, using ~ when it is
+# under $HOME. $1 is the name of the file.
+home_display() {
     case "$PLUSH_HOME" in
-        "$HOME"/*) printf '~/%s/env' "${PLUSH_HOME#"$HOME"/}" ;;
-        *) printf '%s/env' "$PLUSH_HOME" ;;
+        "$HOME"/*) printf '~/%s/%s' "${PLUSH_HOME#"$HOME"/}" "$1" ;;
+        *) printf '%s/%s' "$PLUSH_HOME" "$1" ;;
     esac
+}
+
+env_display() {
+    home_display env
 }
 
 # Same path for writing into a shell profile, keeping $HOME symbolic so the
@@ -226,6 +231,17 @@ update_profile() {
     } >> "$profile"
 
     say "set up $profile to load plush in new shells"
+}
+
+# The VSCode extension ships inside the release archive. Releases made before
+# that was the case have no such file, so this stays quiet for them.
+say_vscode_hint() {
+    [ -f "$PLUSH_HOME/install_vsix.sh" ] || return 0
+
+    say ""
+    say "To install the VSCode extension, run this, then restart VSCode:"
+    say ""
+    say "    $(home_display install_vsix.sh)"
 }
 
 install_plush() {
@@ -303,6 +319,9 @@ main() {
     update_profile
 
     if [ $# -gt 0 ]; then
+        # Ahead of the exec, which never returns
+        say_vscode_hint
+        say ""
         say "running: plush $*"
         exec "$PLUSH_HOME/bin/plush" "$@"
     fi
@@ -321,6 +340,8 @@ main() {
     say "To list all available examples:"
     say ""
     say "    plush --list-examples"
+
+    say_vscode_hint
     say ""
 }
 

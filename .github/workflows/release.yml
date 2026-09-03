@@ -22,8 +22,37 @@ env:
   CMAKE_POLICY_VERSION_MINIMUM: '3.5'
 
 jobs:
+  # Built once here rather than pulled from the vsix-* releases the extension
+  # workflow publishes: those track pushes to main, so a release tagged right
+  # after a grammar change would silently bundle the previous extension.
+  # Packaging from the tagged tree keeps the two in step by construction.
+  vsix:
+    name: Build the VSCode extension
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.tag || github.ref }}
+
+    - uses: actions/setup-node@v5
+      with:
+        node-version: '>=20.x.x'
+
+    # Unversioned, so the install scripts don't have to know the version
+    - name: Package
+      run: |
+        cd plush.tmbundle
+        npx --yes @vscode/vsce package --allow-missing-repository --out ../plush.vsix
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: vsix
+        path: plush.vsix
+        if-no-files-found: error
+
   build:
     name: Build ${{ matrix.asset }}
+    needs: vsix
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -85,7 +114,13 @@ jobs:
     - name: Smoke test
       run: cargo run --release --locked --features static-sdl --target ${{ matrix.target }} -- --eval '$println("ok");'
 
-    # Layout matches what the installer drops into ~/.plush
+    - uses: actions/download-artifact@v4
+      with:
+        name: vsix
+
+    # Layout matches what the installer drops into ~/.plush. The extension
+    # and its installer ride along so that installing it afterwards is one
+    # command and needs no network access or Node.js.
     - name: Package
       if: runner.os != 'Windows'
       run: |
@@ -94,6 +129,9 @@ jobs:
         cp "target/${{ matrix.target }}/release/plush" "$root/bin/"
         cp README.md LICENSE "$root/"
         cp -r examples "$root/examples"
+        cp plush.vsix "$root/"
+        cp plush.tmbundle/install_vsix.sh "$root/"
+        chmod +x "$root/install_vsix.sh"
         tar -czf "${{ matrix.asset }}.tar.gz" -C dist "${{ matrix.asset }}"
 
     - name: Package
@@ -105,6 +143,8 @@ jobs:
         Copy-Item "target/${{ matrix.target }}/release/plush.exe" "$root/bin/"
         Copy-Item README.md, LICENSE "$root/"
         Copy-Item -Recurse examples "$root/examples"
+        Copy-Item plush.vsix "$root/"
+        Copy-Item plush.tmbundle/install_vsix.ps1 "$root/"
         Compress-Archive -Path $root -DestinationPath "${{ matrix.asset }}.zip"
 
     # Each runner produces one of these two. if-no-files-found only fires
@@ -126,6 +166,9 @@ jobs:
       with:
         ref: ${{ inputs.tag || github.ref }}
 
+    # Everything the build jobs produced, plus the plush.vsix the vsix job
+    # uploaded. That one is already inside each archive; publishing it
+    # loose as well gives people a direct download for the extension.
     - uses: actions/download-artifact@v4
       with:
         path: dist

@@ -4,17 +4,31 @@ A syntax highlighting extension for [Plush](https://github.com/maximecb/plush) (
 
 ## Installation
 
-### Using install_vsix.sh (macOS/Linux)
+### If you installed Plush with the installer
 
-From this directory, run:
+The extension ships inside the release, so there is nothing to download:
+
+```sh
+~/.plush/install_vsix.sh          # macOS and Linux
+```
+```powershell
+~\.plush\install_vsix.ps1         # Windows
+```
+
+Then restart VS Code.
+
+### From this repository
+
+Running the same script from `plush.tmbundle/` packages the extension from
+source first, then installs it:
 
 ```sh
 ./install_vsix.sh
 ```
 
-This packages the extension and installs or updates it in your local VS Code.
-Requires Node.js and the `code` command. Set `CODE_CLI` to use a different
-editor CLI (e.g. `CODE_CLI=code-insiders ./install_vsix.sh`).
+That mode needs Node.js, since it has to build the `.vsix`. Both modes need a
+VS Code CLI; set `CODE_CLI` to pick a specific one (e.g.
+`CODE_CLI=code-insiders ./install_vsix.sh`).
 
 ### Using .vsix
 
