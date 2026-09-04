@@ -177,6 +177,7 @@ def_host_fns! {
         actor_poll(0),
         window_create(4),
         window_draw_frame(2),
+        window_lock_mouse(2),
         audio_open_output(2),
         audio_write_samples(2),
         audio_open_input(2),

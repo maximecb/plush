@@ -151,9 +151,15 @@ pub fn window_draw_frame(
     let window_id = unwrap_u32!(window_id);
     let frame = unwrap_ba!(frame);
 
-    assert!(window_id == 0);
+    if window_id != 0 {
+        error!("invalid window id {}", window_id);
+    }
+
     let mut window_lock = WINDOW.lock().unwrap();
-    let window = window_lock.as_mut().unwrap();
+    let window = match window_lock.as_mut() {
+        Some(window) => window,
+        None => error!("the window must be created before drawing a frame")
+    };
 
     // Get the address to copy pixel data from
     let data_len = (4 * window.width * window.height) as usize;
@@ -194,6 +200,45 @@ pub fn window_draw_frame(
     window.canvas.present();
 
     Ok(Value::NIL)
+}
+
+/// Lock the mouse to a window for FPS-style mouse look. While locked, the
+/// cursor is hidden and confined to the window, and MOUSE_MOVE events keep
+/// reporting motion once the pointer reaches the window edge.
+pub fn window_lock_mouse(
+    actor: &mut Actor,
+    window_id: Value,
+    enabled: Value,
+) -> HostResult
+{
+    if actor.actor_id != 0 {
+        error!("window functions should only be called from the main actor");
+    }
+
+    let window_id = unwrap_u32!(window_id);
+    let enabled = unwrap_bool!(enabled);
+
+    if window_id != 0 {
+        error!("invalid window id {}", window_id);
+    }
+
+    let window = WINDOW.lock().unwrap();
+    if window.is_none() {
+        error!("the window must be created before locking the mouse");
+    }
+    drop(window);
+
+    // SDL2 has a single global relative mouse mode, whereas SDL3 makes it a
+    // property of the window. We take a window id so that Plush code doesn't
+    // have to change when we move to SDL3.
+    with_sdl_context(|sdl| {
+        let mouse = sdl.mouse();
+        mouse.set_relative_mouse_mode(enabled);
+
+        // SDL reports failure through the setter's return value, which the
+        // sdl2 crate discards, so we read the mode back instead
+        Ok(Value::from(mouse.relative_mouse_mode() == enabled))
+    })
 }
 
 /// Poll for UI events
@@ -280,13 +325,22 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
             Some(msg)
         }
 
-        Event::MouseMotion { window_id: _, x, y, .. } => {
+        Event::MouseMotion { window_id: _, x, y, xrel, yrel, .. } => {
             let msg = actor.alloc_obj(UIEVENT_ID);
             actor.set_field(msg, "window_id", Value::from(0));
             let event_type = actor.intern_str("MOUSE_MOVE");
             actor.set_field(msg, "kind", event_type);
             actor.set_field(msg, "x", Value::from(x));
             actor.set_field(msg, "y", Value::from(y));
+
+            // Reported as floats because SDL3 gives sub-pixel deltas. They
+            // are the only meaningful motion while the mouse is locked, as
+            // x and y then stop at the window edge.
+            let dx = actor.float64(xrel as f64);
+            let dy = actor.float64(yrel as f64);
+            actor.set_field(msg, "dx", dx);
+            actor.set_field(msg, "dy", dy);
+
             Some(msg)
         }
 

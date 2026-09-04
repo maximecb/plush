@@ -158,7 +158,7 @@ let GRAVITY = 900.0;
 let JUMP_SPEED = 330.0;
 let MAX_FALL_SPEED = 1400.0;
 let TURN_SPEED = 2.6;
-//let MOUSE_SENS = 0.0032;
+let MOUSE_SENS = 0.0032;
 let PITCH_LIMIT = 1.2;
 
 let PI = 3.14159265358979;
@@ -2393,6 +2393,10 @@ if (BENCH_FRAMES > 0) {
 
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Tremor", 0);
 
+// Hide the cursor and aim with raw mouse motion. SDL suspends this while the
+// window is not focused and resumes it when focus returns.
+$window_lock_mouse(window, true);
+
 // --- Input state ---
 
 let var key_fwd = false;
@@ -2406,8 +2410,9 @@ let var key_look_d = false;
 let var key_up = false;
 let var key_down = false;
 
-//let var mouse_x = -1;
-//let var mouse_y = -1;
+// The right mouse button jumps, tracked apart from SPACE so that releasing
+// one does not cancel the other
+let var mouse_up = false;
 
 fun set_key(key, down) {
     if (key == 'W') key_fwd = down;
@@ -2455,14 +2460,16 @@ loop {
         else if (msg.kind == 'KEY_UP') {
             set_key(msg.key, false);
         }
-        //else if (msg.kind == 'MOUSE_MOVE') {
-        //    if (mouse_x >= 0) {
-        //        cam_yaw = cam_yaw + (msg.x - mouse_x).to_f() * MOUSE_SENS;
-        //        cam_pitch = cam_pitch - (msg.y - mouse_y).to_f() * MOUSE_SENS;
-        //    }
-        //    mouse_x = msg.x;
-        //    mouse_y = msg.y;
-        //}
+        else if (msg.kind == 'MOUSE_MOVE') {
+            cam_yaw = cam_yaw + msg.dx * MOUSE_SENS;
+            cam_pitch = cam_pitch - msg.dy * MOUSE_SENS;
+        }
+        else if (msg.kind == 'MOUSE_DOWN') {
+            if (msg.button == 'RIGHT') mouse_up = true;
+        }
+        else if (msg.kind == 'MOUSE_UP') {
+            if (msg.button == 'RIGHT') mouse_up = false;
+        }
     }
     if (quit) break;
 
@@ -2485,7 +2492,7 @@ loop {
     if (key_right) ms = ms + 1.0;
     if (key_left) ms = ms - 1.0;
 
-    move_player(dt, mf, ms, key_up, key_down);
+    move_player(dt, mf, ms, key_up || mouse_up, key_down);
 
     warp_phase = time_s * 1.1;
 
@@ -2505,3 +2512,6 @@ loop {
         last_report_ms = now_ms;
     }
 }
+
+// Give the cursor back before exiting
+$window_lock_mouse(window, false);

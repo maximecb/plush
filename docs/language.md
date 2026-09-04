@@ -415,6 +415,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$actor_poll()`: Polls the actor's mailbox for a message, returning `nil` if empty.
 -   `$window_create(width, height, title, flags)`: Creates a new window.
 -   `$window_draw_frame(window_id, frame_buffer)`: Draws a frame buffer to the specified window.
+-   `$window_lock_mouse(window_id, enabled)`: Locks the mouse to the window for FPS-style mouse look. The `dx` and `dy` fields of `MOUSE_MOVE` events report relative motion as floats.
 -   `$audio_open_output(sample_rate, num_channels)`: Opens an audio output device with the specified sample rate and number of channels. Returns a device ID.
 -   `$audio_write_samples(device_id, samples)`: Writes a `ByteArray` of `float32` audio samples to the specified audio device.
 -   `$audio_open_input(sample_rate, num_channels)`: Opens an audio input device with the specified sample rate and number of channels. Returns a device ID .

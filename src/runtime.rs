@@ -395,6 +395,8 @@ pub fn init_runtime(prog: &mut Program)
     ui_class.reg_field("button");
     ui_class.reg_field("x");
     ui_class.reg_field("y");
+    ui_class.reg_field("dx");
+    ui_class.reg_field("dy");
     ui_class.reg_field("text");
     prog.reg_class(ui_class);
 
