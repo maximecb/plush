@@ -1,0 +1,59 @@
+// Dictionary lookup benchmark. A dict of 32k entries is read pass after
+// pass, so the table is far too large to sit in cache and the timing
+// reflects hashing and probing rather than one hot slot staying resident.
+
+let num_keys = 32_000;
+let num_passes = 1600;
+let num_reads = num_keys * num_passes;
+
+let d = {};
+let keys = [];
+
+for (let var i = 0; i < num_keys; ++i)
+{
+    let key = i.to_s();
+    keys.push(key);
+    d[key] = i;
+}
+
+// Guard against timing a loop that isn't finding what it should
+assert(d[keys[0]] == 0);
+assert(d[keys[num_keys - 1]] == num_keys - 1);
+
+// The keys come out of the array rather than being built in the loop, so
+// what is measured is the lookup and not string formatting
+let start_time = $time_current_ms();
+
+for (let var p = 0; p < num_passes; ++p)
+{
+    for (let var i = 0; i < num_keys; ++i)
+    {
+        d[keys[i]];
+    }
+}
+
+let time_ms = $time_current_ms() - start_time;
+
+// The same loop without the lookup. Feeding the keys in costs an array
+// read and the loop itself costs a compare and an increment, which is a
+// large enough share of the total to be worth naming rather than
+// leaving folded into the headline number
+let base_start = $time_current_ms();
+
+for (let var p = 0; p < num_passes; ++p)
+{
+    for (let var i = 0; i < num_keys; ++i)
+    {
+        keys[i];
+    }
+}
+
+let base_ms = $time_current_ms() - base_start;
+
+let mreads = num_reads.to_f() / (time_ms.to_f() * 1000.0);
+let net_mreads = num_reads.to_f() / ((time_ms - base_ms).to_f() * 1000.0);
+
+$println("reads: " + num_reads.comma_sep());
+$println("time: " + time_ms.to_s() + " ms (" + base_ms.to_s() + " ms of loop overhead)");
+$println("Mreads/s: " + mreads.format_decimals(1));
+$println("Mreads/s excluding overhead: " + net_mreads.format_decimals(1));

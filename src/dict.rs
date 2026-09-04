@@ -151,6 +151,9 @@ impl Dict {
 
         self.table = new_table;
 
+        // The entries are counted again as they are put back in
+        self.set_len(0);
+
         for entry in old_table {
             if let Some((key, val)) = entry.key_value() {
                 self.set(*key, *val, alloc);
@@ -194,10 +197,14 @@ impl Dict {
 
         let key = unsafe { &*field_name }.as_str();
         let slot = self.get_slot(key);
+        let was_occupied = slot.is_occupied();
         *slot = TableSlot::new(field_name, new_val);
 
-        let len = self.len();
-        self.set_len(len + 1);
+        // Overwriting a key that is already there adds no entry
+        if !was_occupied {
+            let len = self.len();
+            self.set_len(len + 1);
+        }
     }
 
     // Get the value associated with a given field
@@ -207,5 +214,87 @@ impl Dict {
 
     pub fn has(&mut self, field_name: &str) -> bool {
         self.get_slot(field_name).is_occupied()
+    }
+}
+
+#[cfg(test)]
+mod tests
+{
+    use super::*;
+
+    /// Set a key given as a Rust string. No collection can happen here,
+    /// so the dict and the keys stay put for the life of the test
+    fn set(dict: &mut Value, key: &str, val: i64, alloc: &mut Alloc)
+    {
+        let key = Str::new(key, alloc);
+        dict.as_dict().set(key.as_string() as *const Str, Value::fixnum(val), alloc);
+    }
+
+    /// Overwriting a key must not count as a new entry, or the table
+    /// keeps growing under a dict that only ever holds one thing
+    #[test]
+    fn overwrite_keeps_len()
+    {
+        let mut alloc = Alloc::new();
+        let mut dict = Dict::with_capacity(0, &mut alloc);
+
+        // The growth check runs before the key is looked up, so it cannot
+        // tell an overwrite from an insert and grows the smallest table
+        // once regardless. It has to settle there
+        set(&mut dict, "x", 0, &mut alloc);
+        set(&mut dict, "x", 1, &mut alloc);
+        let capacity = dict.as_dict().capacity();
+
+        for i in 2..100 {
+            set(&mut dict, "x", i, &mut alloc);
+            assert_eq!(dict.as_dict().len(), 1);
+            assert_eq!(dict.as_dict().capacity(), capacity);
+        }
+
+        assert_eq!(dict.as_dict().get("x"), Some(Value::fixnum(99)));
+    }
+
+    /// The count has to survive the rehash, which puts every entry back
+    /// through the same set path
+    #[test]
+    fn len_survives_growth()
+    {
+        let mut alloc = Alloc::new();
+        let mut dict = Dict::with_capacity(0, &mut alloc);
+
+        for i in 0..200 {
+            set(&mut dict, &i.to_string(), i, &mut alloc);
+            assert_eq!(dict.as_dict().len(), (i + 1) as usize);
+        }
+
+        // Overwrites after a rehash are still overwrites
+        for i in 0..200 {
+            set(&mut dict, &i.to_string(), i * 2, &mut alloc);
+        }
+        assert_eq!(dict.as_dict().len(), 200);
+
+        for i in 0..200 {
+            let d = dict.as_dict();
+            assert_eq!(d.get(&i.to_string()), Some(Value::fixnum(i * 2)));
+        }
+    }
+
+    /// The table has to keep a free slot for the probe loop to stop on,
+    /// however the entries got there
+    #[test]
+    fn growth_keeps_a_free_slot()
+    {
+        let mut alloc = Alloc::new();
+        let mut dict = Dict::with_capacity(0, &mut alloc);
+
+        for i in 0..200 {
+            // Every key is set twice, so the count only moves on the
+            // first of each pair
+            set(&mut dict, &(i / 2).to_string(), i, &mut alloc);
+
+            let d = dict.as_dict();
+            assert_eq!(d.len(), (i / 2 + 1) as usize);
+            assert!(d.len() < d.capacity(), "no free slot left in the table");
+        }
     }
 }

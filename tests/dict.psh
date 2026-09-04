@@ -14,3 +14,22 @@ assert(d.has('a'));
 assert(d.has('100'));
 assert(!d.has('500'));
 assert(!d.has(' '));
+
+// Overwriting a key must not grow the table, so a dict holding one
+// entry stays that size no matter how many times it is written
+let d2 = {};
+for (let var i = 0; i < 100000; ++i)
+{
+    d2['x'] = i;
+}
+assert(d2['x'] == 99999);
+assert(d2.has('x'));
+assert(!d2.has('y'));
+
+// Rewriting every key of a grown dict leaves the entries it already had
+for (let var i = 0; i < 200; ++i)
+{
+    d[i.to_s()] = i * 2;
+}
+assert(d['100'] == 200);
+assert(d.has('a'));
