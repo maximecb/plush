@@ -2,6 +2,7 @@ use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet as HashSet;
 use crate::lexer::ParseError;
 use crate::ast::*;
+use crate::value::Value;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Decl
@@ -708,8 +709,36 @@ impl ExprBox
                         if let Expr::Ref { decl: Decl::Class { id }, name } = base.expr.as_ref() {
                             // Try to lookup the class
                             match prog.classes.get(id) {
-                                // If this is a core class with no definition
-                                None => {},
+                                // A core class has no definition to look in.
+                                // Its static methods come from the runtime,
+                                // and codegen calls them directly, so the
+                                // arity has to be settled here
+                                None => {
+                                    let host_fn = match crate::runtime::get_method(Value::class(*id), field) {
+                                        Some(host_fn) => host_fn.get(),
+                                        None => {
+                                            return ParseError::with_pos(
+                                                &format!("method `{}` not found on class `{}`", field, name),
+                                                &callee.pos
+                                            );
+                                        }
+                                    };
+
+                                    // The class itself is passed as self, so
+                                    // it takes one of the parameters
+                                    if host_fn.num_params() != args.len() + 1 {
+                                        return ParseError::with_pos(
+                                            &format!(
+                                                "incorrect argument count for method `{}` of class `{}`, expected {}, got {}",
+                                                field,
+                                                name,
+                                                host_fn.num_params() - 1,
+                                                args.len()
+                                            ),
+                                            &callee.pos
+                                        );
+                                    }
+                                },
 
                                 Some(class) => {
                                     let fun_id = match class.methods.get(field) {
@@ -790,7 +819,7 @@ impl ExprBox
 #[cfg(test)]
 mod tests
 {
-    
+
     use crate::lexer::Lexer;
     use crate::parser::parse_program;
 

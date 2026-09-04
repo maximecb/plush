@@ -1136,8 +1136,24 @@ fn gen_call(
                 gen_call_opnd(arg, fun, regs, cg, start + 1 + i as u16)?;
             }
 
-            let cache = cg.actor.new_call_cache(field);
-            cg.push_insn(Insn::call_method(start, argc, cache));
+            // A static method on a core class is settled by the class
+            // alone, and symbol resolution has already checked that it
+            // exists and that its arity matches. A class is the one
+            // receiver a call site never learns anything about, since it
+            // is not an object and its methods don't follow from the type
+            // tag, so the site would look the method up on every call
+            let host_fn = match base.expr.as_ref() {
+                Expr::Ref { decl: Decl::Class { id }, .. } =>
+                    crate::runtime::get_method(Value::class(*id), field),
+                _ => None
+            };
+
+            if let Some(host_fn) = host_fn {
+                cg.push_insn(Insn::call_host(host_fn as u16, start, argc));
+            } else {
+                let cache = cg.actor.new_call_cache(field);
+                cg.push_insn(Insn::call_method(start, argc, cache));
+            }
         }
 
         // Call to a known function
