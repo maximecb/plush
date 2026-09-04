@@ -1,14 +1,29 @@
 use crate::vm::Actor;
 use crate::value::*;
-use crate::alloc::{Alloc, Tag, HEADER_SIZE};
+use crate::alloc::{
+    header_of, set_fixed_len, table_len, table_slice, table_slice_mut,
+    Alloc, Tag, FIXED_SIZE, HEADER_SIZE,
+};
 use crate::*;
 use crate::host::HostResult;
 
 pub struct Array
 {
-    // Relocated by the collector, which walks the table on its own
-    pub(crate) elems: *mut [Value],
-    len: usize,
+    // Relocated by the collector, which walks the table on its own.
+    // The capacity is the length of the table block this points at, so
+    // it is read back from that block's header rather than stored here
+    pub(crate) elems: *mut Value,
+}
+
+// Nothing but the pointer to the element table. The length lives in the
+// block header, which is what makes this a fixed-layout block.
+const _: () = assert!(size_of::<Array>() == FIXED_SIZE);
+
+/// Capacity to grow to when a table of a given capacity is full.
+/// Growing doubles, but an empty array has to end up with room for one.
+fn grown_capacity(capacity: usize) -> usize
+{
+    std::cmp::max(capacity * 2, 1)
 }
 
 impl Array
@@ -29,11 +44,11 @@ impl Array
     /// between the two allocations: callers reserve the space up front.
     pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Value
     {
-        // Placeholder standing in until the table below is allocated
-        const NO_TABLE: *mut [Value] = std::ptr::slice_from_raw_parts_mut(std::ptr::null_mut(), 0);
-
-        let arr = alloc.alloc(Array { elems: NO_TABLE, len: 0 }, Tag::Array);
+        // alloc_fixed leaves the element pointer null, so the array is
+        // walkable between here and the table allocation below
+        let arr = alloc.alloc_fixed(Tag::Array, 0) as *mut Array;
         unsafe { (*arr).elems = alloc.alloc_table(capacity, Tag::ValueTable) };
+
         Value::array(arr)
     }
 
@@ -49,82 +64,145 @@ impl Array
     /// doubles, but an empty array has to end up with room for one.
     fn grown_capacity(&self) -> usize
     {
-        std::cmp::max(self.capacity() * 2, 1)
+        grown_capacity(self.capacity())
+    }
+
+    fn block(&self) -> *mut u8
+    {
+        self as *const Array as *mut u8
     }
 
     pub fn len(&self) -> usize
     {
-        self.len
+        header_of(self.block()).fixed_len()
+    }
+
+    fn set_len(&mut self, len: usize)
+    {
+        set_fixed_len(self.block(), len);
     }
 
     pub fn capacity(&self) -> usize
     {
-        self.elems.len()
+        table_len(self.elems)
     }
 
+    /// The whole element table, spare capacity included
+    fn elems(&self) -> &[Value]
+    {
+        table_slice(self.elems)
+    }
+
+    fn elems_mut(&mut self) -> &mut [Value]
+    {
+        table_slice_mut(self.elems)
+    }
+
+    /// Grow the element table to a given capacity, keeping what is in it
+    fn grow_to(&mut self, new_capacity: usize, alloc: &mut Alloc)
+    {
+        let new_elems: *mut Value = alloc.alloc_table(new_capacity, Tag::ValueTable);
+        let cur_len = self.len();
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.elems, new_elems, cur_len);
+        }
+
+        self.elems = new_elems;
+    }
+
+    /// An index inside the length is inside the table as well, so it can
+    /// be read without going to the table header for the capacity. Only
+    /// an index in the spare capacity past the length has to check
+    /// against it, and that goes out of line so that the common case
+    /// stays small enough to inline into the interpreter loop.
     pub fn get(&self, idx: usize) -> Value
     {
-        unsafe { (*self.elems) [idx] }
+        debug_assert!(self.len() <= self.capacity());
+
+        if idx < self.len() {
+            return unsafe { *self.elems.add(idx) };
+        }
+
+        self.get_past_len(idx)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn get_past_len(&self, idx: usize) -> Value
+    {
+        self.elems()[idx]
     }
 
     pub fn set(&mut self, idx: usize, val: Value)
     {
-        unsafe { (*self.elems) [idx] = val };
+        debug_assert!(self.len() <= self.capacity());
+
+        if idx < self.len() {
+            unsafe { *self.elems.add(idx) = val };
+            return;
+        }
+
+        self.set_past_len(idx, val);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn set_past_len(&mut self, idx: usize, val: Value)
+    {
+        self.elems_mut()[idx] = val;
     }
 
     pub fn items(&self) -> &[Value] {
-        let elems = unsafe { &*self.elems };
-        &elems[..self.len]
+        &self.elems()[..self.len()]
     }
 
     pub fn push(&mut self, val: Value, alloc: &mut Alloc)
     {
-        assert!(self.len <= self.elems.len());
+        let len = self.len();
+        let capacity = self.capacity();
+        assert!(len <= capacity);
 
         // If we are at capacity
-        if self.len == self.elems.len() {
-            let new_capacity = self.grown_capacity();
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_capacity, Tag::ValueTable) };
-            new_elems[..self.len].copy_from_slice(self.items());
-            self.elems = new_elems;
+        if len == capacity {
+            self.grow_to(grown_capacity(capacity), alloc);
         }
 
-        unsafe {
-            (&mut *self.elems)[self.len] = val;
-            self.len += 1;
-        }
+        // There is room at the end now, so this needs no bounds check
+        unsafe { *self.elems.add(len) = val };
+        self.set_len(len + 1);
     }
 
     pub fn insert(&mut self, idx: usize, val: Value, alloc: &mut Alloc)
     {
+        let len = self.len();
+        let capacity = self.capacity();
+
         // If we are at capacity
-        if self.len == self.elems.len() {
-            let new_capacity = self.grown_capacity();
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_capacity, Tag::ValueTable) };
-            new_elems[..self.len].copy_from_slice(self.items());
-            self.elems = new_elems;
+        if len == capacity {
+            self.grow_to(grown_capacity(capacity), alloc);
         }
 
-        unsafe {
-            (&mut *self.elems).copy_within(idx..self.len, idx + 1);
-            (&mut *self.elems)[idx] = val;
-            self.len += 1;
-        }
+        let elems = self.elems_mut();
+        elems.copy_within(idx..len, idx + 1);
+        elems[idx] = val;
+        self.set_len(len + 1);
     }
 
     pub fn remove(&mut self, idx: usize) -> Value
     {
-        if idx >= self.len {
+        let len = self.len();
+
+        if idx >= len {
             return Value::NIL;
         }
 
-        let removed = unsafe { (&mut *self.elems)[idx] };
-        unsafe {
-            (&mut *self.elems).copy_within(idx + 1..self.len, idx);
-        }
+        let elems = self.elems_mut();
+        let removed = elems[idx];
+        elems.copy_within(idx + 1..len, idx);
 
-        self.len -= 1;
-        self.clear_slot(self.len);
+        self.set_len(len - 1);
+        self.clear_slot(len - 1);
         removed
     }
 
@@ -133,61 +211,55 @@ impl Array
     {
         let new_arr = Self::with_capacity(end - start, alloc);
         let src = &self.items()[start..end];
-        unsafe { (&mut *new_arr.as_arr().elems)[..src.len()].copy_from_slice(src) };
-        new_arr.as_arr().len = end - start;
+        new_arr.as_arr().elems_mut()[..src.len()].copy_from_slice(src);
+        new_arr.as_arr().set_len(end - start);
         new_arr
     }
 
     pub fn append(&mut self, other: &Array, alloc: &mut Alloc) {
         let other_elems = other.items();
         let cur_len = self.len();
+        let new_len = cur_len + other_elems.len();
 
-        if self.len + other_elems.len() > self.elems.len() {
-            let new_len = self.len + other_elems.len();
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len, Tag::ValueTable) };
-
-            let elems = self.items();
-            new_elems[..cur_len].copy_from_slice(elems);
-            new_elems[cur_len..].copy_from_slice(other_elems);
-            self.elems = new_elems;
-        } else {
-            let elems = unsafe { &mut *self.elems };
-            elems[cur_len..cur_len + other_elems.len()].copy_from_slice(other_elems);
+        if new_len > self.capacity() {
+            self.grow_to(new_len, alloc);
         }
 
-        self.len += other_elems.len();
+        self.elems_mut()[cur_len..new_len].copy_from_slice(other_elems);
+        self.set_len(new_len);
     }
 
     pub fn resize(&mut self, new_len: usize, fill_val: Value, alloc: &mut Alloc)
     {
         // If the new length doesn't fit in the current table
-        if new_len > self.elems.len() {
-            let new_elems = unsafe { &mut *alloc.alloc_table(new_len, Tag::ValueTable) };
-            new_elems[..self.len].copy_from_slice(self.items());
-            self.elems = new_elems;
+        if new_len > self.capacity() {
+            self.grow_to(new_len, alloc);
         }
 
-        let elems = unsafe { &mut *self.elems };
+        let len = self.len();
+        let elems = self.elems_mut();
 
-        if new_len > self.len {
-            elems[self.len..new_len].fill(fill_val);
+        if new_len > len {
+            elems[len..new_len].fill(fill_val);
         } else {
             // Clear the slots past the new end, which the collector scans
-            elems[new_len..self.len].fill(Value::UNDEF);
+            elems[new_len..len].fill(Value::UNDEF);
         }
 
-        self.len = new_len;
+        self.set_len(new_len);
     }
 
     pub fn pop(&mut self) -> Value
     {
-        if self.len == 0 {
+        let len = self.len();
+
+        if len == 0 {
             return Value::NIL;
         }
 
-        self.len -= 1;
-        let popped = unsafe { (*self.elems) [self.len] };
-        self.clear_slot(self.len);
+        self.set_len(len - 1);
+        let popped = unsafe { *self.elems.add(len - 1) };
+        self.clear_slot(len - 1);
         popped
     }
 
@@ -195,7 +267,8 @@ impl Array
     /// whole table, so a stale value left here would be kept alive.
     fn clear_slot(&mut self, idx: usize)
     {
-        unsafe { (*self.elems)[idx] = Value::UNDEF };
+        debug_assert!(idx < self.capacity());
+        unsafe { *self.elems.add(idx) = Value::UNDEF };
     }
 }
 

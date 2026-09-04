@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 
 use crate::alloc::{header_of, restore_header, set_forwarded};
-use crate::alloc::{Alloc, Header, Tag, HEADER_SIZE};
+use crate::alloc::{table_len, Alloc, Header, Tag, HEADER_SIZE};
 use crate::array::Array;
 use crate::bytearray::ByteArray;
 use crate::closure::Closure;
@@ -180,8 +180,10 @@ impl<'a> Copier<'a>
             return hdr.forward_addr();
         }
 
+        // The header goes across as it is, so everything it records
+        // beyond the size comes with the copy and nothing is rebuilt
         let size = hdr.size();
-        let new_p = self.dst.alloc_bytes(size, hdr.tag());
+        let new_p = self.dst.alloc_copy(hdr);
         unsafe { std::ptr::copy_nonoverlapping(p, new_p, size) };
 
         self.record_undo(p, hdr);
@@ -199,38 +201,31 @@ impl<'a> Copier<'a>
     }
 
     /// Relocate a table, keeping its length
-    fn copy_table<T>(&mut self, table: *mut [T]) -> *mut [T]
+    fn copy_table<T>(&mut self, table: *mut T) -> *mut T
     {
-        let len = table.len();
-        let new_p = self.copy(table as *mut T as *mut u8);
-
-        std::ptr::slice_from_raw_parts_mut(new_p as *mut T, len)
+        self.copy(table as *mut u8) as *mut T
     }
 
     /// Relocate a table, dropping the capacity past its live length.
     ///
     /// A table has exactly one owner, so there can be no other reference
     /// to the block left behind for the shorter copy to invalidate.
-    fn copy_table_prefix<T>(&mut self, table: *mut [T], len: usize, tag: Tag) -> *mut [T]
+    fn copy_table_prefix<T>(&mut self, table: *mut T, len: usize, tag: Tag) -> *mut T
     {
         // Both of these guard the copy below, so they stay on in release:
         // a short table would read past its end, and a forwarded one would
         // be copied twice and silently corrupt the heap
-        assert!(len <= table.len());
+        assert!(len <= table_len(table));
 
-        let p = table as *mut T as *mut u8;
+        let p = table as *mut u8;
         let hdr = header_of(p);
         assert!(!hdr.is_forwarded(), "table reachable from two owners");
 
         let new_table = self.dst.alloc_table::<T>(len, tag);
-        unsafe { std::ptr::copy_nonoverlapping(
-            p as *const T,
-            new_table as *mut T,
-            len
-        )};
+        unsafe { std::ptr::copy_nonoverlapping(table, new_table, len) };
 
         self.record_undo(p, hdr);
-        set_forwarded(p, new_table as *mut T as *mut u8);
+        set_forwarded(p, new_table as *mut u8);
 
         self.num_blocks += 1;
         new_table
@@ -291,6 +286,17 @@ impl<'a> Copier<'a>
 
             self.scan_block(hdr, p);
         }
+
+        // The walk steps from one block to the next by the size in each
+        // header, so it lands exactly on the allocation point unless a
+        // header reported the wrong size. Catching that here beats
+        // finding it as a corrupted heap several cycles later.
+        assert!(
+            self.scan == self.dst.bytes_used(),
+            "heap walk ended at {} of {} bytes",
+            self.scan,
+            self.dst.bytes_used()
+        );
     }
 
     /// Update the references held by a block that has been copied

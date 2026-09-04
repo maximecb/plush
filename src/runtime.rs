@@ -532,7 +532,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
 pub fn get_class_id(val: Value) -> ClassId
 {
     match val.type_of() {
-        Type::Object => val.as_obj().class_id,
+        Type::Object => val.as_obj().class_id(),
 
         Type::Nil => NIL_ID,
         Type::Bool => BOOL_ID,

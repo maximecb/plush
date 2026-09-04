@@ -368,6 +368,17 @@ impl Value
         header_of(self.heap_ptr()).tag()
     }
 
+    /// Low half of the header of the block this points at. For an object
+    /// that is the tag and the class id together, which is what a field
+    /// or method cache guards against: matching it proves both that this
+    /// is an object and that its class is the one the site resolved to.
+    #[inline(always)]
+    pub fn guard_key(self) -> u32
+    {
+        debug_assert!(self.is_heap());
+        header_of(self.heap_ptr()).guard_key()
+    }
+
     /// Retag a pointer that the collector moved
     #[inline(always)]
     pub fn with_heap_ptr(self, p: *mut u8) -> Value
@@ -546,7 +557,7 @@ impl Value
     pub fn to_fun_id(self) -> Option<FunId>
     {
         match self.to_clos() {
-            Some(clos) => Some(clos.fun_id),
+            Some(clos) => Some(clos.fun_id()),
             None => self.to_fun(),
         }
     }

@@ -1,56 +1,56 @@
 use std::mem::size_of;
 use crate::ast::FunId;
 use crate::value::Value;
-use crate::alloc::{Alloc, Tag, HEADER_SIZE};
+use crate::alloc::{header_of, Alloc, Tag, HEADER_SIZE};
 
-/// The slots are stored inline, right after the closure
+/// Nothing is stored here: the slots start at the address of the closure
+/// itself, and the function and slot count come from the block header
 #[repr(C, align(8))]
-pub struct Closure
-{
-    pub fun_id: FunId,
-    num_slots: u32,
-}
+pub struct Closure;
 
 impl Closure
 {
     /// Bytes a closure with a given slot count occupies, header included
     pub fn alloc_size(num_slots: usize) -> usize
     {
-        HEADER_SIZE + size_of::<Closure>() + num_slots * size_of::<Value>()
+        HEADER_SIZE + num_slots * size_of::<Value>()
     }
 
     /// Allocate a new closure with a given number of slots
     pub fn new(fun_id: FunId, num_slots: usize, alloc: &mut Alloc) -> Value
     {
-        let clos = Closure { fun_id, num_slots: num_slots as u32 };
-        let tail_bytes = num_slots * size_of::<Value>();
-        let p = alloc.alloc_var(clos, tail_bytes, Tag::Closure);
+        let p = alloc.alloc_slots(Tag::Closure, usize::from(fun_id), num_slots);
 
         // Zeroed memory reads back as the integer zero, so the slots have
         // to be marked uninitialized explicitly
-        unsafe { &mut *p }.slots_mut().fill(Value::UNDEF);
+        unsafe { std::slice::from_raw_parts_mut(p, num_slots) }.fill(Value::UNDEF);
 
-        Value::closure(p)
+        Value::closure(p as *mut Closure)
+    }
+
+    pub fn fun_id(&self) -> FunId
+    {
+        FunId::from(header_of(self as *const Closure as *const u8).aux24())
     }
 
     pub fn num_slots(&self) -> usize
     {
-        self.num_slots as usize
+        header_of(self as *const Closure as *const u8).num_slots()
     }
 
     fn slots(&self) -> &[Value]
     {
         unsafe { std::slice::from_raw_parts(
-            (self as *const Closure).add(1) as *const Value,
-            self.num_slots as usize
+            self as *const Closure as *const Value,
+            self.num_slots()
         )}
     }
 
     fn slots_mut(&mut self) -> &mut [Value]
     {
         unsafe { std::slice::from_raw_parts_mut(
-            (self as *mut Closure).add(1) as *mut Value,
-            self.num_slots as usize
+            self as *mut Closure as *mut Value,
+            self.num_slots()
         )}
     }
 

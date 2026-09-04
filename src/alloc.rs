@@ -20,36 +20,44 @@ const ALIGN: usize = 8;
 
 /// What kind of block an allocation holds. The collector needs this to
 /// know which references live inside a block it has walked to.
+///
+/// The order matters: the tag also says how to read the rest of the
+/// header, and the three layouts below are told apart by comparing
+/// against FIRST_SLOTS and FIRST_FIXED, so each group has to stay
+/// contiguous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Tag
 {
-    // Objects with their variable-sized part stored inline
+    // Raw blocks: the header holds the size, and nothing else needs a
+    // field of its own. Strings keep their inline bytes here, and the
+    // tables the containers below point at are raw blocks too.
     Str = 1,
-    Object,
-    Closure,
-
-    // Objects pointing to a separate table
-    Array,
-    ByteArray,
-    Dict,
-
-    // Captured variable, holds a single value
-    Cell,
-
-    // Boxed numbers that don't fit in an immediate value
-    Int64,
-    Float64,
-
-    // Tables, referenced by the objects above
     ValueTable,
     SlotTable,
     Bytes,
+
+    // Blocks whose payload is a run of slots, with the id of what
+    // describes them in the header alongside the slot count
+    Object,
+    Closure,
+
+    // Blocks with an eight-byte payload, so the header holds a length
+    // instead of a size. The first three are a thin pointer to a table,
+    // the rest a single value.
+    Array,
+    Dict,
+    ByteArray,
+    Cell,
+    Int64,
+    Float64,
 }
 
 impl Tag
 {
-    const LAST: u8 = Tag::Bytes as u8;
+    const FIRST_SLOTS: u8 = Tag::Object as u8;
+    const FIRST_FIXED: u8 = Tag::Array as u8;
+    const LAST: u8 = Tag::Float64 as u8;
 
     fn from_u8(val: u8) -> Tag
     {
@@ -58,12 +66,88 @@ impl Tag
     }
 }
 
+// Field positions within a live header. The tag says which of the three
+// layouts applies, and the reserved bits sit at the same place in all of
+// them so that a collector can mark a block without decoding the tag.
+const TAG_SHIFT: u32 = 1;
+const TAG_BITS: u64 = 0x7F;
+
+const RAW_SHIFT: u32 = 8;
+const RAW_BITS: u64 = (1 << 46) - 1;
+// Bits 54..58 of a raw header are unused
+
+const AUX24_SHIFT: u32 = 8;
+const AUX24_BITS: u64 = (1 << 24) - 1;
+const SLOTS_SHIFT: u32 = 32;
+const SLOTS_BITS: u64 = 0xFFFF;
+
+const LEN_SHIFT: u32 = 8;
+const LEN_BITS: u64 = (1 << 50) - 1;
+
+/// Largest values each field can hold, checked where blocks are made
+pub const MAX_AUX24: usize = AUX24_BITS as usize;
+pub const MAX_NUM_SLOTS: usize = SLOTS_BITS as usize;
+pub const MAX_FIXED_LEN: usize = LEN_BITS as usize;
+
 /// Header word preceding every allocation.
 ///
-/// Bit 0 set means the block is live: bits 1..8 hold the tag and bits
-/// 8..64 the payload size. Bit 0 clear means the block has been copied
-/// and the word is the address the payload moved to, which is aligned
-/// and so always has bit 0 clear.
+/// Bit 0 set means the block is live. Bit 0 clear means the block has
+/// been copied and the whole word is the address the payload moved to,
+/// which is aligned and so always has bit 0 clear. That is why the tag
+/// starts at bit 1 rather than filling the low byte: bit 0 is what tells
+/// a live header from a forwarding address, and the eight-alignment of
+/// every block is what guarantees a real address never collides with it.
+///
+/// Every live header carries the tag in bits 1..8 and leaves bits 58..64
+/// for a future collector, at the same place whatever the tag, so that a
+/// mark or a lock can be set without decoding what the block is. The tag
+/// says how to read the bits between, in one of three layouts:
+///
+/// ```text
+///                 1     8              32        48   54   58      64
+///                 +-----+--------------+---------+----+----+-------+
+/// raw    live tag | bytes                        |  --     | resvd |
+/// slots  live tag | class or fun id   | num_slots|   --    | resvd |
+/// fixed  live tag | length                            | resvd |
+///                 +-----+--------------+---------+----+----+-------+
+/// ```
+///
+/// A raw header counts the bytes the block was asked for, not the
+/// rounded block size, so nothing has to be stored to recover an exact
+/// length; size() rounds up on the way out.
+///
+/// And per block kind:
+///
+/// ```text
+/// Str         tag(7) | len in bytes(46) | ---(4) | reserved(6)
+///   Bytes inline, at the block address, and the length is the field
+///   itself. 64 TB, against a 16 GB cap on a single message.
+///
+/// ValueTable  tag(7) | size in bytes(46) | ---(4) | reserved(6)
+/// SlotTable   tag(7) | size in bytes(46) | ---(4) | reserved(6)
+/// Bytes       tag(7) | size in bytes(46) | ---(4) | reserved(6)
+///   An array's, dict's or bytearray's table. The owner reads its
+///   capacity back out of this size, which is why it can point at the
+///   table with a plain pointer.
+///
+/// Object      tag(7) | class_id(24) | num_slots(16) | ---(10) | resvd(6)
+/// Closure     tag(7) | fun_id(24)   | num_slots(16) | ---(10) | resvd(6)
+///   Slots inline, at the block address. The low 32 bits are the tag and
+///   the id together, which is the whole of a field or method cache
+///   guard: one compare proves both the kind and the class.
+///
+/// Array       tag(7) | len in values(50)  | reserved(6)
+/// Dict        tag(7) | len in entries(50) | reserved(6)
+/// ByteArray   tag(7) | len in bytes(50)   | reserved(6)
+///   Payload is one thin pointer to the table above. The unit of the
+///   length differs per kind and is the block's own business; nothing
+///   generic reads it, because the size of these blocks is a constant.
+///
+/// Cell        tag(7) | ---(50) | reserved(6)
+/// Int64       tag(7) | ---(50) | reserved(6)
+/// Float64     tag(7) | ---(50) | reserved(6)
+///   Payload is the single value they box, and there is no length.
+/// ```
 #[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
 pub struct Header(u64);
@@ -71,12 +155,50 @@ pub struct Header(u64);
 /// Size of the header preceding every allocation
 pub const HEADER_SIZE: usize = size_of::<Header>();
 
+/// Payload size of every fixed-layout block: one pointer or one value
+pub const FIXED_SIZE: usize = 8;
+
 impl Header
 {
-    fn new(tag: Tag, size: usize) -> Self
+    /// Header for a raw block holding a given number of bytes.
+    ///
+    /// The count is the exact byte length asked for, not the rounded
+    /// block size, so a string reads its length straight back out and a
+    /// table of bytes reports the capacity it was actually given. The
+    /// rounding up to a whole word is recovered by size() below.
+    fn new_raw(tag: Tag, num_bytes: usize) -> Self
     {
-        debug_assert!(size < (1 << 56), "block too large to fit in a header");
-        Header(((size as u64) << 8) | ((tag as u64) << 1) | 1)
+        debug_assert!((tag as u8) < Tag::FIRST_SLOTS);
+        assert!(num_bytes as u64 <= RAW_BITS, "block too large to fit in a header");
+
+        Header(((num_bytes as u64) << RAW_SHIFT) | ((tag as u64) << TAG_SHIFT) | 1)
+    }
+
+    /// Header for a block of slots, tagged with the class or function
+    /// the slots belong to
+    fn new_slots(tag: Tag, aux24: usize, num_slots: usize) -> Self
+    {
+        debug_assert!((tag as u8) >= Tag::FIRST_SLOTS && (tag as u8) < Tag::FIRST_FIXED);
+        assert!(aux24 <= MAX_AUX24, "class or function id too large for a header");
+        assert!(num_slots <= MAX_NUM_SLOTS, "too many slots to fit in a header");
+
+        Header(
+            ((num_slots as u64) << SLOTS_SHIFT) |
+            ((aux24 as u64) << AUX24_SHIFT) |
+            ((tag as u64) << TAG_SHIFT) | 1
+        )
+    }
+
+    /// Header for an eight-byte block, whose header holds a length
+    /// rather than a size. The unit of that length is the block's own
+    /// business: values for an array, entries for a dict, bytes for a
+    /// bytearray. Nothing generic reads it.
+    fn new_fixed(tag: Tag, len: usize) -> Self
+    {
+        debug_assert!((tag as u8) >= Tag::FIRST_FIXED);
+        assert!(len <= MAX_FIXED_LEN, "length too large to fit in a header");
+
+        Header(((len as u64) << LEN_SHIFT) | ((tag as u64) << TAG_SHIFT) | 1)
     }
 
     pub fn is_forwarded(&self) -> bool
@@ -91,17 +213,87 @@ impl Header
         self.0 as *mut u8
     }
 
-    pub fn tag(&self) -> Tag
+    fn tag_u8(&self) -> u8
     {
         debug_assert!(!self.is_forwarded());
-        Tag::from_u8(((self.0 >> 1) & 0x7F) as u8)
+        ((self.0 >> TAG_SHIFT) & TAG_BITS) as u8
     }
 
-    /// Payload size in bytes, already rounded up to the alignment
+    pub fn tag(&self) -> Tag
+    {
+        Tag::from_u8(self.tag_u8())
+    }
+
+    /// Payload size in bytes, rounded up to the alignment.
+    ///
+    /// This is the one field the collector reads without knowing what
+    /// kind of block it is looking at, so the three layouts are decoded
+    /// here with compares rather than a table: both candidates come out
+    /// of the header word with no memory access of their own.
     pub fn size(&self) -> usize
     {
-        debug_assert!(!self.is_forwarded());
-        (self.0 >> 8) as usize
+        let t = self.tag_u8();
+        let raw = ((self.0 >> RAW_SHIFT) & RAW_BITS) as usize;
+        let slots = ((self.0 >> SLOTS_SHIFT) & SLOTS_BITS) as usize;
+
+        if t < Tag::FIRST_SLOTS {
+            align_up(raw)
+        } else if t < Tag::FIRST_FIXED {
+            slots * size_of::<Value>()
+        } else {
+            FIXED_SIZE
+        }
+    }
+
+    /// Bytes a raw block was asked for, before the rounding up to a
+    /// word that size() reports. This is a string's length and a
+    /// table's capacity.
+    pub fn num_bytes(&self) -> usize
+    {
+        debug_assert!(self.tag_u8() < Tag::FIRST_SLOTS);
+        ((self.0 >> RAW_SHIFT) & RAW_BITS) as usize
+    }
+
+    /// The class or function id of a block of slots
+    pub fn aux24(&self) -> usize
+    {
+        debug_assert!(self.tag_u8() >= Tag::FIRST_SLOTS && self.tag_u8() < Tag::FIRST_FIXED);
+        ((self.0 >> AUX24_SHIFT) & AUX24_BITS) as usize
+    }
+
+    pub fn num_slots(&self) -> usize
+    {
+        debug_assert!(self.tag_u8() >= Tag::FIRST_SLOTS && self.tag_u8() < Tag::FIRST_FIXED);
+        ((self.0 >> SLOTS_SHIFT) & SLOTS_BITS) as usize
+    }
+
+    pub fn fixed_len(&self) -> usize
+    {
+        debug_assert!(self.tag_u8() >= Tag::FIRST_FIXED);
+        ((self.0 >> LEN_SHIFT) & LEN_BITS) as usize
+    }
+
+    /// The low half of a slots header: the tag and the class or function
+    /// id together. A field or method cache guards on this, which checks
+    /// that the block is an object of the right class in one compare.
+    pub fn guard_key(&self) -> u32
+    {
+        self.0 as u32
+    }
+
+    /// The key every object of a given class has. The slot count lives
+    /// above the low half, so it plays no part in this.
+    pub fn object_key(class_id: usize) -> u32
+    {
+        Header::new_slots(Tag::Object, class_id, 0).guard_key()
+    }
+
+    /// The class an object key was built from. A site that needs the
+    /// class itself keeps the key and comes back through here, rather
+    /// than carrying both.
+    pub fn class_id_of_key(key: u32) -> usize
+    {
+        (key >> AUX24_SHIFT) as usize
     }
 }
 
@@ -109,6 +301,43 @@ impl Header
 pub fn header_of(payload: *const u8) -> Header
 {
     unsafe { *(payload as *const Header).sub(1) }
+}
+
+/// Number of elements a table block holds, read from its own header.
+///
+/// This is what lets an array or dict point at its table with a plain
+/// pointer: the capacity is already recorded in the block it points at,
+/// so there is nothing to carry alongside the pointer.
+/// View a table block as a slice, taking its length from its own header
+pub fn table_slice<'a, T>(p: *const T) -> &'a [T]
+{
+    unsafe { std::slice::from_raw_parts(p, table_len(p)) }
+}
+
+pub fn table_slice_mut<'a, T>(p: *mut T) -> &'a mut [T]
+{
+    unsafe { std::slice::from_raw_parts_mut(p, table_len(p)) }
+}
+
+pub fn table_len<T>(p: *const T) -> usize
+{
+    debug_assert!(!p.is_null());
+    header_of(p as *const u8).num_bytes() / size_of::<T>()
+}
+
+/// Change the length recorded in the header of a fixed-layout block.
+/// This is how an array or dict updates its length, since the header is
+/// where that lives.
+pub fn set_fixed_len(payload: *mut u8, len: usize)
+{
+    assert!(len <= MAX_FIXED_LEN, "length too large to fit in a header");
+
+    unsafe {
+        let p = (payload as *mut Header).sub(1);
+        let bits = (*p).0;
+        debug_assert!(bits & 1 == 1, "length written to a forwarded block");
+        *p = Header((bits & !(LEN_BITS << LEN_SHIFT)) | ((len as u64) << LEN_SHIFT));
+    }
 }
 
 /// Record that a block has been copied, and where its payload moved to
@@ -125,7 +354,7 @@ pub fn restore_header(payload: *mut u8, header: Header)
 }
 
 /// Round a size up to the allocation alignment
-fn align_up(size: usize) -> usize
+pub fn align_up(size: usize) -> usize
 {
     (size + (ALIGN - 1)) & !(ALIGN - 1)
 }
@@ -514,14 +743,17 @@ impl Alloc
         addr >= start + HEADER_SIZE && addr - HEADER_SIZE < start + self.next_idx
     }
 
-    /// Allocate a block with a given payload size and tag.
+    /// Carve a block of a given payload size out of the heap and put a
+    /// header in front of it.
     ///
     /// Sizes are rounded up to the alignment so that blocks sit back to
     /// back with no gaps between them. That is what lets the collector
-    /// walk the heap linearly, one header at a time.
-    pub fn alloc_bytes(&mut self, size_bytes: usize, tag: Tag) -> *mut u8
+    /// walk the heap linearly, one header at a time. The header is built
+    /// by the caller, because what goes in it depends on the tag.
+    fn bump(&mut self, size_bytes: usize, hdr: Header) -> *mut u8
     {
-        let size_bytes = align_up(size_bytes);
+        debug_assert!(size_bytes % ALIGN == 0);
+        debug_assert!(hdr.size() == size_bytes);
 
         // Every block is a header plus a rounded payload, so the next
         // allocation index stays aligned without any adjustment here
@@ -553,43 +785,71 @@ impl Alloc
 
         unsafe {
             let p = self.mem_block.add(obj_pos);
-            std::ptr::write(
-                p.sub(HEADER_SIZE) as *mut Header,
-                Header::new(tag, size_bytes)
-            );
+            std::ptr::write(p.sub(HEADER_SIZE) as *mut Header, hdr);
             p
         }
     }
 
-    /// Allocate a variable-sized table of elements of a given type
-    pub fn alloc_table<T>(&mut self, num_elems: usize, tag: Tag) -> *mut [T]
+    /// Allocate a raw block: a string's inline bytes, or a table. The
+    /// four spare header bits are the tag's to use.
+    pub fn alloc_raw(&mut self, tag: Tag, num_bytes: usize) -> *mut u8
+    {
+        self.bump(align_up(num_bytes), Header::new_raw(tag, num_bytes))
+    }
+
+    /// Allocate a block of slots, tagged with the class or function id
+    /// the slots belong to
+    pub fn alloc_slots(&mut self, tag: Tag, aux24: usize, num_slots: usize) -> *mut Value
+    {
+        let size_bytes = num_slots * size_of::<Value>();
+        let p = self.bump(size_bytes, Header::new_slots(tag, aux24, num_slots));
+        p as *mut Value
+    }
+
+    /// Allocate an eight-byte block whose header carries a length.
+    ///
+    /// The payload is cleared, because a container is allocated before
+    /// the table it points at and the bytes here are whatever the last
+    /// heap left behind. Anything walking the heap in between would
+    /// otherwise find a stale pointer to follow.
+    pub fn alloc_fixed(&mut self, tag: Tag, len: usize) -> *mut u8
+    {
+        let p = self.bump(FIXED_SIZE, Header::new_fixed(tag, len));
+        unsafe { std::ptr::write(p as *mut u64, 0) };
+        p
+    }
+
+    /// Allocate room for a block the collector is copying, keeping the
+    /// header it already has. Everything the header records beyond the
+    /// size survives the copy this way, with nothing to rebuild.
+    pub fn alloc_copy(&mut self, hdr: Header) -> *mut u8
+    {
+        self.bump(hdr.size(), hdr)
+    }
+
+    /// Allocate a variable-sized table of elements of a given type.
+    /// The element count is recovered from the block header with
+    /// table_len, so it is not carried alongside the pointer.
+    pub fn alloc_table<T>(&mut self, num_elems: usize, tag: Tag) -> *mut T
     {
         debug_assert!(align_of::<T>() <= ALIGN);
 
         let num_bytes = num_elems * size_of::<T>();
-        let bytes = self.alloc_bytes(num_bytes, tag);
-        let p = bytes as *mut T;
-
-        std::ptr::slice_from_raw_parts_mut(p, num_elems)
+        self.alloc_raw(tag, num_bytes) as *mut T
     }
 
-    /// Allocate a new object of a given type
-    pub fn alloc<T>(&mut self, obj: T, tag: Tag) -> *mut T
+    /// Allocate an eight-byte block holding a single value of a given
+    /// type, such as a captured variable or a boxed number
+    pub fn alloc_boxed<T>(&mut self, val: T, tag: Tag) -> *mut T
     {
-        self.alloc_var(obj, 0, tag)
-    }
+        debug_assert!(size_of::<T>() <= FIXED_SIZE && align_of::<T>() <= ALIGN);
 
-    /// Allocate an object with a variable-sized tail stored right after it
-    pub fn alloc_var<T>(&mut self, obj: T, tail_bytes: usize, tag: Tag) -> *mut T
-    {
-        debug_assert!(align_of::<T>() <= ALIGN);
+        // Straight to the bump: the value below covers the whole payload,
+        // so there is nothing for alloc_fixed's clearing to do
+        let p = self.bump(FIXED_SIZE, Header::new_fixed(tag, 0)) as *mut T;
 
-        let bytes = self.alloc_bytes(size_of::<T>() + tail_bytes, tag);
-        let p = bytes as *mut T;
-
-        // Write object at location without calling drop
-        // on what's currently at that location
-        unsafe { std::ptr::write(p, obj) };
+        // Write the value without dropping what is currently there
+        unsafe { std::ptr::write(p, val) };
 
         p
     }
@@ -598,14 +858,14 @@ impl Alloc
     pub fn heap_int64(&mut self, val: i64) -> Value
     {
         debug_assert!(!Value::fits_fixnum(val));
-        Value::int64_box(self.alloc(val, Tag::Int64))
+        Value::int64_box(self.alloc_boxed(val, Tag::Int64))
     }
 
     /// Box a double that has no inline flonum encoding
     pub fn heap_float64(&mut self, val: f64) -> Value
     {
         debug_assert!(Value::try_flonum(val).is_none());
-        Value::float64_box(self.alloc(val, Tag::Float64))
+        Value::float64_box(self.alloc_boxed(val, Tag::Float64))
     }
 }
 
@@ -633,7 +893,7 @@ mod tests
     fn grow_keeps_addresses_and_zeroes()
     {
         let mut alloc = Alloc::with_size(1024 * 1024);
-        let p = alloc.alloc::<u64>(1337, Tag::Bytes);
+        let p = alloc.alloc_boxed::<u64>(1337, Tag::Int64);
 
         // An allocator can always grow into its own reservation
         let reserve_size = alloc.reserve_size();
@@ -644,7 +904,7 @@ mod tests
         assert!(alloc.mem_size() == reserve_size);
 
         let table = alloc.alloc_table::<u64>(4096, Tag::Bytes);
-        assert!(unsafe { (*table).iter().all(|&x| x == 0) });
+        assert!(table_slice_mut(table).iter().all(|&x| x == 0));
     }
 
     /// An empty allocator can be given a larger reservation
@@ -660,7 +920,7 @@ mod tests
         // The new reservation must be usable and zeroed
         alloc.grow(64 * 1024 * 1024);
         let table = alloc.alloc_table::<u64>(4 * 1024 * 1024, Tag::Bytes);
-        assert!(unsafe { (*table).iter().all(|&x| x == 0) });
+        assert!(table_slice_mut(table).iter().all(|&x| x == 0));
     }
 
     /// Growing the reservation moves the memory block, so it must not be
@@ -670,7 +930,7 @@ mod tests
     fn grow_reserve_rejects_live_objects()
     {
         let mut alloc = Alloc::with_size(1024 * 1024);
-        alloc.alloc::<u64>(1337, Tag::Bytes);
+        alloc.alloc_boxed::<u64>(1337, Tag::Int64);
         alloc.grow_reserve(64 * 1024 * 1024);
     }
 
@@ -691,7 +951,7 @@ mod tests
         let mut alloc = Alloc::with_size(8 * 1024 * 1024);
 
         let table = alloc.alloc_table::<u64>(256 * 1024, Tag::Bytes);
-        unsafe { (*table).fill(0xABAB_ABAB_ABAB_ABAB) };
+        table_slice_mut(table).fill(0xABAB_ABAB_ABAB_ABAB);
         alloc.reset();
 
         // Release every page, so none of the old contents can come back
@@ -700,7 +960,7 @@ mod tests
 
         alloc.grow(8 * 1024 * 1024);
         let table = alloc.alloc_table::<u64>(256 * 1024, Tag::Bytes);
-        assert!(unsafe { (*table).iter().all(|&x| x == 0) });
+        assert!(table_slice_mut(table).iter().all(|&x| x == 0));
     }
 
     /// Resetting leaves the old bytes in place, and zero_up_to clears
@@ -711,20 +971,20 @@ mod tests
         let mut alloc = Alloc::with_size(1024 * 1024);
 
         let table = alloc.alloc_table::<u64>(1024, Tag::Bytes);
-        unsafe { (*table).fill(0xABAB_ABAB_ABAB_ABAB) };
+        table_slice_mut(table).fill(0xABAB_ABAB_ABAB_ABAB);
         let dirty_bytes = alloc.bytes_used();
         alloc.reset();
 
         // Allocate over the first half, the way a copy would
         let kept = alloc.alloc_table::<u64>(512, Tag::Bytes);
-        unsafe { (*kept).fill(1337) };
+        table_slice_mut(kept).fill(1337);
 
         alloc.zero_up_to(dirty_bytes);
 
         // What we wrote is untouched, and the tail is back to zero
-        assert!(unsafe { (*kept).iter().all(|&x| x == 1337) });
+        assert!(table_slice_mut(kept).iter().all(|&x| x == 1337));
         let rest = alloc.alloc_table::<u64>(510, Tag::Bytes);
-        assert!(unsafe { (*rest).iter().all(|&x| x == 0) });
+        assert!(table_slice_mut(rest).iter().all(|&x| x == 0));
     }
 
     /// Zeroing must stop at the committed size, not run off the end
@@ -753,7 +1013,7 @@ mod tests
 
         let mut src = Alloc::with_size(INIT_SIZE);
         for &s in &sizes {
-            src.alloc_bytes(s, Tag::Bytes);
+            src.alloc_raw(Tag::Bytes, s);
         }
 
         // Copy the same allocations back in a different order
@@ -764,27 +1024,53 @@ mod tests
         let mut reordered = sizes.clone();
         reordered.sort();
         for &s in &reordered {
-            dst.alloc_bytes(s, Tag::Bytes);
+            dst.alloc_raw(Tag::Bytes, s);
         }
 
         assert!(dst.bytes_used() == src.bytes_used());
     }
 
+    /// One block of each of the three header layouts, and the size each
+    /// one should walk over
+    fn sample_blocks() -> Vec<(Tag, usize)>
+    {
+        vec![
+            (Tag::Bytes, 8),        // raw, 3 bytes rounded up
+            (Tag::Str, 24),         // raw, 17 bytes rounded up
+            (Tag::ValueTable, 8),   // raw
+            (Tag::Object, 24),      // slots, 3 of them
+            (Tag::Closure, 8),      // slots, 1 of them
+            (Tag::Array, 8),        // fixed
+            (Tag::Dict, 8),         // fixed
+            (Tag::Int64, 8),        // fixed
+        ]
+    }
+
+    fn alloc_sample(alloc: &mut Alloc, tag: Tag)
+    {
+        match tag {
+            Tag::Bytes => { alloc.alloc_raw(tag, 3); }
+            Tag::Str => { alloc.alloc_raw(tag, 17); }
+            Tag::ValueTable => { alloc.alloc_raw(tag, 8); }
+            Tag::Object => { alloc.alloc_slots(tag, 1337, 3); }
+            Tag::Closure => { alloc.alloc_slots(tag, 42, 1); }
+            _ => { alloc.alloc_fixed(tag, 7); }
+        }
+    }
+
     /// Blocks sit back to back, so a linear walk must land on every one
-    /// of them and recover the tag and size it was allocated with
+    /// of them and recover the tag and size it was allocated with. Each
+    /// of the three header layouts has to walk correctly.
     #[test]
     fn heap_walk_visits_every_block()
     {
-        let blocks: Vec<(usize, Tag)> = (0..1000).map(|i| match i % 4 {
-            0 => (3, Tag::Bytes),
-            1 => (8, Tag::ValueTable),
-            2 => (24, Tag::Object),
-            _ => (17, Tag::Str),
-        }).collect();
+        let sample = sample_blocks();
+        let blocks: Vec<(Tag, usize)> =
+            (0..1000).map(|i| sample[i % sample.len()]).collect();
 
         let mut alloc = Alloc::with_size(INIT_SIZE);
-        for &(size, tag) in &blocks {
-            alloc.alloc_bytes(size, tag);
+        for &(tag, _) in &blocks {
+            alloc_sample(&mut alloc, tag);
         }
 
         let mut offset = 0;
@@ -793,12 +1079,12 @@ mod tests
         while offset < alloc.bytes_used() {
             let p = alloc.block_at(offset);
             let hdr = header_of(p);
-            let (size, tag) = blocks[visited];
+            let (tag, size) = blocks[visited];
 
             assert!(alloc.contains(p));
             assert!(!hdr.is_forwarded());
             assert!(hdr.tag() == tag);
-            assert!(hdr.size() == align_up(size));
+            assert!(hdr.size() == size, "{:?} walked {} bytes", tag, hdr.size());
 
             offset += HEADER_SIZE + hdr.size();
             visited += 1;
@@ -807,14 +1093,41 @@ mod tests
         assert!(visited == blocks.len());
     }
 
+    /// Every layout has to read back the fields it was built with
+    #[test]
+    fn header_fields_round_trip()
+    {
+        let mut alloc = Alloc::with_size(INIT_SIZE);
+
+        // A string keeps an exact byte length across the rounding
+        let p = alloc.alloc_raw(Tag::Str, 17);
+        let hdr = header_of(p);
+        assert!(hdr.num_bytes() == 17 && hdr.size() == 24);
+
+        // An object keeps its class and slot count, and every object of
+        // a class has the same guard key whatever its slot count
+        let p = alloc.alloc_slots(Tag::Object, 1337, 3) as *mut u8;
+        let hdr = header_of(p);
+        assert!(hdr.aux24() == 1337 && hdr.num_slots() == 3);
+        assert!(hdr.guard_key() == Header::object_key(1337));
+        assert!(hdr.guard_key() != Header::object_key(1338));
+
+        // A fixed block keeps a length that can be written again
+        let p = alloc.alloc_fixed(Tag::Array, 5);
+        assert!(header_of(p).fixed_len() == 5 && header_of(p).size() == FIXED_SIZE);
+        set_fixed_len(p, MAX_FIXED_LEN);
+        assert!(header_of(p).fixed_len() == MAX_FIXED_LEN);
+        assert!(header_of(p).tag() == Tag::Array && header_of(p).size() == FIXED_SIZE);
+    }
+
     /// A forwarded header reads back as the address the block moved to,
     /// and can be put back the way it was
     #[test]
     fn forwarding_round_trips()
     {
         let mut alloc = Alloc::with_size(INIT_SIZE);
-        let p = alloc.alloc_bytes(24, Tag::Object);
-        let q = alloc.alloc_bytes(24, Tag::Object);
+        let p = alloc.alloc_slots(Tag::Object, 7, 3) as *mut u8;
+        let q = alloc.alloc_slots(Tag::Object, 7, 3) as *mut u8;
 
         let hdr = header_of(p);
         assert!(!hdr.is_forwarded());
@@ -827,6 +1140,7 @@ mod tests
         assert!(!header_of(p).is_forwarded());
         assert!(header_of(p).tag() == Tag::Object);
         assert!(header_of(p).size() == 24);
+        assert!(header_of(p).aux24() == 7);
     }
 
     /// Tables start out zeroed and the collector scans every slot of the
@@ -837,8 +1151,9 @@ mod tests
     {
         let mut alloc = Alloc::with_size(INIT_SIZE);
         let table = alloc.alloc_table::<Value>(64, Tag::ValueTable);
+        assert!(table_len(table) == 64);
 
-        for val in unsafe { &*table } {
+        for val in table_slice_mut(table) {
             assert!(!val.is_heap());
             assert!(*val == Value::fixnum(0));
         }

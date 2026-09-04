@@ -1,4 +1,5 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use crate::alloc::MAX_AUX24;
 use crate::lexer::SrcPos;
 use crate::symbols::Decl;
 use crate::host::HostFnId;
@@ -365,6 +366,8 @@ pub struct ClassId(u32);
 
 impl From<usize> for FunId {
     fn from(id: usize) -> Self {
+        // Closures keep this in a block header, which has room for 24 bits
+        assert!(id <= MAX_AUX24, "too many functions to fit an id in a header");
         FunId(id.try_into().unwrap())
     }
 }
@@ -378,6 +381,8 @@ impl From<FunId> for usize {
 
 impl From<usize> for ClassId {
     fn from(id: usize) -> Self {
+        // Objects keep this in a block header, which has room for 24 bits
+        assert!(id <= MAX_AUX24, "too many classes to fit an id in a header");
         ClassId(id.try_into().unwrap())
     }
 }

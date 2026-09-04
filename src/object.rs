@@ -1,56 +1,56 @@
 use std::mem::size_of;
 use crate::ast::ClassId;
 use crate::value::Value;
-use crate::alloc::{Alloc, Tag, HEADER_SIZE};
+use crate::alloc::{header_of, Alloc, Tag, HEADER_SIZE};
 
-/// The slots are stored inline, right after the object
+/// Nothing is stored here: the slots start at the address of the object
+/// itself, and the class and slot count come from the block header
 #[repr(C, align(8))]
-pub struct Object
-{
-    pub class_id: ClassId,
-    num_slots: u32,
-}
+pub struct Object;
 
 impl Object
 {
     /// Bytes an object with a given slot count occupies, header included
     pub fn alloc_size(num_slots: usize) -> usize
     {
-        HEADER_SIZE + size_of::<Object>() + num_slots * size_of::<Value>()
+        HEADER_SIZE + num_slots * size_of::<Value>()
     }
 
     /// Allocate a new object with a given number of slots
     pub fn new(class_id: ClassId, num_slots: usize, alloc: &mut Alloc) -> Value
     {
-        let obj = Object { class_id, num_slots: num_slots as u32 };
-        let tail_bytes = num_slots * size_of::<Value>();
-        let p = alloc.alloc_var(obj, tail_bytes, Tag::Object);
+        let p = alloc.alloc_slots(Tag::Object, usize::from(class_id), num_slots);
 
         // Zeroed memory reads back as the integer zero, so the slots have
         // to be marked uninitialized explicitly
-        unsafe { &mut *p }.slots_mut().fill(Value::UNDEF);
+        unsafe { std::slice::from_raw_parts_mut(p, num_slots) }.fill(Value::UNDEF);
 
-        Value::object(p)
+        Value::object(p as *mut Object)
+    }
+
+    pub fn class_id(&self) -> ClassId
+    {
+        ClassId::from(header_of(self as *const Object as *const u8).aux24())
     }
 
     pub fn num_slots(&self) -> usize
     {
-        self.num_slots as usize
+        header_of(self as *const Object as *const u8).num_slots()
     }
 
     fn slots(&self) -> &[Value]
     {
         unsafe { std::slice::from_raw_parts(
-            (self as *const Object).add(1) as *const Value,
-            self.num_slots as usize
+            self as *const Object as *const Value,
+            self.num_slots()
         )}
     }
 
     fn slots_mut(&mut self) -> &mut [Value]
     {
         unsafe { std::slice::from_raw_parts_mut(
-            (self as *mut Object).add(1) as *mut Value,
-            self.num_slots as usize
+            self as *mut Object as *mut Value,
+            self.num_slots()
         )}
     }
 

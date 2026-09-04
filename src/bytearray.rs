@@ -1,16 +1,21 @@
 use std::mem::{transmute, size_of};
 use crate::vm::Actor;
 use crate::value::*;
-use crate::alloc::{Alloc, Tag, HEADER_SIZE};
+use crate::alloc::{header_of, set_fixed_len, table_len, Alloc, Tag, FIXED_SIZE, HEADER_SIZE};
 use crate::*;
 use crate::host::HostResult;
 
 pub struct ByteArray
 {
-    // Relocated by the collector, which walks the table on its own
-    pub(crate) bytes: *mut [u8],
-    len: usize,
+    // Relocated by the collector, which walks the table on its own.
+    // The capacity is the length of the table block this points at, so
+    // it is read back from that block's header rather than stored here
+    pub(crate) bytes: *mut u8,
 }
+
+// Nothing but the pointer to the byte table. The length lives in the
+// block header, which is what makes this a fixed-layout block.
+const _: () = assert!(size_of::<ByteArray>() == FIXED_SIZE);
 
 impl ByteArray
 {
@@ -18,7 +23,8 @@ impl ByteArray
     /// of both the bytearray and its byte table
     pub fn alloc_size(num_bytes: usize) -> usize
     {
-        HEADER_SIZE + size_of::<ByteArray>() + HEADER_SIZE + num_bytes
+        HEADER_SIZE + size_of::<ByteArray>() +
+        HEADER_SIZE + crate::alloc::align_up(num_bytes)
     }
 
     /// Allocate a zeroed bytearray of a given size.
@@ -29,18 +35,17 @@ impl ByteArray
     /// between the two allocations: callers reserve the space up front.
     pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Value
     {
-        // Placeholder standing in until the table below is allocated
-        const NO_TABLE: *mut [u8] = std::ptr::slice_from_raw_parts_mut(std::ptr::null_mut(), 0);
-
-        let ba = alloc.alloc(ByteArray { bytes: NO_TABLE, len: num_bytes }, Tag::ByteArray);
-        let bytes = alloc.alloc_table(num_bytes, Tag::Bytes);
+        // alloc_fixed leaves the byte pointer null, so the bytearray is
+        // walkable between here and the table allocation below
+        let ba = alloc.alloc_fixed(Tag::ByteArray, num_bytes) as *mut ByteArray;
+        let bytes: *mut u8 = alloc.alloc_table(num_bytes, Tag::Bytes);
         unsafe { (*ba).bytes = bytes };
 
         // A new bytearray reads as zeroed. Stale bytes here would be
         // silently wrong data rather than anything that fails.
         #[cfg(feature = "verify_gc")]
         assert!(
-            unsafe { &*bytes }.iter().all(|b| *b == 0),
+            crate::alloc::table_slice(bytes).iter().all(|b| *b == 0),
             "bytearray allocated over memory that was not zeroed"
         );
 
@@ -49,51 +54,61 @@ impl ByteArray
 
     pub fn clone(&self, alloc: &mut Alloc) -> Value
     {
-        let new_ba = Self::with_size(self.len, alloc);
+        let len = self.num_bytes();
+        let new_ba = Self::with_size(len, alloc);
 
         unsafe {
-            let src_slice: &[u8] = self.get_slice(0, self.len);
-            let dst_slice: &mut [u8] = new_ba.as_ba().get_slice_mut(0, self.len);
+            let src_slice: &[u8] = self.get_slice(0, len);
+            let dst_slice: &mut [u8] = new_ba.as_ba().get_slice_mut(0, len);
             dst_slice.copy_from_slice(src_slice);
         }
 
         new_ba
     }
 
-    pub fn num_bytes(&self) -> usize
+    fn block(&self) -> *mut u8
     {
-        self.len
+        self as *const ByteArray as *mut u8
     }
 
+    /// Bytes held, which lives in the block header
+    pub fn num_bytes(&self) -> usize
+    {
+        header_of(self.block()).fixed_len()
+    }
+
+    fn set_num_bytes(&mut self, num_bytes: usize)
+    {
+        set_fixed_len(self.block(), num_bytes);
+    }
+
+    /// Bytes the table can hold
     pub fn capacity(&self) -> usize
     {
-        self.bytes.len()
+        table_len(self.bytes)
     }
 
     pub unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
     {
-        assert!((idx + num_elems) * size_of::<T>() <= self.len);
-        let buf_ptr = (*self.bytes).as_ptr();
-        let elem_ptr = transmute::<*const u8 , *const T>(buf_ptr).add(idx);
+        assert!((idx + num_elems) * size_of::<T>() <= self.num_bytes());
+        let elem_ptr = transmute::<*const u8 , *const T>(self.bytes as *const u8).add(idx);
         std::slice::from_raw_parts(elem_ptr, num_elems as usize)
     }
 
     pub unsafe fn get_slice_mut<T>(&mut self, idx: usize, num_elems: usize) -> &'static mut [T]
     {
-        assert!((idx + num_elems) * size_of::<T>() <= self.len);
-        let buf_ptr = (*self.bytes).as_mut_ptr();
-        let elem_ptr = transmute::<*mut u8 , *mut T>(buf_ptr).add(idx);
+        assert!((idx + num_elems) * size_of::<T>() <= self.num_bytes());
+        let elem_ptr = transmute::<*mut u8 , *mut T>(self.bytes).add(idx);
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
 
     /// Load a value at the given byte index
     pub fn load<T>(&mut self, byte_idx: usize) -> T where T: Copy
     {
-        assert!(byte_idx + size_of::<T>() <= self.len);
+        assert!(byte_idx + size_of::<T>() <= self.num_bytes());
 
         unsafe {
-            let buf_ptr = (*self.bytes).as_ptr();
-            let val_ptr = transmute::<*const u8 , *const T>(buf_ptr.add(byte_idx));
+            let val_ptr = transmute::<*const u8 , *const T>(self.bytes.add(byte_idx) as *const u8);
             std::ptr::read_unaligned(val_ptr)
         }
     }
@@ -101,11 +116,10 @@ impl ByteArray
     /// Store a value at the given byte index
     pub fn store<T>(&mut self, byte_idx: usize, val: T) where T: Copy
     {
-        assert!(byte_idx + size_of::<T>() <= self.len);
+        assert!(byte_idx + size_of::<T>() <= self.num_bytes());
 
         unsafe {
-            let buf_ptr = (*self.bytes).as_mut_ptr();
-            let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr.add(byte_idx));
+            let val_ptr = transmute::<*mut u8 , *mut T>(self.bytes.add(byte_idx));
             std::ptr::write_unaligned(val_ptr, val);
         }
     }
@@ -113,11 +127,10 @@ impl ByteArray
     /// Read a value at the given index (aligned read)
     pub fn get<T>(&mut self, idx: usize) -> T where T: Copy
     {
-        assert!((idx + 1) * size_of::<T>() <= self.len);
+        assert!((idx + 1) * size_of::<T>() <= self.num_bytes());
 
         unsafe {
-            let buf_ptr = (*self.bytes).as_ptr();
-            let val_ptr = transmute::<*const u8 , *const T>(buf_ptr).add(idx);
+            let val_ptr = transmute::<*const u8 , *const T>(self.bytes as *const u8).add(idx);
             std::ptr::read(val_ptr)
         }
     }
@@ -125,11 +138,10 @@ impl ByteArray
     /// Write a value at the given index (aligned write)
     pub fn set<T>(&mut self, idx: usize, val: T) where T: Copy
     {
-        assert!((idx + 1) * size_of::<T>() <= self.len);
+        assert!((idx + 1) * size_of::<T>() <= self.num_bytes());
 
         unsafe {
-            let buf_ptr = (*self.bytes).as_mut_ptr();
-            let val_ptr = transmute::<*mut u8 , *mut T>(buf_ptr).add(idx);
+            let val_ptr = transmute::<*mut u8 , *mut T>(self.bytes).add(idx);
             std::ptr::write(val_ptr, val);
         }
     }
@@ -181,24 +193,20 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResul
         );
         let ba_mut = ba.as_ba();
 
-        let old_len = ba_mut.len;
-        let new_bytes = actor.alloc.alloc_table(new_size, Tag::Bytes);
+        let old_len = ba_mut.num_bytes();
+        let new_bytes: *mut u8 = actor.alloc.alloc_table(new_size, Tag::Bytes);
         let copy_len = std::cmp::min(old_len, new_size);
 
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                (*ba_mut.bytes).as_ptr(),
-                (*new_bytes).as_mut_ptr(),
-                copy_len
-            );
+            std::ptr::copy_nonoverlapping(ba_mut.bytes, new_bytes, copy_len);
         }
 
         ba_mut.bytes = new_bytes;
-        ba_mut.len = new_size;
+        ba_mut.set_num_bytes(new_size);
     }
     else {
         let ba_mut = ba.as_ba();
-        ba_mut.len = new_size;
+        ba_mut.set_num_bytes(new_size);
     }
 
     Ok(Value::NIL)
@@ -427,7 +435,7 @@ pub fn ba_dot_f32(
 pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
-    let len = ba.len;
+    let len = ba.num_bytes();
 
     if len % 4 != 0 {
         error!("expected ByteArray size to be divisible by 4");
@@ -452,7 +460,7 @@ pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src
 pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
-    let slice = unsafe { ba.get_slice_mut(0, ba.len) };
+    let slice = unsafe { ba.get_slice_mut(0, ba.num_bytes()) };
     slice.fill(0u8);
     Ok(Value::NIL)
 }

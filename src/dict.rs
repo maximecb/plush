@@ -1,6 +1,13 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use crate::{alloc::{Alloc, Tag, HEADER_SIZE}, str::Str, value::Value};
+use crate::{
+    alloc::{
+        header_of, set_fixed_len, table_len, table_slice, table_slice_mut,
+        Alloc, Tag, FIXED_SIZE, HEADER_SIZE,
+    },
+    str::Str,
+    value::Value,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) struct TableSlot {
@@ -44,12 +51,17 @@ impl TableSlot {
 }
 
 pub struct Dict {
-    // Relocated by the collector, which walks the table on its own
-    pub(crate) table: *mut [TableSlot],
-    len: usize
+    // Relocated by the collector, which walks the table on its own.
+    // The capacity is the length of the table block this points at, so
+    // it is read back from that block's header rather than stored here
+    pub(crate) table: *mut TableSlot,
 }
 
 const THRESHOLD: usize = 75;
+
+// Nothing but the pointer to the slot table. The entry count lives in
+// the block header, which is what makes this a fixed-layout block.
+const _: () = assert!(size_of::<Dict>() == FIXED_SIZE);
 
 impl Dict {
     /// Bytes a dict with a given capacity occupies, counting the headers
@@ -59,7 +71,7 @@ impl Dict {
         HEADER_SIZE + std::cmp::max(capacity, 2) * size_of::<TableSlot>()
     }
 
-    fn empty_zeroed_table(capacity: usize, alloc: &mut Alloc) -> *mut [TableSlot] {
+    fn empty_zeroed_table(capacity: usize, alloc: &mut Alloc) -> *mut TableSlot {
         let table = alloc.alloc_table::<TableSlot>(capacity, Tag::SlotTable);
 
         // Lookups probe until they land on an empty slot, so a table
@@ -67,7 +79,7 @@ impl Dict {
         // than fail. Nothing else notices this, so check it here.
         #[cfg(feature = "verify_gc")]
         assert!(
-            unsafe { &*table }.iter().all(|slot| !slot.is_occupied()),
+            table_slice(table).iter().all(|slot| !slot.is_occupied()),
             "dict table allocated over memory that was not zeroed"
         );
 
@@ -82,13 +94,26 @@ impl Dict {
     /// between the two allocations: callers reserve the space up front.
     pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Value
     {
-        // Placeholder standing in until the table below is allocated
-        const NO_TABLE: *mut [TableSlot] = std::ptr::slice_from_raw_parts_mut(std::ptr::null_mut(), 0);
-
         let capacity = std::cmp::max(capacity, 2);
-        let dict = alloc.alloc(Dict { table: NO_TABLE, len: 0 }, Tag::Dict);
+        // alloc_fixed leaves the table pointer null, so the dict is
+        // walkable between here and the table allocation below
+        let dict = alloc.alloc_fixed(Tag::Dict, 0) as *mut Dict;
         unsafe { (*dict).table = Self::empty_zeroed_table(capacity, alloc) };
+
         Value::dict(dict)
+    }
+
+    fn block(&self) -> *mut u8 {
+        self as *const Dict as *mut u8
+    }
+
+    /// Number of entries held, which lives in the block header
+    pub fn len(&self) -> usize {
+        header_of(self.block()).fixed_len()
+    }
+
+    fn set_len(&mut self, len: usize) {
+        set_fixed_len(self.block(), len);
     }
 
     // get slot is the heart of the dict implementation, as it's used for both
@@ -96,7 +121,7 @@ impl Dict {
     // should go. The hashing algorithm we use is the default one that rust stdlib ships with.
     // We then use linear probing to deal with collisions.
     fn get_slot<'a>(&'a mut self, key: &str) -> &'a mut TableSlot {
-        let table = unsafe { &mut *self.table };
+        let table = table_slice_mut(self.table);
         let len = table.len();
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
@@ -120,7 +145,7 @@ impl Dict {
     // Double the size of the internal backing table. This allocates a whole new backing table
     // and rehashes all entries into it
     fn double_size(&mut self, alloc: &mut Alloc) {
-        let old_table = unsafe { &* self.table };
+        let old_table = table_slice(self.table);
 
         let new_table = Self::empty_zeroed_table((old_table.len() + 1) * 2, alloc);
 
@@ -134,7 +159,7 @@ impl Dict {
     }
 
     pub fn capacity(&self) -> usize {
-        self.table.len()
+        table_len(self.table)
     }
 
     pub const fn size_of_slot() -> usize {
@@ -151,13 +176,14 @@ impl Dict {
     }
 
     fn will_allocate_on_set(&self) -> bool {
-        let table = unsafe { &*self.table };
+        let capacity = self.capacity();
+        let len = self.len();
 
         // Note: we must never end up in a situation where there are no
         // free slots after an element is added, because the get_slot method
         // relies on there always being at least one free slot.
-        (self.len + 1 == table.len()) ||
-        (100 * self.len / table.len() > THRESHOLD)
+        (len + 1 == capacity) ||
+        (100 * len / capacity > THRESHOLD)
     }
 
     // Set the value associated with a given key
@@ -169,7 +195,9 @@ impl Dict {
         let key = unsafe { &*field_name }.as_str();
         let slot = self.get_slot(key);
         *slot = TableSlot::new(field_name, new_val);
-        self.len += 1;
+
+        let len = self.len();
+        self.set_len(len + 1);
     }
 
     // Get the value associated with a given field

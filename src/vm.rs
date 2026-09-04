@@ -6,7 +6,7 @@ use crate::dict::Dict;
 #[cfg(feature = "log_gc")]
 use crate::utils::thousands_sep;
 use crate::ast::{Program, FunId, ClassId, Class};
-use crate::alloc::{Alloc, Tag, HEADER_SIZE, INIT_SIZE, MSG_INIT_SIZE};
+use crate::alloc::{Alloc, Header, Tag, HEADER_SIZE, INIT_SIZE, MSG_INIT_SIZE};
 use crate::object::Object;
 use crate::closure::Closure;
 use crate::array::Array;
@@ -37,11 +37,16 @@ const MSG_BACKLOG_LIMIT: usize = 64 * 1024 * 1024;
 pub use crate::insns::Insn;
 
 /// Cache for a field access site. The name is what the site was compiled
-/// for; the class and slot are what it last resolved to
+/// for; the key and slot are what it last resolved to.
+///
+/// The key is the low half of an object's block header, which holds the
+/// tag and the class id together. Comparing it checks both that the
+/// value points at an object and that the object has the right class,
+/// in one compare against a word the fast path has already loaded.
 struct PropCache
 {
     name: NameId,
-    class_id: ClassId,
+    key: u32,
     slot_idx: u32,
 }
 
@@ -57,9 +62,9 @@ struct CallCache
 {
     name: NameId,
 
-    // Class the site last looked the method up on, which is what a
-    // method call guards against
-    class_id: ClassId,
+    // Low half of the header of the object the site last looked the
+    // method up on, which is what a method call guards against
+    key: u32,
 
     // Callee the site resolved to
     fun_id: FunId,
@@ -871,11 +876,11 @@ impl Actor
             Tag::Object => {
                 let o = obj.as_obj();
 
-                let slot_idx = match self.get_slot_idx_of(o.class_id, name) {
+                let slot_idx = match self.get_slot_idx_of(o.class_id(), name) {
                     Some(slot_idx) => slot_idx,
                     None => {
-                        let class_name = self.get_class_name(o.class_id);
-                        let field_names = self.get_field_names(o.class_id);
+                        let class_name = self.get_class_name(o.class_id());
+                        let field_names = self.get_field_names(o.class_id());
                         return Err(format!(
                             "class `{}` has no field `{}`, known fields are: {}",
                             class_name,
@@ -887,7 +892,7 @@ impl Actor
 
                 // Update the cache
                 let entry = &mut self.prop_caches[cache as usize];
-                entry.class_id = o.class_id;
+                entry.key = Header::object_key(usize::from(o.class_id()));
                 entry.slot_idx = slot_idx as u32;
 
                 let val = o.get(slot_idx);
@@ -942,11 +947,11 @@ impl Actor
         let name = self.prop_caches[cache as usize].name;
 
         if let Some(o) = obj.to_obj() {
-            let slot_idx = match self.get_slot_idx_of(o.class_id, name) {
+            let slot_idx = match self.get_slot_idx_of(o.class_id(), name) {
                 Some(slot_idx) => slot_idx,
                 None => {
-                    let class_name = self.get_class_name(o.class_id);
-                    let field_names = self.get_field_names(o.class_id);
+                    let class_name = self.get_class_name(o.class_id());
+                    let field_names = self.get_field_names(o.class_id());
                     return Err(format!(
                         "class `{}` has no field `{}`, known fields are: {}",
                         class_name,
@@ -958,7 +963,7 @@ impl Actor
 
             // Update the cache
             let entry = &mut self.prop_caches[cache as usize];
-            entry.class_id = o.class_id;
+            entry.key = Header::object_key(usize::from(o.class_id()));
             entry.slot_idx = slot_idx as u32;
 
             o.set(slot_idx, val);
@@ -984,10 +989,11 @@ impl Actor
     {
         let name = self.intern_name(name);
 
-        // The class id no real object has, so a fresh site always misses
+        // No live header has bit 0 clear, so a zero key never matches
+        // and a fresh site always misses
         self.prop_caches.push(PropCache {
             name,
-            class_id: ClassId::default(),
+            key: 0,
             slot_idx: 0,
         });
 
@@ -1118,12 +1124,12 @@ impl Actor
             None => panic!("internal error: set_field on non-object value {:?}", obj)
         };
 
-        match self.get_slot_idx(obj.class_id, field_name) {
+        match self.get_slot_idx(obj.class_id(), field_name) {
             Some(slot_idx) => obj.set(slot_idx, val),
             None => panic!(
                 "internal error: no field `{}` on class `{}`",
                 field_name,
-                self.get_class_name(obj.class_id)
+                self.get_class_name(obj.class_id())
             )
         }
     }
@@ -2159,7 +2165,7 @@ impl Actor
 
                     self.gc_check(HEADER_SIZE + size_of::<Value>(), &mut []);
 
-                    let p_cell = self.alloc.alloc(Value::NIL, Tag::Cell);
+                    let p_cell = self.alloc.alloc_boxed(Value::NIL, Tag::Cell);
                     set_reg!(opnds.dst, Value::cell(p_cell));
                 }
 
@@ -2239,19 +2245,18 @@ impl Actor
                     let opnds = insns::get_field::decode(insn);
                     let obj = get_reg!(opnds.obj);
                     let cache = &self.prop_caches[opnds.cache as usize];
-                    let (class_id, slot_idx) = (cache.class_id, cache.slot_idx);
+                    let (key, slot_idx) = (cache.key, cache.slot_idx);
 
                     // Fast path: an object of the class this site last
-                    // resolved. Everything else goes out of line, so that
+                    // resolved. One header load and one compare settle
+                    // both, and everything else goes out of line, so that
                     // the interpreter loop carries only this
-                    if let Some(o) = obj.to_obj() {
-                        if o.class_id == class_id {
-                            let val = o.get(slot_idx as usize);
+                    if obj.is_heap() && obj.guard_key() == key {
+                        let val = obj.as_obj().get(slot_idx as usize);
 
-                            if !val.is_undef() {
-                                set_reg!(opnds.dst, val);
-                                continue;
-                            }
+                        if !val.is_undef() {
+                            set_reg!(opnds.dst, val);
+                            continue;
                         }
                     }
 
@@ -2268,13 +2273,11 @@ impl Actor
                     let obj = get_reg!(opnds.obj);
                     let val = get_reg!(opnds.src);
                     let cache = &self.prop_caches[opnds.cache as usize];
-                    let (class_id, slot_idx) = (cache.class_id, cache.slot_idx);
+                    let (key, slot_idx) = (cache.key, cache.slot_idx);
 
-                    if let Some(o) = obj.to_obj() {
-                        if o.class_id == class_id {
-                            o.set(slot_idx as usize, val);
-                            continue;
-                        }
+                    if obj.is_heap() && obj.guard_key() == key {
+                        obj.as_obj().set(slot_idx as usize, val);
+                        continue;
                     }
 
                     if let Err(msg) = self.set_field_slow(obj, val, opnds.cache) {
@@ -2526,25 +2529,23 @@ impl Actor
                     let self_val = get_reg!(opnds.start_reg);
 
                     let cache = &self.call_caches[opnds.cache as usize];
-                    let (name, class_id) = (cache.name, cache.class_id);
+                    let (name, key) = (cache.name, cache.key);
 
                     // Guard that self is an object of the class this site
                     // last looked the method up on
-                    if let Some(obj) = self_val.to_obj() {
-                        if obj.class_id == class_id {
-                            let cache = &self.call_caches[opnds.cache as usize];
-                            let (fun_id, entry_pc, frame_size) =
-                                (cache.fun_id, cache.entry_pc, cache.frame_size);
-                            push_frame!(Value::fun(fun_id), opnds.start_reg, entry_pc, frame_size);
-                            continue;
-                        }
+                    if self_val.is_heap() && self_val.guard_key() == key {
+                        let cache = &self.call_caches[opnds.cache as usize];
+                        let (fun_id, entry_pc, frame_size) =
+                            (cache.fun_id, cache.entry_pc, cache.frame_size);
+                        push_frame!(Value::fun(fun_id), opnds.start_reg, entry_pc, frame_size);
+                        continue;
                     }
 
                     match self_val.to_obj() {
                         Some(obj) => {
                             // Read before the call below, which can compile
                             // the callee and collect, leaving obj behind
-                            let class_id = obj.class_id;
+                            let class_id = obj.class_id();
 
                             let fun_id = match self.get_method_of(class_id, name) {
                                 None => {
@@ -2558,7 +2559,7 @@ impl Actor
                             let (fun_val, _, entry) = resolve_callee!(Value::fun(fun_id), opnds.argc);
 
                             let cache = &mut self.call_caches[opnds.cache as usize];
-                            cache.class_id = class_id;
+                            cache.key = Header::object_key(usize::from(class_id));
                             cache.fun_id = fun_id;
                             cache.entry_pc = entry.entry_pc as u32;
                             cache.frame_size = entry.frame_size as u16;
@@ -2700,7 +2701,7 @@ impl Actor
                         // The class is statically known, so the site is
                         // rewritten rather than guarded
                         let cache = self.new_call_cache_entry(CallCache {
-                            class_id,
+                            key: Header::object_key(usize::from(class_id)),
                             fun_id,
                             entry_pc: entry.entry_pc as u32,
                             frame_size: entry.frame_size as u16,
@@ -2723,7 +2724,8 @@ impl Actor
                 Opcode::new_known_ctor => {
                     let opnds = insns::new_known_ctor::decode(insn);
                     let cache = &self.call_caches[opnds.cache as usize];
-                    let (class_id, num_slots) = (cache.class_id, cache.num_slots as usize);
+                    let num_slots = cache.num_slots as usize;
+                    let class_id = ClassId::from(Header::class_id_of_key(cache.key));
                     let (fun_id, entry_pc, frame_size) =
                         (cache.fun_id, cache.entry_pc, cache.frame_size);
 
