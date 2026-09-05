@@ -247,6 +247,34 @@ pub(crate) fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint:
     Ok(Str::new(&s, &mut actor.alloc))
 }
 
+/// Decode a run of bytes from a ByteArray as UTF-8.
+/// Returns nil if the bytes are not valid UTF-8
+pub(crate) fn string_from_utf8(actor: &mut Actor, _class: Value, ba: Value, start: Value, len: Value) -> HostResult
+{
+    let ba = unwrap_ba!(ba);
+    let start = unwrap_usize!(start);
+    let len = unwrap_usize!(len);
+
+    if start + len > ba.num_bytes() {
+        error!(
+            "String.from_utf8 asked for bytes {}..{} of a byte array of {} bytes",
+            start,
+            start + len,
+            ba.num_bytes()
+        );
+    }
+
+    let bytes: &[u8] = unsafe { ba.get_slice(start, len) };
+
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return Ok(Value::NIL),
+    };
+
+    actor.gc_check(Str::alloc_size(s.len()), &mut []);
+    Ok(Str::new(s, &mut actor.alloc))
+}
+
 /// Get the UTF-8 byte at the given index
 pub(crate) fn string_byte_at(_actor: &mut Actor, s: Value, idx: Value) -> HostResult
 {
@@ -519,6 +547,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         // Static methods, called on the class itself
         (Type::Class, _) => match (val.as_class(), method_name) {
             (STRING_ID, "from_codepoint") => string_from_codepoint,
+            (STRING_ID, "from_utf8") => string_from_utf8,
             (ARRAY_ID, "with_size") => array_with_size,
             (BYTEARRAY_ID, "with_size") => ba_with_size,
             _ => return None,

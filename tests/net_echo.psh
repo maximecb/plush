@@ -1,0 +1,189 @@
+// TCP networking: echo round-trip, addresses, read timeouts, EOF and
+// cancelling a blocked accept
+
+// Copy a string into a new ByteArray
+fun str_bytes(s) {
+    let ba = ByteArray.with_size(s.len);
+    for (let var i = 0; i < s.len; ++i) {
+        ba[i] = s.byte_at(i);
+    }
+    return ba;
+}
+
+// Whether the first num_bytes of a ByteArray match a string
+fun bytes_eq(ba, num_bytes, s) {
+    if (num_bytes != s.len) {
+        return false;
+    }
+
+    for (let var i = 0; i < num_bytes; ++i) {
+        if (ba[i] != s.byte_at(i)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+fun main() {
+    // Bind to port 0 and ask the OS which port we ended up with
+    let server = $net_listen("127.0.0.1:0");
+    assert(server != nil);
+    let addr = $net_local_addr(server);
+    assert(addr != nil);
+
+    // The client runs in its own actor, the way a connection handler would
+    let client = $actor_spawn(|| {
+        let sock = $net_connect(addr);
+        assert(sock != nil);
+
+        let hello = str_bytes("hello");
+        assert($net_write(sock, hello, hello.len) == 5);
+
+        let buf = ByteArray.with_size(64);
+        let num_read = $net_read(sock, buf);
+        assert(num_read == 5);
+        assert(bytes_eq(buf, num_read, "hello"));
+
+        // Closing this end gives the server an EOF
+        $net_close(sock);
+
+        // A second connection that stays silent, so that the server's timed
+        // read has nothing to return
+        let quiet = $net_connect(addr);
+        assert(quiet != nil);
+        $actor_send(0, "connected");
+
+        // Hold it open until the server has seen its read time out
+        assert($actor_recv() == "close");
+        $net_close(quiet);
+    });
+
+    let conn = $net_accept(server);
+    assert(conn != nil);
+
+    // The connection knows who it is talking to
+    let peer = $net_peer_addr(conn);
+    assert(peer != nil);
+    assert(peer.len > 0);
+
+    let buf = ByteArray.with_size(64);
+
+    // A listening socket and a connection are not interchangeable
+    assert($net_read(server, buf) == 0);
+    assert($net_write(server, buf, 1) == nil);
+    assert($net_peer_addr(server) == nil);
+    assert($net_accept(conn) == nil);
+
+    // Echo back exactly the bytes that arrived, not the whole buffer
+    let num_read = $net_read(conn, buf);
+    assert(num_read == 5);
+    assert(bytes_eq(buf, num_read, "hello"));
+    assert($net_write(conn, buf, num_read) == 5);
+
+    // The client closes once it has the echo, which reads as 0 bytes
+    assert($net_read(conn, buf) == 0);
+    $net_close(conn);
+
+    // Operating on a closed socket is not an error, just a finished one
+    assert($net_read(conn, buf) == 0);
+    assert($net_write(conn, buf, 1) == nil);
+    assert($net_peer_addr(conn) == nil);
+    $net_close(conn);
+
+    // A read that times out reports nil, which is distinct from the 0 that
+    // means the connection is over
+    let quiet = $net_accept(server);
+    assert(quiet != nil);
+    assert($actor_recv() == "connected");
+    $net_set_timeout(quiet, 50);
+    assert($net_read(quiet, buf) == nil);
+
+    // Once the client closes, a read reports the end of the connection.
+    // Reads before the close lands keep timing out
+    $actor_send(client, "close");
+    let var ended = false;
+    for (let var i = 0; i < 200; ++i) {
+        let res = $net_read(quiet, buf);
+        if (res == 0) {
+            ended = true;
+            break;
+        }
+        assert(res == nil);
+    }
+    assert(ended);
+    $net_close(quiet);
+    $actor_join(client);
+
+    // A request delimited by EOF. The client shuts down its writing half so
+    // the server can read to the end, and still reads the response back
+    let requester = $actor_spawn(|| {
+        let sock = $net_connect(addr);
+        assert(sock != nil);
+
+        let req = str_bytes("request");
+        assert($net_write(sock, req, req.len) == 7);
+        $net_shutdown_write(sock);
+
+        // Writing after the shutdown fails instead of reaching the peer
+        assert($net_write(sock, req, req.len) == nil);
+
+        let chunk = ByteArray.with_size(64);
+        let resp = ByteArray.with_size(64);
+        let var got = 0;
+
+        loop {
+            let num_read = $net_read(sock, chunk);
+
+            if (num_read == 0)
+                break;
+
+            resp.memcpy(got, chunk, 0, num_read);
+            got = got + num_read;
+        }
+
+        assert(bytes_eq(resp, got, "response"));
+        $net_close(sock);
+    });
+
+    let req_conn = $net_accept(server);
+    assert(req_conn != nil);
+
+    // The shutdown is what ends this loop: the client is still connected
+    let var got = 0;
+    loop {
+        let num_read = $net_read(req_conn, buf);
+
+        if (num_read == 0)
+            break;
+
+        got = got + num_read;
+    }
+    assert(got == 7);
+
+    let response = str_bytes("response");
+    assert($net_write(req_conn, response, response.len) == 8);
+    $net_close(req_conn);
+    $actor_join(requester);
+
+    // Closing a listening socket cancels an actor blocked in accept
+    let waiter = $actor_spawn(|| {
+        $actor_send(0, "accepting");
+        assert($net_accept(server) == nil);
+        $actor_send(0, "cancelled");
+    });
+
+    assert($actor_recv() == "accepting");
+    $actor_sleep(100);
+    $net_close(server);
+    assert($actor_recv() == "cancelled");
+    $actor_join(waiter);
+
+    // Binding an address that cannot be parsed fails rather than aborting
+    assert($net_listen("not an address") == nil);
+    assert($net_connect("not an address") == nil);
+
+    $println("net test completed successfully!");
+}
+
+main();

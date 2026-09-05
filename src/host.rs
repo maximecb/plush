@@ -148,6 +148,7 @@ impl HostFnId
 use crate::array::*;
 use crate::audio::*;
 use crate::bytearray::*;
+use crate::net::*;
 use crate::runtime::*;
 use crate::window::*;
 
@@ -182,6 +183,16 @@ def_host_fns! {
         audio_write_samples(2),
         audio_open_input(2),
         audio_read_samples(4),
+        net_listen(1),
+        net_connect(1),
+        net_accept(1),
+        net_peer_addr(1),
+        net_local_addr(1),
+        net_read(2),
+        net_write(3),
+        net_shutdown_write(1),
+        net_close(1),
+        net_set_timeout(2),
         exit(1),
     }
 
@@ -221,6 +232,7 @@ def_host_fns! {
         format_decimals: float64_format_decimals(2),
 
         from_codepoint: string_from_codepoint(2),
+        from_utf8: string_from_utf8(4),
         byte_at: string_byte_at(2),
         char_at: string_char_at(2),
         parse_int: string_parse_int(2),

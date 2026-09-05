@@ -19,6 +19,7 @@ mod host;
 mod gc;
 mod window;
 mod audio;
+mod net;
 mod exec_tests;
 mod str;
 mod dict;

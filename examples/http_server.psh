@@ -1,0 +1,256 @@
+// A toy HTTP server.
+//
+// Run it, then visit http://127.0.0.1:8080/ in a browser, or:
+//   curl -i http://127.0.0.1:8080/time
+//
+// Each connection is handled by its own actor, which blocks on its own
+// socket. That is the usual shape for a Plush server: the accept loop stays
+// in the main actor and does nothing but hand sockets off.
+
+let LISTEN_ADDR = "127.0.0.1:8080";
+
+// Longest request head we will accept, to bound what one client can make
+// us buffer before we give up on it
+let MAX_HEAD = 16 * 1024;
+
+fun str_bytes(s) {
+    let ba = ByteArray.with_size(s.len);
+    for (let var i = 0; i < s.len; ++i) {
+        ba[i] = s.byte_at(i);
+    }
+    return ba;
+}
+
+// Read until the blank line that ends the request head. Returns the head as
+// a string, or nil if the client went away or sent something unreasonable
+fun read_head(sock) {
+    let chunk = ByteArray.with_size(4096);
+    let head = ByteArray.with_size(MAX_HEAD);
+    let var len = 0;
+
+    loop {
+        let num_read = $net_read(sock, chunk);
+
+        // nil is the read timing out, 0 is the connection ending. Either
+        // way the rest of the head is never arriving
+        if (num_read == nil || num_read == 0)
+            return nil;
+
+        if (len + num_read > MAX_HEAD)
+            return nil;
+
+        head.memcpy(len, chunk, 0, num_read);
+        len = len + num_read;
+
+        // Look for the CRLF CRLF that ends the head. Scanning from the
+        // start each time is fine for a head this small
+        for (let var i = 3; i < len; ++i) {
+            if (head[i - 3] == 13 && head[i - 2] == 10 &&
+                head[i - 1] == 13 && head[i] == 10) {
+                return String.from_utf8(head, 0, i + 1);
+            }
+        }
+    }
+}
+
+// Pull the method and path out of a request line like "GET /time HTTP/1.1"
+fun parse_request_line(head) {
+    let lines = head.split("\r\n");
+
+    if (lines.len == 0)
+        return nil;
+
+    let parts = lines[0].split(" ");
+
+    if (parts.len < 2)
+        return nil;
+
+    return {method: parts[0], path: parts[1]};
+}
+
+fun response(status, content_type, body) {
+    return "HTTP/1.1 " + status + "\r\n" +
+        "Content-Type: " + content_type + "; charset=utf-8\r\n" +
+        "Content-Length: " + body.len.to_s() + "\r\n" +
+        "Connection: close\r\n" +
+        "\r\n" + body;
+}
+
+fun text(status, body) {
+    return response(status, "text/plain", body);
+}
+
+// A teddy bear, drawn back to front: ears, then head and body, then the
+// face on top. Single-quoted strings so the markup keeps its own quotes
+fun teddy_svg() {
+    return '<svg viewBox="0 0 200 250" width="200" height="250" role="img" aria-label="A teddy bear">
+  <ellipse cx="100" cy="238" rx="62" ry="9" fill="rgba(0,0,0,0.10)"/>
+
+  <g fill="#a9744f" stroke="#6f4529" stroke-width="3">
+    <circle cx="62" cy="44" r="19"/>
+    <circle cx="138" cy="44" r="19"/>
+    <ellipse cx="100" cy="170" rx="52" ry="54"/>
+    <ellipse cx="46" cy="146" rx="17" ry="27" transform="rotate(22 46 146)"/>
+    <ellipse cx="154" cy="146" rx="17" ry="27" transform="rotate(-22 154 146)"/>
+    <ellipse cx="72" cy="214" rx="23" ry="18"/>
+    <ellipse cx="128" cy="214" rx="23" ry="18"/>
+    <circle cx="100" cy="82" r="46"/>
+  </g>
+
+  <g fill="#e8c9a0">
+    <circle cx="62" cy="44" r="9"/>
+    <circle cx="138" cy="44" r="9"/>
+    <ellipse cx="100" cy="180" rx="32" ry="36"/>
+    <ellipse cx="72" cy="216" rx="12" ry="9"/>
+    <ellipse cx="128" cy="216" rx="12" ry="9"/>
+    <ellipse cx="100" cy="98" rx="26" ry="20"/>
+  </g>
+
+  <g fill="#3a2415">
+    <circle cx="84" cy="74" r="6"/>
+    <circle cx="116" cy="74" r="6"/>
+    <ellipse cx="100" cy="88" rx="9" ry="6.5"/>
+  </g>
+
+  <g fill="#ffffff">
+    <circle cx="86" cy="72" r="2.1"/>
+    <circle cx="118" cy="72" r="2.1"/>
+  </g>
+
+  <path d="M100 94 v6 M100 100 q -9 8 -15 1 M100 100 q 9 8 15 1"
+        fill="none" stroke="#3a2415" stroke-width="3" stroke-linecap="round"/>
+</svg>';
+}
+
+fun home_page() {
+    return '<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plush HTTP Server</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #f4efe8;
+    color: #2c2118;
+  }
+  .card {
+    background: #fffdfa;
+    border: 1px solid #e4d8c8;
+    border-radius: 16px;
+    padding: 32px 40px;
+    text-align: center;
+    box-shadow: 0 8px 28px rgba(80, 54, 30, 0.12);
+  }
+  h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.01em; }
+  p.sub { margin: 0 0 20px; color: #7a6a58; }
+  nav a {
+    display: inline-block;
+    margin: 0 6px;
+    padding: 7px 15px;
+    border-radius: 999px;
+    background: #a9744f;
+    color: #fffdfa;
+    text-decoration: none;
+    font-size: 14px;
+  }
+  nav a:hover { background: #8d5c3c; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1d1713; color: #ece2d6; }
+    .card { background: #272019; border-color: #3b3128; box-shadow: none; }
+    p.sub { color: #a4917c; }
+  }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1>Hello from Plush!</h1>
+    <p class="sub">Served by an actor of its own.</p>
+' + teddy_svg() + '
+    <nav>
+      <a href="/time">/time</a>
+      <a href="/echo">/echo</a>
+      <a href="/nope">/nope</a>
+    </nav>
+  </main>
+</body>
+</html>
+';
+}
+
+// Content is generated rather than read off disk, so that the example has
+// no path handling for a request to abuse
+fun route(req) {
+    if (req.path == "/") {
+        return response("200 OK", "text/html", home_page());
+    }
+
+    if (req.path == "/time") {
+        return text("200 OK", $time_current_ms().to_s() + "\n");
+    }
+
+    if (req.path == "/echo") {
+        return text("200 OK", req.method + " " + req.path + "\n");
+    }
+
+    return text("404 Not Found", "No route for " + req.path + "\n");
+}
+
+fun handle_conn(sock) {
+    let peer = $net_peer_addr(sock);
+
+    // A client that connects and then says nothing must not tie up this
+    // actor forever
+    $net_set_timeout(sock, 10000);
+
+    let head = read_head(sock);
+    let var body = text("400 Bad Request", "Could not read request\n");
+
+    if (head != nil) {
+        let req = parse_request_line(head);
+
+        if (req == nil) {
+            body = text("400 Bad Request", "Malformed request line\n");
+        } else {
+            $println(peer + " " + req.method + " " + req.path);
+            body = route(req);
+        }
+    }
+
+    let bytes = str_bytes(body);
+    $net_write(sock, bytes, bytes.len);
+
+    // We wrote the whole response, so closing both directions is right here
+    $net_close(sock);
+}
+
+fun main() {
+    let server = $net_listen(LISTEN_ADDR);
+
+    if (server == nil) {
+        $println("could not bind " + LISTEN_ADDR);
+        return;
+    }
+
+    $println("listening on http://" + $net_local_addr(server));
+
+    loop {
+        let sock = $net_accept(server);
+
+        // nil means the listening socket was closed
+        if (sock == nil)
+            break;
+
+        $actor_spawn(|| handle_conn(sock));
+    }
+
+    $net_close(server);
+}
+
+main();

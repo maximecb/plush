@@ -1,0 +1,127 @@
+// TCP networking: a transfer larger than the socket buffers, many
+// simultaneous connections, and the failure paths
+
+let MSG_SIZE = 512 * 1024;
+let NUM_CONNS = 8;
+
+// Echo every chunk back as it arrives, until the peer closes
+fun handle_conn(sock) {
+    let buf = ByteArray.with_size(8192);
+    let var total = 0;
+
+    loop {
+        let num_read = $net_read(sock, buf);
+
+        if (num_read == 0)
+            break;
+
+        assert($net_write(sock, buf, num_read) == num_read);
+        total = total + num_read;
+    }
+
+    $net_close(sock);
+    return total;
+}
+
+fun bulk_client(addr) {
+    let sock = $net_connect(addr);
+    assert(sock != nil);
+
+    let payload = ByteArray.with_size(MSG_SIZE);
+    for (let var i = 0; i < MSG_SIZE; i = i + 4096) {
+        payload[i] = i % 251;
+    }
+
+    // The echo has to be drained while we send, or both ends block once the
+    // socket buffers fill. This actor reads the socket we are writing to
+    let reader = $actor_spawn(|| {
+        let read_sock = $actor_recv();
+        let buf = ByteArray.with_size(8192);
+        let var got = 0;
+
+        loop {
+            let num_read = $net_read(read_sock, buf);
+
+            if (num_read == 0)
+                break;
+
+            got = got + num_read;
+        }
+
+        return got;
+    });
+
+    $actor_send(reader, sock);
+    assert($net_write(sock, payload, MSG_SIZE) == MSG_SIZE);
+
+    // Give the server its EOF without giving up the echo still in flight.
+    // The reader stops when the server closes its end in turn
+    $net_shutdown_write(sock);
+
+    let got = $actor_join(reader);
+    $net_close(sock);
+    return got;
+}
+
+fun main() {
+    let server = $net_listen("127.0.0.1:0");
+    assert(server != nil);
+    let addr = $net_local_addr(server);
+    assert(addr != nil);
+
+    // A transfer big enough to arrive across many reads
+    let bulk = $actor_spawn(|| bulk_client(addr));
+    let conn = $net_accept(server);
+    assert(conn != nil);
+    let echoed = $actor_spawn(|| handle_conn(conn));
+
+    assert($actor_join(bulk) == MSG_SIZE);
+    assert($actor_join(echoed) == MSG_SIZE);
+
+    // Many connections at once, each handled by its own actor
+    let clients = [];
+    for (let var i = 0; i < NUM_CONNS; ++i) {
+        clients.push($actor_spawn(|| {
+            let sock = $net_connect(addr);
+            assert(sock != nil);
+
+            let msg = ByteArray.with_size(64);
+            msg[0] = 7;
+            assert($net_write(sock, msg, 64) == 64);
+
+            let buf = ByteArray.with_size(64);
+            assert($net_read(sock, buf) == 64);
+            assert(buf[0] == 7);
+
+            $net_close(sock);
+            return 1;
+        }));
+    }
+
+    let handlers = [];
+    for (let var i = 0; i < NUM_CONNS; ++i) {
+        let sock = $net_accept(server);
+        assert(sock != nil);
+        handlers.push($actor_spawn(|| handle_conn(sock)));
+    }
+
+    for (let var i = 0; i < NUM_CONNS; ++i) {
+        assert($actor_join(clients[i]) == 1);
+        assert($actor_join(handlers[i]) == 64);
+    }
+
+    // A port already bound cannot be bound again
+    assert($net_listen(addr) == nil);
+
+    // Nothing is listening once the server closes
+    $net_close(server);
+    assert($net_connect(addr) == nil);
+
+    // Addresses that cannot be parsed or resolved fail rather than aborting
+    assert($net_listen("127.0.0.1:99999") == nil);
+    assert($net_connect("no-such-host.invalid:80") == nil);
+
+    $println("net concurrency test completed successfully!");
+}
+
+main();

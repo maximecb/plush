@@ -344,6 +344,7 @@ from ./font import *;
 
 -   **String**
     -   `from_codepoint(int_val)`: Get a single-character string representing the given unicode codepoint value.
+    -   `from_utf8(bytes, start, len)`: Decode `len` bytes of a `ByteArray`, starting at index `start`, as UTF-8. Returns `nil` if that run of bytes is not valid UTF-8. This is how to turn bytes read with `$net_read()` or `$read_file()` into a string.
     -   `byte_at(byte_idx)`: Get the UTF-8 byte at the given byte index.
     -   `char_at(byte_idx)`: Get a string for the single character at the given byte index. Returns `nil` if invalid.
     -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
@@ -420,6 +421,16 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$audio_write_samples(device_id, samples)`: Writes a `ByteArray` of `float32` audio samples to the specified audio device.
 -   `$audio_open_input(sample_rate, num_channels)`: Opens an audio input device with the specified sample rate and number of channels. Returns a device ID .
 -   `$audio_read_samples(device_id, num_samples, dst_ba, index)`: Reads `num_samples` of `float32` audio samples from the specified audio device into a destination `ByteArray` starting at `index`. This function blocks until enough samples are available.
+-   `$net_listen(addr)`: Open a listening TCP socket bound to an address such as `"127.0.0.1:8080"`. Returns a socket id, or `nil` if the address could not be bound.
+-   `$net_connect(addr)`: Connect to a remote address such as `"example.com:80"`. Returns a socket id, or `nil` if the connection failed.
+-   `$net_accept(socket_id)`: Blocks until a connection arrives on a listening socket. Returns a socket id for the new connection, or `nil` if the listening socket was closed.
+-   `$net_peer_addr(socket_id)`: Returns the address of the peer on a connected socket as a string, or `nil` if the socket is not a live connection.
+-   `$net_local_addr(socket_id)`: Returns the address a socket is bound to as a string, or `nil` if the socket id is unknown. Bind a listener to port `0` and read this back to find the port the OS assigned.
+-   `$net_read(socket_id, byte_array)`: Reads into a `ByteArray`, blocking until data is available. Returns the number of bytes read, `0` once the connection is over, or `nil` if the read timed out.
+-   `$net_write(socket_id, byte_array, num_bytes)`: Writes the first `num_bytes` of a `ByteArray`, blocking until all of it has been written. Returns `num_bytes`, or `nil` if the connection is over. There are no partial writes, so there is never a remainder to send in a second call.
+-   `$net_shutdown_write(socket_id)`: Shuts down the writing half of a connection, giving the peer an EOF while this end can still read. Use it to end a request that the peer reads to EOF, then keep reading for the response. Writing afterwards returns `nil`.
+-   `$net_close(socket_id)`: Closes a socket. Closing a listening socket cancels an actor blocked in `$net_accept()`, and closing a connection wakes one blocked in `$net_read()`. Closing an unknown or already closed socket does nothing.
+-   `$net_set_timeout(socket_id, timeout_ms)`: Sets the read timeout on a connected socket, in milliseconds. A timeout of `0` clears it. Writes are unaffected and always run to completion.
 -   `$exit(code)`: End program execution and produce the given exit code.
 
 ## Concurrency with Actors
@@ -438,6 +449,59 @@ $actor_join(worker_id);
 ```
 
 This example spawns a new worker actor, sends it a message, and then waits for it to complete. The worker receives the message and prints it to the console.
+
+## TCP Networking
+
+The networking API is blocking, and concurrency comes from actors: a server spawns one actor per
+connection, and each actor blocks on its own socket. Sockets are identified by integer ids, which are
+plain values that can be passed to another actor cheaply.
+
+```plush
+fun handle_conn(sock) {
+    let buf = ByteArray.with_size(4096);
+
+    loop {
+        let num_read = $net_read(sock, buf);
+
+        // 0 means the connection is over, so stop reading from it
+        if (num_read == 0)
+            break;
+
+        $net_write(sock, buf, num_read);
+    }
+
+    $net_close(sock);
+}
+
+let server = $net_listen("127.0.0.1:8080");
+
+loop {
+    let sock = $net_accept(server);
+
+    // nil means the listening socket was closed
+    if (sock == nil)
+        break;
+
+    $actor_spawn(|| handle_conn(sock));
+}
+```
+
+Failures are reported as return values rather than as errors, because losing a connection is routine and
+an error would end the program. A socket id that is unknown or already closed behaves like a connection
+that has ended, so closing a socket from one actor while another is blocked on it is safe.
+
+Note that `$net_read()` returns `0` for the end of a connection and `nil` for a timeout, which is the
+opposite of the POSIX convention where a read of zero bytes means "no data yet". Only `$net_read()` can
+return `nil` to mean "try again"; everywhere else in this API `nil` means the operation failed or the
+connection is finished.
+
+A client that ends its request by closing the connection also gives up the response, since `$net_close()`
+shuts down both directions at once. When the peer reads to EOF to know the request is complete, use
+`$net_shutdown_write()` instead: it sends the EOF and leaves this end able to read.
+
+An actor cannot wait on both its mailbox and a socket at once, since both `$actor_recv()` and
+`$net_read()` block. An actor that has to do both should arm a read timeout with `$net_set_timeout()`
+and poll its mailbox with `$actor_poll()` each time a read returns `nil`.
 
 ## Debugging
 
