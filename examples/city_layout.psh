@@ -1,0 +1,829 @@
+from ./random import *;
+
+// Generates the street layout of a dense city district as a graph.
+//
+// A rectangular parcel of land is cut recursively: the longest side of a block
+// is cut at a random position between 30% and 70%, and a road is laid down the
+// cut line. Cutting stops once a block is small enough to build on. The
+// junctions are then jittered so intersections do not sit on a perfect grid.
+//
+// The result is a graph of nodes, each owning a polygon with exactly 4 vertices:
+// an Intersection where roads meet, a Street for each stretch of road between
+// two intersections, and a Lot for the buildable core of each block, which is
+// what a skyscraper gets placed on. Nodes reference each other by id through
+// their `neighbors` list.
+//
+// All positions are in meters on the XZ ground plane, Y being up, with X
+// pointing east and Z pointing south.
+//
+// The dimensions come from the Manhattan grid laid out by the Commissioners'
+// Plan of 1811: avenues are 30.5 m wide, standard cross streets 18.3 m and
+// major cross streets 30.5 m. Blocks are 61 m deep and 180 to 280 m long,
+// which is 11000 to 17000 m^2.
+
+// --- Constants ---
+
+// Road right-of-way widths, roadway plus sidewalks
+let AVENUE_W = 30.5;
+let MAJOR_W = 24.4;
+let STREET_W = 18.3;
+
+// Extent of the land
+let LAND_W = 1200.0;
+let LAND_H = 1200.0;
+
+// A block stops being cut below this area. No cut may leave a block shallower
+// than the 61 m depth of a Manhattan block, and no block may run longer than a
+// long Manhattan block, which keeps blocks slab-shaped rather than square.
+let MIN_BLOCK_AREA = 16000.0;
+let MIN_BLOCK_DIM = 60.0;
+let MAX_BLOCK_DIM = 128.0;
+
+// A block left with less than this once its roads are taken out is dropped
+let MIN_LOT_AREA = 200.0;
+
+// Two junctions on a road are never left closer together than one block depth,
+// which is how far apart parallel streets sit on the Manhattan grid. A cut
+// landing within an avenue's width of an existing junction fuses into it; one
+// landing in between, too close to stand alone but too far to fuse, is refused.
+let FUSE_DIST = AVENUE_W;
+let MIN_JUNCTION_GAP = MIN_BLOCK_DIM;
+
+// Random cut positions tried before a block gives up on a side
+let CUT_TRIES = 6;
+
+// How far a junction may wander off the ideal grid
+let JITTER = 3.5;
+
+let WIN_SIZE = 1000;
+let MARGIN = 14.0;
+
+fun rgb32(r, g, b) {
+    return 0xFF_00_00_00 | (r << 16) | (g << 8) | b;
+}
+
+let BACKGROUND = rgb32(22, 25, 31);
+let LOT_COLOR = rgb32(150, 150, 150);
+let ROAD_COLOR = rgb32(0, 0, 0);
+let NODE_COLOR = rgb32(255, 214, 0);
+
+// The earliest cuts split the whole district and carry the most traffic, so
+// they get the widest right-of-way.
+fun road_width(depth) {
+    if (depth <= 1)
+        return AVENUE_W;
+    if (depth <= 3)
+        return MAJOR_W;
+    return STREET_W;
+}
+
+fun road_kind(depth) {
+    if (depth <= 1)
+        return "avenue";
+    if (depth <= 3)
+        return "major_street";
+    return "street";
+}
+
+// --- Geometry ---
+
+// A point or direction on the ground plane
+class Vec2 {
+    init(self, x, z) {
+        self.x = x;
+        self.z = z;
+    }
+
+    add(self, o) { return Vec2(self.x + o.x, self.z + o.z); }
+    sub(self, o) { return Vec2(self.x - o.x, self.z - o.z); }
+    scale(self, s) { return Vec2(self.x * s, self.z * s); }
+    dot(self, o) { return self.x * o.x + self.z * o.z; }
+    mag(self) { return (self.x * self.x + self.z * self.z).sqrt(); }
+    dist(self, o) { return self.sub(o).mag(); }
+
+    unit(self) {
+        let m = self.mag();
+        if (m <= 0.0)
+            return Vec2(1.0, 0.0);
+        return self.scale(1.0 / m);
+    }
+
+    // Perpendicular, pointing into the interior for sides listed in corner order
+    perp(self) { return Vec2(0.0 - self.z, self.x); }
+
+    lerp(self, o, t) {
+        return Vec2(self.x + (o.x - self.x) * t, self.z + (o.z - self.z) * t);
+    }
+
+    dist_to_seg(self, a, b) {
+        let d = b.sub(a);
+        let len2 = d.dot(d);
+        if (len2 <= 0.0)
+            return self.dist(a);
+        let t = (self.sub(a).dot(d) / len2).clip(0.0, 1.0);
+        return self.dist(a.add(d.scale(t)));
+    }
+}
+
+// A 4-vertex polygon. Side k runs from corner k to corner k+1.
+class Quad {
+    init(self, pts) {
+        self.pts = pts;
+    }
+
+    at(self, k) { return self.pts[k % 4]; }
+    side(self, k) { return self.pts[(k + 1) % 4].sub(self.pts[k]); }
+    side_len(self, k) { return self.side(k).mag(); }
+
+    longest_side(self) {
+        let var best = 0;
+        for (let var k = 1; k < 4; ++k) {
+            if (self.side_len(k) > self.side_len(best))
+                best = k;
+        }
+        return best;
+    }
+
+    min_side(self) {
+        let var m = self.side_len(0);
+        for (let var k = 1; k < 4; ++k)
+            m = m.min(self.side_len(k));
+        return m;
+    }
+
+    area(self) {
+        let var s = 0.0;
+        for (let var k = 0; k < 4; ++k) {
+            let a = self.pts[k];
+            let b = self.pts[(k + 1) % 4];
+            s = s + a.x * b.z - b.x * a.z;
+        }
+        return (s * 0.5).abs();
+    }
+
+    center(self) {
+        let var c = Vec2(0.0, 0.0);
+        for (let var k = 0; k < 4; ++k)
+            c = c.add(self.pts[k]);
+        return c.scale(0.25);
+    }
+
+    // Pulls each side inward by its own distance and rebuilds the corners where
+    // the offset sides meet. Returns nil if the quad collapses.
+    inset(self, dists) {
+        let org = [];
+        let dir = [];
+        for (let var k = 0; k < 4; ++k) {
+            let u = self.side(k).unit();
+            dir.push(u);
+            org.push(self.pts[k].add(u.perp().scale(dists[k])));
+        }
+
+        let out = [];
+        for (let var k = 0; k < 4; ++k) {
+            // Corner k is where the side before it meets side k
+            let j = (k + 3) % 4;
+            let den = dir[j].x * dir[k].z - dir[j].z * dir[k].x;
+            if (den.abs() < 1.0e-9)
+                return nil;
+            let d = org[k].sub(org[j]);
+            let t = (d.x * dir[k].z - d.z * dir[k].x) / den;
+            out.push(org[j].add(dir[j].scale(t)));
+        }
+        return Quad(out);
+    }
+}
+
+// --- Road network ---
+//
+// Road centerlines form a planar graph. Vertices are the junctions where cuts
+// begin and end, edges are the stretches of road between two junctions, and a
+// Road groups the edges that came out of a single cut.
+
+class Road {
+    init(self, kind, width) {
+        self.kind = kind;
+        self.width = width;
+        self.edges = [];
+    }
+}
+
+class Edge {
+    init(self, a, b, road) {
+        self.a = a;
+        self.b = b;
+        self.road = road;
+    }
+}
+
+// Where one end of a cut comes down on a road: either an existing junction it
+// fuses with, or a fresh point of its own
+class CutEnd {
+    init(self, vert, point) {
+        self.vert = vert;   // Junction to fuse with, or -1 for a fresh one
+        self.point = point;
+    }
+}
+
+// Local frame of a junction. `u` runs along the widest road through it, `across`
+// is that road's half-width and `along` the half-width of the widest road
+// crossing it, so a street stops exactly at the kerb line of the road it meets.
+class Frame {
+    init(self, u, along, across) {
+        self.u = u;
+        self.along = along;
+        self.across = across;
+    }
+
+    quad(self, c) {
+        let a = self.u.scale(self.along);
+        let b = self.u.perp().scale(self.across);
+        return Quad([c.add(a).add(b), c.sub(a).add(b), c.sub(a).sub(b), c.add(a).sub(b)]);
+    }
+
+    // How far the junction reaches along a road leaving it in direction d
+    trim(self, d) {
+        if (d.dot(self.u).abs() >= 0.7)
+            return self.along;
+        return self.across;
+    }
+}
+
+class RoadNetwork {
+    init(self) {
+        self.verts = [];
+        self.edges = [];
+        self.roads = [];
+    }
+
+    add_vert(self, p) {
+        self.verts.push(p);
+        return self.verts.len - 1;
+    }
+
+    add_road(self, kind, width) {
+        self.roads.push(Road(kind, width));
+        return self.roads.len - 1;
+    }
+
+    add_edge(self, a, b, road) {
+        self.edges.push(Edge(a, b, road));
+        let ei = self.edges.len - 1;
+        self.roads[road].edges.push(ei);
+        return ei;
+    }
+
+    quad(self, ids) {
+        return Quad([
+            self.verts[ids[0]], self.verts[ids[1]], self.verts[ids[2]], self.verts[ids[3]]
+        ]);
+    }
+
+    edge_dir(self, ei) {
+        let e = self.edges[ei];
+        return self.verts[e.b].sub(self.verts[e.a]).unit();
+    }
+
+    edge_len(self, ei) {
+        let e = self.edges[ei];
+        return self.verts[e.a].dist(self.verts[e.b]);
+    }
+
+    edge_width(self, ei) {
+        return self.roads[self.edges[ei].road].width;
+    }
+
+    // A cut lands inside an existing stretch of road, so that stretch is split
+    // in two and the cut point becomes a junction of the network.
+    split_at(self, vi, road) {
+        let p = self.verts[vi];
+        let eids = self.roads[road].edges;
+
+        for (let var i = 0; i < eids.len; ++i) {
+            let e = self.edges[eids[i]];
+            if (e.a == vi || e.b == vi)
+                continue;
+            if (p.dist_to_seg(self.verts[e.a], self.verts[e.b]) > 0.001)
+                continue;
+
+            let far = e.b;
+            e.b = vi;
+            self.add_edge(vi, far, e.road);
+            return;
+        }
+    }
+
+    nearest_junction(self, p, road) {
+        let eids = self.roads[road].edges;
+        let var best = -1;
+        let var best_d = 1.0e9;
+
+        for (let var i = 0; i < eids.len; ++i) {
+            let e = self.edges[eids[i]];
+            let ends = [e.a, e.b];
+            for (let var k = 0; k < 2; ++k) {
+                let d = self.verts[ends[k]].dist(p);
+                if (d < best_d) {
+                    best_d = d;
+                    best = ends[k];
+                }
+            }
+        }
+
+        return best;
+    }
+
+    // Where a cut landing at p comes down on a road. Returns nil if it lands too
+    // close to an existing junction to stand alone, but too far to fuse with it.
+    cut_end(self, p, road) {
+        let near = self.nearest_junction(p, road);
+        if (near < 0)
+            return CutEnd(-1, p);
+
+        let d = self.verts[near].dist(p);
+        if (d < FUSE_DIST)
+            return CutEnd(near, self.verts[near]);
+        if (d < MIN_JUNCTION_GAP)
+            return nil;
+        return CutEnd(-1, p);
+    }
+
+    // The stretches of a road that run along the segment from vertex va to vb
+    edges_along(self, va, vb, road) {
+        let a = self.verts[va];
+        let d = self.verts[vb].sub(a);
+        let l = d.mag();
+        let u = d.scale(1.0 / l);
+        let out = [];
+
+        let eids = self.roads[road].edges;
+        for (let var i = 0; i < eids.len; ++i) {
+            let e = self.edges[eids[i]];
+            let s = self.verts[e.a].sub(a).dot(u);
+            let t = self.verts[e.b].sub(a).dot(u);
+            if (s.max(t).min(l) - s.min(t).max(0.0) > 1.0)
+                out.push(eids[i]);
+        }
+        return out;
+    }
+
+    // Nudges every junction off the ideal grid. Points on the edge of the land
+    // only slide along it, so the district keeps a clean outline.
+    jitter(self, amount) {
+        for (let var i = 0; i < self.verts.len; ++i) {
+            let v = self.verts[i];
+            if (v.x > 0.01 && v.x < LAND_W - 0.01)
+                v.x = v.x + rand_float(0.0 - amount, amount);
+            if (v.z > 0.01 && v.z < LAND_H - 0.01)
+                v.z = v.z + rand_float(0.0 - amount, amount);
+        }
+    }
+
+    // Roads meeting at each junction, indexed by vertex
+    incidence(self) {
+        let inc = [];
+        for (let var i = 0; i < self.verts.len; ++i)
+            inc.push([]);
+        for (let var i = 0; i < self.edges.len; ++i) {
+            inc[self.edges[i].a].push(i);
+            inc[self.edges[i].b].push(i);
+        }
+        return inc;
+    }
+
+    // A Frame per vertex, or nil for a vertex no road reaches
+    frames(self) {
+        let inc = self.incidence();
+        let out = [];
+
+        for (let var vi = 0; vi < self.verts.len; ++vi) {
+            let ei = inc[vi];
+            if (ei.len == 0) {
+                out.push(nil);
+                continue;
+            }
+
+            // The frame follows the widest road through the junction, ties going
+            // to the longest edge so that a short stub cannot skew it
+            let var main = ei[0];
+            for (let var k = 1; k < ei.len; ++k) {
+                let dw = self.edge_width(ei[k]) - self.edge_width(main);
+                if (dw > 0.01 || (dw > 0.0 - 0.01 && self.edge_len(ei[k]) > self.edge_len(main)))
+                    main = ei[k];
+            }
+
+            let u = self.edge_dir(main);
+            let across = self.edge_width(main) * 0.5;
+            let var along = 0.0;
+            for (let var k = 0; k < ei.len; ++k) {
+                // Only a road actually crossing this one sets the length
+                if (self.edge_dir(ei[k]).dot(u).abs() < 0.7)
+                    along = along.max(self.edge_width(ei[k]) * 0.5);
+            }
+            if (along <= 0.0)
+                along = across;
+
+            out.push(Frame(u, along, across));
+        }
+
+        return out;
+    }
+}
+
+// --- City graph ---
+
+class Node {
+    init(self, kind, poly) {
+        self.id = -1;           // Assigned when the node joins the city
+        self.kind = kind;
+        self.poly = poly;       // Quad, always 4 vertices
+        self.center = poly.center();
+        self.neighbors = [];    // Ids of the nodes this one touches
+    }
+
+    // Both nodes must already have joined the city
+    link(self, other) {
+        self.neighbors.push(other.id);
+        other.neighbors.push(self.id);
+    }
+}
+
+class Intersection extends Node {
+    init(self, poly) {
+        Node.init(self, "intersection", poly);
+    }
+}
+
+class Street extends Node {
+    init(self, poly, road_class, width, length) {
+        Node.init(self, "street", poly);
+        self.road_class = road_class;   // "avenue", "major_street" or "street"
+        self.width = width;
+        self.length = length;
+        self.ends = [];                 // The two intersections it runs between
+    }
+}
+
+class Lot extends Node {
+    init(self, poly) {
+        Node.init(self, "lot", poly);
+        self.area = poly.area();
+    }
+}
+
+class City {
+    init(self, layout) {
+        self.units = "meters";
+        self.axes = "x east, z south, y up";
+        self.min = Vec2(0.0 - AVENUE_W * 0.5, 0.0 - AVENUE_W * 0.5);
+        self.max = Vec2(LAND_W + AVENUE_W * 0.5, LAND_H + AVENUE_W * 0.5);
+        self.nodes = [];
+
+        let frames = layout.net.frames();
+        let at_vert = self.add_intersections(layout.net, frames);
+        let at_edge = self.add_streets(layout.net, frames, at_vert);
+        self.add_lots(layout, at_edge);
+    }
+
+    add(self, node) {
+        node.id = self.nodes.len;
+        self.nodes.push(node);
+        return node;
+    }
+
+    // All nodes of one kind: "intersection", "street" or "lot"
+    nodes_of(self, kind) {
+        let out = [];
+        for (let var i = 0; i < self.nodes.len; ++i) {
+            if (self.nodes[i].kind == kind)
+                out.push(self.nodes[i]);
+        }
+        return out;
+    }
+
+    // One node per junction, returned indexed by vertex
+    add_intersections(self, net, frames) {
+        let at_vert = [];
+        for (let var vi = 0; vi < net.verts.len; ++vi) {
+            if (frames[vi] == nil) {
+                at_vert.push(nil);
+                continue;
+            }
+            at_vert.push(self.add(Intersection(frames[vi].quad(net.verts[vi]))));
+        }
+        return at_vert;
+    }
+
+    // One node per stretch of road, returned indexed by edge
+    add_streets(self, net, frames, at_vert) {
+        let at_edge = [];
+
+        for (let var ei = 0; ei < net.edges.len; ++ei) {
+            let e = net.edges[ei];
+            let a = net.verts[e.a];
+            let b = net.verts[e.b];
+            let d = net.edge_dir(ei);
+            let l = a.dist(b);
+
+            // Leave the intersections at either end the room they take up
+            let var ta = frames[e.a].trim(d);
+            let var tb = frames[e.b].trim(d);
+            if (ta + tb > l * 0.8) {
+                let s = l * 0.8 / (ta + tb);
+                ta = ta * s;
+                tb = tb * s;
+            }
+
+            let road = net.roads[e.road];
+            let n = d.perp().scale(road.width * 0.5);
+            let p = a.add(d.scale(ta));
+            let q = b.sub(d.scale(tb));
+
+            let street = self.add(Street(
+                Quad([p.add(n), q.add(n), q.sub(n), p.sub(n)]),
+                road.kind,
+                road.width,
+                l - ta - tb
+            ));
+
+            street.ends = [at_vert[e.a].id, at_vert[e.b].id];
+            street.link(at_vert[e.a]);
+            street.link(at_vert[e.b]);
+            at_edge.push(street);
+        }
+
+        return at_edge;
+    }
+
+    // One buildable lot per block, pulled in from the road centerlines and
+    // linked to every stretch of road running along its sides
+    add_lots(self, layout, at_edge) {
+        let net = layout.net;
+
+        for (let var bi = 0; bi < layout.blocks.len; ++bi) {
+            let block = layout.blocks[bi];
+            let inner = net.quad(block.corners).inset(block.insets);
+            if (inner == nil || inner.area() < MIN_LOT_AREA)
+                continue;
+
+            let lot = self.add(Lot(inner));
+            for (let var k = 0; k < 4; ++k) {
+                let along = net.edges_along(
+                    block.corners[k], block.corners[(k + 1) % 4], block.roads[k]
+                );
+                for (let var j = 0; j < along.len; ++j)
+                    lot.link(at_edge[along[j]]);
+            }
+        }
+    }
+}
+
+// --- Layout generation ---
+
+// A block being cut up: four corners in the road network, plus the road
+// bordering each side and how far that side sits from the road's centerline.
+class Block {
+    init(self, corners, insets, roads) {
+        self.corners = corners;
+        self.insets = insets;
+        self.roads = roads;
+    }
+}
+
+// Cuts the land into blocks, laying a road down every cut line
+class Layout {
+    init(self) {
+        self.net = RoadNetwork();
+        self.blocks = [];
+
+        let corners = [
+            self.net.add_vert(Vec2(0.0, 0.0)),
+            self.net.add_vert(Vec2(LAND_W, 0.0)),
+            self.net.add_vert(Vec2(LAND_W, LAND_H)),
+            self.net.add_vert(Vec2(0.0, LAND_H))
+        ];
+
+        // The district is ringed by avenues, so the outer blocks have frontage too
+        let roads = [];
+        let insets = [];
+        for (let var k = 0; k < 4; ++k) {
+            roads.push(self.net.add_road("avenue", AVENUE_W));
+            insets.push(AVENUE_W * 0.5);
+        }
+        for (let var k = 0; k < 4; ++k)
+            self.net.add_edge(corners[k], corners[(k + 1) % 4], roads[k]);
+
+        self.subdivide(Block(corners, insets, roads), 0);
+        self.net.jitter(JITTER);
+    }
+
+    subdivide(self, block, depth) {
+        let q = self.net.quad(block.corners);
+        let longest = q.longest_side();
+
+        if (q.area() >= MIN_BLOCK_AREA || q.side_len(longest) > MAX_BLOCK_DIM) {
+            // The longest side first, then the perpendicular one
+            for (let var attempt = 0; attempt < 2; ++attempt) {
+                if (self.try_cut(block, (longest + attempt) % 4, depth))
+                    return;
+            }
+        }
+
+        self.blocks.push(block);
+    }
+
+    // Cuts across side i and the side opposite it, laying a road down the cut.
+    // Returns false if no cut position works out.
+    try_cut(self, block, i, depth) {
+        let net = self.net;
+        let q = net.quad(block.corners);
+        let i1 = (i + 1) % 4;
+        let i2 = (i + 2) % 4;
+        let i3 = (i + 3) % 4;
+
+        // Both halves must stay a block deep once the road is taken out of them
+        let width = road_width(depth);
+        let span = (q.side_len(i) + q.side_len(i2)) * 0.5;
+        let lo = ((MIN_BLOCK_DIM + width * 0.5) / span).max(0.3);
+        if (lo >= 0.5)
+            return false;
+
+        for (let var attempt = 0; attempt < CUT_TRIES; ++attempt) {
+            // The opposite side runs the other way around the quad, so it is
+            // walked backwards to keep the cut roughly square to side i
+            let t = rand_float(lo, 1.0 - lo);
+
+            // Resolve both ends before touching the network, so that a cut that
+            // gets rejected leaves nothing behind
+            let a = net.cut_end(q.at(i).lerp(q.at(i1), t), block.roads[i]);
+            let b = net.cut_end(q.at(i2).lerp(q.at(i3), 1.0 - t), block.roads[i2]);
+            if (a == nil || b == nil)
+                continue;
+
+            // Fusing drags the cut sideways, which can leave a sliver of a block
+            if (Quad([q.at(i), a.point, b.point, q.at(i3)]).min_side() < MIN_BLOCK_DIM)
+                continue;
+            if (Quad([a.point, q.at(i1), q.at(i2), b.point]).min_side() < MIN_BLOCK_DIM)
+                continue;
+
+            let var va = a.vert;
+            if (va < 0) {
+                va = net.add_vert(a.point);
+                net.split_at(va, block.roads[i]);
+            }
+            let var vb = b.vert;
+            if (vb < 0) {
+                vb = net.add_vert(b.point);
+                net.split_at(vb, block.roads[i2]);
+            }
+
+            let r = net.add_road(road_kind(depth), width);
+            net.add_edge(va, vb, r);
+
+            let c = block.corners;
+            let n = block.insets;
+            let d = block.roads;
+            let half = width * 0.5;
+            self.subdivide(
+                Block([c[i], va, vb, c[i3]], [n[i], half, n[i2], n[i3]], [d[i], r, d[i2], d[i3]]),
+                depth + 1
+            );
+            self.subdivide(
+                Block([va, c[i1], c[i2], vb], [n[i], n[i1], n[i2], half], [d[i], d[i1], d[i2], r]),
+                depth + 1
+            );
+            return true;
+        }
+
+        return false;
+    }
+}
+
+fun generate_city() {
+    return City(Layout());
+}
+
+// --- Rendering ---
+
+class View {
+    init(self, size, city) {
+        self.size = size;
+        self.origin = city.min;
+        let span = (city.max.x - city.min.x).max(city.max.z - city.min.z);
+        self.scale = (size.to_f() - 2.0 * MARGIN) / span;
+        self.fb = ByteArray.with_size(size * size * 4);
+    }
+
+    // World meters to pixels
+    px(self, v) {
+        return Vec2(
+            MARGIN + (v.x - self.origin.x) * self.scale,
+            MARGIN + (v.z - self.origin.z) * self.scale
+        );
+    }
+
+    // Scanline fill of a convex polygon
+    fill(self, quad, color) {
+        let p = [];
+        let var top = 1.0e9;
+        let var bot = 0.0 - 1.0e9;
+        for (let var k = 0; k < 4; ++k) {
+            let s = self.px(quad.pts[k]);
+            p.push(s);
+            top = top.min(s.z);
+            bot = bot.max(s.z);
+        }
+
+        let y0 = top.floor().max(0);
+        let y1 = bot.ceil().min(self.size);
+
+        for (let var y = y0; y < y1; ++y) {
+            let yc = y.to_f() + 0.5;
+            let var lo = 1.0e9;
+            let var hi = 0.0 - 1.0e9;
+
+            for (let var k = 0; k < 4; ++k) {
+                let a = p[k];
+                let b = p[(k + 1) % 4];
+                if ((a.z <= yc && b.z > yc) || (b.z <= yc && a.z > yc)) {
+                    let x = a.x + (b.x - a.x) * (yc - a.z) / (b.z - a.z);
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                }
+            }
+
+            let x0 = lo.floor().max(0);
+            let x1 = hi.ceil().min(self.size);
+            if (x1 > x0)
+                self.fb.fill_u32(y * self.size + x0, x1 - x0, color);
+        }
+    }
+
+    draw_kind(self, city, kind, color) {
+        let nodes = city.nodes_of(kind);
+        for (let var i = 0; i < nodes.len; ++i)
+            self.fill(nodes[i].poly, color);
+    }
+
+    // Lots first, then the roads over them, then the intersections on top
+    draw(self, city) {
+        self.fb.fill_u32(0, self.size * self.size, BACKGROUND);
+        self.draw_kind(city, "lot", LOT_COLOR);
+        self.draw_kind(city, "street", ROAD_COLOR);
+        self.draw_kind(city, "intersection", NODE_COLOR);
+    }
+}
+
+// --- Main ---
+
+fun print_summary(city) {
+    let streets = city.nodes_of("street");
+    let lots = city.nodes_of("lot");
+
+    let var road_len = 0.0;
+    for (let var i = 0; i < streets.len; ++i)
+        road_len = road_len + streets[i].length;
+
+    let var lot_area = 0.0;
+    for (let var i = 0; i < lots.len; ++i)
+        lot_area = lot_area + lots[i].area;
+
+    $println("district:      " + LAND_W.format_decimals(0) + " x " + LAND_H.format_decimals(0) + " m");
+    $println("intersections: " + city.nodes_of("intersection").len.to_s());
+    $println("streets:       " + streets.len.to_s() + " (" + (road_len / 1000.0).format_decimals(2) + " km)");
+    $println("lots:          " + lots.len.to_s() + " (mean " + (lot_area / lots.len.to_f()).format_decimals(0) + " m2)");
+    $println("nodes:         " + city.nodes.len.to_s());
+}
+
+// Another program can pull the graph in with:
+//   from ./city_layout import generate_city;
+if (!$MAIN_UNIT) {
+    return;
+}
+
+rand_init($time_current_ms());
+
+let var city = generate_city();
+let view = View(WIN_SIZE, city);
+let window = $window_create(WIN_SIZE, WIN_SIZE, "City Layout (any key for a new city)", 0);
+
+print_summary(city);
+view.draw(city);
+$window_draw_frame(window, view.fb);
+
+loop {
+    let msg = $actor_recv();
+
+    if (msg instanceof UIEvent) {
+        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE'))
+            break;
+
+        if (msg.kind == 'KEY_DOWN') {
+            city = generate_city();
+            $println("");
+            print_summary(city);
+            view.draw(city);
+            $window_draw_frame(window, view.fb);
+        }
+    }
+}
