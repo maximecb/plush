@@ -12,10 +12,18 @@ The extension ships inside the release, so there is nothing to download:
 ~/.plush/install_vsix.sh          # macOS and Linux
 ```
 ```powershell
-~\.plush\install_vsix.ps1         # Windows
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.plush\install_vsix.ps1"   # Windows
 ```
 
 Then restart VS Code.
+
+The Windows command goes through `-ExecutionPolicy Bypass` because the default
+policy refuses to run script files at all. If a group policy blocks even that,
+pipe the script in instead, from `~\.plush`:
+
+```powershell
+Get-Content .\install_vsix.ps1 -Raw | Invoke-Expression
+```
 
 ### From this repository
 

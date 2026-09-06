@@ -19,7 +19,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# $PSScriptRoot is empty when the script is piped into iex, which is the way
+# around an execution policy that forbids running script files
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }
 
 # Locate the VSCode command line tool
 function Find-CodeCli {

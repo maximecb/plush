@@ -41,10 +41,12 @@ function Say-VSCodeHint {
         return
     }
 
+    # Running a .ps1 file is blocked under the default execution policy, which
+    # is why the hint spells out a command that bypasses it for this one run
     Say ''
     Say 'To install the VSCode extension, run this, then restart VSCode:'
     Say ''
-    Say "    $script"
+    Say "    powershell -NoProfile -ExecutionPolicy Bypass -File `"$script`""
 }
 
 # We only publish an x64 Windows build. Windows on ARM runs it under
@@ -167,6 +169,12 @@ function Install-Plush {
         }
 
         Move-Item -Path $unpacked -Destination $PlushHome
+
+        # Insurance: depending on the PowerShell version, unpacking can carry
+        # the archive's mark-of-the-web tag over to the files, and a tagged
+        # script is refused under the RemoteSigned policy
+        Get-ChildItem -Path $PlushHome -Filter '*.ps1' -Recurse |
+            Unblock-File -ErrorAction SilentlyContinue
 
         Say "installed $version to $PlushHome"
     }
