@@ -41,12 +41,20 @@ let VOID_COLOR = 0xFF05050A;
 let TEX_DIR = "examples/data/textures/";
 let MAP_PATH = $cmd_get_arg_or(1, "examples/data/level1.map");
 
+// --- Units ---
+
+// World space is metric: positions, distances and speeds are all in meters
+// (and seconds). The map format used to give one texel per world unit;
+// TEXELS_PER_METER keeps that same texture density now that a unit is a
+// meter, and is what an unscaled face's `scale` key defaults to.
+let TEXELS_PER_METER = 40.0;
+
 // Projection. FOCAL is half the frame width over the tangent of half the
 // horizontal field of view, so this is a 90 degree view.
 let FOCAL = 400.0;
 let CENTER_X = (FRAME_WIDTH.idiv(2)).to_f();
 let CENTER_Y = (FRAME_HEIGHT.idiv(2)).to_f();
-let NEAR = 8.0;
+let NEAR = 0.2;
 
 // The span loop interpolates texture coordinates in fixed point, with u and v
 // packed into the two halves of one integer:
@@ -133,7 +141,7 @@ let ALPHA = 0xFF000000;
 
 // A face is cut until interpolation reproduces the light across it, but never
 // into pieces smaller than this, and never more than LIGHT_DEPTH halvings deep
-let LIGHT_GRID = 56.0;
+let LIGHT_GRID = 1.4;
 let LIGHT_DEPTH = 4;
 
 // How far the interpolated scale may sit from the real one, on the 0..256
@@ -145,30 +153,30 @@ let AMBIENT = 0.13;
 
 // --- Player ---
 
-let EYE_HEIGHT = 56.0;
-let PLAYER_RADIUS = 18.0;
-let PLAYER_HEIGHT = 64.0;
-let STEP_HEIGHT = 28.0;
-let WALK_SPEED = 300.0;
-let FLY_SPEED = 420.0;
+let EYE_HEIGHT = 1.4;
+let PLAYER_RADIUS = 0.45;
+let PLAYER_HEIGHT = 1.6;
+let STEP_HEIGHT = 0.7;
+let WALK_SPEED = 7.5;
+let FLY_SPEED = 10.5;
 
-// A jump clears about 60 units, which is twice the height of a step and enough
+// A jump clears about 1.5 m, which is twice the height of a step and enough
 // to hop onto the low ledges, but nowhere near the parapet
-let GRAVITY = 900.0;
-let JUMP_SPEED = 330.0;
-let MAX_FALL_SPEED = 1400.0;
+let GRAVITY = 22.5;
+let JUMP_SPEED = 8.25;
+let MAX_FALL_SPEED = 35.0;
 let TURN_SPEED = 2.6;
 let MOUSE_SENS = 0.0032;
 let PITCH_LIMIT = 1.2;
 
 let PI = 3.14159265358979;
-let PLANE_EPS = 0.01;
-let BIG = 16384.0;
+let PLANE_EPS = 0.00025;
+let BIG = 409.6;
 
 // --- Camera state ---
 
 let var cam_x = 0.0;
-let var cam_y = 64.0;
+let var cam_y = 1.6;
 let var cam_z = 0.0;
 let var cam_feet = 0.0;
 let var cam_vel_y = 0.0;
@@ -238,9 +246,9 @@ let var bsp_root = nil;
 // actually moves rather than having its texture slid across it. The waves are
 // a function of world position, so neighbouring quads agree along the edge they
 // share and the surface stays watertight.
-let WAVE_AMP = 6.0;
-let WAVE_FREQ = 0.0245;
-let LAVA_GRID = 40.0;
+let WAVE_AMP = 0.15;
+let WAVE_FREQ = 0.98;
+let LAVA_GRID = 1.0;
 let var warp_phase = 0.0;
 
 let var pixels_drawn = 0;
@@ -442,7 +450,7 @@ class Plane {
         self.light = -1;
         self.fit = false;
         self.flow = false;
-        self.scale = 1.0;
+        self.scale = TEXELS_PER_METER;
         self.turn = false;
     }
 }
@@ -505,7 +513,7 @@ let brushes = [];
 let lights = [];
 
 let var start_x = 0.0;
-let var start_y = 64.0;
+let var start_y = 1.6;
 let var start_z = 0.0;
 let var start_yaw = 0.0;
 
@@ -637,8 +645,8 @@ fun set_fit(f) {
         if (v > v1) v1 = v;
     }
 
-    if (u1 - u0 > 0.001) { f.su = size / (u1 - u0); f.ou = 0.0 - f.su * u0; }
-    if (v1 - v0 > 0.001) { f.sv = size / (v1 - v0); f.ov = 0.0 - f.sv * v0; }
+    if (u1 - u0 > 0.000025) { f.su = size / (u1 - u0); f.ou = 0.0 - f.su * u0; }
+    if (v1 - v0 > 0.000025) { f.sv = size / (v1 - v0); f.ov = 0.0 - f.sv * v0; }
 }
 
 // --- Map parsing ---
@@ -677,7 +685,7 @@ class BrushOpts {
         self.light = -1;
         self.fit = false;
         self.flow = false;
-        self.scale = 1.0;
+        self.scale = TEXELS_PER_METER;
         self.turn = false;
     }
 }
@@ -1022,10 +1030,10 @@ fun occluded(ax, ay, az, bx, by, bz) {
             if (t0 > t1) { miss = true; break; }
         }
 
-        // A sample sits half a unit off its own surface, which is not enough to
-        // clear a wall its face runs into at a corner. Requiring the segment to
-        // pass through some thickness is what keeps those seams from reading as
-        // occlusions and drawing a dark line down every join.
+        // A sample sits about a centimeter off its own surface, which is not
+        // enough to clear a wall its face runs into at a corner. Requiring the
+        // segment to pass through some thickness is what keeps those seams
+        // from reading as occlusions and drawing a dark line down every join.
         if (!miss && t1 - t0 > 0.002) return true;
     }
 
@@ -1045,7 +1053,7 @@ fun in_solid(x, y, z) {
         let var inside = true;
         for (let var j = 0; j < planes.len; ++j) {
             let p = planes[j];
-            if (p.nx * x + p.ny * y + p.nz * z - p.d > 0.0 - 0.05) { inside = false; break; }
+            if (p.nx * x + p.ny * y + p.nz * z - p.d > 0.0 - 0.00125) { inside = false; break; }
         }
         if (inside) return true;
     }
@@ -1057,9 +1065,9 @@ fun in_solid(x, y, z) {
 fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     // Lift the sample off the surface, so that a fixture sitting flush against
     // a wall still counts as being in front of it
-    let cx = px + nx * 0.5;
-    let cy = py + ny * 0.5;
-    let cz = pz + nz * 0.5;
+    let cx = px + nx * 0.0125;
+    let cy = py + ny * 0.0125;
+    let cz = pz + nz * 0.0125;
 
     // Most of a face is usually walled in by the brushes around it: an arcade
     // pocket is a gap left between two wall boxes, so the face that shows in
@@ -1078,7 +1086,7 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     let mx = tx - cx; let my = ty - cy; let mz = tz - cz;
     let span = (mx * mx + my * my + mz * mz).sqrt();
     let var probe = 0.5;
-    if (span > 2.0) probe = 1.0 / span;
+    if (span > 0.05) probe = 0.025 / span;
     let buried = in_solid(cx + mx * probe, cy + my * probe, cz + mz * probe);
 
     let var lum = AMBIENT;
@@ -1092,7 +1100,7 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
         if (dist2 >= radius * radius) continue;
 
         let dist = dist2.sqrt();
-        if (dist < 0.001) { lum = lum + L[4]; continue; }
+        if (dist < 0.000025) { lum = lum + L[4]; continue; }
 
         // Facing the light counts for most of it, but a surface edge on to it
         // keeps a little, which softens the falloff around corners
@@ -1353,15 +1361,15 @@ fun slice_axis(f, axis, grid, out) {
             if (c > hi) hi = c;
         }
 
-        if (hi - lo <= grid + 0.5) { out.push(rest); return; }
+        if (hi - lo <= grid + 0.0125) { out.push(rest); return; }
 
         // Cut on the grid line just past the low edge, so that the quads of
         // neighbouring faces line up. A cut landing within the clipper's
         // epsilon of an edge would hand back a piece identical to the one it
         // came from and this loop would never end, so keep clear of both ends.
         let var cut = (lo / grid).floor().to_f() * grid + grid;
-        if (cut - lo < 1.0) cut = cut + grid;
-        if (cut > hi - 1.0) { out.push(rest); return; }
+        if (cut - lo < 0.025) cut = cut + grid;
+        if (cut > hi - 0.025) { out.push(rest); return; }
 
         let parts = split_face(rest, nx, ny, nz, cut);
         if (parts.len < 2) { out.push(rest); return; }
@@ -2152,8 +2160,8 @@ fun brush_top_near(b, x, z) {
 }
 
 fun blocked(x, feet, z) {
-    let cy = feet + 4.0 + (PLAYER_HEIGHT - 4.0) * 0.5;
-    let hy = (PLAYER_HEIGHT - 4.0) * 0.5;
+    let cy = feet + 0.1 + (PLAYER_HEIGHT - 0.1) * 0.5;
+    let hy = (PLAYER_HEIGHT - 0.1) * 0.5;
 
     for (let var i = 0; i < brushes.len; ++i) {
         let b = brushes[i];
@@ -2334,16 +2342,16 @@ cam_yaw = start_yaw;
 // below, which renders the tour without opening a window, times it, and can
 // write each viewpoint out as a screenshot.
 let TOUR = [
-    [   0.0,  56.0, -520.0,  0.0,  0.0],
-    [   0.0,  56.0, -180.0,  0.0,  0.1],
-    [   0.0,  56.0,   80.0,  0.0,  0.0],
-    [   0.0,  56.0,  420.0,  0.5, -0.1],
-    [   0.0,  56.0,  760.0, -0.6, -0.15],
-    [ -60.0,  56.0, 1080.0,  0.9,  0.05],
-    [ 500.0, 312.0,  900.0, -1.9, -0.22],
-    [ 480.0, 312.0,  620.0, -1.75, -0.35],
-    [   0.0, 120.0,  520.0,  0.0, -0.5],
-    [ 215.0,  86.0, 1380.0, -0.45, -0.02]
+    [   0.0, 1.4, -13.0,  0.0,  0.0],
+    [   0.0, 1.4,  -4.5,  0.0,  0.1],
+    [   0.0, 1.4,   2.0,  0.0,  0.0],
+    [   0.0, 1.4,  10.5,  0.5, -0.1],
+    [   0.0, 1.4,  19.0, -0.6, -0.15],
+    [ -1.5, 1.4,  27.0,  0.9,  0.05],
+    [ 12.5, 7.8,  22.5, -1.9, -0.22],
+    [ 12.0, 7.8,  15.5, -1.75, -0.35],
+    [   0.0, 3.0,  13.0,  0.0, -0.5],
+    [5.375, 2.15,  34.5, -0.45, -0.02]
 ];
 
 let BENCH_FRAMES = $cmd_get_arg_or(2, "0").parse_int(10);

@@ -1,8 +1,9 @@
 // The Sunken Vault, a level for examples/level_walk.psh
 //
 // Brushes are convex solids; the space you walk through is what is left
-// between them. One unit is one texel, so a 256 texture repeats every 256
-// units. Rooms are sized in multiples of 64.
+// between them. Coordinates are in meters. A texture tiles at 40 texels per
+// meter by default, so a 256-texel texture repeats every 6.4 m. Rooms are
+// sized in multiples of 1.6 m.
 //
 //   tex   <index> <name>
 //   start <x> <y> <z> <yaw degrees>
@@ -13,7 +14,9 @@
 //   arch  <x|z> <a0> <a1> <c0> <c1> <ybase> <ytop> <segments> [keys]
 //
 // Keys: all= side= top= bottom= nx= px= ny= py= nz= pz= to place textures,
-// light=<0..15> to force a light level instead of baking one, scale=<f>,
+// light=<0..15> to force a light level instead of baking one, scale=<f> sets
+// the texture density in texels per meter (default 40, so scale=20 makes a
+// texture repeat over twice the span),
 // fit to stretch a texture once across each face, flow to make it swim and
 // burn at full brightness whatever is around it,
 // turn to give the texture a quarter turn on the face.
@@ -47,139 +50,140 @@ tex 21 rock_slate
 tex 22 light_strip_red
 tex 23 floor_gravel
 
-start 0 56 -520 0
+start 0 1.4 -13 0
 
 // ===========================================================================
-// Entry crypt: interior x -192..192, z -704..-256, floor 0, ceiling 224
+// Entry crypt: interior x -4.8..4.8, z -17.6..-6.4, floor 0, ceiling 5.6
 // ===========================================================================
 
-box -256 -32 -768   256    0 -192   all=3
-box -256 224 -768   256  256 -192   all=2
-box -256   0 -768   256  224 -704   all=0
+box -6.4 -0.8 -19.2 6.4 0 -4.8 all=3
+box -6.4 5.6 -19.2 6.4 6.4 -4.8 all=2
+box -6.4 0 -19.2 6.4 5.6 -17.6 all=0
 
-// West wall, with a torch niche cut into it at z -560..-496
-box -256   0 -768  -192  224 -560   all=0
-box -256   0 -496  -192  224 -192   all=0
-box -256   0 -560  -192   96 -496   all=0
-box -256 160 -560  -192  224 -496   all=0
-box -256  96 -560  -224  160 -496   all=0 px=11 light=15 fit
+// West wall, with a torch niche cut into it at z -14..-12.4
+box -6.4 0 -19.2 -4.8 5.6 -14 all=0
+box -6.4 0 -12.4 -4.8 5.6 -4.8 all=0
+box -6.4 0 -14 -4.8 2.4 -12.4 all=0
+box -6.4 4 -14 -4.8 5.6 -12.4 all=0
+box -6.4 2.4 -14 -5.6 4 -12.4 all=0 px=11 light=15 fit
 
 // East wall, with the same niche mirrored
-box  192   0 -768   256  224 -560   all=0
-box  192   0 -496   256  224 -192   all=0
-box  192   0 -560   256   96 -496   all=0
-box  192 160 -560   256  224 -496   all=0
-box  224  96 -560   256  160 -496   all=0 nx=11 light=15 fit
+box 4.8 0 -19.2 6.4 5.6 -14 all=0
+box 4.8 0 -12.4 6.4 5.6 -4.8 all=0
+box 4.8 0 -14 6.4 2.4 -12.4 all=0
+box 4.8 4 -14 6.4 5.6 -12.4 all=0
+box 5.6 2.4 -14 6.4 4 -12.4 all=0 nx=11 light=15 fit
 
-light -212 128 -528 340 1.0
-light  212 128 -528 340 1.0
+light -5.3 3.2 -13.2 8.5 1.0
+light 5.3 3.2 -13.2 8.5 1.0
 
-// South wall of the crypt, with an arched doorway at x -96..96
-box -256   0 -256   -96  224 -192   all=0
-box   96   0 -256   256  224 -192   all=0
-box  -96 224 -256    96  256 -192   all=0
-arch z -256 -192   -96   96  144  224  5   all=4 bottom=4
-
-// ===========================================================================
-// Passage down to the vault: x -96..96, z -192..0, ceiling 224
-// ===========================================================================
-
-box -160 -32 -192   160    0    0   all=3
-box -160 224 -192   160  256    0   all=2
-box -160   0 -192   -96  224    0   all=1
-box   96   0 -192   160  224    0   all=1
-
-light 0 170 -96 240 0.45
+// South wall of the crypt, with an arched doorway at x -2.4..2.4
+box -6.4 0 -6.4 -2.4 5.6 -4.8 all=0
+box 2.4 0 -6.4 6.4 5.6 -4.8 all=0
+box -2.4 5.6 -6.4 2.4 6.4 -4.8 all=0
+arch z -6.4 -4.8 -2.4 2.4 3.6 5.6 5 all=4 bottom=4
 
 // ===========================================================================
-// The vault: interior x -576..576, z 0..1280. The lava lake sits at y -176,
-// the stone bridge crosses it at y 0, and the ceiling is up at 640.
+// Passage down to the vault: x -2.4..2.4, z -4.8..0, ceiling 5.6
+// ===========================================================================
+
+box -4 -0.8 -4.8 4 0 0 all=3
+box -4 5.6 -4.8 4 6.4 0 all=2
+box -4 0 -4.8 -2.4 5.6 0 all=1
+box 2.4 0 -4.8 4 5.6 0 all=1
+
+light 0 4.25 -2.4 6 0.45
+
+// ===========================================================================
+// The vault: interior x -14.4..14.4, z 0..32. The lava lake sits at y -4.4,
+// the stone bridge crosses it at y 0, and the ceiling is up at 16.
 // ===========================================================================
 
 // The lake, and the ledges at either end of it
-box -576 -256  128   576 -176 1088   all=6 flow
-box -576 -256    0   576    0  128   all=3 top=3 scale=0.5
-box -576 -256 1088   576    0 1280   all=3 top=3 scale=0.5
+box -14.4 -6.4 3.2 14.4 -4.4 27.2 all=6 flow
+box -14.4 -6.4 0 14.4 0 3.2 all=3 top=3 scale=20
+box -14.4 -6.4 27.2 14.4 0 32 all=3 top=3 scale=20
 
 // The bridge across the lake
-box  -96 -256  128    96    0 1088   all=8 top=3 scale=0.5
+box -2.4 -6.4 3.2 2.4 0 27.2 all=8 top=3 scale=20
 
 // The ceiling is a gable running the length of the room: two slopes rising
-// from the tops of the side walls at 416 to a ridge down the middle at 640,
+// from the tops of the side walls at 10.4 to a ridge down the middle at 16,
 // where the slab that caps the room sits on them. An arch of two segments is
 // exactly that pair of slopes.
-arch z    0 1280  -576  576  416  640  2   all=2 bottom=2
+arch z 0 32 -14.4 14.4 10.4 16 2 all=2 bottom=2
 
 // That cap, and the walls behind everything else
-box -640 640    0   640  672 1344   all=2
-box -640 -256    0  -576  640  256   all=0
-box -640 -256  416  -576  640  560   all=0
-box -640 -256  720  -576  640  864   all=0
+box -16 16 0 16 16.8 33.6 all=2
+box -16 -6.4 0 -14.4 16 6.4 all=0
+box -16 -6.4 10.4 -14.4 16 14 all=0
+box -16 -6.4 18 -14.4 16 21.6 all=0
 // This stretch of the west wall carries the way through to the monolith
 // chamber. The opening sits at ledge level in the far corner of the room, so
 // what you see from the bridge is a door in the corner rather than a stair
 // standing out in the open; the climb is all on the far side of it.
-box -640 -256 1024  -576  640 1088   all=0
-box -640 -256 1280  -576  640 1344   all=0
-box -640 -256 1088  -576    0 1280   all=0 top=3
-box -640  224 1088  -576  640 1280   all=0
-arch x -640 -576  1088 1280  144 224  4   all=4 bottom=4
+box -16 -6.4 25.6 -14.4 16 27.2 all=0
+box -16 -6.4 32 -14.4 16 33.6 all=0
+box -16 -6.4 27.2 -14.4 0 32 all=0 top=3
+box -16 5.6 27.2 -14.4 16 32 all=0
+arch x -16 -14.4 27.2 32 3.6 5.6 4 all=4 bottom=4
 
-box  576 -256    0   640  640 1344   all=0
+box 14.4 -6.4 0 16 16 33.6 all=0
 
 // North wall, with the arched way back to the passage
-box -640 -256  -64   -96  640    0   all=0
-box   96 -256  -64   640  640    0   all=0
-box  -96 224  -64    96  640    0   all=0
-arch z  -64    0   -96   96  144  224  5   all=4 bottom=4
+box -16 -6.4 -1.6 -2.4 16 0 all=0
+box 2.4 -6.4 -1.6 16 16 0 all=0
+box -2.4 5.6 -1.6 2.4 16 0 all=0
+arch z -1.6 0 -2.4 2.4 3.6 5.6 5 all=4 bottom=4
 
 // South wall, with the arched way on to the reliquary. The doorway needs its
 // own floor: the wall pieces either side of it stop at the opening.
-box -128  -96 1280   128    0 1344   all=3 top=3 scale=0.5
-box -640 -256 1280  -128  640 1344   all=0
-box  128 -256 1280   640  640 1344   all=0
-box -128 288 1280   128  640 1344   all=0
-arch z 1280 1344  -128  128  192  288  5   all=4 bottom=4
+box -3.2 -2.4 32 3.2 0 33.6 all=3 top=3 scale=20
+box -16 -6.4 32 -3.2 16 33.6 all=0
+box 3.2 -6.4 32 16 16 33.6 all=0
+box -3.2 7.2 32 3.2 16 33.6 all=0
+arch z 32 33.6 -3.2 3.2 4.8 7.2 5 all=4 bottom=4
 
-// --- Timber beams tying the roof across, one every 256 ---
+// --- Timber beams tying the roof across, one every 6.4 m ---
 //
 // They sit above the eaves, so each one runs out of one slope and into the
 // other, and nothing below them is high enough to touch. `turn` lays the grain
 // along the beam rather than across it.
 
-box -576 456  108   576  504  148   all=20 turn
-box -576 456  364   576  504  404   all=20 turn
-box -576 456  620   576  504  660   all=20 turn
-box -576 456  876   576  504  916   all=20 turn
-box -576 456 1132   576  504 1172   all=20 turn
+box -14.4 11.4 2.7 14.4 12.6 3.7 all=20 turn
+box -14.4 11.4 9.1 14.4 12.6 10.1 all=20 turn
+box -14.4 11.4 15.5 14.4 12.6 16.5 all=20 turn
+box -14.4 11.4 21.9 14.4 12.6 22.9 all=20 turn
+box -14.4 11.4 28.3 14.4 12.6 29.3 all=20 turn
 
 // --- The west arcade: three lamps in arched recesses ---
 //
-// Each one is a pocket cut 32 deep into the wall: the wall below and above it,
-// the back of the pocket, the lamp mounted on that back, and a faceted arch
+// Each one is a pocket cut 0.8 m deep into the wall: the wall below and
+// above it, the back of the pocket, the lamp mounted on that back, and a
+// faceted arch
 // across the mouth. Nothing protrudes into the room.
 
-box -640 -256  256  -576    0  416   all=0
-box -640  224  256  -576  640  416   all=0
-box -640    0  256  -608  224  416   all=1
-box -608   64  304  -604  176  368   all=0 px=11 light=15 fit
-arch x -608 -576   256  416  176  224  4   all=4 bottom=4
+box -16 -6.4 6.4 -14.4 0 10.4 all=0
+box -16 5.6 6.4 -14.4 16 10.4 all=0
+box -16 0 6.4 -15.2 5.6 10.4 all=1
+box -15.2 1.6 7.6 -15.1 4.4 9.2 all=0 px=11 light=15 fit
+arch x -15.2 -14.4 6.4 10.4 4.4 5.6 4 all=4 bottom=4
 
-box -640 -256  560  -576    0  720   all=0
-box -640  224  560  -576  640  720   all=0
-box -640    0  560  -608  224  720   all=1
-box -608   64  608  -604  176  672   all=0 px=11 light=15 fit
-arch x -608 -576   560  720  176  224  4   all=4 bottom=4
+box -16 -6.4 14 -14.4 0 18 all=0
+box -16 5.6 14 -14.4 16 18 all=0
+box -16 0 14 -15.2 5.6 18 all=1
+box -15.2 1.6 15.2 -15.1 4.4 16.8 all=0 px=11 light=15 fit
+arch x -15.2 -14.4 14 18 4.4 5.6 4 all=4 bottom=4
 
-box -640 -256  864  -576    0 1024   all=0
-box -640  224  864  -576  640 1024   all=0
-box -640    0  864  -608  224 1024   all=1
-box -608   64  912  -604  176  976   all=0 px=11 light=15 fit
-arch x -608 -576   864 1024  176  224  4   all=4 bottom=4
+box -16 -6.4 21.6 -14.4 0 25.6 all=0
+box -16 5.6 21.6 -14.4 16 25.6 all=0
+box -16 0 21.6 -15.2 5.6 25.6 all=1
+box -15.2 1.6 22.8 -15.1 4.4 24.4 all=0 px=11 light=15 fit
+arch x -15.2 -14.4 21.6 25.6 4.4 5.6 4 all=4 bottom=4
 
-light -592 120  336 380 1.0
-light -592 120  640 380 1.0
-light -592 120  944 380 1.0
+light -14.8 3 8.4 9.5 1.0
+light -14.8 3 16 9.5 1.0
+light -14.8 3 23.6 9.5 1.0
 
 // --- Buttresses along the west wall, angled where they meet it ---
 //
@@ -187,121 +191,121 @@ light -592 120  944 380 1.0
 // wall and slopes away as it comes out over the lava, which is the way a
 // buttress carries a load
 
-ramp -576 -176  180  -496  180  260 nx   all=4
-ramp -576 -176  484  -496  180  564 nx   all=4
-ramp -576 -176  788  -496  180  868 nx   all=4
+ramp -14.4 -4.4 4.5 -12.4 4.5 6.5 nx all=4
+ramp -14.4 -4.4 12.1 -12.4 4.5 14.1 nx all=4
+ramp -14.4 -4.4 19.7 -12.4 4.5 21.7 nx all=4
 
 // --- The east side: a plinth, a ramp climbing it, and the gallery above ---
 
-box  384 -256 1088   576    0 1280   all=0 top=3
+box 9.6 -6.4 27.2 14.4 0 32 all=0 top=3
 
 // A slab under the ramp, so the foot of it has some thickness to it instead of
 // tapering away to nothing where it meets the ledge
-box  384  -30  512   576    0 1088   all=0 scale=0.5
-ramp 384    0  512   576  256 1088 nz   all=0 top=3 scale=0.5
+box 9.6 -0.75 12.8 14.4 0 27.2 all=0 scale=20
+ramp 9.6 0 12.8 14.4 6.4 27.2 nz all=0 top=3 scale=20
 
-box  384 -256  128   576  256  512   all=0 top=3 scale=0.5
+box 9.6 -6.4 3.2 14.4 6.4 12.8 all=0 top=3 scale=20
 
 // The parapet along the gallery, with a gap to see over
-box  352 256  128   384  320  296   all=4
-box  352 256  424   384  320  512   all=4
-box  352 256  296   384  288  424   all=4
+box 8.8 6.4 3.2 9.6 8 7.4 all=4
+box 8.8 6.4 10.6 9.6 8 12.8 all=4
+box 8.8 6.4 7.4 9.6 7.2 10.6 all=4
 
 // Lamps set into the east wall above the gallery
-box  568 320  240   576  384  296   all=1 nx=12 light=15 fit
-box  568 320  392   576  384  448   all=1 nx=12 light=15 fit
-light 552 350 268 300 1.0
-light 552 350 420 300 1.0
+box 14.2 8 6 14.4 9.6 7.4 all=1 nx=12 light=15 fit
+box 14.2 8 9.8 14.4 9.6 11.2 all=1 nx=12 light=15 fit
+light 13.8 8.75 6.7 7.5 1.0
+light 13.8 8.75 10.5 7.5 1.0
 
 // A crate or two left on the gallery
-box  420 256  180   516  352  276   all=19 fit
-box  432 352  204   504  424  268   all=19 fit
+box 10.5 6.4 4.5 12.9 8.8 6.9 all=19 fit
+box 10.8 8.8 5.1 12.6 10.6 6.7 all=19 fit
 
 // --- What the lava throws up into the room ---
 //
 // These sit in the open air over the lake, clear of the bridge pier at x
-// -96..96 and of the east plinth at x 384: a lamp inside either one is walled
+// -2.4..2.4 and of the east plinth at x 9.6: a lamp inside either one is walled
 // off from the room and lights nothing.
 //
-// The lake runs z 128..1088, so they are spaced about its middle at 608. A
+// The lake runs z 3.2..27.2, so they are spaced about its middle at 15.2. A
 // lamp nearer one end than the other lights that end's ledge harder, and since
 // the two ledges face each other across the room the difference is there to be
 // compared.
 
-light -288 -130  320 560 0.44
-light  288 -130  320 560 0.44
-light -288 -130  608 560 0.44
-light  288 -130  608 560 0.44
-light -288 -130  896 560 0.44
-light  288 -130  896 560 0.44
-light -300 -130  464 480 0.34
-light  300 -130  464 480 0.34
-light -300 -130  752 480 0.34
-light  300 -130  752 480 0.34
+light -7.2 -3.25 8 14 0.44
+light 7.2 -3.25 8 14 0.44
+light -7.2 -3.25 15.2 14 0.44
+light 7.2 -3.25 15.2 14 0.44
+light -7.2 -3.25 22.4 14 0.44
+light 7.2 -3.25 22.4 14 0.44
+light -7.5 -3.25 11.6 12 0.34
+light 7.5 -3.25 11.6 12 0.34
+light -7.5 -3.25 18.8 12 0.34
+light 7.5 -3.25 18.8 12 0.34
 
 // The glow the lake throws up onto the bridge and the ledges. These sit above
 // the deck on purpose: a floor takes nothing from a lamp underneath it. They
 // stand almost on top of the deck, so what they mostly light is the deck, and
 // they are the one thing that decides how bright it reads.
-light    0   90  300 560 0.42
-light    0   90  600 560 0.42
-light    0   90  900 560 0.42
+light 0 2.25 7.5 14 0.42
+light 0 2.25 15 14 0.42
+light 0 2.25 22.5 14 0.42
 
 // High fill under the eaves. Mirrored: a single lamp to one side at each end
 // leans the whole bridge that way, and the lean reads as a mistake because
 // nothing up there is visible to explain it.
-light -300  420  480 620 0.13
-light  300  420  480 620 0.13
-light -300  420  820 620 0.13
-light  300  420  820 620 0.13
-light -260  120  110 380 0.46
-light  260  120  110 380 0.46
-light -260  120 1180 380 0.46
-light  260  120 1180 380 0.46
+light -7.5 10.5 12 15.5 0.13
+light 7.5 10.5 12 15.5 0.13
+light -7.5 10.5 20.5 15.5 0.13
+light 7.5 10.5 20.5 15.5 0.13
+light -6.5 3 2.75 9.5 0.46
+light 6.5 3 2.75 9.5 0.46
+light -6.5 3 29.5 9.5 0.46
+light 6.5 3 29.5 9.5 0.46
 
 // ===========================================================================
-// The reliquary: interior x -256..256, z 1344..1792, ceiling 288. A sunken
+// The reliquary: interior x -6.4..6.4, z 33.6..44.8, ceiling 7.2. A sunken
 // pool of lava in the middle of the floor lights the room from below.
 // ===========================================================================
 
-box -320 288 1344   320  320 1856   all=2
-box -320   0 1344  -256  288 1856   all=14
-box  256   0 1344   320  288 1856   all=14
-box -320   0 1792   320  288 1856   all=14
+box -8 7.2 33.6 8 8 46.4 all=2
+box -8 0 33.6 -6.4 7.2 46.4 all=14
+box 6.4 0 33.6 8 7.2 46.4 all=14
+box -8 0 44.8 8 7.2 46.4 all=14
 
 // The floor, in four pieces around the pool
-box -320 -96 1344   320    0 1504   all=13
-box -320 -96 1696   320    0 1856   all=13
-box -320 -96 1504  -128    0 1696   all=13
-box  128 -96 1504   320    0 1696   all=13
+box -8 -2.4 33.6 8 0 37.6 all=13
+box -8 -2.4 42.4 8 0 46.4 all=13
+box -8 -2.4 37.6 -3.2 0 42.4 all=13
+box 3.2 -2.4 37.6 8 0 42.4 all=13
 
 // The pool itself, and the rough rock it has eaten into. The surface rides
 // the wave, which takes it a WAVE_AMP down each way, so it sits that much
 // above the underside of the floor rather than flush with it: level with it,
 // the down-swing would pull the lava clear of the rim and open a gap all the
 // way round.
-box -128 -160 1504   128  -80 1696   all=7 flow
-box -128 -168 1496   128 -160 1704   all=5
+box -3.2 -4 37.6 3.2 -2 42.4 all=7 flow
+box -3.2 -4.2 37.4 3.2 -4 42.6 all=5
 
 // An eight-sided pedestal standing in the pool
-prism 0 1600 72 -96 96 8 22.5   all=4 top=4
+prism 0 40 1.8 -2.4 2.4 8 22.5 all=4 top=4
 
-light 0 -40 1600 460 0.85
-light 0 210 1430 260 0.3
+light 0 -1 40 11.5 0.85
+light 0 5.25 35.75 6.5 0.3
 
 // Torch niches either side of the door back out
-box -256  96 1360  -224  160 1416   all=14 px=11 light=15 fit
-box  224  96 1360   256  160 1416   all=14 nx=11 light=15 fit
-light -212 128 1388 320 0.9
-light  212 128 1388 320 0.9
+box -6.4 2.4 34 -5.6 4 35.4 all=14 px=11 light=15 fit
+box 5.6 2.4 34 6.4 4 35.4 all=14 nx=11 light=15 fit
+light -5.3 3.2 34.7 8 0.9
+light 5.3 3.2 34.7 8 0.9
 
 // ===========================================================================
-// The monolith chamber: interior x -3392..-1344, z 160..2208, floor 256,
-// ceiling 2304. A 2048 cube, hung off the west wall of the vault and reached
+// The monolith chamber: interior x -84.8..-33.6, z 4..55.2, floor 6.4,
+// ceiling 57.6. A 51.2 m cube, hung off the west wall of the vault and reached
 // from the far corner of the ledge behind the lava: a low corridor, then a
-// stair climbing 256 in a shaft that opens out above you.
+// stair climbing 6.4 m in a shaft that opens out above you.
 //
-// The crosses stop 384 short of the ceiling, which is a good deal more than
+// The crosses stop 9.6 m short of the ceiling, which is a good deal more than
 // they stand clear of the floor: the roof wants dark above them rather than
 // the tops of the arms crowding it.
 //
@@ -319,231 +323,233 @@ light  212 128 1388 320 0.9
 // shaft it runs into is wider again and more than twice as tall, so the space
 // opens out around you and over your head as the stair starts to climb.
 
-box  -768  -64 1088   -640    0 1280   all=0 top=3
-box  -768  224 1088   -640  576 1280   all=10
-box  -768  -64 1024   -640  576 1088   all=10
-box  -768  -64 1280   -640  576 1344   all=10
+box -19.2 -1.6 27.2 -16 0 32 all=0 top=3
+box -19.2 5.6 27.2 -16 14.4 32 all=10
+box -19.2 -1.6 25.6 -16 14.4 27.2 all=10
+box -19.2 -1.6 32 -16 14.4 33.6 all=10
 
-box -1280  -64  992   -768  512 1056   all=10
-box -1280  -64 1312   -768  512 1376   all=10
-box -1280  512 1056   -768  576 1312   all=10
+box -32 -1.6 24.8 -19.2 12.8 26.4 all=10
+box -32 -1.6 32.8 -19.2 12.8 34.4 all=10
+box -32 12.8 26.4 -19.2 14.4 32.8 all=10
 
-// Sixteen steps of 16, climbing west from x -768 to the sill at -1280. Each one
-// carries down to the underside of the corridor floor, so the flight is solid.
+// Sixteen steps of 0.4 m, climbing west from x -19.2 to the sill at -32.
+// Each one carries down to the underside of the corridor floor, so the
+// flight is solid.
 
-box  -800 -64 1056   -768   16 1312   all=0 top=3
-box  -832 -64 1056   -800   32 1312   all=0 top=3
-box  -864 -64 1056   -832   48 1312   all=0 top=3
-box  -896 -64 1056   -864   64 1312   all=0 top=3
-box  -928 -64 1056   -896   80 1312   all=0 top=3
-box  -960 -64 1056   -928   96 1312   all=0 top=3
-box  -992 -64 1056   -960  112 1312   all=0 top=3
-box -1024 -64 1056   -992  128 1312   all=0 top=3
-box -1056 -64 1056  -1024  144 1312   all=0 top=3
-box -1088 -64 1056  -1056  160 1312   all=0 top=3
-box -1120 -64 1056  -1088  176 1312   all=0 top=3
-box -1152 -64 1056  -1120  192 1312   all=0 top=3
-box -1184 -64 1056  -1152  208 1312   all=0 top=3
-box -1216 -64 1056  -1184  224 1312   all=0 top=3
-box -1248 -64 1056  -1216  240 1312   all=0 top=3
-box -1280 -64 1056  -1248  256 1312   all=0 top=3
+box -20 -1.6 26.4 -19.2 0.4 32.8 all=0 top=3
+box -20.8 -1.6 26.4 -20 0.8 32.8 all=0 top=3
+box -21.6 -1.6 26.4 -20.8 1.2 32.8 all=0 top=3
+box -22.4 -1.6 26.4 -21.6 1.6 32.8 all=0 top=3
+box -23.2 -1.6 26.4 -22.4 2 32.8 all=0 top=3
+box -24 -1.6 26.4 -23.2 2.4 32.8 all=0 top=3
+box -24.8 -1.6 26.4 -24 2.8 32.8 all=0 top=3
+box -25.6 -1.6 26.4 -24.8 3.2 32.8 all=0 top=3
+box -26.4 -1.6 26.4 -25.6 3.6 32.8 all=0 top=3
+box -27.2 -1.6 26.4 -26.4 4 32.8 all=0 top=3
+box -28 -1.6 26.4 -27.2 4.4 32.8 all=0 top=3
+box -28.8 -1.6 26.4 -28 4.8 32.8 all=0 top=3
+box -29.6 -1.6 26.4 -28.8 5.2 32.8 all=0 top=3
+box -30.4 -1.6 26.4 -29.6 5.6 32.8 all=0 top=3
+box -31.2 -1.6 26.4 -30.4 6 32.8 all=0 top=3
+box -32 -1.6 26.4 -31.2 6.4 32.8 all=0 top=3
 
 // --- Shell ---
 
-box -3456  192   96  -1280  256 2272   all=10 top=13
+box -86.4 4.8 2.4 -32 6.4 56.8 all=10 top=13
 
-box -1344  192   96  -1280 2368 1056   all=10
-box -1344  192 1312  -1280 2368 2272   all=10
-box -1344  480 1056  -1280 2368 1312   all=10
-arch x -1344 -1280  1056 1312  400 480  4   all=4 bottom=4
+box -33.6 4.8 2.4 -32 59.2 26.4 all=10
+box -33.6 4.8 32.8 -32 59.2 56.8 all=10
+box -33.6 12 26.4 -32 59.2 32.8 all=10
+arch x -33.6 -32 26.4 32.8 10 12 4 all=4 bottom=4
 
 // --- The three crosses ---
 //
-// Each of the west, north and south walls is built in two layers: a back plate,
-// and a front layer 32 proud of it laid out as eight pieces around a cross
-// shaped void. The upright stands 1408 and the bar reaches 1024 across, both
-// cut 256 thick, so what shows is a thin figure drawn on a broad wall rather
-// than a blocky one. The bar sits a little over a quarter of the way up the
+// Each of the west, north and south walls is built in two layers: a back
+// plate, and a front layer 0.8 m proud of it laid out as eight pieces around
+// a cross shaped void. The upright stands 35.2 m and the bar reaches 25.6 m
+// across, both cut 6.4 m thick, so what shows is a thin figure drawn on a
+// broad wall rather than a blocky one. The bar sits a little over a quarter
+// of the way up the
 // upright rather than the same distance down from the top, which turns the
 // cross over.
 //
-// The bar is placed in whole lozenge rows. A row is 32 -- a quarter of the 128
-// a panel fits -- so the bar can only be moved by multiples of 32 without its
-// rows falling out of step with the upright's.
+// The bar is placed in whole lozenge rows. A row is 0.8 m -- a quarter of the
+// 3.2 m a panel fits -- so the bar can only be moved by multiples of 0.8 m
+// without its rows falling out of step with the upright's.
 //
 // The void is filled with lamp panels laid on the back plate, so each cross
 // reads as a slot of red light rather than a shadow. Those panels are cut into
-// 128 squares, one per texture, and each is marked `fit`: the lamp texture is
-// 128 across and lays its eight lozenges out on a 64 by 32 grid inside that, so
-// a panel whose edges miss those lines slices the lozenges at its ends. A limb
-// is two panels across at this size, and the void is filled two columns wide
-// rather than one. The room is centred on z 1184 and x -2368, neither of which
-// the grid divides, so tiling by world position cannot be made to land -- `fit`
-// maps one whole copy across each square instead and puts the cut where the
-// panels already end.
+// 3.2 m squares, one per texture, and each is marked `fit`: the lamp texture is
+// 128 texels across and lays its eight lozenges out on a 64 by 32 texel grid
+// inside that, so a panel whose edges miss those lines slices the lozenges at
+// its ends. A limb is two panels across at this size, and the void is filled
+// two columns wide rather than one. The room is centred on z 29.6 and x -59.2,
+// neither of which the grid divides, so tiling by world position cannot be
+// made to land -- `fit` maps one whole copy across each square instead and
+// puts the cut where the panels already end.
 //
 // The upright and the arms are cut as separate squares that meet rather than
 // overlap, so no two lamp faces are coplanar.
 
 // West wall
-box -3456  192   96  -3424 2368 2272   all=10
+box -86.4 4.8 2.4 -85.6 59.2 56.8 all=10
 
-box -3424  256  160  -3392  512 2208   all=10
-box -3424 1920  160  -3392 2304 2208   all=10
-box -3424  512  160  -3392  768 1056   all=10
-box -3424  512 1312  -3392  768 2208   all=10
-box -3424  768  160  -3392 1024  672   all=10
-box -3424  768 1696  -3392 1024 2208   all=10
-box -3424 1024  160  -3392 1920 1056   all=10
-box -3424 1024 1312  -3392 1920 2208   all=10
+box -85.6 6.4 4 -84.8 12.8 55.2 all=10
+box -85.6 48 4 -84.8 57.6 55.2 all=10
+box -85.6 12.8 4 -84.8 19.2 26.4 all=10
+box -85.6 12.8 32.8 -84.8 19.2 55.2 all=10
+box -85.6 19.2 4 -84.8 25.6 16.8 all=10
+box -85.6 19.2 42.4 -84.8 25.6 55.2 all=10
+box -85.6 25.6 4 -84.8 48 26.4 all=10
+box -85.6 25.6 32.8 -84.8 48 55.2 all=10
 
-box -3424  512 1056  -3420  640 1184   all=10 px=22 light=15 fit
-box -3424  640 1056  -3420  768 1184   all=10 px=22 light=15 fit
-box -3424  768 1056  -3420  896 1184   all=10 px=22 light=15 fit
-box -3424  896 1056  -3420 1024 1184   all=10 px=22 light=15 fit
-box -3424 1024 1056  -3420 1152 1184   all=10 px=22 light=15 fit
-box -3424 1152 1056  -3420 1280 1184   all=10 px=22 light=15 fit
-box -3424 1280 1056  -3420 1408 1184   all=10 px=22 light=15 fit
-box -3424 1408 1056  -3420 1536 1184   all=10 px=22 light=15 fit
-box -3424 1536 1056  -3420 1664 1184   all=10 px=22 light=15 fit
-box -3424 1664 1056  -3420 1792 1184   all=10 px=22 light=15 fit
-box -3424 1792 1056  -3420 1920 1184   all=10 px=22 light=15 fit
+box -85.6 12.8 26.4 -85.5 16 29.6 all=10 px=22 light=15 fit
+box -85.6 16 26.4 -85.5 19.2 29.6 all=10 px=22 light=15 fit
+box -85.6 19.2 26.4 -85.5 22.4 29.6 all=10 px=22 light=15 fit
+box -85.6 22.4 26.4 -85.5 25.6 29.6 all=10 px=22 light=15 fit
+box -85.6 25.6 26.4 -85.5 28.8 29.6 all=10 px=22 light=15 fit
+box -85.6 28.8 26.4 -85.5 32 29.6 all=10 px=22 light=15 fit
+box -85.6 32 26.4 -85.5 35.2 29.6 all=10 px=22 light=15 fit
+box -85.6 35.2 26.4 -85.5 38.4 29.6 all=10 px=22 light=15 fit
+box -85.6 38.4 26.4 -85.5 41.6 29.6 all=10 px=22 light=15 fit
+box -85.6 41.6 26.4 -85.5 44.8 29.6 all=10 px=22 light=15 fit
+box -85.6 44.8 26.4 -85.5 48 29.6 all=10 px=22 light=15 fit
 
-box -3424  512 1184  -3420  640 1312   all=10 px=22 light=15 fit
-box -3424  640 1184  -3420  768 1312   all=10 px=22 light=15 fit
-box -3424  768 1184  -3420  896 1312   all=10 px=22 light=15 fit
-box -3424  896 1184  -3420 1024 1312   all=10 px=22 light=15 fit
-box -3424 1024 1184  -3420 1152 1312   all=10 px=22 light=15 fit
-box -3424 1152 1184  -3420 1280 1312   all=10 px=22 light=15 fit
-box -3424 1280 1184  -3420 1408 1312   all=10 px=22 light=15 fit
-box -3424 1408 1184  -3420 1536 1312   all=10 px=22 light=15 fit
-box -3424 1536 1184  -3420 1664 1312   all=10 px=22 light=15 fit
-box -3424 1664 1184  -3420 1792 1312   all=10 px=22 light=15 fit
-box -3424 1792 1184  -3420 1920 1312   all=10 px=22 light=15 fit
+box -85.6 12.8 29.6 -85.5 16 32.8 all=10 px=22 light=15 fit
+box -85.6 16 29.6 -85.5 19.2 32.8 all=10 px=22 light=15 fit
+box -85.6 19.2 29.6 -85.5 22.4 32.8 all=10 px=22 light=15 fit
+box -85.6 22.4 29.6 -85.5 25.6 32.8 all=10 px=22 light=15 fit
+box -85.6 25.6 29.6 -85.5 28.8 32.8 all=10 px=22 light=15 fit
+box -85.6 28.8 29.6 -85.5 32 32.8 all=10 px=22 light=15 fit
+box -85.6 32 29.6 -85.5 35.2 32.8 all=10 px=22 light=15 fit
+box -85.6 35.2 29.6 -85.5 38.4 32.8 all=10 px=22 light=15 fit
+box -85.6 38.4 29.6 -85.5 41.6 32.8 all=10 px=22 light=15 fit
+box -85.6 41.6 29.6 -85.5 44.8 32.8 all=10 px=22 light=15 fit
+box -85.6 44.8 29.6 -85.5 48 32.8 all=10 px=22 light=15 fit
 
-box -3424  768  672  -3420  896  800   all=10 px=22 light=15 fit
-box -3424  768  800  -3420  896  928   all=10 px=22 light=15 fit
-box -3424  768  928  -3420  896 1056   all=10 px=22 light=15 fit
-box -3424  768 1312  -3420  896 1440   all=10 px=22 light=15 fit
-box -3424  768 1440  -3420  896 1568   all=10 px=22 light=15 fit
-box -3424  768 1568  -3420  896 1696   all=10 px=22 light=15 fit
+box -85.6 19.2 16.8 -85.5 22.4 20 all=10 px=22 light=15 fit
+box -85.6 19.2 20 -85.5 22.4 23.2 all=10 px=22 light=15 fit
+box -85.6 19.2 23.2 -85.5 22.4 26.4 all=10 px=22 light=15 fit
+box -85.6 19.2 32.8 -85.5 22.4 36 all=10 px=22 light=15 fit
+box -85.6 19.2 36 -85.5 22.4 39.2 all=10 px=22 light=15 fit
+box -85.6 19.2 39.2 -85.5 22.4 42.4 all=10 px=22 light=15 fit
 
-box -3424  896  672  -3420 1024  800   all=10 px=22 light=15 fit
-box -3424  896  800  -3420 1024  928   all=10 px=22 light=15 fit
-box -3424  896  928  -3420 1024 1056   all=10 px=22 light=15 fit
-box -3424  896 1312  -3420 1024 1440   all=10 px=22 light=15 fit
-box -3424  896 1440  -3420 1024 1568   all=10 px=22 light=15 fit
-box -3424  896 1568  -3420 1024 1696   all=10 px=22 light=15 fit
+box -85.6 22.4 16.8 -85.5 25.6 20 all=10 px=22 light=15 fit
+box -85.6 22.4 20 -85.5 25.6 23.2 all=10 px=22 light=15 fit
+box -85.6 22.4 23.2 -85.5 25.6 26.4 all=10 px=22 light=15 fit
+box -85.6 22.4 32.8 -85.5 25.6 36 all=10 px=22 light=15 fit
+box -85.6 22.4 36 -85.5 25.6 39.2 all=10 px=22 light=15 fit
+box -85.6 22.4 39.2 -85.5 25.6 42.4 all=10 px=22 light=15 fit
 
 // North wall
-box -3456  192   96  -1280 2368  128   all=10
+box -86.4 4.8 2.4 -32 59.2 3.2 all=10
 
-box -3392  256  128  -1344  512  160   all=10
-box -3392 1920  128  -1344 2304  160   all=10
-box -3392  512  128  -2496  768  160   all=10
-box -2240  512  128  -1344  768  160   all=10
-box -3392  768  128  -2880 1024  160   all=10
-box -1856  768  128  -1344 1024  160   all=10
-box -3392 1024  128  -2496 1920  160   all=10
-box -2240 1024  128  -1344 1920  160   all=10
+box -84.8 6.4 3.2 -33.6 12.8 4 all=10
+box -84.8 48 3.2 -33.6 57.6 4 all=10
+box -84.8 12.8 3.2 -62.4 19.2 4 all=10
+box -56 12.8 3.2 -33.6 19.2 4 all=10
+box -84.8 19.2 3.2 -72 25.6 4 all=10
+box -46.4 19.2 3.2 -33.6 25.6 4 all=10
+box -84.8 25.6 3.2 -62.4 48 4 all=10
+box -56 25.6 3.2 -33.6 48 4 all=10
 
-box -2496  512  128  -2368  640  132   all=10 pz=22 light=15 fit
-box -2496  640  128  -2368  768  132   all=10 pz=22 light=15 fit
-box -2496  768  128  -2368  896  132   all=10 pz=22 light=15 fit
-box -2496  896  128  -2368 1024  132   all=10 pz=22 light=15 fit
-box -2496 1024  128  -2368 1152  132   all=10 pz=22 light=15 fit
-box -2496 1152  128  -2368 1280  132   all=10 pz=22 light=15 fit
-box -2496 1280  128  -2368 1408  132   all=10 pz=22 light=15 fit
-box -2496 1408  128  -2368 1536  132   all=10 pz=22 light=15 fit
-box -2496 1536  128  -2368 1664  132   all=10 pz=22 light=15 fit
-box -2496 1664  128  -2368 1792  132   all=10 pz=22 light=15 fit
-box -2496 1792  128  -2368 1920  132   all=10 pz=22 light=15 fit
+box -62.4 12.8 3.2 -59.2 16 3.3 all=10 pz=22 light=15 fit
+box -62.4 16 3.2 -59.2 19.2 3.3 all=10 pz=22 light=15 fit
+box -62.4 19.2 3.2 -59.2 22.4 3.3 all=10 pz=22 light=15 fit
+box -62.4 22.4 3.2 -59.2 25.6 3.3 all=10 pz=22 light=15 fit
+box -62.4 25.6 3.2 -59.2 28.8 3.3 all=10 pz=22 light=15 fit
+box -62.4 28.8 3.2 -59.2 32 3.3 all=10 pz=22 light=15 fit
+box -62.4 32 3.2 -59.2 35.2 3.3 all=10 pz=22 light=15 fit
+box -62.4 35.2 3.2 -59.2 38.4 3.3 all=10 pz=22 light=15 fit
+box -62.4 38.4 3.2 -59.2 41.6 3.3 all=10 pz=22 light=15 fit
+box -62.4 41.6 3.2 -59.2 44.8 3.3 all=10 pz=22 light=15 fit
+box -62.4 44.8 3.2 -59.2 48 3.3 all=10 pz=22 light=15 fit
 
-box -2368  512  128  -2240  640  132   all=10 pz=22 light=15 fit
-box -2368  640  128  -2240  768  132   all=10 pz=22 light=15 fit
-box -2368  768  128  -2240  896  132   all=10 pz=22 light=15 fit
-box -2368  896  128  -2240 1024  132   all=10 pz=22 light=15 fit
-box -2368 1024  128  -2240 1152  132   all=10 pz=22 light=15 fit
-box -2368 1152  128  -2240 1280  132   all=10 pz=22 light=15 fit
-box -2368 1280  128  -2240 1408  132   all=10 pz=22 light=15 fit
-box -2368 1408  128  -2240 1536  132   all=10 pz=22 light=15 fit
-box -2368 1536  128  -2240 1664  132   all=10 pz=22 light=15 fit
-box -2368 1664  128  -2240 1792  132   all=10 pz=22 light=15 fit
-box -2368 1792  128  -2240 1920  132   all=10 pz=22 light=15 fit
+box -59.2 12.8 3.2 -56 16 3.3 all=10 pz=22 light=15 fit
+box -59.2 16 3.2 -56 19.2 3.3 all=10 pz=22 light=15 fit
+box -59.2 19.2 3.2 -56 22.4 3.3 all=10 pz=22 light=15 fit
+box -59.2 22.4 3.2 -56 25.6 3.3 all=10 pz=22 light=15 fit
+box -59.2 25.6 3.2 -56 28.8 3.3 all=10 pz=22 light=15 fit
+box -59.2 28.8 3.2 -56 32 3.3 all=10 pz=22 light=15 fit
+box -59.2 32 3.2 -56 35.2 3.3 all=10 pz=22 light=15 fit
+box -59.2 35.2 3.2 -56 38.4 3.3 all=10 pz=22 light=15 fit
+box -59.2 38.4 3.2 -56 41.6 3.3 all=10 pz=22 light=15 fit
+box -59.2 41.6 3.2 -56 44.8 3.3 all=10 pz=22 light=15 fit
+box -59.2 44.8 3.2 -56 48 3.3 all=10 pz=22 light=15 fit
 
-box -2880  768  128  -2752  896  132   all=10 pz=22 light=15 fit
-box -2752  768  128  -2624  896  132   all=10 pz=22 light=15 fit
-box -2624  768  128  -2496  896  132   all=10 pz=22 light=15 fit
-box -2240  768  128  -2112  896  132   all=10 pz=22 light=15 fit
-box -2112  768  128  -1984  896  132   all=10 pz=22 light=15 fit
-box -1984  768  128  -1856  896  132   all=10 pz=22 light=15 fit
+box -72 19.2 3.2 -68.8 22.4 3.3 all=10 pz=22 light=15 fit
+box -68.8 19.2 3.2 -65.6 22.4 3.3 all=10 pz=22 light=15 fit
+box -65.6 19.2 3.2 -62.4 22.4 3.3 all=10 pz=22 light=15 fit
+box -56 19.2 3.2 -52.8 22.4 3.3 all=10 pz=22 light=15 fit
+box -52.8 19.2 3.2 -49.6 22.4 3.3 all=10 pz=22 light=15 fit
+box -49.6 19.2 3.2 -46.4 22.4 3.3 all=10 pz=22 light=15 fit
 
-box -2880  896  128  -2752 1024  132   all=10 pz=22 light=15 fit
-box -2752  896  128  -2624 1024  132   all=10 pz=22 light=15 fit
-box -2624  896  128  -2496 1024  132   all=10 pz=22 light=15 fit
-box -2240  896  128  -2112 1024  132   all=10 pz=22 light=15 fit
-box -2112  896  128  -1984 1024  132   all=10 pz=22 light=15 fit
-box -1984  896  128  -1856 1024  132   all=10 pz=22 light=15 fit
+box -72 22.4 3.2 -68.8 25.6 3.3 all=10 pz=22 light=15 fit
+box -68.8 22.4 3.2 -65.6 25.6 3.3 all=10 pz=22 light=15 fit
+box -65.6 22.4 3.2 -62.4 25.6 3.3 all=10 pz=22 light=15 fit
+box -56 22.4 3.2 -52.8 25.6 3.3 all=10 pz=22 light=15 fit
+box -52.8 22.4 3.2 -49.6 25.6 3.3 all=10 pz=22 light=15 fit
+box -49.6 22.4 3.2 -46.4 25.6 3.3 all=10 pz=22 light=15 fit
 
 // South wall
-box -3456  192 2240  -1280 2368 2272   all=10
+box -86.4 4.8 56 -32 59.2 56.8 all=10
 
-box -3392  256 2208  -1344  512 2240   all=10
-box -3392 1920 2208  -1344 2304 2240   all=10
-box -3392  512 2208  -2496  768 2240   all=10
-box -2240  512 2208  -1344  768 2240   all=10
-box -3392  768 2208  -2880 1024 2240   all=10
-box -1856  768 2208  -1344 1024 2240   all=10
-box -3392 1024 2208  -2496 1920 2240   all=10
-box -2240 1024 2208  -1344 1920 2240   all=10
+box -84.8 6.4 55.2 -33.6 12.8 56 all=10
+box -84.8 48 55.2 -33.6 57.6 56 all=10
+box -84.8 12.8 55.2 -62.4 19.2 56 all=10
+box -56 12.8 55.2 -33.6 19.2 56 all=10
+box -84.8 19.2 55.2 -72 25.6 56 all=10
+box -46.4 19.2 55.2 -33.6 25.6 56 all=10
+box -84.8 25.6 55.2 -62.4 48 56 all=10
+box -56 25.6 55.2 -33.6 48 56 all=10
 
-box -2496  512 2236  -2368  640 2240   all=10 nz=22 light=15 fit
-box -2496  640 2236  -2368  768 2240   all=10 nz=22 light=15 fit
-box -2496  768 2236  -2368  896 2240   all=10 nz=22 light=15 fit
-box -2496  896 2236  -2368 1024 2240   all=10 nz=22 light=15 fit
-box -2496 1024 2236  -2368 1152 2240   all=10 nz=22 light=15 fit
-box -2496 1152 2236  -2368 1280 2240   all=10 nz=22 light=15 fit
-box -2496 1280 2236  -2368 1408 2240   all=10 nz=22 light=15 fit
-box -2496 1408 2236  -2368 1536 2240   all=10 nz=22 light=15 fit
-box -2496 1536 2236  -2368 1664 2240   all=10 nz=22 light=15 fit
-box -2496 1664 2236  -2368 1792 2240   all=10 nz=22 light=15 fit
-box -2496 1792 2236  -2368 1920 2240   all=10 nz=22 light=15 fit
+box -62.4 12.8 55.9 -59.2 16 56 all=10 nz=22 light=15 fit
+box -62.4 16 55.9 -59.2 19.2 56 all=10 nz=22 light=15 fit
+box -62.4 19.2 55.9 -59.2 22.4 56 all=10 nz=22 light=15 fit
+box -62.4 22.4 55.9 -59.2 25.6 56 all=10 nz=22 light=15 fit
+box -62.4 25.6 55.9 -59.2 28.8 56 all=10 nz=22 light=15 fit
+box -62.4 28.8 55.9 -59.2 32 56 all=10 nz=22 light=15 fit
+box -62.4 32 55.9 -59.2 35.2 56 all=10 nz=22 light=15 fit
+box -62.4 35.2 55.9 -59.2 38.4 56 all=10 nz=22 light=15 fit
+box -62.4 38.4 55.9 -59.2 41.6 56 all=10 nz=22 light=15 fit
+box -62.4 41.6 55.9 -59.2 44.8 56 all=10 nz=22 light=15 fit
+box -62.4 44.8 55.9 -59.2 48 56 all=10 nz=22 light=15 fit
 
-box -2368  512 2236  -2240  640 2240   all=10 nz=22 light=15 fit
-box -2368  640 2236  -2240  768 2240   all=10 nz=22 light=15 fit
-box -2368  768 2236  -2240  896 2240   all=10 nz=22 light=15 fit
-box -2368  896 2236  -2240 1024 2240   all=10 nz=22 light=15 fit
-box -2368 1024 2236  -2240 1152 2240   all=10 nz=22 light=15 fit
-box -2368 1152 2236  -2240 1280 2240   all=10 nz=22 light=15 fit
-box -2368 1280 2236  -2240 1408 2240   all=10 nz=22 light=15 fit
-box -2368 1408 2236  -2240 1536 2240   all=10 nz=22 light=15 fit
-box -2368 1536 2236  -2240 1664 2240   all=10 nz=22 light=15 fit
-box -2368 1664 2236  -2240 1792 2240   all=10 nz=22 light=15 fit
-box -2368 1792 2236  -2240 1920 2240   all=10 nz=22 light=15 fit
+box -59.2 12.8 55.9 -56 16 56 all=10 nz=22 light=15 fit
+box -59.2 16 55.9 -56 19.2 56 all=10 nz=22 light=15 fit
+box -59.2 19.2 55.9 -56 22.4 56 all=10 nz=22 light=15 fit
+box -59.2 22.4 55.9 -56 25.6 56 all=10 nz=22 light=15 fit
+box -59.2 25.6 55.9 -56 28.8 56 all=10 nz=22 light=15 fit
+box -59.2 28.8 55.9 -56 32 56 all=10 nz=22 light=15 fit
+box -59.2 32 55.9 -56 35.2 56 all=10 nz=22 light=15 fit
+box -59.2 35.2 55.9 -56 38.4 56 all=10 nz=22 light=15 fit
+box -59.2 38.4 55.9 -56 41.6 56 all=10 nz=22 light=15 fit
+box -59.2 41.6 55.9 -56 44.8 56 all=10 nz=22 light=15 fit
+box -59.2 44.8 55.9 -56 48 56 all=10 nz=22 light=15 fit
 
-box -2880  768 2236  -2752  896 2240   all=10 nz=22 light=15 fit
-box -2752  768 2236  -2624  896 2240   all=10 nz=22 light=15 fit
-box -2624  768 2236  -2496  896 2240   all=10 nz=22 light=15 fit
-box -2240  768 2236  -2112  896 2240   all=10 nz=22 light=15 fit
-box -2112  768 2236  -1984  896 2240   all=10 nz=22 light=15 fit
-box -1984  768 2236  -1856  896 2240   all=10 nz=22 light=15 fit
+box -72 19.2 55.9 -68.8 22.4 56 all=10 nz=22 light=15 fit
+box -68.8 19.2 55.9 -65.6 22.4 56 all=10 nz=22 light=15 fit
+box -65.6 19.2 55.9 -62.4 22.4 56 all=10 nz=22 light=15 fit
+box -56 19.2 55.9 -52.8 22.4 56 all=10 nz=22 light=15 fit
+box -52.8 19.2 55.9 -49.6 22.4 56 all=10 nz=22 light=15 fit
+box -49.6 19.2 55.9 -46.4 22.4 56 all=10 nz=22 light=15 fit
 
-box -2880  896 2236  -2752 1024 2240   all=10 nz=22 light=15 fit
-box -2752  896 2236  -2624 1024 2240   all=10 nz=22 light=15 fit
-box -2624  896 2236  -2496 1024 2240   all=10 nz=22 light=15 fit
-box -2240  896 2236  -2112 1024 2240   all=10 nz=22 light=15 fit
-box -2112  896 2236  -1984 1024 2240   all=10 nz=22 light=15 fit
-box -1984  896 2236  -1856 1024 2240   all=10 nz=22 light=15 fit
+box -72 22.4 55.9 -68.8 25.6 56 all=10 nz=22 light=15 fit
+box -68.8 22.4 55.9 -65.6 25.6 56 all=10 nz=22 light=15 fit
+box -65.6 22.4 55.9 -62.4 25.6 56 all=10 nz=22 light=15 fit
+box -56 22.4 55.9 -52.8 25.6 56 all=10 nz=22 light=15 fit
+box -52.8 22.4 55.9 -49.6 25.6 56 all=10 nz=22 light=15 fit
+box -49.6 22.4 55.9 -46.4 25.6 56 all=10 nz=22 light=15 fit
 
 // --- The roof ---
 //
-// The slab is broken into coffers by eight ribs, 96 across and hanging 128
-// below it, and the middle square of that grid is left open: a well 512 across
-// and 768 deep, capped by a bank of lamps.
+// The slab is broken into coffers by eight ribs, 2.4 m across and hanging
+// 3.2 m below it, and the middle square of that grid is left open: a well
+// 12.8 m across and 19.2 m deep, capped by a bank of lamps.
 //
 // The ribs are set out from the opening rather than from the room, so the two
 // either side of it frame it exactly and the coffers left over still come out
-// even -- 288 apiece, against the 512 of the well.
+// even -- 7.2 m apiece, against the 12.8 m of the well.
 //
 // The well holds the only white light in the room, and it lands where it would
 // fall: on the top of the monolith, which stands directly under it. Two lamps
@@ -551,31 +557,31 @@ box -1984  896 2236  -1856 1024 2240   all=10 nz=22 light=15 fit
 // well, and a second below the mouth does the falling: light does not carry
 // through the slab, so nothing above it can light what is below.
 
-box -3456 2304   96  -2624 2368 2272   all=18
-box -2112 2304   96  -1280 2368 2272   all=18
-box -2624 2304   96  -2112 2368  928   all=18
-box -2624 2304 1440  -2112 2368 2272   all=18
+box -86.4 57.6 2.4 -65.6 59.2 56.8 all=18
+box -52.8 57.6 2.4 -32 59.2 56.8 all=18
+box -65.6 57.6 2.4 -52.8 59.2 23.2 all=18
+box -65.6 57.6 36 -52.8 59.2 56.8 all=18
 
-box -3392 2176  448  -1344 2304  544   all=8
-box -3392 2176  832  -1344 2304  928   all=8
-box -3392 2176 1440  -1344 2304 1536   all=8
-box -3392 2176 1824  -1344 2304 1920   all=8
+box -84.8 54.4 11.2 -33.6 57.6 13.6 all=8
+box -84.8 54.4 20.8 -33.6 57.6 23.2 all=8
+box -84.8 54.4 36 -33.6 57.6 38.4 all=8
+box -84.8 54.4 45.6 -33.6 57.6 48 all=8
 
-box -3104 2176  160  -3008 2304 2208   all=8
-box -2720 2176  160  -2624 2304 2208   all=8
-box -2112 2176  160  -2016 2304 2208   all=8
-box -1728 2176  160  -1632 2304 2208   all=8
+box -77.6 54.4 4 -75.2 57.6 55.2 all=8
+box -68 54.4 4 -65.6 57.6 55.2 all=8
+box -52.8 54.4 4 -50.4 57.6 55.2 all=8
+box -43.2 54.4 4 -40.8 57.6 55.2 all=8
 
 // The well itself, and the four lamp panels that cap it
-box -2688 2304  864  -2624 3136 1504   all=8
-box -2112 2304  864  -2048 3136 1504   all=8
-box -2688 2304  864  -2048 3136  928   all=8
-box -2688 2304 1440  -2048 3136 1504   all=8
+box -67.2 57.6 21.6 -65.6 78.4 37.6 all=8
+box -52.8 57.6 21.6 -51.2 78.4 37.6 all=8
+box -67.2 57.6 21.6 -51.2 78.4 23.2 all=8
+box -67.2 57.6 36 -51.2 78.4 37.6 all=8
 
-box -2624 3072  928  -2368 3136 1184   all=8 ny=11 light=15 fit
-box -2624 3072 1184  -2368 3136 1440   all=8 ny=11 light=15 fit
-box -2368 3072  928  -2112 3136 1184   all=8 ny=11 light=15 fit
-box -2368 3072 1184  -2112 3136 1440   all=8 ny=11 light=15 fit
+box -65.6 76.8 23.2 -59.2 78.4 29.6 all=8 ny=11 light=15 fit
+box -65.6 76.8 29.6 -59.2 78.4 36 all=8 ny=11 light=15 fit
+box -59.2 76.8 23.2 -52.8 78.4 29.6 all=8 ny=11 light=15 fit
+box -59.2 76.8 29.6 -52.8 78.4 36 all=8 ny=11 light=15 fit
 
 // --- The monolith ---
 //
@@ -583,8 +589,8 @@ box -2368 3072 1184  -2112 3136 1440   all=8 ny=11 light=15 fit
 // of the room with its broad face to the door. The crosses now stand clear of
 // its top, so it reads against them rather than over them.
 
-box -2560 256  944  -2176  352 1424   all=21
-box -2440 352  968  -2296 1648 1400   all=21
+box -64 6.4 23.6 -54.4 8.8 35.6 all=21
+box -61 8.8 24.2 -57.4 41.2 35 all=21
 
 // --- Light ---
 //
@@ -594,25 +600,25 @@ box -2440 352  968  -2296 1648 1400   all=21
 // against the dark behind it. Nothing here is baked with shadows, so every
 // radius is kept short enough to die before it reaches the next room.
 //
-// The pair under the well is kept tight on purpose: at 800 it dies well short
+// The pair under the well is kept tight on purpose: at 20 m it dies well short
 // of the walls, so what it lights is the ribs around the mouth and the top of
 // the slab, and the floor stays as dark as the rest of the room.
 //
 // The pair has to sit outside the slab: a lamp buried in it would face the
 // backs of its own faces and light nothing.
 
-light -3360  896 1184 1720 0.34
-light -2368  896  192 1720 0.34
-light -2368  896 2176 1720 0.34
-light -2368 2120 1184 1700 0.22
-light -2368 2950 1184  850 1.00
-light -2368 1980 1184  900 0.60
-light -2224  500 1184  630 0.30
-light -2512  500 1184  600 0.22
-light -1560  460 1184  700 0.20
+light -84 22.4 29.6 43 0.34
+light -59.2 22.4 4.8 43 0.34
+light -59.2 22.4 54.4 43 0.34
+light -59.2 53 29.6 42.5 0.22
+light -59.2 73.75 29.6 21.25 1.00
+light -59.2 49.5 29.6 22.5 0.60
+light -55.6 12.5 29.6 15.75 0.30
+light -62.8 12.5 29.6 15 0.22
+light -39 11.5 29.6 17.5 0.20
 
 // The way in wants enough light to walk by, and no more
-light  -700 140 1184 320 0.55
-light  -900 240 1184 340 0.45
-light -1080 320 1184 340 0.45
-light -1250 440 1184 320 0.40
+light -17.5 3.5 29.6 8 0.55
+light -22.5 6 29.6 8.5 0.45
+light -27 8 29.6 8.5 0.45
+light -31.25 11 29.6 8 0.40
