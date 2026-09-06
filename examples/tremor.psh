@@ -10,6 +10,17 @@
 // list of the parts of each scanline already covered, so a pixel is only ever
 // written once however much geometry stands behind it.
 //
+// The world is cut into areas, each holding its own brushes, its own lights and
+// its own BSP tree, and each reading its coordinates as its own. What joins them
+// is portals: one-sided quads standing in a doorway that name the area on the
+// other side and the change of coordinates to get there. An area is drawn by
+// walking its tree front to back as before, and when the walk reaches a portal
+// it asks the s-buffer whether any part of that quad is still uncovered. If some
+// is, the area beyond is drawn in turn, with the camera carried into its
+// coordinates and the rasterizer held to the rectangle the portal showed
+// through. A portal may lead back where it came from, so the recursion stops
+// after MAX_PORTAL_DEPTH of them.
+//
 // The span loop is the one from examples/textured_cube.psh: u and v are packed
 // into the two halves of one integer so a single add steps both. Here it runs
 // over sub-spans, with the perspective divide done once per sub-span, which is
@@ -20,7 +31,7 @@
 // Light is baked per face at load time from the point lights in the map, into
 // darkened copies of each texture, so the span loop stays a plain texel copy.
 //
-// Usage: plush examples/level_walk.psh [map file] [frames] [shot directory]
+// Usage: plush examples/tremor.psh [map file] [frames] [shot directory]
 //
 //   W A S D     move
 //   arrows      turn and look
@@ -150,6 +161,18 @@ let LIGHT_TOL = 16.0;
 // The level everything starts from, before any lamp reaches it
 let AMBIENT = 0.13;
 
+// --- Areas and portals ---
+
+// How many portals deep the recursion may go. An area drawn at this depth has
+// its geometry but not its portals, so whatever lies beyond those stays void.
+// Two rooms facing each other through a pair of portals would otherwise recurse
+// forever, and the fourth copy of a room is already a few pixels across.
+let MAX_PORTAL_DEPTH = 4;
+
+// How far off a portal's plane the player may be and still count as having
+// crossed it, and how far outside its rectangle the crossing point may land
+let PORTAL_SLOP = 0.1;
+
 // --- Player ---
 
 let EYE_HEIGHT = 1.6;
@@ -187,6 +210,10 @@ let var cos_yaw = 1.0;
 let var sin_pitch = 0.0;
 let var cos_pitch = 1.0;
 let var noclip = false;
+
+// Which area the camera stands in, and so which coordinate system the values
+// above are read in. It changes as the player walks through a portal.
+let var cam_area = 0;
 
 // --- Scratch buffers, reused so that drawing a frame allocates no arrays ---
 
@@ -237,8 +264,6 @@ let var g_umask = 0;
 let var g_vshift = 0;
 let var g_vmask = 0;
 let var g_wrap = 0;
-
-let var bsp_root = nil;
 
 // Lava swell. The surface is cut into small quads at load and their corners
 // ride a pair of sine waves, one running along x and one along z, so the lava
@@ -368,6 +393,72 @@ fun sbuf_insert(y, x0, x1) {
     }
     return n_vis;
 }
+
+// How far the uncovered part of [x0, x1) reaches on scanline y, left edge in
+// probe_x0 and right edge in probe_x1, without covering anything. This is what
+// a portal asks: it is not drawn itself, it only wants to know whether anything
+// behind it could still be seen, and between which columns.
+//
+// Unlike the insert above, an interval ending exactly at x0 is left behind
+// rather than joined: nothing is being coalesced here, and it covers no part of
+// the range asked about.
+let var probe_x0 = 0;
+let var probe_x1 = 0;
+
+fun sbuf_probe(y, x0, x1) {
+    if (sb_full.get_u32(y) != 0) return false;
+
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN && sp_x1[cur] <= x0) cur = sp_next[cur];
+
+    let var lo = 0 - 1;
+    let var hi = 0;
+    let var cx = x0;
+    while (cur != NO_SPAN) {
+        let sx0 = sp_x0[cur];
+        if (sx0 >= x1) break;
+
+        if (sx0 > cx) {
+            if (lo < 0) lo = cx;
+            hi = sx0;
+        }
+        if (sp_x1[cur] > cx) cx = sp_x1[cur];
+        cur = sp_next[cur];
+    }
+    if (cx < x1) {
+        if (lo < 0) lo = cx;
+        hi = x1;
+    }
+
+    if (lo < 0) return false;
+    probe_x0 = lo;
+    probe_x1 = hi;
+    return true;
+}
+
+// --- The clip rectangle ---
+
+// Where the rasterizer is allowed to put pixels at all. It is the whole frame
+// while the area the camera stands in is being drawn, and the rectangle a
+// portal was seen through while the area beyond it is. Nothing outside a portal
+// can be reached through it, so this is what keeps a room from spilling out
+// around the doorway it is seen in.
+let var clip_x0 = 0;
+let var clip_x1 = FRAME_WIDTH;
+let var clip_y0 = 0;
+let var clip_y1 = FRAME_HEIGHT;
+
+// The plane of the portal being looked through, with its normal pointing back
+// at the eye, or inactive while the camera's own area is being drawn. Areas
+// meet at a portal by each carrying its own copy of the wall the portal is a
+// hole in, so the area beyond holds surfaces that stand between the eye and the
+// portal. Everything on the eye's side of this plane is dropped, which is
+// exactly those.
+let var pp_active = false;
+let var pp_nx = 0.0;
+let var pp_ny = 0.0;
+let var pp_nz = 0.0;
+let var pp_d = 0.0;
 
 // --- Textures ---
 
@@ -502,15 +593,78 @@ class Face {
 
         // One light level per vertex, as a float so that it interpolates
         self.vl = nil;
+
+        // Set on the quad standing in a doorway: the way through to another
+        // area. Such a face is never drawn, only looked through.
+        self.portal = nil;
+    }
+}
+
+// The way through one portal: which area it opens onto, and the change of
+// coordinates that gets there. A point is turned by `ang` about the vertical
+// axis and then moved by `tx, ty, tz`; the camera's yaw gains `ang` to match.
+// Both are zero between rooms laid out in one shared coordinate system, and the
+// pair is what lets an area be built around its own origin instead.
+class Portal {
+    init(self, name, ang, tx, ty, tz) {
+        // The area named here may not have been declared yet, so the name is
+        // what is kept and the index is filled in once the whole map is read
+        self.name = name;
+        self.target = 0 - 1;
+        self.ang = ang;
+        self.cos_a = ang.cos();
+        self.sin_a = ang.sin();
+        self.tx = tx;
+        self.ty = ty;
+        self.tz = tz;
+
+        // The rectangle the way through stands in, for the crossing test
+        self.x0 = 0.0; self.y0 = 0.0; self.z0 = 0.0;
+        self.x1 = 0.0; self.y1 = 0.0; self.z1 = 0.0;
+
+        // The plane it lies in, normal pointing back into the area it is seen
+        // from. Filled in once the quad is built.
+        self.nx = 0.0; self.ny = 0.0; self.nz = 0.0; self.d = 0.0;
+    }
+}
+
+// One cell of the world: the solids that bound it, the lamps inside it, the
+// ways out of it, and a BSP tree over its own faces. Coordinates mean whatever
+// this area says they mean, and a portal is what translates between two of them.
+class Area {
+    init(self, name) {
+        self.name = name;
+        self.faces = [];
+        self.brushes = [];
+        self.lights = [];
+        self.portals = [];
+        self.root = nil;
     }
 }
 
 let textures = [];
 let tex_by_name = {};
-let faces = [];
-let brushes = [];
-let lights = [];
 
+let areas = [];
+let area_by_name = {};
+
+// The area whose brushes and lamps the baking below is working on. Light is an
+// area's own business: it is cast by the lamps in that area and stopped by the
+// solids in it, and none of it reaches through a portal.
+let var bake_brushes = nil;
+let var bake_lights = nil;
+
+// The area map commands are read into, and the portals waiting on the area they
+// name to be declared
+let var cur_area = nil;
+let pending_portals = [];
+
+// A set tour of the level, as area, x, y, z, yaw and pitch, read from the map.
+// The headless mode below renders it without opening a window, times it, and
+// can write each viewpoint out as a screenshot.
+let tour = [];
+
+let var start_area = 0;
 let var start_x = 0.0;
 let var start_y = 1.6;
 let var start_z = 0.0;
@@ -812,10 +966,11 @@ fun set_brush_bounds(b, planes) {
 fun add_brush(planes) {
     let b = Brush(planes);
     set_brush_bounds(b, planes);
-    brushes.push(b);
+    cur_area.brushes.push(b);
 
     let new_faces = brush_to_faces(planes);
-    for (let var i = 0; i < new_faces.len; ++i) faces.push(new_faces[i]);
+    let out = cur_area.faces;
+    for (let var i = 0; i < new_faces.len; ++i) out.push(new_faces[i]);
 }
 
 // An axis-aligned box
@@ -941,6 +1096,78 @@ fun cmd_arch(axis, a0, a1, c0, c1, ybase, ytop, segs, o) {
     }
 }
 
+// A one-way quad standing in a doorway: seen from this area it shows whatever
+// the area it names holds. `dir` is the way through it, which is also the wall
+// of this area it sits in, so the quad itself faces back into the room and goes
+// away as a backface once the eye is past it.
+//
+// The rectangle is given the way a box is, with no thickness along the axis
+// `dir` runs on.
+fun cmd_portal(p, x0, y0, z0, x1, y1, z1, dir) {
+    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+    let v = [];
+
+    if (dir == "px" || dir == "nx") {
+        if (dir == "px") nx = -1.0; else nx = 1.0;
+        v.push(x0); v.push(y0); v.push(z0);
+        v.push(x0); v.push(y0); v.push(z1);
+        v.push(x0); v.push(y1); v.push(z1);
+        v.push(x0); v.push(y1); v.push(z0);
+    } else if (dir == "py" || dir == "ny") {
+        if (dir == "py") ny = -1.0; else ny = 1.0;
+        v.push(x0); v.push(y0); v.push(z0);
+        v.push(x1); v.push(y0); v.push(z0);
+        v.push(x1); v.push(y0); v.push(z1);
+        v.push(x0); v.push(y0); v.push(z1);
+    } else if (dir == "pz" || dir == "nz") {
+        if (dir == "pz") nz = -1.0; else nz = 1.0;
+        v.push(x0); v.push(y0); v.push(z0);
+        v.push(x1); v.push(y0); v.push(z0);
+        v.push(x1); v.push(y1); v.push(z0);
+        v.push(x0); v.push(y1); v.push(z0);
+    } else {
+        $println("portal dir must be px, nx, py, ny, pz or nz, got " + dir);
+        $exit(1);
+    }
+
+    // Only one component of the normal is set, and the corner is on the plane
+    // whichever axis that is
+    let d = nx * x0 + ny * y0 + nz * z0;
+    p.nx = nx; p.ny = ny; p.nz = nz; p.d = d;
+    p.x0 = x0; p.y0 = y0; p.z0 = z0;
+    p.x1 = x1; p.y1 = y1; p.z1 = z1;
+
+    // The quad rides in the area's BSP tree like any other face, which is what
+    // puts it in its place in the front to back order
+    let f = Face(v, nx, ny, nz, d, nil, 0 - 1, false, false, TEXELS_PER_METER, false);
+    f.portal = p;
+    cur_area.faces.push(f);
+    cur_area.portals.push(p);
+    pending_portals.push(p);
+}
+
+// The optional tail of a portal command: how coordinates change going through
+// it. All zero between areas sharing one coordinate system.
+fun parse_xform(tok, first) {
+    let out = [0.0, 0.0, 0.0, 0.0];
+    for (let var i = first; i < tok.len; ++i) {
+        let kv = tok[i].split("=");
+        if (kv.len != 2) {
+            $println("bad portal token: " + tok[i]);
+            $exit(1);
+        }
+        if (kv[0] == "yaw") out[0] = parse_num(kv[1]) * PI / 180.0;
+        else if (kv[0] == "dx") out[1] = parse_num(kv[1]);
+        else if (kv[0] == "dy") out[2] = parse_num(kv[1]);
+        else if (kv[0] == "dz") out[3] = parse_num(kv[1]);
+        else {
+            $println("unknown portal key: " + kv[0]);
+            $exit(1);
+        }
+    }
+    return out;
+}
+
 fun parse_map(path) {
     let text = $read_file_utf8(path);
     if (text == nil) {
@@ -954,7 +1181,32 @@ fun parse_map(path) {
         if (tok.len == 0) continue;
         let cmd = tok[0];
 
+        // `area <name> {` opens a cell and `}` closes it. Everything else
+        // belongs to whichever one is open.
+        if (cmd == "area") {
+            if (tok.len < 2) {
+                $println("area needs a name");
+                $exit(1);
+            }
+            let a = Area(tok[1]);
+            area_by_name[a.name] = areas.len;
+            areas.push(a);
+            cur_area = a;
+            continue;
+        }
+
+        if (cmd == "}") {
+            cur_area = nil;
+            continue;
+        }
+
+        if (cur_area == nil) {
+            $println("map command outside any area: " + cmd);
+            $exit(1);
+        }
+
         if (cmd == "spawn") {
+            start_area = areas.len - 1;
             start_x = field_num(tok, 1, "x");
             start_y = field_num(tok, 2, "y");
             start_z = field_num(tok, 3, "z");
@@ -964,8 +1216,28 @@ fun parse_map(path) {
 
         // A point light: where it is, how far it reaches, how strong it is
         if (cmd == "light") {
-            lights.push([field_num(tok, 1, "x"), field_num(tok, 2, "y"), field_num(tok, 3, "z"),
-                field_num(tok, 4, "radius"), field_num(tok, 5, "brightness")]);
+            cur_area.lights.push([field_num(tok, 1, "x"), field_num(tok, 2, "y"),
+                field_num(tok, 3, "z"), field_num(tok, 4, "radius"),
+                field_num(tok, 5, "brightness")]);
+            continue;
+        }
+
+        // One viewpoint of the set tour the headless mode walks
+        if (cmd == "tour") {
+            tour.push([areas.len - 1,
+                field_num(tok, 1, "x"), field_num(tok, 2, "y"), field_num(tok, 3, "z"),
+                field_num(tok, 4, "yaw") * PI / 180.0,
+                field_num(tok, 5, "pitch") * PI / 180.0]);
+            continue;
+        }
+
+        if (cmd == "portal") {
+            let x = parse_xform(tok, 9);
+            let p = Portal(field(tok, 1, "to"), x[0], x[1], x[2], x[3]);
+            cmd_portal(p,
+                field_num(tok, 2, "x0"), field_num(tok, 3, "y0"), field_num(tok, 4, "z0"),
+                field_num(tok, 5, "x1"), field_num(tok, 6, "y1"), field_num(tok, 7, "z1"),
+                field(tok, 8, "dir"));
             continue;
         }
 
@@ -1000,6 +1272,17 @@ fun parse_map(path) {
         $println("unknown map command: " + cmd);
         $exit(1);
     }
+
+    // Areas are named before they are declared as often as not, so the names
+    // are turned into indices only now that every one of them is known
+    for (let var i = 0; i < pending_portals.len; ++i) {
+        let p = pending_portals[i];
+        if (!area_by_name.has(p.name)) {
+            $println("portal leads to unknown area: " + p.name);
+            $exit(1);
+        }
+        p.target = area_by_name[p.name];
+    }
 }
 
 // --- Lighting ---
@@ -1018,8 +1301,8 @@ fun occluded(ax, ay, az, bx, by, bz) {
     let var lz = az; let var hz = bz;
     if (hz < lz) { lz = bz; hz = az; }
 
-    for (let var i = 0; i < brushes.len; ++i) {
-        let b = brushes[i];
+    for (let var i = 0; i < bake_brushes.len; ++i) {
+        let b = bake_brushes[i];
         if (hx < b.x0 || lx > b.x1) continue;
         if (hy < b.y0 || ly > b.y1) continue;
         if (hz < b.z0 || lz > b.z1) continue;
@@ -1060,8 +1343,8 @@ fun occluded(ax, ay, az, bx, by, bz) {
 // Is this point strictly inside a brush? Boundaries do not count: a sample
 // lifted off one surface routinely lands exactly on another.
 fun in_solid(x, y, z) {
-    for (let var i = 0; i < brushes.len; ++i) {
-        let b = brushes[i];
+    for (let var i = 0; i < bake_brushes.len; ++i) {
+        let b = bake_brushes[i];
         if (x <= b.x0 || x >= b.x1) continue;
         if (y <= b.y0 || y >= b.y1) continue;
         if (z <= b.z0 || z >= b.z1) continue;
@@ -1107,8 +1390,8 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     let buried = in_solid(cx + mx * probe, cy + my * probe, cz + mz * probe);
 
     let var lum = AMBIENT;
-    for (let var i = 0; i < lights.len; ++i) {
-        let L = lights[i];
+    for (let var i = 0; i < bake_lights.len; ++i) {
+        let L = bake_lights[i];
         let dx = L[0] - cx;
         let dy = L[1] - cy;
         let dz = L[2] - cz;
@@ -1348,11 +1631,13 @@ fun split_face(f, nx, ny, nz, d) {
     if (back.len >= 9) {
         let g = Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn);
         g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        g.portal = f.portal;
         out.push(g);
     }
     if (front.len >= 9) {
         let g = Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn);
         g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        g.portal = f.portal;
         out.push(g);
     }
     return out;
@@ -1581,9 +1866,9 @@ fun raster_poly(m) {
     }
 
     let var scan_y = y_min.floor();
-    if (scan_y < 0) scan_y = 0;
+    if (scan_y < clip_y0) scan_y = clip_y0;
     let var end_y = y_max.floor();
-    if (end_y > FRAME_HEIGHT) end_y = FRAME_HEIGHT;
+    if (end_y > clip_y1) end_y = clip_y1;
     if (scan_y >= end_y) return;
 
     // Which way round the left chain runs, from the winding on screen
@@ -1615,6 +1900,8 @@ fun raster_poly(m) {
     let vshift = g_vshift;
     let vmask = g_vmask;
     let wrap = g_wrap;
+    let cx0 = clip_x0;
+    let cx1 = clip_x1;
     let mask_rb = MASK_RB;
     let mask_g = MASK_G;
     let alpha = ALPHA;
@@ -1667,9 +1954,9 @@ fun raster_poly(m) {
 
         while (scan_y < band_end) {
             let var xa = xl.floor();
-            if (xa < 0) xa = 0;
+            if (xa < cx0) xa = cx0;
             let var xb = xr.floor();
-            if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+            if (xb > cx1) xb = cx1;
 
             if (xa < xb) {
                 let n_vis = sbuf_insert(scan_y, xa, xb);
@@ -1813,6 +2100,24 @@ fun draw_face(f) {
     let n = f.v.len.idiv(3);
     if (n > MAX_VERTS - 8) return;
 
+    // Seen through a portal, anything lying wholly on the eye's side of its
+    // plane is part of the wall the portal is a hole in. Both areas carry that
+    // wall, so the eye's own copy is already drawn and this one would do
+    // nothing but paper over the doorway. A face reaching past the plane is
+    // kept: it is a jamb running back towards the eye, and the part of it in
+    // front is covered by the other copy anyway.
+    if (pp_active) {
+        let var through = false;
+        for (let var i = 0; i < n; ++i) {
+            if (pp_nx * f.v[i * 3] + pp_ny * f.v[i * 3 + 1] + pp_nz * f.v[i * 3 + 2]
+                - pp_d < 0.0 - PLANE_EPS) {
+                through = true;
+                break;
+            }
+        }
+        if (!through) return;
+    }
+
     for (let var i = 0; i < n; ++i) {
         let wx = f.v[i * 3];
         let var wy = f.v[i * 3 + 1];
@@ -1927,12 +2232,218 @@ fun draw_face(f) {
     raster_poly(m);
 }
 
-// The five planes of the view frustum, in world space, as normal and offset.
-// A point is inside a plane when nx*x + ny*y + nz*z - d >= 0.
-let fr_nx = Array.with_size(5, 0.0);
-let fr_ny = Array.with_size(5, 0.0);
-let fr_nz = Array.with_size(5, 0.0);
-let fr_d = Array.with_size(5, 0.0);
+// --- Portals ---
+
+// The box around the parts of the last portal scanned that were still
+// uncovered, which is what the area beyond it gets to draw in
+let var pv_x0 = 0;
+let var pv_x1 = 0;
+let var pv_y0 = 0;
+let var pv_y1 = 0;
+
+// Walk the projected quad in pX/pY scanline by scanline the way the rasterizer
+// does, but ask the s-buffer what is still visible on each line instead of
+// writing anything. What comes back is the box around every uncovered piece of
+// it, or false if the quad is hidden and there is nothing behind it to draw.
+fun portal_scan(m) {
+    let var top = 0;
+    let var y_min = pY[0];
+    let var bot = 0;
+    let var y_max = pY[0];
+    for (let var i = 1; i < m; ++i) {
+        if (pY[i] < y_min) { y_min = pY[i]; top = i; }
+        if (pY[i] > y_max) { y_max = pY[i]; bot = i; }
+    }
+
+    let var scan_y = y_min.floor();
+    if (scan_y < clip_y0) scan_y = clip_y0;
+    let var end_y = y_max.floor();
+    if (end_y > clip_y1) end_y = clip_y1;
+    if (scan_y >= end_y) return false;
+
+    let var area = 0.0;
+    for (let var i = 0; i < m; ++i) {
+        let var j = i + 1;
+        if (j == m) j = 0;
+        area = area + pX[i] * pY[j] - pX[j] * pY[i];
+    }
+    let var step_l = 1;
+    if (area > 0.0) step_l = m - 1;
+    let step_r = m - step_l;
+
+    let cx0 = clip_x0;
+    let cx1 = clip_x1;
+
+    let var found = false;
+    let var lo_x = 0; let var hi_x = 0;
+    let var lo_y = 0; let var hi_y = 0;
+
+    let var cl = top; let var xl = 0.0; let var dxl = 0.0; let var end_l = scan_y;
+    let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = scan_y;
+
+    while (scan_y < end_y) {
+        while (scan_y >= end_l && cl != bot) {
+            let ya = pY[cl];
+            let xa = pX[cl];
+            cl = (cl + step_l) % m;
+            let yb = pY[cl];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_l = e;
+            if (end_l > scan_y && yb > ya) {
+                dxl = (pX[cl] - xa) / (yb - ya);
+                xl = xa + (scan_y + 1 - ya) * dxl;
+            }
+        }
+        while (scan_y >= end_r && cr != bot) {
+            let ya = pY[cr];
+            let xa = pX[cr];
+            cr = (cr + step_r) % m;
+            let yb = pY[cr];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_r = e;
+            if (end_r > scan_y && yb > ya) {
+                dxr = (pX[cr] - xa) / (yb - ya);
+                xr = xa + (scan_y + 1 - ya) * dxr;
+            }
+        }
+
+        let var band_end = end_l;
+        if (end_r < band_end) band_end = end_r;
+        if (band_end <= scan_y) break;
+
+        while (scan_y < band_end) {
+            let var xa = xl.floor();
+            if (xa < cx0) xa = cx0;
+            let var xb = xr.floor();
+            if (xb > cx1) xb = cx1;
+
+            if (xa < xb && sbuf_probe(scan_y, xa, xb)) {
+                if (!found) {
+                    found = true;
+                    lo_x = probe_x0;
+                    hi_x = probe_x1;
+                    lo_y = scan_y;
+                } else {
+                    if (probe_x0 < lo_x) lo_x = probe_x0;
+                    if (probe_x1 > hi_x) hi_x = probe_x1;
+                }
+                hi_y = scan_y + 1;
+            }
+
+            xl = xl + dxl;
+            xr = xr + dxr;
+            scan_y = scan_y + 1;
+        }
+    }
+
+    if (!found) return false;
+
+    pv_x0 = lo_x;
+    pv_x1 = hi_x;
+    pv_y0 = lo_y;
+    pv_y1 = hi_y;
+    return true;
+}
+
+// Transform, clip and project a portal quad, then scan it. A portal carries no
+// texture and no light, so this is the same march as a face without any of the
+// gradients that go with drawing one.
+fun portal_visible(f) {
+    let n = f.v.len.idiv(3);
+    if (n > MAX_VERTS - 8) return false;
+
+    for (let var i = 0; i < n; ++i) {
+        let dx = f.v[i * 3] - cam_x;
+        let dy = f.v[i * 3 + 1] - cam_y;
+        let dz = f.v[i * 3 + 2] - cam_z;
+        let rx = dx * cos_yaw - dz * sin_yaw;
+        let rz = dx * sin_yaw + dz * cos_yaw;
+
+        aX[i] = rx;
+        aY[i] = dy * cos_pitch - rz * sin_pitch;
+        aZ[i] = rz * cos_pitch + dy * sin_pitch;
+    }
+
+    let m = clip_plane(n, 0.0, 0.0, 1.0, 0.0 - NEAR);
+    if (m < 3) return false;
+
+    for (let var i = 0; i < m; ++i) {
+        let w = 1.0 / aZ[i];
+        pX[i] = CENTER_X + FOCAL * aX[i] * w;
+        pY[i] = CENTER_Y - FOCAL * aY[i] * w;
+    }
+
+    return portal_scan(m);
+}
+
+// Look through one portal: if any of it is still visible, draw the area it
+// leads to, with the eye carried into that area's coordinates and the
+// rasterizer held to the rectangle the portal showed through.
+fun draw_portal(f, depth) {
+    // Backfacing, so the eye is already past it and it is not a way anywhere
+    if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return;
+    if (!portal_visible(f)) return;
+
+    let p = f.portal;
+
+    let s_x = cam_x; let s_y = cam_y; let s_z = cam_z;
+    let s_yaw = cam_yaw; let s_sin = sin_yaw; let s_cos = cos_yaw;
+    let s_cx0 = clip_x0; let s_cx1 = clip_x1;
+    let s_cy0 = clip_y0; let s_cy1 = clip_y1;
+    let s_pa = pp_active;
+    let s_pnx = pp_nx; let s_pny = pp_ny; let s_pnz = pp_nz; let s_pd = pp_d;
+
+    let ca = p.cos_a;
+    let sa = p.sin_a;
+
+    // The eye, turned about the vertical axis and moved. Yaw gains the same
+    // angle, so where the camera looks comes through the change unbent.
+    cam_x = s_x * ca + s_z * sa + p.tx;
+    cam_y = s_y + p.ty;
+    cam_z = s_z * ca - s_x * sa + p.tz;
+    cam_yaw = s_yaw + p.ang;
+    sin_yaw = cam_yaw.sin();
+    cos_yaw = cam_yaw.cos();
+
+    // The portal's own plane goes through with it, since what it has to cull
+    // is read in the coordinates of the area on the other side
+    let nx = f.nx * ca + f.nz * sa;
+    let nz = f.nz * ca - f.nx * sa;
+    let vx = f.v[0] * ca + f.v[2] * sa + p.tx;
+    let vy = f.v[1] + p.ty;
+    let vz = f.v[2] * ca - f.v[0] * sa + p.tz;
+
+    pp_active = true;
+    pp_nx = nx; pp_ny = f.ny; pp_nz = nz;
+    pp_d = nx * vx + f.ny * vy + nz * vz;
+
+    clip_x0 = pv_x0; clip_x1 = pv_x1;
+    clip_y0 = pv_y0; clip_y1 = pv_y1;
+
+    draw_area(p.target, depth + 1);
+
+    // Put the view back for the rest of the area the portal stands in
+    cam_x = s_x; cam_y = s_y; cam_z = s_z;
+    cam_yaw = s_yaw; sin_yaw = s_sin; cos_yaw = s_cos;
+    clip_x0 = s_cx0; clip_x1 = s_cx1;
+    clip_y0 = s_cy0; clip_y1 = s_cy1;
+    pp_active = s_pa;
+    pp_nx = s_pnx; pp_ny = s_pny; pp_nz = s_pnz; pp_d = s_pd;
+    update_frustum();
+}
+
+// The planes bounding what is worth drawing, in world space, as normal and
+// offset. A point is inside a plane when nx*x + ny*y + nz*z - d >= 0. Five of
+// them are the view frustum; a sixth is added while an area is being seen
+// through a portal, to drop what stands between the eye and it.
+let MAX_FRUSTUM = 6;
+let fr_nx = Array.with_size(MAX_FRUSTUM, 0.0);
+let fr_ny = Array.with_size(MAX_FRUSTUM, 0.0);
+let fr_nz = Array.with_size(MAX_FRUSTUM, 0.0);
+let fr_d = Array.with_size(MAX_FRUSTUM, 0.0);
+let var fr_count = 5;
 
 fun set_frustum_plane(i, nx, ny, nz, d) {
     fr_nx[i] = nx; fr_ny[i] = ny; fr_nz[i] = nz; fr_d[i] = d;
@@ -1940,6 +2451,11 @@ fun set_frustum_plane(i, nx, ny, nz, d) {
 
 // Rebuild the frustum for where the camera is now. The camera's own axes come
 // straight out of the yaw and pitch the view transform uses.
+//
+// The sides follow the clip rectangle rather than the frame, so an area seen
+// through a doorway is culled against the doorway: the four planes close in on
+// the few degrees the portal actually shows, and the far side of that room
+// costs one box test instead of a walk over all of it.
 fun update_frustum() {
     let fx = cos_pitch * sin_yaw;
     let fy = sin_pitch;
@@ -1953,30 +2469,42 @@ fun update_frustum() {
     let uy = cos_pitch;
     let uz = 0.0 - sin_pitch * cos_yaw;
 
-    // How far the frustum opens out, per unit of depth
-    let tan_h = CENTER_X / FOCAL;
-    let tan_v = CENTER_Y / FOCAL;
+    // Where the edges of the clip rectangle sit, as a slope per unit of depth.
+    // Screen x is CENTER_X + FOCAL * X/Z and screen y is CENTER_Y - FOCAL * Y/Z,
+    // so these invert to the X/Z and Y/Z the four edges stand at.
+    let sl_l = (clip_x0.to_f() - CENTER_X) / FOCAL;
+    let sl_r = (clip_x1.to_f() - CENTER_X) / FOCAL;
+    let sl_t = (CENTER_Y - clip_y0.to_f()) / FOCAL;
+    let sl_b = (CENTER_Y - clip_y1.to_f()) / FOCAL;
 
     set_frustum_plane(0, fx, fy, fz, fx * cam_x + fy * cam_y + fz * cam_z + NEAR);
 
-    let lx = rx + tan_h * fx; let ly = ry + tan_h * fy; let lz = rz + tan_h * fz;
+    let lx = rx - sl_l * fx; let ly = ry - sl_l * fy; let lz = rz - sl_l * fz;
     set_frustum_plane(1, lx, ly, lz, lx * cam_x + ly * cam_y + lz * cam_z);
 
-    let sx = tan_h * fx - rx; let sy = tan_h * fy - ry; let sz = tan_h * fz - rz;
+    let sx = sl_r * fx - rx; let sy = sl_r * fy - ry; let sz = sl_r * fz - rz;
     set_frustum_plane(2, sx, sy, sz, sx * cam_x + sy * cam_y + sz * cam_z);
 
-    let bx = ux + tan_v * fx; let by = uy + tan_v * fy; let bz = uz + tan_v * fz;
+    let bx = ux - sl_b * fx; let by = uy - sl_b * fy; let bz = uz - sl_b * fz;
     set_frustum_plane(3, bx, by, bz, bx * cam_x + by * cam_y + bz * cam_z);
 
-    let tx = tan_v * fx - ux; let ty = tan_v * fy - uy; let tz = tan_v * fz - uz;
+    let tx = sl_t * fx - ux; let ty = sl_t * fy - uy; let tz = sl_t * fz - uz;
     set_frustum_plane(4, tx, ty, tz, tx * cam_x + ty * cam_y + tz * cam_z);
+
+    // The portal's plane, turned around so that the far side of it, which is
+    // the side the area being drawn lies on, is the inside
+    fr_count = 5;
+    if (pp_active) {
+        set_frustum_plane(5, 0.0 - pp_nx, 0.0 - pp_ny, 0.0 - pp_nz, 0.0 - pp_d);
+        fr_count = 6;
+    }
 }
 
 // Is this subtree's box entirely outside one of the frustum planes?
 fun node_hidden(node) {
     if (node.empty) return true;
 
-    for (let var i = 0; i < 5; ++i) {
+    for (let var i = 0; i < fr_count; ++i) {
         let nx = fr_nx[i];
         let ny = fr_ny[i];
         let nz = fr_nz[i];
@@ -2047,8 +2575,15 @@ fun compute_bounds(node) {
 }
 
 // Walk the tree from the eye: everything on the near side of a plane, then the
-// faces lying in it, then everything beyond
-fun bsp_draw(node) {
+// faces lying in it, then everything beyond. `depth` is how many portals were
+// crossed to get here, and stops the walk stepping through another once the
+// rooms have stacked up deep enough.
+//
+// A portal reached this way has every nearer face of its own area already in
+// the s-buffer, which is what the visibility test it makes needs. Faces
+// coplanar with it are its own doorway's wall and do not overlap it on screen,
+// so their turn coming after it in this list changes nothing.
+fun bsp_draw(node, depth) {
     if (node == nil) return;
     if (screen_done) return;
     if (node_hidden(node)) return;
@@ -2059,23 +2594,37 @@ fun bsp_draw(node) {
     let var far_child = node.front;
     if (side >= 0.0) { near_child = node.front; far_child = node.back; }
 
-    bsp_draw(near_child);
+    bsp_draw(near_child, depth);
 
     let on = node.on;
     for (let var i = 0; i < on.len; ++i) {
         if (screen_done) return;
-        draw_face(on[i]);
+        let f = on[i];
+        if (f.portal == nil) draw_face(f);
+        else if (depth < MAX_PORTAL_DEPTH) draw_portal(f, depth);
     }
 
-    bsp_draw(far_child);
+    bsp_draw(far_child, depth);
+}
+
+// Draw one area, in its own coordinates. The camera globals, the clip rectangle
+// and the portal plane are all set up by the caller and read here as they
+// stand, so this only has to work out what they mean for culling.
+fun draw_area(idx, depth) {
+    update_frustum();
+    bsp_draw(areas[idx].root, depth);
 }
 
 fun render_frame() {
     pixels_drawn = 0;
     frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, VOID_COLOR);
     sbuf_reset();
-    update_frustum();
-    bsp_draw(bsp_root);
+
+    clip_x0 = 0; clip_x1 = FRAME_WIDTH;
+    clip_y0 = 0; clip_y1 = FRAME_HEIGHT;
+    pp_active = false;
+
+    draw_area(cam_area, 0);
 }
 
 // Write the frame buffer out as a TGA, for screenshots and for checking the
@@ -2176,12 +2725,12 @@ fun brush_top_near(b, x, z) {
     return best;
 }
 
-fun blocked(x, feet, z) {
+fun blocked(bs, x, feet, z) {
     let cy = feet + 0.1 + (PLAYER_HEIGHT - 0.1) * 0.5;
     let hy = (PLAYER_HEIGHT - 0.1) * 0.5;
 
-    for (let var i = 0; i < brushes.len; ++i) {
-        let b = brushes[i];
+    for (let var i = 0; i < bs.len; ++i) {
+        let b = bs[i];
 
         // Anything low enough to step onto is not something to walk into. The
         // height is taken under the player, so a ramp is steppable where it is
@@ -2201,6 +2750,13 @@ fun move_player(dt, mf, ms, want_up, want_down) {
     if (noclip) speed = FLY_SPEED;
     let step = speed * dt;
 
+    // Where the step is taken from, which is what the portal crossing test
+    // below compares against
+    let px = cam_x;
+    let py = cam_y;
+    let pz = cam_z;
+    let bs = areas[cam_area].brushes;
+
     if (noclip) {
         // Off the leash: move along the way the camera is actually pointing,
         // pitch included, and pass through everything
@@ -2214,6 +2770,7 @@ fun move_player(dt, mf, ms, want_up, want_down) {
         cam_vel_y = 0.0;
         on_ground = false;
         cam_y = cam_feet + EYE_HEIGHT;
+        cross_portals(px, py, pz);
         return;
     }
 
@@ -2223,8 +2780,8 @@ fun move_player(dt, mf, ms, want_up, want_down) {
         let dz = (cos_yaw * mf - sin_yaw * ms) * step;
 
         // One axis at a time, so that a wall slides instead of stopping
-        if (!blocked(cam_x + dx, cam_feet, cam_z)) cam_x = cam_x + dx;
-        if (!blocked(cam_x, cam_feet, cam_z + dz)) cam_z = cam_z + dz;
+        if (!blocked(bs, cam_x + dx, cam_feet, cam_z)) cam_x = cam_x + dx;
+        if (!blocked(bs, cam_x, cam_feet, cam_z + dz)) cam_z = cam_z + dz;
     }
 
     // A jump is a shove upwards; from there gravity has it
@@ -2240,7 +2797,7 @@ fun move_player(dt, mf, ms, want_up, want_down) {
 
     if (cam_vel_y > 0.0) {
         // On the way up, stop dead at a ceiling rather than rising through it
-        if (blocked(cam_x, next_feet, cam_z)) {
+        if (blocked(bs, cam_x, next_feet, cam_z)) {
             next_feet = cam_feet;
             cam_vel_y = 0.0;
         }
@@ -2250,7 +2807,7 @@ fun move_player(dt, mf, ms, want_up, want_down) {
         // On the way down, land on whatever is under us. The same test steps
         // the player up onto low ledges as they walk into them, since it looks
         // for ground within a step of their feet.
-        let ground = support_height(cam_x, cam_feet, cam_z);
+        let ground = support_height(bs, cam_x, cam_feet, cam_z);
         if (ground > -50000.0 && next_feet <= ground) {
             cam_feet = ground;
             cam_vel_y = 0.0;
@@ -2262,15 +2819,16 @@ fun move_player(dt, mf, ms, want_up, want_down) {
     }
 
     cam_y = cam_feet + EYE_HEIGHT;
+    cross_portals(px, py, pz);
 }
 
 // The highest surface under the player that is within a step of their feet
-fun support_height(x, feet, z) {
+fun support_height(bs, x, feet, z) {
     let reach = feet + STEP_HEIGHT;
     let var best = 0.0 - 100000.0;
 
-    for (let var i = 0; i < brushes.len; ++i) {
-        let t = brush_top_near(brushes[i], x, z);
+    for (let var i = 0; i < bs.len; ++i) {
+        let t = brush_top_near(bs[i], x, z);
         if (t == nil) continue;
         if (t > reach) continue;
         if (t > best) best = t;
@@ -2278,20 +2836,60 @@ fun support_height(x, feet, z) {
     return best;
 }
 
+// Did the player just walk through one of the ways out of the area they were
+// in? The step they took is tested against each portal plane, and a crossing
+// that lands inside the rectangle carries them over: position and heading are
+// put through the portal's change of coordinates, and from the next frame on
+// they walk in the area on the other side.
+//
+// Both areas carry the wall the doorway is cut through, so there is no moment
+// where the player is clear of one room's floor and not yet on the other's.
+fun cross_portals(px, py, pz) {
+    let ps = areas[cam_area].portals;
+
+    for (let var i = 0; i < ps.len; ++i) {
+        let p = ps[i];
+        let s0 = p.nx * px + p.ny * py + p.nz * pz - p.d;
+        if (s0 <= 0.0) continue;
+
+        let s1 = p.nx * cam_x + p.ny * cam_y + p.nz * cam_z - p.d;
+        if (s1 > 0.0) continue;
+
+        // Where the step met the plane
+        let t = s0 / (s0 - s1);
+        let hx = px + (cam_x - px) * t;
+        let hy = py + (cam_y - py) * t;
+        let hz = pz + (cam_z - pz) * t;
+
+        if (hx < p.x0 - PORTAL_SLOP || hx > p.x1 + PORTAL_SLOP) continue;
+        if (hy < p.y0 - PORTAL_SLOP || hy > p.y1 + PORTAL_SLOP) continue;
+        if (hz < p.z0 - PORTAL_SLOP || hz > p.z1 + PORTAL_SLOP) continue;
+
+        let ca = p.cos_a;
+        let sa = p.sin_a;
+        let nx = cam_x * ca + cam_z * sa + p.tx;
+        let nz = cam_z * ca - cam_x * sa + p.tz;
+
+        cam_x = nx;
+        cam_y = cam_y + p.ty;
+        cam_z = nz;
+        cam_feet = cam_y - EYE_HEIGHT;
+        cam_yaw = cam_yaw + p.ang;
+        sin_yaw = cam_yaw.sin();
+        cos_yaw = cam_yaw.cos();
+        cam_area = p.target;
+        return;
+    }
+}
+
 // --- Setup ---
 
 parse_map(MAP_PATH);
 
-// Fit each face while it is still whole. Everything below cuts faces up, for
-// the tree and again for the light, and a piece fitted to itself would squeeze
-// a whole texture into whatever the cut left it: that is what made the middle
-// of a tall lamp panel come out at a different scale from its ends.
-for (let var i = 0; i < faces.len; ++i) {
-    if (faces[i].fit) set_fit(faces[i]);
+if (areas.len == 0) {
+    $println(MAP_PATH + ": the map holds no areas");
+    $exit(1);
 }
-
-let num_input_faces = faces.len;
-bsp_root = bsp_build(faces);
 
 // Light the faces the tree holds, cutting up the ones the light falls across
 // unevenly, and hang each piece's shaded texture on it so that drawing one is a
@@ -2305,6 +2903,14 @@ fun prepare_node(node) {
     let out = [];
     for (let var i = 0; i < node.on.len; ++i) {
         let f = node.on[i];
+
+        // A portal is looked through rather than drawn, so it is neither cut up
+        // nor lit, and it carries no texture to hang on it
+        if (f.portal != nil) {
+            out.push(f);
+            continue;
+        }
+
         let pieces = [];
         if (f.flow) {
             // A moving surface is still cut on a fixed grid: it needs corners
@@ -2331,10 +2937,42 @@ fun prepare_node(node) {
     prepare_node(node.front);
     prepare_node(node.back);
 }
+// Each area gets its own tree and its own bake. The lamps of one room light
+// only the surfaces of that room, and a portal passes no light: what is beyond
+// a doorway is lit by whatever stands on its own side of it.
+let var num_input_faces = 0;
+let var num_brushes = 0;
+let var num_lights = 0;
+let var num_portals = 0;
+
 let light_start_ms = $time_current_ms();
-prepare_node(bsp_root);
+
+for (let var ai = 0; ai < areas.len; ++ai) {
+    let a = areas[ai];
+
+    // Fit each face while it is still whole. Everything below cuts faces up,
+    // for the tree and again for the light, and a piece fitted to itself would
+    // squeeze a whole texture into whatever the cut left it: that is what made
+    // the middle of a tall lamp panel come out at a different scale from its
+    // ends.
+    for (let var i = 0; i < a.faces.len; ++i) {
+        if (a.faces[i].fit) set_fit(a.faces[i]);
+    }
+
+    num_input_faces = num_input_faces + a.faces.len;
+    num_brushes = num_brushes + a.brushes.len;
+    num_lights = num_lights + a.lights.len;
+    num_portals = num_portals + a.portals.len;
+
+    a.root = bsp_build(a.faces);
+
+    bake_brushes = a.brushes;
+    bake_lights = a.lights;
+    prepare_node(a.root);
+    compute_bounds(a.root);
+}
+
 let light_ms = $time_current_ms() - light_start_ms;
-compute_bounds(bsp_root);
 
 let var tex_bytes = 0;
 for (let var i = 0; i < textures.len; ++i) {
@@ -2342,34 +2980,26 @@ for (let var i = 0; i < textures.len; ++i) {
     tex_bytes = tex_bytes + t.size * t.size * 4;
 }
 
-$println(textures.len.to_s() + " textures, " + brushes.len.to_s() + " brushes, "
+$println(textures.len.to_s() + " textures, " + areas.len.to_s() + " areas, "
+    + num_portals.to_s() + " portals, " + num_brushes.to_s() + " brushes, "
     + num_input_faces.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
-    + lights.len.to_s() + " lights");
+    + num_lights.to_s() + " lights");
 $println("bsp: " + bsp_nodes.to_s() + " nodes, " + bsp_splits.to_s() + " splits");
 $println("lighting: " + light_ms.to_s() + " ms to cut and bake");
 $println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB, shaded per pixel");
 
+cam_area = start_area;
 cam_x = start_x;
 cam_z = start_z;
 cam_feet = start_y - EYE_HEIGHT;
 cam_y = start_y;
 cam_yaw = start_yaw;
 
-// A set tour of the level: x, y, z, yaw, pitch. Used by the headless mode
-// below, which renders the tour without opening a window, times it, and can
-// write each viewpoint out as a screenshot.
-let TOUR = [
-    [   0.0, 1.4, -13.0,  0.0,  0.0],
-    [   0.0, 1.4,  -4.5,  0.0,  0.1],
-    [   0.0, 1.4,   2.0,  0.0,  0.0],
-    [   0.0, 1.4,  10.5,  0.5, -0.1],
-    [   0.0, 1.4,  19.0, -0.6, -0.15],
-    [ -1.5, 1.4,  27.0,  0.9,  0.05],
-    [ 12.5, 7.8,  22.5, -1.9, -0.22],
-    [ 12.0, 7.8,  15.5, -1.75, -0.35],
-    [   0.0, 3.0,  13.0,  0.0, -0.5],
-    [5.375, 2.15,  34.5, -0.45, -0.02]
-];
+// A viewpoint belongs to the area it stands in, so the tour is written into the
+// map beside the rooms it looks at. A map with none falls back to its spawn.
+if (tour.len == 0) {
+    tour.push([start_area, start_x, start_y, start_z, start_yaw, 0.0]);
+}
 
 let BENCH_FRAMES = $cmd_get_arg_or(2, "0").parse_int(10);
 let SHOT_DIR = $cmd_get_arg_or(3, "");
@@ -2380,14 +3010,15 @@ if (BENCH_FRAMES > 0) {
     let var total_pixels = 0;
 
     for (let var i = 0; i < BENCH_FRAMES; ++i) {
-        let view = TOUR[i % TOUR.len];
-        cam_x = view[0];
-        cam_y = view[1];
-        cam_feet = view[1] - EYE_HEIGHT;
+        let view = tour[i % tour.len];
+        cam_area = view[0];
+        cam_x = view[1];
+        cam_y = view[2];
+        cam_feet = view[2] - EYE_HEIGHT;
         cam_vel_y = 0.0;
-        cam_z = view[2];
-        cam_yaw = view[3];
-        cam_pitch = view[4];
+        cam_z = view[3];
+        cam_yaw = view[4];
+        cam_pitch = view[5];
         sin_yaw = cam_yaw.sin();
         cos_yaw = cam_yaw.cos();
         sin_pitch = cam_pitch.sin();
@@ -2401,7 +3032,7 @@ if (BENCH_FRAMES > 0) {
         total_pixels = total_pixels + pixels_drawn;
         if (ms > worst_ms) worst_ms = ms;
 
-        if (SHOT_DIR.len > 0 && i < TOUR.len) {
+        if (SHOT_DIR.len > 0 && i < tour.len) {
             save_tga(SHOT_DIR + "/view" + i.to_s() + ".tga");
         }
     }
