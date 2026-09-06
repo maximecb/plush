@@ -399,21 +399,27 @@ impl Lexer
                 break;
             }
 
-            // Single-line comment
-            if self.match_chars(&['/', '/'])
-            {
-                self.eat_comment();
-                continue;
-            }
-
-            // Multi-line comment
-            if self.match_chars(&['/', '*'])
-            {
-                self.eat_multi_comment()?;
-                continue;
-            }
-
             let ch = self.peek_ch();
+
+            // Comments always start with '/', which is rare, so check
+            // that first instead of unconditionally trying both patterns
+            // This improves parsing performance
+            if ch == '/'
+            {
+                // Single-line comment
+                if self.match_chars(&['/', '/'])
+                {
+                    self.eat_comment();
+                    continue;
+                }
+
+                // Multi-line comment
+                if self.match_chars(&['/', '*'])
+                {
+                    self.eat_multi_comment()?;
+                    continue;
+                }
+            }
 
             // Consume ASCII whitespace characters
             // Explicitly reject non-ASCII whitespace
