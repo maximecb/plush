@@ -5,13 +5,15 @@
 #   ./update_release.sh v0.3.1     # tag explicitly
 #
 # Options:
-#   --skip-ci      don't wait on / check GitHub CI for this commit
-#   --skip-tests   don't run the local test suite
+#   --skip-ci            don't wait on / check GitHub CI for this commit
+#   --skip-tests         don't run the local test suite
+#   --allow-untracked    tolerate untracked files in the working tree
 
 set -eu
 
 SKIP_CI=0
 SKIP_TESTS=0
+ALLOW_UNTRACKED=0
 TAG=""
 
 # Workflow that gates a release, and how long to wait on it
@@ -21,8 +23,9 @@ CI_TIMEOUT_SECONDS="${CI_TIMEOUT_SECONDS:-1800}"
 
 for arg in "$@"; do
     case "$arg" in
-        --skip-ci)    SKIP_CI=1 ;;
-        --skip-tests) SKIP_TESTS=1 ;;
+        --skip-ci)         SKIP_CI=1 ;;
+        --skip-tests)      SKIP_TESTS=1 ;;
+        --allow-untracked) ALLOW_UNTRACKED=1 ;;
         -*) echo "unknown option: $arg" >&2; exit 1 ;;
         *)  TAG="$arg" ;;
     esac
@@ -43,8 +46,22 @@ say "Releasing $TAG at $(git rev-parse --short HEAD)"
 
 # --- Preflight -------------------------------------------------------------
 
-[ -z "$(git status --porcelain)" ] \
-    || err "working tree is dirty. Commit or stash first."
+# The tag carries committed work only, so untracked files never reach the
+# release. They still count as dirty by default, to catch work that was
+# meant to be part of it.
+if [ "$ALLOW_UNTRACKED" = 1 ]; then
+    DIRTY="$(git status --porcelain --untracked-files=no)"
+else
+    DIRTY="$(git status --porcelain)"
+
+    if [ -n "$DIRTY" ] && [ -z "$(git status --porcelain --untracked-files=no)" ]; then
+        err "working tree has untracked files:
+$DIRTY
+Commit or stash them, or pass --allow-untracked to release anyway."
+    fi
+fi
+
+[ -z "$DIRTY" ] || err "working tree is dirty. Commit or stash first."
 
 # Pick up tags pushed from elsewhere, so the checks below see them too
 git fetch --quiet --tags origin
