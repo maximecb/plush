@@ -329,6 +329,23 @@ impl Lexer
         return true;
     }
 
+    /// Peek for a string
+    pub fn peek_str(&self, s: &str) -> bool
+    {
+        let mut idx = self.idx;
+
+        // Avoid allocating a Vec to hold the characters
+        for ch in s.chars() {
+            if idx >= self.input.len() || self.input[idx] != ch {
+                return false;
+            }
+
+            idx += 1;
+        }
+
+        return true;
+    }
+
     /// Consume characters until the end of a single-line comment
     pub fn eat_comment(&mut self)
     {
@@ -421,8 +438,15 @@ impl Lexer
         // Consume preceding whitespace
         self.eat_ws()?;
 
-        let token_chars: Vec<char> = token.chars().collect();
-        return Ok(self.match_chars(&token_chars));
+        if !self.peek_str(token) {
+            return Ok(false);
+        }
+
+        for _ in token.chars() {
+            self.eat_ch();
+        }
+
+        return Ok(true);
     }
 
     /// Match a keyword in the input, ignoring preceding whitespace
@@ -433,8 +457,12 @@ impl Lexer
         // Consume preceding whitespace
         self.eat_ws()?;
 
-        let chars: Vec<char> = keyword.chars().collect();
-        let end_pos = self.idx + chars.len();
+        if !self.peek_str(keyword) {
+            return Ok(false);
+        }
+
+        let num_chars = keyword.chars().count();
+        let end_pos = self.idx + num_chars;
 
         // We can't match as a keyword if the next chars are
         // valid identifier characters
@@ -442,7 +470,11 @@ impl Lexer
             return Ok(false);
         }
 
-        return Ok(self.match_chars(&chars));
+        for _ in 0..num_chars {
+            self.eat_ch();
+        }
+
+        return Ok(true);
     }
 
     /// Shortcut for yielding a parse error wrapped in a result type
