@@ -3,20 +3,20 @@
 // Brushes are convex solids; the space you walk through is what is left
 // between them. Coordinates are in meters. A texture tiles at 40 texels per
 // meter by default, so a 256-texel texture repeats every 6.4 m. Rooms are
-// sized in multiples of 1.6 m.
+// sized in multiples of 1.6 m. A texture is loaded the first time its name is
+// used below; nothing needs declaring up front.
 //
-//   tex   <index> <name>
-//   start <x> <y> <z> <yaw degrees>
-//   light <x> <y> <z> <radius> <brightness>
-//   box   <x0> <y0> <z0> <x1> <y1> <z1> [keys]
-//   ramp  <x0> <y0> <z0> <x1> <y1> <z1> <px|nx|pz|nz> [keys]
-//   prism <cx> <cz> <radius> <y0> <y1> <sides> <rot degrees> [keys]
-//   arch  <x|z> <a0> <a1> <c0> <c1> <ybase> <ytop> <segments> [keys]
+//   spawn x= y= z= yaw=<degrees>
+//   light x= y= z= radius= brightness=
+//   box   x0= y0= z0= x1= y1= z1= [keys]
+//   ramp  x0= y0= z0= x1= y1= z1= dir=<px|nx|pz|nz> [keys]
+//   prism cx= cz= radius= y0= y1= sides= rot=<degrees> [keys]
+//   arch  axis=<x|z> a0= a1= c0= c1= ybase= ytop= segs= [keys]
 //
-// Keys: all= side= top= bottom= nx= px= ny= py= nz= pz= to place textures,
-// light=<0..15> to force a light level instead of baking one, scale=<f> sets
-// the texture density in texels per meter (default 40, so scale=20 makes a
-// texture repeat over twice the span),
+// Keys: tex= side= top= bottom= nx= px= ny= py= nz= pz= name the texture to
+// place on a face, light=<0..15> to force a light level instead of baking one,
+// scale=<f> sets the texture density in texels per meter (default 40, so
+// scale=20 makes a texture repeat over twice the span),
 // fit to stretch a texture once across each face, flow to make it swim and
 // burn at full brightness whatever is around it,
 // turn to give the texture a quarter turn on the face.
@@ -25,74 +25,49 @@
 // surface takes its light from the lamps below, so the rooms go dark wherever
 // the lamps do not reach.
 
-tex  0 stone_blocks
-tex  1 brick_tan
-tex  2 stone_large
-tex  3 floor_stone
-tex  4 sandstone_brick
-tex  5 rock_craggy
-tex  6 lava
-tex  7 lava_swirl
-tex  8 metal_riveted
-tex  9 floor_tread
-tex 10 iron_brick
-tex 11 light_bank
-tex 12 light_square
-tex 13 floor_checker
-tex 14 brick_blue
-tex 15 metal_bolted
-tex 16 door_grate
-tex 17 floor_dirt
-tex 18 metal_dark
-tex 19 crate_wood
-tex 20 wood_dark
-tex 21 rock_slate
-tex 22 light_strip_red
-tex 23 floor_gravel
-
-start 0 1.4 -13 0
+spawn x=0 y=1.4 z=-13 yaw=0
 
 // ===========================================================================
 // Entry crypt: interior x -4.8..4.8, z -17.6..-6.4, floor 0, ceiling 5.6
 // ===========================================================================
 
-box -6.4 -0.8 -19.2 6.4 0 -4.8 all=3
-box -6.4 5.6 -19.2 6.4 6.4 -4.8 all=2
-box -6.4 0 -19.2 6.4 5.6 -17.6 all=0
+box   x0=-6.4 y0=-0.8 z0=-19.2 x1=6.4 y1=0 z1=-4.8 tex=floor_stone
+box   x0=-6.4 y0=5.6 z0=-19.2 x1=6.4 y1=6.4 z1=-4.8 tex=stone_large
+box   x0=-6.4 y0=0 z0=-19.2 x1=6.4 y1=5.6 z1=-17.6 tex=stone_blocks
 
 // West wall, with a torch niche cut into it at z -14..-12.4
-box -6.4 0 -19.2 -4.8 5.6 -14 all=0
-box -6.4 0 -12.4 -4.8 5.6 -4.8 all=0
-box -6.4 0 -14 -4.8 2.4 -12.4 all=0
-box -6.4 4 -14 -4.8 5.6 -12.4 all=0
-box -6.4 2.4 -14 -5.6 4 -12.4 all=0 px=11 light=15 fit
+box   x0=-6.4 y0=0 z0=-19.2 x1=-4.8 y1=5.6 z1=-14 tex=stone_blocks
+box   x0=-6.4 y0=0 z0=-12.4 x1=-4.8 y1=5.6 z1=-4.8 tex=stone_blocks
+box   x0=-6.4 y0=0 z0=-14 x1=-4.8 y1=2.4 z1=-12.4 tex=stone_blocks
+box   x0=-6.4 y0=4 z0=-14 x1=-4.8 y1=5.6 z1=-12.4 tex=stone_blocks
+box   x0=-6.4 y0=2.4 z0=-14 x1=-5.6 y1=4 z1=-12.4 tex=stone_blocks px=light_bank light=15 fit
 
 // East wall, with the same niche mirrored
-box 4.8 0 -19.2 6.4 5.6 -14 all=0
-box 4.8 0 -12.4 6.4 5.6 -4.8 all=0
-box 4.8 0 -14 6.4 2.4 -12.4 all=0
-box 4.8 4 -14 6.4 5.6 -12.4 all=0
-box 5.6 2.4 -14 6.4 4 -12.4 all=0 nx=11 light=15 fit
+box   x0=4.8 y0=0 z0=-19.2 x1=6.4 y1=5.6 z1=-14 tex=stone_blocks
+box   x0=4.8 y0=0 z0=-12.4 x1=6.4 y1=5.6 z1=-4.8 tex=stone_blocks
+box   x0=4.8 y0=0 z0=-14 x1=6.4 y1=2.4 z1=-12.4 tex=stone_blocks
+box   x0=4.8 y0=4 z0=-14 x1=6.4 y1=5.6 z1=-12.4 tex=stone_blocks
+box   x0=5.6 y0=2.4 z0=-14 x1=6.4 y1=4 z1=-12.4 tex=stone_blocks nx=light_bank light=15 fit
 
-light -5.3 3.2 -13.2 8.5 1.0
-light 5.3 3.2 -13.2 8.5 1.0
+light x=-5.3 y=3.2 z=-13.2 radius=8.5 brightness=1.0
+light x=5.3 y=3.2 z=-13.2 radius=8.5 brightness=1.0
 
 // South wall of the crypt, with an arched doorway at x -2.4..2.4
-box -6.4 0 -6.4 -2.4 5.6 -4.8 all=0
-box 2.4 0 -6.4 6.4 5.6 -4.8 all=0
-box -2.4 5.6 -6.4 2.4 6.4 -4.8 all=0
-arch z -6.4 -4.8 -2.4 2.4 3.6 5.6 5 all=4 bottom=4
+box   x0=-6.4 y0=0 z0=-6.4 x1=-2.4 y1=5.6 z1=-4.8 tex=stone_blocks
+box   x0=2.4 y0=0 z0=-6.4 x1=6.4 y1=5.6 z1=-4.8 tex=stone_blocks
+box   x0=-2.4 y0=5.6 z0=-6.4 x1=2.4 y1=6.4 z1=-4.8 tex=stone_blocks
+arch  axis=z a0=-6.4 a1=-4.8 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
 // ===========================================================================
 // Passage down to the vault: x -2.4..2.4, z -4.8..0, ceiling 5.6
 // ===========================================================================
 
-box -4 -0.8 -4.8 4 0 0 all=3
-box -4 5.6 -4.8 4 6.4 0 all=2
-box -4 0 -4.8 -2.4 5.6 0 all=1
-box 2.4 0 -4.8 4 5.6 0 all=1
+box   x0=-4 y0=-0.8 z0=-4.8 x1=4 y1=0 z1=0 tex=floor_stone
+box   x0=-4 y0=5.6 z0=-4.8 x1=4 y1=6.4 z1=0 tex=stone_large
+box   x0=-4 y0=0 z0=-4.8 x1=-2.4 y1=5.6 z1=0 tex=brick_tan
+box   x0=2.4 y0=0 z0=-4.8 x1=4 y1=5.6 z1=0 tex=brick_tan
 
-light 0 4.25 -2.4 6 0.45
+light x=0 y=4.25 z=-2.4 radius=6 brightness=0.45
 
 // ===========================================================================
 // The vault: interior x -14.4..14.4, z 0..32. The lava lake sits at y -4.4,
@@ -100,49 +75,49 @@ light 0 4.25 -2.4 6 0.45
 // ===========================================================================
 
 // The lake, and the ledges at either end of it
-box -14.4 -6.4 3.2 14.4 -4.4 27.2 all=6 flow
-box -14.4 -6.4 0 14.4 0 3.2 all=3 top=3 scale=20
-box -14.4 -6.4 27.2 14.4 0 32 all=3 top=3 scale=20
+box   x0=-14.4 y0=-6.4 z0=3.2 x1=14.4 y1=-4.4 z1=27.2 tex=lava flow
+box   x0=-14.4 y0=-6.4 z0=0 x1=14.4 y1=0 z1=3.2 tex=floor_stone top=floor_stone scale=20
+box   x0=-14.4 y0=-6.4 z0=27.2 x1=14.4 y1=0 z1=32 tex=floor_stone top=floor_stone scale=20
 
 // The bridge across the lake
-box -2.4 -6.4 3.2 2.4 0 27.2 all=8 top=3 scale=20
+box   x0=-2.4 y0=-6.4 z0=3.2 x1=2.4 y1=0 z1=27.2 tex=metal_riveted top=floor_stone scale=20
 
 // The ceiling is a gable running the length of the room: two slopes rising
 // from the tops of the side walls at 10.4 to a ridge down the middle at 16,
 // where the slab that caps the room sits on them. An arch of two segments is
 // exactly that pair of slopes.
-arch z 0 32 -14.4 14.4 10.4 16 2 all=2 bottom=2
+arch  axis=z a0=0 a1=32 c0=-14.4 c1=14.4 ybase=10.4 ytop=16 segs=2 tex=stone_large bottom=stone_large
 
 // That cap, and the walls behind everything else
-box -16 16 0 16 16.8 33.6 all=2
-box -16 -6.4 0 -14.4 16 6.4 all=0
-box -16 -6.4 10.4 -14.4 16 14 all=0
-box -16 -6.4 18 -14.4 16 21.6 all=0
+box   x0=-16 y0=16 z0=0 x1=16 y1=16.8 z1=33.6 tex=stone_large
+box   x0=-16 y0=-6.4 z0=0 x1=-14.4 y1=16 z1=6.4 tex=stone_blocks
+box   x0=-16 y0=-6.4 z0=10.4 x1=-14.4 y1=16 z1=14 tex=stone_blocks
+box   x0=-16 y0=-6.4 z0=18 x1=-14.4 y1=16 z1=21.6 tex=stone_blocks
 // This stretch of the west wall carries the way through to the monolith
 // chamber. The opening sits at ledge level in the far corner of the room, so
 // what you see from the bridge is a door in the corner rather than a stair
 // standing out in the open; the climb is all on the far side of it.
-box -16 -6.4 25.6 -14.4 16 27.2 all=0
-box -16 -6.4 32 -14.4 16 33.6 all=0
-box -16 -6.4 27.2 -14.4 0 32 all=0 top=3
-box -16 5.6 27.2 -14.4 16 32 all=0
-arch x -16 -14.4 27.2 32 3.6 5.6 4 all=4 bottom=4
+box   x0=-16 y0=-6.4 z0=25.6 x1=-14.4 y1=16 z1=27.2 tex=stone_blocks
+box   x0=-16 y0=-6.4 z0=32 x1=-14.4 y1=16 z1=33.6 tex=stone_blocks
+box   x0=-16 y0=-6.4 z0=27.2 x1=-14.4 y1=0 z1=32 tex=stone_blocks top=floor_stone
+box   x0=-16 y0=5.6 z0=27.2 x1=-14.4 y1=16 z1=32 tex=stone_blocks
+arch  axis=x a0=-16 a1=-14.4 c0=27.2 c1=32 ybase=3.6 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
-box 14.4 -6.4 0 16 16 33.6 all=0
+box   x0=14.4 y0=-6.4 z0=0 x1=16 y1=16 z1=33.6 tex=stone_blocks
 
 // North wall, with the arched way back to the passage
-box -16 -6.4 -1.6 -2.4 16 0 all=0
-box 2.4 -6.4 -1.6 16 16 0 all=0
-box -2.4 5.6 -1.6 2.4 16 0 all=0
-arch z -1.6 0 -2.4 2.4 3.6 5.6 5 all=4 bottom=4
+box   x0=-16 y0=-6.4 z0=-1.6 x1=-2.4 y1=16 z1=0 tex=stone_blocks
+box   x0=2.4 y0=-6.4 z0=-1.6 x1=16 y1=16 z1=0 tex=stone_blocks
+box   x0=-2.4 y0=5.6 z0=-1.6 x1=2.4 y1=16 z1=0 tex=stone_blocks
+arch  axis=z a0=-1.6 a1=0 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
 // South wall, with the arched way on to the reliquary. The doorway needs its
 // own floor: the wall pieces either side of it stop at the opening.
-box -3.2 -2.4 32 3.2 0 33.6 all=3 top=3 scale=20
-box -16 -6.4 32 -3.2 16 33.6 all=0
-box 3.2 -6.4 32 16 16 33.6 all=0
-box -3.2 7.2 32 3.2 16 33.6 all=0
-arch z 32 33.6 -3.2 3.2 4.8 7.2 5 all=4 bottom=4
+box   x0=-3.2 y0=-2.4 z0=32 x1=3.2 y1=0 z1=33.6 tex=floor_stone top=floor_stone scale=20
+box   x0=-16 y0=-6.4 z0=32 x1=-3.2 y1=16 z1=33.6 tex=stone_blocks
+box   x0=3.2 y0=-6.4 z0=32 x1=16 y1=16 z1=33.6 tex=stone_blocks
+box   x0=-3.2 y0=7.2 z0=32 x1=3.2 y1=16 z1=33.6 tex=stone_blocks
+arch  axis=z a0=32 a1=33.6 c0=-3.2 c1=3.2 ybase=4.8 ytop=7.2 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
 // --- Timber beams tying the roof across, one every 6.4 m ---
 //
@@ -150,11 +125,11 @@ arch z 32 33.6 -3.2 3.2 4.8 7.2 5 all=4 bottom=4
 // other, and nothing below them is high enough to touch. `turn` lays the grain
 // along the beam rather than across it.
 
-box -14.4 11.4 2.7 14.4 12.6 3.7 all=20 turn
-box -14.4 11.4 9.1 14.4 12.6 10.1 all=20 turn
-box -14.4 11.4 15.5 14.4 12.6 16.5 all=20 turn
-box -14.4 11.4 21.9 14.4 12.6 22.9 all=20 turn
-box -14.4 11.4 28.3 14.4 12.6 29.3 all=20 turn
+box   x0=-14.4 y0=11.4 z0=2.7 x1=14.4 y1=12.6 z1=3.7 tex=wood_dark turn
+box   x0=-14.4 y0=11.4 z0=9.1 x1=14.4 y1=12.6 z1=10.1 tex=wood_dark turn
+box   x0=-14.4 y0=11.4 z0=15.5 x1=14.4 y1=12.6 z1=16.5 tex=wood_dark turn
+box   x0=-14.4 y0=11.4 z0=21.9 x1=14.4 y1=12.6 z1=22.9 tex=wood_dark turn
+box   x0=-14.4 y0=11.4 z0=28.3 x1=14.4 y1=12.6 z1=29.3 tex=wood_dark turn
 
 // --- The west arcade: three lamps in arched recesses ---
 //
@@ -163,27 +138,27 @@ box -14.4 11.4 28.3 14.4 12.6 29.3 all=20 turn
 // faceted arch
 // across the mouth. Nothing protrudes into the room.
 
-box -16 -6.4 6.4 -14.4 0 10.4 all=0
-box -16 5.6 6.4 -14.4 16 10.4 all=0
-box -16 0 6.4 -15.2 5.6 10.4 all=1
-box -15.2 1.6 7.6 -15.1 4.4 9.2 all=0 px=11 light=15 fit
-arch x -15.2 -14.4 6.4 10.4 4.4 5.6 4 all=4 bottom=4
+box   x0=-16 y0=-6.4 z0=6.4 x1=-14.4 y1=0 z1=10.4 tex=stone_blocks
+box   x0=-16 y0=5.6 z0=6.4 x1=-14.4 y1=16 z1=10.4 tex=stone_blocks
+box   x0=-16 y0=0 z0=6.4 x1=-15.2 y1=5.6 z1=10.4 tex=brick_tan
+box   x0=-15.2 y0=1.6 z0=7.6 x1=-15.1 y1=4.4 z1=9.2 tex=stone_blocks px=light_bank light=15 fit
+arch  axis=x a0=-15.2 a1=-14.4 c0=6.4 c1=10.4 ybase=4.4 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
-box -16 -6.4 14 -14.4 0 18 all=0
-box -16 5.6 14 -14.4 16 18 all=0
-box -16 0 14 -15.2 5.6 18 all=1
-box -15.2 1.6 15.2 -15.1 4.4 16.8 all=0 px=11 light=15 fit
-arch x -15.2 -14.4 14 18 4.4 5.6 4 all=4 bottom=4
+box   x0=-16 y0=-6.4 z0=14 x1=-14.4 y1=0 z1=18 tex=stone_blocks
+box   x0=-16 y0=5.6 z0=14 x1=-14.4 y1=16 z1=18 tex=stone_blocks
+box   x0=-16 y0=0 z0=14 x1=-15.2 y1=5.6 z1=18 tex=brick_tan
+box   x0=-15.2 y0=1.6 z0=15.2 x1=-15.1 y1=4.4 z1=16.8 tex=stone_blocks px=light_bank light=15 fit
+arch  axis=x a0=-15.2 a1=-14.4 c0=14 c1=18 ybase=4.4 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
-box -16 -6.4 21.6 -14.4 0 25.6 all=0
-box -16 5.6 21.6 -14.4 16 25.6 all=0
-box -16 0 21.6 -15.2 5.6 25.6 all=1
-box -15.2 1.6 22.8 -15.1 4.4 24.4 all=0 px=11 light=15 fit
-arch x -15.2 -14.4 21.6 25.6 4.4 5.6 4 all=4 bottom=4
+box   x0=-16 y0=-6.4 z0=21.6 x1=-14.4 y1=0 z1=25.6 tex=stone_blocks
+box   x0=-16 y0=5.6 z0=21.6 x1=-14.4 y1=16 z1=25.6 tex=stone_blocks
+box   x0=-16 y0=0 z0=21.6 x1=-15.2 y1=5.6 z1=25.6 tex=brick_tan
+box   x0=-15.2 y0=1.6 z0=22.8 x1=-15.1 y1=4.4 z1=24.4 tex=stone_blocks px=light_bank light=15 fit
+arch  axis=x a0=-15.2 a1=-14.4 c0=21.6 c1=25.6 ybase=4.4 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
-light -14.8 3 8.4 9.5 1.0
-light -14.8 3 16 9.5 1.0
-light -14.8 3 23.6 9.5 1.0
+light x=-14.8 y=3 z=8.4 radius=9.5 brightness=1.0
+light x=-14.8 y=3 z=16 radius=9.5 brightness=1.0
+light x=-14.8 y=3 z=23.6 radius=9.5 brightness=1.0
 
 // --- Buttresses along the west wall, angled where they meet it ---
 //
@@ -191,35 +166,35 @@ light -14.8 3 23.6 9.5 1.0
 // wall and slopes away as it comes out over the lava, which is the way a
 // buttress carries a load
 
-ramp -14.4 -4.4 4.5 -12.4 4.5 6.5 nx all=4
-ramp -14.4 -4.4 12.1 -12.4 4.5 14.1 nx all=4
-ramp -14.4 -4.4 19.7 -12.4 4.5 21.7 nx all=4
+ramp  x0=-14.4 y0=-4.4 z0=4.5 x1=-12.4 y1=4.5 z1=6.5 dir=nx tex=sandstone_brick
+ramp  x0=-14.4 y0=-4.4 z0=12.1 x1=-12.4 y1=4.5 z1=14.1 dir=nx tex=sandstone_brick
+ramp  x0=-14.4 y0=-4.4 z0=19.7 x1=-12.4 y1=4.5 z1=21.7 dir=nx tex=sandstone_brick
 
 // --- The east side: a plinth, a ramp climbing it, and the gallery above ---
 
-box 9.6 -6.4 27.2 14.4 0 32 all=0 top=3
+box   x0=9.6 y0=-6.4 z0=27.2 x1=14.4 y1=0 z1=32 tex=stone_blocks top=floor_stone
 
 // A slab under the ramp, so the foot of it has some thickness to it instead of
 // tapering away to nothing where it meets the ledge
-box 9.6 -0.75 12.8 14.4 0 27.2 all=0 scale=20
-ramp 9.6 0 12.8 14.4 6.4 27.2 nz all=0 top=3 scale=20
+box   x0=9.6 y0=-0.75 z0=12.8 x1=14.4 y1=0 z1=27.2 tex=stone_blocks scale=20
+ramp  x0=9.6 y0=0 z0=12.8 x1=14.4 y1=6.4 z1=27.2 dir=nz tex=stone_blocks top=floor_stone scale=20
 
-box 9.6 -6.4 3.2 14.4 6.4 12.8 all=0 top=3 scale=20
+box   x0=9.6 y0=-6.4 z0=3.2 x1=14.4 y1=6.4 z1=12.8 tex=stone_blocks top=floor_stone scale=20
 
 // The parapet along the gallery, with a gap to see over
-box 8.8 6.4 3.2 9.6 8 7.4 all=4
-box 8.8 6.4 10.6 9.6 8 12.8 all=4
-box 8.8 6.4 7.4 9.6 7.2 10.6 all=4
+box   x0=8.8 y0=6.4 z0=3.2 x1=9.6 y1=8 z1=7.4 tex=sandstone_brick
+box   x0=8.8 y0=6.4 z0=10.6 x1=9.6 y1=8 z1=12.8 tex=sandstone_brick
+box   x0=8.8 y0=6.4 z0=7.4 x1=9.6 y1=7.2 z1=10.6 tex=sandstone_brick
 
 // Lamps set into the east wall above the gallery
-box 14.2 8 6 14.4 9.6 7.4 all=1 nx=12 light=15 fit
-box 14.2 8 9.8 14.4 9.6 11.2 all=1 nx=12 light=15 fit
-light 13.8 8.75 6.7 7.5 1.0
-light 13.8 8.75 10.5 7.5 1.0
+box   x0=14.2 y0=8 z0=6 x1=14.4 y1=9.6 z1=7.4 tex=brick_tan nx=light_square light=15 fit
+box   x0=14.2 y0=8 z0=9.8 x1=14.4 y1=9.6 z1=11.2 tex=brick_tan nx=light_square light=15 fit
+light x=13.8 y=8.75 z=6.7 radius=7.5 brightness=1.0
+light x=13.8 y=8.75 z=10.5 radius=7.5 brightness=1.0
 
 // A crate or two left on the gallery
-box 10.5 6.4 4.5 12.9 8.8 6.9 all=19 fit
-box 10.8 8.8 5.1 12.6 10.6 6.7 all=19 fit
+box   x0=10.5 y0=6.4 z0=4.5 x1=12.9 y1=8.8 z1=6.9 tex=crate_wood fit
+box   x0=10.8 y0=8.8 z0=5.1 x1=12.6 y1=10.6 z1=6.7 tex=crate_wood fit
 
 // --- What the lava throws up into the room ---
 //
@@ -232,72 +207,72 @@ box 10.8 8.8 5.1 12.6 10.6 6.7 all=19 fit
 // the two ledges face each other across the room the difference is there to be
 // compared.
 
-light -7.2 -3.25 8 14 0.44
-light 7.2 -3.25 8 14 0.44
-light -7.2 -3.25 15.2 14 0.44
-light 7.2 -3.25 15.2 14 0.44
-light -7.2 -3.25 22.4 14 0.44
-light 7.2 -3.25 22.4 14 0.44
-light -7.5 -3.25 11.6 12 0.34
-light 7.5 -3.25 11.6 12 0.34
-light -7.5 -3.25 18.8 12 0.34
-light 7.5 -3.25 18.8 12 0.34
+light x=-7.2 y=-3.25 z=8 radius=14 brightness=0.44
+light x=7.2 y=-3.25 z=8 radius=14 brightness=0.44
+light x=-7.2 y=-3.25 z=15.2 radius=14 brightness=0.44
+light x=7.2 y=-3.25 z=15.2 radius=14 brightness=0.44
+light x=-7.2 y=-3.25 z=22.4 radius=14 brightness=0.44
+light x=7.2 y=-3.25 z=22.4 radius=14 brightness=0.44
+light x=-7.5 y=-3.25 z=11.6 radius=12 brightness=0.34
+light x=7.5 y=-3.25 z=11.6 radius=12 brightness=0.34
+light x=-7.5 y=-3.25 z=18.8 radius=12 brightness=0.34
+light x=7.5 y=-3.25 z=18.8 radius=12 brightness=0.34
 
 // The glow the lake throws up onto the bridge and the ledges. These sit above
 // the deck on purpose: a floor takes nothing from a lamp underneath it. They
 // stand almost on top of the deck, so what they mostly light is the deck, and
 // they are the one thing that decides how bright it reads.
-light 0 2.25 7.5 14 0.42
-light 0 2.25 15 14 0.42
-light 0 2.25 22.5 14 0.42
+light x=0 y=2.25 z=7.5 radius=14 brightness=0.42
+light x=0 y=2.25 z=15 radius=14 brightness=0.42
+light x=0 y=2.25 z=22.5 radius=14 brightness=0.42
 
 // High fill under the eaves. Mirrored: a single lamp to one side at each end
 // leans the whole bridge that way, and the lean reads as a mistake because
 // nothing up there is visible to explain it.
-light -7.5 10.5 12 15.5 0.13
-light 7.5 10.5 12 15.5 0.13
-light -7.5 10.5 20.5 15.5 0.13
-light 7.5 10.5 20.5 15.5 0.13
-light -6.5 3 2.75 9.5 0.46
-light 6.5 3 2.75 9.5 0.46
-light -6.5 3 29.5 9.5 0.46
-light 6.5 3 29.5 9.5 0.46
+light x=-7.5 y=10.5 z=12 radius=15.5 brightness=0.13
+light x=7.5 y=10.5 z=12 radius=15.5 brightness=0.13
+light x=-7.5 y=10.5 z=20.5 radius=15.5 brightness=0.13
+light x=7.5 y=10.5 z=20.5 radius=15.5 brightness=0.13
+light x=-6.5 y=3 z=2.75 radius=9.5 brightness=0.46
+light x=6.5 y=3 z=2.75 radius=9.5 brightness=0.46
+light x=-6.5 y=3 z=29.5 radius=9.5 brightness=0.46
+light x=6.5 y=3 z=29.5 radius=9.5 brightness=0.46
 
 // ===========================================================================
 // The reliquary: interior x -6.4..6.4, z 33.6..44.8, ceiling 7.2. A sunken
 // pool of lava in the middle of the floor lights the room from below.
 // ===========================================================================
 
-box -8 7.2 33.6 8 8 46.4 all=2
-box -8 0 33.6 -6.4 7.2 46.4 all=14
-box 6.4 0 33.6 8 7.2 46.4 all=14
-box -8 0 44.8 8 7.2 46.4 all=14
+box   x0=-8 y0=7.2 z0=33.6 x1=8 y1=8 z1=46.4 tex=stone_large
+box   x0=-8 y0=0 z0=33.6 x1=-6.4 y1=7.2 z1=46.4 tex=brick_blue
+box   x0=6.4 y0=0 z0=33.6 x1=8 y1=7.2 z1=46.4 tex=brick_blue
+box   x0=-8 y0=0 z0=44.8 x1=8 y1=7.2 z1=46.4 tex=brick_blue
 
 // The floor, in four pieces around the pool
-box -8 -2.4 33.6 8 0 37.6 all=13
-box -8 -2.4 42.4 8 0 46.4 all=13
-box -8 -2.4 37.6 -3.2 0 42.4 all=13
-box 3.2 -2.4 37.6 8 0 42.4 all=13
+box   x0=-8 y0=-2.4 z0=33.6 x1=8 y1=0 z1=37.6 tex=floor_checker
+box   x0=-8 y0=-2.4 z0=42.4 x1=8 y1=0 z1=46.4 tex=floor_checker
+box   x0=-8 y0=-2.4 z0=37.6 x1=-3.2 y1=0 z1=42.4 tex=floor_checker
+box   x0=3.2 y0=-2.4 z0=37.6 x1=8 y1=0 z1=42.4 tex=floor_checker
 
 // The pool itself, and the rough rock it has eaten into. The surface rides
 // the wave, which takes it a WAVE_AMP down each way, so it sits that much
 // above the underside of the floor rather than flush with it: level with it,
 // the down-swing would pull the lava clear of the rim and open a gap all the
 // way round.
-box -3.2 -4 37.6 3.2 -2 42.4 all=7 flow
-box -3.2 -4.2 37.4 3.2 -4 42.6 all=5
+box   x0=-3.2 y0=-4 z0=37.6 x1=3.2 y1=-2 z1=42.4 tex=lava_swirl flow
+box   x0=-3.2 y0=-4.2 z0=37.4 x1=3.2 y1=-4 z1=42.6 tex=rock_craggy
 
 // An eight-sided pedestal standing in the pool
-prism 0 40 1.8 -2.4 2.4 8 22.5 all=4 top=4
+prism cx=0 cz=40 radius=1.8 y0=-2.4 y1=2.4 sides=8 rot=22.5 tex=sandstone_brick top=sandstone_brick
 
-light 0 -1 40 11.5 0.85
-light 0 5.25 35.75 6.5 0.3
+light x=0 y=-1 z=40 radius=11.5 brightness=0.85
+light x=0 y=5.25 z=35.75 radius=6.5 brightness=0.3
 
 // Torch niches either side of the door back out
-box -6.4 2.4 34 -5.6 4 35.4 all=14 px=11 light=15 fit
-box 5.6 2.4 34 6.4 4 35.4 all=14 nx=11 light=15 fit
-light -5.3 3.2 34.7 8 0.9
-light 5.3 3.2 34.7 8 0.9
+box   x0=-6.4 y0=2.4 z0=34 x1=-5.6 y1=4 z1=35.4 tex=brick_blue px=light_bank light=15 fit
+box   x0=5.6 y0=2.4 z0=34 x1=6.4 y1=4 z1=35.4 tex=brick_blue nx=light_bank light=15 fit
+light x=-5.3 y=3.2 z=34.7 radius=8 brightness=0.9
+light x=5.3 y=3.2 z=34.7 radius=8 brightness=0.9
 
 // ===========================================================================
 // The monolith chamber: interior x -84.8..-33.6, z 4..55.2, floor 6.4,
@@ -323,44 +298,44 @@ light 5.3 3.2 34.7 8 0.9
 // shaft it runs into is wider again and more than twice as tall, so the space
 // opens out around you and over your head as the stair starts to climb.
 
-box -19.2 -1.6 27.2 -16 0 32 all=0 top=3
-box -19.2 5.6 27.2 -16 14.4 32 all=10
-box -19.2 -1.6 25.6 -16 14.4 27.2 all=10
-box -19.2 -1.6 32 -16 14.4 33.6 all=10
+box   x0=-19.2 y0=-1.6 z0=27.2 x1=-16 y1=0 z1=32 tex=stone_blocks top=floor_stone
+box   x0=-19.2 y0=5.6 z0=27.2 x1=-16 y1=14.4 z1=32 tex=iron_brick
+box   x0=-19.2 y0=-1.6 z0=25.6 x1=-16 y1=14.4 z1=27.2 tex=iron_brick
+box   x0=-19.2 y0=-1.6 z0=32 x1=-16 y1=14.4 z1=33.6 tex=iron_brick
 
-box -32 -1.6 24.8 -19.2 12.8 26.4 all=10
-box -32 -1.6 32.8 -19.2 12.8 34.4 all=10
-box -32 12.8 26.4 -19.2 14.4 32.8 all=10
+box   x0=-32 y0=-1.6 z0=24.8 x1=-19.2 y1=12.8 z1=26.4 tex=iron_brick
+box   x0=-32 y0=-1.6 z0=32.8 x1=-19.2 y1=12.8 z1=34.4 tex=iron_brick
+box   x0=-32 y0=12.8 z0=26.4 x1=-19.2 y1=14.4 z1=32.8 tex=iron_brick
 
 // Sixteen steps of 0.4 m, climbing west from x -19.2 to the sill at -32.
 // Each one carries down to the underside of the corridor floor, so the
 // flight is solid.
 
-box -20 -1.6 26.4 -19.2 0.4 32.8 all=0 top=3
-box -20.8 -1.6 26.4 -20 0.8 32.8 all=0 top=3
-box -21.6 -1.6 26.4 -20.8 1.2 32.8 all=0 top=3
-box -22.4 -1.6 26.4 -21.6 1.6 32.8 all=0 top=3
-box -23.2 -1.6 26.4 -22.4 2 32.8 all=0 top=3
-box -24 -1.6 26.4 -23.2 2.4 32.8 all=0 top=3
-box -24.8 -1.6 26.4 -24 2.8 32.8 all=0 top=3
-box -25.6 -1.6 26.4 -24.8 3.2 32.8 all=0 top=3
-box -26.4 -1.6 26.4 -25.6 3.6 32.8 all=0 top=3
-box -27.2 -1.6 26.4 -26.4 4 32.8 all=0 top=3
-box -28 -1.6 26.4 -27.2 4.4 32.8 all=0 top=3
-box -28.8 -1.6 26.4 -28 4.8 32.8 all=0 top=3
-box -29.6 -1.6 26.4 -28.8 5.2 32.8 all=0 top=3
-box -30.4 -1.6 26.4 -29.6 5.6 32.8 all=0 top=3
-box -31.2 -1.6 26.4 -30.4 6 32.8 all=0 top=3
-box -32 -1.6 26.4 -31.2 6.4 32.8 all=0 top=3
+box   x0=-20 y0=-1.6 z0=26.4 x1=-19.2 y1=0.4 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-20.8 y0=-1.6 z0=26.4 x1=-20 y1=0.8 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-21.6 y0=-1.6 z0=26.4 x1=-20.8 y1=1.2 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-22.4 y0=-1.6 z0=26.4 x1=-21.6 y1=1.6 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-23.2 y0=-1.6 z0=26.4 x1=-22.4 y1=2 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-24 y0=-1.6 z0=26.4 x1=-23.2 y1=2.4 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-24.8 y0=-1.6 z0=26.4 x1=-24 y1=2.8 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-25.6 y0=-1.6 z0=26.4 x1=-24.8 y1=3.2 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-26.4 y0=-1.6 z0=26.4 x1=-25.6 y1=3.6 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-27.2 y0=-1.6 z0=26.4 x1=-26.4 y1=4 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-28 y0=-1.6 z0=26.4 x1=-27.2 y1=4.4 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-28.8 y0=-1.6 z0=26.4 x1=-28 y1=4.8 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-29.6 y0=-1.6 z0=26.4 x1=-28.8 y1=5.2 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-30.4 y0=-1.6 z0=26.4 x1=-29.6 y1=5.6 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-31.2 y0=-1.6 z0=26.4 x1=-30.4 y1=6 z1=32.8 tex=stone_blocks top=floor_stone
+box   x0=-32 y0=-1.6 z0=26.4 x1=-31.2 y1=6.4 z1=32.8 tex=stone_blocks top=floor_stone
 
 // --- Shell ---
 
-box -86.4 4.8 2.4 -32 6.4 56.8 all=10 top=13
+box   x0=-86.4 y0=4.8 z0=2.4 x1=-32 y1=6.4 z1=56.8 tex=iron_brick top=floor_checker
 
-box -33.6 4.8 2.4 -32 59.2 26.4 all=10
-box -33.6 4.8 32.8 -32 59.2 56.8 all=10
-box -33.6 12 26.4 -32 59.2 32.8 all=10
-arch x -33.6 -32 26.4 32.8 10 12 4 all=4 bottom=4
+box   x0=-33.6 y0=4.8 z0=2.4 x1=-32 y1=59.2 z1=26.4 tex=iron_brick
+box   x0=-33.6 y0=4.8 z0=32.8 x1=-32 y1=59.2 z1=56.8 tex=iron_brick
+box   x0=-33.6 y0=12 z0=26.4 x1=-32 y1=59.2 z1=32.8 tex=iron_brick
+arch  axis=x a0=-33.6 a1=-32 c0=26.4 c1=32.8 ybase=10 ytop=12 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
 // --- The three crosses ---
 //
@@ -392,154 +367,154 @@ arch x -33.6 -32 26.4 32.8 10 12 4 all=4 bottom=4
 // overlap, so no two lamp faces are coplanar.
 
 // West wall
-box -86.4 4.8 2.4 -85.6 59.2 56.8 all=10
+box   x0=-86.4 y0=4.8 z0=2.4 x1=-85.6 y1=59.2 z1=56.8 tex=iron_brick
 
-box -85.6 6.4 4 -84.8 12.8 55.2 all=10
-box -85.6 48 4 -84.8 57.6 55.2 all=10
-box -85.6 12.8 4 -84.8 19.2 26.4 all=10
-box -85.6 12.8 32.8 -84.8 19.2 55.2 all=10
-box -85.6 19.2 4 -84.8 25.6 16.8 all=10
-box -85.6 19.2 42.4 -84.8 25.6 55.2 all=10
-box -85.6 25.6 4 -84.8 48 26.4 all=10
-box -85.6 25.6 32.8 -84.8 48 55.2 all=10
+box   x0=-85.6 y0=6.4 z0=4 x1=-84.8 y1=12.8 z1=55.2 tex=iron_brick
+box   x0=-85.6 y0=48 z0=4 x1=-84.8 y1=57.6 z1=55.2 tex=iron_brick
+box   x0=-85.6 y0=12.8 z0=4 x1=-84.8 y1=19.2 z1=26.4 tex=iron_brick
+box   x0=-85.6 y0=12.8 z0=32.8 x1=-84.8 y1=19.2 z1=55.2 tex=iron_brick
+box   x0=-85.6 y0=19.2 z0=4 x1=-84.8 y1=25.6 z1=16.8 tex=iron_brick
+box   x0=-85.6 y0=19.2 z0=42.4 x1=-84.8 y1=25.6 z1=55.2 tex=iron_brick
+box   x0=-85.6 y0=25.6 z0=4 x1=-84.8 y1=48 z1=26.4 tex=iron_brick
+box   x0=-85.6 y0=25.6 z0=32.8 x1=-84.8 y1=48 z1=55.2 tex=iron_brick
 
-box -85.6 12.8 26.4 -85.5 16 29.6 all=10 px=22 light=15 fit
-box -85.6 16 26.4 -85.5 19.2 29.6 all=10 px=22 light=15 fit
-box -85.6 19.2 26.4 -85.5 22.4 29.6 all=10 px=22 light=15 fit
-box -85.6 22.4 26.4 -85.5 25.6 29.6 all=10 px=22 light=15 fit
-box -85.6 25.6 26.4 -85.5 28.8 29.6 all=10 px=22 light=15 fit
-box -85.6 28.8 26.4 -85.5 32 29.6 all=10 px=22 light=15 fit
-box -85.6 32 26.4 -85.5 35.2 29.6 all=10 px=22 light=15 fit
-box -85.6 35.2 26.4 -85.5 38.4 29.6 all=10 px=22 light=15 fit
-box -85.6 38.4 26.4 -85.5 41.6 29.6 all=10 px=22 light=15 fit
-box -85.6 41.6 26.4 -85.5 44.8 29.6 all=10 px=22 light=15 fit
-box -85.6 44.8 26.4 -85.5 48 29.6 all=10 px=22 light=15 fit
+box   x0=-85.6 y0=12.8 z0=26.4 x1=-85.5 y1=16 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=16 z0=26.4 x1=-85.5 y1=19.2 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=19.2 z0=26.4 x1=-85.5 y1=22.4 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=22.4 z0=26.4 x1=-85.5 y1=25.6 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=25.6 z0=26.4 x1=-85.5 y1=28.8 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=28.8 z0=26.4 x1=-85.5 y1=32 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=32 z0=26.4 x1=-85.5 y1=35.2 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=35.2 z0=26.4 x1=-85.5 y1=38.4 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=38.4 z0=26.4 x1=-85.5 y1=41.6 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=41.6 z0=26.4 x1=-85.5 y1=44.8 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=44.8 z0=26.4 x1=-85.5 y1=48 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
 
-box -85.6 12.8 29.6 -85.5 16 32.8 all=10 px=22 light=15 fit
-box -85.6 16 29.6 -85.5 19.2 32.8 all=10 px=22 light=15 fit
-box -85.6 19.2 29.6 -85.5 22.4 32.8 all=10 px=22 light=15 fit
-box -85.6 22.4 29.6 -85.5 25.6 32.8 all=10 px=22 light=15 fit
-box -85.6 25.6 29.6 -85.5 28.8 32.8 all=10 px=22 light=15 fit
-box -85.6 28.8 29.6 -85.5 32 32.8 all=10 px=22 light=15 fit
-box -85.6 32 29.6 -85.5 35.2 32.8 all=10 px=22 light=15 fit
-box -85.6 35.2 29.6 -85.5 38.4 32.8 all=10 px=22 light=15 fit
-box -85.6 38.4 29.6 -85.5 41.6 32.8 all=10 px=22 light=15 fit
-box -85.6 41.6 29.6 -85.5 44.8 32.8 all=10 px=22 light=15 fit
-box -85.6 44.8 29.6 -85.5 48 32.8 all=10 px=22 light=15 fit
+box   x0=-85.6 y0=12.8 z0=29.6 x1=-85.5 y1=16 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=16 z0=29.6 x1=-85.5 y1=19.2 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=19.2 z0=29.6 x1=-85.5 y1=22.4 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=22.4 z0=29.6 x1=-85.5 y1=25.6 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=25.6 z0=29.6 x1=-85.5 y1=28.8 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=28.8 z0=29.6 x1=-85.5 y1=32 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=32 z0=29.6 x1=-85.5 y1=35.2 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=35.2 z0=29.6 x1=-85.5 y1=38.4 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=38.4 z0=29.6 x1=-85.5 y1=41.6 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=41.6 z0=29.6 x1=-85.5 y1=44.8 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=44.8 z0=29.6 x1=-85.5 y1=48 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
 
-box -85.6 19.2 16.8 -85.5 22.4 20 all=10 px=22 light=15 fit
-box -85.6 19.2 20 -85.5 22.4 23.2 all=10 px=22 light=15 fit
-box -85.6 19.2 23.2 -85.5 22.4 26.4 all=10 px=22 light=15 fit
-box -85.6 19.2 32.8 -85.5 22.4 36 all=10 px=22 light=15 fit
-box -85.6 19.2 36 -85.5 22.4 39.2 all=10 px=22 light=15 fit
-box -85.6 19.2 39.2 -85.5 22.4 42.4 all=10 px=22 light=15 fit
+box   x0=-85.6 y0=19.2 z0=16.8 x1=-85.5 y1=22.4 z1=20 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=19.2 z0=20 x1=-85.5 y1=22.4 z1=23.2 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=19.2 z0=23.2 x1=-85.5 y1=22.4 z1=26.4 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=19.2 z0=32.8 x1=-85.5 y1=22.4 z1=36 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=19.2 z0=36 x1=-85.5 y1=22.4 z1=39.2 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=19.2 z0=39.2 x1=-85.5 y1=22.4 z1=42.4 tex=iron_brick px=light_strip_red light=15 fit
 
-box -85.6 22.4 16.8 -85.5 25.6 20 all=10 px=22 light=15 fit
-box -85.6 22.4 20 -85.5 25.6 23.2 all=10 px=22 light=15 fit
-box -85.6 22.4 23.2 -85.5 25.6 26.4 all=10 px=22 light=15 fit
-box -85.6 22.4 32.8 -85.5 25.6 36 all=10 px=22 light=15 fit
-box -85.6 22.4 36 -85.5 25.6 39.2 all=10 px=22 light=15 fit
-box -85.6 22.4 39.2 -85.5 25.6 42.4 all=10 px=22 light=15 fit
+box   x0=-85.6 y0=22.4 z0=16.8 x1=-85.5 y1=25.6 z1=20 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=22.4 z0=20 x1=-85.5 y1=25.6 z1=23.2 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=22.4 z0=23.2 x1=-85.5 y1=25.6 z1=26.4 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=22.4 z0=32.8 x1=-85.5 y1=25.6 z1=36 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=22.4 z0=36 x1=-85.5 y1=25.6 z1=39.2 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=22.4 z0=39.2 x1=-85.5 y1=25.6 z1=42.4 tex=iron_brick px=light_strip_red light=15 fit
 
 // North wall
-box -86.4 4.8 2.4 -32 59.2 3.2 all=10
+box   x0=-86.4 y0=4.8 z0=2.4 x1=-32 y1=59.2 z1=3.2 tex=iron_brick
 
-box -84.8 6.4 3.2 -33.6 12.8 4 all=10
-box -84.8 48 3.2 -33.6 57.6 4 all=10
-box -84.8 12.8 3.2 -62.4 19.2 4 all=10
-box -56 12.8 3.2 -33.6 19.2 4 all=10
-box -84.8 19.2 3.2 -72 25.6 4 all=10
-box -46.4 19.2 3.2 -33.6 25.6 4 all=10
-box -84.8 25.6 3.2 -62.4 48 4 all=10
-box -56 25.6 3.2 -33.6 48 4 all=10
+box   x0=-84.8 y0=6.4 z0=3.2 x1=-33.6 y1=12.8 z1=4 tex=iron_brick
+box   x0=-84.8 y0=48 z0=3.2 x1=-33.6 y1=57.6 z1=4 tex=iron_brick
+box   x0=-84.8 y0=12.8 z0=3.2 x1=-62.4 y1=19.2 z1=4 tex=iron_brick
+box   x0=-56 y0=12.8 z0=3.2 x1=-33.6 y1=19.2 z1=4 tex=iron_brick
+box   x0=-84.8 y0=19.2 z0=3.2 x1=-72 y1=25.6 z1=4 tex=iron_brick
+box   x0=-46.4 y0=19.2 z0=3.2 x1=-33.6 y1=25.6 z1=4 tex=iron_brick
+box   x0=-84.8 y0=25.6 z0=3.2 x1=-62.4 y1=48 z1=4 tex=iron_brick
+box   x0=-56 y0=25.6 z0=3.2 x1=-33.6 y1=48 z1=4 tex=iron_brick
 
-box -62.4 12.8 3.2 -59.2 16 3.3 all=10 pz=22 light=15 fit
-box -62.4 16 3.2 -59.2 19.2 3.3 all=10 pz=22 light=15 fit
-box -62.4 19.2 3.2 -59.2 22.4 3.3 all=10 pz=22 light=15 fit
-box -62.4 22.4 3.2 -59.2 25.6 3.3 all=10 pz=22 light=15 fit
-box -62.4 25.6 3.2 -59.2 28.8 3.3 all=10 pz=22 light=15 fit
-box -62.4 28.8 3.2 -59.2 32 3.3 all=10 pz=22 light=15 fit
-box -62.4 32 3.2 -59.2 35.2 3.3 all=10 pz=22 light=15 fit
-box -62.4 35.2 3.2 -59.2 38.4 3.3 all=10 pz=22 light=15 fit
-box -62.4 38.4 3.2 -59.2 41.6 3.3 all=10 pz=22 light=15 fit
-box -62.4 41.6 3.2 -59.2 44.8 3.3 all=10 pz=22 light=15 fit
-box -62.4 44.8 3.2 -59.2 48 3.3 all=10 pz=22 light=15 fit
+box   x0=-62.4 y0=12.8 z0=3.2 x1=-59.2 y1=16 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=16 z0=3.2 x1=-59.2 y1=19.2 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=19.2 z0=3.2 x1=-59.2 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=22.4 z0=3.2 x1=-59.2 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=25.6 z0=3.2 x1=-59.2 y1=28.8 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=28.8 z0=3.2 x1=-59.2 y1=32 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=32 z0=3.2 x1=-59.2 y1=35.2 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=35.2 z0=3.2 x1=-59.2 y1=38.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=38.4 z0=3.2 x1=-59.2 y1=41.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=41.6 z0=3.2 x1=-59.2 y1=44.8 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=44.8 z0=3.2 x1=-59.2 y1=48 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
 
-box -59.2 12.8 3.2 -56 16 3.3 all=10 pz=22 light=15 fit
-box -59.2 16 3.2 -56 19.2 3.3 all=10 pz=22 light=15 fit
-box -59.2 19.2 3.2 -56 22.4 3.3 all=10 pz=22 light=15 fit
-box -59.2 22.4 3.2 -56 25.6 3.3 all=10 pz=22 light=15 fit
-box -59.2 25.6 3.2 -56 28.8 3.3 all=10 pz=22 light=15 fit
-box -59.2 28.8 3.2 -56 32 3.3 all=10 pz=22 light=15 fit
-box -59.2 32 3.2 -56 35.2 3.3 all=10 pz=22 light=15 fit
-box -59.2 35.2 3.2 -56 38.4 3.3 all=10 pz=22 light=15 fit
-box -59.2 38.4 3.2 -56 41.6 3.3 all=10 pz=22 light=15 fit
-box -59.2 41.6 3.2 -56 44.8 3.3 all=10 pz=22 light=15 fit
-box -59.2 44.8 3.2 -56 48 3.3 all=10 pz=22 light=15 fit
+box   x0=-59.2 y0=12.8 z0=3.2 x1=-56 y1=16 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=16 z0=3.2 x1=-56 y1=19.2 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=19.2 z0=3.2 x1=-56 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=22.4 z0=3.2 x1=-56 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=25.6 z0=3.2 x1=-56 y1=28.8 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=28.8 z0=3.2 x1=-56 y1=32 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=32 z0=3.2 x1=-56 y1=35.2 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=35.2 z0=3.2 x1=-56 y1=38.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=38.4 z0=3.2 x1=-56 y1=41.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=41.6 z0=3.2 x1=-56 y1=44.8 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=44.8 z0=3.2 x1=-56 y1=48 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
 
-box -72 19.2 3.2 -68.8 22.4 3.3 all=10 pz=22 light=15 fit
-box -68.8 19.2 3.2 -65.6 22.4 3.3 all=10 pz=22 light=15 fit
-box -65.6 19.2 3.2 -62.4 22.4 3.3 all=10 pz=22 light=15 fit
-box -56 19.2 3.2 -52.8 22.4 3.3 all=10 pz=22 light=15 fit
-box -52.8 19.2 3.2 -49.6 22.4 3.3 all=10 pz=22 light=15 fit
-box -49.6 19.2 3.2 -46.4 22.4 3.3 all=10 pz=22 light=15 fit
+box   x0=-72 y0=19.2 z0=3.2 x1=-68.8 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-68.8 y0=19.2 z0=3.2 x1=-65.6 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-65.6 y0=19.2 z0=3.2 x1=-62.4 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-56 y0=19.2 z0=3.2 x1=-52.8 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-52.8 y0=19.2 z0=3.2 x1=-49.6 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-49.6 y0=19.2 z0=3.2 x1=-46.4 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
 
-box -72 22.4 3.2 -68.8 25.6 3.3 all=10 pz=22 light=15 fit
-box -68.8 22.4 3.2 -65.6 25.6 3.3 all=10 pz=22 light=15 fit
-box -65.6 22.4 3.2 -62.4 25.6 3.3 all=10 pz=22 light=15 fit
-box -56 22.4 3.2 -52.8 25.6 3.3 all=10 pz=22 light=15 fit
-box -52.8 22.4 3.2 -49.6 25.6 3.3 all=10 pz=22 light=15 fit
-box -49.6 22.4 3.2 -46.4 25.6 3.3 all=10 pz=22 light=15 fit
+box   x0=-72 y0=22.4 z0=3.2 x1=-68.8 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-68.8 y0=22.4 z0=3.2 x1=-65.6 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-65.6 y0=22.4 z0=3.2 x1=-62.4 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-56 y0=22.4 z0=3.2 x1=-52.8 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-52.8 y0=22.4 z0=3.2 x1=-49.6 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-49.6 y0=22.4 z0=3.2 x1=-46.4 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
 
 // South wall
-box -86.4 4.8 56 -32 59.2 56.8 all=10
+box   x0=-86.4 y0=4.8 z0=56 x1=-32 y1=59.2 z1=56.8 tex=iron_brick
 
-box -84.8 6.4 55.2 -33.6 12.8 56 all=10
-box -84.8 48 55.2 -33.6 57.6 56 all=10
-box -84.8 12.8 55.2 -62.4 19.2 56 all=10
-box -56 12.8 55.2 -33.6 19.2 56 all=10
-box -84.8 19.2 55.2 -72 25.6 56 all=10
-box -46.4 19.2 55.2 -33.6 25.6 56 all=10
-box -84.8 25.6 55.2 -62.4 48 56 all=10
-box -56 25.6 55.2 -33.6 48 56 all=10
+box   x0=-84.8 y0=6.4 z0=55.2 x1=-33.6 y1=12.8 z1=56 tex=iron_brick
+box   x0=-84.8 y0=48 z0=55.2 x1=-33.6 y1=57.6 z1=56 tex=iron_brick
+box   x0=-84.8 y0=12.8 z0=55.2 x1=-62.4 y1=19.2 z1=56 tex=iron_brick
+box   x0=-56 y0=12.8 z0=55.2 x1=-33.6 y1=19.2 z1=56 tex=iron_brick
+box   x0=-84.8 y0=19.2 z0=55.2 x1=-72 y1=25.6 z1=56 tex=iron_brick
+box   x0=-46.4 y0=19.2 z0=55.2 x1=-33.6 y1=25.6 z1=56 tex=iron_brick
+box   x0=-84.8 y0=25.6 z0=55.2 x1=-62.4 y1=48 z1=56 tex=iron_brick
+box   x0=-56 y0=25.6 z0=55.2 x1=-33.6 y1=48 z1=56 tex=iron_brick
 
-box -62.4 12.8 55.9 -59.2 16 56 all=10 nz=22 light=15 fit
-box -62.4 16 55.9 -59.2 19.2 56 all=10 nz=22 light=15 fit
-box -62.4 19.2 55.9 -59.2 22.4 56 all=10 nz=22 light=15 fit
-box -62.4 22.4 55.9 -59.2 25.6 56 all=10 nz=22 light=15 fit
-box -62.4 25.6 55.9 -59.2 28.8 56 all=10 nz=22 light=15 fit
-box -62.4 28.8 55.9 -59.2 32 56 all=10 nz=22 light=15 fit
-box -62.4 32 55.9 -59.2 35.2 56 all=10 nz=22 light=15 fit
-box -62.4 35.2 55.9 -59.2 38.4 56 all=10 nz=22 light=15 fit
-box -62.4 38.4 55.9 -59.2 41.6 56 all=10 nz=22 light=15 fit
-box -62.4 41.6 55.9 -59.2 44.8 56 all=10 nz=22 light=15 fit
-box -62.4 44.8 55.9 -59.2 48 56 all=10 nz=22 light=15 fit
+box   x0=-62.4 y0=12.8 z0=55.9 x1=-59.2 y1=16 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=16 z0=55.9 x1=-59.2 y1=19.2 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=19.2 z0=55.9 x1=-59.2 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=22.4 z0=55.9 x1=-59.2 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=25.6 z0=55.9 x1=-59.2 y1=28.8 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=28.8 z0=55.9 x1=-59.2 y1=32 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=32 z0=55.9 x1=-59.2 y1=35.2 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=35.2 z0=55.9 x1=-59.2 y1=38.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=38.4 z0=55.9 x1=-59.2 y1=41.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=41.6 z0=55.9 x1=-59.2 y1=44.8 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=44.8 z0=55.9 x1=-59.2 y1=48 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
 
-box -59.2 12.8 55.9 -56 16 56 all=10 nz=22 light=15 fit
-box -59.2 16 55.9 -56 19.2 56 all=10 nz=22 light=15 fit
-box -59.2 19.2 55.9 -56 22.4 56 all=10 nz=22 light=15 fit
-box -59.2 22.4 55.9 -56 25.6 56 all=10 nz=22 light=15 fit
-box -59.2 25.6 55.9 -56 28.8 56 all=10 nz=22 light=15 fit
-box -59.2 28.8 55.9 -56 32 56 all=10 nz=22 light=15 fit
-box -59.2 32 55.9 -56 35.2 56 all=10 nz=22 light=15 fit
-box -59.2 35.2 55.9 -56 38.4 56 all=10 nz=22 light=15 fit
-box -59.2 38.4 55.9 -56 41.6 56 all=10 nz=22 light=15 fit
-box -59.2 41.6 55.9 -56 44.8 56 all=10 nz=22 light=15 fit
-box -59.2 44.8 55.9 -56 48 56 all=10 nz=22 light=15 fit
+box   x0=-59.2 y0=12.8 z0=55.9 x1=-56 y1=16 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=16 z0=55.9 x1=-56 y1=19.2 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=19.2 z0=55.9 x1=-56 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=22.4 z0=55.9 x1=-56 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=25.6 z0=55.9 x1=-56 y1=28.8 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=28.8 z0=55.9 x1=-56 y1=32 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=32 z0=55.9 x1=-56 y1=35.2 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=35.2 z0=55.9 x1=-56 y1=38.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=38.4 z0=55.9 x1=-56 y1=41.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=41.6 z0=55.9 x1=-56 y1=44.8 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=44.8 z0=55.9 x1=-56 y1=48 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
 
-box -72 19.2 55.9 -68.8 22.4 56 all=10 nz=22 light=15 fit
-box -68.8 19.2 55.9 -65.6 22.4 56 all=10 nz=22 light=15 fit
-box -65.6 19.2 55.9 -62.4 22.4 56 all=10 nz=22 light=15 fit
-box -56 19.2 55.9 -52.8 22.4 56 all=10 nz=22 light=15 fit
-box -52.8 19.2 55.9 -49.6 22.4 56 all=10 nz=22 light=15 fit
-box -49.6 19.2 55.9 -46.4 22.4 56 all=10 nz=22 light=15 fit
+box   x0=-72 y0=19.2 z0=55.9 x1=-68.8 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-68.8 y0=19.2 z0=55.9 x1=-65.6 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-65.6 y0=19.2 z0=55.9 x1=-62.4 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-56 y0=19.2 z0=55.9 x1=-52.8 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-52.8 y0=19.2 z0=55.9 x1=-49.6 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-49.6 y0=19.2 z0=55.9 x1=-46.4 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
 
-box -72 22.4 55.9 -68.8 25.6 56 all=10 nz=22 light=15 fit
-box -68.8 22.4 55.9 -65.6 25.6 56 all=10 nz=22 light=15 fit
-box -65.6 22.4 55.9 -62.4 25.6 56 all=10 nz=22 light=15 fit
-box -56 22.4 55.9 -52.8 25.6 56 all=10 nz=22 light=15 fit
-box -52.8 22.4 55.9 -49.6 25.6 56 all=10 nz=22 light=15 fit
-box -49.6 22.4 55.9 -46.4 25.6 56 all=10 nz=22 light=15 fit
+box   x0=-72 y0=22.4 z0=55.9 x1=-68.8 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-68.8 y0=22.4 z0=55.9 x1=-65.6 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-65.6 y0=22.4 z0=55.9 x1=-62.4 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-56 y0=22.4 z0=55.9 x1=-52.8 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-52.8 y0=22.4 z0=55.9 x1=-49.6 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-49.6 y0=22.4 z0=55.9 x1=-46.4 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
 
 // --- The roof ---
 //
@@ -557,31 +532,31 @@ box -49.6 22.4 55.9 -46.4 25.6 56 all=10 nz=22 light=15 fit
 // well, and a second below the mouth does the falling: light does not carry
 // through the slab, so nothing above it can light what is below.
 
-box -86.4 57.6 2.4 -65.6 59.2 56.8 all=18
-box -52.8 57.6 2.4 -32 59.2 56.8 all=18
-box -65.6 57.6 2.4 -52.8 59.2 23.2 all=18
-box -65.6 57.6 36 -52.8 59.2 56.8 all=18
+box   x0=-86.4 y0=57.6 z0=2.4 x1=-65.6 y1=59.2 z1=56.8 tex=metal_dark
+box   x0=-52.8 y0=57.6 z0=2.4 x1=-32 y1=59.2 z1=56.8 tex=metal_dark
+box   x0=-65.6 y0=57.6 z0=2.4 x1=-52.8 y1=59.2 z1=23.2 tex=metal_dark
+box   x0=-65.6 y0=57.6 z0=36 x1=-52.8 y1=59.2 z1=56.8 tex=metal_dark
 
-box -84.8 54.4 11.2 -33.6 57.6 13.6 all=8
-box -84.8 54.4 20.8 -33.6 57.6 23.2 all=8
-box -84.8 54.4 36 -33.6 57.6 38.4 all=8
-box -84.8 54.4 45.6 -33.6 57.6 48 all=8
+box   x0=-84.8 y0=54.4 z0=11.2 x1=-33.6 y1=57.6 z1=13.6 tex=metal_riveted
+box   x0=-84.8 y0=54.4 z0=20.8 x1=-33.6 y1=57.6 z1=23.2 tex=metal_riveted
+box   x0=-84.8 y0=54.4 z0=36 x1=-33.6 y1=57.6 z1=38.4 tex=metal_riveted
+box   x0=-84.8 y0=54.4 z0=45.6 x1=-33.6 y1=57.6 z1=48 tex=metal_riveted
 
-box -77.6 54.4 4 -75.2 57.6 55.2 all=8
-box -68 54.4 4 -65.6 57.6 55.2 all=8
-box -52.8 54.4 4 -50.4 57.6 55.2 all=8
-box -43.2 54.4 4 -40.8 57.6 55.2 all=8
+box   x0=-77.6 y0=54.4 z0=4 x1=-75.2 y1=57.6 z1=55.2 tex=metal_riveted
+box   x0=-68 y0=54.4 z0=4 x1=-65.6 y1=57.6 z1=55.2 tex=metal_riveted
+box   x0=-52.8 y0=54.4 z0=4 x1=-50.4 y1=57.6 z1=55.2 tex=metal_riveted
+box   x0=-43.2 y0=54.4 z0=4 x1=-40.8 y1=57.6 z1=55.2 tex=metal_riveted
 
 // The well itself, and the four lamp panels that cap it
-box -67.2 57.6 21.6 -65.6 78.4 37.6 all=8
-box -52.8 57.6 21.6 -51.2 78.4 37.6 all=8
-box -67.2 57.6 21.6 -51.2 78.4 23.2 all=8
-box -67.2 57.6 36 -51.2 78.4 37.6 all=8
+box   x0=-67.2 y0=57.6 z0=21.6 x1=-65.6 y1=78.4 z1=37.6 tex=metal_riveted
+box   x0=-52.8 y0=57.6 z0=21.6 x1=-51.2 y1=78.4 z1=37.6 tex=metal_riveted
+box   x0=-67.2 y0=57.6 z0=21.6 x1=-51.2 y1=78.4 z1=23.2 tex=metal_riveted
+box   x0=-67.2 y0=57.6 z0=36 x1=-51.2 y1=78.4 z1=37.6 tex=metal_riveted
 
-box -65.6 76.8 23.2 -59.2 78.4 29.6 all=8 ny=11 light=15 fit
-box -65.6 76.8 29.6 -59.2 78.4 36 all=8 ny=11 light=15 fit
-box -59.2 76.8 23.2 -52.8 78.4 29.6 all=8 ny=11 light=15 fit
-box -59.2 76.8 29.6 -52.8 78.4 36 all=8 ny=11 light=15 fit
+box   x0=-65.6 y0=76.8 z0=23.2 x1=-59.2 y1=78.4 z1=29.6 tex=metal_riveted ny=light_bank light=15 fit
+box   x0=-65.6 y0=76.8 z0=29.6 x1=-59.2 y1=78.4 z1=36 tex=metal_riveted ny=light_bank light=15 fit
+box   x0=-59.2 y0=76.8 z0=23.2 x1=-52.8 y1=78.4 z1=29.6 tex=metal_riveted ny=light_bank light=15 fit
+box   x0=-59.2 y0=76.8 z0=29.6 x1=-52.8 y1=78.4 z1=36 tex=metal_riveted ny=light_bank light=15 fit
 
 // --- The monolith ---
 //
@@ -589,8 +564,8 @@ box -59.2 76.8 29.6 -52.8 78.4 36 all=8 ny=11 light=15 fit
 // of the room with its broad face to the door. The crosses now stand clear of
 // its top, so it reads against them rather than over them.
 
-box -64 6.4 23.6 -54.4 8.8 35.6 all=21
-box -61 8.8 24.2 -57.4 41.2 35 all=21
+box   x0=-64 y0=6.4 z0=23.6 x1=-54.4 y1=8.8 z1=35.6 tex=rock_slate
+box   x0=-61 y0=8.8 z0=24.2 x1=-57.4 y1=41.2 z1=35 tex=rock_slate
 
 // --- Light ---
 //
@@ -607,18 +582,18 @@ box -61 8.8 24.2 -57.4 41.2 35 all=21
 // The pair has to sit outside the slab: a lamp buried in it would face the
 // backs of its own faces and light nothing.
 
-light -84 22.4 29.6 43 0.34
-light -59.2 22.4 4.8 43 0.34
-light -59.2 22.4 54.4 43 0.34
-light -59.2 53 29.6 42.5 0.22
-light -59.2 73.75 29.6 21.25 1.00
-light -59.2 49.5 29.6 22.5 0.60
-light -55.6 12.5 29.6 15.75 0.30
-light -62.8 12.5 29.6 15 0.22
-light -39 11.5 29.6 17.5 0.20
+light x=-84 y=22.4 z=29.6 radius=43 brightness=0.34
+light x=-59.2 y=22.4 z=4.8 radius=43 brightness=0.34
+light x=-59.2 y=22.4 z=54.4 radius=43 brightness=0.34
+light x=-59.2 y=53 z=29.6 radius=42.5 brightness=0.22
+light x=-59.2 y=73.75 z=29.6 radius=21.25 brightness=1.00
+light x=-59.2 y=49.5 z=29.6 radius=22.5 brightness=0.60
+light x=-55.6 y=12.5 z=29.6 radius=15.75 brightness=0.30
+light x=-62.8 y=12.5 z=29.6 radius=15 brightness=0.22
+light x=-39 y=11.5 z=29.6 radius=17.5 brightness=0.20
 
 // The way in wants enough light to walk by, and no more
-light -17.5 3.5 29.6 8 0.55
-light -22.5 6 29.6 8.5 0.45
-light -27 8 29.6 8.5 0.45
-light -31.25 11 29.6 8 0.40
+light x=-17.5 y=3.5 z=29.6 radius=8 brightness=0.55
+light x=-22.5 y=6 z=29.6 radius=8.5 brightness=0.45
+light x=-27 y=8 z=29.6 radius=8.5 brightness=0.45
+light x=-31.25 y=11 z=29.6 radius=8 brightness=0.40

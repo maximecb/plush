@@ -44,9 +44,8 @@ let MAP_PATH = $cmd_get_arg_or(1, "examples/data/level1.map");
 // --- Units ---
 
 // World space is metric: positions, distances and speeds are all in meters
-// (and seconds). The map format used to give one texel per world unit;
-// TEXELS_PER_METER keeps that same texture density now that a unit is a
-// meter, and is what an unscaled face's `scale` key defaults to.
+// TEXELS_PER_METER defines the texture density and is what an unscaled
+// face's `scale` key defaults to.
 let TEXELS_PER_METER = 40.0;
 
 // Projection. FOCAL is half the frame width over the tangent of half the
@@ -153,9 +152,9 @@ let AMBIENT = 0.13;
 
 // --- Player ---
 
-let EYE_HEIGHT = 1.4;
+let EYE_HEIGHT = 1.6;
 let PLAYER_RADIUS = 0.45;
-let PLAYER_HEIGHT = 1.6;
+let PLAYER_HEIGHT = 1.7;
 let STEP_HEIGHT = 0.7;
 let WALK_SPEED = 7.5;
 let FLY_SPEED = 10.5;
@@ -507,7 +506,7 @@ class Face {
 }
 
 let textures = [];
-let tex_by_index = {};
+let tex_by_name = {};
 let faces = [];
 let brushes = [];
 let lights = [];
@@ -516,6 +515,16 @@ let var start_x = 0.0;
 let var start_y = 1.6;
 let var start_z = 0.0;
 let var start_yaw = 0.0;
+
+// Loads a texture the first time its name is used in the map, and hands back
+// the same instance every time after that
+fun get_tex(name) {
+    if (tex_by_name.has(name)) return tex_by_name[name];
+    let t = Texture(name);
+    textures.push(t);
+    tex_by_name[name] = t;
+    return t;
+}
 
 // The texture coordinates of a point on a face, before fit and flow. A wall
 // takes v from -y so that the texture is the right way up.
@@ -671,11 +680,29 @@ fun parse_num(s) {
     $exit(1);
 }
 
+// The value out of a `name=value` token at a fixed position in a command,
+// checking that its name is the one expected there
+fun field(tok, i, name) {
+    if (i >= tok.len) {
+        $println("missing " + name + "= in map line");
+        $exit(1);
+    }
+    let kv = tok[i].split("=");
+    if (kv.len != 2 || kv[0] != name) {
+        $println("expected " + name + "=, got " + tok[i]);
+        $exit(1);
+    }
+    return kv[1];
+}
+
+fun field_num(tok, i, name) { return parse_num(field(tok, i, name)); }
+fun field_int(tok, i, name) { return field(tok, i, name).parse_int(10); }
+
 // The keys every brush command takes: which texture goes on which face, how it
 // is applied, and whether the light is baked or forced
 class BrushOpts {
     init(self) {
-        self.all = nil;
+        self.tex = nil;
         self.top = nil;
         self.bottom = nil;
         self.side = nil;
@@ -709,13 +736,9 @@ fun parse_opts(tok, first) {
         if (key == "light") { o.light = val.parse_int(10).clip(0, NUM_LEVELS - 1); continue; }
         if (key == "scale") { o.scale = parse_num(val); continue; }
 
-        if (!tex_by_index.has(val)) {
-            $println("no such texture index: " + val);
-            $exit(1);
-        }
-        let tex = tex_by_index[val];
+        let tex = get_tex(val);
 
-        if (key == "all") { o.all = tex; continue; }
+        if (key == "tex") { o.tex = tex; continue; }
         if (key == "top") { o.top = tex; continue; }
         if (key == "bottom") { o.bottom = tex; continue; }
         if (key == "side") { o.side = tex; continue; }
@@ -748,7 +771,7 @@ fun make_plane(nx, ny, nz, d, tex, o) {
 fun pick(specific, role, o) {
     if (specific != nil) return specific;
     if (role != nil) return role;
-    return o.all;
+    return o.tex;
 }
 
 // The box around a brush, from the corners of every plane cut down by the rest.
@@ -931,52 +954,46 @@ fun parse_map(path) {
         if (tok.len == 0) continue;
         let cmd = tok[0];
 
-        if (cmd == "tex") {
-            let t = Texture(tok[2]);
-            textures.push(t);
-            tex_by_index[tok[1]] = t;
-            continue;
-        }
-
-        if (cmd == "start") {
-            start_x = parse_num(tok[1]);
-            start_y = parse_num(tok[2]);
-            start_z = parse_num(tok[3]);
-            start_yaw = parse_num(tok[4]) * PI / 180.0;
+        if (cmd == "spawn") {
+            start_x = field_num(tok, 1, "x");
+            start_y = field_num(tok, 2, "y");
+            start_z = field_num(tok, 3, "z");
+            start_yaw = field_num(tok, 4, "yaw") * PI / 180.0;
             continue;
         }
 
         // A point light: where it is, how far it reaches, how strong it is
         if (cmd == "light") {
-            lights.push([parse_num(tok[1]), parse_num(tok[2]), parse_num(tok[3]),
-                parse_num(tok[4]), parse_num(tok[5])]);
+            lights.push([field_num(tok, 1, "x"), field_num(tok, 2, "y"), field_num(tok, 3, "z"),
+                field_num(tok, 4, "radius"), field_num(tok, 5, "brightness")]);
             continue;
         }
 
         if (cmd == "box") {
-            cmd_box(parse_num(tok[1]), parse_num(tok[2]), parse_num(tok[3]),
-                parse_num(tok[4]), parse_num(tok[5]), parse_num(tok[6]), parse_opts(tok, 7));
+            cmd_box(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                parse_opts(tok, 7));
             continue;
         }
 
         if (cmd == "ramp") {
-            cmd_ramp(parse_num(tok[1]), parse_num(tok[2]), parse_num(tok[3]),
-                parse_num(tok[4]), parse_num(tok[5]), parse_num(tok[6]), tok[7],
-                parse_opts(tok, 8));
+            cmd_ramp(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                field(tok, 7, "dir"), parse_opts(tok, 8));
             continue;
         }
 
         if (cmd == "prism") {
-            cmd_prism(parse_num(tok[1]), parse_num(tok[2]), parse_num(tok[3]),
-                parse_num(tok[4]), parse_num(tok[5]), tok[6].parse_int(10),
-                parse_num(tok[7]) * PI / 180.0, parse_opts(tok, 8));
+            cmd_prism(field_num(tok, 1, "cx"), field_num(tok, 2, "cz"), field_num(tok, 3, "radius"),
+                field_num(tok, 4, "y0"), field_num(tok, 5, "y1"), field_int(tok, 6, "sides"),
+                field_num(tok, 7, "rot") * PI / 180.0, parse_opts(tok, 8));
             continue;
         }
 
         if (cmd == "arch") {
-            cmd_arch(tok[1], parse_num(tok[2]), parse_num(tok[3]), parse_num(tok[4]),
-                parse_num(tok[5]), parse_num(tok[6]), parse_num(tok[7]),
-                tok[8].parse_int(10), parse_opts(tok, 9));
+            cmd_arch(field(tok, 1, "axis"), field_num(tok, 2, "a0"), field_num(tok, 3, "a1"),
+                field_num(tok, 4, "c0"), field_num(tok, 5, "c1"), field_num(tok, 6, "ybase"),
+                field_num(tok, 7, "ytop"), field_int(tok, 8, "segs"), parse_opts(tok, 9));
             continue;
         }
 
