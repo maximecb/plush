@@ -8,8 +8,11 @@
 //
 // The layout becomes a graph of nodes. A node is an intersection, a street
 // segment or a lot, and owns a polygon with exactly 4 vertices along with the
-// nodes surrounding it: a lot is bordered by streets, and a street runs between
-// two intersections with a lot on either side.
+// nodes surrounding it. A street runs between two intersections with a lot on
+// either side, and a lot is bordered by streets -- except where it grew over
+// a dropped segment, which leaves it flush against the intersection at either
+// end of that segment. Every pair of nodes whose polygons share an edge is a
+// pair of neighbors, and nothing else is.
 //
 // All positions and dimensions are in meters, on the XZ ground plane, with X
 // pointing east and Z pointing south. Y would be up.
@@ -26,15 +29,17 @@ let SPACING = 100.0;
 // How far a road centerline may sit from its ideal position on the grid
 let OFFSET = 18.0;
 
-// Every third road is a 4-lane avenue, the rest are 2-lane streets
-let AVENUE_EVERY = 3;
+// Every other road is a 4-lane avenue, the rest are 2-lane streets
+let AVENUE_EVERY = 2;
 
 // A road is its lanes plus a sidewalk on either side
 let LANE_W = 3.5;
 let SIDEWALK_W = 2.5;
 
-// Chance in percent that a street segment is dropped to leave a T-junction
-let DROP_PERCENT = 12;
+// Chance in percent that a street segment is dropped to leave a T-junction.
+// Only the 2-lane streets are ever cut, so this is a higher rate over fewer
+// candidates than it would otherwise be.
+let DROP_PERCENT = 20;
 
 let WIN_SIZE = 800;
 let MARGIN = 16.0;
@@ -304,7 +309,17 @@ class CityLayout {
     // keeps the border of the land intact and leaves a T-junction at either end.
     // The two blocks it separated become one, and since a block only ever grows
     // once, every lot stays a rectangle.
+    //
+    // An avenue is never cut. Its width is a property of the whole road rather
+    // than of one segment of it, so a gap partway along would leave a 4-lane
+    // road that stops at a block of flats and carries on beyond it, which is
+    // not what four lanes are for. Keeping the cuts to the 2-lane streets is
+    // what makes every avenue a through route from one edge of the land to the
+    // other, and it is what a district does anyway: the arterials run through
+    // and the interruptions happen on the minor streets.
     drop_ew(self, i, j) {
+        if (self.z_lanes[j] == 4)
+            return;
         if (self.legs[i][j] != 4 || self.legs[i + 1][j] != 4)
             return;
         if (!self.free_cell(i, j - 1) || !self.free_cell(i, j))
@@ -318,6 +333,8 @@ class CityLayout {
     }
 
     drop_ns(self, i, j) {
+        if (self.x_lanes[i] == 4)
+            return;
         if (self.legs[i][j] != 4 || self.legs[i][j + 1] != 4)
             return;
         if (!self.free_cell(i - 1, j) || !self.free_cell(i, j))
@@ -334,6 +351,7 @@ class CityLayout {
         let crossings = self.add_intersections();
         let cells = self.add_lots();
         self.add_streets(crossings, cells);
+        self.add_merged_borders(crossings, cells);
     }
 
     // One node per crossing, returned indexed by [i][j]
@@ -423,6 +441,36 @@ class CityLayout {
         }
     }
 
+    // Where a segment was dropped, the block that grew over it now runs the
+    // length of the gap, and the crossing at either end of that gap has the
+    // lot across the road it used to face. Nothing in add_streets can draw
+    // that edge, since the street that would have carried it is the one that
+    // went away, so it is drawn here instead.
+    add_merged_borders(self, crossings, cells) {
+        let nx = self.xs.len;
+        let nz = self.zs.len;
+
+        // A segment only ever goes away between two 4-way crossings, so the
+        // cells either side of it are all on the land
+        for (let var i = 0; i < nx - 1; ++i) {
+            for (let var j = 1; j < nz - 1; ++j) {
+                if (self.ew_open[i][j])
+                    continue;
+                cells[i][j].link(crossings[i][j]);
+                cells[i][j].link(crossings[i + 1][j]);
+            }
+        }
+
+        for (let var i = 1; i < nx - 1; ++i) {
+            for (let var j = 0; j < nz - 1; ++j) {
+                if (self.ns_open[i][j])
+                    continue;
+                cells[i][j].link(crossings[i][j]);
+                cells[i][j].link(crossings[i][j + 1]);
+            }
+        }
+    }
+
     add_street(self, poly, num_lanes) {
         let street = self.add(Node(self.nodes.len, "street", poly));
         street.num_lanes = num_lanes;
@@ -505,9 +553,18 @@ fun print_summary(layout) {
     let streets = layout.nodes_of("street");
     let lots = layout.nodes_of("lot");
 
+    // A T-junction is a crossing with three roads leaving it. Counting its
+    // neighbors would not do: where a segment was dropped the lot that took
+    // its place is a neighbor too, and it is not a road.
     let var tees = 0;
     for (let var i = 0; i < crossings.len; ++i) {
-        if (crossings[i].neighbors.len == 3)
+        let neighbors = crossings[i].neighbors;
+        let var roads = 0;
+        for (let var k = 0; k < neighbors.len; ++k) {
+            if (neighbors[k].kind == "street")
+                roads = roads + 1;
+        }
+        if (roads == 3)
             tees = tees + 1;
     }
 
@@ -526,6 +583,12 @@ fun print_summary(layout) {
     $println("streets:       " + streets.len.to_s() + " (" + avenues.to_s() + " on 4-lane avenues)");
     $println("lots:          " + lots.len.to_s() + " (mean " + (lot_area / lots.len.to_f()).format_decimals(0) + " m2)");
     $println("nodes:         " + layout.nodes.len.to_s());
+}
+
+// The viewer below is only for running this file directly. A unit that
+// imports the layout gets the graph and none of the window.
+if (!$MAIN_UNIT) {
+    return;
 }
 
 rand_init($time_current_ms());
