@@ -18,8 +18,7 @@ from ./random import *;
 //
 // The dimensions come from the Manhattan grid laid out by the Commissioners'
 // Plan of 1811: avenues are 30.5 m wide, standard cross streets 18.3 m and
-// major cross streets 30.5 m. Blocks are 61 m deep and 180 to 280 m long,
-// which is 11000 to 17000 m^2.
+// major cross streets 30.5 m. Blocks are 61 m deep and 180 to 280 m long.
 
 // --- Constants ---
 
@@ -32,12 +31,8 @@ let STREET_W = 18.3;
 let LAND_W = 1200.0;
 let LAND_H = 1200.0;
 
-// A block stops being cut below this area. No cut may leave a block shallower
-// than the 61 m depth of a Manhattan block, and no block may run longer than a
-// long Manhattan block, which keeps blocks slab-shaped rather than square.
-let MIN_BLOCK_AREA = 16000.0;
-let MIN_BLOCK_DIM = 60.0;
-let MAX_BLOCK_DIM = 128.0;
+let MIN_BLOCK_DIM = 50.0;
+let MAX_BLOCK_DIM = 200.0;
 
 // A block left with less than this once its roads are taken out is dropped
 let MIN_LOT_AREA = 200.0;
@@ -55,7 +50,7 @@ let CUT_TRIES = 6;
 // How far a junction may wander off the ideal grid
 let JITTER = 3.5;
 
-let WIN_SIZE = 1000;
+let WIN_SIZE = 800;
 let MARGIN = 14.0;
 
 fun rgb32(r, g, b) {
@@ -621,7 +616,7 @@ class Layout {
         let q = self.net.quad(block.corners);
         let longest = q.longest_side();
 
-        if (q.area() >= MIN_BLOCK_AREA || q.side_len(longest) > MAX_BLOCK_DIM) {
+        if (q.side_len(longest) > MAX_BLOCK_DIM) {
             // The longest side first, then the perpendicular one
             for (let var attempt = 0; attempt < 2; ++attempt) {
                 if (self.try_cut(block, (longest + attempt) % 4, depth))
