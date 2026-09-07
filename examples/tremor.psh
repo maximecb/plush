@@ -1496,29 +1496,63 @@ fun score_plane(face_list, nx, ny, nz, d) {
     return diff + 8 * cut + bonus;
 }
 
+// The same geometric plane may occur on many faces, sometimes with the normal
+// reversed. Scoring it again spends a candidate without considering a new
+// partition of the faces.
+fun same_plane(a, b) {
+    let direct = (a.nx - b.nx).abs() <= PLANE_EPS
+        && (a.ny - b.ny).abs() <= PLANE_EPS
+        && (a.nz - b.nz).abs() <= PLANE_EPS
+        && (a.d - b.d).abs() <= PLANE_EPS;
+    if (direct) return true;
+
+    return (a.nx + b.nx).abs() <= PLANE_EPS
+        && (a.ny + b.ny).abs() <= PLANE_EPS
+        && (a.nz + b.nz).abs() <= PLANE_EPS
+        && (a.d + b.d).abs() <= PLANE_EPS;
+}
+
+fun add_unique_plane(candidate_list, f) {
+    for (let var i = 0; i < candidate_list.len; ++i) {
+        if (same_plane(candidate_list[i], f)) return false;
+    }
+    candidate_list.push(f);
+    return true;
+}
+
 fun bsp_build(face_list) {
     if (face_list.len == 0) return nil;
 
     // Candidate planes are the face planes themselves. Trying every one of them
-    // is quadratic, so a long list is sampled instead.
+    // is quadratic, so a long list is sampled instead. Walk the other offsets
+    // through that sample when it contains duplicate planes, keeping the same
+    // scoring budget but replacing duplicates with distinct partitions.
     let var step = 1;
     if (face_list.len > 24) step = face_list.len.idiv(24);
 
-    let f0 = face_list[0];
-    let var best_i = 0;
-    let var best_score = score_plane(face_list, f0.nx, f0.ny, f0.nz, f0.d);
-    let var i = step;
-    while (i < face_list.len) {
-        let f = face_list[i];
+    let target = (face_list.len + step - 1).idiv(step);
+    let candidates = [];
+    let var offset = 0;
+    while (candidates.len < target && offset < step) {
+        let var i = offset;
+        while (i < face_list.len && candidates.len < target) {
+            add_unique_plane(candidates, face_list[i]);
+            i = i + step;
+        }
+        offset = offset + 1;
+    }
+
+    let var bf = candidates[0];
+    let var best_score = score_plane(face_list, bf.nx, bf.ny, bf.nz, bf.d);
+    for (let var i = 1; i < candidates.len; ++i) {
+        let f = candidates[i];
         let s = score_plane(face_list, f.nx, f.ny, f.nz, f.d);
         if (s < best_score) {
             best_score = s;
-            best_i = i;
+            bf = f;
         }
-        i = i + step;
     }
 
-    let bf = face_list[best_i];
     let node = BspNode(bf.nx, bf.ny, bf.nz, bf.d);
     bsp_nodes = bsp_nodes + 1;
 
