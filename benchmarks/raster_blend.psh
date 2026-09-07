@@ -1,0 +1,625 @@
+// Uniform-alpha blending of a lit textured foreground over a lit background
+//
+// A background layer first covers the frame with opaque lit triangles. A
+// second, differently textured layer is then lit and blended over it at 25%
+// opacity. Both layers use the same geometry, so every foreground pixel has a
+// destination and the benchmark concentrates on the worst-case blend loop.
+//
+// The texel is scaled as it is read, rather than read from a pre-darkened
+// copy of the texture. A table of darkened copies makes shading free per
+// pixel, but it quantizes: sixteen copies show a gradient as sixteen bands.
+// Scaling costs arithmetic on every pixel and gives a continuous level, and
+// it leaves the texture at its own size instead of sixteen times it.
+//
+// examples/level_walk.psh bakes one light level per face and subdivides a
+// face until its lighting is even enough to get away with that. Per-vertex
+// lighting is what removes the subdivision, so this is the loop that has to
+// pay for it.
+// Usage: plush benchmarks/raster_blend.psh [num_frames]
+
+let FRAME_WIDTH = 512;
+let FRAME_HEIGHT = 512;
+
+// Grid of cells, each split into two triangles: 16 * 16 * 2 = 512 triangles
+let GRID_COLS = 16;
+let GRID_ROWS = 16;
+
+// Power-of-two texture, so that wrapping is a bitwise and
+let TEX_SHIFT = 8;
+let TEX_SIZE = 1 << TEX_SHIFT;
+let TEX_MASK = TEX_SIZE - 1;
+
+// The scale a texel is multiplied by, running 0..255. Stopping at 255 rather
+// than 256 keeps a channel product at most 255 * 255, which stays off the
+// sixteenth bit, so an eight bit mask on the scale makes spilling one channel
+// into the next impossible rather than merely unlikely.
+let SHADE_MAX = 255.0;
+
+// How dark an unlit surface goes and how bright a fully lit one gets, and the
+// level everything starts from before any lamp reaches it. Same values
+// level_walk.psh uses, so the shading ramp is representative.
+let MIN_SHADE = 0.09;
+let MAX_SHADE = 1.0;
+let AMBIENT = 0.13;
+
+// Red and blue sit sixteen bits apart in a pixel, which is what lets them
+// share a multiply with green once green is moved out of the way
+let MASK_RB = 0x00FF00FF;
+let MASK_G = 0x0000FF00;
+let ALPHA = 0xFF000000;
+
+// Uniform window opacity on a 0..256 scale. Using 256 rather than 255 as the
+// denominator makes the packed channel division a shift.
+let BLEND_ALPHA = 64;
+
+// The span loop interpolates texture coordinates in fixed point, with u and v
+// packed into the two halves of one integer so that a single add steps both:
+//
+//   bits 63..32: v, as 16.16 fixed point
+//   bits 31..0:  u, as 16.16 fixed point
+//
+// Both halves are biased by 256 texels so that the u half never borrows from
+// the v half when u steps backwards. The bias is a whole number of texture
+// widths, so the wrap-around mask below removes it again.
+//
+// Integers in this VM are 62-bit fixnums, and going past that boxes the value
+// and allocates, which would be ruinous in a per-pixel loop. The bias and the
+// gradient limit below are both sized to keep the packed value well inside
+// that range: the v half reaches about 2^25, so the packed value stays near
+// 2^57.
+//
+// The scale walks in a second accumulator rather than a third field of the
+// same word. It needs eight bits of scale over sixteen of fraction, and what
+// is left above v is nothing like that much.
+let FP_BITS = 16;
+let FP_ONE = 65536.0;
+let FP_BIAS_F = 16777216.0;
+let FP_LIMIT = 1024.0;
+
+// Screen x is only meaningful inside the frame, so edge positions and the
+// slopes that walk them are clipped to a few frame widths before going to
+// fixed point. Anything past that is off screen and clamps to the border
+// anyway, while leaving it unbounded lets an edge that is a hair off
+// horizontal produce a slope big enough to leave the fixnum range.
+let X_LIMIT = (4 * FRAME_WIDTH).to_f();
+
+// Extracting the texel index from the packed value: shift each half down so
+// that its integer part lands where the texture index wants it, then mask.
+// The v mask keeps the fractional bits of v out of the row index.
+let U_SHIFT = FP_BITS;
+let U_MASK = TEX_MASK;
+let V_SHIFT = 32 + FP_BITS - TEX_SHIFT;
+let V_MASK = TEX_MASK << TEX_SHIFT;
+
+// The scale is baked per vertex and interpolated across the triangle in an
+// accumulator carrying this many fractional bits
+let L_FRAC = 16;
+let L_ONE = 65536.0;
+let L_SHIFT = L_FRAC;
+let L_MASK = 0xFF;
+
+// Both ends of a span are clamped to this range before the step between them
+// is taken, which is what keeps every pixel along it in range too. The floor
+// is one whole scale step rather than zero because the step is itself floored,
+// so walking a span can undershoot its far end by a fixed point unit a pixel.
+let L_MIN_FX = 65536;
+let L_MAX_FX = 16711680;
+
+// Past this much scale change per pixel a triangle is degenerate enough to
+// skip, the same way the texture gradients are limited below
+let L_LIMIT = 64.0;
+
+// Command-line argument for the number of frames to render
+let num_frames = $cmd_get_arg_or(1, "50").parse_int(10);
+if (num_frames == nil) {
+    $println("expected an integer number of frames");
+    $exit(1);
+}
+// Screen position, texture coordinates and light of one vertex. The texture
+// coordinates are in texels, not normalized, and the light is the 0..255 scale
+// the texel is multiplied by, as a float so that it interpolates.
+class Vertex {
+    init(self, x, y, u, v, l) {
+        self.x = x;
+        self.y = y;
+        self.u = u;
+        self.v = v;
+        self.l = l;
+    }
+}
+
+// --- Texture ---
+
+// Color-coded texture, in the same u32 pixel format as the frame buffer.
+// Each quadrant has its own hue, the tiles are outlined, and the top-left
+// corner is marked with a white square and a white bar running right along
+// the top edge, so that any flip, rotation or swap of u and v is visible
+// at a glance:
+//
+//   [] ====        white corner square, white bar along the top edge
+//   red     green
+//   blue    yellow
+fun make_texture(variant) {
+    let tex = ByteArray.with_size(TEX_SIZE * TEX_SIZE * 4);
+    let half = TEX_SIZE >> 1;
+
+    for (let var y = 0; y < TEX_SIZE; ++y) {
+        for (let var x = 0; x < TEX_SIZE; ++x) {
+            // Quadrant hue, brightened towards the bottom right of each
+            // quadrant so that the gradient direction is readable too
+            let shade = 96 + (((x & (half - 1)) + (y & (half - 1))) >> 1);
+            let var r = 0; let var g = 0; let var b = 0;
+            if (y < half) {
+                if (x < half) { r = shade; }
+                else { g = shade; }
+            } else {
+                if (x < half) { b = shade; }
+                else { r = shade; g = shade; }
+            }
+
+            // Dark outline on the 32x32 tile borders, which shows up any
+            // stretching or seam in the mapping
+            if ((x & 31) == 0 || (y & 31) == 0) {
+                r = r >> 2; g = g >> 2; b = b >> 2;
+            }
+
+            // Top-left corner markers
+            if (x < 24 && y < 24) { r = 255; g = 255; b = 255; }
+            if (x < 96 && y < 8) { r = 255; g = 255; b = 255; }
+
+            // Give the overlay different source colors, so its checksum also
+            // checks that blending happened rather than merely rewriting the
+            // same pixel value with extra arithmetic.
+            if (variant) {
+                let tmp = r;
+                r = b;
+                b = 255 - g;
+                g = tmp;
+            }
+
+            tex.set_u32(y * TEX_SIZE + x, 0xFF000000 | (r << 16) | (g << 8) | b);
+        }
+    }
+
+    return tex;
+}
+
+let texture = make_texture(false);
+let overlay_texture = make_texture(true);
+
+// --- Rasterization ---
+
+// This function expects the coordinates to be floats such that
+// x is in [0, FRAME_WIDTH] and +x points right
+// y is in [0, FRAME_HEIGHT] and +y points down
+//
+// Texture coordinates are in texels and wrap around the texture. Light is a
+// 0..255 scale and interpolates across the triangle.
+fun rasterize_tri_light(v0, v1, v2, fb, tex, blend_alpha) {
+    // Held in locals: a global folds to a literal that codegen puts back at
+    // every use, and every use here is a pixel
+    let mask_rb = MASK_RB;
+    let mask_g = MASK_G;
+    let alpha = ALPHA;
+
+    let var p0 = v0;
+    let var p1 = v1;
+    let var p2 = v2;
+    if (p0.y > p1.y) { let tmp = p0; p0 = p1; p1 = tmp; }
+    if (p0.y > p2.y) { let tmp = p0; p0 = p2; p2 = tmp; }
+    if (p1.y > p2.y) { let tmp = p1; p1 = p2; p2 = tmp; }
+
+    let py0 = p0.y;
+    let py1 = p1.y;
+    let py2 = p2.y;
+
+    let y0 = py0.floor();
+    let y1 = py1.floor();
+    let y2 = py2.floor();
+
+    if (y0 == y2) return;
+
+    let x0 = p0.x;
+    let x1 = p1.x;
+    let x2 = p2.x;
+
+    // Texture and light gradients. With no perspective, u, v and the light
+    // level are all affine in screen space, so these hold for the whole
+    // triangle and only have to be computed once.
+    let e1x = x1 - x0; let e1y = py1 - py0;
+    let e2x = x2 - x0; let e2y = py2 - py0;
+    let det = e1x * e2y - e2x * e1y;
+    if (det == 0.0) return;
+    let inv_det = 1.0 / det;
+
+    let u0 = p0.u; let e1u = p1.u - u0; let e2u = p2.u - u0;
+    let v0t = p0.v; let e1v = p1.v - v0t; let e2v = p2.v - v0t;
+    let l0 = p0.l; let e1l = p1.l - l0; let e2l = p2.l - l0;
+
+    let dudx = (e1u * e2y - e2u * e1y) * inv_det;
+    let dudy = (e2u * e1x - e1u * e2x) * inv_det;
+    let dvdx = (e1v * e2y - e2v * e1y) * inv_det;
+    let dvdy = (e2v * e1x - e1v * e2x) * inv_det;
+    let dldx = (e1l * e2y - e2l * e1y) * inv_det;
+    let dldy = (e2l * e1x - e1l * e2x) * inv_det;
+
+    // Past this many texels per pixel the packed step leaves the fixnum range.
+    // Only a sliver a small fraction of a pixel wide gets there, and skipping
+    // it costs nothing visible.
+    if (dudx.abs() >= FP_LIMIT || dvdx.abs() >= FP_LIMIT) return;
+    if (dudy.abs() >= FP_LIMIT || dvdy.abs() >= FP_LIMIT) return;
+    if (dldx.abs() >= L_LIMIT || dldy.abs() >= L_LIMIT) return;
+
+    // The x gradient, packed: dt steps the span one pixel right. It carries no
+    // bias, so it can be negative and still add correctly, the packed value
+    // being just an integer. dl steps the light level the same way.
+    let dt = ((dvdx * FP_ONE).floor() << 32) + (dudx * FP_ONE).floor();
+
+    // The gradients again, pre-scaled to fixed point, for stepping the span
+    // start from one scanline to the next
+    let dudx_fx = dudx * FP_ONE;
+    let dudy_fx = dudy * FP_ONE;
+    let dvdx_fx = dvdx * FP_ONE;
+    let dvdy_fx = dvdy * FP_ONE;
+    let dldx_fx = dldx * L_ONE;
+    let dldy_fx = dldy * L_ONE;
+
+    // The edges are walked in 16.16 fixed point as well, so that a scanline
+    // start is a shift rather than a call to floor()
+    let var inv_slope1 = 0.0;
+    if (py1 > py0) inv_slope1 = (x1 - x0) / (py1 - py0);
+    let slope1_fx = (inv_slope1.clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+    let var inv_slope2 = 0.0;
+    if (py2 > py0) inv_slope2 = (x2 - x0) / (py2 - py0);
+    let slope2_fx = (inv_slope2.clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+    let start_scanline_y_top = y0.max(0);
+    let end_scanline_y_top = y1.min(FRAME_HEIGHT);
+
+    // Top half of triangle
+    if (start_scanline_y_top < end_scanline_y_top) {
+        let dy = start_scanline_y_top + 1 - py0;
+        let xa = ((x0 + dy * inv_slope1).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+        let xb = ((x0 + dy * inv_slope2).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+        // Both edges radiate from p0, so which of the two is the left one is
+        // fixed for the whole half and the winding decides it: a positive
+        // determinant puts p1 right of p0p2, making the edge to p2 the left
+        // one. Comparing the two edge positions instead would tie whenever
+        // they are still less than a fixed-point step apart, just below p0,
+        // and drop the whole half by walking the edges crossed over.
+        let var cur_xl = xa; let var slope_l = slope1_fx;
+        let var cur_xr = xb; let var slope_r = slope2_fx;
+        if (det > 0.0) {
+            cur_xl = xb; slope_l = slope2_fx;
+            cur_xr = xa; slope_r = slope1_fx;
+        }
+
+        // Texture coordinates and light level at x = 0 of the current
+        // scanline, pre-scaled and biased. These stay floats: at x = 0 the
+        // value can sit far outside the triangle, which a float carries
+        // without losing the precision that matters once a span start brings
+        // it back inside.
+        let y_off = start_scanline_y_top + 0.5 - py0;
+        let var u_row_fx = (u0 + (0.5 - x0) * dudx + y_off * dudy) * FP_ONE + FP_BIAS_F;
+        let var v_row_fx = (v0t + (0.5 - x0) * dvdx + y_off * dvdy) * FP_ONE + FP_BIAS_F;
+        let var l_row_fx = (l0 + (0.5 - x0) * dldx + y_off * dldy) * L_ONE;
+        let var row = start_scanline_y_top * FRAME_WIDTH;
+        let end_row = end_scanline_y_top * FRAME_WIDTH;
+
+        while (row < end_row) {
+            // Clamping with a branch rather than min/max, which are method
+            // calls, and the branch is almost never taken
+            let var start_x = cur_xl >> FP_BITS;
+            if (start_x < 0) start_x = 0;
+            let var end_x = cur_xr >> FP_BITS;
+            if (end_x > FRAME_WIDTH) end_x = FRAME_WIDTH;
+            if (start_x < end_x) {
+                // Packed at the span start, which is always inside the
+                // triangle, so both halves of the value stay small
+                let var t = ((v_row_fx + start_x * dvdx_fx).floor() << 32)
+                          + (u_row_fx + start_x * dudx_fx).floor();
+                // Both ends of the span are clamped and the step taken
+                // between the clamped pair, so every pixel along it is in
+                // range as well. Clamping only the start would leave the step
+                // free to run the scale off the end of a channel, which
+                // overflows red into green and shows as a flash of colour.
+                let var l = (l_row_fx + start_x * dldx_fx).floor();
+                if (l < L_MIN_FX) l = L_MIN_FX;
+                else if (l > L_MAX_FX) l = L_MAX_FX;
+
+                let var l_e = (l_row_fx + end_x * dldx_fx).floor();
+                if (l_e < L_MIN_FX) l_e = L_MIN_FX;
+                else if (l_e > L_MAX_FX) l_e = L_MAX_FX;
+
+                let dl = ((l_e - l).to_f() / (end_x - start_x).to_f()).floor();
+
+                let var i = row + start_x;
+                let end_i = row + end_x;
+                if (blend_alpha == 256) {
+                    while (i < end_i) {
+                        let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
+                                          | ((t >> U_SHIFT) & U_MASK));
+
+                        // Red and blue are already sixteen bits apart; moving
+                        // green up to bit 32 puts all three that far apart, so one
+                        // multiply scales them without their products running into
+                        // each other. Sixty-two bit fixnums are what make the third
+                        // channel fit: in thirty-two bits this takes two multiplies.
+                        let x = ((c & mask_rb) | ((c & mask_g) << 24))
+                              * ((l >> L_SHIFT) & L_MASK);
+
+                        // Red and blue come back out together: they are still
+                        // sixteen apart after the shift, so the mask that separated
+                        // them separates the products too
+                        fb.set_u32(i, alpha | ((x >> 8) & mask_rb)
+                                            | ((x >> 32) & 0xFF00));
+                        t = t + dt;
+                        l = l + dl;
+                        ++i;
+                    }
+                } else {
+                    while (i < end_i) {
+                        let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
+                                          | ((t >> U_SHIFT) & U_MASK));
+                        let x = ((c & mask_rb) | ((c & mask_g) << 24))
+                              * ((l >> L_SHIFT) & L_MASK);
+                        let src = ((x >> 8) & mask_rb) | ((x >> 32) & mask_g);
+                        let dst = fb.get_u32(i);
+                        let src_wide = (src & mask_rb) | ((src & mask_g) << 24);
+                        let dst_wide = (dst & mask_rb) | ((dst & mask_g) << 24);
+
+                        // At 25% opacity, src/4 + 3*dst/4 becomes
+                        // (src + 3*dst) << 6 on the 0..256 blend scale. This
+                        // avoids both general blend multiplies. Each lane of
+                        // `mixed` is at most 1020; after the shift it is 65280,
+                        // below the 65536 carry boundary, and the full packed
+                        // value remains below 2^48, safely inside int62.
+                        let mixed = src_wide + dst_wide + dst_wide + dst_wide;
+                        let out = mixed << 6;
+                        fb.set_u32(i, alpha | ((out >> 8) & mask_rb)
+                                            | ((out >> 32) & mask_g));
+                        t = t + dt;
+                        l = l + dl;
+                        ++i;
+                    }
+                }
+            }
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
+            u_row_fx = u_row_fx + dudy_fx;
+            v_row_fx = v_row_fx + dvdy_fx;
+            l_row_fx = l_row_fx + dldy_fx;
+            row = row + FRAME_WIDTH;
+        }
+    }
+
+    let var inv_slope3 = 0.0;
+    if (py2 > py1) inv_slope3 = (x2 - x1) / (py2 - py1);
+    let slope3_fx = (inv_slope3.clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+    let start_scanline_y_bot = y1.max(0);
+    let end_scanline_y_bot = y2.min(FRAME_HEIGHT);
+
+    // Bottom half of triangle
+    if (start_scanline_y_bot < end_scanline_y_bot) {
+        let xa = ((x1 + (start_scanline_y_bot + 1 - py1) * inv_slope3).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+        let xb = ((x0 + (start_scanline_y_bot + 1 - py0) * inv_slope2).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+        // Both edges converge on p2, so the left/right order is fixed here
+        // too, and the same determinant decides it
+        let var cur_xl = xa; let var slope_l = slope3_fx;
+        let var cur_xr = xb; let var slope_r = slope2_fx;
+        if (det > 0.0) {
+            cur_xl = xb; slope_l = slope2_fx;
+            cur_xr = xa; slope_r = slope3_fx;
+        }
+
+        // Texture coordinates and light level at x = 0 of the current
+        // scanline, pre-scaled and biased. These stay floats: at x = 0 the
+        // value can sit far outside the triangle, which a float carries
+        // without losing the precision that matters once a span start brings
+        // it back inside.
+        let y_off = start_scanline_y_bot + 0.5 - py0;
+        let var u_row_fx = (u0 + (0.5 - x0) * dudx + y_off * dudy) * FP_ONE + FP_BIAS_F;
+        let var v_row_fx = (v0t + (0.5 - x0) * dvdx + y_off * dvdy) * FP_ONE + FP_BIAS_F;
+        let var l_row_fx = (l0 + (0.5 - x0) * dldx + y_off * dldy) * L_ONE;
+        let var row = start_scanline_y_bot * FRAME_WIDTH;
+        let end_row = end_scanline_y_bot * FRAME_WIDTH;
+
+        while (row < end_row) {
+            let var start_x = cur_xl >> FP_BITS;
+            if (start_x < 0) start_x = 0;
+            let var end_x = cur_xr >> FP_BITS;
+            if (end_x > FRAME_WIDTH) end_x = FRAME_WIDTH;
+            if (start_x < end_x) {
+                // Packed at the span start, which is always inside the
+                // triangle, so both halves of the value stay small
+                let var t = ((v_row_fx + start_x * dvdx_fx).floor() << 32)
+                          + (u_row_fx + start_x * dudx_fx).floor();
+                // Both ends of the span are clamped and the step taken
+                // between the clamped pair, so every pixel along it is in
+                // range as well. Clamping only the start would leave the step
+                // free to run the scale off the end of a channel, which
+                // overflows red into green and shows as a flash of colour.
+                let var l = (l_row_fx + start_x * dldx_fx).floor();
+                if (l < L_MIN_FX) l = L_MIN_FX;
+                else if (l > L_MAX_FX) l = L_MAX_FX;
+
+                let var l_e = (l_row_fx + end_x * dldx_fx).floor();
+                if (l_e < L_MIN_FX) l_e = L_MIN_FX;
+                else if (l_e > L_MAX_FX) l_e = L_MAX_FX;
+
+                let dl = ((l_e - l).to_f() / (end_x - start_x).to_f()).floor();
+
+                let var i = row + start_x;
+                let end_i = row + end_x;
+                if (blend_alpha == 256) {
+                    while (i < end_i) {
+                        let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
+                                          | ((t >> U_SHIFT) & U_MASK));
+
+                        // Red and blue are already sixteen bits apart; moving
+                        // green up to bit 32 puts all three that far apart, so one
+                        // multiply scales them without their products running into
+                        // each other. Sixty-two bit fixnums are what make the third
+                        // channel fit: in thirty-two bits this takes two multiplies.
+                        let x = ((c & mask_rb) | ((c & mask_g) << 24))
+                              * ((l >> L_SHIFT) & L_MASK);
+
+                        // Red and blue come back out together: they are still
+                        // sixteen apart after the shift, so the mask that separated
+                        // them separates the products too
+                        fb.set_u32(i, alpha | ((x >> 8) & mask_rb)
+                                            | ((x >> 32) & 0xFF00));
+                        t = t + dt;
+                        l = l + dl;
+                        ++i;
+                    }
+                } else {
+                    while (i < end_i) {
+                        let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
+                                          | ((t >> U_SHIFT) & U_MASK));
+                        let x = ((c & mask_rb) | ((c & mask_g) << 24))
+                              * ((l >> L_SHIFT) & L_MASK);
+                        let src = ((x >> 8) & mask_rb) | ((x >> 32) & mask_g);
+                        let dst = fb.get_u32(i);
+                        let src_wide = (src & mask_rb) | ((src & mask_g) << 24);
+                        let dst_wide = (dst & mask_rb) | ((dst & mask_g) << 24);
+                        // Same 25% packed blend and bounds as above
+                        let mixed = src_wide + dst_wide + dst_wide + dst_wide;
+                        let out = mixed << 6;
+                        fb.set_u32(i, alpha | ((out >> 8) & mask_rb)
+                                            | ((out >> 32) & mask_g));
+                        t = t + dt;
+                        l = l + dl;
+                        ++i;
+                    }
+                }
+            }
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
+            u_row_fx = u_row_fx + dudy_fx;
+            v_row_fx = v_row_fx + dvdy_fx;
+            l_row_fx = l_row_fx + dldy_fx;
+            row = row + FRAME_WIDTH;
+        }
+    }
+}
+
+// --- Lighting ---
+
+// A lamp's contribution at a point, falling off with distance
+fun lamp(x, y, lx, ly, reach, power) {
+    let dx = x - lx;
+    let dy = y - ly;
+    let dist = (dx * dx + dy * dy).sqrt();
+    if (dist >= reach) return 0.0;
+
+    let t = 1.0 - dist / reach;
+    return power * t * t;
+}
+
+// The scale a vertex multiplies its texel by, on the same curve level_walk.psh
+// uses. It bends towards the dark end, where a step is worth more to the eye
+// than it is up in the light.
+fun vertex_light(x, y) {
+    let var lum = AMBIENT;
+    lum = lum + lamp(x, y, 300.0, 280.0, 460.0, 0.95);
+    lum = lum + lamp(x, y, 800.0, 760.0, 400.0, 0.80);
+    lum = lum + lamp(x, y, 150.0, 880.0, 300.0, 0.60);
+
+    let t = lum.clip(0.0, 1.0);
+    return ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+        .clip(0.0, SHADE_MAX);
+}
+
+// --- Pre-generated geometry ---
+
+// Grid of vertices, GRID_COLS + 1 of them per row. The texture is stretched
+// over the whole frame, so the sampling stays local from one cell to the next.
+let vertices = [];
+for (let var r = 0; r <= GRID_ROWS; ++r) {
+    for (let var c = 0; c <= GRID_COLS; ++c) {
+        let x = (c * FRAME_WIDTH) / GRID_COLS;
+        let y = (r * FRAME_HEIGHT) / GRID_ROWS;
+
+        vertices.push(Vertex(
+            x,
+            y,
+            (c * TEX_SIZE) / GRID_COLS,
+            (r * TEX_SIZE) / GRID_ROWS,
+            vertex_light(x.to_f(), y.to_f())
+        ));
+    }
+}
+
+// Two triangles per cell, as indices into the vertex array
+let indices = [];
+for (let var r = 0; r < GRID_ROWS; ++r) {
+    for (let var c = 0; c < GRID_COLS; ++c) {
+        let i00 = r * (GRID_COLS + 1) + c;
+        let i11 = i00 + GRID_COLS + 2;
+
+        indices.push(i00); indices.push(i00 + 1); indices.push(i11);
+        indices.push(i00); indices.push(i11); indices.push(i11 - 1);
+    }
+}
+
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+let num_tris = indices.len / 3;
+
+// --- Rendering ---
+
+// The triangles tile the whole frame, so there is no need to clear it
+let start_ms = $time_current_ms();
+
+for (let var frame = 0; frame < num_frames; ++frame) {
+    let var i = 0;
+    for (let var t = 0; t < num_tris; ++t) {
+        rasterize_tri_light(
+            vertices[indices[i]],
+            vertices[indices[i + 1]],
+            vertices[indices[i + 2]],
+            frame_buffer,
+            texture,
+            256
+        );
+        i += 3;
+    }
+
+    i = 0;
+    for (let var t = 0; t < num_tris; ++t) {
+        rasterize_tri_light(
+            vertices[indices[i]],
+            vertices[indices[i + 1]],
+            vertices[indices[i + 2]],
+            frame_buffer,
+            overlay_texture,
+            BLEND_ALPHA
+        );
+        i += 3;
+    }
+}
+
+let total_ms = $time_current_ms() - start_ms;
+let fps = (num_frames * 1000) / total_ms;
+let mpix = (num_frames * FRAME_WIDTH * FRAME_HEIGHT) / (total_ms * 1000);
+
+// Checksum of the finished frame, so that an optimization of the span loop
+// can be shown to leave the output alone
+let var sum = 0;
+let var unlit = 0;
+for (let var p = 0; p < FRAME_WIDTH * FRAME_HEIGHT; ++p) {
+    let px = frame_buffer.get_u32(p);
+    sum = (sum * 31 + px) & 0xFFFFFFFF;
+    if ((px & 0xFFFFFF) == 0) unlit = unlit + 1;
+}
+
+$println(num_frames.to_s() + " frames of " + num_tris.to_s()
+    + " lit textured triangles in two layers");
+$println("total time: " + total_ms.to_s() + "ms");
+$println("fps: " + fps.format_decimals(1));
+$println("Mpixels/s: " + mpix.format_decimals(1));
+$println("checksum: " + sum.to_s() + ", unwritten pixels: " + unlit.to_s());
