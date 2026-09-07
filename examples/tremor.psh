@@ -17,7 +17,7 @@
 // walking its tree front to back as before, and when the walk reaches a portal
 // it asks the s-buffer whether any part of that quad is still uncovered. If some
 // is, the area beyond is drawn in turn, with the camera carried into its
-// coordinates and the rasterizer held to the rectangle the portal showed
+// coordinates and the rasterizer held to the silhouette the portal showed
 // through. A portal may lead back where it came from, so the recursion stops
 // after MAX_PORTAL_DEPTH of them.
 //
@@ -64,7 +64,7 @@ let TEXELS_PER_METER = 40.0;
 let FOCAL = 400.0;
 let CENTER_X = (FRAME_WIDTH.idiv(2)).to_f();
 let CENTER_Y = (FRAME_HEIGHT.idiv(2)).to_f();
-let NEAR = 0.2;
+let NEAR = 0.00001;
 
 // The span loop interpolates texture coordinates in fixed point, with u and v
 // packed into the two halves of one integer:
@@ -289,7 +289,11 @@ let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 // The whole structure is thrown away and rebuilt each frame, so handing them
 // out of a bump allocator that resets with it means drawing a frame allocates
 // nothing at all, and the collector never runs inside one.
-let MAX_SPANS = 16384;
+// A close portal can expose a complex area over nearly the whole screen. The
+// old 16384-entry pool could then retire partially uncovered scanlines, leaving
+// their remaining pixels at the void colour. This is still a small fixed arena
+// and remains allocation-free while a frame is drawn.
+let MAX_SPANS = 65536;
 let NO_SPAN = 0 - 1;
 
 let sp_x0 = Array.with_size(MAX_SPANS, 0);
@@ -302,7 +306,10 @@ let sb_full = ByteArray.with_size(FRAME_HEIGHT * 4);
 let var sb_num_full = 0;
 let var screen_done = false;
 
-let MAX_VIS = 128;
+// In the worst case every other pixel is already covered, leaving one visible
+// piece between each pair. Size this for that actual frame-width bound rather
+// than silently dropping pieces after an arbitrary limit.
+let MAX_VIS = FRAME_WIDTH.idiv(2) + 1;
 let vis_x0 = Array.with_size(MAX_VIS, 0);
 let vis_x1 = Array.with_size(MAX_VIS, 0);
 
@@ -438,15 +445,23 @@ fun sbuf_probe(y, x0, x1) {
 
 // --- The clip rectangle ---
 
-// Where the rasterizer is allowed to put pixels at all. It is the whole frame
-// while the area the camera stands in is being drawn, and the rectangle a
-// portal was seen through while the area beyond it is. Nothing outside a portal
-// can be reached through it, so this is what keeps a room from spilling out
-// around the doorway it is seen in.
+// A conservative box around where the rasterizer may put pixels. It is the
+// whole frame while the camera's area is being drawn and the box around the
+// portal silhouette for the area beyond. The per-row bounds below provide the
+// exact aperture; this box cheaply limits scanlines and the BSP frustum.
 let var clip_x0 = 0;
 let var clip_x1 = FRAME_WIDTH;
 let var clip_y0 = 0;
 let var clip_y1 = FRAME_HEIGHT;
+
+// The exact portal aperture on each scanline. Each projected portal is convex,
+// and intersecting it with its convex parent aperture still leaves at most one
+// interval on a row. The rectangle above remains as a conservative bound for
+// the rasterizer and the BSP frustum; these intervals provide the exact edge.
+let PORTAL_CLIP_LEVELS = MAX_PORTAL_DEPTH + 1;
+let portal_clip_x0 = Array.with_size(PORTAL_CLIP_LEVELS * FRAME_HEIGHT, 0);
+let portal_clip_x1 = Array.with_size(PORTAL_CLIP_LEVELS * FRAME_HEIGHT, 0);
+let var portal_clip_depth = 0;
 
 // The plane of the portal being looked through, with its normal pointing back
 // at the eye, or inactive while the camera's own area is being drawn. Areas
@@ -648,9 +663,9 @@ let tex_by_name = {};
 let areas = [];
 let area_by_name = {};
 
-// The area whose brushes and lamps the baking below is working on. Light is an
-// area's own business: it is cast by the lamps in that area and stopped by the
-// solids in it, and none of it reaches through a portal.
+// The area whose brushes and lamps the baking below is working on. The active
+// list contains its own lamps and the neighbouring lamps whose influence
+// spheres reach it through a portal.
 let var bake_brushes = nil;
 let var bake_lights = nil;
 
@@ -1900,8 +1915,7 @@ fun raster_poly(m) {
     let vshift = g_vshift;
     let vmask = g_vmask;
     let wrap = g_wrap;
-    let cx0 = clip_x0;
-    let cx1 = clip_x1;
+    let clip_base = portal_clip_depth * FRAME_HEIGHT;
     let mask_rb = MASK_RB;
     let mask_g = MASK_G;
     let alpha = ALPHA;
@@ -1954,9 +1968,12 @@ fun raster_poly(m) {
 
         while (scan_y < band_end) {
             let var xa = xl.floor();
-            if (xa < cx0) xa = cx0;
             let var xb = xr.floor();
-            if (xb > cx1) xb = cx1;
+            let pci = clip_base + scan_y;
+            let pcx0 = portal_clip_x0[pci];
+            let pcx1 = portal_clip_x1[pci];
+            if (xa < pcx0) xa = pcx0;
+            if (xb > pcx1) xb = pcx1;
 
             if (xa < xb) {
                 let n_vis = sbuf_insert(scan_y, xa, xb);
@@ -2235,7 +2252,8 @@ fun draw_face(f) {
 // --- Portals ---
 
 // The box around the parts of the last portal scanned that were still
-// uncovered, which is what the area beyond it gets to draw in
+// uncovered. It is a conservative scanline and BSP bound; the per-row portal
+// clip above is the exact aperture the area beyond gets to draw in.
 let var pv_x0 = 0;
 let var pv_x1 = 0;
 let var pv_y0 = 0;
@@ -2244,8 +2262,9 @@ let var pv_y1 = 0;
 // Walk the projected quad in pX/pY scanline by scanline the way the rasterizer
 // does, but ask the s-buffer what is still visible on each line instead of
 // writing anything. What comes back is the box around every uncovered piece of
-// it, or false if the quad is hidden and there is nothing behind it to draw.
-fun portal_scan(m) {
+// it. The exact geometric span is also saved for the child area. Returns false
+// if the quad is hidden and there is nothing behind it to draw.
+fun portal_scan(m, depth) {
     let var top = 0;
     let var y_min = pY[0];
     let var bot = 0;
@@ -2271,8 +2290,8 @@ fun portal_scan(m) {
     if (area > 0.0) step_l = m - 1;
     let step_r = m - step_l;
 
-    let cx0 = clip_x0;
-    let cx1 = clip_x1;
+    let parent_base = depth * FRAME_HEIGHT;
+    let child_base = (depth + 1) * FRAME_HEIGHT;
 
     let var found = false;
     let var lo_x = 0; let var hi_x = 0;
@@ -2315,9 +2334,24 @@ fun portal_scan(m) {
 
         while (scan_y < band_end) {
             let var xa = xl.floor();
-            if (xa < cx0) xa = cx0;
             let var xb = xr.floor();
-            if (xb > cx1) xb = cx1;
+            let pci = parent_base + scan_y;
+            let pcx0 = portal_clip_x0[pci];
+            let pcx1 = portal_clip_x1[pci];
+            if (xa < pcx0) xa = pcx0;
+            if (xb > pcx1) xb = pcx1;
+
+            // Save the geometric aperture, including portions currently hidden
+            // by nearer spans. Those spans remain in the s-buffer while the
+            // child is drawn and will continue to reject the hidden portions.
+            let cci = child_base + scan_y;
+            if (xa < xb) {
+                portal_clip_x0[cci] = xa;
+                portal_clip_x1[cci] = xb;
+            } else {
+                portal_clip_x0[cci] = 0;
+                portal_clip_x1[cci] = 0;
+            }
 
             if (xa < xb && sbuf_probe(scan_y, xa, xb)) {
                 if (!found) {
@@ -2350,7 +2384,7 @@ fun portal_scan(m) {
 // Transform, clip and project a portal quad, then scan it. A portal carries no
 // texture and no light, so this is the same march as a face without any of the
 // gradients that go with drawing one.
-fun portal_visible(f) {
+fun portal_visible(f, depth) {
     let n = f.v.len.idiv(3);
     if (n > MAX_VERTS - 8) return false;
 
@@ -2366,7 +2400,18 @@ fun portal_visible(f) {
         aZ[i] = rz * cos_pitch + dy * sin_pitch;
     }
 
-    let m = clip_plane(n, 0.0, 0.0, 1.0, 0.0 - NEAR);
+    // Clip to the complete view before projection. This keeps the final screen
+    // coordinates bounded at the small near distance, and a portal wholly
+    // behind the viewer disappears without traversing the area beyond it.
+    let var m = clip_plane(n, 0.0, 0.0, 1.0, 0.0 - NEAR);
+    if (m < 3) return false;
+    m = clip_plane(m, 1.0, 0.0, CENTER_X / FOCAL, 0.0);
+    if (m < 3) return false;
+    m = clip_plane(m, 0.0 - 1.0, 0.0, (FRAME_WIDTH.to_f() - CENTER_X) / FOCAL, 0.0);
+    if (m < 3) return false;
+    m = clip_plane(m, 0.0, 0.0 - 1.0, CENTER_Y / FOCAL, 0.0);
+    if (m < 3) return false;
+    m = clip_plane(m, 0.0, 1.0, (FRAME_HEIGHT.to_f() - CENTER_Y) / FOCAL, 0.0);
     if (m < 3) return false;
 
     for (let var i = 0; i < m; ++i) {
@@ -2375,16 +2420,16 @@ fun portal_visible(f) {
         pY[i] = CENTER_Y - FOCAL * aY[i] * w;
     }
 
-    return portal_scan(m);
+    return portal_scan(m, depth);
 }
 
 // Look through one portal: if any of it is still visible, draw the area it
 // leads to, with the eye carried into that area's coordinates and the
-// rasterizer held to the rectangle the portal showed through.
+// rasterizer held to the silhouette the portal showed through.
 fun draw_portal(f, depth) {
     // Backfacing, so the eye is already past it and it is not a way anywhere
     if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return;
-    if (!portal_visible(f)) return;
+    if (!portal_visible(f, depth)) return;
 
     let p = f.portal;
 
@@ -2392,6 +2437,7 @@ fun draw_portal(f, depth) {
     let s_yaw = cam_yaw; let s_sin = sin_yaw; let s_cos = cos_yaw;
     let s_cx0 = clip_x0; let s_cx1 = clip_x1;
     let s_cy0 = clip_y0; let s_cy1 = clip_y1;
+    let s_clip_depth = portal_clip_depth;
     let s_pa = pp_active;
     let s_pnx = pp_nx; let s_pny = pp_ny; let s_pnz = pp_nz; let s_pd = pp_d;
 
@@ -2421,6 +2467,7 @@ fun draw_portal(f, depth) {
 
     clip_x0 = pv_x0; clip_x1 = pv_x1;
     clip_y0 = pv_y0; clip_y1 = pv_y1;
+    portal_clip_depth = depth + 1;
 
     draw_area(p.target, depth + 1);
 
@@ -2429,6 +2476,7 @@ fun draw_portal(f, depth) {
     cam_yaw = s_yaw; sin_yaw = s_sin; cos_yaw = s_cos;
     clip_x0 = s_cx0; clip_x1 = s_cx1;
     clip_y0 = s_cy0; clip_y1 = s_cy1;
+    portal_clip_depth = s_clip_depth;
     pp_active = s_pa;
     pp_nx = s_pnx; pp_ny = s_pny; pp_nz = s_pnz; pp_d = s_pd;
     update_frustum();
@@ -2452,10 +2500,9 @@ fun set_frustum_plane(i, nx, ny, nz, d) {
 // Rebuild the frustum for where the camera is now. The camera's own axes come
 // straight out of the yaw and pitch the view transform uses.
 //
-// The sides follow the clip rectangle rather than the frame, so an area seen
-// through a doorway is culled against the doorway: the four planes close in on
-// the few degrees the portal actually shows, and the far side of that room
-// costs one box test instead of a walk over all of it.
+// The sides follow the conservative portal box rather than the frame, so the
+// four planes close in on the few degrees the portal can show. The scanline
+// aperture remains responsible for the portal's exact sloping edges.
 fun update_frustum() {
     let fx = cos_pitch * sin_yaw;
     let fy = sin_pitch;
@@ -2622,6 +2669,11 @@ fun render_frame() {
 
     clip_x0 = 0; clip_x1 = FRAME_WIDTH;
     clip_y0 = 0; clip_y1 = FRAME_HEIGHT;
+    portal_clip_depth = 0;
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+        portal_clip_x0[y] = 0;
+        portal_clip_x1[y] = FRAME_WIDTH;
+    }
     pp_active = false;
 
     draw_area(cam_area, 0);
@@ -2842,17 +2894,21 @@ fun support_height(bs, x, feet, z) {
 // put through the portal's change of coordinates, and from the next frame on
 // they walk in the area on the other side.
 //
-// Both areas carry the wall the doorway is cut through, so there is no moment
-// where the player is clear of one room's floor and not yet on the other's.
+// The two areas meet on the portal plane, so there is no moment where the
+// player is clear of one room's floor and not yet on the other's.
 fun cross_portals(px, py, pz) {
     let ps = areas[cam_area].portals;
 
     for (let var i = 0; i < ps.len; ++i) {
         let p = ps[i];
         let s0 = p.nx * px + p.ny * py + p.nz * pz - p.d;
-        if (s0 <= 0.0) continue;
-
         let s1 = p.nx * cam_x + p.ny * cam_y + p.nz * cam_z - p.d;
+
+        // Only motion from the front side towards the back can cross. Allow a
+        // step beginning exactly on the plane, which gives the boundary to the
+        // destination instead of leaving the camera stranded between areas.
+        if (s1 >= s0) continue;
+        if (s0 < 0.0) continue;
         if (s1 > 0.0) continue;
 
         // Where the step met the plane
@@ -2937,9 +2993,63 @@ fun prepare_node(node) {
     prepare_node(node.front);
     prepare_node(node.back);
 }
-// Each area gets its own tree and its own bake. The lamps of one room light
-// only the surfaces of that room, and a portal passes no light: what is beyond
-// a doorway is lit by whatever stands on its own side of it.
+
+// Does a light's sphere reach any point of this portal rectangle? The closest
+// point is found independently on each axis; the portal's flat axis naturally
+// contributes the distance to its plane.
+fun light_reaches_portal(x, y, z, radius, p) {
+    let var dx = 0.0;
+    if (x < p.x0) dx = p.x0 - x;
+    else if (x > p.x1) dx = x - p.x1;
+
+    let var dy = 0.0;
+    if (y < p.y0) dy = p.y0 - y;
+    else if (y > p.y1) dy = y - p.y1;
+
+    let var dz = 0.0;
+    if (z < p.z0) dz = p.z0 - z;
+    else if (z > p.z1) dz = z - p.z1;
+
+    return dx * dx + dy * dy + dz * dz < radius * radius;
+}
+
+// Build the lights used to bake one area. A portal stores the transform from
+// this area's coordinates to its target's, so a target light is brought back
+// with the inverse transform before its sphere is tested against the opening.
+// Only directly adjoining areas are considered; farther light has to reach the
+// intervening area through another portal first and is outside this bake.
+fun lights_for_area(idx) {
+    let a = areas[idx];
+    let out = [];
+    for (let var i = 0; i < a.lights.len; ++i) out.push(a.lights[i]);
+
+    for (let var pi = 0; pi < a.portals.len; ++pi) {
+        let p = a.portals[pi];
+        let other = areas[p.target];
+        let ca = p.cos_a;
+        let sa = p.sin_a;
+
+        for (let var li = 0; li < other.lights.len; ++li) {
+            let L = other.lights[li];
+            let tx = L[0] - p.tx;
+            let ty = L[1] - p.ty;
+            let tz = L[2] - p.tz;
+            let x = tx * ca - tz * sa;
+            let y = ty;
+            let z = tx * sa + tz * ca;
+
+            if (light_reaches_portal(x, y, z, L[3], p)) {
+                out.push([x, y, z, L[3], L[4]]);
+            }
+        }
+    }
+
+    return out;
+}
+
+// Each area gets its own tree and bake. Nearby lamps from directly adjoining
+// areas are included automatically when their effective radius reaches the
+// shared portal.
 let var num_input_faces = 0;
 let var num_brushes = 0;
 let var num_lights = 0;
@@ -2967,7 +3077,7 @@ for (let var ai = 0; ai < areas.len; ++ai) {
     a.root = bsp_build(a.faces);
 
     bake_brushes = a.brushes;
-    bake_lights = a.lights;
+    bake_lights = lights_for_area(ai);
     prepare_node(a.root);
     compute_bounds(a.root);
 }

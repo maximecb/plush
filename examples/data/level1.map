@@ -32,19 +32,16 @@
 // them. A portal is a rectangle with no thickness along the axis `dir` runs on,
 // `dir` being the way through it. It is one way, so a doorway is a pair.
 //
-// Every area is closed on its own. Where two of them meet, both carry the whole
-// wall the doorway is cut through -- the same boxes and the same arch, written
-// out twice -- and each one's portal stands on the far face of that wall, where
-// the next room begins. The wall is then nearer than the portal it surrounds,
-// so the tree draws it first and the s-buffer knows the true shape of the
-// opening by the time the portal asks whether anything of it shows. The other
-// room's copy stands on the eye's side of that plane and is dropped.
+// Where two areas meet, the wall containing the doorway is divided between
+// them and both portals stand on the dividing plane. Each area therefore owns
+// one half of the connecting slab, with no overlapping floor, ceiling or jambs
+// to change when the camera crosses. The wall is nearer than the portal it
+// surrounds, so the tree draws it first and the s-buffer knows the true shape
+// of the opening by the time the portal asks whether anything of it shows.
 //
-// Light is an area's own: it comes from the lamps listed inside it and is
-// stopped by the solids listed inside it, and none of it passes a portal. A
-// lamp near a doorway is therefore written into both rooms, so that the two
-// copies of the wall between them come out lit the same and the seam does not
-// show as you walk through.
+// A light is listed only in the area that contains it. If its radius reaches a
+// portal, the baker carries it automatically into the adjoining area, where
+// that area's solids still cast their own shadows.
 //
 // Nothing here is lit by hand except the fixtures themselves: every other
 // surface takes its light from the lamps, so the rooms go dark wherever the
@@ -57,8 +54,8 @@
 area crypt {
     spawn x=0 y=1.4 z=-13 yaw=0
 
-    box   x0=-6.4 y0=-0.8 z0=-19.2 x1=6.4 y1=0 z1=-4.8 tex=floor_stone
-    box   x0=-6.4 y0=5.6 z0=-19.2 x1=6.4 y1=6.4 z1=-4.8 tex=stone_large
+    box   x0=-6.4 y0=-0.8 z0=-19.2 x1=6.4 y1=0 z1=-5.6 tex=floor_stone
+    box   x0=-6.4 y0=5.6 z0=-19.2 x1=6.4 y1=6.4 z1=-5.6 tex=stone_large
     box   x0=-6.4 y0=0 z0=-19.2 x1=6.4 y1=5.6 z1=-17.6 tex=stone_blocks
 
     // West wall, with a torch niche cut into it at z -14..-12.4
@@ -79,17 +76,14 @@ area crypt {
     light x=5.3 y=3.2 z=-13.2 radius=8.5 brightness=1.0
 
     // South wall of the crypt, with an arched doorway at x -2.4..2.4. The
-    // passage carries this wall over again, and the way through stands on its
-    // far face at z -4.8.
-    box   x0=-6.4 y0=0 z0=-6.4 x1=-2.4 y1=5.6 z1=-4.8 tex=stone_blocks
-    box   x0=2.4 y0=0 z0=-6.4 x1=6.4 y1=5.6 z1=-4.8 tex=stone_blocks
-    box   x0=-2.4 y0=5.6 z0=-6.4 x1=2.4 y1=6.4 z1=-4.8 tex=stone_blocks
-    arch  axis=z a0=-6.4 a1=-4.8 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+    // passage carries the other half, and the way through stands in their
+    // middle at z -5.6.
+    box   x0=-6.4 y0=0 z0=-6.4 x1=-2.4 y1=5.6 z1=-5.6 tex=stone_blocks
+    box   x0=2.4 y0=0 z0=-6.4 x1=6.4 y1=5.6 z1=-5.6 tex=stone_blocks
+    box   x0=-2.4 y0=5.6 z0=-6.4 x1=2.4 y1=6.4 z1=-5.6 tex=stone_blocks
+    arch  axis=z a0=-6.4 a1=-5.6 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
-    portal to=passage x0=-2.4 y0=0 z0=-4.8 x1=2.4 y1=5.6 z1=-4.8 dir=pz
-
-    // The passage's lamp, so the doorway is lit the same from both sides
-    light x=0 y=4.25 z=-2.4 radius=6 brightness=0.45
+    portal to=passage x0=-2.4 y0=0 z0=-5.6 x1=2.4 y1=5.6 z1=-5.6 dir=pz
 
     tour x=0 y=1.4 z=-13 yaw=0 pitch=0
 }
@@ -101,32 +95,25 @@ area crypt {
 // ===========================================================================
 
 area passage {
-    // Floor and ceiling run out under both doorways, so this area is closed
-    // right up to the far face of each of them
-    box   x0=-4 y0=-0.8 z0=-6.4 x1=4 y1=0 z1=0 tex=floor_stone
-    box   x0=-4 y0=5.6 z0=-6.4 x1=4 y1=6.4 z1=0 tex=stone_large
-    box   x0=-4 y0=0 z0=-4.8 x1=-2.4 y1=5.6 z1=0 tex=brick_tan
-    box   x0=2.4 y0=0 z0=-4.8 x1=4 y1=5.6 z1=0 tex=brick_tan
+    // Floor and ceiling run out under both doorways to their portal seams
+    box   x0=-4 y0=-0.8 z0=-5.6 x1=4 y1=0 z1=-0.8 tex=floor_stone
+    box   x0=-4 y0=5.6 z0=-5.6 x1=4 y1=6.4 z1=-0.8 tex=stone_large
+    box   x0=-4 y0=0 z0=-4.8 x1=-2.4 y1=5.6 z1=-0.8 tex=brick_tan
+    box   x0=2.4 y0=0 z0=-4.8 x1=4 y1=5.6 z1=-0.8 tex=brick_tan
 
-    // The crypt's south wall over again
-    box   x0=-6.4 y0=0 z0=-6.4 x1=-2.4 y1=5.6 z1=-4.8 tex=stone_blocks
-    box   x0=2.4 y0=0 z0=-6.4 x1=6.4 y1=5.6 z1=-4.8 tex=stone_blocks
-    arch  axis=z a0=-6.4 a1=-4.8 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+    // The passage half of the crypt's south wall
+    box   x0=-6.4 y0=0 z0=-5.6 x1=-2.4 y1=5.6 z1=-4.8 tex=stone_blocks
+    box   x0=2.4 y0=0 z0=-5.6 x1=6.4 y1=5.6 z1=-4.8 tex=stone_blocks
+    arch  axis=z a0=-5.6 a1=-4.8 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
-    // The vault's north wall over again. Only the arch is wanted: the side
+    // The passage half of the vault's north wall. Only the arch is wanted: the side
     // walls above already close this end, and so does the ceiling.
-    arch  axis=z a0=-1.6 a1=0 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+    arch  axis=z a0=-1.6 a1=-0.8 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
-    portal to=crypt x0=-2.4 y0=0 z0=-6.4 x1=2.4 y1=5.6 z1=-6.4 dir=nz
-    portal to=vault x0=-2.4 y0=0 z0=0 x1=2.4 y1=5.6 z1=0 dir=pz
+    portal to=crypt x0=-2.4 y0=0 z0=-5.6 x1=2.4 y1=5.6 z1=-5.6 dir=nz
+    portal to=vault x0=-2.4 y0=0 z0=-0.8 x1=2.4 y1=5.6 z1=-0.8 dir=pz
 
     light x=0 y=4.25 z=-2.4 radius=6 brightness=0.45
-
-    // The lamps either side, so both doorways are lit the same from both sides
-    light x=-5.3 y=3.2 z=-13.2 radius=8.5 brightness=1.0
-    light x=5.3 y=3.2 z=-13.2 radius=8.5 brightness=1.0
-    light x=-6.5 y=3 z=2.75 radius=9.5 brightness=0.46
-    light x=6.5 y=3 z=2.75 radius=9.5 brightness=0.46
 
     tour x=0 y=1.4 z=-4.5 yaw=0 pitch=5.73
 }
@@ -160,29 +147,29 @@ area vault {
     // chamber. The opening sits at ledge level in the far corner of the room, so
     // what you see from the bridge is a door in the corner rather than a stair
     // standing out in the open; the climb is all on the far side of it.
-    box   x0=-16 y0=-6.4 z0=25.6 x1=-14.4 y1=16 z1=27.2 tex=stone_blocks
-    box   x0=-16 y0=-6.4 z0=32 x1=-14.4 y1=16 z1=33.6 tex=stone_blocks
-    box   x0=-16 y0=-6.4 z0=27.2 x1=-14.4 y1=0 z1=32 tex=stone_blocks top=floor_stone
-    box   x0=-16 y0=5.6 z0=27.2 x1=-14.4 y1=16 z1=32 tex=stone_blocks
-    arch  axis=x a0=-16 a1=-14.4 c0=27.2 c1=32 ybase=3.6 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
+    box   x0=-15.2 y0=-6.4 z0=25.6 x1=-14.4 y1=16 z1=27.2 tex=stone_blocks
+    box   x0=-15.2 y0=-6.4 z0=32 x1=-14.4 y1=16 z1=33.6 tex=stone_blocks
+    box   x0=-15.2 y0=-6.4 z0=27.2 x1=-14.4 y1=0 z1=32 tex=stone_blocks top=floor_stone
+    box   x0=-15.2 y0=5.6 z0=27.2 x1=-14.4 y1=16 z1=32 tex=stone_blocks
+    arch  axis=x a0=-15.2 a1=-14.4 c0=27.2 c1=32 ybase=3.6 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
     box   x0=14.4 y0=-6.4 z0=0 x1=16 y1=16 z1=33.6 tex=stone_blocks
 
     // North wall, with the arched way back to the passage. The doorway needs a
     // threshold: the ledge behind it starts at z 0.
-    box   x0=-2.4 y0=-0.8 z0=-1.6 x1=2.4 y1=0 z1=0 tex=floor_stone top=floor_stone scale=20
-    box   x0=-16 y0=-6.4 z0=-1.6 x1=-2.4 y1=16 z1=0 tex=stone_blocks
-    box   x0=2.4 y0=-6.4 z0=-1.6 x1=16 y1=16 z1=0 tex=stone_blocks
-    box   x0=-2.4 y0=5.6 z0=-1.6 x1=2.4 y1=16 z1=0 tex=stone_blocks
-    arch  axis=z a0=-1.6 a1=0 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+    box   x0=-2.4 y0=-0.8 z0=-0.8 x1=2.4 y1=0 z1=0 tex=floor_stone top=floor_stone scale=20
+    box   x0=-16 y0=-6.4 z0=-0.8 x1=-2.4 y1=16 z1=0 tex=stone_blocks
+    box   x0=2.4 y0=-6.4 z0=-0.8 x1=16 y1=16 z1=0 tex=stone_blocks
+    box   x0=-2.4 y0=5.6 z0=-0.8 x1=2.4 y1=16 z1=0 tex=stone_blocks
+    arch  axis=z a0=-0.8 a1=0 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
     // South wall, with the arched way on to the reliquary. The doorway needs its
     // own floor: the wall pieces either side of it stop at the opening.
-    box   x0=-3.2 y0=-2.4 z0=32 x1=3.2 y1=0 z1=33.6 tex=floor_stone top=floor_stone scale=20
-    box   x0=-16 y0=-6.4 z0=32 x1=-3.2 y1=16 z1=33.6 tex=stone_blocks
-    box   x0=3.2 y0=-6.4 z0=32 x1=16 y1=16 z1=33.6 tex=stone_blocks
-    box   x0=-3.2 y0=7.2 z0=32 x1=3.2 y1=16 z1=33.6 tex=stone_blocks
-    arch  axis=z a0=32 a1=33.6 c0=-3.2 c1=3.2 ybase=4.8 ytop=7.2 segs=5 tex=sandstone_brick bottom=sandstone_brick
+    box   x0=-3.2 y0=-2.4 z0=32 x1=3.2 y1=0 z1=32.8 tex=floor_stone top=floor_stone scale=20
+    box   x0=-16 y0=-6.4 z0=32 x1=-3.2 y1=16 z1=32.8 tex=stone_blocks
+    box   x0=3.2 y0=-6.4 z0=32 x1=16 y1=16 z1=32.8 tex=stone_blocks
+    box   x0=-3.2 y0=7.2 z0=32 x1=3.2 y1=16 z1=32.8 tex=stone_blocks
+    arch  axis=z a0=32 a1=32.8 c0=-3.2 c1=3.2 ybase=4.8 ytop=7.2 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
     // --- Timber beams tying the roof across, one every 6.4 m ---
     //
@@ -303,15 +290,9 @@ area vault {
     light x=-6.5 y=3 z=29.5 radius=9.5 brightness=0.46
     light x=6.5 y=3 z=29.5 radius=9.5 brightness=0.46
 
-    // The lamps of the rooms next door, for the walls this one shares with them
-    light x=0 y=4.25 z=-2.4 radius=6 brightness=0.45
-    light x=-5.3 y=3.2 z=34.7 radius=8 brightness=0.9
-    light x=5.3 y=3.2 z=34.7 radius=8 brightness=0.9
-    light x=-17.5 y=3.5 z=29.6 radius=8 brightness=0.55
-
-    portal to=passage x0=-2.4 y0=0 z0=-1.6 x1=2.4 y1=5.6 z1=-1.6 dir=nz
-    portal to=reliquary x0=-3.2 y0=0 z0=33.6 x1=3.2 y1=7.2 z1=33.6 dir=pz
-    portal to=stairs x0=-16 y0=0 z0=27.2 x1=-16 y1=5.6 z1=32 dir=nx
+    portal to=passage x0=-2.4 y0=0 z0=-0.8 x1=2.4 y1=5.6 z1=-0.8 dir=nz
+    portal to=reliquary x0=-3.2 y0=0 z0=32.8 x1=3.2 y1=7.2 z1=32.8 dir=pz
+    portal to=stairs x0=-15.2 y0=0 z0=27.2 x1=-15.2 y1=5.6 z1=32 dir=nx
 
     tour x=0 y=1.4 z=2 yaw=0 pitch=0
     tour x=0 y=1.4 z=10.5 yaw=28.65 pitch=-5.73
@@ -328,23 +309,23 @@ area vault {
 // ===========================================================================
 
 area reliquary {
-    // The shell reaches back under the doorway to z 32, where the vault begins
-    box   x0=-8 y0=7.2 z0=32 x1=8 y1=8 z1=46.4 tex=stone_large
-    box   x0=-8 y0=0 z0=32 x1=-6.4 y1=7.2 z1=46.4 tex=brick_blue
-    box   x0=6.4 y0=0 z0=32 x1=8 y1=7.2 z1=46.4 tex=brick_blue
+    // The shell reaches back under the doorway to the seam with the vault
+    box   x0=-8 y0=7.2 z0=32.8 x1=8 y1=8 z1=46.4 tex=stone_large
+    box   x0=-8 y0=0 z0=32.8 x1=-6.4 y1=7.2 z1=46.4 tex=brick_blue
+    box   x0=6.4 y0=0 z0=32.8 x1=8 y1=7.2 z1=46.4 tex=brick_blue
     box   x0=-8 y0=0 z0=44.8 x1=8 y1=7.2 z1=46.4 tex=brick_blue
 
     // The floor, in four pieces around the pool
-    box   x0=-8 y0=-2.4 z0=32 x1=8 y1=0 z1=37.6 tex=floor_checker
+    box   x0=-8 y0=-2.4 z0=32.8 x1=8 y1=0 z1=37.6 tex=floor_checker
     box   x0=-8 y0=-2.4 z0=42.4 x1=8 y1=0 z1=46.4 tex=floor_checker
     box   x0=-8 y0=-2.4 z0=37.6 x1=-3.2 y1=0 z1=42.4 tex=floor_checker
     box   x0=3.2 y0=-2.4 z0=37.6 x1=8 y1=0 z1=42.4 tex=floor_checker
 
-    // The vault's south wall over again, the doorway's own floor included
-    box   x0=-3.2 y0=-2.4 z0=32 x1=3.2 y1=0 z1=33.6 tex=floor_stone top=floor_stone scale=20
-    box   x0=-8 y0=-2.4 z0=32 x1=-3.2 y1=7.2 z1=33.6 tex=stone_blocks
-    box   x0=3.2 y0=-2.4 z0=32 x1=8 y1=7.2 z1=33.6 tex=stone_blocks
-    arch  axis=z a0=32 a1=33.6 c0=-3.2 c1=3.2 ybase=4.8 ytop=7.2 segs=5 tex=sandstone_brick bottom=sandstone_brick
+    // The reliquary half of the vault's south wall, including the doorway floor
+    box   x0=-3.2 y0=-2.4 z0=32.8 x1=3.2 y1=0 z1=33.6 tex=floor_stone top=floor_stone scale=20
+    box   x0=-8 y0=-2.4 z0=32.8 x1=-3.2 y1=7.2 z1=33.6 tex=stone_blocks
+    box   x0=3.2 y0=-2.4 z0=32.8 x1=8 y1=7.2 z1=33.6 tex=stone_blocks
+    arch  axis=z a0=32.8 a1=33.6 c0=-3.2 c1=3.2 ybase=4.8 ytop=7.2 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
     // The pool itself, and the rough rock it has eaten into. The surface rides
     // the wave, which takes it a WAVE_AMP down each way, so it sits that much
@@ -366,11 +347,7 @@ area reliquary {
     light x=-5.3 y=3.2 z=34.7 radius=8 brightness=0.9
     light x=5.3 y=3.2 z=34.7 radius=8 brightness=0.9
 
-    // The vault's lamps nearest the doorway, for its copy of the wall
-    light x=-6.5 y=3 z=29.5 radius=9.5 brightness=0.46
-    light x=6.5 y=3 z=29.5 radius=9.5 brightness=0.46
-
-    portal to=vault x0=-3.2 y0=0 z0=32 x1=3.2 y1=7.2 z1=32 dir=nz
+    portal to=vault x0=-3.2 y0=0 z0=32.8 x1=3.2 y1=7.2 z1=32.8 dir=nz
 
     tour x=5.375 y=2.15 z=34.5 yaw=-25.78 pitch=-1.15
 }
@@ -395,19 +372,19 @@ area stairs {
     box   x0=-32 y0=-1.6 z0=32.8 x1=-19.2 y1=12.8 z1=34.4 tex=iron_brick
     box   x0=-32 y0=12.8 z0=26.4 x1=-19.2 y1=14.4 z1=32.8 tex=iron_brick
 
-    // The vault's west wall over again, at the low end
-    box   x0=-16 y0=-6.4 z0=27.2 x1=-14.4 y1=0 z1=32 tex=stone_blocks top=floor_stone
-    box   x0=-16 y0=5.6 z0=27.2 x1=-14.4 y1=16 z1=32 tex=stone_blocks
-    box   x0=-16 y0=-6.4 z0=25.6 x1=-14.4 y1=16 z1=27.2 tex=stone_blocks
-    box   x0=-16 y0=-6.4 z0=32 x1=-14.4 y1=16 z1=33.6 tex=stone_blocks
-    arch  axis=x a0=-16 a1=-14.4 c0=27.2 c1=32 ybase=3.6 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
+    // The stair half of the vault's west wall, at the low end
+    box   x0=-16 y0=-6.4 z0=27.2 x1=-15.2 y1=0 z1=32 tex=stone_blocks top=floor_stone
+    box   x0=-16 y0=5.6 z0=27.2 x1=-15.2 y1=16 z1=32 tex=stone_blocks
+    box   x0=-16 y0=-6.4 z0=25.6 x1=-15.2 y1=16 z1=27.2 tex=stone_blocks
+    box   x0=-16 y0=-6.4 z0=32 x1=-15.2 y1=16 z1=33.6 tex=stone_blocks
+    arch  axis=x a0=-16 a1=-15.2 c0=27.2 c1=32 ybase=3.6 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
-    // The monolith chamber's east wall over again, at the top of the climb
-    box   x0=-33.6 y0=4.8 z0=26.4 x1=-32 y1=6.4 z1=32.8 tex=iron_brick top=floor_checker
-    box   x0=-33.6 y0=4.8 z0=24.8 x1=-32 y1=59.2 z1=26.4 tex=iron_brick
-    box   x0=-33.6 y0=4.8 z0=32.8 x1=-32 y1=59.2 z1=34.4 tex=iron_brick
-    box   x0=-33.6 y0=12 z0=26.4 x1=-32 y1=59.2 z1=32.8 tex=iron_brick
-    arch  axis=x a0=-33.6 a1=-32 c0=26.4 c1=32.8 ybase=10 ytop=12 segs=4 tex=sandstone_brick bottom=sandstone_brick
+    // The stair half of the monolith chamber's east wall, at the top
+    box   x0=-32.8 y0=4.8 z0=26.4 x1=-32 y1=6.4 z1=32.8 tex=iron_brick top=floor_checker
+    box   x0=-32.8 y0=4.8 z0=24.8 x1=-32 y1=59.2 z1=26.4 tex=iron_brick
+    box   x0=-32.8 y0=4.8 z0=32.8 x1=-32 y1=59.2 z1=34.4 tex=iron_brick
+    box   x0=-32.8 y0=12 z0=26.4 x1=-32 y1=59.2 z1=32.8 tex=iron_brick
+    arch  axis=x a0=-32.8 a1=-32 c0=26.4 c1=32.8 ybase=10 ytop=12 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
     // Sixteen steps of 0.4 m, climbing west from x -19.2 to the sill at -32.
     // Each one carries down to the underside of the corridor floor, so the
@@ -436,13 +413,8 @@ area stairs {
     light x=-27 y=8 z=29.6 radius=8.5 brightness=0.45
     light x=-31.25 y=11 z=29.6 radius=8 brightness=0.40
 
-    // What reaches the two doorways from the rooms on the other side of them
-    light x=-14.8 y=3 z=23.6 radius=9.5 brightness=1.0
-    light x=-7.2 y=-3.25 z=22.4 radius=14 brightness=0.44
-    light x=-39 y=11.5 z=29.6 radius=17.5 brightness=0.20
-
-    portal to=vault x0=-14.4 y0=0 z0=27.2 x1=-14.4 y1=5.6 z1=32 dir=px
-    portal to=monolith x0=-33.6 y0=6.4 z0=26.4 x1=-33.6 y1=12 z1=32.8 dir=nx
+    portal to=vault x0=-15.2 y0=0 z0=27.2 x1=-15.2 y1=5.6 z1=32 dir=px
+    portal to=monolith x0=-32.8 y0=6.4 z0=26.4 x1=-32.8 y1=12 z1=32.8 dir=nx
 
     tour x=-18 y=1.4 z=29.6 yaw=-90 pitch=0
 }
@@ -467,12 +439,12 @@ area stairs {
 area monolith {
     // --- Shell ---
 
-    box   x0=-86.4 y0=4.8 z0=2.4 x1=-32 y1=6.4 z1=56.8 tex=iron_brick top=floor_checker
+    box   x0=-86.4 y0=4.8 z0=2.4 x1=-32.8 y1=6.4 z1=56.8 tex=iron_brick top=floor_checker
 
-    box   x0=-33.6 y0=4.8 z0=2.4 x1=-32 y1=59.2 z1=26.4 tex=iron_brick
-    box   x0=-33.6 y0=4.8 z0=32.8 x1=-32 y1=59.2 z1=56.8 tex=iron_brick
-    box   x0=-33.6 y0=12 z0=26.4 x1=-32 y1=59.2 z1=32.8 tex=iron_brick
-    arch  axis=x a0=-33.6 a1=-32 c0=26.4 c1=32.8 ybase=10 ytop=12 segs=4 tex=sandstone_brick bottom=sandstone_brick
+    box   x0=-33.6 y0=4.8 z0=2.4 x1=-32.8 y1=59.2 z1=26.4 tex=iron_brick
+    box   x0=-33.6 y0=4.8 z0=32.8 x1=-32.8 y1=59.2 z1=56.8 tex=iron_brick
+    box   x0=-33.6 y0=12 z0=26.4 x1=-32.8 y1=59.2 z1=32.8 tex=iron_brick
+    arch  axis=x a0=-33.6 a1=-32.8 c0=26.4 c1=32.8 ybase=10 ytop=12 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
     // --- The three crosses ---
     //
@@ -729,10 +701,7 @@ area monolith {
     light x=-62.8 y=12.5 z=29.6 radius=15 brightness=0.22
     light x=-39 y=11.5 z=29.6 radius=17.5 brightness=0.20
 
-    // The lamp at the top of the stair, for this room's side of that doorway
-    light x=-31.25 y=11 z=29.6 radius=8 brightness=0.40
-
-    portal to=stairs x0=-32 y0=6.4 z0=26.4 x1=-32 y1=12 z1=32.8 dir=px
+    portal to=stairs x0=-32.8 y0=6.4 z0=26.4 x1=-32.8 y1=12 z1=32.8 dir=px
 
     tour x=-40 y=8 z=29.6 yaw=-90 pitch=8
 }
