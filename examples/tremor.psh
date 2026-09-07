@@ -251,6 +251,7 @@ let LAVA_GRID = 1.0;
 let var warp_phase = 0.0;
 
 let var pixels_drawn = 0;
+let var rect_faces_skipped = 0;
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 
@@ -367,6 +368,22 @@ fun sbuf_insert(y, x0, x1) {
         if (sb_num_full >= FRAME_HEIGHT) screen_done = true;
     }
     return n_vis;
+}
+
+// Is every pixel in this screen-space rectangle already covered? This is a
+// deliberately conservative polygon occlusion test: a polygon fits inside its
+// bounding rectangle, so covering the whole rectangle proves that the polygon
+// cannot contribute a pixel. The reverse is not true, but a missed rejection
+// only costs time and cannot change the image.
+fun sbuf_covers_rect(x0, y0, x1, y1) {
+    for (let var y = y0; y < y1; ++y) {
+        if (sb_full.get_u32(y) != 0) continue;
+
+        let var cur = sb_head[y];
+        while (cur != NO_SPAN && sp_x1[cur] <= x0) cur = sp_next[cur];
+        if (cur == NO_SPAN || sp_x0[cur] > x0 || sp_x1[cur] < x1) return false;
+    }
+    return true;
 }
 
 // --- Textures ---
@@ -1860,6 +1877,8 @@ fun draw_face(f) {
     let m = clip_plane(n, 0.0, 0.0, 1.0, 0.0 - NEAR);
     if (m < 3) return;
 
+    let var box_x0 = 0.0; let var box_y0 = 0.0;
+    let var box_x1 = 0.0; let var box_y1 = 0.0;
     for (let var i = 0; i < m; ++i) {
         let w = 1.0 / aZ[i];
         pX[i] = CENTER_X + FOCAL * aX[i] * w;
@@ -1868,6 +1887,28 @@ fun draw_face(f) {
         pUZ[i] = aU[i] * w;
         pVZ[i] = aV[i] * w;
         pLZ[i] = aL[i] * w;
+
+        if (i == 0) {
+            box_x0 = pX[i]; box_x1 = pX[i];
+            box_y0 = pY[i]; box_y1 = pY[i];
+        } else {
+            if (pX[i] < box_x0) box_x0 = pX[i];
+            if (pX[i] > box_x1) box_x1 = pX[i];
+            if (pY[i] < box_y0) box_y0 = pY[i];
+            if (pY[i] > box_y1) box_y1 = pY[i];
+        }
+    }
+
+    // Match the rasterizer's floor-and-clamp convention. Requiring this
+    // enclosing rectangle to be covered is stronger than necessary, but lets
+    // a fully hidden face skip gradient setup and edge walking cheaply.
+    let rx0 = box_x0.floor().max(0);
+    let ry0 = box_y0.floor().max(0);
+    let rx1 = box_x1.floor().min(FRAME_WIDTH);
+    let ry1 = box_y1.floor().min(FRAME_HEIGHT);
+    if (rx0 < rx1 && ry0 < ry1 && sbuf_covers_rect(rx0, ry0, rx1, ry1)) {
+        rect_faces_skipped = rect_faces_skipped + 1;
+        return;
     }
 
     // u/z, v/z and 1/z are linear in screen space, so their gradients come from
@@ -2072,6 +2113,7 @@ fun bsp_draw(node) {
 
 fun render_frame() {
     pixels_drawn = 0;
+    rect_faces_skipped = 0;
     frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, VOID_COLOR);
     sbuf_reset();
     update_frustum();
@@ -2378,6 +2420,7 @@ if (BENCH_FRAMES > 0) {
     let var total_ms = 0;
     let var worst_ms = 0;
     let var total_pixels = 0;
+    let var total_rect_skipped = 0;
 
     for (let var i = 0; i < BENCH_FRAMES; ++i) {
         let view = TOUR[i % TOUR.len];
@@ -2399,6 +2442,7 @@ if (BENCH_FRAMES > 0) {
         let ms = $time_current_ms() - t0;
         total_ms = total_ms + ms;
         total_pixels = total_pixels + pixels_drawn;
+        total_rect_skipped = total_rect_skipped + rect_faces_skipped;
         if (ms > worst_ms) worst_ms = ms;
 
         if (SHOT_DIR.len > 0 && i < TOUR.len) {
@@ -2413,6 +2457,8 @@ if (BENCH_FRAMES > 0) {
     $println("pixels drawn per frame: " + avg_px.floor().to_s() + " of "
         + (FRAME_WIDTH * FRAME_HEIGHT).to_s() + ", overdraw "
         + (avg_px / (FRAME_WIDTH * FRAME_HEIGHT).to_f()).format_decimals(3) + "x");
+    $println("rectangle-occluded faces per frame: "
+        + (total_rect_skipped.to_f() / BENCH_FRAMES.to_f()).format_decimals(1));
     $exit(0);
 }
 
