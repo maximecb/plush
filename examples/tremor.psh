@@ -252,6 +252,7 @@ let var warp_phase = 0.0;
 
 let var pixels_drawn = 0;
 let var rect_faces_skipped = 0;
+let var rect_nodes_skipped = 0;
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 
@@ -1449,6 +1450,7 @@ class BspNode {
         self.cx = 0.0; self.cy = 0.0; self.cz = 0.0;
         self.hx = 0.0; self.hy = 0.0; self.hz = 0.0;
         self.empty = true;
+        self.moving = false;
     }
 }
 
@@ -2027,6 +2029,53 @@ fun node_hidden(node) {
     return false;
 }
 
+// Project a subtree's world-space box and reject it when the s-buffer already
+// covers the box's whole screen rectangle. If the box crosses the near plane,
+// projection is unbounded and its corners no longer give a useful enclosure,
+// so that case deliberately falls back to normal traversal.
+fun node_occluded(node) {
+    // Moving lava can leave the static box computed from its source face.
+    if (node.moving) return false;
+
+    let var box_x0 = 0.0; let var box_y0 = 0.0;
+    let var box_x1 = 0.0; let var box_y1 = 0.0;
+    for (let var i = 0; i < 8; ++i) {
+        let var wx = node.cx - node.hx;
+        let var wy = node.cy - node.hy;
+        let var wz = node.cz - node.hz;
+        if ((i & 1) != 0) wx = node.cx + node.hx;
+        if ((i & 2) != 0) wy = node.cy + node.hy;
+        if ((i & 4) != 0) wz = node.cz + node.hz;
+
+        let dx = wx - cam_x;
+        let dy = wy - cam_y;
+        let dz = wz - cam_z;
+        let vx = dx * cos_yaw - dz * sin_yaw;
+        let rz = dx * sin_yaw + dz * cos_yaw;
+        let vy = dy * cos_pitch - rz * sin_pitch;
+        let vz = rz * cos_pitch + dy * sin_pitch;
+        if (vz <= NEAR) return false;
+
+        let sx = CENTER_X + FOCAL * vx / vz;
+        let sy = CENTER_Y - FOCAL * vy / vz;
+        if (i == 0) {
+            box_x0 = sx; box_x1 = sx;
+            box_y0 = sy; box_y1 = sy;
+        } else {
+            if (sx < box_x0) box_x0 = sx;
+            if (sx > box_x1) box_x1 = sx;
+            if (sy < box_y0) box_y0 = sy;
+            if (sy > box_y1) box_y1 = sy;
+        }
+    }
+
+    let rx0 = box_x0.floor().max(0);
+    let ry0 = box_y0.floor().max(0);
+    let rx1 = box_x1.floor().min(FRAME_WIDTH);
+    let ry1 = box_y1.floor().min(FRAME_HEIGHT);
+    return rx0 < rx1 && ry0 < ry1 && sbuf_covers_rect(rx0, ry0, rx1, ry1);
+}
+
 // The box around everything in a subtree, from the faces it holds and the
 // boxes of its children
 fun compute_bounds(node) {
@@ -2040,6 +2089,7 @@ fun compute_bounds(node) {
 
     for (let var i = 0; i < node.on.len; ++i) {
         let f = node.on[i];
+        if (f.flow) node.moving = true;
         let n = f.v.len.idiv(3);
         for (let var k = 0; k < n; ++k) {
             let x = f.v[k * 3];
@@ -2059,6 +2109,7 @@ fun compute_bounds(node) {
         let var child = node.front;
         if (c == 1) child = node.back;
         if (child == nil || child.empty) continue;
+        if (child.moving) node.moving = true;
 
         let cl_x = child.cx - child.hx; let ch_x = child.cx + child.hx;
         let cl_y = child.cy - child.hy; let ch_y = child.cy + child.hy;
@@ -2093,6 +2144,10 @@ fun bsp_draw(node) {
     if (node == nil) return;
     if (screen_done) return;
     if (node_hidden(node)) return;
+    if (node_occluded(node)) {
+        rect_nodes_skipped = rect_nodes_skipped + 1;
+        return;
+    }
 
     let side = node.nx * cam_x + node.ny * cam_y + node.nz * cam_z - node.d;
 
@@ -2114,6 +2169,7 @@ fun bsp_draw(node) {
 fun render_frame() {
     pixels_drawn = 0;
     rect_faces_skipped = 0;
+    rect_nodes_skipped = 0;
     frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, VOID_COLOR);
     sbuf_reset();
     update_frustum();
@@ -2421,6 +2477,7 @@ if (BENCH_FRAMES > 0) {
     let var worst_ms = 0;
     let var total_pixels = 0;
     let var total_rect_skipped = 0;
+    let var total_nodes_skipped = 0;
 
     for (let var i = 0; i < BENCH_FRAMES; ++i) {
         let view = TOUR[i % TOUR.len];
@@ -2443,6 +2500,7 @@ if (BENCH_FRAMES > 0) {
         total_ms = total_ms + ms;
         total_pixels = total_pixels + pixels_drawn;
         total_rect_skipped = total_rect_skipped + rect_faces_skipped;
+        total_nodes_skipped = total_nodes_skipped + rect_nodes_skipped;
         if (ms > worst_ms) worst_ms = ms;
 
         if (SHOT_DIR.len > 0 && i < TOUR.len) {
@@ -2459,6 +2517,8 @@ if (BENCH_FRAMES > 0) {
         + (avg_px / (FRAME_WIDTH * FRAME_HEIGHT).to_f()).format_decimals(3) + "x");
     $println("rectangle-occluded faces per frame: "
         + (total_rect_skipped.to_f() / BENCH_FRAMES.to_f()).format_decimals(1));
+    $println("rectangle-occluded BSP nodes per frame: "
+        + (total_nodes_skipped.to_f() / BENCH_FRAMES.to_f()).format_decimals(1));
     $exit(0);
 }
 
