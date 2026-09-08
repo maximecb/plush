@@ -101,8 +101,8 @@ let PERSP_TOL = 0.04;
 // The scale runs 0..255, so a channel product is at most 255 * 255 and stays
 // inside sixteen bits. That is what lets one multiply carry all three
 // channels: see the span loop. Stopping at 255 rather than 256 keeps the
-// product off the sixteenth bit, so an eight bit mask on the scale makes
-// spilling one channel into the next impossible rather than merely unlikely.
+// product off the sixteenth bit. The endpoint clamps below keep the multiplier
+// in that range, making spilling one channel into the next impossible.
 let SHADE_MAX = 255.0;
 
 // Levels a map may ask for by name, which are turned into a scale on the same
@@ -120,7 +120,6 @@ let MAX_SHADE = 1.0;
 let L_FRAC = 16;
 let L_ONE = 65536.0;
 let L_SHIFT = L_FRAC;
-let L_MASK = 0xFF;
 
 // Both ends of a sub-span are clamped to this range before the step between
 // them is taken, which is what keeps every pixel along it in range too.
@@ -136,7 +135,9 @@ let L_MAX_FX = 16711680;
 // share a multiply with green once green is moved out of the way
 let MASK_RB = 0x00FF00FF;
 let MASK_G = 0x0000FF00;
-let ALPHA = 0xFF000000;
+
+// The framebuffer consumer currently ignores alpha, so the span loop leaves
+// its high byte clear instead of ORing the same constant into every pixel.
 
 // A face is cut until interpolation reproduces the light across it, but never
 // into pieces smaller than this, and never more than LIGHT_DEPTH halvings deep
@@ -1668,9 +1669,9 @@ fun raster_poly(m) {
     let vshift = g_vshift;
     let vmask = g_vmask;
     let wrap = g_wrap;
+    // MASK_RB is non-contiguous and worth holding in a register. MASK_G stays
+    // a constant so codegen can fold its contiguous field into the operation.
     let mask_rb = MASK_RB;
-    let mask_g = MASK_G;
-    let alpha = ALPHA;
     let fb = frame_buffer;
 
     // Per chain: the corner reached so far, the current x, how far x moves per
@@ -1820,14 +1821,14 @@ fun raster_poly(m) {
                             // products running into each other. Sixty-two bit
                             // fixnums are what make the third channel fit: in
                             // thirty-two bits this takes two multiplies.
-                            let x = ((c & mask_rb) | ((c & mask_g) << 24))
-                                  * ((lp >> L_SHIFT) & L_MASK);
+                            let x = ((c & mask_rb) | ((c & MASK_G) << 24))
+                                  * (lp >> L_SHIFT);
 
                             // Red and blue come back out together: they are
                             // still sixteen apart after the shift, so the mask
                             // that separated them separates the products too
-                            fb.set_u32(i, alpha | ((x >> 8) & mask_rb)
-                                                | ((x >> 32) & 0xFF00));
+                            fb.set_u32(i, ((x >> 8) & mask_rb)
+                                        | ((x >> 32) & 0xFF00));
                             t = t + dt;
                             lp = lp + dl;
                             i = i + 1;
