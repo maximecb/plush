@@ -265,9 +265,10 @@ let var g_inv_alpha = 0;
 let var g_l_min = L_MIN_FX;
 let var g_l_max = L_MAX_FX;
 
-// Which deferred face the spans being collected belong to, or -1 when the
-// polygon is being drawn rather than collected
-let var g_defer_slot = 0 - 1;
+// Whether the polygon being rasterized is one whose spans are being taken down
+// for the blending pass rather than drawn. It cannot change inside a polygon,
+// so the span loop reads it once and picks its scanline loop with it.
+let var g_collecting = false;
 
 let var bsp_root = nil;
 
@@ -1851,7 +1852,7 @@ fun raster_poly(m) {
     let fb = frame_buffer;
     let l_min = g_l_min;
     let l_max = g_l_max;
-    let slot = g_defer_slot;
+    let collecting = g_collecting;
 
     // Per chain: the corner reached so far, the current x, how far x moves per
     // scanline, and the scanline its current edge runs out on
@@ -1898,6 +1899,35 @@ fun raster_poly(m) {
         if (end_r < band_end) band_end = end_r;
         if (band_end <= scan_y) { pixels_drawn = pixels_drawn + span_px; return; }
 
+        // A face you can see through only wants to know where it is visible, so
+        // it runs a band of its own: no interpolants to carry down the rows and
+        // no s-buffer to fill in. Which of the two runs is settled once a band
+        // rather than once a scanline, because it cannot change inside one.
+        if (collecting) {
+            while (scan_y < band_end) {
+                let var xa = xl.floor();
+                if (xa < 0) xa = 0;
+                let var xb = xr.floor();
+                if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+
+                if (scan_y >= render_y0 && xa < xb) {
+                    let n_vis = sbuf_visible(scan_y, xa, xb);
+                    for (let var k = 0; k < n_vis; ++k) {
+                        if (ds_top >= MAX_DEFER_SPANS) break;
+                        ds_y[ds_top] = scan_y;
+                        ds_x0[ds_top] = vis_x0[k];
+                        ds_x1[ds_top] = vis_x1[k];
+                        ds_top = ds_top + 1;
+                    }
+                }
+
+                xl = xl + dxl;
+                xr = xr + dxr;
+                scan_y = scan_y + 1;
+            }
+            continue;
+        }
+
         while (scan_y < band_end) {
             let var xa = xl.floor();
             if (xa < 0) xa = 0;
@@ -1909,18 +1939,7 @@ fun raster_poly(m) {
             // one row at a time preserves the serial renderer's floating
             // point rounding at polygon edges; this branch is per row, never
             // in the pixel hot path.
-            if (scan_y >= render_y0 && xa < xb && slot >= 0) {
-                // See through: take down what is visible and leave it for the
-                // blending pass, without covering anything
-                let n_vis = sbuf_visible(scan_y, xa, xb);
-                for (let var k = 0; k < n_vis; ++k) {
-                    if (ds_top >= MAX_DEFER_SPANS) break;
-                    ds_y[ds_top] = scan_y;
-                    ds_x0[ds_top] = vis_x0[k];
-                    ds_x1[ds_top] = vis_x1[k];
-                    ds_top = ds_top + 1;
-                }
-            } else if (scan_y >= render_y0 && xa < xb) {
+            if (scan_y >= render_y0 && xa < xb) {
                 let n_vis = sbuf_insert(scan_y, xa, xb);
                 for (let var k = 0; k < n_vis; ++k) {
                     let var x = vis_x0[k];
@@ -2353,7 +2372,6 @@ fun face_setup(f, cull) {
 // and leave it for `draw_deferred`
 fun draw_face(f) {
     if (f.alpha >= 1.0) {
-        g_defer_slot = 0 - 1;
         let m = face_setup(f, true);
         if (m > 0) raster_poly(m);
         return;
@@ -2361,11 +2379,11 @@ fun draw_face(f) {
 
     if (df_num >= MAX_DEFER_FACES || ds_top >= MAX_DEFER_SPANS) return;
 
-    g_defer_slot = df_num;
     let first = ds_top;
+    g_collecting = true;
     let m = face_setup(f, true);
     if (m > 0) raster_poly(m);
-    g_defer_slot = 0 - 1;
+    g_collecting = false;
 
     // Every part of it was hidden, so it never reaches the second pass
     if (ds_top == first) return;
@@ -2381,7 +2399,6 @@ fun draw_face(f) {
 fun draw_deferred() {
     for (let var i = df_num - 1; i >= 0; --i) {
         let f = df_face[i];
-        g_defer_slot = 0 - 1;
         if (face_setup(f, false) > 0) raster_spans(df_first[i], df_count[i]);
     }
 }
