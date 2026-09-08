@@ -20,7 +20,7 @@
 // Light is baked per face at load time from the point lights in the map, into
 // darkened copies of each texture, so the span loop stays a plain texel copy.
 //
-// Usage: plush examples/level_walk.psh [map file] [frames] [shot directory]
+// Usage: plush examples/tremor.psh [map file] [width] [height] [workers] [frames] [shot directory]
 //
 //   W A S D     move
 //   arrows      turn and look
@@ -34,12 +34,22 @@
 // were written. Given a directory as well, it writes each viewpoint of the
 // tour there as a TGA screenshot.
 
-let FRAME_WIDTH = 800;
-let FRAME_HEIGHT = 600;
+let FRAME_WIDTH = $cmd_get_arg_or(2, "1280").parse_int(10);
+let FRAME_HEIGHT = $cmd_get_arg_or(3, "720").parse_int(10);
 let VOID_COLOR = 0xFF05050A;
 
 let TEX_DIR = "examples/data/textures/";
 let MAP_PATH = $cmd_get_arg_or(1, "examples/data/level1.map");
+let NUM_RENDER_ACTORS = $cmd_get_arg_or(4, "8").parse_int(10);
+
+if (FRAME_WIDTH == nil || FRAME_HEIGHT == nil || FRAME_WIDTH < 1 || FRAME_HEIGHT < 1) {
+    $println("width and height must be positive integers");
+    $exit(1);
+}
+if (NUM_RENDER_ACTORS == nil || NUM_RENDER_ACTORS < 1 || NUM_RENDER_ACTORS > FRAME_HEIGHT) {
+    $println("worker count must be between 1 and " + FRAME_HEIGHT.to_s());
+    $exit(1);
+}
 
 // --- Units ---
 
@@ -50,7 +60,7 @@ let TEXELS_PER_METER = 40.0;
 
 // Projection. FOCAL is half the frame width over the tangent of half the
 // horizontal field of view, so this is a 90 degree view.
-let FOCAL = 400.0;
+let FOCAL = FRAME_WIDTH.to_f() * 0.5;
 let CENTER_X = (FRAME_WIDTH.idiv(2)).to_f();
 let CENTER_Y = (FRAME_HEIGHT.idiv(2)).to_f();
 let NEAR = 0.2;
@@ -257,6 +267,12 @@ let var rect_nodes_skipped = 0;
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 
+// Each render actor owns one horizontal band. These remain full-frame in the
+// main actor and are changed only in the private heap of each worker.
+let var render_y0 = 0;
+let var render_y1 = FRAME_HEIGHT;
+let BAND_HEIGHT = 60;
+
 // --- The s-buffer ---
 
 // One covered interval of a scanline. The intervals of a scanline are kept
@@ -346,7 +362,7 @@ fun sbuf_insert(y, x0, x1) {
             // that from being let through out of order.
             sb_full.set_u32(y, 1);
             sb_num_full = sb_num_full + 1;
-            if (sb_num_full >= FRAME_HEIGHT) screen_done = true;
+            if (sb_num_full >= render_y1 - render_y0) screen_done = true;
             return 0;
         }
 
@@ -367,7 +383,7 @@ fun sbuf_insert(y, x0, x1) {
     if (mx0 <= 0 && mx1 >= FRAME_WIDTH) {
         sb_full.set_u32(y, 1);
         sb_num_full = sb_num_full + 1;
-        if (sb_num_full >= FRAME_HEIGHT) screen_done = true;
+        if (sb_num_full >= render_y1 - render_y0) screen_done = true;
     }
     return n_vis;
 }
@@ -378,7 +394,11 @@ fun sbuf_insert(y, x0, x1) {
 // cannot contribute a pixel. The reverse is not true, but a missed rejection
 // only costs time and cannot change the image.
 fun sbuf_covers_rect(x0, y0, x1, y1) {
-    for (let var y = y0; y < y1; ++y) {
+    let var ry0 = y0.max(render_y0);
+    let ry1 = y1.min(render_y1);
+    if (ry0 >= ry1) return true;
+
+    for (let var y = ry0; y < ry1; ++y) {
         if (sb_full.get_u32(y) != 0) continue;
 
         let var cur = sb_head[y];
@@ -1637,7 +1657,7 @@ fun raster_poly(m) {
     let var scan_y = y_min.floor();
     if (scan_y < 0) scan_y = 0;
     let var end_y = y_max.floor();
-    if (end_y > FRAME_HEIGHT) end_y = FRAME_HEIGHT;
+    if (end_y > render_y1) end_y = render_y1;
     if (scan_y >= end_y) return;
 
     // Which way round the left chain runs, from the winding on screen
@@ -1725,7 +1745,12 @@ fun raster_poly(m) {
             let var xb = xr.floor();
             if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
 
-            if (xa < xb) {
+            // Start edge interpolation at the polygon's true first scanline,
+            // even when this actor owns a lower band. Advancing to the band
+            // one row at a time preserves the serial renderer's floating
+            // point rounding at polygon edges; this branch is per row, never
+            // in the pixel hot path.
+            if (scan_y >= render_y0 && xa < xb) {
                 let n_vis = sbuf_insert(scan_y, xa, xb);
                 for (let var k = 0; k < n_vis; ++k) {
                     let var x = vis_x0[k];
@@ -2205,10 +2230,154 @@ fun render_frame() {
     pixels_drawn = 0;
     rect_faces_skipped = 0;
     rect_nodes_skipped = 0;
-    frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, VOID_COLOR);
+    frame_buffer.fill_u32(
+        render_y0 * FRAME_WIDTH,
+        (render_y1 - render_y0) * FRAME_WIDTH,
+        VOID_COLOR
+    );
     sbuf_reset();
     update_frustum();
     bsp_draw(bsp_root);
+}
+
+class RenderBandRequest {
+    init(self, frame_id, y0, y1) {
+        self.frame_id = frame_id;
+        self.y0 = y0;
+        self.y1 = y1;
+        self.cam_x = cam_x;
+        self.cam_y = cam_y;
+        self.cam_z = cam_z;
+        self.cam_yaw = cam_yaw;
+        self.cam_pitch = cam_pitch;
+        self.sin_yaw = sin_yaw;
+        self.cos_yaw = cos_yaw;
+        self.sin_pitch = sin_pitch;
+        self.cos_pitch = cos_pitch;
+        self.warp_phase = warp_phase;
+    }
+}
+
+class RenderBandResult {
+    init(self, frame_id, actor_id, y0, num_bytes, pixels, num_pixels, num_faces_skipped, num_nodes_skipped) {
+        self.frame_id = frame_id;
+        self.actor_id = actor_id;
+        self.y0 = y0;
+        self.num_bytes = num_bytes;
+        self.pixels = pixels;
+        self.num_pixels = num_pixels;
+        self.num_faces_skipped = num_faces_skipped;
+        self.num_nodes_skipped = num_nodes_skipped;
+    }
+}
+
+// Workers are forked only after the map has been prepared, so actor spawning
+// gives each one a private copy of the finished BSP, textures and light data.
+// The main actor dynamically hands out small row bands, so a worker running on
+// a faster core naturally renders more of the frame.
+fun render_actor_loop() {
+    // Reused for every result. Sending copies it synchronously, so it is safe
+    // for the worker to overwrite once the next request arrives.
+    let pixels = ByteArray.with_size(BAND_HEIGHT * FRAME_WIDTH * 4);
+    let actor_id = $actor_id();
+
+    loop {
+        let msg = $actor_recv();
+        if (msg == nil) return;
+
+        render_y0 = msg.y0;
+        render_y1 = msg.y1;
+        cam_x = msg.cam_x;
+        cam_y = msg.cam_y;
+        cam_z = msg.cam_z;
+        cam_yaw = msg.cam_yaw;
+        cam_pitch = msg.cam_pitch;
+        sin_yaw = msg.sin_yaw;
+        cos_yaw = msg.cos_yaw;
+        sin_pitch = msg.sin_pitch;
+        cos_pitch = msg.cos_pitch;
+        warp_phase = msg.warp_phase;
+
+        render_frame();
+        let band_start = render_y0 * FRAME_WIDTH * 4;
+        let band_bytes = (render_y1 - render_y0) * FRAME_WIDTH * 4;
+        pixels.memcpy(0, frame_buffer, band_start, band_bytes);
+        $actor_send($actor_parent(), RenderBandResult(
+            msg.frame_id,
+            actor_id,
+            render_y0,
+            band_bytes,
+            pixels,
+            pixels_drawn,
+            rect_faces_skipped,
+            rect_nodes_skipped
+        ));
+    }
+}
+
+let var render_actor_ids = nil;
+let pending_ui_events = [];
+
+fun start_render_actors(num_actors) {
+    let ids = [];
+    for (let var i = 0; i < num_actors; ++i) {
+        ids.push($actor_spawn(render_actor_loop));
+    }
+    return ids;
+}
+
+fun render_frame_parallel(frame_id) {
+    let num_bands = (FRAME_HEIGHT + BAND_HEIGHT - 1).idiv(BAND_HEIGHT);
+    let var next_y = 0;
+
+    // Give every actor one band initially. From then on, whichever actor
+    // returns first receives the next one.
+    for (let var i = 0; i < render_actor_ids.len && next_y < FRAME_HEIGHT; ++i) {
+        let y1 = (next_y + BAND_HEIGHT).min(FRAME_HEIGHT);
+        $actor_send(render_actor_ids[i], RenderBandRequest(frame_id, next_y, y1));
+        next_y = y1;
+    }
+
+    pixels_drawn = 0;
+    rect_faces_skipped = 0;
+    rect_nodes_skipped = 0;
+
+    let var received = 0;
+    while (received < num_bands) {
+        let msg = $actor_recv();
+        if (msg instanceof UIEvent) {
+            pending_ui_events.push(msg);
+            continue;
+        }
+        if (msg == nil || msg.frame_id != frame_id) continue;
+
+        // Keep the returning actor busy before assembling its completed band.
+        if (next_y < FRAME_HEIGHT) {
+            let y1 = (next_y + BAND_HEIGHT).min(FRAME_HEIGHT);
+            $actor_send(msg.actor_id, RenderBandRequest(frame_id, next_y, y1));
+            next_y = y1;
+        }
+
+        frame_buffer.memcpy(
+            msg.y0 * FRAME_WIDTH * 4,
+            msg.pixels,
+            0,
+            msg.num_bytes
+        );
+        pixels_drawn = pixels_drawn + msg.num_pixels;
+        rect_faces_skipped = rect_faces_skipped + msg.num_faces_skipped;
+        rect_nodes_skipped = rect_nodes_skipped + msg.num_nodes_skipped;
+        received = received + 1;
+    }
+}
+
+fun stop_render_actors() {
+    for (let var i = 0; i < render_actor_ids.len; ++i) {
+        $actor_send(render_actor_ids[i], nil);
+    }
+    for (let var i = 0; i < render_actor_ids.len; ++i) {
+        $actor_join(render_actor_ids[i]);
+    }
 }
 
 // Write the frame buffer out as a TGA, for screenshots and for checking the
@@ -2507,8 +2676,14 @@ let TOUR = [
     [5.375, 2.15,  34.5, -0.45, -0.02]
 ];
 
-let BENCH_FRAMES = $cmd_get_arg_or(2, "0").parse_int(10);
-let SHOT_DIR = $cmd_get_arg_or(3, "");
+let actor_start_ms = $time_current_ms();
+render_actor_ids = start_render_actors(NUM_RENDER_ACTORS);
+$println("render workers: " + NUM_RENDER_ACTORS.to_s() + " actors forked in "
+    + ($time_current_ms() - actor_start_ms).to_s() + " ms, dynamic "
+    + BAND_HEIGHT.to_s() + "-row bands");
+
+let BENCH_FRAMES = $cmd_get_arg_or(5, "0").parse_int(10);
+let SHOT_DIR = $cmd_get_arg_or(6, "");
 
 if (BENCH_FRAMES > 0) {
     let var total_ms = 0;
@@ -2533,7 +2708,7 @@ if (BENCH_FRAMES > 0) {
         warp_phase = i.to_f() * 0.21;
 
         let t0 = $time_current_ms();
-        render_frame();
+        render_frame_parallel(i);
         let ms = $time_current_ms() - t0;
         total_ms = total_ms + ms;
         total_pixels = total_pixels + pixels_drawn;
@@ -2557,6 +2732,7 @@ if (BENCH_FRAMES > 0) {
         + (total_rect_skipped.to_f() / BENCH_FRAMES.to_f()).format_decimals(1));
     $println("rectangle-occluded BSP nodes per frame: "
         + (total_nodes_skipped.to_f() / BENCH_FRAMES.to_f()).format_decimals(1));
+    stop_render_actors();
     $exit(0);
 }
 
@@ -2603,6 +2779,7 @@ let var last_ms = start_ms;
 let var frame_count = 0;
 let var render_ms_total = 0;
 let var last_report_ms = start_ms;
+let var render_frame_id = 0;
 
 loop {
     let now_ms = $time_current_ms();
@@ -2615,7 +2792,9 @@ loop {
     // Events first, so that turning responds in the frame the key arrives
     let var quit = false;
     loop {
-        let msg = $actor_poll();
+        let var msg = nil;
+        if (pending_ui_events.len > 0) msg = pending_ui_events.pop();
+        else msg = $actor_poll();
         if (msg == nil) break;
         if (!(msg instanceof UIEvent)) continue;
 
@@ -2675,7 +2854,8 @@ loop {
     warp_phase = time_s * 1.1;
 
     let render_start = $time_current_ms();
-    render_frame();
+    render_frame_parallel(render_frame_id);
+    render_frame_id = render_frame_id + 1;
     render_ms_total = render_ms_total + ($time_current_ms() - render_start);
 
     $window_draw_frame(window, frame_buffer);
@@ -2690,6 +2870,8 @@ loop {
         last_report_ms = now_ms;
     }
 }
+
+stop_render_actors();
 
 // Give the cursor back before exiting
 $window_lock_mouse(window, false);

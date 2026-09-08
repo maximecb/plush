@@ -1,0 +1,14 @@
+// Every actor starts with a four MiB GC heap and a two MiB incoming-message
+// heap. gc_mem_size reports their committed capacity, not their live bytes or
+// the virtual address space reserved for later growth.
+let initial_size = $gc_mem_size();
+assert(initial_size >= 6 * 1024 * 1024);
+
+// Shrinking the GC heap changes the total while leaving the message heap in
+// the count.
+$gc_shrink_heap(256_000);
+let shrunk_size = $gc_mem_size();
+assert(shrunk_size < initial_size);
+assert(shrunk_size >= 2 * 1024 * 1024 + 256_000);
+
+$println('ok');

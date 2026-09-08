@@ -109,7 +109,7 @@ pub fn window_create(
         .build()
         .unwrap();
 
-    let mut canvas = sdl_window.into_canvas().build().unwrap();
+    let mut canvas = sdl_window.into_canvas().present_vsync().build().unwrap();
 
     canvas.set_draw_color(Color::RGB(0, 0, 0));
     canvas.clear();
