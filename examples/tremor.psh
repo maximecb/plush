@@ -10,6 +10,14 @@
 // list of the parts of each scanline already covered, so a pixel is only ever
 // written once however much geometry stands behind it.
 //
+// A face given an alpha in the map is the exception, and the one thing the
+// front to back order cannot serve directly: what it blends over has not been
+// drawn yet. It is met like anything else and asks the s-buffer which parts of
+// it are in view, which is already the final answer at that moment, but claims
+// none of them; those spans are written down and replayed once the frame is
+// otherwise finished, in reverse, so each one blends over completed pixels and
+// glass behind glass falls out in the right order.
+//
 // The span loop is the one from examples/textured_cube.psh: u and v are packed
 // into the two halves of one integer so a single add steps both. Here it runs
 // over sub-spans, with the perspective divide done once per sub-span, which is
@@ -249,6 +257,18 @@ let var g_vshift = 0;
 let var g_vmask = 0;
 let var g_wrap = 0;
 
+// How much of the destination the face lets through, 0 for an opaque one, and
+// the range the interpolated light multiplier is held to. Opaque faces run the
+// full scale; a blended one is capped at its own alpha, so that its share and
+// the destination's cannot together carry a channel past sixteen bits.
+let var g_inv_alpha = 0;
+let var g_l_min = L_MIN_FX;
+let var g_l_max = L_MAX_FX;
+
+// Which deferred face the spans being collected belong to, or -1 when the
+// polygon is being drawn rather than collected
+let var g_defer_slot = 0 - 1;
+
 let var bsp_root = nil;
 
 // Lava swell. The surface is cut into small quads at load and their corners
@@ -300,12 +320,40 @@ let MAX_VIS = 128;
 let vis_x0 = Array.with_size(MAX_VIS, 0);
 let vis_x1 = Array.with_size(MAX_VIS, 0);
 
+// --- Faces held back to blend ---
+//
+// A face you can see through cannot be drawn where it is met, because what it
+// blends over has not been drawn yet: the traversal is front to back, so the
+// wall behind a pane of glass comes later. What it can do at that moment is ask
+// the s-buffer which parts of it are in view, since that answer is already
+// final, and write them down.
+//
+// The spans go in a flat pool and each face keeps a run of it. Once the opaque
+// pass has finished the frame, the faces are replayed in reverse, which is back
+// to front among themselves, and each one blends over a frame buffer that is by
+// then complete underneath it. Glass behind glass composites in the right order
+// for the same reason.
+let MAX_DEFER_FACES = 256;
+let MAX_DEFER_SPANS = 8192;
+
+let df_face = Array.with_size(MAX_DEFER_FACES, nil);
+let df_first = Array.with_size(MAX_DEFER_FACES, 0);
+let df_count = Array.with_size(MAX_DEFER_FACES, 0);
+let var df_num = 0;
+
+let ds_y = Array.with_size(MAX_DEFER_SPANS, 0);
+let ds_x0 = Array.with_size(MAX_DEFER_SPANS, 0);
+let ds_x1 = Array.with_size(MAX_DEFER_SPANS, 0);
+let var ds_top = 0;
+
 fun sbuf_reset() {
     for (let var y = 0; y < FRAME_HEIGHT; ++y) sb_head[y] = NO_SPAN;
     sb_full.zero_fill();
     sb_num_full = 0;
     sp_top = 0;
     screen_done = false;
+    df_num = 0;
+    ds_top = 0;
 }
 
 // Insert [x0, x1) into scanline y and report which parts of it were not already
@@ -384,6 +432,44 @@ fun sbuf_insert(y, x0, x1) {
         sb_full.set_u32(y, 1);
         sb_num_full = sb_num_full + 1;
         if (sb_num_full >= render_y1 - render_y0) screen_done = true;
+    }
+    return n_vis;
+}
+
+// The same walk as `sbuf_insert`, reporting what of [x0, x1) is still visible
+// without claiming any of it.
+//
+// This is what a face you can see through asks instead. Front to back order
+// means the covered set at the moment a face is reached is exactly the geometry
+// nearer than it, so the gaps it comes back with are already the right answer
+// for which parts of it are in view. What it must not do is fill those gaps in:
+// whatever stands behind still has to be drawn, because the blend is going to
+// need it.
+fun sbuf_visible(y, x0, x1) {
+    if (sb_full.get_u32(y) != 0) return 0;
+
+    let var n_vis = 0;
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN && sp_x1[cur] < x0) cur = sp_next[cur];
+
+    let var cx = x0;
+    while (cur != NO_SPAN) {
+        let sx0 = sp_x0[cur];
+        if (sx0 > x1) break;
+
+        if (sx0 > cx && n_vis < MAX_VIS) {
+            vis_x0[n_vis] = cx;
+            vis_x1[n_vis] = sx0;
+            n_vis = n_vis + 1;
+        }
+        let sx1 = sp_x1[cur];
+        if (sx1 > cx) cx = sx1;
+        cur = sp_next[cur];
+    }
+    if (cx < x1 && n_vis < MAX_VIS) {
+        vis_x0[n_vis] = cx;
+        vis_x1[n_vis] = x1;
+        n_vis = n_vis + 1;
     }
     return n_vis;
 }
@@ -490,6 +576,7 @@ class Plane {
         self.flow = false;
         self.scale = TEXELS_PER_METER;
         self.turn = false;
+        self.alpha = 1.0;
     }
 }
 
@@ -501,6 +588,7 @@ class Brush {
         self.planes = planes;
         self.x0 = 0.0; self.y0 = 0.0; self.z0 = 0.0;
         self.x1 = 0.0; self.y1 = 0.0; self.z1 = 0.0;
+        self.alpha = 1.0;
     }
 }
 
@@ -509,7 +597,7 @@ class Brush {
 // axis the normal is most nearly parallel to, which is what Quake does too, and
 // what makes neighbouring brushes line up with no authoring.
 class Face {
-    init(self, verts, nx, ny, nz, d, tex, light, fit, flow, scale, turn) {
+    init(self, verts, nx, ny, nz, d, tex, light, fit, flow, scale, turn, alpha) {
         self.v = verts;
         self.nx = nx;
         self.ny = ny;
@@ -521,6 +609,16 @@ class Face {
         self.flow = flow;
         self.scale = scale;
         self.turn = turn;
+        self.alpha = alpha;
+
+        // What the span loop actually wants: how much of the destination
+        // survives, as a 0..255 multiplier. The source side needs no number of
+        // its own because alpha is folded into the baked light instead, which
+        // leaves the opaque loop's one multiply doing the same work it did.
+        // Rounding to whole 255ths here is what makes the two sum to 255 and
+        // keeps a blended channel inside its sixteen bits.
+        self.alpha8 = (alpha * 255.0).floor().clip(0, 255);
+        self.inv_alpha8 = 255 - self.alpha8;
 
         let ax = nx.abs();
         let ay = ny.abs();
@@ -669,7 +767,8 @@ fun brush_to_faces(planes) {
         }
 
         if (poly.len < 9) continue;
-        out.push(Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale, p.turn));
+        out.push(Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale, p.turn,
+            p.alpha));
     }
     return out;
 }
@@ -753,6 +852,10 @@ class BrushOpts {
         self.flow = false;
         self.scale = TEXELS_PER_METER;
         self.turn = false;
+
+        // 1 is opaque. Below that the face is blended over whatever stands
+        // behind it, and the whole face carries the one value.
+        self.alpha = 1.0;
     }
 }
 
@@ -774,6 +877,7 @@ fun parse_opts(tok, first) {
 
         if (key == "light") { o.light = val.parse_int(10).clip(0, NUM_LEVELS - 1); continue; }
         if (key == "scale") { o.scale = parse_num(val); continue; }
+        if (key == "alpha") { o.alpha = parse_num(val).clip(0.0, 1.0); continue; }
 
         let tex = get_tex(val);
 
@@ -802,6 +906,7 @@ fun make_plane(nx, ny, nz, d, tex, o) {
     p.flow = o.flow;
     p.scale = o.scale;
     p.turn = o.turn;
+    p.alpha = o.alpha;
     return p;
 }
 
@@ -851,6 +956,13 @@ fun set_brush_bounds(b, planes) {
 fun add_brush(planes) {
     let b = Brush(planes);
     set_brush_bounds(b, planes);
+
+    // A solid you can see through is one light passes through as well, so the
+    // clearest of its planes is what the shadow test goes by. It stays solid to
+    // walk into: a window is still a wall to the player.
+    for (let var i = 0; i < planes.len; ++i) {
+        if (planes[i].alpha < b.alpha) b.alpha = planes[i].alpha;
+    }
     brushes.push(b);
 
     let new_faces = brush_to_faces(planes);
@@ -1100,6 +1212,7 @@ fun occluded(ax, ay, az, bx, by, bz) {
 
     for (let var i = 0; i < brushes.len; ++i) {
         let b = brushes[i];
+        if (b.alpha < 1.0) continue;
         if (hx < b.x0 || lx > b.x1) continue;
         if (hy < b.y0 || ly > b.y1) continue;
         if (hz < b.z0 || lz > b.z1) continue;
@@ -1426,12 +1539,14 @@ fun split_face(f, nx, ny, nz, d) {
     let front = clip_poly(f.v, 0.0 - nx, 0.0 - ny, 0.0 - nz, 0.0 - d);
     let out = [];
     if (back.len >= 9) {
-        let g = Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn);
+        let g = Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
+            f.alpha);
         g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
         out.push(g);
     }
     if (front.len >= 9) {
-        let g = Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn);
+        let g = Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
+            f.alpha);
         g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
         out.push(g);
     }
@@ -1734,6 +1849,9 @@ fun raster_poly(m) {
     // a constant so codegen can fold its contiguous field into the operation.
     let mask_rb = MASK_RB;
     let fb = frame_buffer;
+    let l_min = g_l_min;
+    let l_max = g_l_max;
+    let slot = g_defer_slot;
 
     // Per chain: the corner reached so far, the current x, how far x moves per
     // scanline, and the scanline its current edge runs out on
@@ -1791,7 +1909,18 @@ fun raster_poly(m) {
             // one row at a time preserves the serial renderer's floating
             // point rounding at polygon edges; this branch is per row, never
             // in the pixel hot path.
-            if (scan_y >= render_y0 && xa < xb) {
+            if (scan_y >= render_y0 && xa < xb && slot >= 0) {
+                // See through: take down what is visible and leave it for the
+                // blending pass, without covering anything
+                let n_vis = sbuf_visible(scan_y, xa, xb);
+                for (let var k = 0; k < n_vis; ++k) {
+                    if (ds_top >= MAX_DEFER_SPANS) break;
+                    ds_y[ds_top] = scan_y;
+                    ds_x0[ds_top] = vis_x0[k];
+                    ds_x1[ds_top] = vis_x1[k];
+                    ds_top = ds_top + 1;
+                }
+            } else if (scan_y >= render_y0 && xa < xb) {
                 let n_vis = sbuf_insert(scan_y, xa, xb);
                 for (let var k = 0; k < n_vis; ++k) {
                     let var x = vis_x0[k];
@@ -1821,8 +1950,8 @@ fun raster_poly(m) {
                     // worked out below carries over instead of being floored
                     // and clamped a second time.
                     let var lfx = (l * L_ONE).floor();
-                    if (lfx < L_MIN_FX) lfx = L_MIN_FX;
-                    else if (lfx > L_MAX_FX) lfx = L_MAX_FX;
+                    if (lfx < l_min) lfx = l_min;
+                    else if (lfx > l_max) lfx = l_max;
 
                     while (x < piece_end) {
                         let var run = SUB_MAX;
@@ -1868,8 +1997,8 @@ fun raster_poly(m) {
                         // sliver a pixel or two wide carrying the whole
                         // perspective range, and its step is enormous.
                         let var lfx_e = (l_e * L_ONE).floor();
-                        if (lfx_e < L_MIN_FX) lfx_e = L_MIN_FX;
-                        else if (lfx_e > L_MAX_FX) lfx_e = L_MAX_FX;
+                        if (lfx_e < l_min) lfx_e = l_min;
+                        else if (lfx_e > l_max) lfx_e = l_max;
 
                         let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
 
@@ -1922,16 +2051,157 @@ fun raster_poly(m) {
     pixels_drawn = pixels_drawn + span_px;
 }
 
-// Cull, transform, clip, project and draw one face
-fun draw_face(f) {
+// Draw a run of spans taken down earlier, blending each pixel over what is
+// already in the frame buffer.
+//
+// There is no edge walking here: which pixels belong to the face was settled in
+// the first pass, and a row's starting values come straight off the gradients
+// rather than by stepping down from the top of the polygon. The sub-span loop
+// below is the one in `raster_poly`, repeated rather than shared because the
+// only way to share it would be a call per pixel.
+//
+// The blend is the same trick as the shading multiply. Both texel and
+// destination are unpacked so their three channels sit sixteen bits apart, each
+// is scaled by its own share, and the two are added while still packed: one
+// extra load, one extra multiply and an add over an opaque pixel. It cannot
+// carry between channels because the shares sum to 255 and a channel is at
+// most 255, which puts the worst case at 255 * 255, just inside sixteen bits.
+// That is the whole reason alpha is baked into the light rather than applied
+// here: the source share arrives already multiplied by it and already bounded.
+fun raster_spans(first, count) {
+    let duzdx = g_duzdx; let dvzdx = g_dvzdx; let dwdx = g_dwdx;
+    let dlzdx = g_dlzdx;
+    let pix = g_pix;
+    let umask = g_umask;
+    let vshift = g_vshift;
+    let vmask = g_vmask;
+    let wrap = g_wrap;
+    let mask_rb = MASK_RB;
+    let fb = frame_buffer;
+    let l_min = g_l_min;
+    let l_max = g_l_max;
+    let inv_alpha = g_inv_alpha;
+    let x_off = 0.5 - g_ref_x;
+
+    let var span_px = 0;
+    let end_s = first + count;
+
+    for (let var s = first; s < end_s; ++s) {
+        let scan_y = ds_y[s];
+        let piece_end = ds_x1[s];
+        let row = scan_y * FRAME_WIDTH;
+
+        let y_off = scan_y + 0.5 - g_ref_y;
+        let uz_row = g_uz0 + x_off * duzdx + y_off * g_duzdy;
+        let vz_row = g_vz0 + x_off * dvzdx + y_off * g_dvzdy;
+        let w_row = g_w0 + x_off * dwdx + y_off * g_dwdy;
+        let lz_row = g_lz0 + x_off * dlzdx + y_off * g_dlzdy;
+
+        let var x = ds_x0[s];
+        let var uz = uz_row + x * duzdx;
+        let var vz = vz_row + x * dvzdx;
+        let var w = w_row + x * dwdx;
+        let var lz = lz_row + x * dlzdx;
+        let var z = 1.0 / w;
+        let var u = uz * z;
+        let var v = vz * z;
+        let l = lz * z;
+
+        let var wscale = 0.0;
+        let adw = dwdx.abs();
+        if (adw > 0.0) wscale = PERSP_TOL / adw;
+
+        let var lfx = (l * L_ONE).floor();
+        if (lfx < l_min) lfx = l_min;
+        else if (lfx > l_max) lfx = l_max;
+
+        while (x < piece_end) {
+            let var run = SUB_MAX;
+            if (wscale > 0.0) {
+                let n = (w * wscale).floor();
+                if (n < run) run = n;
+                if (run < 1) run = 1;
+            }
+
+            let var xe = x + run;
+            if (xe > piece_end) xe = piece_end;
+            let len = xe - x;
+
+            let uz_e = uz + len * duzdx;
+            let vz_e = vz + len * dvzdx;
+            let lz_e = lz + len * dlzdx;
+            let w_e = w + len * dwdx;
+            let z_e = 1.0 / w_e;
+            let u_e = uz_e * z_e;
+            let v_e = vz_e * z_e;
+            let l_e = lz_e * z_e;
+
+            let inv_len = INV_N[len];
+            let var du = (u_e - u) * inv_len;
+            let var dv = (v_e - v) * inv_len;
+            if (du > GRAD_LIMIT) du = GRAD_LIMIT;
+            else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
+            if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
+            else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
+
+            let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & wrap) + EXC_FX;
+            let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & wrap) + EXC_FX;
+            let var t = (vfx << 32) + ufx;
+            let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
+
+            let var lfx_e = (l_e * L_ONE).floor();
+            if (lfx_e < l_min) lfx_e = l_min;
+            else if (lfx_e > l_max) lfx_e = l_max;
+
+            let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
+
+            let var lp = lfx;
+            let var i = row + x;
+            let end_i = row + xe;
+            span_px = span_px + len;
+            while (i < end_i) {
+                let c = pix.get_u32(((t >> vshift) & vmask)
+                                  | ((t >> U_SHIFT) & umask));
+                let d = fb.get_u32(i);
+
+                let acc = ((c & mask_rb) | ((c & MASK_G) << 24)) * (lp >> L_SHIFT)
+                        + ((d & mask_rb) | ((d & MASK_G) << 24)) * inv_alpha;
+
+                fb.set_u32(i, ((acc >> 8) & mask_rb)
+                            | ((acc >> 32) & 0xFF00));
+                t = t + dt;
+                lp = lp + dl;
+                i = i + 1;
+            }
+
+            lfx = lfx_e;
+            uz = uz_e; vz = vz_e; lz = lz_e; w = w_e;
+            u = u_e; v = v_e;
+            x = xe;
+        }
+    }
+
+    pixels_drawn = pixels_drawn + span_px;
+}
+
+// Cull, transform, clip and project one face, and work out the gradients the
+// span loop runs on. Returns the vertex count left after clipping, or 0 if
+// there is nothing to draw.
+//
+// `cull` asks for the cheap rejection against the s-buffer, which only the
+// first pass wants: by the time a held back face is replayed the s-buffer holds
+// the whole frame, and a pane of glass is covered in it by the very wall it is
+// meant to be blended over. Everything else here reads only the face and the
+// camera, so the second pass gets gradients identical to the first.
+fun face_setup(f, cull) {
     // Faces pointing away from the eye are the inside of a solid
-    if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return;
+    if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return 0;
 
     let taxis = f.taxis;
     let turn = f.turn;
     let scale = f.scale;
     let n = f.v.len.idiv(3);
-    if (n > MAX_VERTS - 8) return;
+    if (n > MAX_VERTS - 8) return 0;
 
     for (let var i = 0; i < n; ++i) {
         let wx = f.v[i * 3];
@@ -1978,7 +2248,7 @@ fun draw_face(f) {
     // inside and leaves an uncovered row along the border; the span and
     // scanline clamps below handle off-screen geometry anyway.
     let m = clip_plane(n, 0.0, 0.0, 1.0, 0.0 - NEAR);
-    if (m < 3) return;
+    if (m < 3) return 0;
 
     let var box_x0 = 0.0; let var box_y0 = 0.0;
     let var box_x1 = 0.0; let var box_y1 = 0.0;
@@ -2009,9 +2279,9 @@ fun draw_face(f) {
     let ry0 = box_y0.floor().max(0);
     let rx1 = box_x1.floor().min(FRAME_WIDTH);
     let ry1 = box_y1.floor().min(FRAME_HEIGHT);
-    if (rx0 < rx1 && ry0 < ry1 && sbuf_covers_rect(rx0, ry0, rx1, ry1)) {
+    if (cull && rx0 < rx1 && ry0 < ry1 && sbuf_covers_rect(rx0, ry0, rx1, ry1)) {
         rect_faces_skipped = rect_faces_skipped + 1;
-        return;
+        return 0;
     }
 
     // u/z, v/z and 1/z are linear in screen space, so their gradients come from
@@ -2028,7 +2298,7 @@ fun draw_face(f) {
         let det = (e1x * e2y - e2x * e1y).abs();
         if (det > best) { best = det; bi = i; bj = i + 1; }
     }
-    if (best < 0.000001) return;
+    if (best < 0.000001) return 0;
 
     let x0 = pX[0]; let y0 = pY[0];
     let e1x = pX[bi] - x0; let e1y = pY[bi] - y0;
@@ -2068,7 +2338,52 @@ fun draw_face(f) {
     g_vmask = f.vmask;
     g_wrap = f.wrap;
 
-    raster_poly(m);
+    // What the face lets through, and the ceiling that puts on its share of a
+    // blended pixel. The floor comes down with it so that a nearly clear pane
+    // is not held above its own alpha by it.
+    g_inv_alpha = f.inv_alpha8;
+    g_l_max = f.alpha8 << L_SHIFT;
+    g_l_min = L_MIN_FX;
+    if (g_l_min > g_l_max) g_l_min = g_l_max;
+
+    return m;
+}
+
+// Draw one face, or, if you can see through it, take down where it is visible
+// and leave it for `draw_deferred`
+fun draw_face(f) {
+    if (f.alpha >= 1.0) {
+        g_defer_slot = 0 - 1;
+        let m = face_setup(f, true);
+        if (m > 0) raster_poly(m);
+        return;
+    }
+
+    if (df_num >= MAX_DEFER_FACES || ds_top >= MAX_DEFER_SPANS) return;
+
+    g_defer_slot = df_num;
+    let first = ds_top;
+    let m = face_setup(f, true);
+    if (m > 0) raster_poly(m);
+    g_defer_slot = 0 - 1;
+
+    // Every part of it was hidden, so it never reaches the second pass
+    if (ds_top == first) return;
+
+    df_face[df_num] = f;
+    df_first[df_num] = first;
+    df_count[df_num] = ds_top - first;
+    df_num = df_num + 1;
+}
+
+// The second pass: the faces held back, replayed furthest first, each over a
+// frame buffer that is finished underneath it
+fun draw_deferred() {
+    for (let var i = df_num - 1; i >= 0; --i) {
+        let f = df_face[i];
+        g_defer_slot = 0 - 1;
+        if (face_setup(f, false) > 0) raster_spans(df_first[i], df_count[i]);
+    }
 }
 
 // The five planes of the view frustum, in world space, as normal and offset.
@@ -2279,6 +2594,9 @@ fun render_frame() {
     sbuf_reset();
     update_frustum();
     bsp_draw(bsp_root);
+
+    // Everything opaque is down, so what was held back can be blended over it
+    draw_deferred();
 }
 
 class RenderBandRequest {
@@ -2660,6 +2978,17 @@ fun prepare_node(node) {
         for (let var k = 0; k < pieces.len; ++k) {
             let g = pieces[k];
             g.vl = bake_vertex_light(g);
+
+            // Alpha rides into the level the face was baked at, rather than
+            // being a second number the span loop has to apply. The multiplier
+            // it interpolates then already carries it, so a blended pixel pays
+            // for the destination and nothing more. This is also what bounds
+            // that multiplier by alpha8, which is what keeps the two halves of
+            // the blend summing to 255.
+            if (g.alpha < 1.0) {
+                for (let var i = 0; i < g.vl.len; ++i) g.vl[i] = g.vl[i] * g.alpha;
+            }
+
             g.pix = g.tex.shaded();
             g.umask = g.tex.umask;
             g.vshift = g.tex.vshift;
