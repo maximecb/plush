@@ -13,6 +13,7 @@ The Plush language has:
 - A native byte array type
 - A simple frame buffer API for graphics and animations
 - A simple audio output API
+- A simple TCP networking API
 - Memory safe, actor-based parallelism
 - A copying garbage-collector that runs independently for each actor
 - No global VM lock
@@ -24,6 +25,9 @@ Caveats and limitations:
 - May be missing functionality you're used to in other programming languages
   - For example, not as many `String` and `Array` methods as Python or JS
   - This is an area where you can potentially contribute
+
+If you would like to know more about the design principles and ideas behind Plush, a
+[design notes](design.md) document is also available.
 
 ## Getting Started
 
