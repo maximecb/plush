@@ -13,14 +13,6 @@ let LISTEN_ADDR = "127.0.0.1:8080";
 // us buffer before we give up on it
 let MAX_HEAD = 16 * 1024;
 
-fun str_bytes(s) {
-    let ba = ByteArray.with_size(s.len);
-    for (let var i = 0; i < s.len; ++i) {
-        ba[i] = s.byte_at(i);
-    }
-    return ba;
-}
-
 // Read until the blank line that ends the request head. Returns the head as
 // a string, or nil if the client went away or sent something unreasonable
 fun read_head(sock) {
@@ -68,12 +60,16 @@ fun parse_request_line(head) {
     return {method: parts[0], path: parts[1]};
 }
 
+// Built as bytes, ready to hand to $net_write. Content-Length is the body's
+// length in UTF-8 bytes, which is what .len gives us
 fun response(status, content_type, body) {
-    return "HTTP/1.1 " + status + "\r\n" +
-        "Content-Type: " + content_type + "; charset=utf-8\r\n" +
-        "Content-Length: " + body.len.to_s() + "\r\n" +
-        "Connection: close\r\n" +
-        "\r\n" + body;
+    let resp = ByteArray.with_size(0);
+    resp.push_string("HTTP/1.1 " + status + "\r\n");
+    resp.push_string("Content-Type: " + content_type + "; charset=utf-8\r\n");
+    resp.push_string("Content-Length: " + body.len.to_s() + "\r\n");
+    resp.push_string("Connection: close\r\n\r\n");
+    resp.push_string(body);
+    return resp;
 }
 
 fun text(status, body) {
@@ -249,21 +245,20 @@ fun handle_conn(sock) {
     $net_set_timeout(sock, 10000);
 
     let head = read_head(sock);
-    let var body = text("400 Bad Request", "Could not read request\n");
+    let var resp = text("400 Bad Request", "Could not read request\n");
 
     if (head != nil) {
         let req = parse_request_line(head);
 
         if (req == nil) {
-            body = text("400 Bad Request", "Malformed request line\n");
+            resp = text("400 Bad Request", "Malformed request line\n");
         } else {
             $println(peer + " " + req.method + " " + req.path);
-            body = route(req);
+            resp = route(req);
         }
     }
 
-    let bytes = str_bytes(body);
-    $net_write(sock, bytes, bytes.len);
+    $net_write(sock, resp, resp.len);
 
     // We wrote the whole response, so closing both directions is right here
     $net_close(sock);
