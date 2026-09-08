@@ -45,7 +45,7 @@ class Node
 
 fun echo()
 {
-    $vm_shrink_heap(256_000);
+    $gc_shrink_heap(256_000);
 
     loop {
         let msg = $actor_recv();
@@ -56,13 +56,13 @@ fun echo()
 
         // Collect between taking the message and sending it back, so the
         // copy has to survive being moved
-        $vm_gc_collect();
+        $gc_collect();
         msg.check(24);
         $actor_send($actor_parent(), msg);
     }
 }
 
-$vm_shrink_heap(256_000);
+$gc_shrink_heap(256_000);
 
 let aid = $actor_spawn(echo);
 let tree = Node(24);
@@ -76,7 +76,7 @@ for (let var i = 0; i < 200; ++i)
     for (let var j = 0; j < 200; ++j) {
         junk.push('junk' + j.to_s());
     }
-    $vm_gc_collect();
+    $gc_collect();
 
     let reply = $actor_recv();
     reply.check(24);

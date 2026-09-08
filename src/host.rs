@@ -166,8 +166,9 @@ def_host_fns! {
         read_file_utf8(1),
         write_file(2),
         make_dir(1),
-        vm_shrink_heap(1),
-        vm_gc_collect(0),
+        gc_shrink_heap(1),
+        gc_collect(0),
+        gc_mem_size(0),
         actor_id(0),
         actor_parent(0),
         actor_sleep(1),
@@ -585,6 +586,9 @@ mod tests
         assert_eq!(HostFnId::float64_clip.get().num_params(), 3);
 
         assert_eq!(HostFnId::from_name("println"), Some(HostFnId::println));
+        assert_eq!(HostFnId::from_name("gc_collect"), Some(HostFnId::gc_collect));
+        assert_eq!(HostFnId::from_name("gc_mem_size"), Some(HostFnId::gc_mem_size));
+        assert_eq!(HostFnId::from_name("vm_gc_collect"), None);
         assert_eq!(HostFnId::from_name("nope"), None);
 
         // Methods are not reachable as globals, even though they sit in
@@ -676,7 +680,7 @@ fn make_dir(_actor: &mut Actor, dir_path: Value) -> HostResult
 }
 
 /// Shrink the heap to a smaller size
-fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> HostResult
+fn gc_shrink_heap(actor: &mut Actor, new_size: Value) -> HostResult
 {
     let new_size = unwrap_usize!(new_size);
 
@@ -694,10 +698,25 @@ fn vm_shrink_heap(actor: &mut Actor, new_size: Value) -> HostResult
 }
 
 /// Manually trigger garbage collection in the current actor
-fn vm_gc_collect(actor: &mut Actor) -> HostResult
+fn gc_collect(actor: &mut Actor) -> HostResult
 {
     actor.gc_collect(0, &mut []);
     Ok(Value::NIL)
+}
+
+/// Total committed capacity of the current actor's GC and message heaps
+fn gc_mem_size(actor: &mut Actor) -> HostResult
+{
+    // Other actors may be copying messages into this actor's incoming heap.
+    // Hold its lock only long enough to read the capacity, and release it
+    // before constructing the return value through `actor` below.
+    let msg_mem_size = {
+        let msg_alloc = actor.msg_alloc.lock().unwrap();
+        msg_alloc.mem_size()
+    };
+
+    let mem_size = actor.alloc.mem_size() + msg_mem_size;
+    Ok(actor.int64(mem_size as i64))
 }
 
 /// Get the id of the current actor

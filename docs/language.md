@@ -410,6 +410,9 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$read_file_utf8(file_path)`: Read an entire file encoded as valid UTF-8 into a `String`.
 -   `$write_file(file_path, bytes)`: Writes a `ByteArray` to a file. Returns `true` on success and `false` on failure. The parent directory must already exist.
 -   `$make_dir(dir_path)`: Creates a directory, along with any missing parent directories. Returns `true` if the directory exists afterwards, including when it already existed, and `false` on failure.
+-   `$gc_shrink_heap(size)`: Shrinks the current actor's GC heap to `size` bytes. Primarily useful for testing the collector.
+-   `$gc_collect()`: Immediately runs a garbage-collection cycle in the current actor.
+-   `$gc_mem_size()`: Returns the total committed capacity, in bytes, of the current actor's GC and incoming-message heaps.
 -   `$actor_id()`: Returns the ID of the current actor.
 -   `$actor_parent()`: Returns the ID of the parent actor.
 -   `$actor_sleep(msecs)`: Pauses the current actor for the specified number of milliseconds.
