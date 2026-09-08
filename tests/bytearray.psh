@@ -38,6 +38,30 @@ b3.set_f32(0, 0.625);
 assert(b3.get_f32(0) == 0.625);
 assert(b3.num_f32() == 1);
 
+// Test appending unsigned integers
+let pushed = ByteArray.with_size(0);
+pushed.push_u8(0x12);
+pushed.push_u16(0x3456);
+pushed.push_u32(0x789ABCDE);
+assert(pushed.len == 7);
+assert(pushed[0] == 0x12);
+assert(pushed[1] == 0x56);
+assert(pushed[2] == 0x34);
+assert(pushed[3] == 0xDE);
+assert(pushed[4] == 0xBC);
+assert(pushed[5] == 0x9A);
+assert(pushed[6] == 0x78);
+
+// Strings append their UTF-8 bytes without a terminator or length prefix
+pushed.push_string("hé!");
+assert(pushed.len == 11);
+assert(pushed[7] == 0x68);
+assert(pushed[8] == 0xC3);
+assert(pushed[9] == 0xA9);
+assert(pushed[10] == 0x21);
+pushed.push_string("");
+assert(pushed.len == 11);
+
 // Test zero_fill
 let b4 = ByteArray.with_size(4);
 b4.fill_u32(0, 1, 0xFFFFFFFF);

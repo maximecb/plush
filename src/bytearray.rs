@@ -164,6 +164,44 @@ impl ByteArray
         let dst_slice = unsafe { self.get_slice_mut::<u8>(dst_idx, num_bytes) };
         dst_slice.copy_from_slice(src_slice);
     }
+
+    /// Append bytes, growing the backing table when necessary. The bytearray
+    /// is passed as a Value because reserving space may relocate it.
+    fn push_bytes(actor: &mut Actor, mut ba: Value, bytes: &[u8]) -> HostResult
+    {
+        let byte_array = unwrap_ba!(ba);
+        let len = byte_array.num_bytes();
+        let new_len = len + bytes.len();
+        let capacity = byte_array.capacity();
+
+        if new_len > capacity {
+            let new_capacity = std::cmp::max(capacity * 2, new_len);
+            actor.gc_check(
+                HEADER_SIZE + crate::alloc::align_up(new_capacity),
+                &mut [&mut ba]
+            );
+
+            let byte_array = ba.as_ba();
+            let new_bytes = actor.alloc.alloc_table(new_capacity, Tag::Bytes);
+
+            unsafe {
+                std::ptr::copy_nonoverlapping(byte_array.bytes, new_bytes, len);
+            }
+
+            byte_array.bytes = new_bytes;
+        }
+
+        let byte_array = ba.as_ba();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                byte_array.bytes.add(len),
+                bytes.len()
+            );
+        }
+        byte_array.set_num_bytes(new_len);
+        Ok(Value::NIL)
+    }
 }
 
 /// Create a new ByteArray instance
@@ -295,6 +333,50 @@ pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Host
     let val = unwrap_f64!(val);
     ba.set(idx, val as f32);
     Ok(Value::NIL)
+}
+
+pub fn ba_push_u8(actor: &mut Actor, ba: Value, val: Value) -> HostResult
+{
+    let val = unwrap_u8!(val);
+    ByteArray::push_bytes(actor, ba, &[val])
+}
+
+pub fn ba_push_u16(actor: &mut Actor, ba: Value, val: Value) -> HostResult
+{
+    let val = unwrap_i64!(val);
+    let val = match u16::try_from(val) {
+        Ok(val) => val,
+        Err(_) => error!("expected u16-sized integer value but got {:?}", val),
+    };
+    ByteArray::push_bytes(actor, ba, &val.to_le_bytes())
+}
+
+pub fn ba_push_u32(actor: &mut Actor, ba: Value, val: Value) -> HostResult
+{
+    let val = unwrap_u32!(val);
+    ByteArray::push_bytes(actor, ba, &val.to_le_bytes())
+}
+
+pub fn ba_push_string(actor: &mut Actor, mut ba: Value, mut string: Value) -> HostResult
+{
+    let string_len = unwrap_str!(string).len();
+    let byte_array = unwrap_ba!(ba);
+    let new_len = byte_array.num_bytes() + string_len;
+    let capacity = byte_array.capacity();
+
+    // We do this here because GC could invalidate the string byte slice
+    if new_len > capacity {
+        let new_capacity = std::cmp::max(capacity * 2, new_len);
+        actor.gc_check(
+            HEADER_SIZE + crate::alloc::align_up(new_capacity),
+            &mut [&mut ba, &mut string]
+        );
+    }
+
+    // The check above rooted the string and guaranteed that push_bytes cannot
+    // collect, so this slice stays valid throughout the copy.
+    let string = unwrap_str!(string);
+    ByteArray::push_bytes(actor, ba, string.as_bytes())
 }
 
 /// How many independent accumulators the dot product kernel keeps.
@@ -474,7 +556,6 @@ pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: V
     ba.fill(idx, num, val);
     Ok(Value::NIL)
 }
-
 
 #[cfg(test)]
 mod tests
