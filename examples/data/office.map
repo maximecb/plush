@@ -1,0 +1,274 @@
+// Skyline Office, a level for examples/tremor.psh
+//
+// A two-storey office floor near the top of a tower, looking out over a night
+// city through a curtain wall that leans outwards as it rises. The lower floor
+// is an open atrium; a mezzanine runs around the back and both sides at 4.8,
+// reached by a flight of stairs, and looks down into it and out of the window.
+//
+// The window plane is the one thing here worth stating in numbers, because
+// every piece of the curtain wall sits on it:
+//
+//     z = 0.4 * (y - 1.6)
+//
+// so it meets the floor slab at z = -0.64, crosses z = 0 at the sill line
+// y = 1.6, and reaches the ceiling at y = 9.6, z = 3.2. The spandrel under the
+// sill, the transom that splits the window and the mullions that divide it are
+// all `slab` brushes whose front face runs along that line: give a slab the two
+// ends of that face and it stands its own thickness behind them, so a mullion
+// is a narrow one and leans exactly as much as the wall it sits in.
+//
+// The glass fills the bays left between them, on a plane 0.16 further out so
+// that the frame stands proud of it. The panes are solid until the renderer can
+// blend: the shell reaches z 3.6 rather than 3.2 so that the ceiling and the
+// two piers close over that further out plane instead of leaving a slot of sky
+// open along the head of every bay.
+//
+// Nothing is lit by hand except the fixtures and the city outside. The city is
+// held at fixed levels: its windows are lit in the texture itself and no lamp
+// in here reaches it, and a fixed level costs no ray casts at load time. The
+// levels step down with distance, which is what puts air between the towers.
+//
+// Usage: plush examples/tremor.psh examples/data/office.map
+
+spawn x=0 y=1.6 z=-14 yaw=0
+
+// ===========================================================================
+// Shell: interior x -14.4..14.4, z -19.2..the window, floor 0, ceiling 9.6
+// ===========================================================================
+
+// The floor, and the tower it stands on. The tower's z face is our own facade
+// falling away below the window, which is what you see looking steeply down.
+box   x0=-16 y0=-0.8 z0=-20.8 x1=16 y1=0 z1=0 tex=concrete_white top=carpet_blue scale=100
+box   x0=-16 y0=-56 z0=-20.8 x1=16 y1=-0.8 z1=0 tex=skyscraper_03 scale=10 light=8
+
+// The ceiling slab reaches out to z 3.2, where the window plane meets it, and
+// the storeys above carry the facade on up past the head of the glass
+box   x0=-16 y0=9.6 z0=-20.8 x1=16 y1=10.4 z1=3.6 tex=concrete_white bottom=ceiling_tile scale=160
+box   x0=-16 y0=10.4 z0=-20.8 x1=16 y1=64 z1=3.6 tex=skyscraper_03 scale=10 light=8
+
+// Back wall, and the two side walls. The side walls run out to z 3.2 as well,
+// so they read as piers standing either side of the glass.
+box   x0=-16 y0=0 z0=-20.8 x1=16 y1=9.6 z1=-19.2 tex=beigewall
+box   x0=-16 y0=0 z0=-20.8 x1=-14.4 y1=9.6 z1=3.6 tex=beigewall
+box   x0=14.4 y0=0 z0=-20.8 x1=16 y1=9.6 z1=3.6 tex=beigewall
+
+// ===========================================================================
+// The curtain wall. Every slab below has its front face on the window plane,
+// and what is left open between them are the bays of glass.
+// ===========================================================================
+
+// The spandrel from the floor up to the sill, and the transom at 5.6 that
+// splits the window into a lower and an upper light
+slab  x0=-14.4 y0=0 z0=-0.64 x1=14.4 y1=1.6 z1=0 thick=0.5 tex=concrete_01 scale=50
+slab  x0=-14.4 y0=5.6 z0=1.6 x1=14.4 y1=6 z1=1.76 thick=0.5 tex=concrete_white scale=50
+
+// Six mullions, each in two runs so that they meet the transom rather than
+// pass through it: sill to transom first, then transom to ceiling
+slab  x0=-11.8 y0=1.6 z0=0 x1=-11.4 y1=5.6 z1=1.6 thick=0.5 tex=metal_plate scale=50
+slab  x0=-7.4 y0=1.6 z0=0 x1=-7 y1=5.6 z1=1.6 thick=0.5 tex=metal_plate scale=50
+slab  x0=-2.6 y0=1.6 z0=0 x1=-2.2 y1=5.6 z1=1.6 thick=0.5 tex=metal_plate scale=50
+slab  x0=2.2 y0=1.6 z0=0 x1=2.6 y1=5.6 z1=1.6 thick=0.5 tex=metal_plate scale=50
+slab  x0=7 y0=1.6 z0=0 x1=7.4 y1=5.6 z1=1.6 thick=0.5 tex=metal_plate scale=50
+slab  x0=11.4 y0=1.6 z0=0 x1=11.8 y1=5.6 z1=1.6 thick=0.5 tex=metal_plate scale=50
+
+slab  x0=-11.8 y0=6 z0=1.76 x1=-11.4 y1=9.6 z1=3.2 thick=0.5 tex=metal_plate scale=50
+slab  x0=-7.4 y0=6 z0=1.76 x1=-7 y1=9.6 z1=3.2 thick=0.5 tex=metal_plate scale=50
+slab  x0=-2.6 y0=6 z0=1.76 x1=-2.2 y1=9.6 z1=3.2 thick=0.5 tex=metal_plate scale=50
+slab  x0=2.2 y0=6 z0=1.76 x1=2.6 y1=9.6 z1=3.2 thick=0.5 tex=metal_plate scale=50
+slab  x0=7 y0=6 z0=1.76 x1=7.4 y1=9.6 z1=3.2 thick=0.5 tex=metal_plate scale=50
+slab  x0=11.4 y0=6 z0=1.76 x1=11.8 y1=9.6 z1=3.2 thick=0.5 tex=metal_plate scale=50
+
+// The glass. One pane per bay, on a plane 0.16 further out than the frame, so
+// that the mullions and the transom stand proud of it. Panes are 6 cm thick
+// and take a flat light level rather than a baked one: a sheet of glass has no
+// shading of its own to speak of, and a level that holds still across the face
+// is also what the blend will want, since it collapses to one multiplier for
+// the whole pane instead of a step per pixel.
+//
+// These are solid for now. Nothing sees through them until the renderer can
+// blend, and they are here first so that the fit can be checked against the
+// frame before that lands.
+slab  x0=-14.4 y0=1.6 z0=0.16 x1=-11.8 y1=5.6 z1=1.76 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=-11.4 y0=1.6 z0=0.16 x1=-7.4 y1=5.6 z1=1.76 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=-7 y0=1.6 z0=0.16 x1=-2.6 y1=5.6 z1=1.76 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=-2.2 y0=1.6 z0=0.16 x1=2.2 y1=5.6 z1=1.76 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=2.6 y0=1.6 z0=0.16 x1=7 y1=5.6 z1=1.76 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=7.4 y0=1.6 z0=0.16 x1=11.4 y1=5.6 z1=1.76 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=11.8 y0=1.6 z0=0.16 x1=14.4 y1=5.6 z1=1.76 thick=0.06 tex=glass_blue light=9 fit
+
+slab  x0=-14.4 y0=6 z0=1.92 x1=-11.8 y1=9.6 z1=3.36 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=-11.4 y0=6 z0=1.92 x1=-7.4 y1=9.6 z1=3.36 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=-7 y0=6 z0=1.92 x1=-2.6 y1=9.6 z1=3.36 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=-2.2 y0=6 z0=1.92 x1=2.2 y1=9.6 z1=3.36 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=2.6 y0=6 z0=1.92 x1=7 y1=9.6 z1=3.36 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=7.4 y0=6 z0=1.92 x1=11.4 y1=9.6 z1=3.36 thick=0.06 tex=glass_blue light=9 fit
+slab  x0=11.8 y0=6 z0=1.92 x1=14.4 y1=9.6 z1=3.36 thick=0.06 tex=glass_blue light=9 fit
+
+// ===========================================================================
+// The mezzanine: a gallery along the back and both sides at 4.8, with a
+// soffit over it at 8.8 that leaves the middle of the room full height
+// ===========================================================================
+
+box   x0=-14.4 y0=4.4 z0=-19.2 x1=14.4 y1=4.8 z1=-14.4 tex=wood top=carpet_blue bottom=ceiling_tile scale=100
+box   x0=-14.4 y0=4.4 z0=-14.4 x1=-9.6 y1=4.8 z1=0 tex=wood top=carpet_blue bottom=ceiling_tile scale=100
+box   x0=9.6 y0=4.4 z0=-14.4 x1=14.4 y1=4.8 z1=0 tex=wood top=carpet_blue bottom=ceiling_tile scale=100
+
+// The stairs up to it, off to one side so the middle of the room stays clear.
+// Sixteen steps of 0.3 by 0.5, landing on the gallery edge at z -14.4.
+box   x0=-8.8 y0=0 z0=-6.9 x1=-4 y1=0.3 z1=-6.4 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-7.4 x1=-4 y1=0.6 z1=-6.9 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-7.9 x1=-4 y1=0.9 z1=-7.4 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-8.4 x1=-4 y1=1.2 z1=-7.9 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-8.9 x1=-4 y1=1.5 z1=-8.4 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-9.4 x1=-4 y1=1.8 z1=-8.9 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-9.9 x1=-4 y1=2.1 z1=-9.4 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-10.4 x1=-4 y1=2.4 z1=-9.9 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-10.9 x1=-4 y1=2.7 z1=-10.4 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-11.4 x1=-4 y1=3 z1=-10.9 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-11.9 x1=-4 y1=3.3 z1=-11.4 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-12.4 x1=-4 y1=3.6 z1=-11.9 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-12.9 x1=-4 y1=3.9 z1=-12.4 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-13.4 x1=-4 y1=4.2 z1=-12.9 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-13.9 x1=-4 y1=4.5 z1=-13.4 tex=concrete_white top=marble_white scale=90
+box   x0=-8.8 y0=0 z0=-14.4 x1=-4 y1=4.8 z1=-13.9 tex=concrete_white top=marble_white scale=90
+
+// Parapets. The back one is in two pieces, with the gap where the stairs land.
+box   x0=-9.76 y0=4.8 z0=-14.56 x1=-8.8 y1=5.8 z1=-14.4 tex=metal_01 top=wood
+box   x0=-4 y0=4.8 z0=-14.56 x1=9.76 y1=5.8 z1=-14.4 tex=metal_01 top=wood
+box   x0=-9.76 y0=4.8 z0=-14.4 x1=-9.6 y1=5.8 z1=0 tex=metal_01 top=wood
+box   x0=9.6 y0=4.8 z0=-14.4 x1=9.76 y1=5.8 z1=0 tex=metal_01 top=wood
+box   x0=-14.4 y0=4.8 z0=-0.16 x1=-9.76 y1=5.8 z1=0 tex=metal_01 top=wood
+box   x0=9.76 y0=4.8 z0=-0.16 x1=14.4 y1=5.8 z1=0 tex=metal_01 top=wood
+
+// The soffit over the gallery
+box   x0=-14.4 y0=8.8 z0=-19.2 x1=14.4 y1=9.6 z1=-14.4 tex=concrete_white bottom=ceiling_tile scale=160
+box   x0=-14.4 y0=8.8 z0=-14.4 x1=-9.6 y1=9.6 z1=0 tex=concrete_white bottom=ceiling_tile scale=160
+box   x0=9.6 y0=8.8 z0=-14.4 x1=14.4 y1=9.6 z1=0 tex=concrete_white bottom=ceiling_tile scale=160
+
+// ===========================================================================
+// Light fittings. Every one is a housing hung a little below the surface it
+// is on, with the lamp texture on its underside and a point light beneath it.
+// ===========================================================================
+
+// The atrium ceiling, in two rows down the length of the room
+box   x0=-5.6 y0=9.44 z0=-13.6 x1=-4.8 y1=9.6 z1=-10.4 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=4.8 y0=9.44 z0=-13.6 x1=5.6 y1=9.6 z1=-10.4 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=-5.6 y0=9.44 z0=-8 x1=-4.8 y1=9.6 z1=-4.8 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=4.8 y0=9.44 z0=-8 x1=5.6 y1=9.6 z1=-4.8 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=-5.6 y0=9.44 z0=-3.2 x1=-4.8 y1=9.6 z1=0 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=4.8 y0=9.44 z0=-3.2 x1=5.6 y1=9.6 z1=0 tex=metal_dark bottom=light_bank light=15 fit
+
+light x=-5.2 y=9.2 z=-12 radius=16 brightness=0.6
+light x=5.2 y=9.2 z=-12 radius=16 brightness=0.6
+light x=-5.2 y=9.2 z=-6.4 radius=16 brightness=0.6
+light x=5.2 y=9.2 z=-6.4 radius=16 brightness=0.6
+light x=-5.2 y=9.2 z=-1.6 radius=15 brightness=0.55
+light x=5.2 y=9.2 z=-1.6 radius=15 brightness=0.55
+
+// Under the mezzanine
+box   x0=-8 y0=4.28 z0=-18.4 x1=-7.2 y1=4.4 z1=-15.2 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=7.2 y0=4.28 z0=-18.4 x1=8 y1=4.4 z1=-15.2 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=-12.4 y0=4.28 z0=-12 x1=-11.6 y1=4.4 z1=-8.8 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=-12.4 y0=4.28 z0=-6.4 x1=-11.6 y1=4.4 z1=-3.2 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=11.6 y0=4.28 z0=-12 x1=12.4 y1=4.4 z1=-8.8 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=11.6 y0=4.28 z0=-6.4 x1=12.4 y1=4.4 z1=-3.2 tex=metal_dark bottom=light_bank light=15 fit
+
+light x=-7.6 y=4.15 z=-16.8 radius=9.5 brightness=0.5
+light x=7.6 y=4.15 z=-16.8 radius=9.5 brightness=0.5
+light x=-12 y=4.15 z=-10.4 radius=9.5 brightness=0.5
+light x=-12 y=4.15 z=-4.8 radius=9.5 brightness=0.5
+light x=12 y=4.15 z=-10.4 radius=9.5 brightness=0.5
+light x=12 y=4.15 z=-4.8 radius=9.5 brightness=0.5
+
+// The soffit over the gallery
+box   x0=-8 y0=8.68 z0=-18.4 x1=-7.2 y1=8.8 z1=-15.2 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=7.2 y0=8.68 z0=-18.4 x1=8 y1=8.8 z1=-15.2 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=-12.4 y0=8.68 z0=-12 x1=-11.6 y1=8.8 z1=-8.8 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=-12.4 y0=8.68 z0=-6.4 x1=-11.6 y1=8.8 z1=-3.2 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=11.6 y0=8.68 z0=-12 x1=12.4 y1=8.8 z1=-8.8 tex=metal_dark bottom=light_bank light=15 fit
+box   x0=11.6 y0=8.68 z0=-6.4 x1=12.4 y1=8.8 z1=-3.2 tex=metal_dark bottom=light_bank light=15 fit
+
+light x=-7.6 y=8.55 z=-16.8 radius=9 brightness=0.45
+light x=7.6 y=8.55 z=-16.8 radius=9 brightness=0.45
+light x=-12 y=8.55 z=-10.4 radius=9 brightness=0.45
+light x=-12 y=8.55 z=-4.8 radius=9 brightness=0.45
+light x=12 y=8.55 z=-10.4 radius=9 brightness=0.45
+light x=12 y=8.55 z=-4.8 radius=9 brightness=0.45
+
+// ===========================================================================
+// The floor itself: desks, a counter and some planting
+// ===========================================================================
+
+box   x0=-3.2 y0=0 z0=-18.4 x1=3.2 y1=1.1 z1=-17.6 tex=wood top=marble_white
+box   x0=-13.6 y0=6 z0=-19.2 x1=13.6 y1=7.6 z1=-19.04 tex=wood light=11
+
+box   x0=4 y0=0 z0=-12 x1=6.16 y1=0.94 z1=-10.92 tex=metal_01 top=wood
+box   x0=4.6 y0=0.94 z0=-11.64 x1=5.2 y1=1.46 z1=-11.5 tex=metal_dark nz=computer_screen light=13 fit
+box   x0=7.5 y0=0 z0=-12 x1=9.66 y1=0.94 z1=-10.92 tex=metal_01 top=wood
+box   x0=8.1 y0=0.94 z0=-11.64 x1=8.7 y1=1.46 z1=-11.5 tex=metal_dark nz=computer_screen light=13 fit
+box   x0=4 y0=0 z0=-9 x1=6.16 y1=0.94 z1=-7.92 tex=metal_01 top=wood
+box   x0=4.6 y0=0.94 z0=-8.64 x1=5.2 y1=1.46 z1=-8.5 tex=metal_dark nz=computer_screen light=13 fit
+box   x0=7.5 y0=0 z0=-9 x1=9.66 y1=0.94 z1=-7.92 tex=metal_01 top=wood
+box   x0=8.1 y0=0.94 z0=-8.64 x1=8.7 y1=1.46 z1=-8.5 tex=metal_dark nz=computer_screen light=13 fit
+box   x0=-12 y0=0 z0=-17.6 x1=-9.84 y1=0.94 z1=-16.52 tex=metal_01 top=wood
+box   x0=-11.4 y0=0.94 z0=-17.24 x1=-10.8 y1=1.46 z1=-17.1 tex=metal_dark nz=computer_screen light=13 fit
+
+prism cx=-2.4 cz=-16 radius=0.6 y0=0 y1=0.7 sides=6 rot=0 tex=wood top=floor_dirt
+prism cx=-11.5 cz=-1.6 radius=0.6 y0=0 y1=0.7 sides=6 rot=0 tex=wood top=floor_dirt
+prism cx=11.5 cz=-1.6 radius=0.6 y0=0 y1=0.7 sides=6 rot=0 tex=wood top=floor_dirt
+
+// ===========================================================================
+// The city. Every tower is one box on a long base. The near ones sit at the
+// top of the scale, where the texture comes through as it was drawn and its
+// windows read as lit; the rest step down from there with distance.
+// ===========================================================================
+
+box   x0=-46 y0=-120 z0=34 x1=-22 y1=-6.4 z1=58 tex=skyscraper_03 top=asphalt_02 scale=10 light=15
+box   x0=8 y0=-120 z0=30 x1=32 y1=-14.4 z1=54 tex=skyscraper_01 top=asphalt_02 scale=10 light=12
+box   x0=-20 y0=-120 z0=66 x1=-2 y1=34 z1=88 tex=skyscraper_03 top=asphalt_02 scale=10 light=15
+box   x0=38 y0=-120 z0=58 x1=62 y1=14 z1=84 tex=skyscraper_01 top=asphalt_02 scale=10 light=12
+box   x0=-80 y0=-120 z0=44 x1=-54 y1=-20.4 z1=74 tex=skyscraper_01 top=asphalt_02 scale=10 light=11
+box   x0=70 y0=-120 z0=30 x1=96 y1=-24.4 z1=60 tex=skyscraper_03 top=asphalt_02 scale=10 light=13
+box   x0=130 y0=-120 z0=60 x1=164 y1=-10.4 z1=104 tex=skyscraper_01 top=asphalt_02 scale=10 light=11
+
+box   x0=-38 y0=-120 z0=96 x1=-8 y1=52 z1=128 tex=skyscraper_03 top=asphalt_02 scale=9 light=13
+box   x0=6 y0=-120 z0=100 x1=36 y1=-2.4 z1=134 tex=skyscraper_01 top=asphalt_02 scale=9 light=10
+box   x0=46 y0=-120 z0=110 x1=78 y1=40 z1=146 tex=skyscraper_04 top=asphalt_02 scale=9 light=13
+box   x0=-96 y0=-120 z0=104 x1=-62 y1=22 z1=140 tex=skyscraper_01 top=asphalt_02 scale=9 light=10
+box   x0=92 y0=-120 z0=120 x1=126 y1=60 z1=158 tex=skyscraper_03 top=asphalt_02 scale=9 light=12
+box   x0=-152 y0=-120 z0=110 x1=-114 y1=7.6 z1=150 tex=skyscraper_04 top=asphalt_02 scale=9 light=11
+
+box   x0=-60 y0=-120 z0=180 x1=-22 y1=74 z1=222 tex=skyscraper_03 top=asphalt_02 scale=8 light=11
+box   x0=12 y0=-120 z0=186 x1=52 y1=30 z1=228 tex=skyscraper_04 top=asphalt_02 scale=8 light=10
+box   x0=66 y0=-120 z0=190 x1=108 y1=62 z1=234 tex=skyscraper_01 top=asphalt_02 scale=8 light=8
+box   x0=-128 y0=-120 z0=176 x1=-86 y1=46 z1=220 tex=skyscraper_01 top=asphalt_02 scale=8 light=9
+box   x0=-20 y0=-120 z0=240 x1=22 y1=88 z1=286 tex=skyscraper_04 top=asphalt_02 scale=8 light=11
+box   x0=76 y0=-120 z0=246 x1=120 y1=54 z1=292 tex=skyscraper_03 top=asphalt_02 scale=8 light=10
+box   x0=-104 y0=-120 z0=244 x1=-60 y1=68 z1=290 tex=skyscraper_01 top=asphalt_02 scale=8 light=8
+box   x0=140 y0=-120 z0=200 x1=186 y1=36 z1=250 tex=skyscraper_04 top=asphalt_02 scale=8 light=9
+box   x0=-186 y0=-120 z0=190 x1=-146 y1=26 z1=240 tex=skyscraper_03 top=asphalt_02 scale=8 light=9
+
+// The parapet capping every tower whose roof we look down on. A roof takes the
+// level of the tower it belongs to, and the towers are up near the top of the
+// scale for their windows' sake, which leaves the roof reading brighter than
+// anything else out there. Its own brush lets it take its own level, and the
+// small oversail is what a roof edge does anyway.
+box   x0=-46.4 y0=-6.4 z0=33.6 x1=-21.6 y1=-6 z1=58.4 tex=asphalt_02 scale=10 light=6
+box   x0=7.6 y0=-14.4 z0=29.6 x1=32.4 y1=-14 z1=54.4 tex=asphalt_02 scale=10 light=6
+box   x0=-80.4 y0=-20.4 z0=43.6 x1=-53.6 y1=-20 z1=74.4 tex=asphalt_02 scale=10 light=6
+box   x0=69.6 y0=-24.4 z0=29.6 x1=96.4 y1=-24 z1=60.4 tex=asphalt_02 scale=10 light=6
+box   x0=129.6 y0=-10.4 z0=59.6 x1=164.4 y1=-10 z1=104.4 tex=asphalt_02 scale=10 light=6
+box   x0=5.6 y0=-2.4 z0=99.6 x1=36.4 y1=-2 z1=134.4 tex=asphalt_02 scale=9 light=6
+box   x0=-152.4 y0=7.6 z0=109.6 x1=-113.6 y1=8 z1=150.4 tex=asphalt_02 scale=9 light=6
+
+// Roof clutter and masts on the near roofs. These stay dark: they are what the
+// lit towers standing behind them are read against.
+box   x0=-40 y0=-6 z0=40 x1=-32 y1=-1 z1=48 tex=metal_dark light=5
+box   x0=14 y0=-14 z0=36 x1=22 y1=-10 z1=44 tex=metal_dark light=5
+prism cx=-67 cz=59 radius=0.5 y0=-20 y1=-2 sides=4 rot=0 tex=metal_dark light=4
+prism cx=83 cz=45 radius=0.5 y0=-24 y1=-8 sides=4 rot=0 tex=metal_dark light=4
+
+// Lit signage, the one thing out there bright enough to read at this distance
+box   x0=-16 y0=20 z0=65.6 x1=-6 y1=28 z1=66 tex=tech_panel_teal light=15 fit
+box   x0=46 y0=3 z0=57.6 x1=54 y1=7 z1=58 tex=light_strip_red light=14 fit
+box   x0=50 y0=26 z0=109.6 x1=70 y1=34 z1=110 tex=tech_panel_teal light=15 fit

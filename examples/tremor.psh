@@ -907,6 +907,40 @@ fun cmd_ramp(x0, y0, z0, x1, y1, z1, dir, o) {
     add_brush(planes);
 }
 
+// A slab of even thickness on a plane that leans back as it rises, which is
+// what a wall that is not upright is made of. The line from (y0, z0) to
+// (y1, z1) is the face that looks into the room, and the solid runs `thick`
+// behind it, square to that face rather than along z, so a slab keeps its
+// thickness however far it leans. Bounded in x by x0..x1 and in y by y0..y1:
+// a mullion is a narrow one and a pane of glass a thin one, and both sit on
+// the same plane as the wall they divide.
+//
+// A ramp leans too, but everything under its slope is solid, which is right
+// for ground and wrong for a wall with a room on the other side of it.
+fun cmd_slab(x0, y0, z0, x1, y1, z1, thick, o) {
+    let dy = y1 - y0;
+    let dz = z1 - z0;
+    let len = (dy * dy + dz * dz).sqrt();
+    if (len < 0.000001 || thick <= 0.0) {
+        $println("a slab needs y1 above y0 and a thickness above zero");
+        $exit(1);
+    }
+
+    // Square to the run of the slab, pointing back into the room
+    let ny = dz / len;
+    let nz = 0.0 - dy / len;
+    let d = ny * y0 + nz * z0;
+
+    let planes = [];
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+    planes.push(make_plane(0.0, ny, nz, d, pick(o.nz, nil, o), o));
+    planes.push(make_plane(0.0, 0.0 - ny, 0.0 - nz, thick - d, pick(o.pz, nil, o), o));
+    add_brush(planes);
+}
+
 // A vertical column with `sides` flat faces, for pillars and pedestals
 fun cmd_prism(cx, cz, radius, y0, y1, sides, rot, o) {
     let planes = [];
@@ -1019,6 +1053,13 @@ fun parse_map(path) {
             cmd_ramp(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
                 field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
                 field(tok, 7, "dir"), parse_opts(tok, 8));
+            continue;
+        }
+
+        if (cmd == "slab") {
+            cmd_slab(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                field_num(tok, 7, "thick"), parse_opts(tok, 8));
             continue;
         }
 
@@ -2793,7 +2834,10 @@ loop {
     let var quit = false;
     loop {
         let var msg = nil;
-        if (pending_ui_events.len > 0) msg = pending_ui_events.pop();
+        // These were queued in arrival order while render workers were
+        // running, so consume the oldest first. Using pop() here reversed a
+        // KEY_DOWN/KEY_UP pair and could leave the key stuck down.
+        if (pending_ui_events.len > 0) msg = pending_ui_events.remove(0);
         else msg = $actor_poll();
         if (msg == nil) break;
         if (!(msg instanceof UIEvent)) continue;
