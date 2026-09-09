@@ -241,6 +241,8 @@ def_host_fns! {
         trim: string_trim(1),
         upper: string_upper(1),
         lower: string_lower(1),
+        lpad: string_lpad(3),
+        rpad: string_rpad(3),
         split: string_split(2),
         to_s: string_to_s(1),
 

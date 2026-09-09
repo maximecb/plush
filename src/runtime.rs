@@ -363,6 +363,56 @@ pub(crate) fn string_lower(actor: &mut Actor, s: Value) -> HostResult
     Ok(Str::new(&s, &mut actor.alloc))
 }
 
+fn string_pad(actor: &mut Actor, input: Value, width: Value, padding: Value, left: bool) -> HostResult
+{
+    let input_s = unwrap_str!(input);
+    let width = unwrap_usize!(width);
+    let padding = unwrap_str!(padding);
+
+    if padding.chars().count() != 1 {
+        error!("padding must be exactly one character");
+    }
+
+    let input_width = input_s.chars().count();
+    if input_width >= width {
+        return Ok(input);
+    }
+
+    let num_padding = width - input_width;
+    let padding_bytes = match padding.len().checked_mul(num_padding) {
+        Some(len) => len,
+        None => error!("padded string is too large"),
+    };
+    let output_len = match input_s.len().checked_add(padding_bytes) {
+        Some(len) => len,
+        None => error!("padded string is too large"),
+    };
+
+    let mut output = String::with_capacity(output_len);
+    if left {
+        for _ in 0..num_padding { output.push_str(padding); }
+    }
+    output.push_str(input_s);
+    if !left {
+        for _ in 0..num_padding { output.push_str(padding); }
+    }
+
+    actor.gc_check(Str::alloc_size(output.len()), &mut []);
+    Ok(Str::new(&output, &mut actor.alloc))
+}
+
+/// Pad a string on the left to a minimum character width
+pub(crate) fn string_lpad(actor: &mut Actor, input: Value, width: Value, padding: Value) -> HostResult
+{
+    string_pad(actor, input, width, padding, true)
+}
+
+/// Pad a string on the right to a minimum character width
+pub(crate) fn string_rpad(actor: &mut Actor, input: Value, width: Value, padding: Value) -> HostResult
+{
+    string_pad(actor, input, width, padding, false)
+}
+
 /// Split a string by a separator and return an array of strings
 pub(crate) fn string_split(actor: &mut Actor, input: Value, sep: Value) -> HostResult
 {
@@ -507,6 +557,8 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::String, "trim") => string_trim,
         (Type::String, "upper") => string_upper,
         (Type::String, "lower") => string_lower,
+        (Type::String, "lpad") => string_lpad,
+        (Type::String, "rpad") => string_rpad,
         (Type::String, "split") => string_split,
         (Type::String, "to_s") => string_to_s,
 

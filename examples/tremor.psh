@@ -42,6 +42,9 @@
 // were written. Given a directory as well, it writes each viewpoint of the
 // tour there as a TGA screenshot.
 
+from ./image import Image;
+from ./monogram_font import Font;
+
 let FRAME_WIDTH = $cmd_get_arg_or(2, "1280").parse_int(10);
 let FRAME_HEIGHT = $cmd_get_arg_or(3, "720").parse_int(10);
 let VOID_COLOR = 0xFF05050A;
@@ -285,7 +288,8 @@ let var pixels_drawn = 0;
 let var rect_faces_skipped = 0;
 let var rect_nodes_skipped = 0;
 
-let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+let frame_image = Image(FRAME_WIDTH, FRAME_HEIGHT);
+let frame_buffer = frame_image.bytes;
 
 // Each render actor owns one horizontal band. These remain full-frame in the
 // main actor and are changed only in the private heap of each worker.
@@ -3275,6 +3279,16 @@ if (BENCH_FRAMES > 0) {
 }
 
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Tremor", 0);
+let fps_font = Font(2, 0xFFFFFFFF, 0xFF000000);
+let FPS_FIELD_WIDTH = 5;
+let var fps_text = "FPS: " + "--".lpad(FPS_FIELD_WIDTH, " ");
+
+fun draw_fps_counter() {
+    let x0 = FRAME_WIDTH - fps_text.len * fps_font.char_w - 8;
+    for (let var i = 0; i < fps_text.len; ++i) {
+        fps_font.draw_char(frame_image, x0 + i * fps_font.char_w, 8, fps_text.char_at(i));
+    }
+}
 
 // Hide the cursor and aim with raw mouse motion. SDL suspends this while the
 // window is not focused and resumes it when focus returns.
@@ -3399,17 +3413,21 @@ loop {
     render_frame_id = render_frame_id + 1;
     render_ms_total = render_ms_total + ($time_current_ms() - render_start);
 
-    $window_draw_frame(window, frame_buffer);
-
     frame_count = frame_count + 1;
-    if (now_ms - last_report_ms >= 1000) {
+    let report_ms = $time_current_ms();
+    if (report_ms - last_report_ms >= 1000) {
         let render_ms = render_ms_total.to_f() / frame_count.to_f();
         let fps = 1000.0 / render_ms.max(0.001);
-        $println("render: " + render_ms.format_decimals(1) + "ms (" + fps.format_decimals(1) + " fps)");
+        let fps_count = fps.format_decimals(1);
+        fps_text = "FPS: " + fps_count.lpad(FPS_FIELD_WIDTH, " ");
+        $println("render: " + render_ms.format_decimals(1) + "ms (" + fps_count + " fps)");
         frame_count = 0;
         render_ms_total = 0;
-        last_report_ms = now_ms;
+        last_report_ms = report_ms;
     }
+
+    draw_fps_counter();
+    $window_draw_frame(window, frame_buffer);
 }
 
 stop_render_actors();

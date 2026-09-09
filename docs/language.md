@@ -356,6 +356,8 @@ from ./font import *;
     -   `trim()`: Produce a new string without whitespace at the beginning or end.
     -   `upper()`: Produce a new string as the uppercase version of the string.
     -   `lower()`: Produce a new string as the lowercase version of the string.
+    -   `lpad(width, ch)`: Pad the left side with the single character `ch` until the string is at least `width` characters long.
+    -   `rpad(width, ch)`: Pad the right side with the single character `ch` until the string is at least `width` characters long.
     -   `split(sep)`: Given a separator string, split a string into an array of parts.
 -   **Array**
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
