@@ -1871,6 +1871,22 @@ impl Actor
                 };
             }
 
+            // Report an index that fell outside the array or bytearray it
+            // was applied to. Marked cold so that the length it reports,
+            // and the message it builds, are sunk away from the indexing
+            // instructions, which are among the hottest here
+            macro_rules! index_error {
+                ($insn_name: literal, $type_name: literal, $idx: expr, $len: expr) => {{
+                    std::hint::cold_path();
+
+                    error!(
+                        $insn_name,
+                        "index {:?} out of bounds for {} of length {}",
+                        $idx, $type_name, $len
+                    );
+                }};
+            }
+
             match insn.opcode() {
                 Opcode::nop => {},
 
@@ -2294,15 +2310,29 @@ impl Actor
                         error!("get_index", "expected array or dict type in get_index");
                     }
 
+                    // Each arm tests its own index, so nothing about how the
+                    // lookup went has to be carried out of the match
                     let val = match arr.heap_tag() {
                         Tag::Array => {
-                            let idx = unwrap_usize!(idx, "get_index");
-                            arr.as_arr().get(idx)
+                            let elem_idx = unwrap_usize!(idx, "get_index");
+                            let arr = arr.as_arr();
+                            let val = arr.get(elem_idx);
+
+                            if val.is_undef() {
+                                index_error!("get_index", "array", idx, arr.len());
+                            }
+
+                            val
                         }
 
                         Tag::ByteArray => {
-                            let idx = unwrap_usize!(idx, "get_index");
-                            Value::from(arr.as_ba().get::<u8>(idx))
+                            let byte_idx = unwrap_usize!(idx, "get_index");
+                            let ba = arr.as_ba();
+
+                            match ba.get::<u8>(byte_idx) {
+                                Some(b) => Value::from(b),
+                                None => index_error!("get_index", "ByteArray", idx, ba.num_bytes())
+                            }
                         }
 
                         Tag::Dict => {
@@ -2330,16 +2360,26 @@ impl Actor
                         error!("set_index", "expected array or dict type");
                     }
 
+                    // As in get_index, each arm tests its own index rather
+                    // than reporting back to a shared test after the match
                     match arr.heap_tag() {
                         Tag::Array => {
                             let elem_idx = unwrap_usize!(idx, "set_index");
-                            arr.as_arr().set(elem_idx, val);
+                            let arr = arr.as_arr();
+
+                            if !arr.set(elem_idx, val) {
+                                index_error!("set_index", "array", idx, arr.len());
+                            }
                         }
 
                         Tag::ByteArray => {
                             let byte_idx = unwrap_usize!(idx, "set_index");
                             let b = unwrap_u8!(val, "set_index");
-                            arr.as_ba().set::<u8>(byte_idx, b);
+                            let ba = arr.as_ba();
+
+                            if !ba.set::<u8>(byte_idx, b) {
+                                index_error!("set_index", "ByteArray", idx, ba.num_bytes());
+                            }
                         }
 
                         Tag::Dict => {
@@ -2358,7 +2398,7 @@ impl Actor
                         }
 
                         _ => error!("set_index", "expected array or dict type")
-                    };
+                    }
                 }
 
                 // Jump if true
@@ -3433,6 +3473,41 @@ mod tests
         eval_eq("let a = [11, 22, 33]; return a.len;", Value::fixnum(3));
         eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::fixnum(4));
         eval_eq("let a = Array.with_size(5, nil); return a.len;", Value::fixnum(5));
+
+        // The last index is in bounds and the one past it is not, however
+        // much spare capacity the table happens to have
+        eval_eq("let var a = []; a.push(11); a.push(22); return a[1];", Value::fixnum(22));
+    }
+
+    // Only the length bounds an array, never the capacity behind it. A
+    // pop leaves a cleared slot in the spare capacity, and reading one
+    // used to hand back the `undef` it holds
+    #[test]
+    #[should_panic]
+    fn array_read_past_len()
+    {
+        eval("let var a = []; a.push(11); a.push(22); a.pop(); return a[1];");
+    }
+
+    #[test]
+    #[should_panic]
+    fn array_write_past_len()
+    {
+        eval("let var a = []; a.push(11); a.push(22); a.pop(); a[1] = 33;");
+    }
+
+    #[test]
+    #[should_panic]
+    fn array_read_past_capacity()
+    {
+        eval("let a = [11, 22, 33]; return a[5];");
+    }
+
+    #[test]
+    #[should_panic]
+    fn array_write_past_capacity()
+    {
+        eval("let a = [11, 22, 33]; a[5] = 44;");
     }
 
     #[test]
@@ -3443,6 +3518,54 @@ mod tests
         eval("let a = ByteArray.with_size(32); a.store_u32(0, 0xFF_FF_FF_FF);");
         eval("let a = ByteArray.with_size(32); a.store_u32(0, 0xFF_00_00_00); assert(a[0] == 0 && a[3] == 255);");
         eval("let a = ByteArray.with_size(32); a[11] = 77; assert(a[11] == 77);");
+
+        // The last value that fits is readable, one element further is not
+        eval("let a = ByteArray.with_size(8); a.store_u32(4, 7); assert(a.load_u32(4) == 7);");
+        eval("let a = ByteArray.with_size(8); a.set_u32(1, 7); assert(a.get_u32(1) == 7);");
+    }
+
+    #[test]
+    #[should_panic]
+    fn bytearray_read_past_len()
+    {
+        eval("let a = ByteArray.with_size(4); return a[4];");
+    }
+
+    #[test]
+    #[should_panic]
+    fn bytearray_write_past_len()
+    {
+        eval("let a = ByteArray.with_size(4); a[4] = 1;");
+    }
+
+    // A wide access has to fit whole: the last three bytes of a
+    // four-byte array are not a u32
+    #[test]
+    #[should_panic]
+    fn bytearray_load_straddles_end()
+    {
+        eval("let a = ByteArray.with_size(4); return a.load_u32(1);");
+    }
+
+    #[test]
+    #[should_panic]
+    fn bytearray_store_straddles_end()
+    {
+        eval("let a = ByteArray.with_size(4); a.store_u32(1, 7);");
+    }
+
+    #[test]
+    #[should_panic]
+    fn bytearray_get_past_last_elem()
+    {
+        eval("let a = ByteArray.with_size(8); return a.get_u32(2);");
+    }
+
+    #[test]
+    #[should_panic]
+    fn bytearray_set_past_last_elem()
+    {
+        eval("let a = ByteArray.with_size(8); a.set_f32(2, 1.0);");
     }
 
     #[test]

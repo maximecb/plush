@@ -111,46 +111,41 @@ impl Array
         self.elems = new_elems;
     }
 
-    /// An index inside the length is inside the table as well, so it can
-    /// be read without going to the table header for the capacity. Only
-    /// an index in the spare capacity past the length has to check
-    /// against it, and that goes out of line so that the common case
-    /// stays small enough to inline into the interpreter loop.
+    /// Read an element, or `undef` if the index is out of bounds.
+    ///
+    /// Only the length bounds an array. The spare capacity past it holds
+    /// no element the program ever wrote, so reading it would hand back
+    /// a stale value or the `undef` a cleared slot carries.
+    ///
+    /// `undef` is not a value the language can produce, so it stands in
+    /// for the missing element without costing a second register the way
+    /// an Option would.
+    #[inline(always)]
     pub fn get(&self, idx: usize) -> Value
     {
         debug_assert!(self.len() <= self.capacity());
 
-        if idx < self.len() {
-            return unsafe { *self.elems.add(idx) };
+        if idx >= self.len() {
+            return Value::UNDEF;
         }
 
-        self.get_past_len(idx)
+        unsafe { *self.elems.add(idx) }
     }
 
-    #[cold]
-    #[inline(never)]
-    fn get_past_len(&self, idx: usize) -> Value
-    {
-        self.elems()[idx]
-    }
-
-    pub fn set(&mut self, idx: usize, val: Value)
+    /// Write an element, reporting whether the index was in bounds.
+    /// A write into the spare capacity would be silently dropped: the
+    /// length does not cover it, and the next push overwrites it
+    #[inline(always)]
+    pub fn set(&mut self, idx: usize, val: Value) -> bool
     {
         debug_assert!(self.len() <= self.capacity());
 
-        if idx < self.len() {
-            unsafe { *self.elems.add(idx) = val };
-            return;
+        if idx >= self.len() {
+            return false;
         }
 
-        self.set_past_len(idx, val);
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn set_past_len(&mut self, idx: usize, val: Value)
-    {
-        self.elems_mut()[idx] = val;
+        unsafe { *self.elems.add(idx) = val };
+        true
     }
 
     pub fn items(&self) -> &[Value] {

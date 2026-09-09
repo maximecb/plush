@@ -102,48 +102,88 @@ impl ByteArray
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
 
-    /// Load a value at the given byte index
-    pub fn load<T>(&mut self, byte_idx: usize) -> T where T: Copy
+    /// How many values of a given type fit in the bytes held. A trailing
+    /// partial element is not counted, and so cannot be indexed
+    #[inline(always)]
+    pub fn num_elems<T>(&self) -> usize
     {
-        assert!(byte_idx + size_of::<T>() <= self.num_bytes());
+        self.num_bytes() / size_of::<T>()
+    }
 
-        unsafe {
-            let val_ptr = transmute::<*const u8 , *const T>(self.bytes.add(byte_idx) as *const u8);
-            std::ptr::read_unaligned(val_ptr)
+    /// Whether a value of a given type, placed at a byte index, lies
+    /// entirely inside the bytes held. Written as a subtraction so that
+    /// a byte index near the top of the address space cannot overflow
+    #[inline(always)]
+    fn spans<T>(&self, byte_idx: usize) -> bool
+    {
+        match self.num_bytes().checked_sub(size_of::<T>()) {
+            Some(last_idx) => byte_idx <= last_idx,
+            None => false,
         }
     }
 
-    /// Store a value at the given byte index
-    pub fn store<T>(&mut self, byte_idx: usize, val: T) where T: Copy
+    /// Load a value at the given byte index, or None if it would reach
+    /// past the end of the bytes held
+    #[inline(always)]
+    pub fn load<T>(&mut self, byte_idx: usize) -> Option<T> where T: Copy
     {
-        assert!(byte_idx + size_of::<T>() <= self.num_bytes());
+        if !self.spans::<T>(byte_idx) {
+            return None;
+        }
+
+        unsafe {
+            let val_ptr = transmute::<*const u8 , *const T>(self.bytes.add(byte_idx) as *const u8);
+            Some(std::ptr::read_unaligned(val_ptr))
+        }
+    }
+
+    /// Store a value at the given byte index, reporting whether it lay
+    /// inside the bytes held
+    #[inline(always)]
+    pub fn store<T>(&mut self, byte_idx: usize, val: T) -> bool where T: Copy
+    {
+        if !self.spans::<T>(byte_idx) {
+            return false;
+        }
 
         unsafe {
             let val_ptr = transmute::<*mut u8 , *mut T>(self.bytes.add(byte_idx));
             std::ptr::write_unaligned(val_ptr, val);
         }
+
+        true
     }
 
-    /// Read a value at the given index (aligned read)
-    pub fn get<T>(&mut self, idx: usize) -> T where T: Copy
+    /// Read a value at the given index (aligned read), or None if the
+    /// index is past the last element that fits
+    #[inline(always)]
+    pub fn get<T>(&mut self, idx: usize) -> Option<T> where T: Copy
     {
-        assert!((idx + 1) * size_of::<T>() <= self.num_bytes());
+        if idx >= self.num_elems::<T>() {
+            return None;
+        }
 
         unsafe {
             let val_ptr = transmute::<*const u8 , *const T>(self.bytes as *const u8).add(idx);
-            std::ptr::read(val_ptr)
+            Some(std::ptr::read(val_ptr))
         }
     }
 
-    /// Write a value at the given index (aligned write)
-    pub fn set<T>(&mut self, idx: usize, val: T) where T: Copy
+    /// Write a value at the given index (aligned write), reporting
+    /// whether the index was in bounds
+    #[inline(always)]
+    pub fn set<T>(&mut self, idx: usize, val: T) -> bool where T: Copy
     {
-        assert!((idx + 1) * size_of::<T>() <= self.num_bytes());
+        if idx >= self.num_elems::<T>() {
+            return false;
+        }
 
         unsafe {
             let val_ptr = transmute::<*mut u8 , *mut T>(self.bytes).add(idx);
             std::ptr::write(val_ptr, val);
         }
+
+        true
     }
 
     /// Fill an interval with a given value
@@ -250,12 +290,38 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResul
     Ok(Value::NIL)
 }
 
+/// Report an access that reaches past the end of a bytearray. The host
+/// call wrapper prefixes the method name, so the message only has to say
+/// which index broke which bound.
+///
+/// A byte-indexed accessor passes the width it was going to read, and an
+/// element-indexed one passes the number of elements it has room for
+macro_rules! oob_error {
+    (bytes: $idx: expr, $width: expr, $num_bytes: expr) => {
+        error!(
+            "byte index {} out of bounds, cannot access {} bytes in a ByteArray of {} bytes",
+            $idx, $width, $num_bytes
+        )
+    };
+
+    (elems: $idx: expr, $num_elems: expr) => {
+        error!(
+            "index {} out of bounds, ByteArray holds {} elements of this size",
+            $idx, $num_elems
+        )
+    };
+}
+
 pub fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
-    let val: u32 = ba.load(byte_idx);
-    Ok(Value::from(val))
+    let num_bytes = ba.num_bytes();
+
+    match ba.load::<u32>(byte_idx) {
+        Some(val) => Ok(Value::from(val)),
+        None => oob_error!(bytes: byte_idx, 4, num_bytes)
+    }
 }
 
 pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
@@ -263,7 +329,12 @@ pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
     let val = unwrap_u32!(val);
-    ba.store(byte_idx, val);
+    let num_bytes = ba.num_bytes();
+
+    if !ba.store(byte_idx, val) {
+        oob_error!(bytes: byte_idx, 4, num_bytes);
+    }
+
     Ok(Value::NIL)
 }
 
@@ -271,8 +342,12 @@ pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
-    let val: u16 = ba.load(byte_idx);
-    Ok(Value::from(val as u32))
+    let num_bytes = ba.num_bytes();
+
+    match ba.load::<u16>(byte_idx) {
+        Some(val) => Ok(Value::from(val as u32)),
+        None => oob_error!(bytes: byte_idx, 2, num_bytes)
+    }
 }
 
 pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
@@ -280,7 +355,12 @@ pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
     let val = unwrap_i64!(val);
-    ba.store(byte_idx, val as u16);
+    let num_bytes = ba.num_bytes();
+
+    if !ba.store(byte_idx, val as u16) {
+        oob_error!(bytes: byte_idx, 2, num_bytes);
+    }
+
     Ok(Value::NIL)
 }
 
@@ -288,8 +368,12 @@ pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
-    let val: f32 = ba.load(byte_idx);
-    Ok(actor.float64(val as f64))
+    let num_bytes = ba.num_bytes();
+
+    match ba.load::<f32>(byte_idx) {
+        Some(val) => Ok(actor.float64(val as f64)),
+        None => oob_error!(bytes: byte_idx, 4, num_bytes)
+    }
 }
 
 pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
@@ -297,7 +381,12 @@ pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
     let val = unwrap_f64!(val);
-    ba.store(byte_idx, val as f32);
+    let num_bytes = ba.num_bytes();
+
+    if !ba.store(byte_idx, val as f32) {
+        oob_error!(bytes: byte_idx, 4, num_bytes);
+    }
+
     Ok(Value::NIL)
 }
 
@@ -305,8 +394,12 @@ pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
-    let val: u32 = ba.get(idx);
-    Ok(Value::from(val))
+    let num_elems = ba.num_elems::<u32>();
+
+    match ba.get::<u32>(idx) {
+        Some(val) => Ok(Value::from(val)),
+        None => oob_error!(elems: idx, num_elems)
+    }
 }
 
 pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> HostResult
@@ -314,7 +407,12 @@ pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Host
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
     let val = unwrap_u32!(val);
-    ba.set(idx, val);
+    let num_elems = ba.num_elems::<u32>();
+
+    if !ba.set(idx, val) {
+        oob_error!(elems: idx, num_elems);
+    }
+
     Ok(Value::NIL)
 }
 
@@ -322,8 +420,12 @@ pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
-    let val: f32 = ba.get(idx);
-    Ok(actor.float64(val as f64))
+    let num_elems = ba.num_elems::<f32>();
+
+    match ba.get::<f32>(idx) {
+        Some(val) => Ok(actor.float64(val as f64)),
+        None => oob_error!(elems: idx, num_elems)
+    }
 }
 
 pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> HostResult
@@ -331,7 +433,12 @@ pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Host
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
     let val = unwrap_f64!(val);
-    ba.set(idx, val as f32);
+    let num_elems = ba.num_elems::<f32>();
+
+    if !ba.set(idx, val as f32) {
+        oob_error!(elems: idx, num_elems);
+    }
+
     Ok(Value::NIL)
 }
 

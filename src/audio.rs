@@ -191,9 +191,11 @@ pub fn audio_write_samples(_actor: &mut Actor, device_id: Value, samples: Value)
 
     // The bytearray contains f32 samples
     // We need to iterate and read f32 values
-    let num_samples = samples_ba.num_bytes() / std::mem::size_of::<f32>();
+    let num_samples = samples_ba.num_elems::<f32>();
     for i in 0..num_samples {
-        state.out_queue.push(samples_ba.get::<f32>(i));
+        // The loop runs over the samples the bytearray has room for,
+        // so every index is in bounds
+        state.out_queue.push(samples_ba.get::<f32>(i).unwrap());
     }
 
     // Notify the audio thread that samples are available
