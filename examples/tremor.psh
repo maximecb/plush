@@ -18,6 +18,14 @@
 // otherwise finished, in reverse, so each one blends over completed pixels and
 // glass behind glass falls out in the right order.
 //
+// What no polygon claimed is sky, and the s-buffer already knows which pixels
+// those are: its intervals are sorted and coalesced, so the gaps between them
+// need only be walked once a scanline and painted from a gradient baked along
+// the world's up axis. This runs between the two passes rather than after them
+// both, because the opaque pass is what decides where the sky is and the blend
+// pass needs it already there to composite against. Drawing the moon and stars
+// through the same walk is what lets a building eclipse them.
+//
 // The span loop is the one from examples/textured_cube.psh: u and v are packed
 // into the two halves of one integer so a single add steps both. Here it runs
 // over sub-spans, with the perspective divide done once per sub-span, which is
@@ -47,7 +55,6 @@ from ./monogram_font import Font;
 
 let FRAME_WIDTH = $cmd_get_arg_or(2, "1280").parse_int(10);
 let FRAME_HEIGHT = $cmd_get_arg_or(3, "720").parse_int(10);
-let VOID_COLOR = 0xFF05050A;
 
 let TEX_DIR = "examples/data/textures/";
 let MAP_PATH = $cmd_get_arg_or(1, "examples/data/level1.map");
@@ -84,8 +91,8 @@ let NEAR = 0.2;
 //
 // Integers in this VM are 62-bit fixnums, and going past that boxes the value
 // and allocates, which would be ruinous per pixel. Both halves are therefore
-// wrapped into one texture width before the sub-span starts, which keeps them
-// under 2^24, and then biased by EXC_FX so that a half stepping backwards
+// wrapped into their texture dimensions before the sub-span starts, which
+// keeps them under 2^24, and then biased by EXC_FX so that a half stepping backwards
 // stays positive instead of borrowing from the half above it. The bias is a
 // whole number of texture widths, so the mask at lookup time removes it again.
 let FP_BITS = 16;
@@ -263,7 +270,8 @@ let var g_pix = nil;
 let var g_umask = 0;
 let var g_vshift = 0;
 let var g_vmask = 0;
-let var g_wrap = 0;
+let var g_uwrap = 0;
+let var g_vwrap = 0;
 
 // How much of the destination the face lets through, 0 for an opaque one, and
 // the range the interpolated light multiplier is held to. Opaque faces run the
@@ -504,6 +512,241 @@ fun sbuf_covers_rect(x0, y0, x1, y1) {
     return true;
 }
 
+// --- Colors ---
+
+fun color_lerp(a, b, t) {
+    let it = 1.0 - t;
+    let r = (((a >> 16) & 0xFF).to_f() * it + ((b >> 16) & 0xFF).to_f() * t).floor();
+    let g = (((a >> 8) & 0xFF).to_f() * it + ((b >> 8) & 0xFF).to_f() * t).floor();
+    let bl = ((a & 0xFF).to_f() * it + (b & 0xFF).to_f() * t).floor();
+    return 0xFF000000 | (r << 16) | (g << 8) | bl;
+}
+
+fun color_scale(c, t) {
+    let r = (((c >> 16) & 0xFF).to_f() * t).floor().min(255).max(0);
+    let g = (((c >> 8) & 0xFF).to_f() * t).floor().min(255).max(0);
+    let b = ((c & 0xFF).to_f() * t).floor().min(255).max(0);
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// Saturating per-channel add. SWAR: the per-byte carry-out is detected in one
+// shot and used to force the overflowed bytes to 0xFF.
+fun color_add_sat(a, b) {
+    let x = a & 0x00FFFFFF;
+    let y = b & 0x00FFFFFF;
+    let s = x + y;
+    let m = ((x & y) | ((x | y) & (s ^ -1))) & 0x00808080;
+    return 0xFF000000 | ((s | ((m << 1) - (m >> 7))) & 0x00FFFFFF);
+}
+
+// --- Sky ---
+//
+// The gradient runs along the world's up axis, so it is baked once into a table
+// indexed by height above the horizon and then sampled through the camera.
+// Pitch slides the whole table up or down the frame, which is what looking up
+// at the sky should do. There is no roll to follow, so the mapping is exact.
+
+let SKY_ZENITH = 0xFF0A0614;
+let SKY_HAZE = 0xFF2A2038;
+let SKY_NADIR = 0xFF08040E;
+
+// Indexed by row of a level view, where the horizon sits at the frame's center
+let bg_rows = Array.with_size(FRAME_HEIGHT, 0);
+for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+    if (y.to_f() < CENTER_Y) {
+        // Near-black at the zenith, warming into the haze at the horizon
+        let t = y.to_f() / CENTER_Y;
+        bg_rows[y] = color_lerp(SKY_ZENITH, SKY_HAZE, t * t * t);
+    } else {
+        // Below the horizon is open air falling away rather than a ground
+        // plane, so it drops off into the dark
+        let t = ((y.to_f() - CENTER_Y) / (FRAME_HEIGHT.to_f() - CENTER_Y) * 4.0).min(1.0);
+        bg_rows[y] = color_lerp(SKY_HAZE, SKY_NADIR, t);
+    }
+}
+
+// Where a screen row falls in the baked gradient. World up in eye space is
+// (0, cos_pitch, sin_pitch), and level with the horizon this is y -> y.
+fun sky_row(y) {
+    let vy = (CENTER_Y + (y.to_f() - CENTER_Y) * cos_pitch - FOCAL * sin_pitch).floor();
+    return bg_rows[vy.max(0).min(FRAME_HEIGHT - 1)];
+}
+
+// Paint the parts of [x0, x1) on scanline y that no polygon claimed. The
+// s-buffer's intervals are sorted, disjoint and coalesced, so the gaps between
+// them are already exactly what is still uncovered and one walk finds them all.
+fun sky_span(y, x0, x1, c) {
+    let fb = frame_buffer;
+    let row = y * FRAME_WIDTH;
+    let var cx = x0;
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN && sp_x1[cur] <= x0) cur = sp_next[cur];
+
+    while (cur != NO_SPAN) {
+        let sx0 = sp_x0[cur];
+        if (sx0 >= x1) break;
+        if (sx0 > cx) fb.fill_u32(row + cx, sx0 - cx, c);
+        let sx1 = sp_x1[cur];
+        if (sx1 > cx) cx = sx1;
+        cur = sp_next[cur];
+    }
+    if (cx < x1) fb.fill_u32(row + cx, x1 - cx, c);
+}
+
+// Is this pixel sky? The same walk, stopped at the first interval that reaches
+// it.
+fun sky_at(y, x) {
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN) {
+        if (sp_x0[cur] > x) return true;
+        if (sp_x1[cur] > x) return false;
+        cur = sp_next[cur];
+    }
+    return true;
+}
+
+// This replaces clearing the frame: every pixel is either covered by the opaque
+// pass or is sky, so nothing is left needing a background color under it.
+//
+// Reports whether the band had any sky at all, which is what keeps a level with
+// a roof over it from paying for a moon and stars it cannot see.
+fun draw_sky() {
+    let var any = false;
+    for (let var y = render_y0; y < render_y1; ++y) {
+        // The intervals are coalesced, so one reaching both edges is the only
+        // shape a fully covered row can take
+        let cur = sb_head[y];
+        if (cur != NO_SPAN && sp_x0[cur] <= 0 && sp_x1[cur] >= FRAME_WIDTH) continue;
+
+        sky_span(y, 0, FRAME_WIDTH, sky_row(y));
+        any = true;
+    }
+    return any;
+}
+
+// --- Moon and stars ---
+//
+// Both sit at fixed world directions, since the sky is effectively at infinity,
+// so they swing across the frame as the camera turns. Drawing them through
+// `sky_span` is what lets a building eclipse them: they only reach the pixels
+// the opaque pass left behind.
+
+let var proj_x = 0.0;
+let var proj_y = 0.0;
+
+// A direction at infinity: the same yaw then pitch the faces go through, with
+// no translation and no divide by distance. False when it is behind us.
+fun project_dir(dx, dy, dz) {
+    let rx = dx * cos_yaw - dz * sin_yaw;
+    let rz = dx * sin_yaw + dz * cos_yaw;
+    let ey = dy * cos_pitch - rz * sin_pitch;
+    let ez = rz * cos_pitch + dy * sin_pitch;
+    if (ez <= 0.01) return false;
+    let s = FOCAL / ez;
+    proj_x = CENTER_X + rx * s;
+    proj_y = CENTER_Y - ey * s;
+    return true;
+}
+
+let MOON_AZ = 0.107;       // Radians right of straight ahead
+let MOON_EL = 0.4054;      // Radians above the horizon
+let MOON_R = (FRAME_HEIGHT.idiv(29)).max(6);
+let MOON_HALO_R = MOON_R * 4;
+// One step every couple of pixels, otherwise the falloff shows as rings
+let MOON_HALO_STEPS = (MOON_HALO_R.idiv(2)).max(8);
+let MOON_COLOR = 0xFFF2F5FF;
+let MOON_GLOW = 0xFFA8C4FF;
+
+fun sky_disc(cx, cy, r, color) {
+    let y0 = (cy - r).max(render_y0);
+    let y1 = (cy + r + 1).min(render_y1);
+    let rr = (r * r).to_f();
+    for (let var y = y0; y < y1; ++y) {
+        let dy = (y - cy).to_f();
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+        let h = h2.sqrt().floor();
+        let xa = (cx - h).max(0);
+        let xb = (cx + h + 1).min(FRAME_WIDTH);
+        if (xa < xb) sky_span(y, xa, xb, color);
+    }
+}
+
+// Same shape, but each row is the gradient underneath plus the glow, so the
+// halo adds to the sky rather than painting over it
+fun glow_disc(cx, cy, r, add) {
+    let y0 = (cy - r).max(render_y0);
+    let y1 = (cy + r + 1).min(render_y1);
+    let rr = (r * r).to_f();
+    for (let var y = y0; y < y1; ++y) {
+        let dy = (y - cy).to_f();
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+        let h = h2.sqrt().floor();
+        let xa = (cx - h).max(0);
+        let xb = (cx + h + 1).min(FRAME_WIDTH);
+        if (xa < xb) sky_span(y, xa, xb, color_add_sat(sky_row(y), add));
+    }
+}
+
+fun draw_moon() {
+    let ce = MOON_EL.cos();
+    if (!project_dir(ce * MOON_AZ.sin(), MOON_EL.sin(), ce * MOON_AZ.cos())) return;
+    let mx = proj_x.floor();
+    let my = proj_y.floor();
+    if (mx < 0 - MOON_HALO_R || mx > FRAME_WIDTH + MOON_HALO_R) return;
+    if (my < render_y0 - MOON_HALO_R || my > render_y1 + MOON_HALO_R) return;
+
+    // Halo, drawn outside in so each smaller disc steps the falloff up
+    for (let var i = MOON_HALO_STEPS; i >= 1; --i) {
+        let t = i.to_f() / MOON_HALO_STEPS.to_f();
+        let k = 1.0 - t;
+        glow_disc(mx, my, MOON_R + (MOON_HALO_R.to_f() * t).floor(),
+                  color_scale(MOON_GLOW, k * k * 0.5));
+    }
+
+    sky_disc(mx, my, MOON_R, MOON_COLOR);
+
+    // A couple of maria, just enough that it reads as a moon and not a lamp
+    let m = color_scale(MOON_COLOR, 0.90);
+    sky_disc(mx - MOON_R.idiv(3), my - MOON_R.idiv(4), MOON_R.idiv(3), m);
+    sky_disc(mx + MOON_R.idiv(4), my + MOON_R.idiv(3), MOON_R.idiv(4), m);
+}
+
+let NUM_STARS = 400;
+let star_dx = Array.with_size(NUM_STARS, 0.0);
+let star_dy = Array.with_size(NUM_STARS, 0.0);
+let star_dz = Array.with_size(NUM_STARS, 0.0);
+let star_color = Array.with_size(NUM_STARS, 0);
+
+let var star_rng = 12345;
+fun star_rand() {
+    star_rng = (star_rng * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (star_rng >> 8).to_f() / 8388608.0;
+}
+
+// Spread over the whole dome, since the player can turn to face any of it
+for (let var i = 0; i < NUM_STARS; ++i) {
+    let az = star_rand() * 6.2831853;
+    let el = 0.05 + star_rand() * 1.4;
+    let ce = el.cos();
+    star_dx[i] = ce * az.sin();
+    star_dy[i] = el.sin();
+    star_dz[i] = ce * az.cos();
+    star_color[i] = color_scale(0xFFFFFFFF, 0.25 + star_rand() * 0.6);
+}
+
+fun draw_stars() {
+    for (let var i = 0; i < NUM_STARS; ++i) {
+        if (!project_dir(star_dx[i], star_dy[i], star_dz[i])) continue;
+        let sx = proj_x.floor();
+        if (sx < 0 || sx >= FRAME_WIDTH) continue;
+        let sy = proj_y.floor();
+        if (sy < render_y0 || sy >= render_y1) continue;
+        if (sky_at(sy, sx)) frame_buffer.set_u32(sy * FRAME_WIDTH + sx, star_color[i]);
+    }
+}
+
 // --- Textures ---
 
 // Reads an uncompressed 32-bit TGA. Its BGRA byte order is the pixel format the
@@ -522,8 +765,9 @@ fun load_tga(path) {
     let top_down = (data[17] & 0x20) != 0;
     let start = 18 + data[0];
 
-    if (img_type != 2 || bpp != 32 || width != height) {
-        $println(path + ": expected a square uncompressed 32-bit TGA");
+    if (img_type != 2 || bpp != 32 || width < 1 || height < 1
+        || (width & (width - 1)) != 0 || (height & (height - 1)) != 0) {
+        $println(path + ": expected a power-of-two uncompressed 32-bit TGA");
         $exit(1);
     }
 
@@ -537,7 +781,7 @@ fun load_tga(path) {
         }
     }
 
-    return [pixels, width];
+    return [pixels, width, height];
 }
 
 // A texture and the darkened copies of it, one per light level in use. Sizes
@@ -548,16 +792,18 @@ class Texture {
         let t = load_tga(TEX_DIR + name + ".tga");
         self.name = name;
         self.base = t[0];
-        self.size = t[1];
+        self.width = t[1];
+        self.height = t[2];
 
         let var shift = 0;
-        while ((1 << shift) < self.size) shift = shift + 1;
+        while ((1 << shift) < self.width) shift = shift + 1;
         self.shift = shift;
 
-        self.umask = self.size - 1;
+        self.umask = self.width - 1;
         self.vshift = 32 + FP_BITS - shift;
-        self.vmask = (self.size - 1) << shift;
-        self.wrap = (self.size << FP_BITS) - 1;
+        self.vmask = (self.height - 1) << shift;
+        self.uwrap = (self.width << FP_BITS) - 1;
+        self.vwrap = (self.height << FP_BITS) - 1;
 
         self.lit = nil;
     }
@@ -586,6 +832,7 @@ class Plane {
         self.flow = false;
         self.scale = TEXELS_PER_METER;
         self.turn = false;
+        self.flip = false;
         self.alpha = 1.0;
     }
 }
@@ -607,7 +854,7 @@ class Brush {
 // axis the normal is most nearly parallel to, which is what Quake does too, and
 // what makes neighbouring brushes line up with no authoring.
 class Face {
-    init(self, verts, nx, ny, nz, d, tex, light, fit, flow, scale, turn, alpha) {
+    init(self, verts, nx, ny, nz, d, tex, light, fit, flow, scale, turn, flip, alpha) {
         self.v = verts;
         self.nx = nx;
         self.ny = ny;
@@ -619,6 +866,7 @@ class Face {
         self.flow = flow;
         self.scale = scale;
         self.turn = turn;
+        self.flip = flip;
         self.alpha = alpha;
 
         // What the span loop actually wants: how much of the destination
@@ -657,7 +905,8 @@ class Face {
         self.umask = 0;
         self.vshift = 0;
         self.vmask = 0;
-        self.wrap = 0;
+        self.uwrap = 0;
+        self.vwrap = 0;
 
         // The planes the light asks this face to be cut on, gathered while it
         // is still whole and handed down to every piece taken out of it
@@ -718,7 +967,8 @@ fun face_v(taxis, turn, x, y, z) {
 // span loop carries. The baked light is a function of these, so it has to be
 // laid out on exactly the coordinates the loop hands it.
 fun texel_u(f, x, y, z) {
-    let u = face_u(f.taxis, f.turn, x, y, z);
+    let var u = face_u(f.taxis, f.turn, x, y, z);
+    if (f.flip) u = 0.0 - u;
     if (f.fit) return u * f.su + f.ou;
     return u * f.scale;
 }
@@ -810,7 +1060,7 @@ fun brush_to_faces(planes) {
 
         if (poly.len < 9) continue;
         out.push(Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale, p.turn,
-            p.alpha));
+            p.flip, p.alpha));
     }
     return out;
 }
@@ -818,15 +1068,17 @@ fun brush_to_faces(planes) {
 // Fit mode maps the texture exactly once across the face, which is what the
 // doors, screens and light fixtures want
 fun set_fit(f) {
-    let size = f.tex.size.to_f();
+    let width = f.tex.width.to_f();
+    let height = f.tex.height.to_f();
     let n = f.v.len.idiv(3);
 
     let var u0 = 0.0; let var u1 = 0.0;
     let var v0 = 0.0; let var v1 = 0.0;
     for (let var i = 0; i < n; ++i) {
         let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
-        let u = face_u(f.taxis, f.turn, x, y, z);
+        let var u = face_u(f.taxis, f.turn, x, y, z);
         let v = face_v(f.taxis, f.turn, x, y, z);
+        if (f.flip) u = 0.0 - u;
         if (i == 0) { u0 = u; u1 = u; v0 = v; v1 = v; }
         if (u < u0) u0 = u;
         if (u > u1) u1 = u;
@@ -834,8 +1086,8 @@ fun set_fit(f) {
         if (v > v1) v1 = v;
     }
 
-    if (u1 - u0 > 0.000025) { f.su = size / (u1 - u0); f.ou = 0.0 - f.su * u0; }
-    if (v1 - v0 > 0.000025) { f.sv = size / (v1 - v0); f.ov = 0.0 - f.sv * v0; }
+    if (u1 - u0 > 0.000025) { f.su = width / (u1 - u0); f.ou = 0.0 - f.su * u0; }
+    if (v1 - v0 > 0.000025) { f.sv = height / (v1 - v0); f.ov = 0.0 - f.sv * v0; }
 }
 
 // --- Map parsing ---
@@ -894,6 +1146,7 @@ class BrushOpts {
         self.flow = false;
         self.scale = TEXELS_PER_METER;
         self.turn = false;
+        self.flip = false;
 
         // 1 is opaque. Below that the face is blended over whatever stands
         // behind it, and the whole face carries the one value.
@@ -908,6 +1161,7 @@ fun parse_opts(tok, first) {
         if (t == "fit") { o.fit = true; continue; }
         if (t == "flow") { o.flow = true; continue; }
         if (t == "turn") { o.turn = true; continue; }
+        if (t == "flip") { o.flip = true; continue; }
 
         let kv = t.split("=");
         if (kv.len != 2) {
@@ -948,6 +1202,7 @@ fun make_plane(nx, ny, nz, d, tex, o) {
     p.flow = o.flow;
     p.scale = o.scale;
     p.turn = o.turn;
+    p.flip = o.flip;
     p.alpha = o.alpha;
     return p;
 }
@@ -1676,7 +1931,7 @@ fun split_face(f, nx, ny, nz, d) {
     let out = [];
     if (back.len >= 9) {
         let g = Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
-            f.alpha);
+            f.flip, f.alpha);
         g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
         g.mid_x = f.mid_x; g.mid_y = f.mid_y; g.mid_z = f.mid_z;
         g.cuts = f.cuts;
@@ -1686,7 +1941,7 @@ fun split_face(f, nx, ny, nz, d) {
     }
     if (front.len >= 9) {
         let g = Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
-            f.alpha);
+            f.flip, f.alpha);
         g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
         g.mid_x = f.mid_x; g.mid_y = f.mid_y; g.mid_z = f.mid_z;
         g.cuts = f.cuts;
@@ -1986,7 +2241,8 @@ fun raster_poly(m) {
     let umask = g_umask;
     let vshift = g_vshift;
     let vmask = g_vmask;
-    let wrap = g_wrap;
+    let uwrap = g_uwrap;
+    let vwrap = g_vwrap;
     // MASK_RB is non-contiguous and worth holding in a register. MASK_G stays
     // a constant so codegen can fold its contiguous field into the operation.
     let mask_rb = MASK_RB;
@@ -2150,8 +2406,8 @@ fun raster_poly(m) {
                         if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
                         else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
 
-                        let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & wrap) + EXC_FX;
-                        let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & wrap) + EXC_FX;
+                        let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & uwrap) + EXC_FX;
+                        let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & vwrap) + EXC_FX;
                         let var t = (vfx << 32) + ufx;
                         let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
 
@@ -2241,7 +2497,8 @@ fun raster_spans(first, count) {
     let umask = g_umask;
     let vshift = g_vshift;
     let vmask = g_vmask;
-    let wrap = g_wrap;
+    let uwrap = g_uwrap;
+    let vwrap = g_vwrap;
     let mask_rb = MASK_RB;
     let fb = frame_buffer;
     let l_min = g_l_min;
@@ -2311,8 +2568,8 @@ fun raster_spans(first, count) {
             if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
             else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
 
-            let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & wrap) + EXC_FX;
-            let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & wrap) + EXC_FX;
+            let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & uwrap) + EXC_FX;
+            let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & vwrap) + EXC_FX;
             let var t = (vfx << 32) + ufx;
             let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
 
@@ -2366,6 +2623,7 @@ fun face_setup(f, cull) {
 
     let taxis = f.taxis;
     let turn = f.turn;
+    let flip = f.flip;
     let scale = f.scale;
     let n = f.v.len.idiv(3);
     if (n > MAX_VERTS - 8) return 0;
@@ -2385,6 +2643,7 @@ fun face_setup(f, cull) {
 
         let var u = face_u(taxis, turn, wx, wy, wz);
         let var v = face_v(taxis, turn, wx, wy, wz);
+        if (flip) u = 0.0 - u;
 
         if (f.fit) {
             u = u * f.su + f.ou;
@@ -2497,7 +2756,8 @@ fun face_setup(f, cull) {
     g_umask = f.umask;
     g_vshift = f.vshift;
     g_vmask = f.vmask;
-    g_wrap = f.wrap;
+    g_uwrap = f.uwrap;
+    g_vwrap = f.vwrap;
 
     // What the face lets through, and the ceiling that puts on its share of a
     // blended pixel. The floor comes down with it so that a nearly clear pane
@@ -2745,14 +3005,16 @@ fun render_frame() {
     pixels_drawn = 0;
     rect_faces_skipped = 0;
     rect_nodes_skipped = 0;
-    frame_buffer.fill_u32(
-        render_y0 * FRAME_WIDTH,
-        (render_y1 - render_y0) * FRAME_WIDTH,
-        VOID_COLOR
-    );
     sbuf_reset();
     update_frustum();
     bsp_draw(bsp_root);
+
+    // The opaque pass is what decides which pixels are sky, and the blend pass
+    // below needs the sky already under it, so this falls between the two
+    if (draw_sky()) {
+        draw_stars();
+        draw_moon();
+    }
 
     // Everything opaque is down, so what was held back can be blended over it
     draw_deferred();
@@ -3191,7 +3453,8 @@ fun prepare_node(node) {
         g.umask = g.tex.umask;
         g.vshift = g.tex.vshift;
         g.vmask = g.tex.vmask;
-        g.wrap = g.tex.wrap;
+        g.uwrap = g.tex.uwrap;
+        g.vwrap = g.tex.vwrap;
     }
 
     prepare_node(node.front);
@@ -3204,7 +3467,7 @@ let main_mem_bytes = $gc_mem_size();
 let var tex_bytes = 0;
 for (let var i = 0; i < textures.len; ++i) {
     let t = textures[i];
-    tex_bytes = tex_bytes + t.size * t.size * 4;
+    tex_bytes = tex_bytes + t.width * t.height * 4;
 }
 
 $println(textures.len.to_s() + " textures, " + brushes.len.to_s() + " brushes, "
