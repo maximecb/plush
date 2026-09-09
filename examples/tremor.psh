@@ -133,8 +133,8 @@ let NUM_LEVELS = 16;
 let MIN_SHADE = 0.09;
 let MAX_SHADE = 1.0;
 
-// The scale is baked per vertex and interpolated across the face, in an
-// accumulator carrying this many fractional bits
+// The scale is baked per face and evaluated across it, in an accumulator
+// carrying this many fractional bits
 let L_FRAC = 16;
 let L_ONE = 65536.0;
 let L_SHIFT = L_FRAC;
@@ -216,14 +216,12 @@ let var aY = Array.with_size(MAX_VERTS, 0.0);
 let var aZ = Array.with_size(MAX_VERTS, 0.0);
 let var aU = Array.with_size(MAX_VERTS, 0.0);
 let var aV = Array.with_size(MAX_VERTS, 0.0);
-let var aL = Array.with_size(MAX_VERTS, 0.0);
 
 let var bX = Array.with_size(MAX_VERTS, 0.0);
 let var bY = Array.with_size(MAX_VERTS, 0.0);
 let var bZ = Array.with_size(MAX_VERTS, 0.0);
 let var bU = Array.with_size(MAX_VERTS, 0.0);
 let var bV = Array.with_size(MAX_VERTS, 0.0);
-let var bL = Array.with_size(MAX_VERTS, 0.0);
 
 // Projected vertices: screen position, and u/z, v/z, 1/z, which are the three
 // quantities that are linear in screen space
@@ -231,7 +229,6 @@ let pX = Array.with_size(MAX_VERTS, 0.0);
 let pY = Array.with_size(MAX_VERTS, 0.0);
 let pUZ = Array.with_size(MAX_VERTS, 0.0);
 let pVZ = Array.with_size(MAX_VERTS, 0.0);
-let pLZ = Array.with_size(MAX_VERTS, 0.0);
 let pW = Array.with_size(MAX_VERTS, 0.0);
 
 // Reciprocals of the sub-span lengths, so the per-sub-span gradient is a
@@ -245,11 +242,13 @@ let var g_dvzdx = 0.0; let var g_dvzdy = 0.0;
 let var g_dwdx = 0.0;  let var g_dwdy = 0.0;
 let var g_uz0 = 0.0;   let var g_vz0 = 0.0;   let var g_w0 = 0.0;
 
-// The level rides through the projection the same way u and v do. Screen space
-// interpolation would be the usual Gouraud approximation, but it is not what
-// the corners agree on: only level over z is affine on screen, so only that
-// gives the same answer whichever three corners the gradient is built from
-let var g_dlzdx = 0.0; let var g_dlzdy = 0.0; let var g_lz0 = 0.0;
+// The level of the face being drawn, as a bilinear function of its texture
+// coordinates: k + a * cu + b * cv + c * cu * cv, with cu and cv measured from
+// the point the fit was centred on. The span loop already carries a
+// perspective correct u and v, so this rides in on them and needs no
+// interpolant of its own.
+let var g_lu0 = 0.0; let var g_lv0 = 0.0;
+let var g_l_k = 0.0; let var g_l_u = 0.0; let var g_l_v = 0.0; let var g_l_uv = 0.0;
 let var g_ref_x = 0.0; let var g_ref_y = 0.0;
 let var g_pix = nil;
 let var g_umask = 0;
@@ -621,6 +620,18 @@ class Face {
         self.alpha8 = (alpha * 255.0).floor().clip(0, 255);
         self.inv_alpha8 = 255 - self.alpha8;
 
+        // A point inside the face, which `light_at` steps towards to ask
+        // whether a sample is walled in. Pieces cut off a face keep the whole
+        // face's point rather than taking their own, so that two of them
+        // meeting at a corner step the same way and find the same answer.
+        let nv = verts.len.idiv(3);
+        let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+        for (let var i = 0; i < nv; ++i) {
+            cx = cx + verts[i * 3]; cy = cy + verts[i * 3 + 1]; cz = cz + verts[i * 3 + 2];
+        }
+        let inv_nv = 1.0 / nv.to_f();
+        self.mid_x = cx * inv_nv; self.mid_y = cy * inv_nv; self.mid_z = cz * inv_nv;
+
         let ax = nx.abs();
         let ay = ny.abs();
         let az = nz.abs();
@@ -638,8 +649,13 @@ class Face {
         self.vmask = 0;
         self.wrap = 0;
 
-        // One light level per vertex, as a float so that it interpolates
-        self.vl = nil;
+        // The planes the light asks this face to be cut on, gathered while it
+        // is still whole and handed down to every piece taken out of it
+        self.cuts = nil;
+
+        // The light across the face, as a bilinear function of u and v
+        self.lu0 = 0.0; self.lv0 = 0.0;
+        self.l_k = 0.0; self.l_u = 0.0; self.l_v = 0.0; self.l_uv = 0.0;
     }
 }
 
@@ -686,6 +702,21 @@ fun face_u(taxis, turn, x, y, z) {
 fun face_v(taxis, turn, x, y, z) {
     if (turn) return 0.0 - axis_u(taxis, x, y, z);
     return axis_v(taxis, x, y, z);
+}
+
+// The same in texels, with the face's fit or scale applied, which is what the
+// span loop carries. The baked light is a function of these, so it has to be
+// laid out on exactly the coordinates the loop hands it.
+fun texel_u(f, x, y, z) {
+    let u = face_u(f.taxis, f.turn, x, y, z);
+    if (f.fit) return u * f.su + f.ou;
+    return u * f.scale;
+}
+
+fun texel_v(f, x, y, z) {
+    let v = face_v(f.taxis, f.turn, x, y, z);
+    if (f.fit) return v * f.sv + f.ov;
+    return v * f.scale;
 }
 
 // A big quad lying on the plane, ready to be cut down by the other planes of
@@ -1272,7 +1303,10 @@ fun in_solid(x, y, z) {
 }
 
 // The light level at one point on a surface facing a given way. `tx, ty, tz`
-// is the middle of the face, which says which way is inward along it.
+// is the middle of the whole face the point belongs to, not of the piece it is
+// being baked with, and says which way is inward along it. Answering the same
+// for every piece of a face is what keeps the reply the same at a point two of
+// them share.
 fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     // Lift the sample off the surface, so that a fixture sitting flush against
     // a wall still counts as being in front of it
@@ -1334,95 +1368,147 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
         .clip(0.0, SHADE_MAX);
 }
 
-// The light level at each corner of a face. A face given an explicit level in
-// the map keeps it at every corner, which shades it flat the way it used to be.
+// Solve a small system in place by Gauss-Jordan with partial pivoting. `a` is
+// `n` rows of `n + 1` columns, the last of them the right hand side.
 //
-// Corners are sampled where they are, not pulled in towards the middle: two
-// faces meeting at an edge then agree on the level along it, and the shading
-// runs across the seam without a visible join.
+// An unknown whose column has no usable pivot is left at zero and its column
+// skipped, rather than the whole solve failing. Columns are taken in order, so
+// what a piece is too degenerate to carry is dropped from the end: a triangle
+// supports a plane and loses the cross term, a sliver loses more.
+fun solve_system(a, n, out) {
+    let stride = n + 1;
+    let piv_row = Array.with_size(n, 0 - 1);
+    let var row = 0;
+
+    for (let var c = 0; c < n; ++c) {
+        let var best = row;
+        let var mag = 0.0;
+        for (let var r = row; r < n; ++r) {
+            let m = a[r * stride + c].abs();
+            if (m > mag) { mag = m; best = r; }
+        }
+        if (mag < 0.000001) continue;
+
+        if (best != row) {
+            for (let var k = c; k <= n; ++k) {
+                let t = a[row * stride + k];
+                a[row * stride + k] = a[best * stride + k];
+                a[best * stride + k] = t;
+            }
+        }
+
+        let inv = 1.0 / a[row * stride + c];
+        for (let var k = c; k <= n; ++k) a[row * stride + k] = a[row * stride + k] * inv;
+
+        for (let var r = 0; r < n; ++r) {
+            if (r == row) continue;
+            let m = a[r * stride + c];
+            if (m == 0.0) continue;
+            for (let var k = c; k <= n; ++k) {
+                a[r * stride + k] = a[r * stride + k] - m * a[row * stride + k];
+            }
+        }
+
+        piv_row[c] = row;
+        row = row + 1;
+    }
+
+    for (let var c = 0; c < n; ++c) {
+        if (piv_row[c] < 0) out[c] = 0.0;
+        else out[c] = a[piv_row[c] * stride + n];
+    }
+}
+
+// The light across a face, as a bilinear function of its texture coordinates.
+// A face given an explicit level in the map takes it everywhere, which shades
+// it flat the way it used to be.
 //
-// The samples are then replaced by a plane fitted through them. The rasterizer
-// builds the level gradient from three corners, and four samples of a light
-// field do not generally lie on a plane, so which three it picked would decide
-// the shading. It picks them by screen area, which changes as the camera moves,
-// and the face would jump as the choice flipped. Fitting first makes every
-// triple agree. What the fit leaves behind is exactly the curvature
-// `light_curves` measures, so subdivision already bounds it.
-fun bake_vertex_light(f) {
+// Corners are sampled where they are, not pulled in towards the middle, and
+// `k + a * u + b * v + c * u * v` has one term per corner, so all four samples
+// are carried exactly. A plane has three and cannot: fitting one left every
+// corner off its own sample by a quarter of the bilinear twist, in opposite
+// directions either side of a shared edge, which is what seamed. `light_curves`
+// never cut on it either, since it probes the centre and the edge midpoints,
+// where a bilinear level is what interpolation already gives.
+//
+// On an edge with u or v constant the cross term folds into the linear ones, so
+// the level runs straight between the two shared corner values and both sides
+// agree. Cuts and faces are axis aligned, which is every edge that matters
+// here; a slanted one keeps a little of the old disagreement.
+fun bake_face_light(f) {
     let n = f.v.len.idiv(3);
-    let out = Array.with_size(n, 0.0);
     let top = SHADE_MAX;
+
+    f.lu0 = 0.0; f.lv0 = 0.0;
+    f.l_u = 0.0; f.l_v = 0.0; f.l_uv = 0.0;
 
     // Lava is its own light: it is as bright as the scale goes wherever it is,
     // and nothing standing over it makes it any dimmer
     if (f.flow) {
-        for (let var i = 0; i < n; ++i) out[i] = top;
-        return out;
+        f.l_k = top;
+        return;
     }
 
     if (f.light >= 0) {
         // A level named in the map, put on the same curve
         let t = f.light.to_f() / (NUM_LEVELS - 1).to_f();
-        let fixed = ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+        f.l_k = ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
             .clip(0.0, top);
-        for (let var i = 0; i < n; ++i) out[i] = fixed;
-        return out;
-    }
-
-    // The two world axes the face has extent on, which parametrize its plane
-    let var ax0 = 0; let var ax1 = 1;
-    if (f.taxis == 0) { ax0 = 1; ax1 = 2; }
-    else if (f.taxis == 1) { ax0 = 0; ax1 = 2; }
-
-    let var mx = 0.0; let var my = 0.0; let var mz = 0.0;
-    for (let var i = 0; i < n; ++i) {
-        mx = mx + f.v[i * 3]; my = my + f.v[i * 3 + 1]; mz = mz + f.v[i * 3 + 2];
-    }
-    let inv_m = 1.0 / n.to_f();
-    mx = mx * inv_m; my = my * inv_m; mz = mz * inv_m;
-
-    let sv = Array.with_size(n, 0.0);
-    let tv = Array.with_size(n, 0.0);
-    let lv = Array.with_size(n, 0.0);
-    let var sc = 0.0; let var tc = 0.0; let var lc = 0.0;
-
-    for (let var i = 0; i < n; ++i) {
-        sv[i] = f.v[i * 3 + ax0];
-        tv[i] = f.v[i * 3 + ax1];
-        lv[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
-            f.nx, f.ny, f.nz, mx, my, mz);
-        sc = sc + sv[i]; tc = tc + tv[i]; lc = lc + lv[i];
+        return;
     }
 
     let inv_n = 1.0 / n.to_f();
-    sc = sc * inv_n; tc = tc * inv_n; lc = lc * inv_n;
+    let uv = Array.with_size(n, 0.0);
+    let vv = Array.with_size(n, 0.0);
+    let lv = Array.with_size(n, 0.0);
+    let var uc = 0.0; let var vc = 0.0;
 
-    // Centred, so that the fit is a two by two solve and world coordinates in
-    // the thousands do not swamp it
-    let var Sss = 0.0; let var Sst = 0.0; let var Stt = 0.0;
-    let var Sls = 0.0; let var Slt = 0.0;
     for (let var i = 0; i < n; ++i) {
-        let ds = sv[i] - sc;
-        let dt = tv[i] - tc;
-        let dl = lv[i] - lc;
-        Sss = Sss + ds * ds; Sst = Sst + ds * dt; Stt = Stt + dt * dt;
-        Sls = Sls + dl * ds; Slt = Slt + dl * dt;
+        let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
+        uv[i] = texel_u(f, x, y, z);
+        vv[i] = texel_v(f, x, y, z);
+        lv[i] = light_at(x, y, z, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+        uc = uc + uv[i]; vc = vc + vv[i];
     }
+    uc = uc * inv_n; vc = vc * inv_n;
 
-    let den = Sss * Stt - Sst * Sst;
-    if (den.abs() < 0.000001) {
-        // Degenerate: every corner takes the average
-        for (let var i = 0; i < n; ++i) out[i] = lc.clip(0.0, top);
-        return out;
-    }
-
-    let ga = (Sls * Stt - Slt * Sst) / den;
-    let gb = (Slt * Sss - Sls * Sst) / den;
+    // Centred and scaled to the unit square, so that the solve is on numbers
+    // around one whatever size the piece is and wherever the map put it
+    let var hu = 0.0; let var hv = 0.0;
     for (let var i = 0; i < n; ++i) {
-        out[i] = (lc + ga * (sv[i] - sc) + gb * (tv[i] - tc)).clip(0.0, top);
+        let du = (uv[i] - uc).abs();
+        let dv = (vv[i] - vc).abs();
+        if (du > hu) hu = du;
+        if (dv > hv) hv = dv;
+    }
+    if (hu < 0.000001) hu = 1.0;
+    if (hv < 0.000001) hv = 1.0;
+
+    // The normal equations of the least squares fit over 1, u, v and u * v.
+    // For the usual four cornered piece the fit is exact and this is just how
+    // the four terms get solved for; a piece with more corners than terms
+    // takes the closest bilinear there is.
+    let a = Array.with_size(20, 0.0);
+    let p = Array.with_size(4, 0.0);
+    for (let var i = 0; i < n; ++i) {
+        p[0] = 1.0;
+        p[1] = (uv[i] - uc) / hu;
+        p[2] = (vv[i] - vc) / hv;
+        p[3] = p[1] * p[2];
+        for (let var r = 0; r < 4; ++r) {
+            for (let var c = 0; c < 4; ++c) a[r * 5 + c] = a[r * 5 + c] + p[r] * p[c];
+            a[r * 5 + 4] = a[r * 5 + 4] + p[r] * lv[i];
+        }
     }
 
-    return out;
+    let coef = Array.with_size(4, 0.0);
+    solve_system(a, 4, coef);
+
+    f.lu0 = uc; f.lv0 = vc;
+    f.l_k = coef[0];
+    f.l_u = coef[1] / hu;
+    f.l_v = coef[2] / hv;
+    f.l_uv = coef[3] / (hu * hv);
 }
 
 // --- Cutting faces up for lighting ---
@@ -1431,10 +1517,11 @@ fun bake_vertex_light(f) {
 //
 // This is a weaker test than flat shading needed, and that is the whole point.
 // Flat shading had to cut wherever the light changed at all, because one level
-// had to serve the whole piece. Interpolation reproduces any light that runs
-// linearly across a face exactly, so only curvature is worth a cut: a wall
-// fading evenly from one end to the other is left whole, and only a lamp pool
-// sitting in the middle of a surface asks for pieces.
+// had to serve the whole piece. The baked fit reproduces any light bilinear in
+// u and v exactly, and the probes below sit where a bilinear level is the mean
+// of the corners around them, so what they measure is what the fit leaves
+// behind: a wall fading evenly from one end to the other is left whole, and
+// only a lamp pool sitting in the middle of a surface asks for pieces.
 fun light_curves(f) {
     if (f.light >= 0 || f.flow) return false;
 
@@ -1451,13 +1538,14 @@ fun light_curves(f) {
 
     for (let var i = 0; i < n; ++i) {
         vl[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
-            f.nx, f.ny, f.nz, cx, cy, cz);
+            f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
         mean = mean + vl[i];
     }
     mean = mean * inv_n;
 
     // The middle, where a lamp pool that the corners all miss shows up
-    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz, cx, cy, cz) - mean).abs() > LIGHT_TOL) {
+    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - mean).abs()
+        > LIGHT_TOL) {
         return true;
     }
 
@@ -1471,7 +1559,8 @@ fun light_curves(f) {
         let my = (f.v[i * 3 + 1] + f.v[j * 3 + 1]) * 0.5;
         let mz = (f.v[i * 3 + 2] + f.v[j * 3 + 2]) * 0.5;
         let interp = (vl[i] + vl[j]) * 0.5;
-        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz, cx, cy, cz) - interp).abs() > LIGHT_TOL) {
+        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - interp).abs()
+            > LIGHT_TOL) {
             return true;
         }
     }
@@ -1479,13 +1568,16 @@ fun light_curves(f) {
     return false;
 }
 
-// Halve a face across its longer side until the light across each piece is one
-// interpolation can carry
-fun subdivide_face(f, out, depth) {
-    if (depth <= 0 || !light_curves(f)) {
-        out.push(f);
-        return;
-    }
+// Halve a face across its longer side, gathering the planes the light asks to
+// be cut on rather than cutting as it goes.
+//
+// Cutting as it goes leaves a cut running half way across the piece next to it,
+// where the neighbour was already straight enough to be left whole. The level
+// along the edge they share is then one straight run on one side and two on the
+// other, and the shading steps at the T. Gathering first and running every
+// plane right across the face afterwards is what makes the pieces line up.
+fun collect_cuts(f, depth, cuts) {
+    if (depth <= 0 || !light_curves(f)) return;
 
     let n = f.v.len.idiv(3);
     let var axis = 0;
@@ -1510,10 +1602,7 @@ fun subdivide_face(f, out, depth) {
         }
     }
 
-    if (span < LIGHT_GRID) {
-        out.push(f);
-        return;
-    }
+    if (span < LIGHT_GRID) return;
 
     let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
     if (axis == 0) nx = 1.0;
@@ -1521,20 +1610,56 @@ fun subdivide_face(f, out, depth) {
     else nz = 1.0;
 
     let parts = split_face(f, nx, ny, nz, cut);
-    if (parts.len < 2) {
-        out.push(f);
-        return;
+    if (parts.len < 2) return;
+
+    let list = cuts[axis];
+    let var seen = false;
+    for (let var i = 0; i < list.len; ++i) {
+        if ((list[i] - cut).abs() < 0.001) { seen = true; break; }
+    }
+    if (!seen) list.push(cut);
+
+    for (let var i = 0; i < parts.len; ++i) collect_cuts(parts[i], depth - 1, cuts);
+}
+
+// Cut a face on every plane gathered for it. A plane that misses a piece leaves
+// it whole, so a fragment the tree took out of the middle of a face is cut by
+// just the planes that cross it and still lines up with what is either side.
+fun apply_cuts(f, out) {
+    let cuts = f.cuts;
+    if (cuts == nil) { out.push(f); return; }
+
+    let var work = [f];
+    for (let var axis = 0; axis < 3; ++axis) {
+        let list = cuts[axis];
+        let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+        if (axis == 0) nx = 1.0;
+        else if (axis == 1) ny = 1.0;
+        else nz = 1.0;
+
+        for (let var c = 0; c < list.len; ++c) {
+            let next = [];
+            for (let var i = 0; i < work.len; ++i) {
+                let parts = split_face(work[i], nx, ny, nz, list[c]);
+                if (parts.len < 2) next.push(work[i]);
+                else { next.push(parts[0]); next.push(parts[1]); }
+            }
+            work = next;
+        }
     }
 
-    for (let var i = 0; i < parts.len; ++i) subdivide_face(parts[i], out, depth - 1);
+    for (let var i = 0; i < work.len; ++i) out.push(work[i]);
 }
 
 // --- Cutting faces up ---
 
 // Split a face in two at a plane, returning the pieces that survive. Both keep
-// everything else about the face they came from, the fit mapping included: it
-// is an affine map from world position to texel, so a piece that inherits it
-// lands exactly where that part of the whole face did.
+// everything else about the face they came from, the fit mapping and the baked
+// light included. Every one of those is a function of world position rather
+// than of the corners it was worked out from, so a piece that inherits one
+// lands exactly where that part of the whole face did. That is what lets the
+// tree cut a lit piece up without the fragments parting company: they read the
+// same light field instead of fitting one each.
 fun split_face(f, nx, ny, nz, d) {
     let back = clip_poly(f.v, nx, ny, nz, d);
     let front = clip_poly(f.v, 0.0 - nx, 0.0 - ny, 0.0 - nz, 0.0 - d);
@@ -1543,12 +1668,20 @@ fun split_face(f, nx, ny, nz, d) {
         let g = Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
             f.alpha);
         g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        g.mid_x = f.mid_x; g.mid_y = f.mid_y; g.mid_z = f.mid_z;
+        g.cuts = f.cuts;
+        g.lu0 = f.lu0; g.lv0 = f.lv0;
+        g.l_k = f.l_k; g.l_u = f.l_u; g.l_v = f.l_v; g.l_uv = f.l_uv;
         out.push(g);
     }
     if (front.len >= 9) {
         let g = Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
             f.alpha);
         g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        g.mid_x = f.mid_x; g.mid_y = f.mid_y; g.mid_z = f.mid_z;
+        g.cuts = f.cuts;
+        g.lu0 = f.lu0; g.lv0 = f.lv0;
+        g.l_k = f.l_k; g.l_u = f.l_u; g.l_v = f.l_v; g.l_uv = f.l_uv;
         out.push(g);
     }
     return out;
@@ -1773,7 +1906,7 @@ fun clip_plane(n, ax, ay, az, aw) {
 
         if (di >= 0.0) {
             bX[m] = aX[i]; bY[m] = aY[i]; bZ[m] = aZ[i];
-            bU[m] = aU[i]; bV[m] = aV[i]; bL[m] = aL[i];
+            bU[m] = aU[i]; bV[m] = aV[i];
             m = m + 1;
         }
 
@@ -1784,7 +1917,6 @@ fun clip_plane(n, ax, ay, az, aw) {
             bZ[m] = aZ[i] + (aZ[j] - aZ[i]) * t;
             bU[m] = aU[i] + (aU[j] - aU[i]) * t;
             bV[m] = aV[i] + (aV[j] - aV[i]) * t;
-            bL[m] = aL[i] + (aL[j] - aL[i]) * t;
             m = m + 1;
         }
     }
@@ -1795,7 +1927,6 @@ fun clip_plane(n, ax, ay, az, aw) {
     let tz = aZ; aZ = bZ; bZ = tz;
     let tu = aU; aU = bU; bU = tu;
     let tv = aV; aV = bV; bV = tv;
-    let tl = aL; aL = bL; bL = tl;
     return m;
 }
 
@@ -1837,10 +1968,10 @@ fun raster_poly(m) {
     let var uz_row = g_uz0 + x_off * g_duzdx + y_off * g_duzdy;
     let var vz_row = g_vz0 + x_off * g_dvzdx + y_off * g_dvzdy;
     let var w_row = g_w0 + x_off * g_dwdx + y_off * g_dwdy;
-    let var lz_row = g_lz0 + x_off * g_dlzdx + y_off * g_dlzdy;
 
     let duzdx = g_duzdx; let dvzdx = g_dvzdx; let dwdx = g_dwdx;
-    let dlzdx = g_dlzdx;
+    let lu0 = g_lu0; let lv0 = g_lv0;
+    let l_k = g_l_k; let l_u = g_l_u; let l_v = g_l_v; let l_uv = g_l_uv;
     let pix = g_pix;
     let umask = g_umask;
     let vshift = g_vshift;
@@ -1949,11 +2080,16 @@ fun raster_poly(m) {
                     let var uz = uz_row + x * duzdx;
                     let var vz = vz_row + x * dvzdx;
                     let var w = w_row + x * dwdx;
-                    let var lz = lz_row + x * dlzdx;
                     let var z = 1.0 / w;
                     let var u = uz * z;
                     let var v = vz * z;
-                    let l = lz * z;
+
+                    // The level is a bilinear function of u and v, so it comes
+                    // out of the pair the loop already has rather than riding
+                    // an interpolant of its own
+                    let cu = u - lu0;
+                    let cv = v - lv0;
+                    let l = l_k + l_u * cu + cv * (l_v + l_uv * cu);
 
                     // 1/z is what makes the affine step inside a sub-span
                     // drift, so the length follows it: the longest run with
@@ -1988,12 +2124,13 @@ fun raster_poly(m) {
                         // far end; in between the step is affine
                         let uz_e = uz + len * duzdx;
                         let vz_e = vz + len * dvzdx;
-                        let lz_e = lz + len * dlzdx;
                         let w_e = w + len * dwdx;
                         let z_e = 1.0 / w_e;
                         let u_e = uz_e * z_e;
                         let v_e = vz_e * z_e;
-                        let l_e = lz_e * z_e;
+                        let cu_e = u_e - lu0;
+                        let cv_e = v_e - lv0;
+                        let l_e = l_k + l_u * cu_e + cv_e * (l_v + l_uv * cu_e);
 
                         let inv_len = INV_N[len];
                         let var du = (u_e - u) * inv_len;
@@ -2049,7 +2186,7 @@ fun raster_poly(m) {
                         }
 
                         lfx = lfx_e;
-                        uz = uz_e; vz = vz_e; lz = lz_e; w = w_e;
+                        uz = uz_e; vz = vz_e; w = w_e;
                         u = u_e; v = v_e;
                         x = xe;
                     }
@@ -2061,7 +2198,6 @@ fun raster_poly(m) {
             uz_row = uz_row + g_duzdy;
             vz_row = vz_row + g_dvzdy;
             w_row = w_row + g_dwdy;
-            lz_row = lz_row + g_dlzdy;
             row = row + FRAME_WIDTH;
             scan_y = scan_y + 1;
         }
@@ -2089,7 +2225,8 @@ fun raster_poly(m) {
 // here: the source share arrives already multiplied by it and already bounded.
 fun raster_spans(first, count) {
     let duzdx = g_duzdx; let dvzdx = g_dvzdx; let dwdx = g_dwdx;
-    let dlzdx = g_dlzdx;
+    let lu0 = g_lu0; let lv0 = g_lv0;
+    let l_k = g_l_k; let l_u = g_l_u; let l_v = g_l_v; let l_uv = g_l_uv;
     let pix = g_pix;
     let umask = g_umask;
     let vshift = g_vshift;
@@ -2114,17 +2251,17 @@ fun raster_spans(first, count) {
         let uz_row = g_uz0 + x_off * duzdx + y_off * g_duzdy;
         let vz_row = g_vz0 + x_off * dvzdx + y_off * g_dvzdy;
         let w_row = g_w0 + x_off * dwdx + y_off * g_dwdy;
-        let lz_row = g_lz0 + x_off * dlzdx + y_off * g_dlzdy;
 
         let var x = ds_x0[s];
         let var uz = uz_row + x * duzdx;
         let var vz = vz_row + x * dvzdx;
         let var w = w_row + x * dwdx;
-        let var lz = lz_row + x * dlzdx;
         let var z = 1.0 / w;
         let var u = uz * z;
         let var v = vz * z;
-        let l = lz * z;
+        let cu = u - lu0;
+        let cv = v - lv0;
+        let l = l_k + l_u * cu + cv * (l_v + l_uv * cu);
 
         let var wscale = 0.0;
         let adw = dwdx.abs();
@@ -2148,12 +2285,13 @@ fun raster_spans(first, count) {
 
             let uz_e = uz + len * duzdx;
             let vz_e = vz + len * dvzdx;
-            let lz_e = lz + len * dlzdx;
             let w_e = w + len * dwdx;
             let z_e = 1.0 / w_e;
             let u_e = uz_e * z_e;
             let v_e = vz_e * z_e;
-            let l_e = lz_e * z_e;
+            let cu_e = u_e - lu0;
+            let cv_e = v_e - lv0;
+            let l_e = l_k + l_u * cu_e + cv_e * (l_v + l_uv * cu_e);
 
             let inv_len = INV_N[len];
             let var du = (u_e - u) * inv_len;
@@ -2194,7 +2332,7 @@ fun raster_spans(first, count) {
             }
 
             lfx = lfx_e;
-            uz = uz_e; vz = vz_e; lz = lz_e; w = w_e;
+            uz = uz_e; vz = vz_e; w = w_e;
             u = u_e; v = v_e;
             x = xe;
         }
@@ -2258,7 +2396,6 @@ fun face_setup(f, cull) {
         aZ[i] = rz * cos_pitch + dy * sin_pitch;
         aU[i] = u;
         aV[i] = v;
-        aL[i] = f.vl[i];
     }
 
     // Only the near plane needs clipping: it is what keeps the projection from
@@ -2278,7 +2415,6 @@ fun face_setup(f, cull) {
         pW[i] = w;
         pUZ[i] = aU[i] * w;
         pVZ[i] = aV[i] * w;
-        pLZ[i] = aL[i] * w;
 
         if (i == 0) {
             box_x0 = pX[i]; box_x1 = pX[i];
@@ -2342,12 +2478,8 @@ fun face_setup(f, cull) {
     g_dwdx = (d1w * e2y - d2w * e1y) * inv_det;
     g_dwdy = (d2w * e1x - d1w * e2x) * inv_det;
 
-    let lz0 = pLZ[0];
-    let d1l = pLZ[bi] - lz0;
-    let d2l = pLZ[bj] - lz0;
-    g_dlzdx = (d1l * e2y - d2l * e1y) * inv_det;
-    g_dlzdy = (d2l * e1x - d1l * e2x) * inv_det;
-    g_lz0 = lz0;
+    g_lu0 = f.lu0; g_lv0 = f.lv0;
+    g_l_k = f.l_k; g_l_u = f.l_u; g_l_v = f.l_v; g_l_uv = f.l_uv;
 
     g_uz0 = uz0; g_vz0 = vz0; g_w0 = w0;
     g_ref_x = x0; g_ref_y = y0;
@@ -2968,61 +3100,79 @@ for (let var i = 0; i < faces.len; ++i) {
     if (faces[i].fit) set_fit(faces[i]);
 }
 
-let num_input_faces = faces.len;
-bsp_root = bsp_build(faces);
-
-// Light the faces the tree holds, cutting up the ones the light falls across
-// unevenly, and hang each piece's shaded texture on it so that drawing one is a
-// straight read. Splitting a face into coplanar pieces cannot disturb the order
-// the tree puts it in, which is why this happens after the tree is built.
+// Cut every face for the light and bake it before the tree divides anything.
+//
+// The tree cuts a face into fragments of its own, and lighting them afterwards
+// meant each fragment gathered its own cuts and fitted its own light. Two
+// fragments of one wall then met along a plane the tree had chosen, cut to
+// different depths on either side of it and reading two different fits, which
+// is a seam down the middle of a surface the map never divided. Baking first
+// leaves the tree nothing to disagree about: it inherits a light field rather
+// than fitting one.
 let var num_lit_faces = 0;
+let light_start_ms = $time_current_ms();
+let lit_faces = [];
 
+for (let var i = 0; i < faces.len; ++i) {
+    let f = faces[i];
+    let pieces = [];
+
+    if (f.flow) {
+        // A moving surface is still cut on a fixed grid: it needs corners
+        // close enough together for the wave to read as a curve
+        subdivide_grid(f, LAVA_GRID, pieces);
+    } else {
+        let cuts = [[], [], []];
+        collect_cuts(f, LIGHT_DEPTH, cuts);
+        f.cuts = cuts;
+        apply_cuts(f, pieces);
+    }
+
+    for (let var k = 0; k < pieces.len; ++k) {
+        let g = pieces[k];
+        bake_face_light(g);
+
+        // Alpha rides into the level the face was baked at, rather than being
+        // a second number the span loop has to apply. The multiplier it
+        // interpolates then already carries it, so a blended pixel pays for the
+        // destination and nothing more. This is also what bounds that
+        // multiplier by alpha8, which is what keeps the two halves of the blend
+        // summing to 255.
+        if (g.alpha < 1.0) {
+            g.l_k = g.l_k * g.alpha;
+            g.l_u = g.l_u * g.alpha;
+            g.l_v = g.l_v * g.alpha;
+            g.l_uv = g.l_uv * g.alpha;
+        }
+
+        lit_faces.push(g);
+        num_lit_faces = num_lit_faces + 1;
+    }
+}
+let light_ms = $time_current_ms() - light_start_ms;
+
+let num_map_faces = faces.len;
+bsp_root = bsp_build(lit_faces);
+
+// Hang each piece's shaded texture on it, so that drawing one is a straight
+// read. The tree may have cut a piece up on the way in; every fragment carries
+// the light of the piece it came out of.
 fun prepare_node(node) {
     if (node == nil) return;
 
-    let out = [];
     for (let var i = 0; i < node.on.len; ++i) {
-        let f = node.on[i];
-        let pieces = [];
-        if (f.flow) {
-            // A moving surface is still cut on a fixed grid: it needs corners
-            // close enough together for the wave to read as a curve
-            subdivide_grid(f, LAVA_GRID, pieces);
-        } else {
-            subdivide_face(f, pieces, LIGHT_DEPTH);
-        }
-
-        for (let var k = 0; k < pieces.len; ++k) {
-            let g = pieces[k];
-            g.vl = bake_vertex_light(g);
-
-            // Alpha rides into the level the face was baked at, rather than
-            // being a second number the span loop has to apply. The multiplier
-            // it interpolates then already carries it, so a blended pixel pays
-            // for the destination and nothing more. This is also what bounds
-            // that multiplier by alpha8, which is what keeps the two halves of
-            // the blend summing to 255.
-            if (g.alpha < 1.0) {
-                for (let var i = 0; i < g.vl.len; ++i) g.vl[i] = g.vl[i] * g.alpha;
-            }
-
-            g.pix = g.tex.shaded();
-            g.umask = g.tex.umask;
-            g.vshift = g.tex.vshift;
-            g.vmask = g.tex.vmask;
-            g.wrap = g.tex.wrap;
-            out.push(g);
-            num_lit_faces = num_lit_faces + 1;
-        }
+        let g = node.on[i];
+        g.pix = g.tex.shaded();
+        g.umask = g.tex.umask;
+        g.vshift = g.tex.vshift;
+        g.vmask = g.tex.vmask;
+        g.wrap = g.tex.wrap;
     }
-    node.on = out;
 
     prepare_node(node.front);
     prepare_node(node.back);
 }
-let light_start_ms = $time_current_ms();
 prepare_node(bsp_root);
-let light_ms = $time_current_ms() - light_start_ms;
 compute_bounds(bsp_root);
 let main_mem_bytes = $gc_mem_size();
 
@@ -3033,9 +3183,10 @@ for (let var i = 0; i < textures.len; ++i) {
 }
 
 $println(textures.len.to_s() + " textures, " + brushes.len.to_s() + " brushes, "
-    + num_input_faces.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
+    + num_map_faces.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
     + lights.len.to_s() + " lights");
-$println("bsp: " + bsp_nodes.to_s() + " nodes, " + bsp_splits.to_s() + " splits");
+$println("bsp: " + bsp_nodes.to_s() + " nodes, " + bsp_splits.to_s() + " splits, "
+    + (num_lit_faces + bsp_splits).to_s() + " pieces drawn from");
 $println("lighting: " + light_ms.to_s() + " ms to cut and bake");
 $println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB, shaded per pixel");
 $println("main actor GC/message heaps: "
