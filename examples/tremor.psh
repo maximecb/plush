@@ -178,6 +178,12 @@ let EYE_HEIGHT = 1.6;
 let PLAYER_RADIUS = 0.45;
 let PLAYER_HEIGHT = 1.7;
 let STEP_HEIGHT = 0.7;
+
+// The steepest ground that can be walked up, as rise over run. Anything above
+// it is a wall, however solid it is underneath: the buttresses leaning off the
+// courtyard and the slabs of a wall that tilts back were all climbable before,
+// since each step up them is short enough to look like a kerb.
+let MAX_CLIMB_SLOPE = 0.5;
 let WALK_SPEED = 7.5;
 let FLY_SPEED = 10.5;
 
@@ -2911,17 +2917,27 @@ fun save_tga(path) {
 // How high the solid reaches on the vertical line through a point, or nil if
 // that line misses the brush entirely. This is what lets the player walk up a
 // ramp: the answer follows the slope.
+//
+// Ground too steep to climb answers nil as well, so that the brush reads as a
+// wall to walk into rather than as a surface to stand on. The plane that caps
+// the line is the one the player would be standing on there, so its lean is
+// what decides. Normals need not be unit: the test compares run against rise
+// on the same normal.
 fun brush_top(b, x, z) {
     let planes = b.planes;
     let var lo = 0.0 - 1000000.0;
     let var hi = 1000000.0;
+    let var hi_p = nil;
 
     for (let var i = 0; i < planes.len; ++i) {
         let p = planes[i];
         let c = p.d - p.nx * x - p.nz * z;
         if (p.ny > 0.0001) {
             let y = c / p.ny;
-            if (y < hi) hi = y;
+            if (y < hi) {
+                hi = y;
+                hi_p = p;
+            }
         } else if (p.ny < 0.0 - 0.0001) {
             let y = c / p.ny;
             if (y > lo) lo = y;
@@ -2932,6 +2948,11 @@ fun brush_top(b, x, z) {
     }
 
     if (hi < lo) return nil;
+
+    if (hi_p != nil) {
+        let run = (hi_p.nx * hi_p.nx + hi_p.nz * hi_p.nz).sqrt();
+        if (run > MAX_CLIMB_SLOPE * hi_p.ny) return nil;
+    }
     return hi;
 }
 
