@@ -2,6 +2,22 @@ use rustc_hash::FxHashMap as HashMap;
 use crate::lexer::*;
 use crate::ast::*;
 
+/// Parse an identifier that is not a reserved keyword
+fn parse_name(input: &mut Lexer) -> Result<String, ParseError>
+{
+    let pos = input.get_pos();
+    let ident = input.parse_ident()?;
+
+    if is_reserved(&ident) {
+        return ParseError::with_pos(
+            &format!("`{}` is a reserved keyword and cannot be used as a name", ident),
+            &pos
+        );
+    }
+
+    Ok(ident)
+}
+
 /// Parse an atomic expression
 fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseError>
 {
@@ -157,7 +173,7 @@ fn parse_atom(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
 
     // Identifier (variable reference)
     if is_ident_start(ch) {
-        let ident = input.parse_ident()?;
+        let ident = parse_name(input)?;
         return Ok(ExprBox::new(
             Expr::Ident(ident),
             pos,
@@ -1124,7 +1140,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
     if input.match_keyword("let")? {
         let mutable = input.match_keyword("var")?;
         input.eat_ws()?;
-        let var_name = input.parse_ident()?;
+        let var_name = parse_name(input)?;
         input.expect_token("=")?;
         let init_expr = parse_expr(input, prog)?;
         input.expect_token(";")?;
@@ -1143,7 +1159,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
     // Function declaration
     if input.match_keyword("fun")? {
         input.eat_ws()?;
-        let name = input.parse_ident()?;
+        let name = parse_name(input)?;
         let fun_id = parse_function(input, prog, name, pos)?;
         let fun_name = prog.funs[&fun_id].name.clone();
 
@@ -1194,7 +1210,7 @@ fn parse_function(input: &mut Lexer, prog: &mut Program, name: String, pos: SrcP
         }
 
         // Parse one parameter
-        let param_name = input.parse_ident()?;
+        let param_name = parse_name(input)?;
 
         if params.contains(&param_name) {
             return input.parse_error(&format!("duplicate parameter name \"{}\"", param_name));
@@ -1255,7 +1271,7 @@ fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<Fu
         }
 
         // Parse one parameter
-        let param_name = input.parse_ident()?;
+        let param_name = parse_name(input)?;
 
         if params.contains(&param_name) {
             return input.parse_error(&format!("duplicate parameter name \"{}\"", param_name));
@@ -1310,12 +1326,12 @@ fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<Fu
 fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(String, ClassId), ParseError>
 {
     input.eat_ws()?;
-    let class_name = input.parse_ident()?;
+    let class_name = parse_name(input)?;
 
     // Parse the parent class name if present
     let parent_name = if input.match_keyword("extends")? {
         input.eat_ws()?;
-        Some(input.parse_ident()?)
+        Some(parse_name(input)?)
     } else {
         None
     };
@@ -1461,7 +1477,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
             // Parse list of imported symbols
             loop {
                 input.eat_ws()?;
-                symbols.push(input.parse_ident()?);
+                symbols.push(parse_name(input)?);
 
                 // End of import directive
                 if input.match_token(";")? {
@@ -1714,6 +1730,41 @@ mod tests
 
         // An import that doesn't resolve to a file is an error, not a panic
         parse_fails("from ./no_such_file_anywhere import x;");
+    }
+
+    #[test]
+    fn reserved_keywords()
+    {
+        let msg = |kw: &str| format!("`{}` is a reserved keyword and cannot be used as a name", kw);
+        parse_fails_with("let true = 7;", &msg("true"));
+        parse_fails_with("let var var = 5;", &msg("var"));
+        parse_fails_with("fun if() {}", &msg("if"));
+        parse_fails_with("fun f(x, nil) {}", &msg("nil"));
+        parse_fails_with("let f = |x, class| x;", &msg("class"));
+        parse_fails_with("class while {}", &msg("while"));
+        parse_fails_with("class Foo extends class {}", &msg("class"));
+        parse_fails_with("from ./examples/datetime import return;", &msg("return"));
+        parse_fails_with("$println(instanceof);", &msg("instanceof"));
+        parse_fails_with("let x = import;", &msg("import"));
+
+        // Keywords reserved for future use
+        parse_fails_with("let try = 1;", &msg("try"));
+        parse_fails_with("fun f(match) {}", &msg("match"));
+        parse_fails_with("let x = yield;", &msg("yield"));
+        parse_fails_with("let f = |in| in;", &msg("in"));
+
+        // Keywords are allowed as field and method names
+        parse_ok("let x = { if: 1, class: 2 }; let y = x.if + x.class;");
+        parse_ok("class Foo { loop(self) {} }");
+
+        // Identifiers that merely start with a keyword
+        parse_ok("let trueish = 1; let from_x = trueish;");
+
+        // The from keyword is only special at the top of a unit
+        parse_ok("fun f(from, to) { let x = from; }");
+
+        // The extends keyword is only special after a class name
+        parse_ok("class extends {} class Foo extends extends {}");
     }
 
     #[test]

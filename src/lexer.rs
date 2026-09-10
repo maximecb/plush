@@ -175,6 +175,21 @@ pub fn is_ident_ch(ch: char) -> bool
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+/// Check if an identifier is a reserved keyword
+pub fn is_reserved(ident: &str) -> bool
+{
+    matches!(ident,
+        "true" | "false" | "nil" |
+        "let" | "var" | "fun" | "class" |
+        "if" | "else" | "loop" | "while" | "for" |
+        "return" | "break" | "continue" | "assert" |
+        "instanceof" | "import" |
+        // Reserved for future use
+        "try" | "catch" | "finally" | "throw" |
+        "yield" | "do" | "in" | "match"
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct Lexer
 {
