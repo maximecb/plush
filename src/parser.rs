@@ -1762,9 +1762,6 @@ mod tests
 
         // The from keyword is only special at the top of a unit
         parse_ok("fun f(from, to) { let x = from; }");
-
-        // The extends keyword is only special after a class name
-        parse_ok("class extends {} class Foo extends extends {}");
     }
 
     #[test]

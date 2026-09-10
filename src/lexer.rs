@@ -179,11 +179,15 @@ pub fn is_ident_ch(ch: char) -> bool
 pub fn is_reserved(ident: &str) -> bool
 {
     matches!(ident,
+        // Currently in use and potentially unusable
+        // or confusing if chosen as a name
         "true" | "false" | "nil" |
-        "let" | "var" | "fun" | "class" |
+        "let" | "var" | "fun" |
+        "class" | "extends" |
         "if" | "else" | "loop" | "while" | "for" |
         "return" | "break" | "continue" | "assert" |
         "instanceof" | "import" |
+
         // Reserved for future use
         "try" | "catch" | "finally" | "throw" |
         "yield" | "do" | "in" | "match"
