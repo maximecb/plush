@@ -1809,11 +1809,28 @@ mod tests
     fn numeric_literals()
     {
         parse_ok("let g = 400_000;");
-        parse_ok("let g = 400_000_;");
+        parse_ok("let g = 1_000_000;");
         parse_ok("let f = 0.2;");
         parse_ok("let f = 4.567;");
         parse_ok("let f = 4.56e78;");
-        parse_ok("let f = 4.5_6e8_;");
+        parse_ok("let f = 4.5_6e8_0;");
+        parse_ok("let g = 0xAA_BB_CC_DD;");
+
+        // Separators must be single underscores between digits
+        parse_fails("let g = 1__2;");
+        parse_fails("let g = 1_;");
+        parse_fails("let g = 0xF__F;");
+        parse_fails("let g = 0xFF_;");
+        parse_fails("let g = 0x_FF;");
+        parse_fails("let f = 1__2.0;");
+        parse_fails("let f = 1_.2;");
+        parse_fails("let f = 1._2;");
+        parse_fails("let f = 1.2__3;");
+        parse_fails("let f = 1.2_;");
+        parse_fails("let f = 10_e6;");
+        parse_fails("let f = 10e_6;");
+        parse_fails("let f = 1e2__3;");
+        parse_fails("let f = 1e2_;");
 
         // A dot only starts a fractional part when a digit follows it, so
         // that a method can be called on an integer literal directly

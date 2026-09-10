@@ -535,8 +535,12 @@ impl Lexer
 
             let ch = self.peek_ch();
 
-            // Allow underscores as separators
+            // Separators must be single underscores between digits
             if ch == '_' {
+                if self.peek_ch_at(1).to_digit(radix).is_none() {
+                    return self.parse_error("only one numeric separator can occur between digits");
+                }
+
                 self.eat_ch();
                 continue;
             }
@@ -566,26 +570,35 @@ impl Lexer
     /// Read the characters of a numeric value into a string
     pub fn read_numeric(&mut self) -> Result<String, ParseError>
     {
-        /// Read a run of digits, returns false if there is no digit to read
-        fn read_digits(input: &mut Lexer) -> bool
+        /// Read a run of digits, returning false if there is no first digit
+        fn read_digits(input: &mut Lexer) -> Result<bool, ParseError>
         {
             let ch = input.peek_ch();
 
             // The first char must be a digit
             if !ch.is_ascii_digit() {
-                return false;
+                return Ok(false);
             }
 
             loop
             {
                 let ch = input.peek_ch();
-                if !ch.is_ascii_digit() && ch != '_' {
+                if ch == '_' {
+                    if !input.peek_ch_at(1).is_ascii_digit() {
+                        return input.parse_error("only one numeric separator can occur between digits");
+                    }
+
+                    input.eat_ch();
+                    continue;
+                }
+
+                if !ch.is_ascii_digit() {
                     break;
                 }
                 input.eat_ch();
             }
 
-            true
+            Ok(true)
         }
 
         fn read_sign(input: &mut Lexer)
@@ -599,14 +612,19 @@ impl Lexer
         read_sign(self);
 
         // Read decimal part
-        read_digits(self);
+        read_digits(self)?;
+
+        // Do not interpret an underscore after a dot as a member name
+        if self.peek_ch() == '.' && self.peek_ch_at(1) == '_' {
+            return self.parse_error("only one numeric separator can occur between digits");
+        }
 
         // Fractional part. A digit has to follow the dot, otherwise the dot
         // belongs to a method call: `10.idiv(3)` is an integer with a method
         // on it, not the float `10.` followed by a stray name
         if self.peek_ch() == '.' && self.peek_ch_at(1).is_ascii_digit() {
             self.eat_ch();
-            read_digits(self);
+            read_digits(self)?;
         }
 
         // Exponent. Unlike the fractional part above, there is no valid
@@ -615,7 +633,7 @@ impl Lexer
         if self.match_char('e') || self.match_char('E') {
             read_sign(self);
 
-            if !read_digits(self) {
+            if !read_digits(self)? {
                 return self.parse_error("expected digits in floating-point exponent");
             }
         }
