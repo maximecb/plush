@@ -191,6 +191,7 @@ let STEP_HEIGHT = 0.7;
 // courtyard and the slabs of a wall that tilts back were all climbable before,
 // since each step up them is short enough to look like a kerb.
 let MAX_CLIMB_SLOPE = 0.5;
+let STEEP_SLIDE_MAX_SPEED = 10.0;
 let WALK_SPEED = 7.5;
 let FLY_SPEED = 10.5;
 
@@ -214,6 +215,7 @@ let var cam_y = 1.6;
 let var cam_z = 0.0;
 let var cam_feet = 0.0;
 let var cam_vel_y = 0.0;
+let var cam_slide_speed = 0.0;
 let var on_ground = false;
 let var cam_yaw = 0.0;
 let var cam_pitch = 0.0;
@@ -3180,12 +3182,17 @@ fun save_tga(path) {
 // that line misses the brush entirely. This is what lets the player walk up a
 // ramp: the answer follows the slope.
 //
-// Ground too steep to climb answers nil as well, so that the brush reads as a
-// wall to walk into rather than as a surface to stand on. The plane that caps
-// the line is the one the player would be standing on there, so its lean is
-// what decides. Normals need not be unit: the test compares run against rise
-// on the same normal.
-fun brush_top(b, x, z) {
+// Normals need not be unit: this compares run against rise on the same normal.
+fun plane_is_walkable(p) {
+    if (p == nil) return true;
+    let run = (p.nx * p.nx + p.nz * p.nz).sqrt();
+    return run <= MAX_CLIMB_SLOPE * p.ny;
+}
+
+// With walkable_only set, ground too steep to climb answers nil so that the
+// brush reads as a wall. The result also carries the supporting plane because
+// a falling player that lands on a steep face has to slide along it.
+fun brush_top(b, x, z, walkable_only) {
     let planes = b.planes;
     let var lo = 0.0 - 1000000.0;
     let var hi = 1000000.0;
@@ -3211,11 +3218,8 @@ fun brush_top(b, x, z) {
 
     if (hi < lo) return nil;
 
-    if (hi_p != nil) {
-        let run = (hi_p.nx * hi_p.nx + hi_p.nz * hi_p.nz).sqrt();
-        if (run > MAX_CLIMB_SLOPE * hi_p.ny) return nil;
-    }
-    return hi;
+    if (walkable_only && !plane_is_walkable(hi_p)) return nil;
+    return [hi, hi_p];
 }
 
 // Does the player box run into this brush? The boxes are compared first: the
@@ -3246,7 +3250,7 @@ fun brush_hits(b, cx, cy, cz, hx, hy, hz) {
 // reads as having no top, and blocked() then takes it for a wall: sampling
 // short of the radius is what used to stop the climb one step up a flight, the
 // box catching the next tread while every sample fell just clear of it.
-fun brush_top_near(b, x, z) {
+fun brush_top_near(b, x, z, walkable_only) {
     let r = PLAYER_RADIUS;
 
     // Nothing to sample if the footprint misses the brush altogether
@@ -3265,9 +3269,9 @@ fun brush_top_near(b, x, z) {
             if (j == 1) sz = z - r;
             else if (j == 2) sz = z + r;
 
-            let t = brush_top(b, sx, sz);
-            if (t == nil) continue;
-            if (best == nil || t > best) best = t;
+            let support = brush_top(b, sx, sz, walkable_only);
+            if (support == nil) continue;
+            if (best == nil || support[0] > best[0]) best = support;
         }
     }
     return best;
@@ -3283,8 +3287,8 @@ fun blocked(x, feet, z) {
         // Anything low enough to step onto is not something to walk into. The
         // height is taken under the player, so a ramp is steppable where it is
         // still low and solid once it has risen.
-        let t = brush_top_near(b, x, z);
-        if (t != nil && t <= feet + STEP_HEIGHT) continue;
+        let support = brush_top_near(b, x, z, true);
+        if (support != nil && support[0] <= feet + STEP_HEIGHT) continue;
 
         if (brush_hits(b, x, cy, z, PLAYER_RADIUS, hy, PLAYER_RADIUS)) return true;
     }
@@ -3309,6 +3313,7 @@ fun move_player(dt, mf, ms, want_up, want_down) {
         if (want_down) cam_feet = cam_feet - FLY_SPEED * dt;
 
         cam_vel_y = 0.0;
+        cam_slide_speed = 0.0;
         on_ground = false;
         cam_y = cam_feet + EYE_HEIGHT;
         return;
@@ -3347,13 +3352,57 @@ fun move_player(dt, mf, ms, want_up, want_down) {
         // On the way down, land on whatever is under us. The same test steps
         // the player up onto low ledges as they walk into them, since it looks
         // for ground within a step of their feet.
-        let ground = support_height(cam_x, cam_feet, cam_z);
-        if (ground > -50000.0 && next_feet <= ground) {
-            cam_feet = ground;
+        let ground = support_at(cam_x, cam_feet, cam_z, false);
+        if (ground != nil && next_feet <= ground[0]) {
+            cam_feet = ground[0];
             cam_vel_y = 0.0;
-            on_ground = true;
+
+            let plane = ground[1];
+            on_ground = plane_is_walkable(plane);
+
+            // Accelerate along a steep face instead of starting at full slide
+            // speed on contact. For an upward-facing plane, its horizontal
+            // normal points downhill.
+            if (!on_ground && plane != nil) {
+                let run = (plane.nx * plane.nx + plane.nz * plane.nz).sqrt();
+                if (run > 0.0001) {
+                    let plen = (run * run + plane.ny * plane.ny).sqrt();
+                    let nrun = run / plen;
+                    let nup = plane.ny / plen;
+                    cam_slide_speed = (cam_slide_speed + GRAVITY * nrun * dt)
+                        .min(STEEP_SLIDE_MAX_SPEED);
+
+                    let along = cam_slide_speed * nup * dt / run;
+                    let slide_x = plane.nx * along;
+                    let slide_z = plane.nz * along;
+                    let old_x = cam_x;
+                    let old_z = cam_z;
+                    if (!blocked(cam_x + slide_x, cam_feet, cam_z)) cam_x = cam_x + slide_x;
+                    if (!blocked(cam_x, cam_feet, cam_z + slide_z)) cam_z = cam_z + slide_z;
+
+                    // Follow only the distance travelled along this face. At
+                    // its edge, retain the downward part of the slide velocity
+                    // and let regular falling take over.
+                    let lower = support_at(cam_x, cam_feet, cam_z, false);
+                    if (lower != nil && lower[1] == plane && lower[0] < cam_feet) {
+                        cam_feet = lower[0];
+                    } else if (lower != nil && lower[0] >= cam_feet - STEP_HEIGHT) {
+                        cam_feet = lower[0];
+                        on_ground = plane_is_walkable(lower[1]);
+                        if (on_ground) cam_slide_speed = 0.0;
+                    } else if (cam_x != old_x || cam_z != old_z) {
+                        cam_vel_y = 0.0 - cam_slide_speed * nrun;
+                        cam_slide_speed = 0.0;
+                    } else {
+                        cam_slide_speed = 0.0;
+                    }
+                }
+            } else {
+                cam_slide_speed = 0.0;
+            }
         } else {
             cam_feet = next_feet;
+            cam_slide_speed = 0.0;
             on_ground = false;
         }
     }
@@ -3362,15 +3411,15 @@ fun move_player(dt, mf, ms, want_up, want_down) {
 }
 
 // The highest surface under the player that is within a step of their feet
-fun support_height(x, feet, z) {
+fun support_at(x, feet, z, walkable_only) {
     let reach = feet + STEP_HEIGHT;
-    let var best = 0.0 - 100000.0;
+    let var best = nil;
 
     for (let var i = 0; i < brushes.len; ++i) {
-        let t = brush_top_near(brushes[i], x, z);
-        if (t == nil) continue;
-        if (t > reach) continue;
-        if (t > best) best = t;
+        let support = brush_top_near(brushes[i], x, z, walkable_only);
+        if (support == nil) continue;
+        if (support[0] > reach) continue;
+        if (best == nil || support[0] > best[0]) best = support;
     }
     return best;
 }
@@ -3490,16 +3539,18 @@ cam_yaw = start_yaw;
 // below, which renders the tour without opening a window, times it, and can
 // write each viewpoint out as a screenshot.
 let TOUR = [
-    [   0.0, 1.4, -13.0,  0.0,  0.0],
-    [   0.0, 1.4,  -4.5,  0.0,  0.1],
-    [   0.0, 1.4,   2.0,  0.0,  0.0],
-    [   0.0, 1.4,  10.5,  0.5, -0.1],
-    [   0.0, 1.4,  19.0, -0.6, -0.15],
-    [ -1.5, 1.4,  27.0,  0.9,  0.05],
-    [ 12.5, 7.8,  22.5, -1.9, -0.22],
-    [ 12.0, 7.8,  15.5, -1.75, -0.35],
-    [   0.0, 3.0,  13.0,  0.0, -0.5],
-    [5.375, 2.15,  34.5, -0.45, -0.02]
+    [  0.0, 1.6, -15.0,  0.0,  0.0],
+    [  0.0, 1.6,  -4.5,  0.0,  0.05],
+    [  0.0, 1.6,   3.0,  0.0,  0.0],
+    [-12.0, 1.6,   8.0, -1.57, 0.0],
+    [-21.5, 1.6,   8.0, -1.57, 0.0],
+    [ 12.0, 1.6,   8.0,  1.57, 0.0],
+    [ 21.5, 1.6,   8.0,  1.57, 0.0],
+    [  0.0, 1.6,  16.0,  0.35, -0.05],
+    [ 12.0, 7.8,  25.5, -2.1, -0.28],
+    [  0.0, 1.6,  29.0,  0.0,  0.0],
+    [  0.0, 1.6,  40.5,  0.0,  0.0],
+    [  0.0, 1.6,  47.5,  0.0, -0.05]
 ];
 
 let actor_start_ms = $time_current_ms();
