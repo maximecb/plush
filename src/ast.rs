@@ -43,8 +43,6 @@ pub enum BinOp
     And,
     Or,
 
-    // Assignment
-    Assign,
 }
 
 /// Expression
@@ -177,6 +175,11 @@ pub enum Stmt
 {
     Expr(ExprBox),
 
+    Assign {
+        lhs: ExprBox,
+        rhs: ExprBox,
+    },
+
     Return(ExprBox),
 
     Break,
@@ -193,7 +196,7 @@ pub enum Stmt
     For {
         init_stmt: StmtBox,
         test_expr: ExprBox,
-        incr_expr: ExprBox,
+        incr_stmt: StmtBox,
         body_stmt: StmtBox,
     },
 

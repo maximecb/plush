@@ -399,6 +399,37 @@ impl StmtBox
                 expr.resolve_syms(prog, fun, env)?;
             }
 
+            Stmt::Assign { lhs, rhs } => {
+                lhs.resolve_syms(prog, fun, env)?;
+                rhs.resolve_syms(prog, fun, env)?;
+
+                match lhs.expr.as_ref() {
+                    Expr::Ref { name, decl } => {
+                        if !decl.is_mutable() {
+                            return ParseError::with_pos(
+                                &format!("assignment to immutable variable `{}`, use `let var` to declare mutable variables", name),
+                                &self.pos
+                            );
+                        }
+                    }
+
+                    Expr::Member { field, .. } => {
+                        if let Some(class) = prog.classes.get_mut(&fun.class_id) {
+                            class.reg_field(field);
+
+                            if class.fields.len() > u16::MAX.into() {
+                                return ParseError::with_pos(
+                                    &format!("too many fields in class `{}`", class.name),
+                                    &self.pos
+                                );
+                            }
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+
             Stmt::Block(stmts) => {
                 env.push_scope();
 
@@ -434,11 +465,11 @@ impl StmtBox
                 }
             }
 
-            Stmt::For { init_stmt, test_expr, incr_expr, body_stmt } => {
+            Stmt::For { init_stmt, test_expr, incr_stmt, body_stmt } => {
                 env.push_scope();
                 init_stmt.resolve_syms(prog, fun, env)?;
                 test_expr.resolve_syms(prog, fun, env)?;
-                incr_expr.resolve_syms(prog, fun, env)?;
+                incr_stmt.resolve_syms(prog, fun, env)?;
                 body_stmt.resolve_syms(prog, fun, env)?;
                 env.pop_scope();
             }
@@ -615,40 +646,9 @@ impl ExprBox
                 child.resolve_syms(prog, fun, env)?;
             }
 
-            Expr::Binary { op, lhs, rhs, .. } => {
+            Expr::Binary { lhs, rhs, .. } => {
                 lhs.resolve_syms(prog, fun, env)?;
                 rhs.resolve_syms(prog, fun, env)?;
-
-                // If this is an assignment to a constant
-                if *op == BinOp::Assign {
-                    match lhs.expr.as_ref() {
-                        // Detect assignments to immutable variables
-                        Expr::Ref { name, decl } => {
-                            if !decl.is_mutable() {
-                                return ParseError::with_pos(
-                                    &format!("assignment to immutable variable `{}`, use `let var` to declare mutable variables", name),
-                                    &self.pos
-                                );
-                            }
-                        }
-
-                        // Keep track of fields being assigned in class methods
-                        Expr::Member { field, .. } => {
-                            if let Some(class) = prog.classes.get_mut(&fun.class_id) {
-                                class.reg_field(field);
-
-                                if class.fields.len() > u16::MAX.into() {
-                                    return ParseError::with_pos(
-                                        &format!("too many fields in class `{}`", class.name),
-                                        &self.pos
-                                    );
-                                }
-                            }
-                        }
-
-                        _ => {}
-                    }
-                }
             }
 
             Expr::Ternary { test_expr, then_expr, else_expr, .. } => {

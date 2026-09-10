@@ -3290,10 +3290,10 @@ mod tests
         eval_eq("fun f() { let var n = 0; return || n; } let c = f(); return c();", Value::fixnum(0));
 
         // Write mutable captured variable
-        eval_eq("fun f() { let var n = 0; return || n = 1; } let c = f(); return c();", Value::fixnum(1));
+        eval_eq("fun f() { let var n = 0; return || { n = 1; return n; }; } let c = f(); return c();", Value::fixnum(1));
 
         // Counter
-        eval_eq("fun f() { let var n = 0; return || ++n; } let c = f(); c(); return c();", Value::fixnum(2));
+        eval_eq("fun f() { let var n = 0; return || { ++n; return n; }; } let c = f(); c(); return c();", Value::fixnum(2));
     }
 
     #[test]

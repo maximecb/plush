@@ -68,6 +68,24 @@ let var y = 20;      // Mutable variable
 y = 30;              // Reassigning a mutable variable
 ```
 
+Assignment is a statement, not an expression. It changes its target but does not produce a value. This
+prevents an assignment accidentally being used where a comparison was intended, such as writing `=`
+instead of `==` in a condition.
+
+```plush
+let var flag = false;
+flag = true;          // Valid assignment statement
+if (flag == true) {}  // Valid comparison
+
+// Invalid: assignment cannot be used as an expression
+// if (flag = true) {}
+// let result = (flag = true);
+```
+
+Compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `<<=`, `>>=`, `&=`, `^=`, and `|=`) are also
+statements. Prefix increment and decrement, `++target` and `--target`, follow the same rule. Postfix
+increment and decrement are not supported.
+
 Loop counters, which are mutable, must be declared with `let var`, e.g.
 
 ```plush
@@ -122,6 +140,14 @@ while (i < 10) {
     $println(i);
     i = i + 1;
 }
+```
+
+The third clause of a `for` loop accepts either an expression statement or an assignment statement. The
+statement's trailing semicolon is omitted inside the loop header.
+
+```plush
+for (let var i = 0; i < 10; i = i + 1) {}
+for (; should_continue(); advance()) {}
 ```
 
 The `loop` statement is an infinite loop, equivalent to `while (true)`:

@@ -287,6 +287,12 @@ fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseE
     let ch = input.peek_ch();
     let pos = input.get_pos();
 
+    if input.peek_str("++") || input.peek_str("--") {
+        return input.parse_error(
+            "increment and decrement are statements and cannot be used as expressions"
+        );
+    }
+
     // Unary not expression (bitwise or logical not)
     if ch == '!' {
         input.eat_ch();
@@ -298,52 +304,6 @@ fn parse_prefix(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseE
                 child
             },
             pos,
-        );
-    }
-
-    // Pre-increment expression
-    if input.match_token("++")? {
-        let sub_expr = parse_prefix(input, prog)?;
-        check_assign_target(&sub_expr)?;
-
-        // Transform into i = i + 1
-        return ExprBox::new_ok(
-            Expr::Binary {
-                op: BinOp::Assign,
-                lhs: sub_expr.clone(),
-                rhs: ExprBox::new(
-                    Expr::Binary{
-                        op: BinOp::Add,
-                        lhs: sub_expr.clone(),
-                        rhs: ExprBox::new(Expr::Int64(1), sub_expr.pos)
-                    },
-                    sub_expr.pos
-                )
-            },
-            sub_expr.pos
-        );
-    }
-
-    // Pre-decrement expression
-    if input.match_token("--")? {
-        let sub_expr = parse_prefix(input, prog)?;
-        check_assign_target(&sub_expr)?;
-
-        // Transform into i = i - 1
-        return ExprBox::new_ok(
-            Expr::Binary {
-                op: BinOp::Assign,
-                lhs: sub_expr.clone(),
-                rhs: ExprBox::new(
-                    Expr::Binary{
-                        op: BinOp::Sub,
-                        lhs: sub_expr.clone(),
-                        rhs: ExprBox::new(Expr::Int64(1), sub_expr.pos)
-                    },
-                    sub_expr.pos
-                )
-            },
-            sub_expr.pos
         );
     }
 
@@ -661,7 +621,6 @@ struct OpInfo
     op_str: &'static str,
     prec: usize,
     op: BinOp,
-    assign: bool,
 }
 
 /// Binary operators and their precedence level
@@ -669,50 +628,77 @@ struct OpInfo
 /// https://en.cppreference.com/w/c/language/operator_precedence
 /// Note that operators that share some prefix (e.g. &, &&) must be ordered
 /// with the longer operator first.
-const BIN_OPS: [OpInfo; 29] = [
-    // Arithmetic assignment operators
-    OpInfo { op_str: "*=",  prec: 3, op: BinOp::Mul, assign: true },
-    OpInfo { op_str: "/=",  prec: 3, op: BinOp::Div, assign: true },
-    OpInfo { op_str: "%=",  prec: 3, op: BinOp::Mod, assign: true },
-    OpInfo { op_str: "+=",  prec: 4, op: BinOp::Add, assign: true },
-    OpInfo { op_str: "-=",  prec: 4, op: BinOp::Sub, assign: true },
-
-    OpInfo { op_str: "<<=", prec: 5, op: BinOp::LShift, assign: true },
-    OpInfo { op_str: ">>=", prec: 5, op: BinOp::RShift, assign: true },
-
-    OpInfo { op_str: "&=", prec: 8, op: BinOp::BitAnd, assign: true },
-    OpInfo { op_str: "^=", prec: 9, op: BinOp::BitXor, assign: true },
-    OpInfo { op_str: "|=", prec: 10, op: BinOp::BitOr, assign: true },
-
+const BIN_OPS: [OpInfo; 18] = [
     // Arithmetic operators
-    OpInfo { op_str: "*", prec: 3, op: BinOp::Mul, assign: false },
-    OpInfo { op_str: "/", prec: 3, op: BinOp::Div, assign: false },
-    OpInfo { op_str: "%", prec: 3, op: BinOp::Mod, assign: false },
-    OpInfo { op_str: "+", prec: 4, op: BinOp::Add, assign: false },
-    OpInfo { op_str: "-", prec: 4, op: BinOp::Sub, assign: false },
+    OpInfo { op_str: "*", prec: 3, op: BinOp::Mul },
+    OpInfo { op_str: "/", prec: 3, op: BinOp::Div },
+    OpInfo { op_str: "%", prec: 3, op: BinOp::Mod },
+    OpInfo { op_str: "+", prec: 4, op: BinOp::Add },
+    OpInfo { op_str: "-", prec: 4, op: BinOp::Sub },
 
-    OpInfo { op_str: "<<", prec: 5, op: BinOp::LShift, assign: false },
-    OpInfo { op_str: ">>", prec: 5, op: BinOp::RShift, assign: false },
+    OpInfo { op_str: "<<", prec: 5, op: BinOp::LShift },
+    OpInfo { op_str: ">>", prec: 5, op: BinOp::RShift },
 
-    OpInfo { op_str: "<=", prec: 6, op: BinOp::Le, assign: false },
-    OpInfo { op_str: "<" , prec: 6, op: BinOp::Lt, assign: false },
-    OpInfo { op_str: ">=", prec: 6, op: BinOp::Ge, assign: false },
-    OpInfo { op_str: ">" , prec: 6, op: BinOp::Gt, assign: false },
-    OpInfo { op_str: "==", prec: 7, op: BinOp::Eq, assign: false },
-    OpInfo { op_str: "!=", prec: 7, op: BinOp::Ne, assign: false },
+    OpInfo { op_str: "<=", prec: 6, op: BinOp::Le },
+    OpInfo { op_str: "<" , prec: 6, op: BinOp::Lt },
+    OpInfo { op_str: ">=", prec: 6, op: BinOp::Ge },
+    OpInfo { op_str: ">" , prec: 6, op: BinOp::Gt },
+    OpInfo { op_str: "==", prec: 7, op: BinOp::Eq },
+    OpInfo { op_str: "!=", prec: 7, op: BinOp::Ne },
 
     // Logical AND, logical OR
     // We place these before bitwise ops because they are longer tokens
-    OpInfo { op_str: "&&", prec: 11, op: BinOp::And, assign: false },
-    OpInfo { op_str: "||", prec: 12, op: BinOp::Or, assign: false },
+    OpInfo { op_str: "&&", prec: 11, op: BinOp::And },
+    OpInfo { op_str: "||", prec: 12, op: BinOp::Or },
 
-    OpInfo { op_str: "&", prec: 8, op: BinOp::BitAnd, assign: false },
-    OpInfo { op_str: "^", prec: 9, op: BinOp::BitXor, assign: false },
-    OpInfo { op_str: "|", prec: 10, op: BinOp::BitOr, assign: false },
-
-    // Assignment operator, evaluates right to left
-    OpInfo { op_str: "=", prec: 14, op: BinOp::Assign, assign: true },
+    OpInfo { op_str: "&", prec: 8, op: BinOp::BitAnd },
+    OpInfo { op_str: "^", prec: 9, op: BinOp::BitXor },
+    OpInfo { op_str: "|", prec: 10, op: BinOp::BitOr },
 ];
+
+struct AssignOpInfo
+{
+    op_str: &'static str,
+    op: Option<BinOp>,
+}
+
+const ASSIGN_OPS: [AssignOpInfo; 11] = [
+    AssignOpInfo { op_str: "<<=", op: Some(BinOp::LShift) },
+    AssignOpInfo { op_str: ">>=", op: Some(BinOp::RShift) },
+    AssignOpInfo { op_str: "*=", op: Some(BinOp::Mul) },
+    AssignOpInfo { op_str: "/=", op: Some(BinOp::Div) },
+    AssignOpInfo { op_str: "%=", op: Some(BinOp::Mod) },
+    AssignOpInfo { op_str: "+=", op: Some(BinOp::Add) },
+    AssignOpInfo { op_str: "-=", op: Some(BinOp::Sub) },
+    AssignOpInfo { op_str: "&=", op: Some(BinOp::BitAnd) },
+    AssignOpInfo { op_str: "^=", op: Some(BinOp::BitXor) },
+    AssignOpInfo { op_str: "|=", op: Some(BinOp::BitOr) },
+    AssignOpInfo { op_str: "=", op: None },
+];
+
+fn peek_assign_op(input: &Lexer) -> bool
+{
+    ASSIGN_OPS.iter().any(|op| {
+        input.peek_str(op.op_str) && (op.op_str != "=" || !input.peek_str("=="))
+    })
+}
+
+fn match_assign_op(input: &mut Lexer) -> Result<Option<AssignOpInfo>, ParseError>
+{
+    input.eat_ws()?;
+
+    for op in ASSIGN_OPS {
+        if op.op_str == "=" && input.peek_str("==") {
+            continue;
+        }
+
+        if input.match_token(op.op_str)? {
+            return Ok(Some(op));
+        }
+    }
+
+    Ok(None)
+}
 
 /// Precedence level of the ternary operator (a? b:c)
 const TERNARY_PREC: usize = 13;
@@ -720,6 +706,14 @@ const TERNARY_PREC: usize = 13;
 /// Try to match a binary operator in the input
 fn match_bin_op(input: &mut Lexer) -> Result<Option<OpInfo>, ParseError>
 {
+    input.eat_ws()?;
+
+    // Leave assignment operators for statement parsing. This also keeps
+    // the shorter arithmetic operators from consuming their prefixes.
+    if peek_assign_op(input) {
+        return Ok(None);
+    }
+
     for op_info in BIN_OPS {
         if input.match_token(op_info.op_str)? {
             return Ok(Some(op_info));
@@ -733,6 +727,20 @@ fn match_bin_op(input: &mut Lexer) -> Result<Option<OpInfo>, ParseError>
 /// This uses the shunting yard algorithm to parse infix expressions:
 /// https://en.wikipedia.org/wiki/Shunting_yard_algorithm
 fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseError>
+{
+    parse_expr_inner(input, prog, false)
+}
+
+fn parse_expr_before_assignment(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseError>
+{
+    parse_expr_inner(input, prog, true)
+}
+
+fn parse_expr_inner(
+    input: &mut Lexer,
+    prog: &mut Program,
+    allow_assignment: bool,
+) -> Result<ExprBox, ParseError>
 {
     // Operator stack
     let mut op_stack: Vec<OpInfo> = Vec::default();
@@ -805,57 +813,15 @@ fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
 
         // If no operator could be matched, stop
         if new_op.is_none() {
-            break;
-        }
-        let new_op = new_op.unwrap();
-
-        // If the operator is some kind of assignment operator (=, +=, etc.)
-        if new_op.assign == true {
-            // The lhs has to be a whole operand, so a pending operator
-            // means it is part of a larger expression, as in `a * b = c`
-            if !op_stack.is_empty() {
+            if peek_assign_op(input) && !allow_assignment {
                 return input.parse_error(
-                    "the left-hand side of an assignment cannot be a binary expression"
+                    "assignment is a statement and cannot be used as an expression"
                 );
             }
 
-            // Assignment operators evaluates right-to-left.
-            // Recursively parse the rhs expression,
-            // forcing it to be evaluated before the lhs
-            let rhs = parse_expr(input, prog)?;
-            let lhs = expr_stack.pop().unwrap();
-            check_assign_target(&lhs)?;
-
-            let pos = lhs.pos.clone();
-
-            // Arithmetic assignment operators (e.g. +=, -=)
-            // They are transformed into normal assignment operations like so:
-            //  `x += y` => `x = x + y`
-            if new_op.op != BinOp::Assign {
-                let pure_op = new_op.op; // The pure operator (e.g. BinOp::Add for +=)
-                let bin_expr = Expr::Binary {
-                    op: pure_op,
-                    lhs: lhs.clone(),
-                    rhs: rhs.clone(),
-                };
-                let assign_expr = Expr::Binary {
-                    op: BinOp::Assign,
-                    lhs,
-                    rhs: ExprBox::new(bin_expr, rhs.pos.clone()),
-                };
-                expr_stack.push(ExprBox::new(assign_expr, pos));
-                break;
-
-            } else {
-                let bin_expr = Expr::Binary {
-                    op: new_op.op,
-                    lhs,
-                    rhs,
-                };
-                expr_stack.push(ExprBox::new(bin_expr, pos));
-                break;
-            }
+            break;
         }
+        let new_op = new_op.unwrap();
 
         // Evaluate the operators with lower precedence than
         // the new operator we just read
@@ -885,6 +851,63 @@ fn parse_expr(input: &mut Lexer, prog: &mut Program) -> Result<ExprBox, ParseErr
 
     assert!(expr_stack.len() == 1);
     Ok(expr_stack.pop().unwrap())
+}
+
+/// Parse an expression statement or assignment statement.
+fn parse_expr_or_assign_stmt(input: &mut Lexer, prog: &mut Program, end_token: &str) -> Result<StmtBox, ParseError>
+{
+    input.eat_ws()?;
+    let pos = input.get_pos();
+
+    let inc_op = if input.match_token("++")? {
+        Some(BinOp::Add)
+    } else if input.match_token("--")? {
+        Some(BinOp::Sub)
+    } else {
+        None
+    };
+
+    if let Some(op) = inc_op {
+        let lhs = parse_postfix(input, prog)?;
+        check_assign_target(&lhs)?;
+        input.expect_token(end_token)?;
+
+        let rhs = ExprBox::new(
+            Expr::Binary {
+                op,
+                lhs: lhs.clone(),
+                rhs: ExprBox::new(Expr::Int64(1), lhs.pos),
+            },
+            lhs.pos,
+        );
+
+        return StmtBox::new_ok(Stmt::Assign { lhs, rhs }, pos);
+    }
+
+    let lhs = parse_expr_before_assignment(input, prog)?;
+
+    if let Some(op) = match_assign_op(input)? {
+        check_assign_target(&lhs)?;
+        let value = parse_expr(input, prog)?;
+        input.expect_token(end_token)?;
+
+        let rhs = match op.op {
+            Some(op) => ExprBox::new(
+                Expr::Binary {
+                    op,
+                    lhs: lhs.clone(),
+                    rhs: value,
+                },
+                lhs.pos,
+            ),
+            None => value,
+        };
+
+        return StmtBox::new_ok(Stmt::Assign { lhs, rhs }, pos);
+    }
+
+    input.expect_token(end_token)?;
+    StmtBox::new_ok(Stmt::Expr(lhs), pos)
 }
 
 /// Parse a block statement
@@ -996,7 +1019,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
             Stmt::For {
                 init_stmt: StmtBox::default(),
                 test_expr: ExprBox::new(Expr::True, pos),
-                incr_expr: ExprBox::default(),
+                incr_stmt: StmtBox::default(),
                 body_stmt,
             },
             pos
@@ -1017,7 +1040,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
             Stmt::For {
                 init_stmt: StmtBox::default(),
                 test_expr,
-                incr_expr: ExprBox::default(),
+                incr_stmt: StmtBox::default(),
                 body_stmt,
             },
             pos
@@ -1047,13 +1070,11 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
             expr
         };
 
-        // Increment expression
-        let incr_expr = if input.match_token(")")? {
-            ExprBox::default()
+        // Increment statement
+        let incr_stmt = if input.match_token(")")? {
+            StmtBox::default()
         } else {
-            let expr = parse_expr(input, prog)?;
-            input.expect_token(")")?;
-            expr
+            parse_expr_or_assign_stmt(input, prog, ")")?
         };
 
         // Parse the loop body
@@ -1063,7 +1084,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
             Stmt::For {
                 init_stmt,
                 test_expr,
-                incr_expr,
+                incr_stmt,
                 body_stmt,
             },
             pos
@@ -1142,14 +1163,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
         return input.parse_error("extraneous semicolon `;`");
     }
 
-    // Try to parse this as an expression statement
-    let expr = parse_expr(input, prog)?;
-    input.expect_token(";")?;
-
-    StmtBox::new_ok(
-        Stmt::Expr(expr),
-        pos,
-    )
+    parse_expr_or_assign_stmt(input, prog, ";")
 }
 
 /// Parse a function declaration
@@ -1642,6 +1656,14 @@ mod tests
         assert!(parse_program(&mut input).is_err());
     }
 
+    fn parse_fails_with(src: &str, msg: &str)
+    {
+        dbg!(src);
+        let mut input = Lexer::new(&src, "");
+        let err = parse_program(&mut input).unwrap_err();
+        assert_eq!(err.msg, msg);
+    }
+
     fn parse_file(file_name: &str)
     {
         dbg!(file_name);
@@ -1990,6 +2012,18 @@ mod tests
     {
         parse_ok("let var x = 1; x = 2;");
         parse_ok("let var x = 2; let var y = 3; x = 1; y = 2; x = x + y;");
+
+        let msg = "assignment is a statement and cannot be used as an expression";
+        parse_fails_with("let var a = 1; let b = (a = 3);", msg);
+        parse_fails_with("let var flag = false; if (flag = true) {}", msg);
+        parse_fails_with("let var a = 1; f(a = 3);", msg);
+        parse_fails_with("let var a = 1; return a = 3;", msg);
+        parse_fails_with("let var a = 1; let b = (a += 3);", msg);
+        parse_fails_with("let var a = 1; a = b = 3;", msg);
+
+        let msg = "increment and decrement are statements and cannot be used as expressions";
+        parse_fails_with("let var a = 1; let b = ++a;", msg);
+        parse_fails_with("let var a = 1; let b = --a;", msg);
     }
 
     #[test]
@@ -2057,6 +2091,8 @@ mod tests
     fn for_stmt()
     {
         parse_ok("for (let var i = 0; i < 10; ++i) {}");
+        parse_ok("for (let var i = 0; i < 10; i = i + 1) {}");
+        parse_ok("for (;; f()) {}");
         parse_ok("for (;;) {}");
 
         // Common error, don't accept
@@ -2120,11 +2156,13 @@ mod tests
 
         // These still reach the assignment with a whole operand
         parse_ok("let var a = 1; a = b + c;");
-        parse_ok("let var a = 1; a = b = c;");
         parse_ok("let var a = 1; a += b + c;");
         parse_ok("o.x[i + 1] = b * c;");
         parse_ok("(a) = b;");
-        parse_ok("a ? b : c = d;");
+
+        // Assignments cannot be nested inside expressions or assignments
+        parse_fails("let var a = 1; a = b = c;");
+        parse_fails("a ? b : c = d;");
     }
 
     #[test]

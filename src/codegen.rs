@@ -318,22 +318,17 @@ impl StmtBox
             Stmt::Expr(expr) => {
                 let top = regs.top();
 
-                match expr.expr.as_ref() {
-                    // An omitted clause, as a while loop has in place of
-                    // the init and increment a for loop would carry
-                    Expr::Nil => {}
-
-                    // For assignment expressions as statements, the
-                    // assigned value itself is not needed
-                    Expr::Binary { op: BinOp::Assign, lhs, rhs } => {
-                        gen_assign(lhs, rhs, fun, regs, cg, false)?;
-                    }
-
-                    _ => {
-                        expr.gen_code(fun, regs, cg, None)?;
-                    }
+                // Default statements stand in for omitted loop clauses
+                if !matches!(expr.expr.as_ref(), Expr::Nil) {
+                    expr.gen_code(fun, regs, cg, None)?;
                 }
 
+                regs.free_to(top);
+            }
+
+            Stmt::Assign { lhs, rhs } => {
+                let top = regs.top();
+                gen_assign(lhs, rhs, fun, regs, cg)?;
                 regs.free_to(top);
             }
 
@@ -422,7 +417,7 @@ impl StmtBox
                 }
             }
 
-            Stmt::For { init_stmt, test_expr, incr_expr, body_stmt } => {
+            Stmt::For { init_stmt, test_expr, incr_stmt, body_stmt } => {
                 // Generate code for the init statement
                 init_stmt.gen_code(fun, regs, break_idxs, cont_idxs, cg)?;
 
@@ -445,13 +440,9 @@ impl StmtBox
                 // Continue will jump here
                 let cont_idx = cg.actor.insns.len();
 
-                // Evaluate the increment expression, which a while loop
+                // Evaluate the increment statement, which a while loop
                 // does not have
-                if !matches!(incr_expr.expr.as_ref(), Expr::Nil) {
-                    let top = regs.top();
-                    incr_expr.gen_code(fun, regs, cg, None)?;
-                    regs.free_to(top);
-                }
+                incr_stmt.gen_code(fun, regs, &mut break_idxs, &mut cont_idxs, cg)?;
 
                 // Evaluate the test, and go round again if it holds
                 let test_idx = cg.actor.insns.len();
@@ -1233,12 +1224,6 @@ fn gen_bin_op(
 {
     use BinOp::*;
 
-    // Assignments are different from other kinds of expressions
-    // because we don't evaluate the lhs the same way
-    if *op == Assign {
-        return gen_assign(lhs, rhs, fun, regs, cg, true);
-    }
-
     // A mask that is one run of set bits, as the position of its lowest
     // set bit and the length of the run. Runs that reach past what a
     // fixnum holds are rejected, so the mask never needs boxing
@@ -1501,8 +1486,7 @@ fn gen_assign(
     fun: &Function,
     regs: &mut Regs,
     cg: &mut CodeGen,
-    need_value: bool,
-) -> Result<u16, ParseError>
+) -> Result<(), ParseError>
 {
     match lhs.expr.as_ref() {
         Expr::Ref { decl, .. } => {
@@ -1511,51 +1495,30 @@ fn gen_assign(
             let target = write_target(decl, fun, regs);
             let src = rhs.gen_code(fun, regs, cg, Some(target))?;
             gen_var_write(decl, fun, regs, cg, src);
-            Ok(src)
         }
 
         Expr::Member { base, field } => {
-            // The assigned value is the result of the expression, so it
-            // is allocated before the operands and outlives them
-            let d = if need_value { Some(regs.alloc()) } else { None };
-
             let top = regs.top();
             let obj = base.gen_code(fun, regs, cg, None)?;
-            let src = rhs.gen_code(fun, regs, cg, d)?;
+            let src = rhs.gen_code(fun, regs, cg, None)?;
 
             let cache = cg.actor.new_prop_cache(field);
             cg.push_insn(Insn::set_field(obj, src, cache));
-
-            if let Some(d) = d {
-                if d != src {
-                    cg.push_insn(Insn::mov(d, src));
-                }
-            }
-
             regs.free_to(top);
-            Ok(d.unwrap_or(src))
         }
 
         Expr::Index { base, index } => {
-            let d = if need_value { Some(regs.alloc()) } else { None };
-
             let top = regs.top();
             let arr = base.gen_code(fun, regs, cg, None)?;
             let idx = index.gen_code(fun, regs, cg, None)?;
-            let src = rhs.gen_code(fun, regs, cg, d)?;
+            let src = rhs.gen_code(fun, regs, cg, None)?;
 
             cg.push_insn(Insn::set_index(arr, idx, src));
-
-            if let Some(d) = d {
-                if d != src {
-                    cg.push_insn(Insn::mov(d, src));
-                }
-            }
-
             regs.free_to(top);
-            Ok(d.unwrap_or(src))
         }
 
         _ => todo!()
     }
+
+    Ok(())
 }
