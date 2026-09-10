@@ -907,6 +907,14 @@ fn parse_expr_or_assign_stmt(input: &mut Lexer, prog: &mut Program, end_token: &
     }
 
     input.expect_token(end_token)?;
+
+    if !matches!(lhs.expr.as_ref(), Expr::Call { .. }) {
+        return ParseError::with_pos(
+            "only calls can be used as expression statements",
+            &lhs.pos
+        );
+    }
+
     StmtBox::new_ok(Stmt::Expr(lhs), pos)
 }
 
@@ -1679,14 +1687,17 @@ mod tests
         parse_ok("/* Hi! */");
         parse_ok("/* Hi\nthere */");
         parse_ok("/* Hi\n/*there*/ */");
-        parse_ok("x;");
-        parse_ok("1;");
-        parse_ok("1; ");
-        parse_ok(" \"foobar\";");
-        parse_ok("'foo\tbar\nbif';");
-        parse_ok("1_000_000;");
-        parse_ok("+3;");
-        parse_ok("+3.5;");
+        let msg = "only calls can be used as expression statements";
+        parse_fails_with("x;", msg);
+        parse_fails_with("1;", msg);
+        parse_fails_with("1; ", msg);
+        parse_fails_with(" \"foobar\";", msg);
+        parse_fails_with("'foo\tbar\nbif';", msg);
+        parse_fails_with("1_000_000;", msg);
+        parse_fails_with("+3;", msg);
+        parse_fails_with("+3.5;", msg);
+        parse_fails_with("foo() + 1;", msg);
+        parse_fails_with("flag && foo();", msg);
 
         // No semicolon
         parse_fails("x");
@@ -1709,12 +1720,12 @@ mod tests
     fn infix_exprs()
     {
         // Should parse
-        parse_ok("1 + 2;");
-        parse_ok("1 + 2 * 3;");
-        parse_ok("1 + 2 + 3;");
-        parse_ok("1 + 2 + 3 + 4;");
-        parse_ok("(1) + 2 + 3 * 4;");
-        parse_ok("1 * -3;");
+        parse_ok("let x = 1 + 2;");
+        parse_ok("let x = 1 + 2 * 3;");
+        parse_ok("let x = 1 + 2 + 3;");
+        parse_ok("let x = 1 + 2 + 3 + 4;");
+        parse_ok("let x = (1) + 2 + 3 * 4;");
+        parse_ok("let x = 1 * -3;");
 
         // Should not parse
         parse_fails("1 + 2 +;");
@@ -1723,7 +1734,7 @@ mod tests
     #[test]
     fn ternary_expr()
     {
-        parse_ok("1? 2:3;");
+        parse_ok("let a = 1? 2:3;");
         parse_ok("let a = 1? (2+3):4;");
     }
 
@@ -1827,8 +1838,8 @@ mod tests
         parse_ok("foo(0,);");
         parse_ok("foo(0,1);");
         parse_ok("foo( 0 , 1 , 2 , );");
-        parse_ok("foo(0,1,2) + 3;");
-        parse_ok("foo(0,1,2) + bar();");
+        parse_ok("let x = foo(0,1,2) + 3;");
+        parse_ok("let x = foo(0,1,2) + bar();");
     }
 
     #[test]
@@ -1850,8 +1861,8 @@ mod tests
         parse_ok("fun foo() { return 0; }");
         parse_ok("fun foo() { return -2; }");
         parse_ok("fun foo() { return !1; }");
-        parse_ok("fun foo() { \"foo\"; return 77; }");
-        parse_ok("fun foo() { 333; return 77; }");
+        parse_ok("fun foo() { let s = \"foo\"; return 77; }");
+        parse_ok("fun foo() { let n = 333; return 77; }");
         parse_ok("fun foo() { return none; }");
         parse_ok("fun foo( a , b ) { return 77; }");
 
@@ -1878,7 +1889,7 @@ mod tests
         parse_ok("let x = 3;");
         parse_ok("let str = 'foo';");
         parse_ok("let x = 3; let y = 5;");
-        parse_ok("{ let x = 3; x; } let y = 4;");
+        parse_ok("{ let x = 3; foo(x); } let y = 4;");
 
         parse_ok("let x = 3;");
         parse_ok("let x = 3; return x;");
@@ -1933,8 +1944,8 @@ mod tests
         parse_ok("let a = [ 1 , 2, 3 ];");
 
         // Single and double indexing
-        parse_ok("let a = nil; a[0];");
-        parse_ok("let a = nil; a[0][0];");
+        parse_ok("let a = nil; let b = a[0];");
+        parse_ok("let a = nil; let b = a[0][0];");
         parse_ok("let a = nil; a[0][0]();");
 
         // Methods
@@ -2004,7 +2015,7 @@ mod tests
     #[test]
     fn instanceof()
     {
-        parse_ok("a instanceof Foo;");
+        parse_ok("let value = a instanceof Foo;");
     }
 
     #[test]
@@ -2095,6 +2106,11 @@ mod tests
         parse_ok("for (;; f()) {}");
         parse_ok("for (;;) {}");
 
+        parse_fails_with(
+            "for (;; i + 1) {}",
+            "only calls can be used as expression statements"
+        );
+
         // Common error, don't accept
         parse_fails("for (;;);");
     }
@@ -2110,8 +2126,8 @@ mod tests
     #[test]
     fn regress_instanceof_keyword()
     {
-        parse_ok("a instanceof Foo;");
-        parse_ok("a instanceof\nFoo;");
+        parse_ok("let value = a instanceof Foo;");
+        parse_ok("let value = a instanceof\nFoo;");
 
         // `instanceof` must not match an identifier that merely starts with it
         parse_fails("a instanceofFoo;");

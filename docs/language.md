@@ -86,6 +86,14 @@ Compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `<<=`, `>>=`, `&=`, `^=`, an
 statements. Prefix increment and decrement, `++target` and `--target`, follow the same rule. Postfix
 increment and decrement are not supported.
 
+Only function and method calls can be used as expression statements. Other expressions must be used as
+part of a declaration, assignment, condition, or return value instead of being silently discarded.
+
+```plush
+items.push(value);  // Valid call statement
+value + 1;          // Invalid: the result would be discarded
+```
+
 Loop counters, which are mutable, must be declared with `let var`, e.g.
 
 ```plush
@@ -142,8 +150,8 @@ while (i < 10) {
 }
 ```
 
-The third clause of a `for` loop accepts either an expression statement or an assignment statement. The
-statement's trailing semicolon is omitted inside the loop header.
+The third clause of a `for` loop accepts either a call statement or an assignment statement. The statement's
+trailing semicolon is omitted inside the loop header.
 
 ```plush
 for (let var i = 0; i < 10; i = i + 1) {}

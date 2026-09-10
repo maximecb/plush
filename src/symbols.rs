@@ -871,7 +871,7 @@ mod tests
         succeeds("let global_str = \"foo\"; fun main() {}");
 
         // Undefined global
-        fails("g;");
+        fails("return g;");
     }
 
     #[test]
