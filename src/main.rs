@@ -53,6 +53,21 @@ pub struct Options
     rest: Vec<String>,
 }
 
+fn print_usage()
+{
+    println!("Usage:");
+    println!("  plush [OPTIONS] <FILE> [ARGS]...");
+    println!("  plush [OPTIONS] --eval <CODE>");
+    println!();
+    println!("Options:");
+    println!("  -e, --eval <CODE>         Evaluate a string of Plush code");
+    println!("      --no-exec             Parse and compile without executing");
+    println!("      --list-examples       List the available example programs");
+    println!("      --run-example <NAME>  Run an example program");
+    println!("      --version             Print the version");
+    println!("  -h, --help                Print this help");
+}
+
 // Parse the command-line arguments
 // TODO: parse permissions
 // --allow <permissions>
@@ -84,6 +99,8 @@ pub fn parse_args(args: Vec<String>) -> Options
             ($name: expr) => {{
                 if idx >= args.len() {
                     println!("Missing argument for {} command-line option", $name);
+                    println!();
+                    print_usage();
                     exit(-1);
                 }
 
@@ -95,6 +112,11 @@ pub fn parse_args(args: Vec<String>) -> Options
 
         // Try to match this argument as an option
         match arg.as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                exit(0);
+            }
+
             "--version" => {
                 println!("plush {}", env!("CARGO_PKG_VERSION"));
                 exit(0);
@@ -125,7 +147,12 @@ pub fn parse_args(args: Vec<String>) -> Options
                 break;
             }
 
-            _ => panic!("unknown option {}", arg)
+            _ => {
+                println!("Unknown command-line option: {}", arg);
+                println!();
+                print_usage();
+                exit(-1);
+            }
         }
     }
 
@@ -235,7 +262,7 @@ fn parse_input(opts: &Options) -> Program
 
     let file_name = match &opts.input_file {
         None => {
-            println!("Error: must specify exactly one input file to run");
+            print_usage();
             exit(-1);
         }
         Some(file_name) => file_name,
@@ -293,6 +320,6 @@ fn main()
 
     match ret.to_i64() {
         Some(v) => exit(v as i32),
-        None => panic!("main unit should return an integer value")
+        None => panic!("main unit returned a non-integer value")
     }
 }
