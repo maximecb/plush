@@ -108,6 +108,11 @@ Plush supports a range of arithmetic, comparison, and logical operators:
 -   **Arithmetic**: `+`, `-`, `*`, `/`, `%`
 -   **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`.
 -   **Logical**: `&&`, `||`, `!`
+-   **Bitwise**: `&`, `|`, `^`, `~`, `<<`, `>>`
+
+The shift operators work on 64-bit integers. Bits shifted past either end are dropped, so `1 << 63`
+is the most negative integer, and `>>` preserves the sign. The shift amount must be between 0 and 63,
+anything else is a runtime error.
 
 The division operator `/` always yields a floating-point value. To divide integers and stay in the integer
 domain, use the [`idiv`](#methods) method, which performs truncated division: `10.idiv(3)` is `3`.

@@ -232,6 +232,16 @@ fn int_op_error(insn: &str, divisor: i64) -> String
     }
 }
 
+/// Check that a shift amount is below the word size. Bits shifted past
+/// either end are dropped, but an amount out of range is an error
+fn shift_amount(insn: &str, amount: i64) -> Result<u32, String>
+{
+    match u32::try_from(amount) {
+        Ok(n) if n < 64 => Ok(n),
+        _ => Err(format!("shift amount {} out of range in {}", amount, insn)),
+    }
+}
+
 /// Slow path of an arithmetic instruction: integers that don't fit a
 /// fixnum, floats, and mixed operands. `$checked` is the i64 operation
 /// and `$op` the float one.
@@ -258,7 +268,7 @@ macro_rules! num_slow_path {
 }
 
 /// Slow path of an instruction that only accepts integers. `$op` is
-/// the operation, and produces None where it is undefined.
+/// the operation, and produces an error where it is undefined.
 macro_rules! int_slow_path {
     ($name: ident, $insn: literal, $op: expr) => {
         #[cold]
@@ -267,10 +277,8 @@ macro_rules! int_slow_path {
             let a = unwrap_i64!(v0, $insn);
             let b = unwrap_i64!(v1, $insn);
 
-            match ($op)(a, b) {
-                Some(r) => Ok(self.int64(r)),
-                None => Err(int_op_error($insn, b)),
-            }
+            let r: Result<i64, String> = ($op)(a, b);
+            Ok(self.int64(r?))
         }
     }
 }
@@ -1381,11 +1389,11 @@ impl Actor
     num_slow_path!(mul_slow, "mul", checked_mul, *);
     num_slow_path!(modulo_slow, "modulo", checked_rem, %);
 
-    int_slow_path!(bit_and_slow, "bit_and", |a: i64, b: i64| Some(a & b));
-    int_slow_path!(bit_or_slow, "bit_or", |a: i64, b: i64| Some(a | b));
-    int_slow_path!(bit_xor_slow, "bit_xor", |a: i64, b: i64| Some(a ^ b));
-    int_slow_path!(lshift_slow, "lshift", |a: i64, b: i64| Some(a << b));
-    int_slow_path!(rshift_slow, "rshift", |a: i64, b: i64| Some(a >> b));
+    int_slow_path!(bit_and_slow, "bit_and", |a: i64, b: i64| Ok(a & b));
+    int_slow_path!(bit_or_slow, "bit_or", |a: i64, b: i64| Ok(a | b));
+    int_slow_path!(bit_xor_slow, "bit_xor", |a: i64, b: i64| Ok(a ^ b));
+    int_slow_path!(lshift_slow, "lshift", |a: i64, b: i64| shift_amount("lshift", b).map(|b| a << b));
+    int_slow_path!(rshift_slow, "rshift", |a: i64, b: i64| shift_amount("rshift", b).map(|b| a >> b));
 
     /// Call a host function, checking that it takes the number of
     /// arguments the call site passes. Only the dynamic method lookup
@@ -3432,6 +3440,54 @@ mod tests
     fn int_overflow()
     {
         eval("return 4611686018427387904 * 4;");
+    }
+
+    #[test]
+    fn shift_amount_range()
+    {
+        assert_eq!(shift_amount("lshift", 0), Ok(0));
+        assert_eq!(shift_amount("lshift", 63), Ok(63));
+        assert!(shift_amount("lshift", 64).is_err());
+        assert!(shift_amount("rshift", -1).is_err());
+        assert!(shift_amount("rshift", i64::MIN).is_err());
+        assert!(shift_amount("rshift", 1 << 32).is_err());
+    }
+
+    // An amount out of range is reported as a runtime error, whose panic
+    // is explicit, rather than tripping Rust's shift overflow check
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn lshift_amount_too_big()
+    {
+        eval("let n = 64; return 1 << n;");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn lshift_amount_negative()
+    {
+        eval("let n = -1; return 1 << n;");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn rshift_amount_const()
+    {
+        eval("let x = 5; return x >> 64;");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn rshift_amount_boxed()
+    {
+        eval("let x = 1 << 62; return x >> 64;");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn rshift_mask_amount()
+    {
+        eval("let x = 0xABCD; return (x >> 64) & 0xFF;");
     }
 
     #[test]
