@@ -1323,10 +1323,22 @@ fn parse_lambda(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<Fu
 }
 
 /// Parse a class declaration
-fn parse_class(input: &mut Lexer, prog: &mut Program, pos: SrcPos) -> Result<(String, ClassId), ParseError>
+fn parse_class(
+    input: &mut Lexer,
+    prog: &mut Program,
+    classes: &HashMap<String, ClassId>,
+    pos: SrcPos
+) -> Result<(String, ClassId), ParseError>
 {
     input.eat_ws()?;
     let class_name = parse_name(input)?;
+
+    if classes.contains_key(&class_name) {
+        return ParseError::with_pos(
+            &format!("duplicate class name \"{}\"", class_name),
+            &pos
+        );
+    }
 
     // Parse the parent class name if present
     let parent_name = if input.match_keyword("extends")? {
@@ -1519,7 +1531,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         }
 
         if input.match_keyword("class")? {
-            let (name, id) = parse_class(input, prog, pos)?;
+            let (name, id) = parse_class(input, prog, &classes, pos)?;
             classes.insert(name, id);
             stmts.push(StmtBox::new(
                 Stmt::ClassDecl { class_id: id },
@@ -2067,6 +2079,11 @@ mod tests
         parse_ok("class Foo { init(self) { self.x = 1; } inc(self) { ++self.x; } }");
         parse_ok("let o = Foo();");
         parse_ok("let o = Foo(1, 2, 3);");
+
+        parse_fails_with(
+            "class Foo {} class Foo {}",
+            "duplicate class name \"Foo\""
+        );
 
         // A repeated method name silently overwrote the earlier one
         parse_fails("class Foo { m(self) {} m(self) {} }");
