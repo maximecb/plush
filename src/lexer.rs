@@ -190,7 +190,8 @@ pub fn is_reserved(ident: &str) -> bool
 
         // Reserved for future use
         "try" | "catch" | "finally" | "throw" |
-        "yield" | "do" | "in" | "match"
+        "yield" | "do" | "in" | "match" |
+        "export"
     )
 }
 
