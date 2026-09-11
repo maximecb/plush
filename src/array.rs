@@ -184,12 +184,12 @@ impl Array
         self.set_len(len + 1);
     }
 
-    pub fn remove(&mut self, idx: usize) -> Value
+    pub fn remove(&mut self, idx: usize) -> HostResult
     {
         let len = self.len();
 
         if idx >= len {
-            return Value::NIL;
+            error!("index {} out of bounds for array of length {}", idx, len);
         }
 
         let elems = self.elems_mut();
@@ -198,7 +198,7 @@ impl Array
 
         self.set_len(len - 1);
         self.clear_slot(len - 1);
-        removed
+        Ok(removed)
     }
 
     /// Copy the `[start, end)` range of this array into a new array
@@ -244,18 +244,18 @@ impl Array
         self.set_len(new_len);
     }
 
-    pub fn pop(&mut self) -> Value
+    pub fn pop(&mut self) -> HostResult
     {
         let len = self.len();
 
         if len == 0 {
-            return Value::NIL;
+            error!("cannot pop from an empty array");
         }
 
         self.set_len(len - 1);
         let popped = unsafe { *self.elems.add(len - 1) };
         self.clear_slot(len - 1);
-        popped
+        Ok(popped)
     }
 
     /// Clear a slot past the end of the array. The collector scans the
@@ -297,13 +297,13 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> HostRe
 
 pub fn array_pop(_actor: &mut Actor, array: Value) -> HostResult
 {
-    Ok(unwrap_arr!(array).pop())
+    unwrap_arr!(array).pop()
 }
 
 pub fn array_remove(_actor: &mut Actor, array: Value, idx: Value) -> HostResult
 {
     let idx = unwrap_usize!(idx);
-    Ok(unwrap_arr!(array).remove(idx))
+    unwrap_arr!(array).remove(idx)
 }
 
 pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val: Value) -> HostResult

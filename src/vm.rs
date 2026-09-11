@@ -3567,6 +3567,20 @@ mod tests
     }
 
     #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn array_remove_past_len_is_a_host_error()
+    {
+        eval("[1, 2].remove(5);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn array_pop_empty_is_a_host_error()
+    {
+        eval("[].pop();");
+    }
+
+    #[test]
     fn bytearray()
     {
         eval("let a = ByteArray.with_size(0);");
