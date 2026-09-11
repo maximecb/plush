@@ -485,6 +485,16 @@ fn is_safe_path(file_path: &str) -> bool
     let cwd = canonicalize(&cwd).unwrap();
     //println!("Canonical cwd: {:?}", cwd);
 
+    let home = std::env::home_dir()
+        .and_then(|home| canonicalize(home).ok());
+
+    // Treat the home directory itself as an unsafe sandbox root
+    if let Some(home) = home {
+        if cwd == home && file_path.starts_with(home) {
+            return false;
+        }
+    }
+
     // If the file path is inside the current working directory, allow access
     if file_path.starts_with(cwd) {
         return true;
@@ -527,6 +537,34 @@ fn is_safe_path(file_path: &str) -> bool
 mod tests
 {
     use crate::host::is_safe_path;
+
+    #[test]
+    fn home_directory_is_not_an_allowed_cwd()
+    {
+        const CHILD_ENV: &str = "PLUSH_TEST_HOME_CWD";
+
+        let Some(home) = std::env::home_dir() else {
+            return;
+        };
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+            let home = std::fs::canonicalize(home).unwrap();
+            assert_eq!(cwd, home);
+            assert!(!is_safe_path(".ssh/id_ed25519"));
+            return;
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("host::tests::home_directory_is_not_an_allowed_cwd")
+            .env(CHILD_ENV, "1")
+            .current_dir(home)
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+    }
 
     #[test]
     fn safe_path()
