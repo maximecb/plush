@@ -195,14 +195,47 @@ impl ByteArray
         }
     }
 
-    /// Copy bytes from another bytearray
-    pub fn memcpy(&mut self, dst_idx: usize, src: &ByteArray, src_idx: usize, num_bytes: usize)
+    /// Copy bytes from another region from another or from the same bytearray
+    /// The regions must be non-overlapping
+    fn memcpy(
+        &mut self,
+        dst_idx: usize,
+        src_bytes: *const u8,
+        src_len: usize,
+        src_idx: usize,
+        num_bytes: usize
+    ) -> HostResult
     {
-        // TODO: make sure the slices don't overlap
+        let src_end = match src_idx.checked_add(num_bytes) {
+            Some(end) if end <= src_len => end,
+            _ => error!(
+                "source range starting at {} with length {} is out of bounds for a ByteArray of length {}",
+                src_idx, num_bytes, src_len
+            )
+        };
 
-        let src_slice = unsafe { src.get_slice::<u8>(src_idx, num_bytes) };
-        let dst_slice = unsafe { self.get_slice_mut::<u8>(dst_idx, num_bytes) };
-        dst_slice.copy_from_slice(src_slice);
+        let dst_len = self.num_bytes();
+        let dst_end = match dst_idx.checked_add(num_bytes) {
+            Some(end) if end <= dst_len => end,
+            _ => error!(
+                "destination range starting at {} with length {} is out of bounds for a ByteArray of length {}",
+                dst_idx, num_bytes, dst_len
+            )
+        };
+
+        if self.bytes == src_bytes as *mut u8 && src_end > dst_idx && dst_end > src_idx {
+            error!("source and destination ranges overlap");
+        }
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                src_bytes.add(src_idx),
+                self.bytes.add(dst_idx),
+                num_bytes
+            );
+        }
+
+        Ok(Value::NIL)
     }
 
     /// Append bytes, growing the backing table when necessary. The bytearray
@@ -635,15 +668,17 @@ pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult
 
 pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> HostResult
 {
-    let dst = unwrap_ba!(dst);
-
-    let src = unwrap_ba!(src);
-
     let src_idx = unwrap_usize!(src_idx);
     let dst_idx = unwrap_usize!(dst_idx);
     let num_bytes = unwrap_usize!(num_bytes);
-    dst.memcpy(dst_idx, src, src_idx, num_bytes);
-    Ok(Value::NIL)
+
+    let (src_bytes, src_len) = {
+        let src = unwrap_ba!(src);
+        (src.bytes as *const u8, src.num_bytes())
+    };
+
+    let dst = unwrap_ba!(dst);
+    dst.memcpy(dst_idx, src_bytes, src_len, src_idx, num_bytes)
 }
 
 pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> HostResult

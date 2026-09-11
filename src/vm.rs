@@ -3625,6 +3625,13 @@ mod tests
     }
 
     #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn bytearray_memcpy_overlap_is_a_host_error()
+    {
+        eval("let a = ByteArray.with_size(8); a.memcpy(2, a, 0, 4);");
+    }
+
+    #[test]
     fn classes()
     {
         eval("class Foo {}");
