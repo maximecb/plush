@@ -23,6 +23,9 @@ STAIR_RUNS = ((10.0, 14.0), (15.0, 19.0))
 STAIR_Z0 = -1.0
 STAIR_Z1 = 7.0
 STEP_RISE = 0.2
+STREET_LIGHT_XS = (-36.0, -12.0, 12.0, 36.0)
+STREET_LIGHT_Z = -34.12
+STREET_LIGHT_HEIGHT = 6.5
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = REPO_ROOT / "examples" / "data" / "skyscraper.map"
@@ -71,6 +74,21 @@ class MapWriter:
         self.lines.append(
             f"light x={number(x)} y={number(y)} z={number(z)} "
             f"radius={number(radius)} brightness={number(brightness)}"
+        )
+
+    def prism(
+        self,
+        cx: float,
+        cz: float,
+        radius: float,
+        y0: float,
+        y1: float,
+        sides: int,
+        options: str,
+    ) -> None:
+        self.lines.append(
+            f"prism cx={number(cx)} cz={number(cz)} radius={number(radius)} "
+            f"y0={number(y0)} y1={number(y1)} sides={sides} rot=0 {options}"
         )
 
     def render(self) -> str:
@@ -151,6 +169,38 @@ def add_site(out: MapWriter) -> None:
             "tex=stone_large top=floor_dirt scale=20",
         )
 
+    out.line("// Street lights along the building-side pavement")
+    pole = "tex=metal_dark scale=50 light=7"
+    lamp = "tex=metal_dark bottom=light_square light=15 fit"
+    for x in STREET_LIGHT_XS:
+        out.box(
+            x - 0.12,
+            GROUND_Y,
+            STREET_LIGHT_Z - 0.12,
+            x + 0.12,
+            GROUND_Y + STREET_LIGHT_HEIGHT,
+            STREET_LIGHT_Z + 0.12,
+            pole,
+        )
+        out.box(
+            x - 0.12,
+            GROUND_Y + STREET_LIGHT_HEIGHT - 0.2,
+            -37.25,
+            x + 0.12,
+            GROUND_Y + STREET_LIGHT_HEIGHT,
+            STREET_LIGHT_Z,
+            pole,
+        )
+        out.box(
+            x - 0.45,
+            GROUND_Y + STREET_LIGHT_HEIGHT - 0.4,
+            -37.55,
+            x + 0.45,
+            GROUND_Y + STREET_LIGHT_HEIGHT - 0.2,
+            -36.75,
+            lamp,
+        )
+
 
 def add_lighting(out: MapWriter, upper_floors: int) -> None:
     out.section("Baked lighting for the site, lobby, and each upper floor")
@@ -159,15 +209,24 @@ def add_lighting(out: MapWriter, upper_floors: int) -> None:
     for floor in range(upper_floors):
         floor_y = GROUND_Y + LOBBY_HEIGHT + floor * FLOOR_HEIGHT
         out.light(-6.0, floor_y + 2.8, 4.0, 46.0, 0.95)
+    for x in STREET_LIGHT_XS:
+        out.light(
+            x,
+            GROUND_Y + STREET_LIGHT_HEIGHT - 0.5,
+            -37.15,
+            24.0,
+            0.375,
+        )
 
 
 def add_floor_plate(
     out: MapWriter,
     y: float,
     stair_openings: tuple[tuple[float, float], ...] = (),
+    top_texture: str = "carpet_blue",
 ) -> None:
     options = (
-        "tex=concrete_white top=carpet_blue bottom=ceiling_tile "
+        f"tex=concrete_white top={top_texture} bottom=ceiling_tile "
         "scale=100"
     )
     y0 = y - SLAB_THICKNESS
@@ -189,7 +248,7 @@ def add_lobby(out: MapWriter) -> None:
     add_floor_plate(out, GROUND_Y)
 
     wall = "tex=concrete_white scale=80"
-    glass = "tex=glass_blue light=9 alpha=0.18 fit"
+    glass = "tex=glass_blue light=9 alpha=0.23 fit"
     lobby_top = GROUND_Y + LOBBY_HEIGHT
     entrance_top = GROUND_Y + 3.6
     out.box(
@@ -259,6 +318,11 @@ def add_lobby(out: MapWriter) -> None:
             "tex=metal_plate scale=50",
         )
 
+    out.line("// Reception desk")
+    reception = "tex=wood top=marble_white scale=90"
+    out.box(-4.0, GROUND_Y, -11.0, 4.0, GROUND_Y + 1.05, -10.0, reception)
+    out.box(3.0, GROUND_Y, -10.0, 4.0, GROUND_Y + 1.05, -7.0, reception)
+
 
 def add_perimeter_band(out: MapWriter, y: float) -> None:
     options = "tex=concrete_white scale=70"
@@ -304,7 +368,7 @@ def add_perimeter_band(out: MapWriter, y: float) -> None:
 
 
 def add_glass_storey(out: MapWriter, y0: float, y1: float) -> None:
-    options = "tex=glass_grey light=9 alpha=0.16 fit"
+    options = "tex=glass_grey light=9 alpha=0.21 fit"
     pane_bottom = y0 + 0.65
     pane_top = y1 - 0.2
     inset = 0.12
@@ -344,6 +408,108 @@ def add_glass_storey(out: MapWriter, y0: float, y1: float) -> None:
         BUILDING_Z1 - inset,
         options,
     )
+
+
+def add_desk(out: MapWriter, floor_y: float, center_x: float, z0: float) -> None:
+    desk_y = floor_y + 0.86
+    out.box(
+        center_x - 1.8,
+        floor_y,
+        z0,
+        center_x + 1.8,
+        desk_y,
+        z0 + 1.2,
+        "tex=metal_01 top=wood scale=80 light=8",
+    )
+    out.box(
+        center_x - 0.4,
+        desk_y,
+        z0 + 0.66,
+        center_x + 0.4,
+        desk_y + 0.62,
+        z0 + 0.82,
+        "tex=asphalt_02 nz=monitor light=13 fit",
+    )
+
+
+def add_office_front(
+    out: MapWriter,
+    floor_y: float,
+    ceiling_y: float,
+    x0: float,
+    x1: float,
+) -> None:
+    partition_z0 = 15.0
+    partition_z1 = 15.24
+    partition_top = ceiling_y - SLAB_THICKNESS
+    door_x1 = x1 - 0.7
+    door_x0 = door_x1 - 1.4
+    window_x0 = x0 + 0.35
+    window_x1 = door_x0 - 0.25
+    wall = "tex=beigewall scale=80 light=8"
+    frame = "tex=metal_plate scale=50 light=8"
+    glass = "tex=glass_grey light=9 alpha=0.20 fit"
+
+    out.box(x0, floor_y, partition_z0, window_x0, partition_top, partition_z1, wall)
+    out.box(window_x0, floor_y, partition_z0, window_x1, floor_y + 0.75, partition_z1, wall)
+    out.box(
+        window_x0,
+        floor_y + 0.75,
+        partition_z0 + 0.08,
+        window_x1,
+        partition_top - 0.35,
+        partition_z0 + 0.14,
+        glass,
+    )
+    out.box(
+        window_x0,
+        partition_top - 0.35,
+        partition_z0,
+        window_x1,
+        partition_top,
+        partition_z1,
+        wall,
+    )
+    out.box(window_x1, floor_y, partition_z0, door_x0, partition_top, partition_z1, frame)
+    out.box(door_x1, floor_y, partition_z0, x1, partition_top, partition_z1, wall)
+    out.box(
+        door_x0,
+        floor_y + 2.5,
+        partition_z0,
+        door_x1,
+        partition_top,
+        partition_z1,
+        wall,
+    )
+
+
+def add_upper_floor_layout(out: MapWriter, floor_y: float, ceiling_y: float) -> None:
+    office_edges = (-23.6, -12.0, -1.0, 9.0)
+    partition_top = ceiling_y - SLAB_THICKNESS
+    wall = "tex=beigewall scale=80 light=8"
+
+    out.line("// Three enclosed offices along the rear curtain wall")
+    for office in range(len(office_edges) - 1):
+        x0 = office_edges[office]
+        x1 = office_edges[office + 1]
+        add_office_front(out, floor_y, ceiling_y, x0, x1)
+        add_desk(out, floor_y, (x0 + x1) * 0.5, 24.4)
+
+    for x in office_edges[1:]:
+        out.box(
+            x - 0.12,
+            floor_y,
+            15.24,
+            x + 0.12,
+            partition_top,
+            BUILDING_Z1 - 0.12,
+            wall,
+        )
+
+    out.line("// Open-plan work area, with the stair circulation left clear")
+    for z0 in (-14.0, -10.0, -6.0, -2.0, 2.0):
+        for center_x in (-17.0, -11.0, -5.0, 1.0):
+            add_desk(out, floor_y, center_x, z0)
 
 
 def add_stairs(
@@ -420,7 +586,12 @@ def add_mullions(out: MapWriter, upper_base: float, roof_y: float) -> None:
 
 def add_roof(out: MapWriter, roof_y: float, final_flight: int) -> None:
     out.section("Accessible roof reached by the final flight")
-    add_floor_plate(out, roof_y, (STAIR_RUNS[final_flight % len(STAIR_RUNS)],))
+    add_floor_plate(
+        out,
+        roof_y,
+        (STAIR_RUNS[final_flight % len(STAIR_RUNS)],),
+        top_texture="asphalt_02",
+    )
     options = "tex=concrete_white top=metal_01 scale=60"
     parapet_height = 1.2
     out.box(
@@ -460,6 +631,16 @@ def add_roof(out: MapWriter, roof_y: float, final_flight: int) -> None:
         options,
     )
 
+    out.line("// Rooftop mechanical equipment")
+    equipment = "tex=metal_bolted scale=60 light=8"
+    out.box(-19.0, roof_y, 16.0, -9.0, roof_y + 4.2, 24.0, equipment)
+    out.box(1.0, roof_y, 16.0, 11.0, roof_y + 4.2, 24.0, equipment)
+
+    out.line("// Communications antenna")
+    mast = "tex=metal_dark scale=50 light=8"
+    out.box(-1.8, roof_y, 4.2, 1.8, roof_y + 0.8, 7.8, "tex=metal_bolted scale=50 light=8")
+    out.prism(0.0, 6.0, 0.72, roof_y + 0.8, roof_y + 36.0, 16, mast)
+
 
 def generate(upper_floors: int) -> str:
     if upper_floors < 1:
@@ -494,6 +675,7 @@ def generate(upper_floors: int) -> str:
         add_perimeter_band(out, floor_y)
         add_glass_storey(out, floor_y, ceiling_y)
         add_stairs(out, floor_y, ceiling_y, flight=floor + 1)
+        add_upper_floor_layout(out, floor_y, ceiling_y)
 
     add_mullions(out, GROUND_Y + LOBBY_HEIGHT, roof_y)
     add_roof(out, roof_y, final_flight=upper_floors)
