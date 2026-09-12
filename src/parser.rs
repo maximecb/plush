@@ -962,6 +962,21 @@ fn parse_block_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, Pa
     );
 }
 
+/// Parse a control-flow body (if/else/for/while/loop)
+fn parse_control_body(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseError>
+{
+    let stmt = parse_stmt(input, prog)?;
+
+    if matches!(stmt.stmt.as_ref(), Stmt::Let { .. }) {
+        return ParseError::with_pos(
+            "declarations in control-flow bodies must be enclosed in braces",
+            &stmt.pos,
+        );
+    }
+
+    Ok(stmt)
+}
+
 /// Parse a statement
 fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseError>
 {
@@ -1004,12 +1019,12 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
         input.expect_token(")")?;
 
         // Parse the then statement
-        let then_stmt = parse_stmt(input, prog)?;
+        let then_stmt = parse_control_body(input, prog)?;
 
         // If there is an else statement
         if input.match_keyword("else")? {
             // Parse the else statement
-            let else_stmt = parse_stmt(input, prog)?;
+            let else_stmt = parse_control_body(input, prog)?;
 
             return StmtBox::new_ok(
                 Stmt::If {
@@ -1037,7 +1052,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
     if input.match_keyword("loop")? {
 
         // Parse the loop body
-        let body_stmt = parse_stmt(input, prog)?;
+        let body_stmt = parse_control_body(input, prog)?;
 
         return StmtBox::new_ok(
             Stmt::For {
@@ -1058,7 +1073,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
         input.expect_token(")")?;
 
         // Parse the loop body
-        let body_stmt = parse_stmt(input, prog)?;
+        let body_stmt = parse_control_body(input, prog)?;
 
         return StmtBox::new_ok(
             Stmt::For {
@@ -1102,7 +1117,7 @@ fn parse_stmt(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, ParseErr
         };
 
         // Parse the loop body
-        let body_stmt = parse_stmt(input, prog)?;
+        let body_stmt = parse_control_body(input, prog)?;
 
         return StmtBox::new_ok(
             Stmt::For {
@@ -2162,6 +2177,25 @@ mod tests
         parse_ok("if (1) {} else {}");
         parse_ok("if (1) { foo(); }");
         parse_ok("if (1) { foo(); } else { bar(); }");
+    }
+
+    #[test]
+    fn control_flow_body_declarations()
+    {
+        let msg = "declarations in control-flow bodies must be enclosed in braces";
+
+        parse_fails_with("if (true) let x = 1;", msg);
+        parse_fails_with("if (true) {} else let x = 1;", msg);
+        parse_fails_with("if (true) fun f() {}", msg);
+        parse_fails_with("loop let x = 1;", msg);
+        parse_fails_with("while (true) let x = 1;", msg);
+        parse_fails_with("for (;;) let x = 1;", msg);
+
+        parse_ok("if (true) { let x = 1; }");
+        parse_ok("if (true) {} else if (false) {}");
+        parse_ok("loop { let x = 1; break; }");
+        parse_ok("while (false) { let x = 1; }");
+        parse_ok("for (let var i = 0; i < 1; ++i) { let x = i; }");
     }
 
     #[test]

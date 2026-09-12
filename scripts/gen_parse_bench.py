@@ -429,6 +429,13 @@ class Generator:
             kinds += ["loop_jump"]
         getattr(self, "stmt_" + self.rng.choice(kinds))(0)
 
+    def control_body_stmt(self):
+        """Emit a non-declaration statement that can be used without braces."""
+        kinds = ["assert", "return_stmt"]
+        if self.in_loop:
+            kinds += ["loop_jump"]
+        getattr(self, "stmt_" + self.rng.choice(kinds))(0)
+
     def stmt_return_stmt(self, depth):
         self.emit("return " + self.bound_int(self.int_expr(self.max_depth - 1)) + ";")
 
@@ -444,7 +451,7 @@ class Generator:
         else:
             self.indent += 1
             self.push_scope()
-            self.simple_stmt()
+            self.control_body_stmt()
             self.pop_scope()
             self.indent -= 1
 
