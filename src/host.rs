@@ -274,6 +274,7 @@ def_host_fns! {
         num_u32: ba_num_u32(1),
         memcpy: ba_memcpy(5),
         resize: ba_resize(2),
+        clear: ba_clear(1),
         zero_fill: ba_zero_fill(1),
         fill_u32: ba_fill_u32(4),
 

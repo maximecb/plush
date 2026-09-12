@@ -410,6 +410,7 @@ from ./font import *;
 -   **ByteArray**
     -   `with_size(size)`: Creates a new `ByteArray` of the given size.
     -   `resize(new_size)`: Resizes the `ByteArray`. If the new size is larger, the new bytes are filled with zeros.
+    -   `clear()`: Resets the length to zero and overwrites the backing data with zeros.
     -   `load_u32(byte_idx)`: Reads a 32-bit unsigned integer from the `ByteArray` at the given byte index.
     -   `store_u32(byte_idx, value)`: Writes a 32-bit unsigned integer to the `ByteArray` at the given byte index.
     -   `load_u16(byte_idx)`: Reads a 16-bit unsigned integer from the `ByteArray` at the given byte index.

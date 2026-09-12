@@ -317,9 +317,33 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResul
     }
     else {
         let ba_mut = ba.as_ba();
+        let old_len = ba_mut.num_bytes();
+
+        if new_size < old_len {
+            unsafe {
+                std::ptr::write_bytes(
+                    ba_mut.bytes.add(new_size),
+                    0,
+                    old_len - new_size
+                );
+            }
+        }
+
         ba_mut.set_num_bytes(new_size);
     }
 
+    Ok(Value::NIL)
+}
+
+pub fn ba_clear(_actor: &mut Actor, ba: Value) -> HostResult
+{
+    let ba = unwrap_ba!(ba);
+
+    unsafe {
+        std::ptr::write_bytes(ba.bytes, 0, ba.capacity());
+    }
+
+    ba.set_num_bytes(0);
     Ok(Value::NIL)
 }
 

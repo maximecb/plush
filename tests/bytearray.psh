@@ -108,6 +108,23 @@ for (let var i = 10; i < 20; ++i) {
 b6.resize(5);
 assert(b6.len == 5);
 
+// Resizing after a shrink exposes zeroed bytes
+b6[4] = 5;
+b6.resize(4);
+b6.resize(8);
+assert(b6[4] == 0);
+assert(b6[7] == 0);
+
+// Clear resets the length and zeroes the backing data
+b6[0] = 5;
+b6[7] = 5;
+b6.clear();
+assert(b6.len == 0);
+b6.resize(8);
+for (let var i = 0; i < 8; ++i) {
+    assert(b6[i] == 0);
+}
+
 // Aligned vs unaligned f32 access
 {
     let ba = ByteArray.with_size(8);

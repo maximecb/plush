@@ -589,6 +589,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "num_f32") => ba_num_u32,
         (Type::ByteArray, "memcpy") => ba_memcpy,
         (Type::ByteArray, "resize") => ba_resize,
+        (Type::ByteArray, "clear") => ba_clear,
         (Type::ByteArray, "zero_fill") => ba_zero_fill,
         (Type::ByteArray, "fill_u32") => ba_fill_u32,
 
