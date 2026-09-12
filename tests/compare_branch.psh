@@ -68,6 +68,10 @@ let pairs = [
 
     // Mixed integer and float, which compare across types
     [1, 1.0], [1, 2.0], [2.0, 1],
+    [9007199254740993, 9007199254740992.0],
+    [9007199254740992.0, 9007199254740993],
+    [-9007199254740993, -9007199254740992.0],
+    [9223372036854775807, 9223372036854775808.0],
 
     // Strings compare structurally and order lexicographically
     ["abc", "abd"], ["abd", "abc"], ["abc", "abc"], ["", "a"],
@@ -105,6 +109,12 @@ assert(ge_branch(nan, 1.0) == false);
 assert(not_lt_branch(nan, 1.0) == true);
 assert(eq_value(nan, nan) == false);
 assert(ne_value(nan, nan) == true);
+
+// Mixed comparisons retain integer precision beyond f64's consecutive range
+assert(gt_value(9007199254740993, 9007199254740992.0));
+assert(lt_value(9007199254740992.0, 9007199254740993));
+assert(lt_value(-9007199254740993, -9007199254740992.0));
+assert(lt_value(9223372036854775807, 9223372036854775808.0));
 
 // A loop whose test is NaN runs zero times, rather than forever
 assert(count_below(4.0) == 4);

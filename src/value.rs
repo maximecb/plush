@@ -720,12 +720,44 @@ fn slow_eq(a: Value, b: Value) -> bool
     if a.is_num() && b.is_num() {
         return match (a.to_i64(), b.to_i64()) {
             (Some(a), Some(b)) => a == b,
-            _ => a.num_as_f64() == b.num_as_f64(),
+            (Some(a), None) => int_float_cmp!(a, b.to_f64().unwrap(), ==),
+            (None, Some(b)) => int_float_cmp!(b, a.to_f64().unwrap(), ==),
+            (None, None) => a.to_f64().unwrap() == b.to_f64().unwrap(),
         };
     }
 
     false
 }
+
+macro_rules! int_float_cmp {
+    ($i:expr, $f:expr, $op:tt) => {{
+        // 2^63, the exclusive upper bound of i64 as an f64
+        const I64_MAX_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0;
+
+        let i = $i;
+        let f = $f;
+        let rounded = i as f64;
+
+        // Above a certain range, f64 can no longer represent consecutive
+        // integers, and multiple integers round to the same f64 value.
+        // The cast back distinguishes integers that round to the same float.
+        // The bound handles 2^63, whose saturating cast produces i64::MAX.
+        if rounded != f {
+            rounded $op f
+        } else if f >= I64_MAX_EXCLUSIVE_F64 {
+            // true:  -1i8 <  0i8
+            // true:  -1i8 <= 0i8
+            // false: -1i8 >  0i8
+            // false: -1i8 >= 0i8
+            // false: -1i8 == 0i8
+            -1i8 $op 0i8
+        } else {
+            i $op (f as i64)
+        }
+    }};
+}
+
+pub(crate) use int_float_cmp;
 
 impl fmt::Debug for Value
 {
@@ -954,6 +986,12 @@ mod tests
         assert_eq!(flo(1.0), Value::fixnum(1));
         assert_ne!(Value::fixnum(1), flo(1.5));
         assert_ne!(Value::fixnum(1), Value::NIL);
+
+        let max_exact_float_int = 9_007_199_254_740_992;
+        let rounded_int = max_exact_float_int + 1;
+        assert_eq!(Value::fixnum(max_exact_float_int), flo(9_007_199_254_740_992.0));
+        assert_ne!(Value::fixnum(rounded_int), flo(9_007_199_254_740_992.0));
+        assert_ne!(flo(9_007_199_254_740_992.0), Value::fixnum(rounded_int));
 
         // Float identities the bit pattern gets wrong on its own
         assert_eq!(flo(0.0), flo(-0.0));

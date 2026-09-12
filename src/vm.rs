@@ -285,7 +285,7 @@ macro_rules! int_slow_path {
 
 /// Slow path of a comparison: boxed integers, floats and strings
 macro_rules! cmp_slow_path {
-    ($name: ident, $insn: literal, $op: tt) => {
+    ($name: ident, $insn: literal, $op: tt, $rev_op: tt) => {
         #[cold]
         fn $name(v0: Value, v1: Value) -> Result<bool, String>
         {
@@ -294,7 +294,12 @@ macro_rules! cmp_slow_path {
             }
 
             if v0.is_num() && v1.is_num() {
-                return Ok(v0.num_as_f64() $op v1.num_as_f64());
+                return match (v0.to_i64(), v1.to_i64()) {
+                    (Some(a), None) => Ok(int_float_cmp!(a, v1.to_f64().unwrap(), $op)),
+                    (None, Some(b)) => Ok(int_float_cmp!(b, v0.to_f64().unwrap(), $rev_op)),
+                    (None, None) => Ok(v0.to_f64().unwrap() $op v1.to_f64().unwrap()),
+                    (Some(_), Some(_)) => unreachable!(),
+                };
             }
 
             if v0.is_string() && v1.is_string() {
@@ -306,10 +311,10 @@ macro_rules! cmp_slow_path {
     }
 }
 
-cmp_slow_path!(cmp_lt, "less-than", <);
-cmp_slow_path!(cmp_le, "less-than-or-equal", <=);
-cmp_slow_path!(cmp_gt, "greater-than", >);
-cmp_slow_path!(cmp_ge, "greater-than-or-equal", >=);
+cmp_slow_path!(cmp_lt, "less-than", <, >);
+cmp_slow_path!(cmp_le, "less-than-or-equal", <=, >=);
+cmp_slow_path!(cmp_gt, "greater-than", >, <);
+cmp_slow_path!(cmp_ge, "greater-than-or-equal", >=, <=);
 
 impl Actor
 {
@@ -3433,6 +3438,9 @@ mod tests
 
         // Boxed and inline representations of the same number are equal
         eval_eq("return 4611686018427387904 == 4611686018427387904.0;", Value::TRUE);
+        eval_eq("return 9007199254740993 == 9007199254740992.0;", Value::FALSE);
+        eval_eq("return 9007199254740992.0 == 9007199254740993;", Value::FALSE);
+        eval_eq("return 9223372036854775807 == 9223372036854775808.0;", Value::FALSE);
     }
 
     #[test]
