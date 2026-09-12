@@ -3536,6 +3536,7 @@ mod tests
         eval_eq("let a = [11, 22, 33]; a[2] = 44; return a[2];", Value::fixnum(44));
         eval_eq("let a = [11, 22, 33]; return a.len;", Value::fixnum(3));
         eval_eq("let a = [11, 22, 33]; a.push(44); return a.len;", Value::fixnum(4));
+        eval_eq("let a = [11, 22]; a.insert(a.len, 33); return a[2];", Value::fixnum(33));
         eval_eq("let a = Array.with_size(5, nil); return a.len;", Value::fixnum(5));
 
         // The last index is in bounds and the one past it is not, however
@@ -3579,6 +3580,13 @@ mod tests
     fn array_remove_past_len_is_a_host_error()
     {
         eval("[1, 2].remove(5);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn array_insert_past_len_is_a_host_error()
+    {
+        eval("[1, 2].insert(3, 0);");
     }
 
     #[test]

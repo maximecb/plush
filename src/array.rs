@@ -306,19 +306,24 @@ pub fn array_remove(_actor: &mut Actor, array: Value, idx: Value) -> HostResult
     unwrap_arr!(array).remove(idx)
 }
 
-pub fn array_insert(actor: &mut Actor, mut array: Value, mut idx: Value, mut val: Value) -> HostResult
+pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, mut val: Value) -> HostResult
 {
+    let idx = unwrap_usize!(idx);
     let arr = unwrap_arr!(array);
+    let len = arr.len();
+
+    if idx > len {
+        error!("index {} out of bounds for array of length {}", idx, len);
+    }
 
     if arr.len() == arr.capacity() {
         actor.gc_check(
             HEADER_SIZE + size_of::<Value>() * arr.grown_capacity(),
-            &mut [&mut array, &mut idx, &mut val]
+            &mut [&mut array, &mut val]
         )
     }
 
     let arr = array.as_arr();
-    let idx = unwrap_usize!(idx);
     arr.insert(idx, val, &mut actor.alloc);
     Ok(Value::NIL)
 }
