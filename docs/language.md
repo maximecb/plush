@@ -16,15 +16,8 @@ The Plush language has:
 - A simple TCP networking API
 - Memory safe, actor-based parallelism
 - A copying garbage-collector that runs independently for each actor
+- A very fast register-based interpreter than can even outperform Lua
 - No global VM lock
-
-Caveats and limitations:
-- Error messages and error handling need improvement
-  - You may have to look at the source code to figure things out
-  - We could use your help in improving error messages
-- May be missing functionality you're used to in other programming languages
-  - For example, not as many `String` and `Array` methods as Python or JS
-  - This is an area where you can potentially contribute
 
 If you would like to know more about the design principles and ideas behind Plush, a
 [design notes](design.md) document is also available.
