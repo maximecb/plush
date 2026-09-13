@@ -1466,6 +1466,8 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
 
         // Parse path elements
         loop {
+            // Path elements must be identifiers
+            // We explicitly don't accept ".."
             let ident = input.parse_ident()?;
             import_path += &ident;
 
