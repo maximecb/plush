@@ -969,7 +969,7 @@ fn parse_control_body(input: &mut Lexer, prog: &mut Program) -> Result<StmtBox, 
 
     if matches!(stmt.stmt.as_ref(), Stmt::Let { .. }) {
         return ParseError::with_pos(
-            "declarations in control-flow bodies must be enclosed in braces",
+            "declarations in control-flow bodies must be enclosed in curly braces",
             &stmt.pos,
         );
     }
@@ -2182,7 +2182,7 @@ mod tests
     #[test]
     fn control_flow_body_declarations()
     {
-        let msg = "declarations in control-flow bodies must be enclosed in braces";
+        let msg = "declarations in control-flow bodies must be enclosed in curly braces";
 
         parse_fails_with("if (true) let x = 1;", msg);
         parse_fails_with("if (true) {} else let x = 1;", msg);
