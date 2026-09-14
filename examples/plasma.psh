@@ -123,32 +123,21 @@ loop
     let frame_end_time = $time_current_ms();
     $println(frame_end_time - frame_start_time);
 
-	let var should_quit = false;
+    loop
+    {
+        // Check for window events
+        let msg = $actor_poll();
 
-	for(let var i = 0; i < 16; ++i)
-	{
-		//Check for window  events
-		let msg = $actor_poll();
+        if (msg == nil)
+            break;
 
-	    if (msg == nil)
-	        continue;
-			
-	    if (!(msg instanceof UIEvent))
-		    continue;
+        if (!(msg instanceof UIEvent))
+            continue;
 
-	    if (msg.kind == 'CLOSE_WINDOW')
-		    {
-			    should_quit = true;
-			    break;
-		    }
-			
-	    if (msg.kind == 'KEY_DOWN' && (msg.key == 'ESCAPE' || msg.key == 'Q'))
-		    {
-			    should_quit = true;
-			    break;
-		    }
-	}
+        if (msg.kind == 'CLOSE_WINDOW')
+            $exit(0);
 
-	if(should_quit)
-		break;
+        if (msg.kind == 'KEY_DOWN' && (msg.key == 'ESCAPE' || msg.key == 'Q'))
+            $exit(0);
+    }
 }
