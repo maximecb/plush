@@ -477,6 +477,9 @@ pub struct Program
 
     // Top-level unit function
     pub main_fn: FunId,
+
+    // True when the program is being run in the REPL
+    pub repl: bool,
 }
 
 impl Program
@@ -491,6 +494,7 @@ impl Program
             init_order: Default::default(),
             num_globals: Default::default(),
             main_fn: Default::default(),
+            repl: false,
         };
 
         crate::runtime::init_runtime(&mut prog);

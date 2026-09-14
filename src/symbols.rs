@@ -53,7 +53,7 @@ struct Scope
 
 /// Represent an environment with multiple levels of scoping
 #[derive(Default)]
-struct Env
+pub struct Env
 {
     scopes: Vec<Scope>,
 
@@ -63,6 +63,25 @@ struct Env
 
 impl Env
 {
+    /// Create an environment with the core classes defined
+    pub fn new() -> Self
+    {
+        let mut env = Env::default();
+        env.push_scope();
+
+        env.define("Int64", Decl::Class { id: INT64_ID });
+        env.define("Float64", Decl::Class { id: FLOAT64_ID });
+        env.define("String", Decl::Class { id: STRING_ID });
+        env.define("Array", Decl::Class { id: ARRAY_ID });
+        env.define("ByteArray", Decl::Class { id: BYTEARRAY_ID });
+        env.define("Dict", Decl::Class { id: DICT_ID });
+        env.define("UIEvent", Decl::Class { id: UIEVENT_ID });
+        env.define("AudioNeeded", Decl::Class { id: AUDIO_NEEDED_ID });
+        env.define("AudioData", Decl::Class { id: AUDIO_DATA_ID });
+
+        env
+    }
+
     fn push_scope(&mut self)
     {
         let num_scopes = self.scopes.len();
@@ -159,20 +178,8 @@ impl Program
 {
     pub fn resolve_syms(&mut self) -> Result<(), ParseError>
     {
-        let mut env = Env::default();
+        let mut env = Env::new();
         env.next_global_idx = self.num_globals;
-        env.push_scope();
-
-        // Register core classes
-        env.define("Int64", Decl::Class { id: INT64_ID });
-        env.define("Float64", Decl::Class { id: FLOAT64_ID });
-        env.define("String", Decl::Class { id: STRING_ID });
-        env.define("Array", Decl::Class { id: ARRAY_ID });
-        env.define("ByteArray", Decl::Class { id: BYTEARRAY_ID });
-        env.define("Dict", Decl::Class { id: DICT_ID });
-        env.define("UIEvent", Decl::Class { id: UIEVENT_ID });
-        env.define("AudioNeeded", Decl::Class { id: AUDIO_NEEDED_ID });
-        env.define("AudioData", Decl::Class { id: AUDIO_DATA_ID });
 
         // For each unit in the program
         let unit_paths: Vec<String> = self.units.keys().cloned().collect();
@@ -185,14 +192,56 @@ impl Program
         // Set the number of globals
         self.num_globals = env.next_global_idx;
 
+        let class_ids = self.classes.keys().cloned().collect();
+        self.resolve_inheritance(class_ids)
+    }
+
+    /// Resolve symbols for a unit entered in the REPL. The unit sees the
+    /// declarations of previous units, and its own top-level declarations
+    /// are kept in the environment, shadowing earlier ones
+    pub fn resolve_repl_unit(&mut self, unit_key: &str, env: &mut Env) -> Result<(), ParseError>
+    {
+        let mut unit = std::mem::take(self.units.get_mut(unit_key).unwrap());
+
+        env.next_global_idx = self.num_globals;
+        let base_scopes = env.scopes.len();
+        let result = unit.resolve_repl_syms(self, env);
+        self.num_globals = env.next_global_idx;
+
+        // Take the scopes pushed for this unit off the environment
+        let scopes = env.scopes.split_off(base_scopes);
+
+        let class_ids = unit.classes.values().cloned().collect();
+        *self.units.get_mut(unit_key).unwrap() = unit;
+        result?;
+        self.resolve_inheritance(class_ids)?;
+
+        // Merge the new declarations into the base scope
+        let base_scope = &mut env.scopes[base_scopes - 1];
+        for scope in scopes {
+            base_scope.decls.extend(scope.decls);
+        }
+
+        Ok(())
+    }
+
+    /// Copy inherited methods and fields into the given classes. Classes
+    /// outside of this set are assumed to have been processed already
+    fn resolve_inheritance(&mut self, class_ids: Vec<ClassId>) -> Result<(), ParseError>
+    {
         // Recursively process the inheritance chain for a given class
         fn process(
             class_id: ClassId,
             classes: &mut HashMap<ClassId, Class>,
-            processed: &mut HashSet<ClassId>,
+            pending: &mut HashSet<ClassId>,
             lineage: &mut HashSet<ClassId>,
         ) -> Result<(), ParseError>
         {
+            // If this class has already been processed, nothing to do
+            if !pending.contains(&class_id) {
+                return Ok(());
+            }
+
             // If we run into an inheritance loop
             if lineage.contains(&class_id) {
                 return ParseError::with_pos(
@@ -208,25 +257,21 @@ impl Program
 
             // If this class has no parent, nothing to do
             if parent_id == ClassId::default() {
+                pending.remove(&class_id);
                 return Ok(());
             }
 
-            // If the parent has not yet been processed
-            if !processed.contains(&parent_id) {
-                // Process the parent class first
-                lineage.insert(class_id);
-                process(parent_id, classes, processed, lineage)?;
-            }
+            // Process the parent class first
+            lineage.insert(class_id);
+            process(parent_id, classes, pending, lineage)?;
 
             // Clone the methods and fields of the parent
-            let mut parent_methods = classes[&parent_id].methods.clone();
-            let mut parent_fields = classes[&parent_id].fields.clone();
+            let parent = classes.get_mut(&parent_id).unwrap();
+            parent.has_children = true;
+            let mut parent_methods = parent.methods.clone();
+            let mut parent_fields = parent.fields.clone();
 
             let class = classes.get_mut(&class_id).unwrap();
-
-            if lineage.len() > 0 {
-                class.has_children = true;
-            }
 
             // Extend the set of parent methods
             parent_methods.extend(class.methods.clone());
@@ -247,35 +292,20 @@ impl Program
             class.fields = parent_fields;
 
             // Mark this class as processed
-            processed.insert(class_id);
+            pending.remove(&class_id);
 
             Ok(())
         }
 
-        // Set of classes that have been processed
-        let mut processed = HashSet::<ClassId>::default();
+        // Set of classes that have yet to be processed
+        let mut pending: HashSet<ClassId> = class_ids.iter().cloned().collect();
 
-        // For each class id
-        let classes: Vec<ClassId> = self.classes.keys().cloned().collect();
-        for class_id in classes{
-            // If this class has already been processed, skip it
-            if processed.contains(&class_id) {
-                continue;
-            }
-
-            let class = &self.classes[&class_id];
-
-            // If a class has no parent, nothing to do
-            if class.parent_id == ClassId::default() {
-                processed.insert(class_id);
-                continue;
-            }
-
-            // Process this class and its ancestors
+        // Process each class and its ancestors
+        for class_id in class_ids {
             process(
                 class_id,
                 &mut self.classes,
-                &mut processed,
+                &mut pending,
                 &mut HashSet::default(),
             )?;
         }
@@ -286,10 +316,51 @@ impl Program
 
 impl Unit
 {
+    // Resolve symbols for a regular unit
     fn resolve_syms(&mut self, prog: &mut Program, env: &mut Env) -> Result<(), ParseError>
     {
         env.push_scope();
+        self.define_imports_and_classes(prog, env)?;
 
+        // Process the unit function
+        let mut unit_fn = std::mem::take(prog.funs.get_mut(&self.unit_fn).unwrap());
+        unit_fn.resolve_syms(prog, env)?;
+
+        // Move the unit function back on the program
+        *prog.funs.get_mut(&self.unit_fn).unwrap() = unit_fn;
+
+        env.pop_scope();
+
+        Ok(())
+    }
+
+    /// Resolve symbols for a REPL unit, leaving the scopes holding its
+    /// declarations on the environment
+    fn resolve_repl_syms(&mut self, prog: &mut Program, env: &mut Env) -> Result<(), ParseError>
+    {
+        env.push_scope();
+        self.define_imports_and_classes(prog, env)?;
+
+        let mut unit_fn = std::mem::take(prog.funs.get_mut(&self.unit_fn).unwrap());
+        let mut body = std::mem::take(&mut unit_fn.body);
+
+        // Resolve the top-level statements in their own scope,
+        // but don't pop the scope afterwards
+        env.push_scope();
+        let result = match body.stmt.as_mut() {
+            Stmt::Block(stmts) => resolve_block(stmts, prog, &mut unit_fn, env),
+            _ => unreachable!(),
+        };
+
+        unit_fn.body = body;
+        *prog.funs.get_mut(&self.unit_fn).unwrap() = unit_fn;
+
+        result
+    }
+
+    /// Define the imported symbols and classes of this unit in the current scope
+    fn define_imports_and_classes(&self, prog: &Program, env: &mut Env) -> Result<(), ParseError>
+    {
         // For each import directive
         for import in &self.imports {
             let unit = &prog.units[&import.full_path];
@@ -341,17 +412,39 @@ impl Unit
             env.define(name, Decl::Class { id: *id });
         }
 
-        // Process the unit function
-        let mut unit_fn = std::mem::take(prog.funs.get_mut(&self.unit_fn).unwrap());
-        unit_fn.resolve_syms(prog, env)?;
-
-        // Move the unit function back on the program
-        *prog.funs.get_mut(&self.unit_fn).unwrap() = unit_fn;
-
-        env.pop_scope();
-
         Ok(())
     }
+}
+
+/// Resolve the statements of a block in the current scope
+fn resolve_block(
+    stmts: &mut Vec<StmtBox>,
+    prog: &mut Program,
+    fun: &mut Function,
+    env: &mut Env
+) -> Result<(), ParseError>
+{
+    // Pre-declare functions before symbols are resolved
+    // This allows referencing functions before their definition occurs
+    for stmt in stmts.iter_mut() {
+        if let Stmt::Let { mutable, var_name, init_expr, ref mut decl } = stmt.stmt.as_mut() {
+            if let Expr::Fun { fun_id, .. } = init_expr.expr.as_ref() {
+                let new_decl = if fun.is_unit && !*mutable {
+                    env.define(var_name, Decl::Fun { id: *fun_id })
+                } else {
+                    env.define_local(var_name, *mutable, fun)
+                };
+
+                *decl = Some(new_decl)
+            }
+        }
+    }
+
+    for stmt in stmts {
+        stmt.resolve_syms(prog, fun, env)?;
+    }
+
+    Ok(())
 }
 
 impl Function
@@ -432,27 +525,7 @@ impl StmtBox
 
             Stmt::Block(stmts) => {
                 env.push_scope();
-
-                // Pre-declare functions before symbols are resolved
-                // This allows referencing functiond before their definition occurs
-                for stmt in stmts.iter_mut() {
-                    if let Stmt::Let { mutable, var_name, init_expr, ref mut decl } = stmt.stmt.as_mut() {
-                        if let Expr::Fun { fun_id, .. } = init_expr.expr.as_ref() {
-                            let new_decl = if fun.is_unit && !*mutable {
-                                env.define(var_name, Decl::Fun { id: *fun_id })
-                            } else {
-                                env.define_local(var_name, *mutable, fun)
-                            };
-
-                            *decl = Some(new_decl)
-                        }
-                    }
-                }
-
-                for stmt in stmts {
-                    stmt.resolve_syms(prog, fun, env)?;
-                }
-
+                resolve_block(stmts, prog, fun, env)?;
                 env.pop_scope();
             }
 

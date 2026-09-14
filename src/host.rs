@@ -353,7 +353,7 @@ pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> HostResult
 }
 
 /// Print a value to stdout
-fn print(_actor: &mut Actor, v: Value) -> HostResult
+pub fn print(_actor: &mut Actor, v: Value) -> HostResult
 {
     match v.type_of() {
         Type::String => print!("{}", v.as_str()),

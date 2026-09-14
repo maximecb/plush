@@ -23,6 +23,7 @@ mod net;
 mod exec_tests;
 mod str;
 mod dict;
+mod repl;
 
 extern crate sdl2;
 use std::env;
@@ -279,6 +280,12 @@ fn parse_input(opts: &Options) -> Program
 
 fn main()
 {
+    // With no command-line arguments, start the REPL
+    if env::args().len() == 1 {
+        repl::run();
+        return;
+    }
+
     let opts = parse_args(env::args().collect());
     //println!("{:?}", opts);
 

@@ -839,6 +839,14 @@ impl Actor
         }
     }
 
+    /// Add slots for globals declared since this actor was created
+    pub fn grow_globals(&mut self)
+    {
+        let num_globals = self.vm.lock().unwrap().prog.num_globals as usize;
+        assert!(num_globals >= self.globals.len());
+        self.globals.resize(num_globals, Value::UNDEF);
+    }
+
     /// Value a global holds right now, or `None` if it has not been
     /// initialized. Codegen reads immutable globals through this: it runs
     /// when a function is first called, by which point the unit that sets
@@ -2987,8 +2995,21 @@ impl VM
         }
     }
 
+    /// Mutable access to the program, e.g. to add code to it from the REPL
+    pub fn prog_mut(&mut self) -> &mut Program
+    {
+        &mut self.prog
+    }
+
     // Call a function in the main actor
     pub fn call(vm: &mut Arc<Mutex<VM>>, fun_id: FunId, args: Vec<Value>) -> Value
+    {
+        let mut actor = VM::new_main_actor(vm);
+        actor.call(Value::fun(fun_id), &args)
+    }
+
+    // Create the main actor, which runs on the current thread
+    pub fn new_main_actor(vm: &Arc<Mutex<VM>>) -> Actor
     {
         let vm_mutex = vm.clone();
 
@@ -3019,7 +3040,7 @@ impl VM
 
         drop(vm_ref);
 
-        let mut actor = Actor::new(
+        Actor::new(
             actor_id,
             None,
             vm_mutex,
@@ -3027,9 +3048,7 @@ impl VM
             msg_alloc,
             queue_rx,
             globals,
-        );
-
-        actor.call(Value::fun(fun_id), &args)
+        )
     }
 
     // Compile every function in a program without running it, which is
@@ -3038,41 +3057,7 @@ impl VM
     {
         let fun_ids: Vec<FunId> = prog.funs.keys().copied().collect();
         let vm = VM::new(prog);
-        let vm_mutex = vm.clone();
-
-        // Create a message queue for the actor
-        let (queue_tx, queue_rx) = mpsc::sync_channel::<Message>(1024);
-
-        // Create an allocator to send messages to the actor
-        let msg_alloc = Arc::new(Mutex::new(Alloc::for_messages()));
-
-        // Info needed to send the actor a message
-        let actor_tx = ActorTx {
-            sender: queue_tx,
-            msg_alloc: Arc::downgrade(&msg_alloc),
-        };
-
-        // Assign an actor id
-        // Store the queue endpoints on the VM
-        let mut vm_ref = vm.lock().unwrap();
-        let actor_id = vm_ref.next_actor_id;
-        vm_ref.next_actor_id += 1;
-        vm_ref.actor_txs.insert(actor_id, actor_tx);
-
-        // Initialize the global slots
-        let globals = vec![Value::UNDEF; vm_ref.prog.num_globals as usize];
-
-        drop(vm_ref);
-
-        let mut actor = Actor::new(
-            actor_id,
-            None,
-            vm_mutex,
-            Alloc::new(),
-            msg_alloc,
-            queue_rx,
-            globals,
-        );
+        let mut actor = VM::new_main_actor(&vm);
 
         for fun_id in fun_ids {
             actor.get_compiled_fun(&mut Value::fun(fun_id));

@@ -924,7 +924,8 @@ fn parse_expr_or_assign_stmt(input: &mut Lexer, prog: &mut Program, end_token: &
 
     input.expect_token(end_token)?;
 
-    if !matches!(lhs.expr.as_ref(), Expr::Call { .. }) {
+    // The REPL accepts any expression, so that its value can be printed
+    if !prog.repl && !matches!(lhs.expr.as_ref(), Expr::Call { .. }) {
         return ParseError::with_pos(
             "only calls can be used as expression statements",
             &lhs.pos
@@ -1420,7 +1421,7 @@ fn parse_class(
 /// way. Keying them by the name the lexer was handed would let the entry
 /// file, usually named by a relative path, slip past the import cycle
 /// check and get parsed a second time under its canonical name.
-fn unit_key(src_name: &str) -> String
+pub fn unit_key(src_name: &str) -> String
 {
     match std::fs::canonicalize(src_name) {
         Ok(path) => path.display().to_string(),
