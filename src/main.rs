@@ -57,6 +57,7 @@ pub struct Options
 fn print_usage()
 {
     println!("Usage:");
+    println!("  plush # Start the interactive REPL");
     println!("  plush [OPTIONS] <FILE> [ARGS]...");
     println!("  plush [OPTIONS] --eval <CODE>");
     println!();

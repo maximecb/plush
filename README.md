@@ -44,6 +44,17 @@ To run your own program, just pass it a file:
 plush myprogram.psh
 ```
 
+Running `plush` with no arguments starts an interactive REPL, where you can type
+Plush code and see the result of each expression:
+```
+$ plush
+> let x = 21;
+> x * 2;
+42
+```
+Declarations carry over from one entry to the next, and redeclaring a name with
+`let` shadows the previous definition. Type `exit` or press `Ctrl+D` to quit.
+
 To upgrade, run the install command again. It skips the download if you already
 have the latest version. To uninstall, delete `~/.plush` and remove the line
 sourcing `~/.plush/env` from your shell profile. On Windows, delete
@@ -111,6 +122,11 @@ To run a plush script:
 # See example programs under /examples, /benchmarks and /tests
 cargo run examples/helloworld.psh
 cargo run examples/plasma.psh
+```
+
+To start the REPL:
+```sh
+cargo run
 ```
 
 ## Open Source License
