@@ -230,6 +230,19 @@ $println(next()); // 1
 $println(next()); // 2
 ```
 
+### Strings
+
+String literals can be written with either double or single quotes, and support the following
+escape sequences:
+
+-   `\\`, `\'`, `\"`: backslash and quotes
+-   `\t`, `\r`, `\n`, `\0`: tab, carriage return, newline and null
+-   `\xNN`: an ASCII character given as two hex digits, from `\x00` to `\x7F`
+-   `\u{N}`: a Unicode codepoint given as 1 to 6 hex digits, e.g. `\u{E9}` or `\u{1F600}`
+
+Since strings are UTF-8 encoded, a codepoint above `\u{7F}` takes more than one byte,
+so `"\u{E9}".len` is 2.
+
 ### Arrays
 
 The syntax for array literals is similar to that of JavaScript, e.g.

@@ -678,17 +678,55 @@ impl Lexer
                     'n' => out.push('\n'),
                     '0' => out.push('\0'),
 
-                    // Hexadecimal escape sequence
+                    // Hexadecimal escape sequence, limited to ASCII since
+                    // strings are UTF-8 and a single byte above 0x7F is invalid
                     'x' => {
                         let digit0 = self.eat_ch().to_digit(16);
                         let digit1 = self.eat_ch().to_digit(16);
 
                         match (digit0, digit1) {
                             (Some(d0), Some(d1)) => {
-                                let byte_val = ((d0 << 4) + d1) as u8;
-                                out.push(byte_val as char);
+                                let byte_val = (d0 << 4) + d1;
+                                if byte_val > 0x7F {
+                                    return self.parse_error("hexadecimal escape sequence must be in the ASCII range \\x00-\\x7F");
+                                }
+                                out.push(byte_val as u8 as char);
                             }
                             _ => return self.parse_error("invalid hexadecimal escape sequence")
+                        }
+                    }
+
+                    // Unicode escape sequence with 1 to 6 hex digits, e.g. \u{1F600}
+                    'u' => {
+                        if !self.match_char('{') {
+                            return self.parse_error("expected `{` in unicode escape sequence");
+                        }
+
+                        let mut codepoint: u32 = 0;
+                        let mut num_digits = 0;
+
+                        while let Some(d) = self.peek_ch().to_digit(16) {
+                            if num_digits == 6 {
+                                return self.parse_error("unicode escape sequence has more than 6 hex digits");
+                            }
+
+                            self.eat_ch();
+                            codepoint = (codepoint << 4) + d;
+                            num_digits += 1;
+                        }
+
+                        if num_digits == 0 {
+                            return self.parse_error("expected hex digits in unicode escape sequence");
+                        }
+
+                        if !self.match_char('}') {
+                            return self.parse_error("expected `}` in unicode escape sequence");
+                        }
+
+                        // Rejects surrogates and values above 0x10FFFF
+                        match char::from_u32(codepoint) {
+                            Some(ch) => out.push(ch),
+                            None => return self.parse_error("invalid unicode codepoint in escape sequence"),
                         }
                     }
 

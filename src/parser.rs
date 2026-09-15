@@ -1914,6 +1914,25 @@ mod tests
         parse_ok("let s = \"foo\";");
         parse_ok("let s = \"foo\" + \"bar\";");
 
+        // Hexadecimal escapes are limited to ASCII
+        parse_ok("let s = \"\\x00\\x41\\x7F\";");
+        parse_fails("let s = \"\\x80\";");
+        parse_fails("let s = \"\\xFF\";");
+        parse_fails("let s = \"\\x4\";");
+        parse_fails("let s = \"\\x");
+
+        // Unicode escapes
+        parse_ok("let s = \"\\u{0}\\u{41}\\u{ff}\\u{1F600}\\u{10FFFF}\";");
+        parse_ok("let s = '\\u{E9}';");
+        parse_fails("let s = \"\\u41\";");
+        parse_fails("let s = \"\\u{}\";");
+        parse_fails("let s = \"\\u{41\";");
+        parse_fails("let s = \"\\u{G}\";");
+        parse_fails("let s = \"\\u{0000041}\";");
+        parse_fails("let s = \"\\u{D800}\";");
+        parse_fails("let s = \"\\u{110000}\";");
+        parse_fails("let s = \"\\u{");
+
         // Adjacent string literals are not implicitly concatenated, so
         // that a missing comma is an error and not a merged string
         parse_fails("let s = \"foo\" \"bar\";");

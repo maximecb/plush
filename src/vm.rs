@@ -3566,6 +3566,14 @@ mod tests
         eval_eq("return ''.len;", Value::fixnum(0));
         eval_eq("return 'hello'.len;", Value::fixnum(5));
         eval_eq("let s1 = 'foo'; let s2 = 'bar'; return s1 + s2 == 'foobar';", Value::TRUE);
+
+        // Escape sequences
+        eval_eq("return '\\x41' == 'A';", Value::TRUE);
+        eval_eq("return '\\u{41}' == 'A';", Value::TRUE);
+        eval_eq("return '\\u{FF}'.len;", Value::fixnum(2));
+        eval_eq("return '\\u{FF}'.byte_at(1);", Value::fixnum(0xBF));
+        eval_eq("return '\\u{1F600}'.len;", Value::fixnum(4));
+        eval_eq("return '\\u{E9}' == String.from_codepoint(0xE9);", Value::TRUE);
     }
 
     #[test]
