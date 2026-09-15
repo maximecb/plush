@@ -280,8 +280,10 @@ pub(crate) fn string_byte_at(_actor: &mut Actor, s: Value, idx: Value) -> HostRe
 {
     let s = unwrap_str!(s);
     let idx = unwrap_usize!(idx);
-    let byte = s.as_bytes().get(idx).unwrap();
-    Ok(Value::from(*byte))
+    match s.as_bytes().get(idx) {
+        Some(byte) => return Ok(Value::from(*byte)),
+        None => error!("string byte index out of bounds"),
+    }
 }
 
 /// Get a string containing the single character at the given byte index
