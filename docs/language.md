@@ -316,9 +316,6 @@ let p = Point3D(1, 2, 3);
 $println(p.to_s()); // (1, 2, 3)
 ```
 
-Note that the `instanceof` operator tests for the exact class of an object, and does not take
-inheritance into account.
-
 ### Imports
 
 Plush supports an `import` directive with a syntax similar to Python's. This makes it possible to import code from other files.

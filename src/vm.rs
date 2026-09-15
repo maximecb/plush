@@ -643,7 +643,7 @@ impl Actor
         // compiling needs to itself in order to make room as it goes.
         let vm = self.vm.clone();
         let vm = vm.lock().unwrap();
-        let entry = vm.prog.funs[&fun_id].gen_code(self).unwrap();
+        let entry = vm.prog.funs[&fun_id].gen_code(self, &vm.prog).unwrap();
         self.funs.insert(fun_id, entry);
 
         *fun = self.stack.pop().unwrap();
@@ -1084,6 +1084,19 @@ impl Actor
         self.name_ids.insert(name.to_string(), id);
         self.name_strs.push(val);
         id
+    }
+
+    /// Check if a class is the same as, or a descendant of, another class
+    #[inline(never)]
+    fn is_subclass(&mut self, mut class_id: ClassId, ancestor_id: ClassId) -> bool
+    {
+        while class_id != ClassId::default() {
+            if class_id == ancestor_id {
+                return true;
+            }
+            class_id = self.with_class(class_id, |c| c.parent_id);
+        }
+        false
     }
 
     /// Get the class name for a given class
@@ -2236,6 +2249,18 @@ impl Actor
                     let val = get_reg!(opnds.val);
                     let class_id = ClassId::from(opnds.class_id as usize);
                     set_reg_bool!(opnds.dst, crate::runtime::get_class_id(val) == class_id);
+                }
+
+                Opcode::instanceof_sub => {
+                    let opnds = insns::instanceof_sub::decode(insn);
+                    let val = get_reg!(opnds.val);
+                    let class_id = ClassId::from(opnds.class_id as usize);
+                    // Only user objects can have an ancestor chain
+                    let result = match val.type_of() {
+                        Type::Object => self.is_subclass(val.as_obj().class_id(), class_id),
+                        _ => false,
+                    };
+                    set_reg_bool!(opnds.dst, result);
                 }
 
                 // Create new empty dictionary
@@ -3700,6 +3725,20 @@ mod tests
         eval_eq("class F {} let o = F(); return o instanceof F;", Value::TRUE);
         eval_eq("class F {} class G {} let o = F(); return o instanceof G;", Value::FALSE);
         eval_eq("class F {} return F() instanceof F;", Value::TRUE);
+
+        // Inheritance
+        let classes = "class A {} class B extends A {} class C extends B {} class D extends A {}";
+        eval_eq(&format!("{classes} return A() instanceof A;"), Value::TRUE);
+        eval_eq(&format!("{classes} return B() instanceof A;"), Value::TRUE);
+        eval_eq(&format!("{classes} return C() instanceof A;"), Value::TRUE);
+        eval_eq(&format!("{classes} return C() instanceof B;"), Value::TRUE);
+        eval_eq(&format!("{classes} return C() instanceof C;"), Value::TRUE);
+        eval_eq(&format!("{classes} return A() instanceof B;"), Value::FALSE);
+        eval_eq(&format!("{classes} return B() instanceof C;"), Value::FALSE);
+        eval_eq(&format!("{classes} return D() instanceof B;"), Value::FALSE);
+        eval_eq(&format!("{classes} return B() instanceof D;"), Value::FALSE);
+        eval_eq(&format!("{classes} return nil instanceof A;"), Value::FALSE);
+        eval_eq(&format!("{classes} return 5 instanceof A;"), Value::FALSE);
 
         // Core runtime classes
         eval_eq("return nil instanceof Int64;", Value::FALSE);

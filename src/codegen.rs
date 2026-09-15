@@ -17,6 +17,9 @@ struct CodeGen<'a>
 {
     actor: &'a mut Actor,
 
+    /// Program being compiled, borrowed from the locked VM
+    prog: &'a Program,
+
     /// Position stamped onto the instructions being emitted. An
     /// expression sets this on the way in and puts back what it found on
     /// the way out, so the instructions a parent emits after its children
@@ -26,9 +29,9 @@ struct CodeGen<'a>
 
 impl<'a> CodeGen<'a>
 {
-    fn new(actor: &'a mut Actor) -> Self
+    fn new(actor: &'a mut Actor, prog: &'a Program) -> Self
     {
-        Self { actor, cur_pos: SrcPos::default() }
+        Self { actor, prog, cur_pos: SrcPos::default() }
     }
 
     /// Emit an instruction, tagged with the position being generated for
@@ -249,11 +252,12 @@ impl Function
     pub fn gen_code(
         &self,
         actor: &mut Actor,
+        prog: &Program,
     ) -> Result<CompiledFun, ParseError>
     {
         // The context lives exactly as long as this one compilation, so
         // nothing codegen tracks can outlive it or be reached from the VM
-        let cg = &mut CodeGen::new(actor);
+        let cg = &mut CodeGen::new(actor, prog);
 
         // Entry address of the compiled function
         let entry_pc = cg.actor.insns.len();
@@ -690,8 +694,15 @@ impl ExprBox
                 let v = val.gen_code(fun, regs, cg, None)?;
                 regs.free_to(top);
 
+                // Classes without subclasses only need a class id comparison.
+                // Core runtime classes are not registered and have no subclasses.
                 let d = out!();
-                cg.push_insn(Insn::instanceof(d, v, usize::from(*class_id) as u32));
+                let id = usize::from(*class_id) as u32;
+                if cg.prog.classes.get(class_id).is_some_and(|c| c.has_children) {
+                    cg.push_insn(Insn::instanceof_sub(d, v, id));
+                } else {
+                    cg.push_insn(Insn::instanceof(d, v, id));
+                }
                 d
             }
 

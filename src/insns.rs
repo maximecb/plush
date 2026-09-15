@@ -446,8 +446,11 @@ def_opcodes! {
     cell_set { cell: reg, src: reg },
     cell_get { dst: out_reg, cell: reg },
 
-    // Check if instance of class
+    // Check if instance of class, for classes with no subclasses
     instanceof { dst: out_reg, val: reg, class_id: u24 },
+
+    // Check if instance of class or one of its subclasses
+    instanceof_sub { dst: out_reg, val: reg, class_id: u24 },
 
     // The field name, class id and slot index all live in the PropCache
     // entry, which is what keeps these within one word
@@ -676,7 +679,7 @@ mod tests
     {
         // Update this when adding opcodes, it is here to make the size of
         // the instruction set visible as it grows
-        assert_eq!(NUM_OPCODES, 76);
+        assert_eq!(NUM_OPCODES, 77);
 
         // Opcodes are dense from zero, so this is the highest opcode value.
         // It has to stay below 255 to leave room for a future extension.
