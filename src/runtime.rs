@@ -34,7 +34,10 @@ pub(crate) fn nil_to_s(actor: &mut Actor, _v: Value) -> HostResult
 pub(crate) fn int64_abs(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
-    Ok(actor.int64(if v > 0 { v } else { -v }))
+    match v.checked_abs() {
+        Some(abs) => Ok(actor.int64(abs)),
+        None => error!("integer overflow in abs()"),
+    }
 }
 
 pub(crate) fn int64_min(actor: &mut Actor, v: Value, other: Value) -> HostResult
@@ -191,6 +194,12 @@ pub(crate) fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) 
     let v = unwrap_f64!(v);
     let min = unwrap_f64!(min);
     let max = unwrap_f64!(max);
+
+    // Also rejects NaN bounds, which make clamp panic
+    if !(min <= max) {
+        error!("min must be less than or equal to max in clip()");
+    }
+
     Ok(actor.float64(v.clamp(min, max)))
 }
 
@@ -238,7 +247,10 @@ pub(crate) fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint:
     // easily intern those strings
 
     let codepoint = unwrap_u32!(codepoint);
-    let ch = char::from_u32(codepoint).expect("Invalid Unicode codepoint");
+    let ch = match char::from_u32(codepoint) {
+        Some(ch) => ch,
+        None => error!("invalid Unicode codepoint {} in from_codepoint()", codepoint),
+    };
 
     let mut s = String::new();
     s.push(ch);
@@ -320,6 +332,10 @@ pub(crate) fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Hos
 {
     let s = unwrap_str!(s);
     let radix = unwrap_u32!(radix);
+
+    if !(2..=36).contains(&radix) {
+        error!("radix must be between 2 and 36 in parse_int(), got {}", radix);
+    }
 
     match i64::from_str_radix(s, radix) {
         Ok(int_val) => Ok(actor.int64(int_val)),
@@ -633,6 +649,8 @@ pub fn get_class_id(val: Value) -> ClassId
         Type::ByteArray => BYTEARRAY_ID,
         Type::Dict => DICT_ID,
 
-        t => todo!("get_class_id for {:?} values", t)
+        // Values such as functions have no class, and so are
+        // not an instance of any class
+        _ => ClassId::default(),
     }
 }

@@ -3001,18 +3001,21 @@ impl VM
     }
 
     // Wait for an actor to produce a result and return it.
-    pub fn join_actor(vm: &Arc<Mutex<VM>>, tid: u64) -> Value
+    pub fn join_actor(vm: &Arc<Mutex<VM>>, tid: u64) -> Result<Value, String>
     {
         // Get the join handle, then release the VM lock
         let mut vm = vm.lock().unwrap();
-        let handle = vm.threads.remove(&tid).unwrap();
-        vm.actor_txs.remove(&tid).unwrap();
+        let handle = match vm.threads.remove(&tid) {
+            Some(handle) => handle,
+            None => return Err(format!("no actor with id {} to join, or it was already joined", tid)),
+        };
+        vm.actor_txs.remove(&tid);
         drop(vm);
 
         // Note: there is no need to copy data when joining,
         // because the actor sending the data is done running
         match handle.join() {
-            Ok(val) => val,
+            Ok(val) => Ok(val),
 
             // The actor reported its own error before dying, so there is
             // nothing useful to add here
@@ -3368,6 +3371,55 @@ mod tests
             ),
             Value::fixnum(77)
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn actor_join_unknown_id()
+    {
+        eval("$actor_join(12345);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn actor_join_twice()
+    {
+        eval("fun f() { return 1; } let id = $actor_spawn(f); $actor_join(id); $actor_join(id);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn int64_abs_overflow()
+    {
+        eval("return (1 << 63).abs();");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn float64_clip_bad_bounds()
+    {
+        eval("return 1.5.clip(2.0, 1.0);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn string_parse_int_bad_radix()
+    {
+        eval("return '10'.parse_int(1);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn string_from_codepoint_invalid()
+    {
+        eval("return String.from_codepoint(0xD800);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn string_byte_at_out_of_bounds()
+    {
+        eval("return 'abc'.byte_at(3);");
     }
 
     #[test]
@@ -3748,5 +3800,10 @@ mod tests
         eval_eq("return 'foo' instanceof String;", Value::TRUE);
         eval_eq("return [] instanceof Array;", Value::TRUE);
         eval_eq("return {} instanceof Dict;", Value::TRUE);
+
+        // Values without a class
+        eval_eq("fun f() {} return f instanceof Int64;", Value::FALSE);
+        eval_eq("class F {} fun f() {} return f instanceof F;", Value::FALSE);
+        eval_eq("fun f() { let x = 1; let c = || x; return c instanceof Int64; } return f();", Value::FALSE);
     }
 }

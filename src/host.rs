@@ -815,7 +815,7 @@ fn actor_spawn(actor: &mut Actor, fun: Value) -> HostResult
 fn actor_join(actor: &mut Actor, actor_id: Value) -> HostResult
 {
     let id = unwrap_u64!(actor_id);
-    Ok(VM::join_actor(&actor.vm, id))
+    Ok(VM::join_actor(&actor.vm, id)?)
 }
 
 /// Send a message to an actor
