@@ -1,0 +1,167 @@
+// Pseudo-random number generation
+//
+// Generators are instantiated, so that independent parts of a program can
+// each own a reproducible stream:
+//
+//   let rng = Xoshiro128(1234);
+//   let roll = rng.int(1, 7);
+//
+// All intermediate values stay within 62-bit fixnum range, so generating
+// numbers never allocates.
+
+// Base class for generators. Subclasses define next_u32().
+class RNG
+{
+    // Returns a uniformly distributed integer in [0, 2^32)
+    next_u32(self)
+    {
+        assert(false);
+    }
+
+    // Returns a uniformly distributed integer in [min, max)
+    int(self, min, max)
+    {
+        let n = max - min;
+        assert(n > 0);
+
+        // Ranges of 2^29 and up would overflow the multiply-shift below,
+        // so they combine two outputs into a 61-bit value instead
+        if (n >= 0x20000000) {
+            // Reject the top 2^61 mod n values to avoid modulo bias
+            let rem = (0x1FFFFFFFFFFFFFFF % n + 1) % n;
+            let limit = 0x1FFFFFFFFFFFFFFF - rem;
+
+            loop {
+                let hi = self.next_u32() >> 3;
+                let x = (hi << 32) | self.next_u32();
+                if (x <= limit) {
+                    return min + x % n;
+                }
+            }
+        }
+
+        // Lemire's multiply-shift, with rejection to avoid bias
+        let var m = self.next_u32() * n;
+        if ((m & 0xFFFFFFFF) < n) {
+            let thresh = (0x100000000 - n) % n;
+            while ((m & 0xFFFFFFFF) < thresh) {
+                m = self.next_u32() * n;
+            }
+        }
+
+        return min + (m >> 32);
+    }
+
+    // Returns a uniformly distributed float in [min, max)
+    float(self, min, max)
+    {
+        let t = self.next_u32().to_f() / 4294967296.0;
+        return min + t * (max - min);
+    }
+
+    // Returns true or false with equal probability
+    bool(self)
+    {
+        return self.next_u32() >= 0x80000000;
+    }
+
+    // Returns a uniformly chosen element of a non-empty array
+    choice(self, arr)
+    {
+        return arr[self.int(0, arr.len)];
+    }
+}
+
+// Xoshiro128++ by Blackman and Vigna, with 128 bits of state and a period
+// of 2^128 - 1. It uses only 32-bit additions, xors and shifts, so it fits
+// in fixnums. See https://prng.di.unimi.it/
+class Xoshiro128 extends RNG
+{
+    init(self, seed)
+    {
+        // Expand the seed into four words with a SplitMix-style sequence.
+        // The mixing multipliers are under 2^29 so products stay fixnums.
+        let var z = (seed ^ (seed >> 32)) & 0xFFFFFFFF;
+        let words = [0, 0, 0, 0];
+
+        for (let var i = 0; i < 4; ++i) {
+            z = (z + 0x9E3779B9) & 0xFFFFFFFF;
+            let var x = z;
+            x = ((x ^ (x >> 16)) * 0x1B873593) & 0xFFFFFFFF;
+            x = ((x ^ (x >> 13)) * 0x165667B1) & 0xFFFFFFFF;
+            words[i] = x ^ (x >> 16);
+        }
+
+        // The all-zero state is a fixed point
+        if ((words[0] | words[1] | words[2] | words[3]) == 0) {
+            words[0] = 1;
+        }
+
+        self.a = words[0];
+        self.b = words[1];
+        self.c = words[2];
+        self.d = words[3];
+    }
+
+    // Returns a uniformly distributed integer in [0, 2^32)
+    next_u32(self)
+    {
+        let var a = self.a;
+        let var b = self.b;
+        let var c = self.c;
+        let var d = self.d;
+
+        let x = (a + d) & 0xFFFFFFFF;
+        let r = ((((x << 7) & 0xFFFFFFFF) | (x >> 25)) + a) & 0xFFFFFFFF;
+        let t = (b << 9) & 0xFFFFFFFF;
+
+        c = c ^ a;
+        d = d ^ b;
+        b = b ^ c;
+        a = a ^ d;
+        c = c ^ t;
+        d = ((d << 11) & 0xFFFFFFFF) | (d >> 21);
+
+        self.a = a;
+        self.b = b;
+        self.c = c;
+        self.d = d;
+        return r;
+    }
+}
+
+if (!$MAIN_UNIT) {
+    return;
+}
+
+let rng = Xoshiro128($time_current_ms());
+
+$println("--- 10 ints in [0, 100) ---");
+for (let var i = 0; i < 10; ++i) {
+    $println(rng.int(0, 100));
+}
+
+$println("\n--- 3 ints in [0, 10^15) ---");
+for (let var i = 0; i < 3; ++i) {
+    $println(rng.int(0, 1000000000000000));
+}
+
+$println("\n--- 5 floats in [10.0, 20.0) ---");
+for (let var i = 0; i < 5; ++i) {
+    $println(rng.float(10.0, 20.0).to_s());
+}
+
+$println("\n--- 5 choices ---");
+let names = ["red", "green", "blue"];
+for (let var i = 0; i < 5; ++i) {
+    $println(rng.choice(names));
+}
+
+$println("\n--- Same seed, same sequence ---");
+let r1 = Xoshiro128(42);
+let r2 = Xoshiro128(42);
+for (let var i = 0; i < 1000; ++i) {
+    assert(r1.next_u32() == r2.next_u32());
+}
+
+$println("ok");
