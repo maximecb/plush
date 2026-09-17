@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet as HashSet;
-use crate::lexer::ParseError;
+use crate::lexer::{ParseError, SrcPos};
 use crate::ast::*;
 use crate::value::Value;
 
@@ -59,6 +59,16 @@ pub struct Env
 
     // Next global variable slot index to assign
     next_global_idx: u32,
+
+    // Constructor calls, checked once inherited methods are resolved
+    ctor_calls: Vec<CtorCall>,
+}
+
+struct CtorCall
+{
+    class_id: ClassId,
+    num_args: usize,
+    pos: SrcPos,
 }
 
 impl Env
@@ -193,7 +203,8 @@ impl Program
         self.num_globals = env.next_global_idx;
 
         let class_ids = self.classes.keys().cloned().collect();
-        self.resolve_inheritance(class_ids)
+        self.resolve_inheritance(class_ids)?;
+        self.check_ctor_calls(std::mem::take(&mut env.ctor_calls))
     }
 
     /// Resolve symbols for a unit entered in the REPL. The unit sees the
@@ -213,13 +224,43 @@ impl Program
 
         let class_ids = unit.classes.values().cloned().collect();
         *self.units.get_mut(unit_key).unwrap() = unit;
+        let ctor_calls = std::mem::take(&mut env.ctor_calls);
         result?;
         self.resolve_inheritance(class_ids)?;
+        self.check_ctor_calls(ctor_calls)?;
 
         // Merge the new declarations into the base scope
         let base_scope = &mut env.scopes[base_scopes - 1];
         for scope in scopes {
             base_scope.decls.extend(scope.decls);
+        }
+
+        Ok(())
+    }
+
+    /// Check that each constructor call targets a class with an init
+    /// method, its own or inherited, and passes it the right arguments
+    fn check_ctor_calls(&self, ctor_calls: Vec<CtorCall>) -> Result<(), ParseError>
+    {
+        for call in ctor_calls {
+            let class = &self.classes[&call.class_id];
+
+            let init_id = match class.methods.get("init") {
+                Some(init_id) => init_id,
+                None => {
+                    return ParseError::with_pos(
+                        &format!("class `{}` has no init method and cannot be instantiated", class.name),
+                        &call.pos
+                    );
+                }
+            };
+
+            if call.num_args + 1 != self.funs[init_id].params.len() {
+                return ParseError::with_pos(
+                    &format!("argument mismatch in call to constructor of class `{}`", class.name),
+                    &call.pos
+                );
+            }
         }
 
         Ok(())
@@ -745,18 +786,12 @@ impl ExprBox
                                 );
                             },
 
-                            Some(class) => {
-                                let ctor_argc = match class.methods.get("init") {
-                                    Some(init_id) => prog.funs[init_id].params.len(),
-                                    None => 1
-                                };
-
-                                if args.len() + 1 != ctor_argc {
-                                    return ParseError::with_pos(
-                                        &format!("argument mismatch in call to constructor of class `{}`", name),
-                                        &callee.pos
-                                    );
-                                }
+                            Some(_) => {
+                                env.ctor_calls.push(CtorCall {
+                                    class_id: *id,
+                                    num_args: args.len(),
+                                    pos: callee.pos,
+                                });
                             }
                         }
                     }
@@ -973,5 +1008,12 @@ mod tests
     fn no_ctor()
     {
         fails("Array();");
+        fails("class Foo {} Foo();");
+        fails("class Foo { bar(self) {} } Foo();");
+        fails("class A {} class B extends A {} B();");
+        succeeds("class Foo {}");
+        succeeds("class A { init(self, x) {} } class B extends A {} B(1);");
+        fails("class A { init(self, x) {} } class B extends A {} B();");
+        succeeds("class B extends A {} class A { init(self) {} } B();");
     }
 }

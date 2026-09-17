@@ -2797,11 +2797,11 @@ impl Actor
                         self.insns[this_pc] = Insn::new_known_ctor(opnds.start_reg, opnds.argc, cache);
 
                         push_frame!(fun_val, opnds.start_reg, entry.entry_pc, entry.frame_size);
-                    } else if opnds.argc != 1 {
+                    } else {
+                        // Symbol resolution rejects this, so it should not happen
                         error!(
-                            "class `{}` has no constructor but was given {} argument(s)",
+                            "class `{}` has no init method and cannot be instantiated",
                             self.get_class_name(class_id),
-                            opnds.argc - 1,
                         );
                     }
                 }
@@ -3235,8 +3235,8 @@ mod tests
     #[test]
     fn comparisons()
     {
-        eval_eq("class F {} let o1 = F(); let o2 = F(); return o1 == o2;", Value::FALSE);
-        eval_eq("class F {} let o1 = F(); let o2 = F(); return o1 != o2;", Value::TRUE);
+        eval_eq("class F { init(s) {} } let o1 = F(); let o2 = F(); return o1 == o2;", Value::FALSE);
+        eval_eq("class F { init(s) {} } let o1 = F(); let o2 = F(); return o1 != o2;", Value::TRUE);
 
         // Integer comparisons
         eval_eq("return 3 <= 5;", Value::TRUE);
@@ -3457,7 +3457,7 @@ mod tests
         // globals are copied for the new actor
         eval_eq(
             concat!(
-                "class F {}",
+                "class F { init(s) {} }",
                 "let g = F();",
                 "let g2 = g;",
                 "fun f() { return g == g2; }",
@@ -3738,15 +3738,16 @@ mod tests
         eval("class Foo { init(self) {} }");
         eval("class Foo { init(self) { self.x = 1; } }");
 
-        eval("class Foo {} let o = Foo();");
         eval("class Foo { init(s) {} } let o = Foo();");
         eval("class Foo { init(s, a) {} } let o = Foo(1);");
 
         eval("class Foo { init(s) { s.x = 1; } } let o = Foo();");
         eval("class Foo { init(s, a) { s.x = a; } } let o = Foo(7);");
 
-        eval_eq("class Foo {} return Foo() != nil;", Value::TRUE);
         eval_eq("class Foo { init(s) {} } return Foo() != nil;", Value::TRUE);
+
+        // Inherited constructor
+        eval_eq("class A { init(s, a) { s.x = a; } } class B extends A {} return B(3).x;", Value::fixnum(3));
 
         eval_eq("class Foo { init(s) { s.x = 1; } } let o = Foo(); return o.x;", Value::fixnum(1));
         eval_eq("class Foo { init(s, a) { s.x = a; } } let o = Foo(7); return o.x;", Value::fixnum(7));
@@ -3759,7 +3760,7 @@ mod tests
     fn get_undef_field()
     {
         // The field x exists on the class but is not initialized
-        eval("class F { g(s) { s.x = 3; } } let o = F(); o.x;");
+        eval("class F { init(s) {} g(s) { s.x = 3; } } let o = F(); o.x;");
     }
 
     #[test]
@@ -3768,6 +3769,14 @@ mod tests
     {
         // Passing an argument to a constructor that accepts none
         eval("class Foo { init(s) {} } let o = Foo(1);");
+    }
+
+    #[test]
+    #[should_panic]
+    fn no_ctor()
+    {
+        // Instantiating a class with no init method
+        eval("class Foo {} let o = Foo();");
     }
 
     #[test]
@@ -3782,12 +3791,12 @@ mod tests
     fn instanceof()
     {
         eval_eq("class F {} return nil instanceof F;", Value::FALSE);
-        eval_eq("class F {} let o = F(); return o instanceof F;", Value::TRUE);
-        eval_eq("class F {} class G {} let o = F(); return o instanceof G;", Value::FALSE);
-        eval_eq("class F {} return F() instanceof F;", Value::TRUE);
+        eval_eq("class F { init(s) {} } let o = F(); return o instanceof F;", Value::TRUE);
+        eval_eq("class F { init(s) {} } class G {} let o = F(); return o instanceof G;", Value::FALSE);
+        eval_eq("class F { init(s) {} } return F() instanceof F;", Value::TRUE);
 
-        // Inheritance
-        let classes = "class A {} class B extends A {} class C extends B {} class D extends A {}";
+        // Inheritance, with the constructor inherited from A
+        let classes = "class A { init(s) {} } class B extends A {} class C extends B {} class D extends A {}";
         eval_eq(&format!("{classes} return A() instanceof A;"), Value::TRUE);
         eval_eq(&format!("{classes} return B() instanceof A;"), Value::TRUE);
         eval_eq(&format!("{classes} return C() instanceof A;"), Value::TRUE);

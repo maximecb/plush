@@ -1,6 +1,16 @@
 // These classes represent two different kinds of messages
-class Inc {}
-class Get {}
+class Inc
+{
+    init(self, amount)
+    {
+        self.amount = amount;
+    }
+}
+
+class Get
+{
+    init(self) {}
+}
 
 let var g = 0;
 
@@ -12,7 +22,7 @@ fun f()
         let msg = $actor_recv();
 
         if (msg instanceof Inc)
-            ++g;
+            g = g + msg.amount;
 
         if (msg instanceof Get)
             $actor_send(0, g);
@@ -22,9 +32,9 @@ fun f()
 let id = $actor_spawn(f);
 
 for (let var i = 0; i < 10; ++i)
-    $actor_send(id, Inc());
+    $actor_send(id, Inc(i));
 
 $actor_send(id, Get());
-let cnt = $actor_recv();
-$println(cnt);
-assert(cnt == 10);
+let sum = $actor_recv();
+$println(sum);
+assert(sum == 45);

@@ -306,6 +306,9 @@ let p = Point(10, 20);
 $println(p.to_s()); // (10, 20)
 ```
 
+A class can only be instantiated if it has an `init` method, either its own or one inherited from a parent class.
+A class without one, such as a base class that only provides shared methods, cannot be instantiated.
+
 ### Inheritance
 
 A class can inherit from a single parent class using the `extends` keyword. The child inherits the parent's
