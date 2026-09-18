@@ -1460,10 +1460,10 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
 
         let mut import_path = String::new();
 
-        // For now, only relative imports are supported
+        // A path starting with `./` is relative to the importing file,
+        // anything else names a standard library module
         input.eat_ws()?;
-        input.expect_token("./")?;
-        import_path += "./";
+        let relative = input.match_token("./")?;
 
         // Parse path elements
         loop {
@@ -1481,18 +1481,32 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
             import_path += "/";
         }
 
-        // Assemble the full path of the imported unit
-        let unit_path = unit_pos.get_src_name();
-        let mut base_path = std::path::PathBuf::from(unit_path);
-        base_path.pop();
-        let mut full_path = base_path.join(&import_path);
-        full_path.set_extension("psh");
-        let full_path = match std::fs::canonicalize(&full_path) {
-            Ok(path) => path,
-            Err(_) => return ParseError::with_pos(
-                &format!("could not find imported file \"{}\"", full_path.display()),
-                &pos
-            )
+        // Assemble the key of the imported unit
+        let full_path = if relative {
+            let unit_path = unit_pos.get_src_name();
+            let mut base_path = std::path::PathBuf::from(unit_path);
+            base_path.pop();
+            let mut full_path = base_path.join(&import_path);
+            full_path.set_extension("psh");
+
+            match std::fs::canonicalize(&full_path) {
+                Ok(path) => path.display().to_string(),
+                Err(_) => return ParseError::with_pos(
+                    &format!("could not find imported file \"{}\"", full_path.display()),
+                    &pos
+                )
+            }
+        } else {
+            let unit_key = crate::stdlib::unit_key(&import_path);
+
+            if crate::stdlib::get_source(&unit_key).is_none() {
+                return ParseError::with_pos(
+                    &format!("unknown standard library module \"{}\"", import_path),
+                    &pos
+                );
+            }
+
+            unit_key
         };
 
         let mut symbols = Vec::new();
@@ -1519,7 +1533,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         }
 
         let import = Import {
-            full_path: full_path.display().to_string(),
+            full_path,
             symbols,
             import_all,
             pos,
@@ -1534,7 +1548,12 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
             continue;
         }
 
-        let mut input = Lexer::from_file(&import.full_path)?;
+        // Standard library modules are baked into the binary
+        let mut input = match crate::stdlib::get_source(&import.full_path) {
+            Some(src) => Lexer::new(src, &import.full_path),
+            None => Lexer::from_file(&import.full_path)?
+        };
+
         parse_unit(&mut input, prog)?;
     }
 
@@ -2344,6 +2363,18 @@ mod tests
         parse_fails("let x = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;");
         parse_fails(&format!("let x = 0b{};", "1".repeat(200)));
         parse_fails(&format!("let x = 0x{};", "F".repeat(1000)));
+    }
+
+    #[test]
+    fn stdlib_imports()
+    {
+        // Standard library modules are baked into the binary and
+        // imported without a leading `./`
+        parse_ok("from random import *;");
+        parse_ok("from random import Xoshiro128;");
+
+        parse_fails("from nosuchmodule import *;");
+        parse_fails("from ./random import *;");
     }
 
     #[test]

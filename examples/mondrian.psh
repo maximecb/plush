@@ -1,4 +1,6 @@
-from ./random import *;
+from random import Xoshiro128;
+
+let rng = Xoshiro128(1);
 
 // Generates abstract art in the style of Piet Mondrian.
 //
@@ -56,9 +58,9 @@ fun subdivide(buffer, x, y, w, h, depth) {
     if (w < MIN_SIZE * 2 || h < MIN_SIZE * 2) {
         stop_chance = 85;
     }
-    if (depth >= MIN_DEPTH && rand_int(0, 100) < stop_chance) {
+    if (depth >= MIN_DEPTH && rng.int(0, 100) < stop_chance) {
         // Fill the rectangle with a random color from the palette.
-        let color = COLORS[rand_int(0, COLORS.len)];
+        let color = COLORS[rng.int(0, COLORS.len)];
         draw_rect(buffer, x, y, w, h, color);
         return;
     }
@@ -69,11 +71,11 @@ fun subdivide(buffer, x, y, w, h, depth) {
         // Split vertically
         let range = w - MIN_SIZE * 2;
         if (range <= 0) {
-            let color = COLORS[rand_int(0, COLORS.len)];
+            let color = COLORS[rng.int(0, COLORS.len)];
             draw_rect(buffer, x, y, w, h, color);
             return;
         }
-        let split_offset = rand_int(0, range) + MIN_SIZE;
+        let split_offset = rng.int(0, range) + MIN_SIZE;
         let line_x = x + split_offset;
 
         // Recurse on the two new sub-rectangles.
@@ -86,11 +88,11 @@ fun subdivide(buffer, x, y, w, h, depth) {
         // Split horizontally
         let range = h - MIN_SIZE * 2;
         if (range <= 0) {
-            let color = COLORS[rand_int(0, COLORS.len)];
+            let color = COLORS[rng.int(0, COLORS.len)];
             draw_rect(buffer, x, y, w, h, color);
             return;
         }
-        let split_offset = rand_int(0, range) + MIN_SIZE;
+        let split_offset = rng.int(0, range) + MIN_SIZE;
         let line_y = y + split_offset;
 
         // Recurse on the two new sub-rectangles.
@@ -106,7 +108,7 @@ fun subdivide(buffer, x, y, w, h, depth) {
 
 fun generate_and_draw(buffer, window) {
     // Re-initialize the random seed to get a new pattern each time.
-    rand_init($time_current_ms());
+    rng.seed($time_current_ms());
 
     // Start with a plain white background.
     draw_rect(buffer, 0, 0, WIDTH, HEIGHT, WHITE);

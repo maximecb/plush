@@ -17,9 +17,11 @@
 // Record a dozen or so examples of each word, keeping them short, plus a good
 // number of noise clips. Training runs continuously in the background.
 
-from ./random import *;
+from random import Xoshiro128;
 from ./image import Image, rgb, COLOR_BLACK, COLOR_WHITE, COLOR_RED, COLOR_GREY;
 from ./monogram_font import Font;
+
+let rng = Xoshiro128(1);
 
 // Constants
 let SAMPLE_RATE = 44100;
@@ -132,7 +134,7 @@ let COLOR_NOISE_HILITE = rgb(225, 80, 80);
 fun random_f32(size, lo, hi) {
     let ba = ByteArray.with_size(size * 4);
     for (let var i = 0; i < size; ++i) {
-        ba.set_f32(i, rand_float(lo, hi));
+        ba.set_f32(i, rng.float(lo, hi));
     }
     return ba;
 }
@@ -203,11 +205,11 @@ class MLP {
 
         self.W2.resize((o + 1) * h * 4);
         for (let var c = 0; c < h; ++c) {
-            self.W2.set_f32(o * h + c, rand_float(-0.5, 0.5));
+            self.W2.set_f32(o * h + c, rng.float(-0.5, 0.5));
         }
 
         self.b2.resize((o + 1) * 4);
-        self.b2.set_f32(o, rand_float(-0.5, 0.5));
+        self.b2.set_f32(o, rng.float(-0.5, 0.5));
 
         self.d_loss.resize((o + 1) * 4);
         self.d_loss.set_f32(o, 0.0);
@@ -502,7 +504,7 @@ fun array_slice(arr, start, end) {
 }
 
 fun training_actor(detection_actor_id) {
-    rand_init($time_current_ms());
+    rng.seed($time_current_ms());
     let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE);
 
     let training_data = [];
@@ -554,7 +556,7 @@ fun training_actor(detection_actor_id) {
         let can_train = training_data.len > 0 && mlp.output_size > 0;
 
         if (can_train) {
-            let idx = rand_int(0, training_data.len);
+            let idx = rng.int(0, training_data.len);
             let sample = training_data[idx];
             let frames = sample[0];
             let label = sample[1];
@@ -566,8 +568,8 @@ fun training_actor(detection_actor_id) {
             // For negative examples, randomly truncate the frames
             if (label == "" && current_frames.len > 1) {
                 let max_len = current_frames.len;
-                let var start_idx = rand_int(0, max_len);
-                let var end_idx = rand_int(start_idx, max_len);
+                let var start_idx = rng.int(0, max_len);
+                let var end_idx = rng.int(start_idx, max_len);
                 if (start_idx == end_idx) {
                     // Ensure at least one frame is selected
                     end_idx = start_idx + 1;
@@ -578,7 +580,7 @@ fun training_actor(detection_actor_id) {
 
             // For negative examples, randomly append zero frames
             if (label == "" && MAX_ZERO_FRAMES_TO_ADD > 0) {
-                let num_zero_frames = rand_int(0, MAX_ZERO_FRAMES_TO_ADD + 1);
+                let num_zero_frames = rng.int(0, MAX_ZERO_FRAMES_TO_ADD + 1);
                 if (num_zero_frames > 0) {
                     let zero_frame = Array.with_size(NUM_MEL_BINS, 0.0);
                     for (let var i = 0; i < num_zero_frames; ++i) {
@@ -588,10 +590,10 @@ fun training_actor(detection_actor_id) {
             }
 
             // With a small probability, for negative examples only, randomly permute the frames
-            if (label == "" && current_frames.len > 1 && rand_float(0.0, 1.0) < 0.30) {
+            if (label == "" && current_frames.len > 1 && rng.float(0.0, 1.0) < 0.30) {
                 let n = current_frames.len;
                 for (let var i = n - 1; i > 0; --i) {
-                    let j = rand_int(0, i + 1);
+                    let j = rng.int(0, i + 1);
                     let temp = current_frames[i];
                     current_frames[i] = current_frames[j];
                     current_frames[j] = temp;
@@ -604,7 +606,7 @@ fun training_actor(detection_actor_id) {
             if (current_frames.len > 1) {
                 let kept_frames = [];
                 for (let var i = 0; i < current_frames.len; ++i) {
-                    if (rand_float(0.0, 1.0) >= FRAME_DROP_PROB) {
+                    if (rng.float(0.0, 1.0) >= FRAME_DROP_PROB) {
                         kept_frames.push(current_frames[i]);
                     }
                 }
@@ -620,11 +622,11 @@ fun training_actor(detection_actor_id) {
             // isn't itself further thinned and `num_silence_frames` stays
             // accurate to what's actually appended.
             let var num_silence_frames = 0;
-            if (label != "" && current_frames.len > 1 && rand_float(0.0, 1.0) < TRUNCATED_PREFIX_PROB) {
-                let cut_len = rand_int(1, current_frames.len);
+            if (label != "" && current_frames.len > 1 && rng.float(0.0, 1.0) < TRUNCATED_PREFIX_PROB) {
+                let cut_len = rng.int(1, current_frames.len);
                 current_frames = array_slice(current_frames, 0, cut_len);
-            } else if (label != "" && TRAILING_SILENCE_MAX_FRAMES > 0 && rand_float(0.0, 1.0) < TRAILING_SILENCE_PROB) {
-                num_silence_frames = rand_int(1, TRAILING_SILENCE_MAX_FRAMES + 1);
+            } else if (label != "" && TRAILING_SILENCE_MAX_FRAMES > 0 && rng.float(0.0, 1.0) < TRAILING_SILENCE_PROB) {
+                num_silence_frames = rng.int(1, TRAILING_SILENCE_MAX_FRAMES + 1);
                 let silence_frame = Array.with_size(NUM_MEL_BINS, 0.0);
                 for (let var i = 0; i < num_silence_frames; ++i) {
                     current_frames.push(silence_frame);
@@ -634,9 +636,9 @@ fun training_actor(detection_actor_id) {
             let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
 
             // Data augmentation: scale the whole example, then add noise
-            let scale_factor = 1.0 + (rand_float(-0.5, 0.5) * 0.35);
+            let scale_factor = 1.0 + (rng.float(-0.5, 0.5) * 0.35);
             for (let var i = 0; i < INPUT_SIZE; ++i) {
-                x.set_f32(i, x.get_f32(i) * scale_factor + rand_float(-0.5, 0.5) * NOISE_MAGNITUDE);
+                x.set_f32(i, x.get_f32(i) * scale_factor + rng.float(-0.5, 0.5) * NOISE_MAGNITUDE);
             }
 
             // One target per word: 1 for the word that was said, 0 for the

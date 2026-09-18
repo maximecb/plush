@@ -14,7 +14,9 @@
 // rectangle, so its windows are plain fill_u32 rect fills instead of triangle
 // pairs. Only faces that span a range of Z need the triangle rasterizer.
 
-from ./random import *;
+from random import Xoshiro128;
+
+let rng = Xoshiro128(12345);
 
 // Everything below derives from these, so changing the resolution is enough.
 // Remember to match --capture's ffmpeg -video_size to it.
@@ -118,8 +120,8 @@ let WIN_SHAPES = [
 // Bands carry a lot of the reference look, so they get more weight than an
 // even split across the archetypes would give them
 fun pick_shape() {
-    if (rand_float(0.0, 1.0) < 0.30) return WIN_SHAPES[WIN_SHAPES.len - 1];
-    return WIN_SHAPES[rand_int(0, WIN_SHAPES.len - 1)];
+    if (rng.float(0.0, 1.0) < 0.30) return WIN_SHAPES[WIN_SHAPES.len - 1];
+    return WIN_SHAPES[rng.int(0, WIN_SHAPES.len - 1)];
 }
 
 // An unlit window still catches the sky and the lit city around it, so it
@@ -787,24 +789,24 @@ class Facade {
         let cols = self.cols;
 
         // One column span for the whole building, so the strips stack cleanly
-        let c0 = rand_int(0, (cols.idiv(5)).max(1));
+        let c0 = rng.int(0, (cols.idiv(5)).max(1));
         // Clamped so the range stays non-empty on narrow walls
         let lo = ((cols * 4).idiv(5)).max(c0 + 1).min(cols - 1);
-        let c1 = rand_int(lo, cols);
+        let c1 = rng.int(lo, cols);
 
         let var r = 0;
         while (r < self.rows) {
             // Colors change every one to three floors
-            let var thick = rand_int(1, 4);
+            let var thick = rng.int(1, 4);
             if (thick > self.rows - r) thick = self.rows - r;
 
             let var color = 0;
             let var hot = 0;
-            if (rand_float(0.0, 1.0) < style.band_prob) {
+            if (rng.float(0.0, 1.0) < style.band_prob) {
                 // Always the building's own accent. Only the brightness
                 // varies, never the hue, so the whole building reads as one
                 // sign rather than a stack of unrelated ones.
-                color = color_scale(style.accent, rand_float(0.62, 1.0));
+                color = color_scale(style.accent, rng.float(0.62, 1.0));
                 hot = 1;
             } else {
                 // An unlit strip is grey glass, same as an unlit window
@@ -829,7 +831,7 @@ class Facade {
         for (let var r = 0; r < self.rows; ++r) {
             self.row_kind[r] = 1;
             // Floors differ: some are still busy, some have mostly gone home
-            let floor_lit = (style.lit_prob * rand_float(0.35, 1.4)).min(0.95);
+            let floor_lit = (style.lit_prob * rng.float(0.35, 1.4)).min(0.95);
 
             // Two-state chain along the floor rather than an independent coin
             // per window: a lit window makes its neighbour much more likely to
@@ -838,7 +840,7 @@ class Facade {
             // probability of the chain is still exactly floor_lit.
             let p_on = (1.0 - RUN_STICK) * floor_lit;
             let p_off = (1.0 - RUN_STICK) * (1.0 - floor_lit);
-            let var on = rand_float(0.0, 1.0) < floor_lit;
+            let var on = rng.float(0.0, 1.0) < floor_lit;
 
             let base = r * cols;
             for (let var c = 0; c < cols; ++c) {
@@ -852,9 +854,9 @@ class Facade {
 
                 // Advance the chain for the next window along
                 if (on) {
-                    if (rand_float(0.0, 1.0) < p_off) on = false;
+                    if (rng.float(0.0, 1.0) < p_off) on = false;
                 } else {
-                    if (rand_float(0.0, 1.0) < p_on) on = true;
+                    if (rng.float(0.0, 1.0) < p_on) on = true;
                 }
             }
         }
@@ -864,10 +866,10 @@ class Facade {
 // Every building commits to one window tint, so a facade reads as a single
 // coherent block of light rather than as confetti
 fun pick_window_tint() {
-    let roll = rand_float(0.0, 1.0);
-    if (roll < 0.56) return WIN_TINTS[rand_int(0, TINT_WARM_END)];
-    if (roll < 0.76) return WIN_TINTS[rand_int(TINT_WARM_END, TINT_COOL_END)];
-    return WIN_TINTS[rand_int(TINT_COOL_END, WIN_TINTS.len)];
+    let roll = rng.float(0.0, 1.0);
+    if (roll < 0.56) return WIN_TINTS[rng.int(0, TINT_WARM_END)];
+    if (roll < 0.76) return WIN_TINTS[rng.int(TINT_WARM_END, TINT_COOL_END)];
+    return WIN_TINTS[rng.int(TINT_COOL_END, WIN_TINTS.len)];
 }
 
 // Brightness of one lit window. Rooms differ in which lights are on and what
@@ -877,7 +879,7 @@ fun pick_window_tint() {
 // reading as a dim light and starts reading as beige, which is what made some
 // windows look washed out.
 fun window_level() {
-    let t = rand_float(0.0, 1.0);
+    let t = rng.float(0.0, 1.0);
     if (t < 0.32) return 1.0;
     if (t < 0.56) return 0.84;
     if (t < 0.75) return 0.70;
@@ -887,7 +889,7 @@ fun window_level() {
 
 // Grey glass, varied a little so a dark floor is not a flat slab
 fun window_off() {
-    return color_scale(GLASS_OFF, rand_float(0.70, 1.30));
+    return color_scale(GLASS_OFF, rng.float(0.70, 1.30));
 }
 
 // Everything that makes one building's facades look like they belong together:
@@ -992,8 +994,8 @@ class Building {
         if (x0 > 0.0) self.xf = x0; else self.xf = x1;
 
         // Near-black concrete with a slight blue cast
-        let g = rand_int(12, 26);
-        self.wall = 0xFF000000 | (g << 16) | (g << 8) | (g + rand_int(4, 10));
+        let g = rng.int(12, 26);
+        self.wall = 0xFF000000 | (g << 16) | (g << 8) | (g + rng.int(4, 10));
 
         // Building character: some are dense window grids, some are dark
         // slabs carrying only a few neon bands
@@ -1002,16 +1004,16 @@ class Building {
         let var band_prob = 0.0;
         if (shape[0] == KIND_BAND) {
             // Chance a strip is lit rather than grey
-            band_prob = rand_float(0.72, 0.92);
+            band_prob = rng.float(0.72, 0.92);
         } else {
             // How much of this building is still working late
-            lit_prob = rand_float(0.40, 0.85);
+            lit_prob = rng.float(0.40, 0.85);
         }
 
         // Both walls share one style, so the building is coherent all the way
         // around as we drive past it
         let style = FacadeStyle(lit_prob, band_prob, pick_window_tint(),
-                                NEON[rand_int(0, NEON.len)], shape);
+                                NEON[rng.int(0, NEON.len)], shape);
 
         // A building further off the road than the furthest thing we ever
         // draw on a facade can never show one, however long we drive past
@@ -1029,7 +1031,7 @@ class Building {
         // Its own seed, so a facade laid out lazily comes out the same
         // whenever that happens. Without it the shared generator would make
         // a chunk's contents depend on when its neighbours were drawn.
-        self.seed = rand_int(0, 0x3FFFFFF);
+        self.seed = rng.int(0, 0x3FFFFFF);
 
         // Only the tall ones get a top, and only its proportions vary
         let s = self.seed;
@@ -1060,7 +1062,7 @@ class Building {
     }
 
     build_detail(self) {
-        rand_init(self.seed);
+        rng.seed(self.seed);
         self.front = Facade(self.x1 - self.x0, self.base, self.height, self.style);
         self.side = Facade(self.z1 - self.z0, self.base, self.height, self.style);
         self.built = true;
@@ -1573,8 +1575,8 @@ let STAR_AZ_MAX = STAR_AZ_EDGE * 1.5;
 
 fun build_stars(count) {
     for (let var i = 0; i < count; ++i) {
-        let az = rand_float(-STAR_AZ_MAX, STAR_AZ_MAX);
-        let el = rand_float(0.02, STAR_EL_MAX);
+        let az = rng.float(-STAR_AZ_MAX, STAR_AZ_MAX);
+        let el = rng.float(0.02, STAR_EL_MAX);
         let ce = el.cos();
         star_dx.push(ce * az.sin());
         star_dy.push(el.sin());
@@ -1584,7 +1586,7 @@ fun build_stars(count) {
         // frame is what keeps the visible ones bright rather than putting
         // the brightest stars where they cannot be seen.
         star_c.push(color_scale(0xFFFFFFFF,
-                    rand_float(0.25, 0.85) * (el / STAR_EL_TOP).min(1.0)));
+                    rng.float(0.25, 0.85) * (el / STAR_EL_TOP).min(1.0)));
     }
 }
 
@@ -2812,7 +2814,7 @@ fun engine_fill(buf, n) {
         // rumble under the note instead of hiss over it, and it barely opens
         // with the throttle: quintupling it on the key press was most of what
         // read as noise popping in.
-        eng_noise = eng_noise * 0.92 + rand_float(-1.0, 1.0) * 0.08;
+        eng_noise = eng_noise * 0.92 + rng.float(-1.0, 1.0) * 0.08;
         eng_noise2 = eng_noise2 * 0.92 + eng_noise * 0.08;
         v = v + eng_noise2 * (0.9 + 0.7 * eng_load_cur);
 
@@ -2839,7 +2841,7 @@ fun audio_actor() {
         $println("no audio device, running silent");
         return 0;
     }
-    rand_init(20461);
+    rng.seed(20461);
 
     loop {
         let msg = $actor_recv();
@@ -2873,7 +2875,6 @@ if (mode_arg == "--capture") {
     pitch_base = $cmd_get_arg_or(6, "0.0").parse_float() * PI / 180.0;
 }
 
-rand_init(12345);
 build_background();
 // Spread over more sky than the frame shows, so this is roughly double what
 // lands on screen at any one time
@@ -2927,8 +2928,8 @@ fun band_empty(band) { return 0.08 + (band - 1).to_f() * 0.015; }
 
 // Box-Muller. Plush has ln and cos, which is all it needs.
 fun rand_normal(mean, sd) {
-    let u1 = rand_float(0.0001, 1.0);
-    let u2 = rand_float(0.0, 1.0);
+    let u1 = rng.float(0.0001, 1.0);
+    let u2 = rng.float(0.0, 1.0);
     return mean + sd * (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
 }
 
@@ -2936,7 +2937,7 @@ fun rand_normal(mean, sd) {
 // which is what a heavy-tailed draw gives and a uniform range does not: a
 // uniform one makes everything mid-rise and nothing stands out.
 fun rand_pareto(x_min, alpha, x_max) {
-    let u = rand_float(0.0001, 1.0);
+    let u = rng.float(0.0001, 1.0);
     return (x_min * u.pow(-1.0 / alpha)).min(x_max);
 }
 
@@ -2990,22 +2991,22 @@ let H_MAX = 620.0;
 // One slot of one band on one side of the street, filled or left open.
 // side is -1 or 1, band selects the lateral distribution.
 fun generate_slot(list, side, band, zs, slot_len) {
-    if (rand_float(0.0, 1.0) < band_empty(band)) return;
+    if (rng.float(0.0, 1.0) < band_empty(band)) return;
 
     let height = rand_pareto(H_MIN, H_ALPHA, H_MAX);
 
     // Width is its own draw rather than a multiple of height, so a low
     // building can still be a broad block. The height term is only a floor,
     // there to stop the tail of the distribution producing needles.
-    let width = rand_float(WIDTH_MIN, WIDTH_MAX).max(height * 0.085).min(WIDTH_MAX);
-    let depth = (width * rand_float(0.7, 1.35)).max(DEPTH_MIN).min(DEPTH_MAX);
+    let width = rng.float(WIDTH_MIN, WIDTH_MAX).max(height * 0.085).min(WIDTH_MAX);
+    let depth = (width * rng.float(0.7, 1.35)).max(DEPTH_MIN).min(DEPTH_MAX);
     // Where it sits in its slot is what opens the gap to the one before it
-    let lead = rand_float(0.0, (slot_len - depth).max(0.0));
+    let lead = rng.float(0.0, (slot_len - depth).max(0.0));
 
     // Lateral distance out of this band's distribution, or out of the near
     // one, and never closer than the block line
     let var near = 0.0;
-    if (rand_float(0.0, 1.0) < NEAR_PROB) {
+    if (rng.float(0.0, 1.0) < NEAR_PROB) {
         near = rand_normal(NEAR_MU, NEAR_SIGMA).max(BLOCK_MIN);
     } else {
         near = rand_normal(band_mu(band), band_sigma(band)).max(BLOCK_MIN);
@@ -3084,7 +3085,7 @@ class Chunk {
         self.objs = [];
 
         let side = ix;
-        rand_init(chunk_hash(ix, iz));
+        rng.seed(chunk_hash(ix, iz));
         for (let var band = 1; band <= NUM_BANDS; ++band) {
             let slots = band_slots(band);
             let slot_len = CHUNK_LEN / slots.to_f();

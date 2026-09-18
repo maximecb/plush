@@ -1,0 +1,27 @@
+//! Standard library modules baked into the binary.
+//!
+//! These are imported without a leading `./`, e.g. `from random import *;`,
+//! which sets them apart from relative imports of files on disk.
+
+/// Key under which a module is registered in the program. Unit keys are
+/// canonical file paths, so this is shaped to not collide with one, and
+/// to read clearly in error messages
+pub fn unit_key(module_path: &str) -> String
+{
+    format!("<stdlib>/{}.psh", module_path)
+}
+
+/// Get the source of a module given its unit key, if the key names one
+pub fn get_source(unit_key: &str) -> Option<&'static str>
+{
+    let module_path = unit_key
+        .strip_prefix("<stdlib>/")?
+        .strip_suffix(".psh")?;
+
+    let src = match module_path {
+        "random" => include_str!("../stdlib/random.psh"),
+        _ => return None
+    };
+
+    Some(src)
+}

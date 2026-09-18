@@ -357,6 +357,16 @@ import every symbol a unit exports instead of listing them, use `*`:
 from ./font import *;
 ```
 
+A path without a leading `./` names a standard library module. These are built into the Plush binary,
+so they can be imported from anywhere:
+
+```plush
+from random import Xoshiro128;
+
+let rng = Xoshiro128(1234);
+$println(rng.int(0, 100));
+```
+
 ## Built-in Functions and Methods
 
 ### Core Methods

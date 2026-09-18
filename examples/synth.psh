@@ -1,4 +1,6 @@
-from ./random import *;
+from random import Xoshiro128;
+
+let rng = Xoshiro128($time_current_ms());
 
 let FRAME_WIDTH = 600;
 let FRAME_HEIGHT = 400;
@@ -306,43 +308,43 @@ class Synth
     init(self)
     {
         self.lfo0 = SineOsc();
-        self.lfo0_freq = rand_float(0.20, 0.60);
+        self.lfo0_freq = rng.float(0.20, 0.60);
         self.lfo0.minVal = 0.90;
         self.lfo0.maxVal = 1.10;
 
         self.osc0 = SawOsc();
         self.osc1 = SawOsc();
         self.osc2 = SineOsc();
-        self.detune1 = rand_float(0.97, 1.03);
-        self.detune2 = 0.5 * rand_float(0.97, 1.03);
+        self.detune1 = rng.float(0.97, 1.03);
+        self.detune2 = 0.5 * rng.float(0.97, 1.03);
 
-        if (rand_float(0.0, 1.0) < 0.25) {
+        if (rng.float(0.0, 1.0) < 0.25) {
             self.detune1 = self.detune1 * 2.0;
-        } else if (rand_float(0.0, 1.0) < 0.25) {
+        } else if (rng.float(0.0, 1.0) < 0.25) {
             self.detune1 = self.detune1 * 0.5;
         }
 
         self.env0 = ADSR(
-            rand_float(0.001, 0.02),
-            rand_float(0.02, 0.40),
-            rand_float(0.05, 0.60),
-            rand_float(0.05, 0.60),
+            rng.float(0.001, 0.02),
+            rng.float(0.02, 0.40),
+            rng.float(0.05, 0.60),
+            rng.float(0.05, 0.60),
         );
 
         self.env1 = ADSR(
-            rand_float(0.001, 0.02),
-            rand_float(0.02, 0.40),
-            rand_float(0.05, 0.60),
-            rand_float(0.05, 0.60),
+            rng.float(0.001, 0.02),
+            rng.float(0.02, 0.40),
+            rng.float(0.05, 0.60),
+            rng.float(0.05, 0.60),
         );
 
         self.filter = Filter();
-        self.cutoff = rand_float(0.60, 1.00);
-        self.reso = rand_float(0.00, 0.30);
+        self.cutoff = rng.float(0.60, 1.00);
+        self.reso = rng.float(0.00, 0.30);
 
         self.drive = 1.0;
-        if (rand_float(0.0, 1.0) < 0.25) {
-            self.drive = rand_float(1.1, 6.0);
+        if (rng.float(0.0, 1.0) < 0.25) {
+            self.drive = rng.float(1.1, 6.0);
         }
 
         // Frequency of current note
@@ -528,7 +530,6 @@ fun audio_actor()
 }
 
 // Generate a different patch on each run
-rand_init($time_current_ms());
 
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Random Synth Generator", 0);
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);

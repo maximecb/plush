@@ -1,4 +1,6 @@
-from ./random import *;
+from random import Xoshiro128;
+
+let rng = Xoshiro128(1);
 
 // 808-style Drum Machine
 //
@@ -166,13 +168,13 @@ let var clap_sample_counter = 0;
 // --- Pattern Mutation ---
 fun mutate_pattern() {
     // 0: kick, 1: snare, 2: hat, 3: clap
-    let instrument_idx = rand_int(0, pattern.len);
+    let instrument_idx = rng.int(0, pattern.len);
     let instrument_name = instrument_names[instrument_idx];
     let available_patterns = all_instrument_patterns[instrument_idx];
 
     // Pick a new pattern
     while (available_patterns.len > 1) {
-        let new_pattern_idx = rand_int(0, available_patterns.len);
+        let new_pattern_idx = rng.int(0, available_patterns.len);
         let new_pattern = available_patterns[new_pattern_idx];
 
         // Ensure the new pattern is different from the last one
@@ -313,7 +315,7 @@ fun generate_samples(num_samples) {
         let var snare_sample = 0.0;
         if (snare_amp_env > 0 || snare_tone_amp_env > 0) {
             // Noise component
-            snare_noise = rand_float(-1.0, 1.0);
+            snare_noise = rng.float(-1.0, 1.0);
             let noise_component = snare_noise * snare_amp_env;
 
             // Tone component
@@ -339,7 +341,7 @@ fun generate_samples(num_samples) {
 
         let var hat_sample = 0.0;
         if (hat_amp_env > 0) {
-            hat_noise = rand_float(-1.0, 1.0);
+            hat_noise = rng.float(-1.0, 1.0);
             hat_sample = hat_noise * hat_amp_env;
             hat_amp_env = hat_amp_env - (1.0 / (HAT_DECAY * SAMPLE_RATE));
             if (hat_amp_env < 0) { hat_amp_env = 0; }
@@ -353,7 +355,7 @@ fun generate_samples(num_samples) {
                 let delay_offset = i * CLAP_DELAY_SAMPLES;
                 if (clap_sample_counter >= delay_offset) {
                     // Generate new noise for each clap burst
-                    clap_noises[i] = rand_float(-1.0, 1.0);
+                    clap_noises[i] = rng.float(-1.0, 1.0);
                     clap_sample = clap_sample + (clap_noises[i] * clap_amp_envs[i]);
 
                     // Decay envelope
@@ -484,7 +486,7 @@ fun draw_visualization(frame_buffer) {
 // --- Main Program ---
 
 fun main() {
-    rand_init($time_current_ms());
+    rng.seed($time_current_ms());
 
     // Create a window to allow graceful exit
     let window = $window_create(VIS_WIDTH, VIS_HEIGHT, "Procedural Drum Machine", 0);

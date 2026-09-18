@@ -5,6 +5,7 @@ mod ast;
 mod lexer;
 mod parser;
 mod symbols;
+mod stdlib;
 mod codegen;
 mod vm;
 mod insns;

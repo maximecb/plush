@@ -2,6 +2,11 @@
 // Based on a tutorial by Lode Vandevenne:
 // https://lodev.org/cgtutor/fire.html
 
+from random import Xoshiro128;
+
+// Seeded from the clock so that the flame differs from one run to the next
+let rng = Xoshiro128($time_current_ms());
+
 let FRAME_WIDTH = 512;
 let FRAME_HEIGHT = 512;
 
@@ -70,19 +75,6 @@ fun hsl_to_rgb(h, s, l)
     );
 }
 
-// Linear congruential generator, as in examples/random.psh. Seeded from
-// the clock so that the flame differs from one run to the next.
-let var lcg_seed = $time_current_ms() & 0x7FFFFFFF;
-
-// Returns a random integer in [0, 256)
-fun rand_byte()
-{
-    lcg_seed = (lcg_seed * 1073716837 + 12345) & 0x7FFFFFFF;
-
-    // The lowest bits of an LCG are the least random, so we drop them
-    return (lcg_seed >> 8) & 0xFF;
-}
-
 // Generate the palette
 let palette = [];
 for (let var i = 0; i < 256; ++i)
@@ -115,7 +107,7 @@ loop
     let bottom_row = fire[FRAME_HEIGHT - 1];
     for (let var x = 0; x < FRAME_WIDTH; ++x)
     {
-        bottom_row[x] = rand_byte() << HEAT_BITS;
+        bottom_row[x] = rng.int(0, 256) << HEAT_BITS;
     }
 
     // Apply the update rule, from top to bottom. Each row is read by the

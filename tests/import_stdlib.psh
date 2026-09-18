@@ -1,0 +1,37 @@
+// Standard library modules are imported without a leading `./`
+from random import Xoshiro128;
+
+let rng = Xoshiro128(1234);
+
+// Same seed, same sequence
+let other = Xoshiro128(1234);
+for (let var i = 0; i < 100; ++i)
+    assert(rng.next_u32() == other.next_u32());
+
+for (let var i = 0; i < 1000; ++i)
+{
+    let v = rng.int(-5, 5);
+    assert(v >= -5);
+    assert(v < 5);
+}
+
+assert(rng.choice([7]) == 7);
+
+let counts = [0, 0, 0];
+for (let var i = 0; i < 3000; ++i)
+{
+    let idx = rng.index(counts.len);
+    counts[idx] = counts[idx] + 1;
+}
+
+// Every index should come up, and roughly equally often
+for (let var i = 0; i < counts.len; ++i)
+    assert(counts[i] > 800);
+
+assert(rng.index(1) == 0);
+
+// Reseeding restarts the sequence
+rng.seed(99);
+let fresh = Xoshiro128(99);
+for (let var i = 0; i < 100; ++i)
+    assert(rng.next_u32() == fresh.next_u32());

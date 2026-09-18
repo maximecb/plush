@@ -17,6 +17,10 @@
 // All positions and dimensions are in meters, on the XZ ground plane, with X
 // pointing east and Z pointing south. Y would be up.
 
+from random import Xoshiro128;
+
+let rng = Xoshiro128(1);
+
 // --- Constants ---
 
 // Extent of the land
@@ -53,33 +57,6 @@ let GROUND_COLOR = rgb32(60, 64, 70);
 let LOT_COLOR = rgb32(150, 150, 150);
 let ROAD_COLOR = rgb32(0, 0, 0);
 let NODE_COLOR = rgb32(255, 214, 0);
-
-// --- Random numbers ---
-//
-// A linear congruential generator, kept here so this program is self-contained.
-
-let var lcg_seed = 1;
-
-fun rand_init(seed) {
-    lcg_seed = seed & 0x7FFF_FFFF;
-}
-
-fun rand_next() {
-    lcg_seed = (lcg_seed * 1073716837 + 12345) & 0x7FFF_FFFF;
-    return lcg_seed;
-}
-
-// Random integer in [min_val, max_val). The low bits of an LCG are the least
-// random, so they get dropped.
-fun rand_int(min_val, max_val) {
-    return min_val + ((rand_next() >> 8) % (max_val - min_val));
-}
-
-// Random float in [min_val, max_val)
-fun rand_float(min_val, max_val) {
-    let t = rand_next().to_f() / 2147483648.0;
-    return min_val + t * (max_val - min_val);
-}
 
 // --- Geometry ---
 
@@ -158,7 +135,7 @@ fun centerlines(span, lanes) {
         else if (i == last)
             out.push(span - half_width(lanes[i]));
         else
-            out.push(span * i.to_f() / last.to_f() + rand_float(-OFFSET, OFFSET));
+            out.push(span * i.to_f() / last.to_f() + rng.float(-OFFSET, OFFSET));
     }
 
     return out;
@@ -292,14 +269,14 @@ class CityLayout {
 
         for (let var i = 0; i < nx - 1; ++i) {
             for (let var j = 0; j < nz; ++j) {
-                if (rand_int(0, 100) < DROP_PERCENT)
+                if (rng.int(0, 100) < DROP_PERCENT)
                     self.drop_ew(i, j);
             }
         }
 
         for (let var i = 0; i < nx; ++i) {
             for (let var j = 0; j < nz - 1; ++j) {
-                if (rand_int(0, 100) < DROP_PERCENT)
+                if (rng.int(0, 100) < DROP_PERCENT)
                     self.drop_ns(i, j);
             }
         }
@@ -591,7 +568,7 @@ if (!$MAIN_UNIT) {
     return;
 }
 
-rand_init($time_current_ms());
+rng.seed($time_current_ms());
 
 let var layout = CityLayout();
 let view = View(WIN_SIZE);
