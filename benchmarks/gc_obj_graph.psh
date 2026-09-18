@@ -2,7 +2,9 @@
 // The edge lists are arrays, so this stresses array reads and object
 // field accesses on a heap that is too big to fit in cache.
 
-from ./lib/random import *;
+from random import Xoshiro128;
+
+let rng = Xoshiro128(1337);
 
 let num_nodes = 1_500_000;
 let num_edges = 4;
@@ -16,7 +18,6 @@ class Node
     }
 }
 
-rand_init(1337);
 
 // Allocate every node first so that edges can point at any of them
 let var nodes = Array.with_size(num_nodes, nil);
@@ -33,7 +34,7 @@ for (let var i = 0; i < num_nodes; ++i)
     edges[0] = nodes[(i + 1) % num_nodes];
     for (let var j = 1; j < num_edges; ++j)
     {
-        edges[j] = nodes[rand_int(0, num_nodes)];
+        edges[j] = nodes[rng.int(0, num_nodes)];
     }
 }
 

@@ -1,29 +1,31 @@
 // Random number generation throughput
 //
-// Every other benchmark that pulls in lib/random calls it only to build its
-// input, outside the timed section, so nothing measures the generator itself.
-// Anything that makes noise, dither or procedural placement while it runs is
-// paying this cost in its inner loop, so it is worth a number.
+// Every other benchmark that pulls in the random module calls it only to
+// build its input, outside the timed section, so nothing measures the
+// generator itself. Anything that makes noise, dither or procedural
+// placement while it runs is paying this cost in its inner loop, so it is
+// worth a number.
 //
-// `rand_int` is what the benchmarks that do use the generator reach for:
+// `int` is what the benchmarks that do use the generator reach for:
 // quicksort fills its array with it, gc_obj_graph picks its edges with it.
-// The range here matches quicksort's.
+// The range here matches quicksort's, and stays under the 2^29 limit above
+// which a draw takes two generator steps instead of one.
 
-from ./lib/random import *;
+from random import Xoshiro128;
 
 let NUM_INTS = 50000000;
 let RANGE = 1000000;
+
+let rng = Xoshiro128(12345);
 
 // Folded into a sink and printed, so the loop is not doing work nothing
 // looks at
 let var sink = 0;
 
-rand_init(12345);
-
 let start_time = $time_current_ms();
 
 for (let var i = 0; i < NUM_INTS; ++i) {
-    sink = sink ^ rand_int(0, RANGE);
+    sink = sink ^ rng.int(0, RANGE);
 }
 
 let elapsed_ms = $time_current_ms() - start_time;
