@@ -1,0 +1,994 @@
+// Text generation with the Falcon-H1-Tiny-90M language model, in pure Plush.
+//
+// Falcon-H1 is a hybrid model: each layer runs an attention block and a
+// Mamba2 state-space block side by side, followed by a SwiGLU MLP. The
+// weights are read directly from the Hugging Face safetensors file.
+//
+// First download the weights and tokenizer (about 185 MB) into the current
+// directory:
+//
+//   curl -LO https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Base/resolve/main/model.safetensors
+//   curl -LO https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Base/resolve/main/tokenizer.json
+//
+// Then run it with a prompt, the number of tokens to generate, and a
+// sampling temperature (0 always picks the most likely token, which tends
+// to get stuck repeating itself):
+//
+//   cargo run --release examples/falcon_h1.psh "The capital of France is" 50 0.8
+
+from random import Xoshiro128;
+
+let MODEL_PATH = "model.safetensors";
+let TOKENIZER_PATH = "tokenizer.json";
+
+// Print how to get the model files, and exit
+fun missing_file(path)
+{
+    $println("Could not read " + path + ". Download the model files into the current directory with:");
+    $println("");
+    $println("  curl -LO https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Base/resolve/main/model.safetensors");
+    $println("  curl -LO https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Base/resolve/main/tokenizer.json");
+    $println("");
+    $println("Then run it with a prompt, the number of tokens to generate, and a sampling temperature:");
+    $println("");
+    $println("  cargo run --release examples/falcon_h1.psh \"The capital of France is\" 50 0.8");
+    $exit(1);
+}
+
+// Hyperparameters, from the model's config.json
+let HIDDEN = 512;
+let NUM_LAYERS = 24;
+let VOCAB_SIZE = 32768;
+let NUM_HEADS = 8;
+let NUM_KV_HEADS = 2;
+let HEAD_DIM = 64;
+let MLP_DIM = 768;
+let SSM_DIM = 768;
+let SSM_STATE = 64;
+let SSM_HEADS = 24;
+let SSM_HEAD_DIM = 32;
+let CONV_WIDTH = 4;
+let ROPE_THETA = 100000000000.0;
+let RMS_EPS = 0.00001;
+let EOS_TOKEN = 11;
+
+// The muP multipliers that aren't 1.0 for this model
+let EMBED_MULT = 0.08154296875;
+let LM_HEAD_MULT = 0.078125;
+
+// The Mamba input projection produces the gate z, then the conv channels
+// (x, B and C), then one time step per head
+let CONV_DIM = SSM_DIM + 2 * SSM_STATE;
+let IN_PROJ_DIM = SSM_DIM + CONV_DIM + SSM_HEADS;
+
+//============================================================================
+// JSON parsing
+//============================================================================
+
+// A parsed JSON object. Plush dictionaries can't be iterated, so the keys
+// are also kept in order.
+class JsonObject
+{
+    init(self)
+    {
+        self.dict = {};
+        self.keys = [];
+    }
+
+    get(self, key)
+    {
+        return self.dict[key];
+    }
+}
+
+// Minimal JSON parser reading from the bytes of a ByteArray
+class JsonParser
+{
+    init(self, bytes, pos)
+    {
+        self.bytes = bytes;
+        self.pos = pos;
+        self.buf = ByteArray.with_size(0);
+    }
+
+    skip_ws(self)
+    {
+        let bytes = self.bytes;
+        let var pos = self.pos;
+        loop {
+            let c = bytes[pos];
+            if (c != 32 && c != 10 && c != 13 && c != 9)
+                break;
+            pos = pos + 1;
+        }
+        self.pos = pos;
+    }
+
+    parse(self)
+    {
+        self.skip_ws();
+        let c = self.bytes[self.pos];
+
+        // '{', '[' and '"'
+        if (c == 123) return self.parse_object();
+        if (c == 91) return self.parse_array();
+        if (c == 34) return self.parse_string();
+
+        // 't', 'f' and 'n'
+        if (c == 116) { self.pos = self.pos + 4; return true; }
+        if (c == 102) { self.pos = self.pos + 5; return false; }
+        if (c == 110) { self.pos = self.pos + 4; return nil; }
+
+        return self.parse_number();
+    }
+
+    parse_object(self)
+    {
+        let obj = JsonObject();
+        self.pos = self.pos + 1;
+        self.skip_ws();
+
+        if (self.bytes[self.pos] == 125) {
+            self.pos = self.pos + 1;
+            return obj;
+        }
+
+        loop {
+            self.skip_ws();
+            let key = self.parse_string();
+            self.skip_ws();
+            // Skip the ':'
+            self.pos = self.pos + 1;
+            obj.dict[key] = self.parse();
+            obj.keys.push(key);
+            self.skip_ws();
+
+            // Either ',' or '}'
+            let c = self.bytes[self.pos];
+            self.pos = self.pos + 1;
+            if (c == 125)
+                return obj;
+        }
+    }
+
+    parse_array(self)
+    {
+        let arr = [];
+        self.pos = self.pos + 1;
+        self.skip_ws();
+
+        if (self.bytes[self.pos] == 93) {
+            self.pos = self.pos + 1;
+            return arr;
+        }
+
+        loop {
+            arr.push(self.parse());
+            self.skip_ws();
+
+            // Either ',' or ']'
+            let c = self.bytes[self.pos];
+            self.pos = self.pos + 1;
+            if (c == 93)
+                return arr;
+        }
+    }
+
+    parse_string(self)
+    {
+        let bytes = self.bytes;
+        let start = self.pos + 1;
+        let var pos = start;
+
+        // Most strings have no escapes and can be decoded in place
+        loop {
+            let c = bytes[pos];
+            if (c == 34) {
+                self.pos = pos + 1;
+                return String.from_utf8(bytes, start, pos - start);
+            }
+            if (c == 92)
+                break;
+            pos = pos + 1;
+        }
+
+        let buf = self.buf;
+        buf.clear();
+        for (let var i = start; i < pos; ++i) {
+            buf.push_u8(bytes[i]);
+        }
+
+        loop {
+            let c = bytes[pos];
+
+            if (c == 34) {
+                self.pos = pos + 1;
+                return String.from_utf8(buf, 0, buf.len);
+            }
+
+            if (c != 92) {
+                buf.push_u8(c);
+                pos = pos + 1;
+                continue;
+            }
+
+            let e = bytes[pos + 1];
+            pos = pos + 2;
+
+            if (e == 110) buf.push_u8(10);
+            else if (e == 116) buf.push_u8(9);
+            else if (e == 114) buf.push_u8(13);
+            else if (e == 98) buf.push_u8(8);
+            else if (e == 102) buf.push_u8(12);
+            else if (e == 117) {
+                let var cp = String.from_utf8(bytes, pos, 4).parse_int(16);
+                pos = pos + 4;
+
+                // A surrogate pair encodes a codepoint beyond the BMP
+                if (cp >= 0xD800 && cp < 0xDC00 && bytes[pos] == 92 && bytes[pos + 1] == 117) {
+                    let lo = String.from_utf8(bytes, pos + 2, 4).parse_int(16);
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    pos = pos + 6;
+                }
+
+                buf.push_string(String.from_codepoint(cp));
+            }
+            // '"', '\' and '/' stand for themselves
+            else buf.push_u8(e);
+        }
+    }
+
+    parse_number(self)
+    {
+        let bytes = self.bytes;
+        let start = self.pos;
+        let var pos = start;
+        let var is_float = false;
+
+        loop {
+            let c = bytes[pos];
+            if (c == 46 || c == 101 || c == 69) {
+                is_float = true;
+            } else if (!((c >= 48 && c <= 57) || c == 45 || c == 43)) {
+                break;
+            }
+            pos = pos + 1;
+        }
+
+        self.pos = pos;
+        let s = String.from_utf8(bytes, start, pos - start);
+        if (is_float)
+            return s.parse_float();
+        return s.parse_int(10);
+    }
+}
+
+//============================================================================
+// Tokenizer
+//============================================================================
+
+fun is_upper(c) { return c >= 65 && c <= 90; }
+fun is_lower(c) { return c >= 97 && c <= 122; }
+fun is_digit(c) { return c >= 48 && c <= 57; }
+fun is_newline(c) { return c == 10 || c == 13; }
+fun is_space(c) { return c == 32 || (c >= 9 && c <= 13); }
+
+// Non-ASCII bytes are all treated as letters. This keeps multibyte
+// characters together, but is only exact for ASCII text.
+fun is_letter(c) { return is_upper(c) || is_lower(c) || c >= 128; }
+fun is_upper_ish(c) { return is_upper(c) || c >= 128; }
+fun is_lower_ish(c) { return is_lower(c) || c >= 128; }
+
+// ASCII punctuation, as used by the Punctuation pre-tokenizer
+fun is_punct(c)
+{
+    return (
+        (c >= 33 && c <= 47) || (c >= 58 && c <= 64) ||
+        (c >= 91 && c <= 96) || (c >= 123 && c <= 126)
+    );
+}
+
+// Byte-level BPE tokenizer, loaded from a Hugging Face tokenizer.json
+class Tokenizer
+{
+    init(self, path)
+    {
+        let bytes = $read_file(path);
+        if (bytes == nil)
+            missing_file(path);
+
+        let model = JsonParser(bytes, 0).parse().get("model");
+
+        let vocab = model.get("vocab");
+        self.vocab = vocab.dict;
+        self.id_to_token = Array.with_size(vocab.keys.len, "");
+        for (let var i = 0; i < vocab.keys.len; ++i) {
+            let tok = vocab.keys[i];
+            self.id_to_token[vocab.dict[tok]] = tok;
+        }
+
+        // Merge priorities, keyed by the two symbols separated by a space.
+        // Byte-level symbols never contain a space, so this is unambiguous.
+        let merges = model.get("merges");
+        self.merge_ranks = {};
+        for (let var i = 0; i < merges.len; ++i) {
+            let m = merges[i];
+            self.merge_ranks[m[0] + " " + m[1]] = i;
+        }
+
+        // Each byte is represented by a printable character, as in GPT-2
+        self.byte_to_char = Array.with_size(256, "");
+        self.char_to_byte = {};
+        let var n = 0;
+        for (let var b = 0; b < 256; ++b) {
+            let var cp = b;
+            if (!((b >= 33 && b <= 126) || (b >= 161 && b <= 172) || b >= 174)) {
+                cp = 256 + n;
+                n = n + 1;
+            }
+            let ch = String.from_codepoint(cp);
+            self.byte_to_char[b] = ch;
+            self.char_to_byte[ch] = b;
+        }
+
+        self.cache = {};
+    }
+
+    // Convert a string to an array of token ids
+    encode(self, text)
+    {
+        let bytes = ByteArray.with_size(0);
+        bytes.push_string(text);
+        let n = bytes.len;
+        let ids = [];
+
+        // Runs of punctuation are split off first, then the rest is split by
+        // the pre-tokenizer's regex
+        let var i = 0;
+        while (i < n) {
+            let var j = i;
+            if (is_punct(bytes[i])) {
+                while (j < n && is_punct(bytes[j])) j = j + 1;
+                self.encode_word(bytes, i, j, ids);
+            } else {
+                while (j < n && !is_punct(bytes[j])) j = j + 1;
+                let var pos = i;
+                while (pos < j) {
+                    let end = regex_match_end(bytes, pos, j);
+                    self.encode_word(bytes, pos, end, ids);
+                    pos = end;
+                }
+            }
+            i = j;
+        }
+
+        return ids;
+    }
+
+    // Apply BPE merges to one pre-tokenized word
+    encode_word(self, bytes, start, end, ids)
+    {
+        let syms = [];
+        let var word = "";
+        for (let var i = start; i < end; ++i) {
+            let ch = self.byte_to_char[bytes[i]];
+            syms.push(ch);
+            word = word + ch;
+        }
+
+        if (!self.cache.has(word)) {
+            let ranks = self.merge_ranks;
+
+            // Repeatedly merge the pair with the highest priority
+            loop {
+                let var best = -1;
+                let var best_rank = 0;
+                for (let var k = 0; k + 1 < syms.len; ++k) {
+                    let pair = syms[k] + " " + syms[k + 1];
+                    if (ranks.has(pair)) {
+                        let r = ranks[pair];
+                        if (best < 0 || r < best_rank) {
+                            best = k;
+                            best_rank = r;
+                        }
+                    }
+                }
+
+                if (best < 0)
+                    break;
+
+                syms[best] = syms[best] + syms[best + 1];
+                syms.remove(best + 1);
+            }
+
+            let word_ids = [];
+            for (let var k = 0; k < syms.len; ++k) {
+                word_ids.push(self.vocab[syms[k]]);
+            }
+            self.cache[word] = word_ids;
+        }
+
+        ids.append(self.cache[word]);
+    }
+
+    // Append the bytes a token stands for to a ByteArray
+    decode(self, id, out)
+    {
+        let tok = self.id_to_token[id];
+        let var i = 0;
+        while (i < tok.len) {
+            let ch = tok.char_at(i);
+            if (self.char_to_byte.has(ch)) {
+                out.push_u8(self.char_to_byte[ch]);
+            } else {
+                out.push_string(ch);
+            }
+            i = i + ch.len;
+        }
+    }
+}
+
+// Where the match of the pre-tokenizer's split regex starting at pos ends:
+//
+//   [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+
+//   |[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*
+//   |\p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+
+fun regex_match_end(bytes, pos, end)
+{
+    let c = bytes[pos];
+
+    // A word, optionally preceded by one space or symbol
+    let var s = pos;
+    if (!is_newline(c) && !is_letter(c) && !is_digit(c))
+        s = pos + 1;
+    if (s < end && is_letter(bytes[s])) {
+        let var j = s;
+        while (j < end && is_upper_ish(bytes[j])) j = j + 1;
+
+        // Uppercase letters followed by lowercase ones, backtracking if the
+        // lowercase part is empty
+        let var m = j;
+        while (m >= s) {
+            let var k = m;
+            while (k < end && is_lower_ish(bytes[k])) k = k + 1;
+            if (k > m) return k;
+            m = m - 1;
+        }
+
+        // Only uppercase letters
+        if (j > s) return j;
+    }
+
+    if (is_digit(c))
+        return pos + 1;
+
+    // Symbols, optionally preceded by a space
+    s = pos;
+    if (c == 32)
+        s = pos + 1;
+    let var j = s;
+    while (j < end && !is_space(bytes[j]) && !is_letter(bytes[j]) && !is_digit(bytes[j]))
+        j = j + 1;
+    if (j > s) {
+        while (j < end && (is_newline(bytes[j]) || bytes[j] == 47)) j = j + 1;
+        return j;
+    }
+
+    // Whitespace
+    let var w = pos;
+    while (w < end && is_space(bytes[w])) w = w + 1;
+
+    // Up to the last newline in the whitespace
+    for (let var k = w - 1; k >= pos; k = k - 1) {
+        if (is_newline(bytes[k]))
+            return k + 1;
+    }
+
+    // Leave the last space to be the prefix of the next word
+    if (w < end && w - 1 > pos)
+        return w - 1;
+
+    return w;
+}
+
+//============================================================================
+// Weights
+//============================================================================
+
+// Convert n bfloat16 values to float32. A bfloat16 is the upper half of a
+// float32, so two values are converted at a time from one u32 load.
+fun bf16_to_f32(src, src_idx, n)
+{
+    let dst = ByteArray.with_size(n * 4);
+    let var i = 0;
+
+    while (i + 1 < n) {
+        let v = src.load_u32(src_idx + i * 2);
+        dst.store_u32(i * 4, (v << 16) & 0xFFFFFFFF);
+        dst.store_u32(i * 4 + 4, v & 0xFFFF0000);
+        i = i + 2;
+    }
+
+    if (i < n) {
+        dst.store_u32(i * 4, src.load_u16(src_idx + i * 2) << 16);
+    }
+
+    return dst;
+}
+
+// Reader for a safetensors file: an 8-byte header length, a JSON header
+// describing each tensor, and then the raw tensor data
+class SafeTensors
+{
+    init(self, path)
+    {
+        let file = $read_file(path);
+        if (file == nil)
+            missing_file(path);
+
+        let header_len = file.load_u32(0);
+        self.header = JsonParser(file, 8).parse();
+        self.data_start = 8 + header_len;
+        self.file = file;
+    }
+
+    // Get a tensor as a ByteArray of float32 values
+    get(self, name)
+    {
+        let info = self.header.get(name);
+        assert(info.get("dtype") == "BF16");
+        let offsets = info.get("data_offsets");
+        let n = (offsets[1] - offsets[0]).idiv(2);
+        return bf16_to_f32(self.file, self.data_start + offsets[0], n);
+    }
+
+    // Get a small tensor as an array of floats
+    get_array(self, name)
+    {
+        let ba = self.get(name);
+        let n = ba.len.idiv(4);
+        let arr = Array.with_size(n, 0.0);
+        for (let var i = 0; i < n; ++i) {
+            arr[i] = ba.get_f32(i);
+        }
+        return arr;
+    }
+}
+
+class Layer
+{
+    init(self, st, idx, max_len)
+    {
+        let p = "model.layers." + idx.to_s() + ".";
+
+        self.input_norm = st.get_array(p + "input_layernorm.weight");
+        self.ff_norm = st.get_array(p + "pre_ff_layernorm.weight");
+
+        self.q_proj = st.get(p + "self_attn.q_proj.weight");
+        self.k_proj = st.get(p + "self_attn.k_proj.weight");
+        self.v_proj = st.get(p + "self_attn.v_proj.weight");
+        self.o_proj = st.get(p + "self_attn.o_proj.weight");
+
+        self.in_proj = st.get(p + "mamba.in_proj.weight");
+        self.out_proj = st.get(p + "mamba.out_proj.weight");
+        self.conv_w = st.get_array(p + "mamba.conv1d.weight");
+        self.conv_b = st.get_array(p + "mamba.conv1d.bias");
+        self.dt_bias = st.get_array(p + "mamba.dt_bias");
+        self.D = st.get_array(p + "mamba.D");
+
+        // The decay rates are stored as log(-A)
+        self.A = st.get_array(p + "mamba.A_log");
+        for (let var h = 0; h < SSM_HEADS; ++h) {
+            self.A[h] = -(self.A[h].exp());
+        }
+
+        self.gate_proj = st.get(p + "feed_forward.gate_proj.weight");
+        self.up_proj = st.get(p + "feed_forward.up_proj.weight");
+        self.down_proj = st.get(p + "feed_forward.down_proj.weight");
+
+        // Previous inputs of the causal convolution, per channel
+        self.conv_state = Array.with_size(CONV_DIM * (CONV_WIDTH - 1), 0.0);
+
+        // Mamba recurrent state, one row of SSM_STATE values per channel
+        self.ssm_state = Array.with_size(SSM_DIM * SSM_STATE, 0.0);
+
+        // Attention key and value cache, indexed by position then head
+        self.k_cache = ByteArray.with_size(max_len * NUM_KV_HEADS * HEAD_DIM * 4);
+        self.v_cache = ByteArray.with_size(max_len * NUM_KV_HEADS * HEAD_DIM * 4);
+    }
+}
+
+//============================================================================
+// Model
+//============================================================================
+
+// out[out_idx + r] = dot(row r of W, x), where x is a ByteArray of float32
+fun matvec(W, rows, cols, x, out, out_idx)
+{
+    for (let var r = 0; r < rows; ++r) {
+        out[out_idx + r] = W.dot_f32(r * cols, 1, x, 0, 1, cols);
+    }
+}
+
+// out[r] += dot(row r of W, x)
+fun matvec_add(W, rows, cols, x, out)
+{
+    for (let var r = 0; r < rows; ++r) {
+        out[r] = out[r] + W.dot_f32(r * cols, 1, x, 0, 1, cols);
+    }
+}
+
+// Normalize x by its root mean square and scale by w, into a ByteArray
+fun rms_norm(x, w, out)
+{
+    let n = x.len;
+    let var ss = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        ss = ss + x[i] * x[i];
+    }
+    let r = 1.0 / (ss / n + RMS_EPS).sqrt();
+    for (let var i = 0; i < n; ++i) {
+        out.set_f32(i, w[i] * x[i] * r);
+    }
+}
+
+fun silu(x)
+{
+    return x / (1.0 + (-x).exp());
+}
+
+fun softplus(x)
+{
+    if (x > 20.0)
+        return x;
+    return (1.0 + x.exp()).ln();
+}
+
+// Rotate each pair (x[i], x[i + HEAD_DIM/2]) of one head by its angle
+fun apply_rope(x, idx, cos, sin, out, out_idx)
+{
+    let half = HEAD_DIM.idiv(2);
+    for (let var i = 0; i < half; ++i) {
+        let a = x[idx + i];
+        let b = x[idx + i + half];
+        out.set_f32(out_idx + i, a * cos[i] - b * sin[i]);
+        out.set_f32(out_idx + i + half, b * cos[i] + a * sin[i]);
+    }
+}
+
+class Model
+{
+    init(self, path, max_len)
+    {
+        let st = SafeTensors(path);
+
+        self.embed = st.get("model.embed_tokens.weight");
+        self.final_norm = st.get_array("model.final_layernorm.weight");
+
+        self.layers = [];
+        for (let var i = 0; i < NUM_LAYERS; ++i) {
+            self.layers.push(Layer(st, i, max_len));
+        }
+
+        // Residual stream
+        self.x = Array.with_size(HIDDEN, 0.0);
+
+        // Scratch buffers. Inputs to matrix products are float32 ByteArrays.
+        self.h = ByteArray.with_size(HIDDEN * 4);
+        self.zxbcdt = Array.with_size(IN_PROJ_DIM, 0.0);
+        self.xbc = Array.with_size(CONV_DIM, 0.0);
+        self.B = Array.with_size(SSM_STATE, 0.0);
+        self.C = Array.with_size(SSM_STATE, 0.0);
+        self.y = ByteArray.with_size(SSM_DIM * 4);
+        self.q = Array.with_size(NUM_HEADS * HEAD_DIM, 0.0);
+        self.k = Array.with_size(NUM_KV_HEADS * HEAD_DIM, 0.0);
+        self.v = Array.with_size(NUM_KV_HEADS * HEAD_DIM, 0.0);
+        self.q_rot = ByteArray.with_size(NUM_HEADS * HEAD_DIM * 4);
+        self.scores = Array.with_size(max_len, 0.0);
+        self.probs = ByteArray.with_size(max_len * 4);
+        self.attn = ByteArray.with_size(NUM_HEADS * HEAD_DIM * 4);
+        self.gate = Array.with_size(MLP_DIM, 0.0);
+        self.up = Array.with_size(MLP_DIM, 0.0);
+        self.act = ByteArray.with_size(MLP_DIM * 4);
+        self.logits = Array.with_size(VOCAB_SIZE, 0.0);
+
+        // Rotary embedding frequencies
+        let half = HEAD_DIM.idiv(2);
+        self.inv_freq = Array.with_size(half, 0.0);
+        for (let var i = 0; i < half; ++i) {
+            self.inv_freq[i] = 1.0 / ROPE_THETA.pow((2 * i) / HEAD_DIM);
+        }
+        self.cos = Array.with_size(half, 0.0);
+        self.sin = Array.with_size(half, 0.0);
+    }
+
+    // Run one token through the model at a given position. The logits for
+    // the next token are only computed if requested.
+    forward(self, token, pos, want_logits)
+    {
+        let x = self.x;
+        let embed = self.embed;
+        for (let var i = 0; i < HIDDEN; ++i) {
+            x[i] = embed.get_f32(token * HIDDEN + i) * EMBED_MULT;
+        }
+
+        for (let var i = 0; i < self.inv_freq.len; ++i) {
+            let angle = pos * self.inv_freq[i];
+            self.cos[i] = angle.cos();
+            self.sin[i] = angle.sin();
+        }
+
+        for (let var l = 0; l < NUM_LAYERS; ++l) {
+            let layer = self.layers[l];
+
+            // Mamba and attention both read the same normalized input, and
+            // both add their output to the residual stream
+            rms_norm(x, layer.input_norm, self.h);
+            self.mamba(layer);
+            self.attention(layer, pos);
+
+            rms_norm(x, layer.ff_norm, self.h);
+            self.mlp(layer);
+        }
+
+        if (!want_logits)
+            return nil;
+
+        // The output projection shares its weights with the embedding
+        rms_norm(x, self.final_norm, self.h);
+        matvec(embed, VOCAB_SIZE, HIDDEN, self.h, self.logits, 0);
+        return self.logits;
+    }
+
+    mamba(self, layer)
+    {
+        let zxbcdt = self.zxbcdt;
+        matvec(layer.in_proj, IN_PROJ_DIM, HIDDEN, self.h, zxbcdt, 0);
+
+        // Depthwise causal convolution over the last CONV_WIDTH inputs of
+        // each channel, followed by SiLU
+        let xbc = self.xbc;
+        let cw = layer.conv_w;
+        let cb = layer.conv_b;
+        let cs = layer.conv_state;
+        for (let var c = 0; c < CONV_DIM; ++c) {
+            let s = c * 3;
+            let w = c * 4;
+            let x0 = cs[s];
+            let x1 = cs[s + 1];
+            let x2 = cs[s + 2];
+            let x3 = zxbcdt[SSM_DIM + c];
+            cs[s] = x1;
+            cs[s + 1] = x2;
+            cs[s + 2] = x3;
+            xbc[c] = silu(cb[c] + cw[w] * x0 + cw[w + 1] * x1 + cw[w + 2] * x2 + cw[w + 3] * x3);
+        }
+
+        let B = self.B;
+        let C = self.C;
+        for (let var n = 0; n < SSM_STATE; ++n) {
+            B[n] = xbc[SSM_DIM + n];
+            C[n] = xbc[SSM_DIM + SSM_STATE + n];
+        }
+
+        // Selective state update. Each head has its own time step, and
+        // every channel's state decays by the same factor within a head:
+        //   state = state * exp(dt * A) + dt * x * B
+        //   y = state . C + D * x
+        let state = layer.ssm_state;
+        let y = self.y;
+        for (let var h = 0; h < SSM_HEADS; ++h) {
+            let dt = softplus(zxbcdt[SSM_DIM + CONV_DIM + h] + layer.dt_bias[h]);
+            let dA = (dt * layer.A[h]).exp();
+            let Dh = layer.D[h];
+
+            for (let var p = 0; p < SSM_HEAD_DIM; ++p) {
+                let ch = h * SSM_HEAD_DIM + p;
+                let xv = xbc[ch];
+                let dtx = dt * xv;
+                let base = ch * SSM_STATE;
+
+                let var acc = 0.0;
+                for (let var n = 0; n < SSM_STATE; ++n) {
+                    let v = state[base + n] * dA + dtx * B[n];
+                    state[base + n] = v;
+                    acc = acc + v * C[n];
+                }
+
+                // Gated by SiLU of z
+                y.set_f32(ch, (acc + Dh * xv) * silu(zxbcdt[ch]));
+            }
+        }
+
+        matvec_add(layer.out_proj, HIDDEN, SSM_DIM, y, self.x);
+    }
+
+    attention(self, layer, pos)
+    {
+        let q = self.q;
+        let k = self.k;
+        let v = self.v;
+        matvec(layer.q_proj, NUM_HEADS * HEAD_DIM, HIDDEN, self.h, q, 0);
+        matvec(layer.k_proj, NUM_KV_HEADS * HEAD_DIM, HIDDEN, self.h, k, 0);
+        matvec(layer.v_proj, NUM_KV_HEADS * HEAD_DIM, HIDDEN, self.h, v, 0);
+
+        for (let var hd = 0; hd < NUM_HEADS; ++hd) {
+            apply_rope(q, hd * HEAD_DIM, self.cos, self.sin, self.q_rot, hd * HEAD_DIM);
+        }
+
+        // Append the new key and value to the cache
+        let kv_size = NUM_KV_HEADS * HEAD_DIM;
+        let k_cache = layer.k_cache;
+        let v_cache = layer.v_cache;
+        for (let var g = 0; g < NUM_KV_HEADS; ++g) {
+            apply_rope(k, g * HEAD_DIM, self.cos, self.sin, k_cache, pos * kv_size + g * HEAD_DIM);
+        }
+        for (let var i = 0; i < kv_size; ++i) {
+            v_cache.set_f32(pos * kv_size + i, v[i]);
+        }
+
+        let q_rot = self.q_rot;
+        let scores = self.scores;
+        let probs = self.probs;
+        let out = self.attn;
+        let len = pos + 1;
+        let scale = 1.0 / HEAD_DIM.to_f().sqrt();
+        let group_size = NUM_HEADS.idiv(NUM_KV_HEADS);
+
+        for (let var hd = 0; hd < NUM_HEADS; ++hd) {
+            // Query heads share key/value heads in groups
+            let g = hd.idiv(group_size);
+
+            let var max = -1.0e30;
+            for (let var t = 0; t < len; ++t) {
+                let s = q_rot.dot_f32(hd * HEAD_DIM, 1, k_cache, t * kv_size + g * HEAD_DIM, 1, HEAD_DIM) * scale;
+                scores[t] = s;
+                max = max.max(s);
+            }
+
+            let var sum = 0.0;
+            for (let var t = 0; t < len; ++t) {
+                let e = (scores[t] - max).exp();
+                scores[t] = e;
+                sum = sum + e;
+            }
+            for (let var t = 0; t < len; ++t) {
+                probs.set_f32(t, scores[t] / sum);
+            }
+
+            // Weighted sum of the values, one strided dot product per
+            // dimension down the cache
+            for (let var d = 0; d < HEAD_DIM; ++d) {
+                out.set_f32(hd * HEAD_DIM + d, v_cache.dot_f32(g * HEAD_DIM + d, kv_size, probs, 0, 1, len));
+            }
+        }
+
+        matvec_add(layer.o_proj, HIDDEN, NUM_HEADS * HEAD_DIM, out, self.x);
+    }
+
+    // SwiGLU feed-forward block
+    mlp(self, layer)
+    {
+        let gate = self.gate;
+        let up = self.up;
+        let act = self.act;
+        matvec(layer.gate_proj, MLP_DIM, HIDDEN, self.h, gate, 0);
+        matvec(layer.up_proj, MLP_DIM, HIDDEN, self.h, up, 0);
+
+        for (let var i = 0; i < MLP_DIM; ++i) {
+            act.set_f32(i, silu(gate[i]) * up[i]);
+        }
+
+        matvec_add(layer.down_proj, HIDDEN, MLP_DIM, act, self.x);
+    }
+}
+
+//============================================================================
+// Sampling
+//============================================================================
+
+fun argmax(logits)
+{
+    let var best = 0;
+    for (let var i = 1; i < logits.len; ++i) {
+        if (logits[i] > logits[best])
+            best = i;
+    }
+    return best;
+}
+
+// Sample from the softmax of the logits, sharpened by a temperature
+fun sample(logits, temperature, rng)
+{
+    let max = logits[argmax(logits)];
+    let scale = LM_HEAD_MULT / temperature;
+
+    let var sum = 0.0;
+    for (let var i = 0; i < logits.len; ++i) {
+        sum = sum + ((logits[i] - max) * scale).exp();
+    }
+
+    let var r = rng.float(0.0, sum);
+    for (let var i = 0; i < logits.len; ++i) {
+        r = r - ((logits[i] - max) * scale).exp();
+        if (r <= 0.0)
+            return i;
+    }
+    return logits.len - 1;
+}
+
+//============================================================================
+// Main
+//============================================================================
+
+let prompt = $cmd_get_arg_or(1, "The capital of France is");
+let num_tokens = $cmd_get_arg_or(2, "100").parse_int(10);
+let temperature = $cmd_get_arg_or(3, "0.8").parse_float();
+
+let load_start = $time_current_ms();
+let tokenizer = Tokenizer(TOKENIZER_PATH);
+let prompt_ids = tokenizer.encode(prompt);
+let model = Model(MODEL_PATH, prompt_ids.len + num_tokens);
+$println("Loaded model in " + ($time_current_ms() - load_start).to_s() + " ms");
+$println("Prompt is " + prompt_ids.len.to_s() + " tokens\n");
+
+let rng = Xoshiro128($time_current_ms());
+
+// Bytes of the output not yet printed, because they don't yet form
+// complete UTF-8 characters
+let pending = ByteArray.with_size(0);
+
+fun print_token(id)
+{
+    tokenizer.decode(id, pending);
+    let s = String.from_utf8(pending, 0, pending.len);
+    if (s != nil) {
+        $print(s);
+        pending.clear();
+    } else if (pending.len > 8) {
+        pending.clear();
+    }
+}
+
+$print(prompt);
+
+// Process the prompt. Only the last token's logits are needed.
+let prompt_start = $time_current_ms();
+let var logits = nil;
+for (let var i = 0; i < prompt_ids.len; ++i) {
+    logits = model.forward(prompt_ids[i], i, i == prompt_ids.len - 1);
+}
+let prompt_ms = $time_current_ms() - prompt_start;
+
+let gen_start = $time_current_ms();
+let var num_generated = 0;
+for (let var i = 0; i < num_tokens; ++i) {
+    let var next = 0;
+    if (temperature > 0.0) {
+        next = sample(logits, temperature, rng);
+    } else {
+        next = argmax(logits);
+    }
+
+    if (next == EOS_TOKEN)
+        break;
+
+    print_token(next);
+    num_generated = num_generated + 1;
+
+    // The last token's logits won't be used
+    if (i + 1 < num_tokens) {
+        logits = model.forward(next, prompt_ids.len + i, true);
+    }
+}
+let gen_ms = $time_current_ms() - gen_start;
+$println("\n");
+
+$println(
+    "Prompt: " + prompt_ids.len.to_s() + " tokens in " + prompt_ms.to_s() + " ms (" +
+    (prompt_ids.len * 1000.0 / prompt_ms.max(1)).format_decimals(1) + " tokens/s)"
+);
+$println(
+    "Generation: " + num_generated.to_s() + " tokens in " + gen_ms.to_s() + " ms (" +
+    (num_generated * 1000.0 / gen_ms.max(1)).format_decimals(1) + " tokens/s)"
+);
