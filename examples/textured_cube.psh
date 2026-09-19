@@ -7,6 +7,8 @@
 //
 // Usage: plush examples/textured_cube.psh
 
+from image import load_tga;
+
 let FRAME_WIDTH = 800;
 let FRAME_HEIGHT = 600;
 let BG_COLOR = 0xFF101418;
@@ -96,40 +98,6 @@ class Vertex {
 
 // --- Texture ---
 
-// Reads an uncompressed 32-bit TGA. Its BGRA byte order is the pixel format
-// the frame buffer uses, so the pixels only need to be copied out.
-fun load_tga(path) {
-    let data = $read_file(path);
-    if (data == nil) {
-        $println("could not read " + path);
-        $exit(1);
-    }
-
-    let img_type = data[2];
-    let width = data.load_u16(12);
-    let height = data.load_u16(14);
-    let bpp = data[16];
-    let top_down = (data[17] & 0x20) != 0;
-    let start = 18 + data[0];
-
-    if (img_type != 2 || bpp != 32) {
-        $println(path + ": expected an uncompressed 32-bit TGA");
-        $exit(1);
-    }
-
-    let pixels = ByteArray.with_size(width * height * 4);
-    let pitch = width * 4;
-    if (top_down) {
-        pixels.memcpy(0, data, start, height * pitch);
-    } else {
-        for (let var y = 0; y < height; ++y) {
-            pixels.memcpy(y * pitch, data, start + (height - 1 - y) * pitch, pitch);
-        }
-    }
-
-    return [pixels, width, height];
-}
-
 // One darkened copy of the texture per shade level. Lighting a face is then
 // picking a texture, instead of blending every pixel it covers. Level s
 // stands for a diffuse term of s / (NUM_SHADES - 1), so level 0 is a face
@@ -161,12 +129,16 @@ fun make_shade_table(tex) {
     return table;
 }
 
-let tga = load_tga(TEX_PATH);
-if (tga[1] != TEX_SIZE || tga[2] != TEX_SIZE) {
+let tex = load_tga(TEX_PATH);
+if (tex == nil) {
+    $println(TEX_PATH + ": could not read an uncompressed 32-bit TGA");
+    $exit(1);
+}
+if (tex.width != TEX_SIZE || tex.height != TEX_SIZE) {
     $println(TEX_PATH + ": expected a " + TEX_SIZE.to_s() + "x" + TEX_SIZE.to_s() + " texture");
     $exit(1);
 }
-let shade_table = make_shade_table(tga[0]);
+let shade_table = make_shade_table(tex.bytes);
 
 // --- Rasterization ---
 

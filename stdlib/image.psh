@@ -1,0 +1,208 @@
+// Images and colors
+//
+//   from image import Image, rgb;
+//
+//   let img = Image(640, 480);
+//   img.fill_rect(10, 10, 100, 50, rgb(255, 0, 0));
+//   $window_draw_frame(window, img.bytes);
+//
+// Pixel format:
+//
+// A color is a 32-bit integer 0xAARRGGBB: alpha in the top byte, then red,
+// green and blue. Pixels are stored little-endian, so in memory each pixel
+// is the 4 bytes B, G, R, A, lowest address first (BGRA32). This is the
+// format $window_draw_frame() expects, so an image's bytes can be drawn to a
+// window as they are.
+//
+// Pixels are stored row by row from the top-left corner, with no padding
+// between rows. The pixel at (x, y) is at byte offset 4 * (y * width + x),
+// or index y * width + x for get_u32() and set_u32().
+
+let COLOR_BLACK     = 0xFF_00_00_00;
+let COLOR_WHITE     = 0xFF_FF_FF_FF;
+let COLOR_GREY      = 0xFF_80_80_80;
+let COLOR_RED       = 0xFF_FF_00_00;
+let COLOR_GREEN     = 0xFF_00_FF_00;
+let COLOR_BLUE      = 0xFF_00_00_FF;
+let COLOR_ORANGE    = 0xFF_FF_A5_00;
+let COLOR_YELLOW    = 0xFF_FF_FF_00;
+let COLOR_MAGENTA   = 0xFF_FF_00_FF;
+let COLOR_PURPLE    = 0xFF_D6_00_FF;
+let COLOR_TURQUOISE = 0xFF_40_E0_D0;
+let COLOR_C64_BLUE  = 0xFF_09_40_DD;
+
+// Builds a color from components in [0, 255]
+fun rgba(r, g, b, a) {
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+// Builds a fully opaque color from components in [0, 255]
+fun rgb(r, g, b) {
+    return (0xFF << 24) | (r << 16) | (g << 8) | b;
+}
+
+// Extract the components of a color
+fun color_a(p) { return (p >> 24) & 0xFF; }
+fun color_r(p) { return (p >> 16) & 0xFF; }
+fun color_g(p) { return (p >>  8) & 0xFF; }
+fun color_b(p) { return (p >>  0) & 0xFF; }
+
+class Image
+{
+    init(self, width, height)
+    {
+        assert(width instanceof Int64);
+        assert(height instanceof Int64);
+
+        self.width = width;
+        self.height = height;
+        self.bytes = ByteArray.with_size(4 * width * height);
+    }
+
+    clear(self, color)
+    {
+        self.bytes.fill_u32(0, self.width * self.height, color);
+    }
+
+    get_pixel(self, x, y)
+    {
+        let idx = y * self.width + x;
+        return(self.bytes.get_u32(idx));
+    }
+
+    set_pixel(self, x, y, color)
+    {
+        let idx = y * self.width + x;
+        self.bytes.set_u32(idx, color);
+    }
+
+    // Copy a source image into this image at a given position, one
+    // contiguous row at a time
+    blit(self, src_img, dst_x, dst_y)
+    {
+        // Clip the destination rectangle against this image
+        let x0 = (0).max(dst_x);
+        let y0 = (0).max(dst_y);
+        let x1 = self.width.min(dst_x + src_img.width);
+        let y1 = self.height.min(dst_y + src_img.height);
+
+        let row_bytes = (x1 - x0) * 4;
+        if (row_bytes <= 0) return;
+
+        for (let var y = y0; y < y1; ++y) {
+            let dst_idx = (y * self.width + x0) * 4;
+            let src_idx = ((y - dst_y) * src_img.width + (x0 - dst_x)) * 4;
+            self.bytes.memcpy(dst_idx, src_img.bytes, src_idx, row_bytes);
+        }
+    }
+
+    // Bresenham's algorithm
+    draw_line(self, x0, y0, x1, y1, color) {
+        let sx = (x0 < x1 ? 1 : -1);
+        let sy = (y0 < y1 ? 1 : -1);
+        let dx = (x1 - x0).abs();
+        let dy = (y1 - y0).abs();
+
+        let var err = dx - dy;
+        let var x = x0;
+        let var y = y0;
+
+        loop {
+            self.set_pixel(x, y, color);
+            if (x == x1 && y == y1) {
+                return;
+            }
+
+            let e2 = 2 * err;
+            if (e2 > -dy) {
+                err = err - dy;
+                x = x + sx;
+            }
+
+            if (e2 < dx) {
+                err = err + dx;
+                y = y + sy;
+            }
+        }
+    }
+
+    // Draw a filled rectangle
+    fill_rect(self, x, y, w, h, color)
+    {
+        let var rx = x;
+        let var ry = y;
+        let var rw = w;
+        let var rh = h;
+
+        // Clipping
+        if (rx < 0) { rw = rw + rx; rx = 0; }
+        if (ry < 0) { rh = rh + ry; ry = 0; }
+        if (rx + rw > self.width) { rw = self.width - rx; }
+        if (ry + rh > self.height) { rh = self.height - ry; }
+
+        if (rw <= 0 || rh <= 0) { return; }
+
+        for (let var j = 0; j < rh; ++j) {
+            let idx = (ry + j) * self.width + rx;
+            self.bytes.fill_u32(idx, rw, color);
+        }
+    }
+
+    // Draw a filled circle
+    fill_circle(self, x0, y0, r, color)
+    {
+        let var x = 0;
+        let var y = r;
+        let var d = 3 - 2 * r;
+
+        while (y >= x) {
+            self.fill_rect(x0 - y, y0 + x, 2 * y + 1, 1, color);
+            self.fill_rect(x0 - y, y0 - x, 2 * y + 1, 1, color);
+            self.fill_rect(x0 - x, y0 + y, 2 * x + 1, 1, color);
+            self.fill_rect(x0 - x, y0 - y, 2 * x + 1, 1, color);
+
+            x = x + 1;
+            if (d > 0) {
+                y = y - 1;
+                d = d + 4 * (x - y) + 10;
+            } else {
+                d = d + 4 * x + 6;
+            }
+        }
+    }
+}
+
+// Reads an uncompressed 32-bit TGA file into an Image. TGA stores pixels in
+// BGRA byte order, the same format as Image, so they are copied as they are.
+// Returns nil if the file can't be read or is not in this format.
+fun load_tga(path)
+{
+    let data = $read_file(path);
+    if (data == nil || data.len < 18) {
+        return nil;
+    }
+
+    let img_type = data[2];
+    let width = data.load_u16(12);
+    let height = data.load_u16(14);
+    let bpp = data[16];
+    let top_down = (data[17] & 0x20) != 0;
+    let start = 18 + data[0];
+    let pitch = width * 4;
+
+    if (img_type != 2 || bpp != 32 || data.len < start + height * pitch) {
+        return nil;
+    }
+
+    // Rows are stored bottom-up unless the header says otherwise
+    let img = Image(width, height);
+    if (top_down) {
+        img.bytes.memcpy(0, data, start, height * pitch);
+    } else {
+        for (let var y = 0; y < height; ++y) {
+            img.bytes.memcpy(y * pitch, data, start + (height - 1 - y) * pitch, pitch);
+        }
+    }
+
+    return img;
+}

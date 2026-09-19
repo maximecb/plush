@@ -50,7 +50,7 @@
 // were written. Given a directory as well, it writes each viewpoint of the
 // tour there as a TGA screenshot.
 
-from ./image import Image;
+from image import Image, load_tga;
 from ./monogram_font import Font;
 from random import Xoshiro128;
 
@@ -748,39 +748,22 @@ fun draw_stars() {
 
 // --- Textures ---
 
-// Reads an uncompressed 32-bit TGA. Its BGRA byte order is the pixel format the
-// frame buffer uses, so the pixels only need to be copied out.
-fun load_tga(path) {
-    let data = $read_file(path);
-    if (data == nil) {
-        $println("could not read " + path);
+// Loads a texture, which the span loop needs to be power-of-two sized
+fun load_texture(path) {
+    let img = load_tga(path);
+    if (img == nil) {
+        $println(path + ": could not read an uncompressed 32-bit TGA");
         $exit(1);
     }
 
-    let img_type = data[2];
-    let width = data.load_u16(12);
-    let height = data.load_u16(14);
-    let bpp = data[16];
-    let top_down = (data[17] & 0x20) != 0;
-    let start = 18 + data[0];
-
-    if (img_type != 2 || bpp != 32 || width < 1 || height < 1
-        || (width & (width - 1)) != 0 || (height & (height - 1)) != 0) {
-        $println(path + ": expected a power-of-two uncompressed 32-bit TGA");
+    let w = img.width;
+    let h = img.height;
+    if (w < 1 || h < 1 || (w & (w - 1)) != 0 || (h & (h - 1)) != 0) {
+        $println(path + ": expected a power-of-two sized texture");
         $exit(1);
     }
 
-    let pixels = ByteArray.with_size(width * height * 4);
-    let pitch = width * 4;
-    if (top_down) {
-        pixels.memcpy(0, data, start, height * pitch);
-    } else {
-        for (let var y = 0; y < height; ++y) {
-            pixels.memcpy(y * pitch, data, start + (height - 1 - y) * pitch, pitch);
-        }
-    }
-
-    return [pixels, width, height];
+    return img;
 }
 
 // A texture and the darkened copies of it, one per light level in use. Sizes
@@ -788,11 +771,11 @@ fun load_tga(path) {
 // texture rather than being global constants.
 class Texture {
     init(self, name) {
-        let t = load_tga(TEX_DIR + name + ".tga");
+        let t = load_texture(TEX_DIR + name + ".tga");
         self.name = name;
-        self.base = t[0];
-        self.width = t[1];
-        self.height = t[2];
+        self.base = t.bytes;
+        self.width = t.width;
+        self.height = t.height;
 
         let var shift = 0;
         while ((1 << shift) < self.width) shift = shift + 1;

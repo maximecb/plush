@@ -1,229 +1,71 @@
-let COLOR_BLACK     = 0xFF_00_00_00;
-let COLOR_WHITE     = 0xFF_FF_FF_FF;
-let COLOR_GREY      = 0xFF_80_80_80;
-let COLOR_RED       = 0xFF_FF_00_00;
-let COLOR_GREEN     = 0xFF_00_FF_00;
-let COLOR_BLUE      = 0xFF_00_00_FF;
-let COLOR_ORANGE    = 0xFF_FF_A5_00;
-let COLOR_YELLOW    = 0xFF_FF_FF_00;
-let COLOR_MAGENTA   = 0xFF_FF_00_FF;
-let COLOR_PURPLE    = 0xFF_D6_00_FF;
-let COLOR_TURQUOISE = 0xFF_40_E0_D0;
-let COLOR_C64_BLUE = rgb(9, 64, 221);
+// Demo showcasing the drawing primitives of the image module
 
-fun rgba(r, g, b, a) {
-    return (a << 24) | (r << 16) | (g << 8) | b;
-}
+from image import *;
 
-fun rgb(r, g, b) {
-    return (0xFF << 24) | (r << 16) | (g << 8) | b;
-}
+let PI = 3.1415926535;
+let WIDTH = 640;
+let HEIGHT = 480;
 
-fun color_a(p) { return (p >> 24) & 0xFF; }
-fun color_r(p) { return (p >> 16) & 0xFF; }
-fun color_g(p) { return (p >>  8) & 0xFF; }
-fun color_b(p) { return (p >>  0) & 0xFF; }
+let palette = [
+    COLOR_RED, COLOR_ORANGE, COLOR_YELLOW, COLOR_GREEN,
+    COLOR_TURQUOISE, COLOR_BLUE, COLOR_PURPLE, COLOR_MAGENTA
+];
 
-class Image
-{
-    init(self, width, height)
-    {
-        assert(width instanceof Int64);
-        assert(height instanceof Int64);
-
-        self.width = width;
-        self.height = height;
-        self.bytes = ByteArray.with_size(4 * width * height);
-    }
-
-    clear(self, color)
-    {
-        self.bytes.fill_u32(0, self.width * self.height, color);
-    }
-
-    // The color is specified as an u32 value in RGBA32 format
-    get_pixel(self, x, y)
-    {
-        let idx = y * self.width + x;
-        return(self.bytes.get_u32(idx));
-    }
-
-    set_pixel(self, x, y, color)
-    {
-        let idx = y * self.width + x;
-        self.bytes.set_u32(idx, color);
-    }
-
-    // Copy a source image into this image at a given position, one
-    // contiguous row at a time
-    blit(self, src_img, dst_x, dst_y)
-    {
-        // Clip the destination rectangle against this image
-        let x0 = (0).max(dst_x);
-        let y0 = (0).max(dst_y);
-        let x1 = self.width.min(dst_x + src_img.width);
-        let y1 = self.height.min(dst_y + src_img.height);
-
-        let row_bytes = (x1 - x0) * 4;
-        if (row_bytes <= 0) return;
-
-        for (let var y = y0; y < y1; ++y) {
-            let dst_idx = (y * self.width + x0) * 4;
-            let src_idx = ((y - dst_y) * src_img.width + (x0 - dst_x)) * 4;
-            self.bytes.memcpy(dst_idx, src_img.bytes, src_idx, row_bytes);
-        }
-    }
-
-    // Bresenham's algorithm
-    draw_line(self, x0, y0, x1, y1, color) {
-        let sx = (x0 < x1 ? 1 : -1);
-        let sy = (y0 < y1 ? 1 : -1);
-        let dx = (x1 - x0).abs();
-        let dy = (y1 - y0).abs();
-
-        let var err = dx - dy;
-        let var x = x0;
-        let var y = y0;
-
-        loop {
-            self.set_pixel(x, y, color);
-            if (x == x1 && y == y1) {
-                return;
-            }
-
-            let e2 = 2 * err;
-            if (e2 > -dy) {
-                err = err - dy;
-                x = x + sx;
-            }
-
-            if (e2 < dx) {
-                err = err + dx;
-                y = y + sy;
-            }
-        }
-    }
-
-    // Draw a filled rectangle
-    fill_rect(self, x, y, w, h, color)
-    {
-        let var rx = x;
-        let var ry = y;
-        let var rw = w;
-        let var rh = h;
-
-        // Clipping
-        if (rx < 0) { rw = rw + rx; rx = 0; }
-        if (ry < 0) { rh = rh + ry; ry = 0; }
-        if (rx + rw > self.width) { rw = self.width - rx; }
-        if (ry + rh > self.height) { rh = self.height - ry; }
-
-        if (rw <= 0 || rh <= 0) { return; }
-
-        for (let var j = 0; j < rh; ++j) {
-            let idx = (ry + j) * self.width + rx;
-            self.bytes.fill_u32(idx, rw, color);
-        }
-    }
-
-    // Draw a filled circle
-    fill_circle(self, x0, y0, r, color)
-    {
-        let var x = 0;
-        let var y = r;
-        let var d = 3 - 2 * r;
-
-        while (y >= x) {
-            self.fill_rect(x0 - y, y0 + x, 2 * y + 1, 1, color);
-            self.fill_rect(x0 - y, y0 - x, 2 * y + 1, 1, color);
-            self.fill_rect(x0 - x, y0 + y, 2 * x + 1, 1, color);
-            self.fill_rect(x0 - x, y0 - y, 2 * x + 1, 1, color);
-
-            x = x + 1;
-            if (d > 0) {
-                y = y - 1;
-                d = d + 4 * (x - y) + 10;
-            } else {
-                d = d + 4 * x + 6;
-            }
-        }
+// A small sprite, painted one pixel at a time and then blitted each frame
+let sprite = Image(48, 48);
+for (let var y = 0; y < sprite.height; ++y) {
+    for (let var x = 0; x < sprite.width; ++x) {
+        sprite.set_pixel(x, y, rgb(255 - 4 * y, 40 + 4 * x, 200));
     }
 }
 
-// Demo showcasing the drawing primitives above. Everything lives inside
-// main() so that units importing this one only pick up the image code.
-fun main()
-{
-    let PI = 3.1415926535;
-    let WIDTH = 640;
-    let HEIGHT = 480;
+let frame_buffer = Image(WIDTH, HEIGHT);
+let window = $window_create(WIDTH, HEIGHT, "Plush Image", 0);
 
-    let palette = [
-        COLOR_RED, COLOR_ORANGE, COLOR_YELLOW, COLOR_GREEN,
-        COLOR_TURQUOISE, COLOR_BLUE, COLOR_PURPLE, COLOR_MAGENTA
-    ];
+let var frame = 0;
 
-    // A small sprite, painted one pixel at a time and then blitted each frame
-    let sprite = Image(48, 48);
-    for (let var y = 0; y < sprite.height; ++y) {
-        for (let var x = 0; x < sprite.width; ++x) {
-            sprite.set_pixel(x, y, rgb(255 - 4 * y, 40 + 4 * x, 200));
-        }
+loop {
+    let t = frame / 60.0;
+    ++frame;
+
+    frame_buffer.clear(COLOR_C64_BLUE);
+
+    // Palette swatches along the top
+    for (let var i = 0; i < palette.len; ++i) {
+        frame_buffer.fill_rect(32 + i * 72, 32, 64, 64, palette[i]);
     }
 
-    let frame_buffer = Image(WIDTH, HEIGHT);
-    let window = $window_create(WIDTH, HEIGHT, "Plush Image", 0);
-
-    let var frame = 0;
-
-    loop {
-        let t = frame / 60.0;
-        ++frame;
-
-        frame_buffer.clear(COLOR_C64_BLUE);
-
-        // Palette swatches along the top
-        for (let var i = 0; i < palette.len; ++i) {
-            frame_buffer.fill_rect(32 + i * 72, 32, 64, 64, palette[i]);
-        }
-
-        // Fan of lines sweeping around a hub
-        let cx = 180;
-        let cy = 280;
-        for (let var i = 0; i < 12; ++i) {
-            let angle = t + i * 2.0 * PI / 12.0;
-            let x = cx + (120.0 * angle.cos()).floor();
-            let y = cy + (120.0 * angle.sin()).floor();
-            frame_buffer.draw_line(cx, cy, x, y, palette[i % palette.len]);
-        }
-        frame_buffer.fill_circle(cx, cy, 24, COLOR_WHITE);
-
-        // Circle with a radius pulsing over time
-        let radius = 40 + (30.0 * (2.0 * t).sin()).floor();
-        frame_buffer.fill_circle(460, 280, radius, COLOR_TURQUOISE);
-        frame_buffer.fill_circle(460, 280, radius.idiv(2), COLOR_GREY);
-
-        // The sprite travels past both edges, where blit clips it
-        let sx = (320.0 + 350.0 * (0.7 * t).sin()).floor() - sprite.width.idiv(2);
-        frame_buffer.blit(sprite, sx, 400);
-
-        $window_draw_frame(window, frame_buffer.bytes);
-
-        $actor_sleep(10); // Limit the frame rate
-
-        // --- Event Handling ---
-        let msg = $actor_poll();
-
-        if (!(msg instanceof UIEvent)) {
-            continue;
-        }
-        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
-            break;
-        }
+    // Fan of lines sweeping around a hub
+    let cx = 180;
+    let cy = 280;
+    for (let var i = 0; i < 12; ++i) {
+        let angle = t + i * 2.0 * PI / 12.0;
+        let x = cx + (120.0 * angle.cos()).floor();
+        let y = cy + (120.0 * angle.sin()).floor();
+        frame_buffer.draw_line(cx, cy, x, y, palette[i % palette.len]);
     }
-}
+    frame_buffer.fill_circle(cx, cy, 24, COLOR_WHITE);
 
-// Only run the demo if this is the main unit, not when this unit is imported
-if ($MAIN_UNIT) {
-    main();
+    // Circle with a radius pulsing over time
+    let radius = 40 + (30.0 * (2.0 * t).sin()).floor();
+    frame_buffer.fill_circle(460, 280, radius, COLOR_TURQUOISE);
+    frame_buffer.fill_circle(460, 280, radius.idiv(2), COLOR_GREY);
+
+    // The sprite travels past both edges, where blit clips it
+    let sx = (320.0 + 350.0 * (0.7 * t).sin()).floor() - sprite.width.idiv(2);
+    frame_buffer.blit(sprite, sx, 400);
+
+    $window_draw_frame(window, frame_buffer.bytes);
+
+    $actor_sleep(10); // Limit the frame rate
+
+    // --- Event Handling ---
+    let msg = $actor_poll();
+
+    if (!(msg instanceof UIEvent)) {
+        continue;
+    }
+    if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+        break;
+    }
 }

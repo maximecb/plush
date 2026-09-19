@@ -1,0 +1,41 @@
+from image import *;
+
+// Colors are 0xAARRGGBB
+let c = rgba(1, 2, 3, 4);
+assert(c == 0x04010203);
+assert(color_a(c) == 4);
+assert(color_r(c) == 1);
+assert(color_g(c) == 2);
+assert(color_b(c) == 3);
+assert(rgb(9, 64, 221) == COLOR_C64_BLUE);
+
+let img = Image(8, 4);
+img.clear(COLOR_BLACK);
+img.set_pixel(3, 2, COLOR_RED);
+assert(img.get_pixel(3, 2) == COLOR_RED);
+
+// Stored as BGRA bytes, row by row
+let idx = 4 * (2 * 8 + 3);
+assert(img.bytes[idx] == 0x00);
+assert(img.bytes[idx + 2] == 0xFF);
+assert(img.bytes[idx + 3] == 0xFF);
+
+// Drawing is clipped at the edges
+img.fill_rect(-2, -2, 4, 4, COLOR_GREEN);
+assert(img.get_pixel(0, 0) == COLOR_GREEN);
+assert(img.get_pixel(1, 1) == COLOR_GREEN);
+assert(img.get_pixel(2, 2) == COLOR_BLACK);
+
+let sprite = Image(2, 2);
+sprite.clear(COLOR_BLUE);
+img.blit(sprite, 7, 3);
+assert(img.get_pixel(7, 3) == COLOR_BLUE);
+assert(img.get_pixel(6, 3) == COLOR_BLACK);
+
+// Loading a TGA, whose rows are stored bottom-up
+let tex = load_tga("examples/data/textures/crate_wood.tga");
+assert(tex.width == 256);
+assert(tex.height == 256);
+assert(tex.get_pixel(0, 0) == 0xFF040303);
+
+assert(load_tga("no/such/file.tga") == nil);
