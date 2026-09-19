@@ -206,3 +206,23 @@ fun load_tga(path)
 
     return img;
 }
+
+// Writes an Image to a file as an uncompressed 32-bit TGA.
+// Returns true on success and false on failure, like $write_file().
+fun save_tga(path, img)
+{
+    let num_bytes = img.width * img.height * 4;
+    let out = ByteArray.with_size(18 + num_bytes);
+    out.zero_fill();
+
+    // Uncompressed true-color, with 8 bits of alpha and rows stored
+    // top-down (0x20), so the pixels can be written out as they are
+    out[2] = 2;
+    out.store_u16(12, img.width);
+    out.store_u16(14, img.height);
+    out[16] = 32;
+    out[17] = 0x28;
+    out.memcpy(18, img.bytes, 0, num_bytes);
+
+    return $write_file(path, out);
+}

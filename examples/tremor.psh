@@ -50,7 +50,7 @@
 // were written. Given a directory as well, it writes each viewpoint of the
 // tour there as a TGA screenshot.
 
-from image import Image, load_tga;
+from image import Image, load_tga, save_tga;
 from ./monogram_font import Font;
 from random import Xoshiro128;
 
@@ -3142,20 +3142,6 @@ fun stop_render_actors() {
     }
 }
 
-// Write the frame buffer out as a TGA, for screenshots and for checking the
-// renderer without a window
-fun save_tga(path) {
-    let num_bytes = FRAME_WIDTH * FRAME_HEIGHT * 4;
-    let out = ByteArray.with_size(18 + num_bytes);
-    out[2] = 2;
-    out.store_u16(12, FRAME_WIDTH);
-    out.store_u16(14, FRAME_HEIGHT);
-    out[16] = 32;
-    out[17] = 0x28;
-    out.memcpy(18, frame_buffer, 0, num_bytes);
-    if (!$write_file(path, out)) $println("could not write " + path);
-}
-
 // --- Player movement ---
 
 // How high the solid reaches on the vertical line through a point, or nil if
@@ -3574,7 +3560,8 @@ if (BENCH_FRAMES > 0) {
         if (ms > worst_ms) worst_ms = ms;
 
         if (SHOT_DIR.len > 0 && i < TOUR.len) {
-            save_tga(SHOT_DIR + "/view" + i.to_s() + ".tga");
+            let path = SHOT_DIR + "/view" + i.to_s() + ".tga";
+            if (!save_tga(path, frame_image)) $println("could not write " + path);
         }
     }
 
