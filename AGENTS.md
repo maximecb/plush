@@ -1,7 +1,4 @@
 Commenting:
-- Avoid overcommenting:
-  - Keep comments concise and relevant in lexical context
-  - Avoid long multi-line comments
 - Comments should start with an uppercase letter, e.g.
   // This is a comment
 
