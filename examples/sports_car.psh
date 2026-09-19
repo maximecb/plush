@@ -1,0 +1,533 @@
+// An F40-inspired sports car, built from colored polygons with no external assets.
+// Usage: plush examples/sports_car.psh
+// Screenshot without a window: plush examples/sports_car.psh car.tga [yaw_radians]
+// Escape or Q closes the window; Space pauses the turntable.
+
+let WIDTH = 800;
+let HEIGHT = 600;
+let PI = 3.141592653589793;
+let RED = 0xFFEF302B;
+let DARK_RED = 0xFFAA1423;
+let TRIM = 0xFF171C24;
+let GLASS = 0xFF466779;
+let SILVER = 0xFFCDD6DF;
+let WHEEL_INSET = 0.18;
+
+class Vertex {
+    init(self, x, y, z) {
+        self.x = x; self.y = y; self.z = z;
+        self.vx = 0.0; self.vy = 0.0; self.vz = 0.0;
+        self.sx = 0.0; self.sy = 0.0; self.q = 0.0;
+    }
+}
+
+class Triangle {
+    init(self, a, b, c, nx, ny, nz, color) {
+        self.a = a; self.b = b; self.c = c;
+        self.nx = nx; self.ny = ny; self.nz = nz;
+        self.color = color;
+    }
+}
+
+let vertices = [];
+let triangles = [];
+
+fun v(x, y, z) {
+    let p = Vertex(x, y, z);
+    vertices.push(p);
+    return p;
+}
+
+// Orient each triangle towards the supplied outward direction.
+fun tri(a, b, c, color, ox, oy, oz) {
+    let ux = b.x - a.x; let uy = b.y - a.y; let uz = b.z - a.z;
+    let vx = c.x - a.x; let vy = c.y - a.y; let vz = c.z - a.z;
+    let var nx = uy * vz - uz * vy;
+    let var ny = uz * vx - ux * vz;
+    let var nz = ux * vy - uy * vx;
+    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+    if (len < 0.000001) return;
+    let var pb = b; let var pc = c;
+    if (nx * ox + ny * oy + nz * oz < 0.0) {
+        pb = c; pc = b;
+        nx = -nx; ny = -ny; nz = -nz;
+    }
+    triangles.push(Triangle(a, pb, pc, nx / len, ny / len, nz / len, color));
+}
+
+fun quad(a, b, c, d, color, nx, ny, nz) {
+    tri(a, b, c, color, nx, ny, nz);
+    tri(a, c, d, color, nx, ny, nz);
+}
+
+fun box(x0, y0, z0, x1, y1, z1, color) {
+    let a = v(x0, y0, z0); let b = v(x1, y0, z0);
+    let c = v(x1, y1, z0); let d = v(x0, y1, z0);
+    let e = v(x0, y0, z1); let f = v(x1, y0, z1);
+    let g = v(x1, y1, z1); let h = v(x0, y1, z1);
+    quad(a, b, c, d, color, 0.0, 0.0, -1.0);
+    quad(e, f, g, h, color, 0.0, 0.0, 1.0);
+    quad(a, d, h, e, color, -1.0, 0.0, 0.0);
+    quad(b, c, g, f, color, 1.0, 0.0, 0.0);
+    quad(d, c, g, h, color, 0.0, 1.0, 0.0);
+    quad(a, b, f, e, color, 0.0, -1.0, 0.0);
+}
+
+// X is across the car, Y is up, and the nose points towards negative Z.
+fun body_width(z) {
+    if (z < -1.7) return 0.99 + (z + 1.7) * 0.22;
+    if (z > 1.65) return 1.01 - (z - 1.65) * 0.12;
+    let flare = (1.0 - (z.abs() - 1.32).abs() / 0.60).max(0.0);
+    return 0.99 + (z + 1.7) * (0.02 / 3.35) + 0.035 * flare * flare;
+}
+
+fun body_height(z) {
+    if (z < -1.4) return 0.88 + (z + 1.4) * 0.34;
+    return 0.88;
+}
+
+fun hood_height(z) {
+    let dip = (1.0 - (z + 1.40).abs() / 0.72).max(0.0);
+    return body_height(z) - 0.065 * dip;
+}
+
+fun hood_panel(x0, z0, x1, z1, color, lift) {
+    quad(v(x0, hood_height(z0) + lift, z0), v(x1, hood_height(z0) + lift, z0),
+        v(x1, hood_height(z1) + lift, z1), v(x0, hood_height(z1) + lift, z1),
+        color, 0.0, 1.0, 0.0);
+}
+
+fun side_point(s, y, z, lift) {
+    let x = body_width(z) - 0.045 + 0.045 * (y - 0.26) / (body_height(z) - 0.295);
+    return v(s * (x + lift), y, z);
+}
+
+fun body_section(z, bottom) {
+    let w = body_width(z);
+    let h = body_height(z);
+    return [v(-w + 0.045, bottom, z), v(-w, h - 0.035, z),
+        v(-w * 0.76, hood_height(z), z), v(w * 0.76, hood_height(z), z),
+        v(w, h - 0.035, z), v(w - 0.045, bottom, z)];
+}
+
+let sections = [];
+sections.push(body_section(-2.25, 0.26));
+sections.push(body_section(-2.12, 0.26));
+sections.push(body_section(-1.86, 0.26));
+for (let var axle = 0; axle < 2; ++axle) {
+    let zc = -1.32 + axle * 2.64;
+    for (let var i = 0; i <= 10; ++i) {
+        let a = PI - i * PI / 10;
+        sections.push(body_section(zc + 0.46 * a.cos(), 0.38 + 0.46 * a.sin()));
+    }
+    sections.push(body_section(zc + 0.46, 0.26));
+    if (axle == 0) {
+        sections.push(body_section(-0.68, 0.26));
+        sections.push(body_section(0.0, 0.26));
+        sections.push(body_section(0.45, 0.26));
+        sections.push(body_section(0.86, 0.26));
+    }
+}
+sections.push(body_section(2.18, 0.26));
+
+for (let var j = 0; j < sections.len - 1; ++j) {
+    let a = sections[j]; let b = sections[j + 1];
+    for (let var k = 0; k < 5; ++k) {
+        let var nx = 0.0;
+        if (k < 2) nx = -1.0;
+        if (k > 2) nx = 1.0;
+        quad(a[k], a[k + 1], b[k + 1], b[k], RED, nx, 1.0, 0.0);
+    }
+}
+let front = sections[0]; let rear = sections[sections.len - 1];
+quad(front[0], front[5], front[4], front[1], RED, 0.0, 0.0, -1.0);
+quad(front[1], front[4], front[3], front[2], RED, 0.0, 0.0, -1.0);
+quad(rear[0], rear[5], rear[4], rear[1], DARK_RED, 0.0, 0.0, 1.0);
+quad(rear[1], rear[4], rear[3], rear[2], RED, 0.0, 0.0, 1.0);
+box(-0.70, 0.24, -1.9, 0.70, 0.36, 1.95, TRIM);
+
+// Return the fender edges into the wheel wells instead of leaving a thin shell.
+for (let var side = -1; side <= 1; side += 2) {
+    let s = side.to_f();
+    for (let var axle = 0; axle < 2; ++axle) {
+        let zc = -1.32 + axle * 2.64;
+        for (let var i = 0; i < 10; ++i) {
+            let a = PI - i * PI / 10;
+            let b = PI - (i + 1) * PI / 10;
+            let za = zc + 0.46 * a.cos(); let ya = 0.38 + 0.46 * a.sin();
+            let zb = zc + 0.46 * b.cos(); let yb = 0.38 + 0.46 * b.sin();
+            quad(v(s * (body_width(za) - 0.045), ya, za),
+                v(s * (body_width(zb) - 0.045), yb, zb),
+                v(s * 0.72, yb, zb), v(s * 0.72, ya, za),
+                DARK_RED, 0.0, -(a.sin() + b.sin()), -(a.cos() + b.cos()));
+        }
+    }
+}
+
+// Cabin, with inset glass leaving the red pillars and roof visible.
+let fl = v(-0.81, 0.886, -0.68); let fr = v(0.81, 0.886, -0.68);
+let tl = v(-0.64, 1.32, -0.08); let tr = v(0.64, 1.32, -0.08);
+let bl = v(-0.64, 1.32, 0.59); let br = v(0.64, 1.32, 0.59);
+let rl = v(-0.81, 0.886, 1.22); let rr = v(0.81, 0.886, 1.22);
+quad(fl, fr, tr, tl, RED, 0.0, 1.0, -1.0);
+quad(tl, tr, br, bl, RED, 0.0, 1.0, 0.0);
+quad(bl, br, rr, rl, RED, 0.0, 1.0, 1.0);
+quad(fl, tl, bl, rl, RED, -1.0, 0.0, 0.0);
+quad(fr, tr, br, rr, RED, 1.0, 0.0, 0.0);
+quad(v(-0.738, 0.924, -0.64), v(0.738, 0.924, -0.64),
+    v(0.594, 1.285, -0.14), v(-0.594, 1.285, -0.14), GLASS, 0.0, 1.0, -1.0);
+quad(v(-0.62, 1.222, -0.23), v(0.62, 1.222, -0.23),
+    v(0.594, 1.287, -0.14), v(-0.594, 1.287, -0.14), 0xFF648594, 0.0, 1.0, -1.0);
+quad(v(-0.60, 1.283, 0.66), v(0.60, 1.283, 0.66),
+    v(0.735, 0.925, 1.18), v(-0.735, 0.925, 1.18), 0xFF304654, 0.0, 1.0, 1.0);
+
+for (let var side = -1; side <= 1; side += 2) {
+    let s = side.to_f();
+    quad(v(s * 0.801, 0.926, -0.56), v(s * 0.662, 1.282, -0.065),
+        v(s * 0.662, 1.282, 0.34), v(s * 0.801, 0.926, 0.34),
+        GLASS, s, 0.0, 0.0);
+    quad(v(s * 0.801, 0.926, 0.405), v(s * 0.662, 1.282, 0.405),
+        v(s * 0.662, 1.282, 0.565), v(s * 0.801, 0.926, 1.10),
+        TRIM, s, 0.0, 0.0);
+    let x0 = (s * 0.94).min(s * 1.08);
+    let x1 = (s * 0.94).max(s * 1.08);
+    box(x0, 0.87, -0.48, x1, 0.94, -0.30, RED);
+    box((s * 0.96).min(s * 1.015), 0.29, -0.82,
+        (s * 0.96).max(s * 1.015), 0.36, 0.83, DARK_RED);
+    // Broad rear-quarter scoops and the smaller opening above the sill.
+    quad(side_point(s, 0.82, 0.36, 0.006), side_point(s, 0.82, 0.81, 0.006),
+        side_point(s, 0.54, 0.77, 0.006), side_point(s, 0.57, 0.48, 0.006),
+        TRIM, s, 0.0, 0.0);
+    quad(side_point(s, 0.82, 0.34, 0.012), side_point(s, 0.80, 0.40, 0.03),
+        side_point(s, 0.59, 0.52, 0.03), side_point(s, 0.55, 0.46, 0.012),
+        DARK_RED, s, 0.0, 0.0);
+    quad(side_point(s, 0.44, 0.41, 0.009), side_point(s, 0.44, 0.76, 0.009),
+        side_point(s, 0.32, 0.73, 0.009), side_point(s, 0.32, 0.49, 0.009),
+        TRIM, s, 0.0, 0.0);
+    quad(side_point(s, 0.485, -0.81, 0.006), side_point(s, 0.485, 0.83, 0.006),
+        side_point(s, 0.502, 0.83, 0.006), side_point(s, 0.502, -0.81, 0.006),
+        TRIM, s, 0.0, 0.0);
+    quad(side_point(s, 0.37, 0.22, 0.007), side_point(s, 0.82, 0.22, 0.007),
+        side_point(s, 0.82, 0.229, 0.007), side_point(s, 0.37, 0.229, 0.007),
+        DARK_RED, s, 0.0, 0.0);
+    box((s * 0.997).min(s * 1.014), 0.754, -0.02,
+        (s * 0.997).max(s * 1.014), 0.785, 0.13, TRIM);
+}
+
+// Glazed driving lamps sit ahead of the closed pop-up covers.
+for (let var side = -1; side <= 1; side += 2) {
+    let x0 = side * 0.56 - 0.18; let x1 = x0 + 0.36;
+    hood_panel(x0, -1.88, x1, -1.46, DARK_RED, 0.004);
+    hood_panel(x0 + 0.012, -1.868, x1 - 0.012, -1.472, RED, 0.007);
+    hood_panel(x0, -2.19, x1, -1.94, TRIM, 0.004);
+    hood_panel(x0 + 0.018, -2.173, x1 - 0.018, -1.957, 0xFF82959C, 0.008);
+    hood_panel(x0 + 0.052, -2.135, x0 + 0.14, -2.035, 0xFFDFE6E3, 0.010);
+    hood_panel(x1 - 0.14, -2.135, x1 - 0.052, -2.035, 0xFFD3DCD7, 0.010);
+    let cx = side * 0.28;
+    quad(v(cx - 0.025, hood_height(-1.65) + 0.006, -1.65),
+        v(cx + 0.025, hood_height(-1.65) + 0.006, -1.65),
+        v(cx + 0.072, hood_height(-1.44) + 0.006, -1.44),
+        v(cx - 0.072, hood_height(-1.44) + 0.006, -1.44), TRIM, 0.0, 1.0, 0.0);
+    box(side * 0.69 - 0.062, 0.32, -2.277, side * 0.69 + 0.062, 0.435, -2.25, TRIM);
+}
+box(-0.91, 0.26, -2.29, 0.91, 0.31, -2.14, TRIM);
+box(-0.43, 0.33, -2.277, 0.43, 0.46, -2.25, TRIM);
+box(-0.875, 0.508, -2.26, 0.875, 0.522, -2.25, TRIM);
+hood_panel(-0.025, -2.075, 0.025, -2.005, 0xFFEBC34D, 0.007);
+box(-0.93, 0.37, 2.17, 0.93, 0.445, 2.23, TRIM);
+box(-0.20, 0.54, 2.19, 0.20, 0.685, 2.209, 0xFFE6DDD0);
+hood_panel(-0.65, 1.26, 0.65, 1.87, 0xFF30434B, 0.003);
+for (let var i = 0; i < 7; ++i) {
+    let z = 1.30 + i * 0.078;
+    box(-0.60, 0.881, z, 0.60, 0.894, z + 0.028, TRIM);
+}
+// Tall end plates make the rear wing part of the car's silhouette.
+for (let var side = -1; side <= 1; side += 2) {
+    let s = side.to_f();
+    let a = v(s * 0.91, 0.86, 1.73); let b = v(s * 0.91, 0.86, 2.18);
+    let c = v(s * 0.91, 1.32, 2.18); let d = v(s * 0.91, 1.32, 1.96);
+    let e = v(s * 0.995, 0.86, 1.73); let f = v(s * 0.995, 0.86, 2.18);
+    let g = v(s * 0.995, 1.32, 2.18); let h = v(s * 0.995, 1.32, 1.96);
+    quad(a, b, c, d, RED, -s, 0.0, 0.0);
+    quad(e, f, g, h, RED, s, 0.0, 0.0);
+    quad(a, e, h, d, RED, 0.0, 1.0, -1.0);
+    quad(b, f, g, c, RED, 0.0, 0.0, 1.0);
+}
+box(-0.995, 1.295, 1.89, 0.995, 1.35, 2.18, RED);
+
+// Circular tail lamps and three central exhaust tips.
+fun rear_disc(x, y, z, radius, color) {
+    let center = v(x, y, z);
+    for (let var i = 0; i < 16; ++i) {
+        let a = i * PI / 8; let b = (i + 1) * PI / 8;
+        tri(center, v(x + radius * a.cos(), y + radius * a.sin(), z),
+            v(x + radius * b.cos(), y + radius * b.sin(), z), color, 0.0, 0.0, 1.0);
+    }
+}
+box(-0.90, 0.53, 2.18, 0.90, 0.79, 2.194, TRIM);
+for (let var side = -1; side <= 1; side += 2) {
+    rear_disc(side * 0.72, 0.655, 2.198, 0.095, 0xFFEF4535);
+    rear_disc(side * 0.49, 0.655, 2.198, 0.095, 0xFFF58E31);
+}
+for (let var i = -1; i <= 1; ++i) {
+    rear_disc(i * 0.14, 0.295, 2.245, 0.065, SILVER);
+    rear_disc(i * 0.14, 0.295, 2.247, 0.046, TRIM);
+}
+
+fun wheel_point(s, x, radius, angle, z) {
+    return v(s * (x - WHEEL_INSET), 0.38 + radius * angle.sin(), z + radius * angle.cos());
+}
+
+fun wheel(s, z) {
+    let xs = [0.84, 0.89, 1.065, 1.105, 1.108, 1.113];
+    let rs = [0.30, 0.38, 0.38, 0.31, 0.27, 0.244];
+    let rings = [];
+    for (let var j = 0; j < xs.len; ++j) {
+        let ring = [];
+        for (let var i = 0; i < 20; ++i) {
+            ring.push(wheel_point(s, xs[j], rs[j], i * PI / 10, z));
+        }
+        rings.push(ring);
+    }
+    let center = wheel_point(s, 1.114, 0.0, 0.0, z);
+    let inner = wheel_point(s, 0.84, 0.0, 0.0, z);
+    for (let var i = 0; i < 20; ++i) {
+        let next = (i + 1) % 20;
+        let a = (i + 0.5) * PI / 10;
+        for (let var j = 0; j < rings.len - 1; ++j) {
+            let var color = 0xFF222630;
+            if (j == 1) color = 0xFF12151C;
+            if (j == 4) color = SILVER;
+            let var outward = s;
+            if (j == 0) outward = -s;
+            quad(rings[j][i], rings[j][next], rings[j + 1][next], rings[j + 1][i],
+                color, outward, a.sin(), a.cos());
+        }
+        tri(center, rings[5][i], rings[5][next], 0xFF353E48, s, 0.0, 0.0);
+        tri(inner, rings[0][i], rings[0][next], TRIM, -s, 0.0, 0.0);
+    }
+    for (let var i = 0; i < 5; ++i) {
+        let a = i * PI * 0.4;
+        quad(wheel_point(s, 1.12, 0.065, a - 0.66, z),
+            wheel_point(s, 1.12, 0.248, a - 0.19, z),
+            wheel_point(s, 1.12, 0.248, a + 0.19, z),
+            wheel_point(s, 1.12, 0.065, a + 0.66, z), SILVER, s, 0.0, 0.0);
+    }
+    let hub = wheel_point(s, 1.124, 0.0, 0.0, z);
+    for (let var i = 0; i < 10; ++i) {
+        tri(hub, wheel_point(s, 1.124, 0.065, i * PI / 5, z),
+            wheel_point(s, 1.124, 0.065, (i + 1) * PI / 5, z), SILVER, s, 0.0, 0.0);
+    }
+}
+wheel(-1.0, -1.32); wheel(1.0, -1.32);
+wheel(-1.0, 1.32); wheel(1.0, 1.32);
+
+// Each scanline contains disjoint visible spans, linked in increasing X order.
+// Reciprocal depth is affine in screen space; two overlapping spans cross at most once.
+class Span {
+    init(self) {
+        self.x0 = 0; self.x1 = 0; self.next = -1;
+        self.q = 0.0; self.dq = 0.0; self.color = 0;
+    }
+}
+let heads = Array.with_size(HEIGHT, -1);
+let spans = [];
+let var span_count = 0;
+
+fun new_span(x0, x1, q, dq, color, next) {
+    let id = span_count;
+    if (id == spans.len) spans.push(Span());
+    span_count += 1;
+    let s = spans[id];
+    s.x0 = x0; s.x1 = x1; s.q = q; s.dq = dq;
+    s.color = color; s.next = next;
+    return id;
+}
+
+fun split_span(id, x) {
+    let s = spans[id];
+    let right = new_span(x, s.x1, s.q, s.dq, s.color, s.next);
+    s.x1 = x; s.next = right;
+    return right;
+}
+
+fun replace_span(id, q, dq, color) {
+    let s = spans[id];
+    s.q = q; s.dq = dq; s.color = color;
+}
+
+fun insert_span(y, x0, x1, q, dq, color) {
+    let var prev = -1;
+    let var cur = heads[y];
+    let var x = x0;
+    while (cur != -1 && spans[cur].x1 <= x) {
+        prev = cur; cur = spans[cur].next;
+    }
+    while (x < x1) {
+        if (cur == -1 || spans[cur].x0 > x) {
+            let var end = x1;
+            if (cur != -1) end = end.min(spans[cur].x0);
+            let id = new_span(x, end, q, dq, color, cur);
+            if (prev == -1) heads[y] = id; else spans[prev].next = id;
+            prev = id; x = end;
+            continue;
+        }
+        let s = spans[cur];
+        let end = x1.min(s.x1);
+        let diff = q - s.q - 0.000000001;
+        let step = dq - s.dq;
+        let near_left = diff + step * x > 0.0;
+        let near_right = diff + step * (end - 1) > 0.0;
+        if (near_left || near_right) {
+            if (s.x0 < x) { prev = cur; cur = split_span(cur, x); }
+            if (spans[cur].x1 > end) split_span(cur, end);
+            if (near_left == near_right) {
+                replace_span(cur, q, dq, color);
+            } else {
+                // Locate the first pixel whose depth ordering changes.
+                let var lo = x + 1; let var hi = end - 1;
+                while (lo < hi) {
+                    let mid = (lo + hi) >> 1;
+                    if ((diff + step * mid > 0.0) == near_left) lo = mid + 1;
+                    else hi = mid;
+                }
+                let right = split_span(cur, lo);
+                if (near_left) replace_span(cur, q, dq, color);
+                else replace_span(right, q, dq, color);
+                cur = right;
+            }
+        }
+        x = end;
+        if (spans[cur].x1 <= x) { prev = cur; cur = spans[cur].next; }
+    }
+}
+
+// Sample pixel centers, using half-open spans so neighboring triangles share edges.
+fun raster_triangle(a, b, c, color) {
+    let var p0 = a; let var p1 = b; let var p2 = c;
+    if (p0.sy > p1.sy) { let t = p0; p0 = p1; p1 = t; }
+    if (p0.sy > p2.sy) { let t = p0; p0 = p2; p2 = t; }
+    if (p1.sy > p2.sy) { let t = p1; p1 = p2; p2 = t; }
+    let ux = p1.sx - p0.sx; let uy = p1.sy - p0.sy;
+    let vx = p2.sx - p0.sx; let vy = p2.sy - p0.sy;
+    let det = ux * vy - vx * uy;
+    if (det.abs() < 0.000001 || vy < 0.000001) return;
+    let dqdx = ((p1.q - p0.q) * vy - (p2.q - p0.q) * uy) / det;
+    let dqdy = ((p2.q - p0.q) * ux - (p1.q - p0.q) * vx) / det;
+    let long_slope = vx / vy;
+    for (let var half = 0; half < 2; ++half) {
+        let var top = p0; let var bot = p1;
+        if (half == 1) { top = p1; bot = p2; }
+        if (bot.sy - top.sy < 0.000001) continue;
+        let slope = (bot.sx - top.sx) / (bot.sy - top.sy);
+        let y0 = (top.sy - 0.5).ceil().max(0);
+        let y1 = (bot.sy - 0.5).ceil().min(HEIGHT);
+        for (let var y = y0; y < y1; ++y) {
+            let xa = p0.sx + (y + 0.5 - p0.sy) * long_slope;
+            let xb = top.sx + (y + 0.5 - top.sy) * slope;
+            let x0 = (xa.min(xb) - 0.5).ceil().max(0);
+            let x1 = (xa.max(xb) - 0.5).ceil().min(WIDTH);
+            if (x0 >= x1) continue;
+            let q = p0.q + (0.5 - p0.sx) * dqdx + (y + 0.5 - p0.sy) * dqdy;
+            insert_span(y, x0, x1, q, dqdx, color);
+        }
+    }
+}
+
+let framebuffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
+let background = ByteArray.with_size(WIDTH * HEIGHT * 4);
+for (let var y = 0; y < HEIGHT; ++y) {
+    let t = y / HEIGHT;
+    let r = (17.0 + 17.0 * t).floor();
+    let g = (23.0 + 20.0 * t).floor();
+    let b = (34.0 + 23.0 * t).floor();
+    background.fill_u32(y * WIDTH, WIDTH, 0xFF000000 | (r << 16) | (g << 8) | b);
+}
+
+fun shade(color, light) {
+    let r = (((color >> 16) & 255) * light).floor().min(255);
+    let g = (((color >> 8) & 255) * light).floor().min(255);
+    let b = ((color & 255) * light).floor().min(255);
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+fun render(yaw) {
+    span_count = 0;
+    for (let var y = 0; y < HEIGHT; ++y) heads[y] = -1;
+    framebuffer.memcpy(0, background, 0, WIDTH * HEIGHT * 4);
+    let sy = yaw.sin(); let cy = yaw.cos();
+    let sp = -0.30.sin(); let cp = 0.30.cos();
+    // This fixed camera keeps the entire model safely beyond the near plane.
+    for (let var i = 0; i < vertices.len; ++i) {
+        let p = vertices[i];
+        let x = p.x * cy + p.z * sy;
+        let z = p.z * cy - p.x * sy;
+        let y = p.y - 0.62;
+        p.vx = x; p.vy = y * cp - z * sp; p.vz = z * cp + y * sp + 7.7;
+        p.q = 1.0 / p.vz;
+        p.sx = WIDTH * 0.5 + x * 930.0 * p.q;
+        p.sy = HEIGHT * 0.5 - p.vy * 930.0 * p.q;
+    }
+    for (let var i = 0; i < triangles.len; ++i) {
+        let t = triangles[i];
+        let nx = t.nx * cy + t.nz * sy;
+        let z = t.nz * cy - t.nx * sy;
+        let ny = t.ny * cp - z * sp;
+        let nz = z * cp + t.ny * sp;
+        let a = t.a;
+        if (nx * a.vx + ny * a.vy + nz * a.vz >= 0.0) continue;
+        let diffuse = (-nx * 0.35 + ny * 0.75 - nz * 0.56).max(0.0);
+        let light = 0.40 + 0.60 * diffuse;
+        raster_triangle(a, t.b, t.c, shade(t.color, light));
+    }
+    // Flat colors let the final pass fill whole visible spans at once.
+    for (let var y = 0; y < HEIGHT; ++y) {
+        let var cur = heads[y];
+        while (cur != -1) {
+            let s = spans[cur];
+            framebuffer.fill_u32(y * WIDTH + s.x0, s.x1 - s.x0, s.color);
+            cur = s.next;
+        }
+    }
+}
+
+fun save_tga(path) {
+    let out = ByteArray.with_size(18 + WIDTH * HEIGHT * 4);
+    out[2] = 2; out[16] = 32; out[17] = 0x28;
+    out.store_u16(12, WIDTH); out.store_u16(14, HEIGHT);
+    out.memcpy(18, framebuffer, 0, WIDTH * HEIGHT * 4);
+    if (!$write_file(path, out)) { $println("Could not write " + path); $exit(1); }
+}
+
+let screenshot = $cmd_get_arg(1);
+if (screenshot != nil) {
+    let yaw = $cmd_get_arg_or(2, "0.65").parse_float();
+    if (yaw == nil) { $println("Expected a yaw angle in radians"); $exit(1); }
+    render(yaw);
+    save_tga(screenshot);
+    $println(triangles.len.to_s() + " triangles, " + span_count.to_s() + " spans");
+    $exit(0);
+}
+
+let window = $window_create(WIDTH, HEIGHT, "1980s sports car", 0);
+let var last_ms = $time_current_ms();
+let var yaw = 0.65;
+let var paused = false;
+let var running = true;
+while (running) {
+    let now = $time_current_ms();
+    if (!paused) yaw = (yaw + (now - last_ms) * 0.00024) % (2.0 * PI);
+    last_ms = now;
+    render(yaw);
+    $window_draw_frame(window, framebuffer);
+    loop {
+        let msg = $actor_poll();
+        if (msg == nil) break;
+        if (!(msg instanceof UIEvent)) continue;
+        if (msg.kind == 'CLOSE_WINDOW') running = false;
+        if (msg.kind == 'KEY_DOWN') {
+            if (msg.key == 'ESCAPE' || msg.key == 'Q') running = false;
+            if (msg.key == 'SPACE') paused = !paused;
+        }
+    }
+}
