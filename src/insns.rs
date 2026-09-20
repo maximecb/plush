@@ -1,8 +1,6 @@
-#![allow(dead_code)]
 #![allow(non_camel_case_types)]
 use std::fmt;
 use std::mem::transmute;
-use crate::host::HostFnId;
 
 // Instructions are one 64-bit word. The opcode occupies the low 8 bits.
 // Operands are packed from bit 8 upwards, except the last one, which is
@@ -193,6 +191,7 @@ macro_rules! def_opcodes {
             )*
         }
 
+        #[allow(dead_code)]
         impl Opcode
         {
             pub fn num_opnds(self) -> usize
@@ -573,41 +572,6 @@ def_opcodes! {
 /// never move and never need to be traced
 pub type NameId = u32;
 
-/// Index into a function's array of inline cache entries
-pub type CacheIdx = u32;
-
-/// Cache for a field access site
-pub struct PropCache
-{
-    pub name: NameId,
-
-    // Class the field was last looked up on, and where it was found.
-    // The slot index is only valid for objects of that class
-    pub class_id: u32,
-    pub slot_idx: u32,
-}
-
-/// Cache for a call site whose callee is not statically known. Dynamic
-/// calls guard on the function they last resolved to, method calls on the
-/// class they last looked the name up on. A statically known callee needs
-/// no entry here: it becomes a call_pc instead
-pub struct CallCache
-{
-    pub name: NameId,
-    pub class_id: u32,
-
-    // Callee the site resolved to. The function id is both the guard and
-    // what the stack frame records, and the frame needs the entry point
-    // and its own size
-    pub fun_id: u32,
-    pub entry_pc: u32,
-    pub num_locals: u16,
-
-    // Host function a call_method_host site resolved to. That site guards
-    // on the type tag in the instruction, so this is only read on a hit
-    pub host_fn: HostFnId,
-}
-
 /// Interpreter instruction
 #[derive(PartialEq, Eq, Copy, Clone)]
 pub struct Insn(u64);
@@ -623,6 +587,7 @@ impl Insn
     }
 
     /// Get the full u64 instruction word
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn word_u64(&self) -> u64
     {
