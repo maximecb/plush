@@ -3753,6 +3753,22 @@ mod tests
     }
 
     #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn bytearray_fill_past_end_is_a_host_error()
+    {
+        eval("let a = ByteArray.with_size(8); a.fill_u32(1, 2, 0);");
+    }
+
+    // A count this large multiplied by the element size wraps, so the
+    // fill has to reject it without computing a byte count
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn bytearray_fill_count_overflows_is_a_host_error()
+    {
+        eval("let a = ByteArray.with_size(8); a.fill_u32(0, 1 << 62, 0);");
+    }
+
+    #[test]
     fn classes()
     {
         eval("class Foo {}");

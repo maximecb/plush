@@ -91,14 +91,14 @@ impl ByteArray
 
     pub unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
     {
-        assert!((idx + num_elems) * size_of::<T>() <= self.num_bytes());
+        assert!(self.run_in_bounds::<T>(idx, num_elems));
         let elem_ptr = transmute::<*const u8 , *const T>(self.bytes as *const u8).add(idx);
         std::slice::from_raw_parts(elem_ptr, num_elems as usize)
     }
 
     pub unsafe fn get_slice_mut<T>(&mut self, idx: usize, num_elems: usize) -> &'static mut [T]
     {
-        assert!((idx + num_elems) * size_of::<T>() <= self.num_bytes());
+        assert!(self.run_in_bounds::<T>(idx, num_elems));
         let elem_ptr = transmute::<*mut u8 , *mut T>(self.bytes).add(idx);
         std::slice::from_raw_parts_mut(elem_ptr, num_elems as usize)
     }
@@ -115,10 +115,22 @@ impl ByteArray
     /// entirely inside the bytes held. Written as a subtraction so that
     /// a byte index near the top of the address space cannot overflow
     #[inline(always)]
-    fn spans<T>(&self, byte_idx: usize) -> bool
+    fn value_in_bounds<T>(&self, byte_idx: usize) -> bool
     {
         match self.num_bytes().checked_sub(size_of::<T>()) {
             Some(last_idx) => byte_idx <= last_idx,
+            None => false,
+        }
+    }
+
+    /// Whether a run of values of a given type, starting at an element
+    /// index, lies entirely inside the bytes held. Checked, because a
+    /// large index or count would otherwise wrap past the comparison
+    #[inline(always)]
+    fn run_in_bounds<T>(&self, idx: usize, num_elems: usize) -> bool
+    {
+        match idx.checked_add(num_elems).and_then(|end| end.checked_mul(size_of::<T>())) {
+            Some(end_byte) => end_byte <= self.num_bytes(),
             None => false,
         }
     }
@@ -128,7 +140,7 @@ impl ByteArray
     #[inline(always)]
     pub fn load<T>(&mut self, byte_idx: usize) -> Option<T> where T: Copy
     {
-        if !self.spans::<T>(byte_idx) {
+        if !self.value_in_bounds::<T>(byte_idx) {
             return None;
         }
 
@@ -143,7 +155,7 @@ impl ByteArray
     #[inline(always)]
     pub fn store<T>(&mut self, byte_idx: usize, val: T) -> bool where T: Copy
     {
-        if !self.spans::<T>(byte_idx) {
+        if !self.value_in_bounds::<T>(byte_idx) {
             return false;
         }
 
@@ -187,13 +199,20 @@ impl ByteArray
         true
     }
 
-    /// Fill an interval with a given value
-    pub fn fill<T>(&mut self, idx: usize, num: usize, val: T) where T: Copy + 'static
+    /// Fill an interval with a given value, reporting whether the
+    /// interval lay inside the bytes held
+    pub fn fill<T>(&mut self, idx: usize, num: usize, val: T) -> bool where T: Copy + 'static
     {
+        if !self.run_in_bounds::<T>(idx, num) {
+            return false;
+        }
+
         unsafe {
             let slice = self.get_slice_mut(idx, num);
             slice.fill(val);
         }
+
+        true
     }
 
     /// Copy bytes from another region from another or from the same bytearray
@@ -366,6 +385,13 @@ macro_rules! oob_error {
         error!(
             "index {} out of bounds, ByteArray holds {} elements of this size",
             $idx, $num_elems
+        )
+    };
+
+    (run: $idx: expr, $num: expr, $num_elems: expr) => {
+        error!(
+            "run of {} elements at index {} out of bounds, ByteArray holds {} elements of this size",
+            $num, $idx, $num_elems
         )
     };
 }
@@ -720,7 +746,12 @@ pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: V
     let idx = unwrap_usize!(idx);
     let num = unwrap_usize!(num);
     let val = unwrap_u32!(val);
-    ba.fill(idx, num, val);
+    let num_elems = ba.num_elems::<u32>();
+
+    if !ba.fill(idx, num, val) {
+        oob_error!(run: idx, num, num_elems);
+    }
+
     Ok(Value::NIL)
 }
 
