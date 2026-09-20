@@ -1,0 +1,122 @@
+from csv import parse_csv, parse_csv_sep, parse_csv_file, format_csv, format_csv_sep;
+
+fun row_str(row)
+{
+    let var s = "";
+    for (let var i = 0; i < row.len; ++i) {
+        if (i > 0) s = s + "|";
+        s = s + "[" + row[i] + "]";
+    }
+    return s;
+}
+
+fun check(text, expected)
+{
+    let rows = parse_csv(text);
+    let var s = "";
+    for (let var i = 0; i < rows.len; ++i) {
+        if (i > 0) s = s + "/";
+        s = s + row_str(rows[i]);
+    }
+    if (s != expected) {
+        $println("parse_csv(" + text + ")");
+        $println("  got:      " + s);
+        $println("  expected: " + expected);
+    }
+    assert(s == expected);
+}
+
+// Basics
+check("", "");
+check("a", "[a]");
+check("a,b,c", "[a]|[b]|[c]");
+check("a,b\nc,d", "[a]|[b]/[c]|[d]");
+check("a,b\n", "[a]|[b]");
+check(",", "[]|[]");
+check("a,,b", "[a]|[]|[b]");
+
+// Spacing is kept, unlike the old example parser which trimmed it
+check(" a , b ", "[ a ]|[ b ]");
+
+// Quoted fields
+check("\"a\",\"b\"", "[a]|[b]");
+check("\"a,b\",c", "[a,b]|[c]");
+check("\"a\"\"b\"", "[a\"b]");
+check("\"\"", "[]");
+check("\"multi\nline\",x", "[multi\nline]|[x]");
+
+// Carriage returns, alone or followed by a line feed, end a row
+check("a,b\r\nc,d\r\n", "[a]|[b]/[c]|[d]");
+check("\"x\"\r\ny", "[x]/[y]");
+check("a,b\rc,d", "[a]|[b]/[c]|[d]");
+check("a\r\r\nb", "[a]/[b]");
+
+// Line endings inside a quoted field are kept as they are
+check("\"a\r\nb\"", "[a\r\nb]");
+check("\"a\rb\"", "[a\rb]");
+
+// Blank lines are skipped, but a quoted empty field is a row
+check("a\n\nb", "[a]/[b]");
+check("a\n\"\"\nb", "[a]/[]/[b]");
+
+// Multi-byte characters, which made the old example parser hang
+check("café,über\nnaïve,日本", "[café]|[über]/[naïve]|[日本]");
+check("\"café, au lait\"", "[café, au lait]");
+
+// Malformed input is accepted rather than rejected
+check("a\"b", "[a\"b]");
+check("\"unterminated", "[unterminated]");
+check("\"a\"b", "[ab]");
+
+// A byte order mark at the start of the text is ignored
+check("\u{FEFF}a,b", "[a]|[b]");
+
+// Other separators
+let tsv = parse_csv_sep("a\tb\nc\td", "\t");
+assert(row_str(tsv[0]) == "[a]|[b]");
+assert(row_str(tsv[1]) == "[c]|[d]");
+
+// Formatting quotes only what needs it
+assert(format_csv([["a", "b"]]) == "a,b\n");
+assert(format_csv([["a,b", "c"]]) == "\"a,b\",c\n");
+assert(format_csv([["a\"b"]]) == "\"a\"\"b\"\n");
+assert(format_csv([["multi\nline"]]) == "\"multi\nline\"\n");
+assert(format_csv([[" a "]]) == " a \n");
+assert(format_csv([[]]) == "\n");
+assert(format_csv_sep([["a", "b"]], "\t") == "a\tb\n");
+
+// Formatting and parsing round-trip, including the awkward fields
+let rows = [
+    ["plain", " spaced ", "with,comma"],
+    ["with\"quote", "multi\nline", ""],
+    ["café", "tab\there", "trailing space "],
+];
+let back = parse_csv(format_csv(rows));
+assert(back.len == rows.len);
+for (let var i = 0; i < rows.len; ++i) {
+    assert(back[i].len == rows[i].len);
+    for (let var j = 0; j < rows[i].len; ++j)
+        assert(back[i][j] == rows[i][j]);
+}
+
+// An unreadable file gives nil rather than failing
+assert(parse_csv_file("no/such/file.csv") == nil);
+
+// The sample file used by the example
+let data = parse_csv_file("examples/data/test_data.csv");
+assert(data.len == 9);
+assert(data[0][0] == "ID");
+assert(data[0].len == 8);
+assert(data[2][7] == "This note, contains a comma.");
+assert(data[3][7] == "He said \"Hello, World!\".");
+assert(data[4][1] == "Emily, \"Em\" Brown");
+assert(data[5][3] == "Shanghai, China");
+assert(data[5][4] == "China");
+assert(data[5][7] == "This field\nhas a newline character.");
+assert(data[6][2] == "");
+assert(data[7].len == 7);
+
+// A row with more fields than the header is kept as it is
+assert(data[8].len == 9);
+assert(data[8][7] == "This is a malformed row");
+assert(data[8][8] == " it has too many columns");

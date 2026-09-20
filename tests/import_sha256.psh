@@ -1,14 +1,14 @@
-from sha256 import SHA256, sha256, to_hex;
+from sha256 import SHA256, sha256;
 
 // Standard test vectors
-assert(to_hex(sha256("")) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-assert(to_hex(sha256("abc")) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+assert(sha256("").to_hex() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+assert(sha256("abc").to_hex() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 assert(
-    to_hex(sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")) ==
+    sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq").to_hex() ==
     "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
 );
 assert(
-    to_hex(sha256("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")) ==
+    sha256("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu").to_hex() ==
     "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1"
 );
 
@@ -17,10 +17,10 @@ let abc = ByteArray.with_size(3);
 abc[0] = 97;
 abc[1] = 98;
 abc[2] = 99;
-assert(to_hex(sha256(abc)) == to_hex(sha256("abc")));
+assert(sha256(abc).to_hex() == sha256("abc").to_hex());
 
 // Non-ASCII strings are hashed as their UTF-8 bytes
-assert(to_hex(sha256("é")) == "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c");
+assert(sha256("é").to_hex() == "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c");
 
 // Lengths around the block boundaries, where padding spills into a second block
 let data = ByteArray.with_size(200);
@@ -31,7 +31,7 @@ for (let var i = 0; i < data.len; ++i)
 for (let var len = 0; len <= 130; ++len) {
     let msg = ByteArray.with_size(len);
     msg.memcpy(0, data, 0, len);
-    let expected = to_hex(sha256(msg));
+    let expected = sha256(msg).to_hex();
 
     for (let var split = 0; split <= len; split = split + 5) {
         let first = ByteArray.with_size(split);
@@ -42,7 +42,7 @@ for (let var len = 0; len <= 130; ++len) {
         let h = SHA256();
         h.update(first);
         h.update(second);
-        assert(to_hex(h.digest()) == expected);
+        assert(h.digest().to_hex() == expected);
     }
 }
 
@@ -50,9 +50,9 @@ for (let var len = 0; len <= 130; ++len) {
 let h = SHA256();
 h.update("a");
 h.update("b");
-assert(to_hex(h.digest()) == to_hex(sha256("ab")));
+assert(h.digest().to_hex() == sha256("ab").to_hex());
 h.update("c");
-assert(to_hex(h.digest()) == to_hex(sha256("abc")));
+assert(h.digest().to_hex() == sha256("abc").to_hex());
 
 // One million 'a' characters, fed in chunks
 let chunk = ByteArray.with_size(1000);
@@ -61,4 +61,4 @@ for (let var i = 0; i < chunk.len; ++i)
 let million = SHA256();
 for (let var i = 0; i < 1000; ++i)
     million.update(chunk);
-assert(to_hex(million.digest()) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+assert(million.digest().to_hex() == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");

@@ -19,6 +19,7 @@ pub fn get_source(unit_key: &str) -> Option<&'static str>
         .strip_suffix(".psh")?;
 
     let src = match module_path {
+        "csv" => include_str!("../lib/std/csv.psh"),
         "image" => include_str!("../lib/std/image.psh"),
         "random" => include_str!("../lib/std/random.psh"),
         "sha256" => include_str!("../lib/std/sha256.psh"),

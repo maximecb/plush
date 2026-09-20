@@ -109,7 +109,7 @@ pub(crate) fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> HostRe
 {
     let v = unwrap_i64!(v);
     let digits = unwrap_usize!(digits);
-    let s = format!("{:0width$X}", v, width = digits);
+    let s = format!("{:0width$x}", v, width = digits);
 
     actor.gc_check(Str::alloc_size(32 + digits), &mut []);
     Ok(Str::new(&s, &mut actor.alloc))
@@ -602,7 +602,6 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "push_u16") => ba_push_u16,
         (Type::ByteArray, "push_u32") => ba_push_u32,
         (Type::ByteArray, "push_string") => ba_push_string,
-        (Type::ByteArray, "dot_f32") => ba_dot_f32,
         (Type::ByteArray, "num_u32") => ba_num_u32,
         (Type::ByteArray, "num_f32") => ba_num_u32,
         (Type::ByteArray, "memcpy") => ba_memcpy,
@@ -610,6 +609,8 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "clear") => ba_clear,
         (Type::ByteArray, "zero_fill") => ba_zero_fill,
         (Type::ByteArray, "fill_u32") => ba_fill_u32,
+        (Type::ByteArray, "dot_f32") => ba_dot_f32,
+        (Type::ByteArray, "to_hex") => ba_to_hex,
 
         (Type::Dict, "has") => dict_has,
 

@@ -380,7 +380,7 @@ $println(rng.int(0, 100));
     -   `to_f()`: Converts the integer to a 64-bit float.
     -   `to_s()`: Converts the integer to a string.
     -   `comma_sep()`: Converts the integer to a string with the digits grouped in threes by commas, e.g. `1000000` becomes `"1,000,000"`.
-    -   `to_hex(digits)`: Get a zero-padded and capitalized hexadecimal string representation of this integer.`
+    -   `to_hex(digits)`: Get a zero-padded, lowercase hexadecimal string representation of this integer. Call `upper()` on the result if you want capitals.
 -   **Float64**
     -   `abs()`: Get the absolute value of this number.
     -   `ceil()`: Returns the smallest integer greater than or equal to the float.
@@ -447,6 +447,7 @@ $println(rng.int(0, 100));
     -   `zero_fill()`: Overwrite the contents of the `ByteArray` with zeros.
     -   `fill_u32(start_index, count, value)`: Fills a portion of the `ByteArray` with a repeated 32-bit unsigned integer value.
     -   `dot_f32(idx_a, stride_a, b, idx_b, stride_b, count)`: Dot product of two runs of `f32` values, `count` elements long. An `f64` accumulator is used, so the result is more accurate than the same sum done in `f32`.
+    -   `to_hex()`: Get the bytes as a lowercase hexadecimal string, two digits per byte, with nothing between them.
 -   **Dict**
     -   `has(key)`: Check if the dictionary contains this key.
 -   **Function**

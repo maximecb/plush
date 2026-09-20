@@ -4,6 +4,7 @@ use crate::value::*;
 use crate::alloc::{header_of, set_fixed_len, table_len, Alloc, Tag, FIXED_SIZE, HEADER_SIZE};
 use crate::*;
 use crate::host::HostResult;
+use crate::str::Str;
 
 pub struct ByteArray
 {
@@ -721,6 +722,30 @@ pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: V
     let val = unwrap_u32!(val);
     ba.fill(idx, num, val);
     Ok(Value::NIL)
+}
+
+/// Format the bytes as lowercase hexadecimal, two digits per byte, with
+/// nothing between them. Useful to print a hash or any other binary blob
+pub fn ba_to_hex(actor: &mut Actor, ba: Value) -> HostResult
+{
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let ba = unwrap_ba!(ba);
+    let num_bytes = ba.num_bytes();
+
+    // The string is built first, so that the allocation below, which can
+    // collect and move the byte array, happens after the bytes are read
+    let mut out = Vec::with_capacity(2 * num_bytes);
+    for byte in unsafe { ba.get_slice::<u8>(0, num_bytes) } {
+        out.push(DIGITS[(byte >> 4) as usize]);
+        out.push(DIGITS[(byte & 0xF) as usize]);
+    }
+
+    // Every byte written is an ASCII hex digit
+    let s = unsafe { std::str::from_utf8_unchecked(&out) };
+
+    actor.gc_check(Str::alloc_size(s.len()), &mut []);
+    Ok(Str::new(s, &mut actor.alloc))
 }
 
 #[cfg(test)]

@@ -1,0 +1,218 @@
+// Comma-separated values, as described by RFC 4180
+//
+//   from csv import parse_csv_file, format_csv;
+//
+//   let rows = parse_csv_file("data.csv");
+//   $println(rows[0][1]);
+//   $println(format_csv([["a", "b"], ["c", "d"]]));
+//
+// A parsed file is an array of rows, each an array of field strings. Fields
+// are returned exactly as they appear, without trimming, so a field that
+// needs surrounding spaces keeps them.
+//
+// Fields may be quoted with double quotes, which lets them contain the
+// separator, newlines, and doubled quotes standing for one quote:
+//
+//   plain,"quoted, with comma","a ""quoted"" word"
+//
+// Rows end at a line feed, a carriage return, or the two together, and the
+// last row needs no line ending. Line endings inside a quoted field are kept
+// as they are. Blank lines are skipped, a byte order mark at the start of
+// the text is ignored, and text is decoded as UTF-8.
+//
+// Malformed input is accepted rather than rejected: a quote in the middle
+// of an unquoted field is kept as data, text after a closing quote is
+// appended to the field, and a quoted field left open runs to the end of
+// the text.
+
+let QUOTE = 34;   // "
+let CR = 13;      // \r
+let LF = 10;      // \n
+
+// Takes the bytes gathered so far as a string, and empties the buffer
+fun take_field(buf)
+{
+    let field = String.from_utf8(buf, 0, buf.len);
+    buf.clear();
+    return field;
+}
+
+// Parses text whose fields are separated by a given one-byte separator,
+// e.g. "\t" for tab-separated values
+fun parse_csv_sep(text, sep)
+{
+    assert(text instanceof String);
+    assert(sep instanceof String);
+    assert(sep.len == 1);
+
+    let SEP = sep.byte_at(0);
+    assert(SEP != QUOTE && SEP != CR && SEP != LF);
+
+    let rows = [];
+    let var row = [];
+    let buf = ByteArray.with_size(0);
+
+    // Whether the next byte starts a field, and whether the parser is
+    // inside a quoted field
+    let var at_field_start = true;
+    let var in_quotes = false;
+
+    // Skip a UTF-8 byte order mark
+    let var i = 0;
+    if (text.len >= 3 && text.byte_at(0) == 0xEF && text.byte_at(1) == 0xBB && text.byte_at(2) == 0xBF) {
+        i = 3;
+    }
+
+    while (i < text.len) {
+        let b = text.byte_at(i);
+
+        if (in_quotes) {
+            // A doubled quote stands for one quote, a single one ends the field
+            if (b == QUOTE) {
+                if (i + 1 < text.len && text.byte_at(i + 1) == QUOTE) {
+                    buf.push_u8(QUOTE);
+                    i = i + 2;
+                    continue;
+                }
+
+                in_quotes = false;
+                i = i + 1;
+                continue;
+            }
+
+            buf.push_u8(b);
+            i = i + 1;
+            continue;
+        }
+
+        // Only a quote at the start of a field opens a quoted field
+        if (b == QUOTE && at_field_start) {
+            in_quotes = true;
+            at_field_start = false;
+            i = i + 1;
+            continue;
+        }
+
+        if (b == SEP) {
+            row.push(take_field(buf));
+            at_field_start = true;
+            i = i + 1;
+            continue;
+        }
+
+        if (b == LF || b == CR) {
+            let blank_line = at_field_start && row.len == 0;
+
+            // A carriage return followed by a line feed ends one row, not two
+            let crlf = b == CR && i + 1 < text.len && text.byte_at(i + 1) == LF;
+            i = i + (crlf ? 2 : 1);
+
+            // A blank line is not a row with one empty field
+            if (blank_line) {
+                buf.clear();
+                continue;
+            }
+
+            row.push(take_field(buf));
+            rows.push(row);
+            row = [];
+            at_field_start = true;
+            continue;
+        }
+
+        buf.push_u8(b);
+        at_field_start = false;
+        i = i + 1;
+    }
+
+    // Text that does not end with a line ending still ends a row
+    if (!at_field_start || row.len > 0) {
+        row.push(take_field(buf));
+        rows.push(row);
+    }
+
+    return rows;
+}
+
+// Parses comma-separated text into an array of rows of field strings
+fun parse_csv(text)
+{
+    return parse_csv_sep(text, ",");
+}
+
+// Parses a comma-separated file, returning nil if it can't be read or
+// does not hold valid UTF-8
+fun parse_csv_file(file_path)
+{
+    let text = $read_file_utf8(file_path);
+    if (text == nil) {
+        return nil;
+    }
+
+    return parse_csv(text);
+}
+
+// Formats one field, quoting it if it contains anything that would
+// otherwise change how the row reads
+fun format_csv_field(field, sep)
+{
+    assert(field instanceof String);
+
+    let SEP = sep.byte_at(0);
+    let var needs_quotes = false;
+
+    for (let var i = 0; i < field.len; ++i) {
+        let b = field.byte_at(i);
+        if (b == SEP || b == QUOTE || b == CR || b == LF) {
+            needs_quotes = true;
+            break;
+        }
+    }
+
+    if (!needs_quotes) {
+        return field;
+    }
+
+    let buf = ByteArray.with_size(0);
+    buf.push_u8(QUOTE);
+    for (let var i = 0; i < field.len; ++i) {
+        let b = field.byte_at(i);
+        if (b == QUOTE) {
+            buf.push_u8(QUOTE);
+        }
+        buf.push_u8(b);
+    }
+    buf.push_u8(QUOTE);
+
+    return take_field(buf);
+}
+
+// Formats rows of fields as text, with a given one-byte separator
+fun format_csv_sep(rows, sep)
+{
+    assert(sep instanceof String);
+    assert(sep.len == 1);
+
+    let out = ByteArray.with_size(0);
+
+    for (let var i = 0; i < rows.len; ++i) {
+        let row = rows[i];
+
+        for (let var j = 0; j < row.len; ++j) {
+            if (j > 0) {
+                out.push_string(sep);
+            }
+            out.push_string(format_csv_field(row[j], sep));
+        }
+
+        out.push_u8(LF);
+    }
+
+    return take_field(out);
+}
+
+// Formats rows of fields as comma-separated text, one row per line
+fun format_csv(rows)
+{
+    return format_csv_sep(rows, ",");
+}

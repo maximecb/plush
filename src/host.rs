@@ -271,6 +271,7 @@ def_host_fns! {
         push_u32: ba_push_u32(2),
         push_string: ba_push_string(2),
         dot_f32: ba_dot_f32(7),
+        to_hex: ba_to_hex(1),
         num_u32: ba_num_u32(1),
         memcpy: ba_memcpy(5),
         resize: ba_resize(2),
