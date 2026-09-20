@@ -6,18 +6,18 @@ use crate::alloc::{header_of, Alloc, Tag, HEADER_SIZE};
 /// Nothing is stored here: the slots start at the address of the object
 /// itself, and the class and slot count come from the block header
 #[repr(C, align(8))]
-pub struct Object;
+pub(crate) struct Object;
 
 impl Object
 {
     /// Bytes an object with a given slot count occupies, header included
-    pub fn alloc_size(num_slots: usize) -> usize
+    pub(crate) fn alloc_size(num_slots: usize) -> usize
     {
         HEADER_SIZE + num_slots * size_of::<Value>()
     }
 
     /// Allocate a new object with a given number of slots
-    pub fn new(class_id: ClassId, num_slots: usize, alloc: &mut Alloc) -> Value
+    pub(crate) fn new(class_id: ClassId, num_slots: usize, alloc: &mut Alloc) -> Value
     {
         let p = alloc.alloc_slots(Tag::Object, usize::from(class_id), num_slots);
 
@@ -28,12 +28,12 @@ impl Object
         Value::object(p as *mut Object)
     }
 
-    pub fn class_id(&self) -> ClassId
+    pub(crate) fn class_id(&self) -> ClassId
     {
         ClassId::from(header_of(self as *const Object as *const u8).aux24())
     }
 
-    pub fn num_slots(&self) -> usize
+    pub(crate) fn num_slots(&self) -> usize
     {
         header_of(self as *const Object as *const u8).num_slots()
     }
@@ -55,13 +55,13 @@ impl Object
     }
 
     // Get the value associated with a given field
-    pub fn get(&self, idx: usize) -> Value
+    pub(crate) fn get(&self, idx: usize) -> Value
     {
         self.slots()[idx]
     }
 
     // Set the value of a given field
-    pub fn set(&mut self, idx: usize, val: Value)
+    pub(crate) fn set(&mut self, idx: usize, val: Value)
     {
         self.slots_mut()[idx] = val
     }

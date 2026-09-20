@@ -6,7 +6,7 @@ use crate::*;
 use crate::host::HostResult;
 use crate::str::Str;
 
-pub struct ByteArray
+pub(crate) struct ByteArray
 {
     // Relocated by the collector, which walks the table on its own.
     // The capacity is the length of the table block this points at, so
@@ -22,7 +22,7 @@ impl ByteArray
 {
     /// Bytes a bytearray of a given size occupies, counting the headers
     /// of both the bytearray and its byte table
-    pub fn alloc_size(num_bytes: usize) -> usize
+    pub(crate) fn alloc_size(num_bytes: usize) -> usize
     {
         HEADER_SIZE + size_of::<ByteArray>() +
         HEADER_SIZE + crate::alloc::align_up(num_bytes)
@@ -34,7 +34,7 @@ impl ByteArray
     /// up in the same order the collector puts them in, with the bytes
     /// following the bytearray they belong to. No collection can happen
     /// between the two allocations: callers reserve the space up front.
-    pub fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Value
+    pub(crate) fn with_size(num_bytes: usize, alloc: &mut Alloc) -> Value
     {
         // alloc_fixed leaves the byte pointer null, so the bytearray is
         // walkable between here and the table allocation below
@@ -53,7 +53,7 @@ impl ByteArray
         Value::bytearray(ba)
     }
 
-    pub fn clone(&self, alloc: &mut Alloc) -> Value
+    pub(crate) fn clone(&self, alloc: &mut Alloc) -> Value
     {
         let len = self.num_bytes();
         let new_ba = Self::with_size(len, alloc);
@@ -73,7 +73,7 @@ impl ByteArray
     }
 
     /// Bytes held, which lives in the block header
-    pub fn num_bytes(&self) -> usize
+    pub(crate) fn num_bytes(&self) -> usize
     {
         header_of(self.block()).fixed_len()
     }
@@ -84,19 +84,19 @@ impl ByteArray
     }
 
     /// Bytes the table can hold
-    pub fn capacity(&self) -> usize
+    pub(crate) fn capacity(&self) -> usize
     {
         table_len(self.bytes)
     }
 
-    pub unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
+    pub(crate) unsafe fn get_slice<T>(&self, idx: usize, num_elems: usize) -> &'static [T]
     {
         assert!(self.run_in_bounds::<T>(idx, num_elems));
         let elem_ptr = transmute::<*const u8 , *const T>(self.bytes as *const u8).add(idx);
         std::slice::from_raw_parts(elem_ptr, num_elems as usize)
     }
 
-    pub unsafe fn get_slice_mut<T>(&mut self, idx: usize, num_elems: usize) -> &'static mut [T]
+    pub(crate) unsafe fn get_slice_mut<T>(&mut self, idx: usize, num_elems: usize) -> &'static mut [T]
     {
         assert!(self.run_in_bounds::<T>(idx, num_elems));
         let elem_ptr = transmute::<*mut u8 , *mut T>(self.bytes).add(idx);
@@ -106,7 +106,7 @@ impl ByteArray
     /// How many values of a given type fit in the bytes held. A trailing
     /// partial element is not counted, and so cannot be indexed
     #[inline(always)]
-    pub fn num_elems<T>(&self) -> usize
+    pub(crate) fn num_elems<T>(&self) -> usize
     {
         self.num_bytes() / size_of::<T>()
     }
@@ -138,7 +138,7 @@ impl ByteArray
     /// Load a value at the given byte index, or None if it would reach
     /// past the end of the bytes held
     #[inline(always)]
-    pub fn load<T>(&mut self, byte_idx: usize) -> Option<T> where T: Copy
+    pub(crate) fn load<T>(&mut self, byte_idx: usize) -> Option<T> where T: Copy
     {
         if !self.value_in_bounds::<T>(byte_idx) {
             return None;
@@ -153,7 +153,7 @@ impl ByteArray
     /// Store a value at the given byte index, reporting whether it lay
     /// inside the bytes held
     #[inline(always)]
-    pub fn store<T>(&mut self, byte_idx: usize, val: T) -> bool where T: Copy
+    pub(crate) fn store<T>(&mut self, byte_idx: usize, val: T) -> bool where T: Copy
     {
         if !self.value_in_bounds::<T>(byte_idx) {
             return false;
@@ -170,7 +170,7 @@ impl ByteArray
     /// Read a value at the given index (aligned read), or None if the
     /// index is past the last element that fits
     #[inline(always)]
-    pub fn get<T>(&mut self, idx: usize) -> Option<T> where T: Copy
+    pub(crate) fn get<T>(&mut self, idx: usize) -> Option<T> where T: Copy
     {
         if idx >= self.num_elems::<T>() {
             return None;
@@ -185,7 +185,7 @@ impl ByteArray
     /// Write a value at the given index (aligned write), reporting
     /// whether the index was in bounds
     #[inline(always)]
-    pub fn set<T>(&mut self, idx: usize, val: T) -> bool where T: Copy
+    pub(crate) fn set<T>(&mut self, idx: usize, val: T) -> bool where T: Copy
     {
         if idx >= self.num_elems::<T>() {
             return false;
@@ -201,7 +201,7 @@ impl ByteArray
 
     /// Fill an interval with a given value, reporting whether the
     /// interval lay inside the bytes held
-    pub fn fill<T>(&mut self, idx: usize, num: usize, val: T) -> bool where T: Copy + 'static
+    pub(crate) fn fill<T>(&mut self, idx: usize, num: usize, val: T) -> bool where T: Copy + 'static
     {
         if !self.run_in_bounds::<T>(idx, num) {
             return false;
@@ -298,7 +298,7 @@ impl ByteArray
 }
 
 /// Create a new ByteArray instance
-pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> HostResult
+pub(crate) fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> HostResult
 {
     let num_bytes = unwrap_usize!(num_bytes);
 
@@ -310,7 +310,7 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> HostRe
     Ok(ByteArray::with_size(num_bytes, &mut actor.alloc))
 }
 
-pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResult
+pub(crate) fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResult
 {
     let new_size = unwrap_usize!(new_size);
 
@@ -355,7 +355,7 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResul
     Ok(Value::NIL)
 }
 
-pub fn ba_clear(_actor: &mut Actor, ba: Value) -> HostResult
+pub(crate) fn ba_clear(_actor: &mut Actor, ba: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
 
@@ -396,7 +396,7 @@ macro_rules! oob_error {
     };
 }
 
-pub fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
+pub(crate) fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -408,7 +408,7 @@ pub fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
     }
 }
 
-pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
+pub(crate) fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -422,7 +422,7 @@ pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     Ok(Value::NIL)
 }
 
-pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
+pub(crate) fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -434,7 +434,7 @@ pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
     }
 }
 
-pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
+pub(crate) fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -448,7 +448,7 @@ pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     Ok(Value::NIL)
 }
 
-pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
+pub(crate) fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -460,7 +460,7 @@ pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
     }
 }
 
-pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
+pub(crate) fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let byte_idx = unwrap_usize!(byte_idx);
@@ -474,7 +474,7 @@ pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
     Ok(Value::NIL)
 }
 
-pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> HostResult
+pub(crate) fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -486,7 +486,7 @@ pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> HostResult
     }
 }
 
-pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> HostResult
+pub(crate) fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -500,7 +500,7 @@ pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Host
     Ok(Value::NIL)
 }
 
-pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> HostResult
+pub(crate) fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -512,7 +512,7 @@ pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> HostResult
     }
 }
 
-pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> HostResult
+pub(crate) fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -526,13 +526,13 @@ pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Host
     Ok(Value::NIL)
 }
 
-pub fn ba_push_u8(actor: &mut Actor, ba: Value, val: Value) -> HostResult
+pub(crate) fn ba_push_u8(actor: &mut Actor, ba: Value, val: Value) -> HostResult
 {
     let val = unwrap_u8!(val);
     ByteArray::push_bytes(actor, ba, &[val])
 }
 
-pub fn ba_push_u16(actor: &mut Actor, ba: Value, val: Value) -> HostResult
+pub(crate) fn ba_push_u16(actor: &mut Actor, ba: Value, val: Value) -> HostResult
 {
     let val = unwrap_i64!(val);
     let val = match u16::try_from(val) {
@@ -542,13 +542,13 @@ pub fn ba_push_u16(actor: &mut Actor, ba: Value, val: Value) -> HostResult
     ByteArray::push_bytes(actor, ba, &val.to_le_bytes())
 }
 
-pub fn ba_push_u32(actor: &mut Actor, ba: Value, val: Value) -> HostResult
+pub(crate) fn ba_push_u32(actor: &mut Actor, ba: Value, val: Value) -> HostResult
 {
     let val = unwrap_u32!(val);
     ByteArray::push_bytes(actor, ba, &val.to_le_bytes())
 }
 
-pub fn ba_push_string(actor: &mut Actor, mut ba: Value, mut string: Value) -> HostResult
+pub(crate) fn ba_push_string(actor: &mut Actor, mut ba: Value, mut string: Value) -> HostResult
 {
     let string_len = unwrap_str!(string).len();
     let byte_array = unwrap_ba!(ba);
@@ -634,7 +634,7 @@ fn dot_f32_kernel(a: &[f32], a_stride: usize, b: &[f32], b_stride: usize, num: u
 /// Dot product of two runs of f32 values, each described by a start index,
 /// a stride, and a shared element count. The two runs may live in the same
 /// bytearray, and are only read.
-pub fn ba_dot_f32(
+pub(crate) fn ba_dot_f32(
     actor: &mut Actor,
     a: Value,
     a_idx: Value,
@@ -705,7 +705,7 @@ pub fn ba_dot_f32(
     Ok(actor.float64(sum))
 }
 
-pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult
+pub(crate) fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let len = ba.num_bytes();
@@ -717,7 +717,7 @@ pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult
     Ok(Value::fixnum((len / 4) as i64))
 }
 
-pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> HostResult
+pub(crate) fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> HostResult
 {
     let src_idx = unwrap_usize!(src_idx);
     let dst_idx = unwrap_usize!(dst_idx);
@@ -732,7 +732,7 @@ pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src
     dst.memcpy(dst_idx, src_bytes, src_len, src_idx, num_bytes)
 }
 
-pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> HostResult
+pub(crate) fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let slice = unsafe { ba.get_slice_mut(0, ba.num_bytes()) };
@@ -740,7 +740,7 @@ pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> HostResult
     Ok(Value::NIL)
 }
 
-pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: Value) -> HostResult
+pub(crate) fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: Value) -> HostResult
 {
     let ba = unwrap_ba!(ba);
     let idx = unwrap_usize!(idx);
@@ -757,7 +757,7 @@ pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: V
 
 /// Format the bytes as lowercase hexadecimal, two digits per byte, with
 /// nothing between them. Useful to print a hash or any other binary blob
-pub fn ba_to_hex(actor: &mut Actor, ba: Value) -> HostResult
+pub(crate) fn ba_to_hex(actor: &mut Actor, ba: Value) -> HostResult
 {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
 

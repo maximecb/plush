@@ -5,7 +5,7 @@ use crate::ast::*;
 use crate::value::Value;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Decl
+pub(crate) enum Decl
 {
     // Global function
     Fun { id: FunId },
@@ -53,7 +53,7 @@ struct Scope
 
 /// Represent an environment with multiple levels of scoping
 #[derive(Default)]
-pub struct Env
+pub(crate) struct Env
 {
     scopes: Vec<Scope>,
 
@@ -74,7 +74,7 @@ struct CtorCall
 impl Env
 {
     /// Create an environment with the core classes defined
-    pub fn new() -> Self
+    pub(crate) fn new() -> Self
     {
         let mut env = Env::default();
         env.push_scope();
@@ -186,7 +186,7 @@ impl Env
 
 impl Program
 {
-    pub fn resolve_syms(&mut self) -> Result<(), ParseError>
+    pub(crate) fn resolve_syms(&mut self) -> Result<(), ParseError>
     {
         let mut env = Env::new();
         env.next_global_idx = self.num_globals;
@@ -210,7 +210,7 @@ impl Program
     /// Resolve symbols for a unit entered in the REPL. The unit sees the
     /// declarations of previous units, and its own top-level declarations
     /// are kept in the environment, shadowing earlier ones
-    pub fn resolve_repl_unit(&mut self, unit_key: &str, env: &mut Env) -> Result<(), ParseError>
+    pub(crate) fn resolve_repl_unit(&mut self, unit_key: &str, env: &mut Env) -> Result<(), ParseError>
     {
         let mut unit = std::mem::take(self.units.get_mut(unit_key).unwrap());
 

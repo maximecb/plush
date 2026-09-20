@@ -476,7 +476,7 @@ pub(crate) fn string_split(actor: &mut Actor, input: Value, sep: Value) -> HostR
     Ok(array)
 }
 
-pub fn init_runtime(prog: &mut Program)
+pub(crate) fn init_runtime(prog: &mut Program)
 {
     /*
     // Int64
@@ -543,7 +543,7 @@ pub(crate) fn fun_dump_bytecode(actor: &mut Actor, f: Value) -> HostResult
 }
 
 /// Get the method associated with a core value
-pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
+pub(crate) fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
 {
     use crate::host::HostFnId::*;
 
@@ -647,7 +647,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
     Some(f)
 }
 
-pub fn get_class_id(val: Value) -> ClassId
+pub(crate) fn get_class_id(val: Value) -> ClassId
 {
     match val.type_of() {
         Type::Object => val.as_obj().class_id(),

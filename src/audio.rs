@@ -113,7 +113,7 @@ unsafe impl Send for OutputState {}
 static AUDIO_OUT_PAIR: (Mutex<Option<OutputState>>, Condvar) = (Mutex::new(None), Condvar::new());
 
 /// Open an audio output device
-pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> HostResult
+pub(crate) fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> HostResult
 {
     {
         let (lock, _) = &AUDIO_OUT_PAIR;
@@ -169,7 +169,7 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
 
 /// Write samples to an audio device
 /// The samples must be a ByteArray containing float32 values
-pub fn audio_write_samples(_actor: &mut Actor, device_id: Value, samples: Value) -> HostResult
+pub(crate) fn audio_write_samples(_actor: &mut Actor, device_id: Value, samples: Value) -> HostResult
 {
     let device_id = unwrap_usize!(device_id);
 
@@ -313,7 +313,7 @@ unsafe impl Send for InputState {}
 static AUDIO_IN_PAIR: (Mutex<Option<InputState>>, Condvar) = (Mutex::new(None), Condvar::new());
 
 /// Open an audio input device
-pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> HostResult
+pub(crate) fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Value) -> HostResult
 {
     {
         let (lock, _) = &AUDIO_IN_PAIR;
@@ -366,7 +366,7 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
 }
 
 /// Read samples from an audio input device into an existing ByteArray
-pub fn audio_read_samples(_actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> HostResult
+pub(crate) fn audio_read_samples(_actor: &mut Actor, device_id: Value, num_samples: Value, dst_ba: Value, dst_idx: Value) -> HostResult
 {
     let device_id = unwrap_usize!(device_id);
     let num_samples_to_read = unwrap_usize!(num_samples);

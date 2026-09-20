@@ -34,7 +34,7 @@ const MSG_BACKLOG_LIMIT: usize = 64 * 1024 * 1024;
 /// Interpreter instructions, one 64-bit word each. The opcode occupies
 /// the low bits and the operands are packed above it, so an instruction
 /// holds no heap pointers and the collector never walks the code
-pub use crate::insns::Insn;
+pub(crate) use crate::insns::Insn;
 
 /// Cache for a field access site. The name is what the site was compiled
 /// for; the key and slot are what it last resolved to.
@@ -105,7 +105,7 @@ macro_rules! error {
 }
 
 /// Mesage to be sent to an actor
-pub struct Message
+pub(crate) struct Message
 {
     // Sender actor id
     // Can be none when the message is a callback
@@ -139,22 +139,22 @@ struct StackFrame
     ret_addr: usize,
 }
 
-pub struct Actor
+pub(crate) struct Actor
 {
     // Actor id
-    pub actor_id: u64,
+    pub(crate) actor_id: u64,
 
     // Parent actor id
-    pub parent_id: Option<u64>,
+    pub(crate) parent_id: Option<u64>,
 
     // Parent VM
-    pub vm: Arc<Mutex<VM>>,
+    pub(crate) vm: Arc<Mutex<VM>>,
 
     // Private allocator
-    pub alloc: Alloc,
+    pub(crate) alloc: Alloc,
 
     // Allocator for incoming messages
-    pub msg_alloc: Arc<Mutex<Alloc>>,
+    pub(crate) msg_alloc: Arc<Mutex<Alloc>>,
 
     // Message queue receiver endpoint
     queue_rx: mpsc::Receiver<Message>,
@@ -318,7 +318,7 @@ cmp_slow_path!(cmp_ge, "greater-than-or-equal", >=, <=);
 
 impl Actor
 {
-    pub fn new(
+    pub(crate) fn new(
         actor_id: u64,
         parent_id: Option<u64>,
         vm: Arc<Mutex<VM>>,
@@ -393,7 +393,7 @@ impl Actor
 
     /// Receive a message from the message queue
     /// This will block until a message is available
-    pub fn recv(&mut self) -> Value
+    pub(crate) fn recv(&mut self) -> Value
     {
         use crate::window::poll_ui_msg;
 
@@ -428,7 +428,7 @@ impl Actor
 
     /// Try to receive a message from the message queue
     /// This function will not block if no message is available
-    pub fn try_recv(&mut self) -> Option<Value>
+    pub(crate) fn try_recv(&mut self) -> Option<Value>
     {
         use crate::window::poll_ui_msg;
 
@@ -496,7 +496,7 @@ impl Actor
     }
 
     /// Send a message to another actor
-    pub fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
+    pub(crate) fn send(&mut self, actor_id: u64, msg: Value) -> Result<(), ()>
     {
         // Lookup the queue endpoint in our local cache
         let mut actor_tx = self.actor_map.get(&actor_id);
@@ -585,7 +585,7 @@ impl Actor
 
     /// Get the number of parameters a function takes, without
     /// having to compile it first
-    pub fn get_num_params(&self, fun_id: FunId) -> usize
+    pub(crate) fn get_num_params(&self, fun_id: FunId) -> usize
     {
         let vm = self.vm.lock().unwrap();
         vm.prog.funs[&fun_id].params.len()
@@ -686,7 +686,7 @@ impl Actor
 
     /// Compute something requiring access to a class, lazily
     /// copying the class from the parent VM as needed
-    pub fn with_class<F, T>(&mut self, class_id: ClassId, f: F) -> T
+    pub(crate) fn with_class<F, T>(&mut self, class_id: ClassId, f: F) -> T
     where F: FnOnce(&Class) -> T
     {
         self.load_class(class_id);
@@ -697,7 +697,7 @@ impl Actor
     /// yet. What comes back reflects any rewriting the sites in it have
     /// done, so a function dumped after it has been called shows the
     /// forms it settled on
-    pub fn dump_fun_bytecode(&mut self, fun: Value) -> Result<String, String>
+    pub(crate) fn dump_fun_bytecode(&mut self, fun: Value) -> Result<String, String>
     {
         let fun_id = match fun.to_fun_id() {
             Some(fun_id) => fun_id,
@@ -728,7 +728,7 @@ impl Actor
     /// The instruction's own formatting prints the operands, so this adds
     /// what they cannot say on their own: what a cache index or constant
     /// slot refers to, and where a branch actually lands
-    pub fn dump_bytecode(&self, name: &str, fun: &CompiledFun) -> String
+    pub(crate) fn dump_bytecode(&self, name: &str, fun: &CompiledFun) -> String
     {
         use std::fmt::Write;
 
@@ -840,7 +840,7 @@ impl Actor
     }
 
     /// Add slots for globals declared since this actor was created
-    pub fn grow_globals(&mut self)
+    pub(crate) fn grow_globals(&mut self)
     {
         let num_globals = self.vm.lock().unwrap().prog.num_globals as usize;
         assert!(num_globals >= self.globals.len());
@@ -851,7 +851,7 @@ impl Actor
     /// initialized. Codegen reads immutable globals through this: it runs
     /// when a function is first called, by which point the unit that sets
     /// them has usually run
-    pub fn global_value(&self, idx: u32) -> Option<Value>
+    pub(crate) fn global_value(&self, idx: u32) -> Option<Value>
     {
         let val = *self.globals.get(idx as usize)?;
 
@@ -859,7 +859,7 @@ impl Actor
     }
 
     /// Text of an interned field or method name
-    pub fn name_str(&self, name: NameId) -> &str
+    pub(crate) fn name_str(&self, name: NameId) -> &str
     {
         &self.names[name as usize]
     }
@@ -1006,7 +1006,7 @@ impl Actor
     }
 
     /// Create a cache entry for a field access site
-    pub fn new_prop_cache(&mut self, name: &str) -> u32
+    pub(crate) fn new_prop_cache(&mut self, name: &str) -> u32
     {
         let name = self.intern_name(name);
 
@@ -1022,7 +1022,7 @@ impl Actor
     }
 
     /// Create a cache entry for a call site
-    pub fn new_call_cache(&mut self, name: &str) -> u32
+    pub(crate) fn new_call_cache(&mut self, name: &str) -> u32
     {
         let name = if name.is_empty() { 0 } else { self.intern_name(name) };
 
@@ -1045,7 +1045,7 @@ impl Actor
     /// pool holds the heap constants the code refers to, along with the
     /// immediates too wide to sit in an instruction. It is a GC root, so
     /// a constant is safe to hold from the moment it lands here
-    pub fn push_const(&mut self, val: Value) -> u32
+    pub(crate) fn push_const(&mut self, val: Value) -> u32
     {
         // The same constant written twice can share one slot, which keeps
         // the pool dense for both the collector and the cache
@@ -1070,7 +1070,7 @@ impl Actor
     /// Intern a field or method name. The heap string a name needs as a
     /// dict key is allocated once, when the name is first seen, and is
     /// rooted from then on
-    pub fn intern_name(&mut self, name: &str) -> NameId
+    pub(crate) fn intern_name(&mut self, name: &str) -> NameId
     {
         if let Some(id) = self.name_ids.get(name) {
             return *id;
@@ -1100,20 +1100,20 @@ impl Actor
     }
 
     /// Get the class name for a given class
-    pub fn get_class_name(&mut self, class_id: ClassId) -> String
+    pub(crate) fn get_class_name(&mut self, class_id: ClassId) -> String
     {
         self.with_class(class_id, |c| c.name.clone())
     }
 
     /// Get the number of slots for a given class
-    pub fn get_num_slots(&mut self, class_id: ClassId) -> usize
+    pub(crate) fn get_num_slots(&mut self, class_id: ClassId) -> usize
     {
         self.with_class(class_id, |c| c.fields.len())
     }
 
     /// Get the slot index for a given field of a given class
     /// Returns `None` if the class has no such field
-    pub fn get_slot_idx(&mut self, class_id: ClassId, field_name: &str) -> Option<usize>
+    pub(crate) fn get_slot_idx(&mut self, class_id: ClassId, field_name: &str) -> Option<usize>
     {
         self.with_class(class_id, |c| c.fields.get(field_name).copied())
     }
@@ -1129,14 +1129,14 @@ impl Actor
     }
 
     // Get the function id for a given method of a given class
-    pub fn get_method(&mut self, class_id: ClassId, method_name: &str) -> Option<FunId>
+    pub(crate) fn get_method(&mut self, class_id: ClassId, method_name: &str) -> Option<FunId>
     {
         self.with_class(class_id, |c| c.methods.get(method_name).copied())
     }
 
     /// Allocate an object of a given class
     /// Note that this won't call the constructor if present
-    pub fn alloc_obj(&mut self, class_id: ClassId) -> Value
+    pub(crate) fn alloc_obj(&mut self, class_id: ClassId) -> Value
     {
         let num_slots = self.get_num_slots(class_id);
 
@@ -1151,7 +1151,7 @@ impl Actor
     /// Set the value of an object field on an object the runtime itself
     /// allocated, e.g. a UI event. The class and its fields are known here,
     /// so a failure means the runtime is at fault, not the running program.
-    pub fn set_field(&mut self, obj: Value, field_name: &str, val: Value)
+    pub(crate) fn set_field(&mut self, obj: Value, field_name: &str, val: Value)
     {
         let obj = match obj.to_obj() {
             Some(obj) => obj,
@@ -1170,7 +1170,7 @@ impl Actor
 
     /// Allocate/intern a constant string used by the runtime
     /// or present as a constant in the program
-    pub fn intern_str(&mut self, str_const: &str) -> Value
+    pub(crate) fn intern_str(&mut self, str_const: &str) -> Value
     {
         self.gc_check(
             Str::alloc_size(str_const.len()),
@@ -1183,7 +1183,7 @@ impl Actor
     }
 
     /// Perform a garbage collection cycle
-    pub fn gc_collect(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
+    pub(crate) fn gc_collect(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
     {
         // Collections can happen many times a second, so the reporting here,
         // its argument formatting, and the timing it needs all compile out
@@ -1320,7 +1320,7 @@ impl Actor
 
     /// Ensure that at least bytes_needed of free space are available in the
     /// allocator. If the memory is not available, perform GC.
-    pub fn gc_check(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
+    pub(crate) fn gc_check(&mut self, bytes_needed: usize, extra_roots: &mut [&mut Value])
     {
         // Add some extra bytes for alignment
         let bytes_needed = bytes_needed + 16;
@@ -1335,7 +1335,7 @@ impl Actor
     /// Wrap an integer in a value, boxing it if it is too large to be
     /// a fixnum. Boxing allocates, so this may collect.
     #[inline(always)]
-    pub fn int64(&mut self, val: i64) -> Value
+    pub(crate) fn int64(&mut self, val: i64) -> Value
     {
         match Value::try_fixnum(val) {
             Some(v) => v,
@@ -1353,7 +1353,7 @@ impl Actor
 
     /// Wrap a double in a value, boxing it if it has no inline encoding
     #[inline(always)]
-    pub fn float64(&mut self, val: f64) -> Value
+    pub(crate) fn float64(&mut self, val: f64) -> Value
     {
         match Value::try_flonum(val) {
             Some(v) => v,
@@ -1589,7 +1589,7 @@ impl Actor
     }
 
     /// Call and execute a function in this actor
-    pub fn call(&mut self, fun: Value, args: &[Value]) -> Value
+    pub(crate) fn call(&mut self, fun: Value, args: &[Value]) -> Value
     {
         assert!(self.stack.len() == 0);
         assert!(self.frames.len() == 0);
@@ -2845,7 +2845,7 @@ struct ActorTx
     msg_alloc: Weak<Mutex<Alloc>>,
 }
 
-pub struct VM
+pub(crate) struct VM
 {
     // Program to run
     prog: Program,
@@ -2872,7 +2872,7 @@ unsafe impl Send for VM {}
 // the lock for the entire duration of a call.
 impl VM
 {
-    pub fn new(prog: Program) -> Arc<Mutex<VM>>
+    pub(crate) fn new(prog: Program) -> Arc<Mutex<VM>>
     {
         let vm = Self {
             prog,
@@ -2892,7 +2892,7 @@ impl VM
     }
 
     // Create a new actor
-    pub fn new_actor(parent: &mut Actor, fun: Value, args: Vec<Value>) -> u64
+    pub(crate) fn new_actor(parent: &mut Actor, fun: Value, args: Vec<Value>) -> u64
     {
         // Assign an actor id
         let mut vm_ref = parent.vm.lock().unwrap();
@@ -3001,7 +3001,7 @@ impl VM
     }
 
     // Wait for an actor to produce a result and return it.
-    pub fn join_actor(vm: &Arc<Mutex<VM>>, tid: u64) -> Result<Value, String>
+    pub(crate) fn join_actor(vm: &Arc<Mutex<VM>>, tid: u64) -> Result<Value, String>
     {
         // Get the join handle, then release the VM lock
         let mut vm = vm.lock().unwrap();
@@ -3024,20 +3024,20 @@ impl VM
     }
 
     /// Mutable access to the program, e.g. to add code to it from the REPL
-    pub fn prog_mut(&mut self) -> &mut Program
+    pub(crate) fn prog_mut(&mut self) -> &mut Program
     {
         &mut self.prog
     }
 
     // Call a function in the main actor
-    pub fn call(vm: &mut Arc<Mutex<VM>>, fun_id: FunId, args: Vec<Value>) -> Value
+    pub(crate) fn call(vm: &mut Arc<Mutex<VM>>, fun_id: FunId, args: Vec<Value>) -> Value
     {
         let mut actor = VM::new_main_actor(vm);
         actor.call(Value::fun(fun_id), &args)
     }
 
     // Create the main actor, which runs on the current thread
-    pub fn new_main_actor(vm: &Arc<Mutex<VM>>) -> Actor
+    pub(crate) fn new_main_actor(vm: &Arc<Mutex<VM>>) -> Actor
     {
         let vm_mutex = vm.clone();
 
@@ -3081,7 +3081,7 @@ impl VM
 
     // Compile every function in a program without running it, which is
     // what --no-exec does to check that code generation works
-    pub fn compile_all(prog: Program)
+    pub(crate) fn compile_all(prog: Program)
     {
         let fun_ids: Vec<FunId> = prog.funs.keys().copied().collect();
         let vm = VM::new(prog);
@@ -3093,7 +3093,7 @@ impl VM
     }
 
     /// Send a message to an actor without copying it to its message allocator
-    pub fn send_nocopy(&self, actor_id: u64, msg: Value, size: usize) -> Result<(), ()>
+    pub(crate) fn send_nocopy(&self, actor_id: u64, msg: Value, size: usize) -> Result<(), ()>
     {
         let actor_tx = self.actor_txs.get(&actor_id).ok_or(())?;
         actor_tx.sender.send(Message { sender: 0, msg, size }).map_err(|_| ())

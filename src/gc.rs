@@ -19,7 +19,7 @@ use crate::value::Value;
 /// a table of these for the duration of a copy so that equal strings
 /// still share a single allocation.
 #[derive(Clone, Copy)]
-pub struct StrKey(*const Str);
+pub(crate) struct StrKey(*const Str);
 
 // The copier is the only thing that touches these, and it runs on the
 // actor thread that owns the heap
@@ -43,10 +43,10 @@ impl PartialEq for StrKey
 
 impl Eq for StrKey {}
 
-pub type StrTable = FxHashSet<StrKey>;
+pub(crate) type StrTable = FxHashSet<StrKey>;
 
 /// A header that was overwritten with a forwarding address
-pub struct UndoEntry
+pub(crate) struct UndoEntry
 {
     block: *mut u8,
     header: Header,
@@ -54,7 +54,7 @@ pub struct UndoEntry
 
 unsafe impl Send for UndoEntry {}
 
-pub type UndoLog = Vec<UndoEntry>;
+pub(crate) type UndoLog = Vec<UndoEntry>;
 
 /// Cheney-style copying collector.
 ///
@@ -66,7 +66,7 @@ pub type UndoLog = Vec<UndoEntry>;
 ///
 /// Walking that region block by block is what the size and tag in each
 /// block header are there for.
-pub struct Copier<'a>
+pub(crate) struct Copier<'a>
 {
     // Allocator to copy into
     dst: &'a mut Alloc,
@@ -89,7 +89,7 @@ impl<'a> Copier<'a>
 {
     /// Copier that leaves forwarding addresses behind in the source.
     /// Only valid when the source heap is about to be discarded.
-    pub fn new(dst: &'a mut Alloc, strs: &'a mut StrTable) -> Self
+    pub(crate) fn new(dst: &'a mut Alloc, strs: &'a mut StrTable) -> Self
     {
         strs.clear();
 
@@ -104,7 +104,7 @@ impl<'a> Copier<'a>
 
     /// Copier that records the headers it overwrites, so that they can
     /// be put back with undo_forwarding once the copy is done
-    pub fn with_undo(
+    pub(crate) fn with_undo(
         dst: &'a mut Alloc,
         strs: &'a mut StrTable,
         undo: &'a mut UndoLog,
@@ -118,7 +118,7 @@ impl<'a> Copier<'a>
     }
 
     #[allow(dead_code)] // used by the log_gc cycle report
-    pub fn num_blocks(&self) -> usize
+    pub(crate) fn num_blocks(&self) -> usize
     {
         self.num_blocks
     }
@@ -130,7 +130,7 @@ impl<'a> Copier<'a>
     /// The value only says that it points at a block, so what kind of
     /// block it is comes from the header. Only strings need to be told
     /// apart here, because they are the one thing the copy deduplicates.
-    pub fn forward(&mut self, val: Value) -> Value
+    pub(crate) fn forward(&mut self, val: Value) -> Value
     {
         if !val.is_heap() {
             return val;
@@ -277,7 +277,7 @@ impl<'a> Copier<'a>
     }
 
     /// Copy everything reachable from the values forwarded so far
-    pub fn run(&mut self)
+    pub(crate) fn run(&mut self)
     {
         while self.scan < self.dst.bytes_used() {
             let p = self.dst.block_at(self.scan);
@@ -373,7 +373,7 @@ impl<'a> Copier<'a>
 
 /// Put back the headers a copier overwrote with forwarding addresses.
 /// Needed when copying out of a heap that has to survive the copy.
-pub fn undo_forwarding(undo: &mut UndoLog)
+pub(crate) fn undo_forwarding(undo: &mut UndoLog)
 {
     for entry in undo.drain(..) {
         restore_header(entry.block, entry.header);
@@ -384,7 +384,7 @@ pub fn undo_forwarding(undo: &mut UndoLog)
 /// reference points at a live block of the expected kind in the same
 /// heap. This is a full heap walk, so it is only meant for testing.
 #[cfg(feature = "verify_gc")]
-pub fn verify_heap(alloc: &Alloc)
+pub(crate) fn verify_heap(alloc: &Alloc)
 {
     fn check(alloc: &Alloc, p: *const u8, expected: Tag)
     {

@@ -10,13 +10,13 @@ use crate::*;
 /// host call's return value stays one pointer wide instead of the three
 /// words a bare `String` needs, which matters because every host call
 /// pays for this on the success path too
-pub type HostResult = Result<Value, Box<String>>;
+pub(crate) type HostResult = Result<Value, Box<String>>;
 
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
 ///       that we can JIT host calls efficiently
 #[derive(Copy, Clone, Debug)]
-pub enum FnPtr
+pub(crate) enum FnPtr
 {
     Fn0(fn(actor: &mut Actor) -> HostResult),
     Fn1(fn(actor: &mut Actor, a0: Value) -> HostResult),
@@ -33,15 +33,15 @@ pub enum FnPtr
 // function pointer equality comparison. It also allows us to store
 // the name of the function for easier debugging
 #[derive(Debug)]
-pub struct HostFn
+pub(crate) struct HostFn
 {
-    pub name: &'static str,
-    pub f: FnPtr,
+    pub(crate) name: &'static str,
+    pub(crate) f: FnPtr,
 }
 
 impl HostFn
 {
-    pub fn num_params(&self) -> usize
+    pub(crate) fn num_params(&self) -> usize
     {
         use FnPtr::*;
         match self.f {
@@ -84,7 +84,7 @@ macro_rules! def_host_fns {
         globals { $($g_id:ident($g_argc:tt),)* }
         methods { $($m_name:ident: $m_id:ident($m_argc:tt),)* }
     ) => {
-        pub const NUM_HOST_FNS: usize =
+        pub(crate) const NUM_HOST_FNS: usize =
             0 $(+ { let _ = stringify!($g_id); 1 })*
               $(+ { let _ = stringify!($m_name); 1 })*;
 
@@ -96,7 +96,7 @@ macro_rules! def_host_fns {
         #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
         #[allow(non_camel_case_types)]
         #[repr(u16)]
-        pub enum HostFnId
+        pub(crate) enum HostFnId
         {
             // The first entry stands in for "not resolved yet", which is
             // what a call cache holds until its site has run
@@ -108,7 +108,7 @@ macro_rules! def_host_fns {
         /// Every host function the VM provides, in `HostFnId` order.
         /// The table is immutable and shared by every actor, so looking
         /// one up costs an indexed load and no locking.
-        pub static HOST_FNS: [HostFn; NUM_HOST_FNS] = [
+        pub(crate) static HOST_FNS: [HostFn; NUM_HOST_FNS] = [
             $(HostFn { name: stringify!($g_id), f: host_fn_ptr!($g_argc, $g_id) },)*
             $(HostFn { name: stringify!($m_name), f: host_fn_ptr!($m_argc, $m_id) },)*
         ];
@@ -118,7 +118,7 @@ macro_rules! def_host_fns {
             /// Look up a host function that Plush code can name directly.
             /// Methods are deliberately not reachable this way: they are
             /// found by the type they are defined on instead
-            pub fn from_name(name: &str) -> Option<HostFnId>
+            pub(crate) fn from_name(name: &str) -> Option<HostFnId>
             {
                 match name {
                     $(stringify!($g_id) => Some(HostFnId::$g_id),)*
@@ -132,14 +132,14 @@ macro_rules! def_host_fns {
 impl HostFnId
 {
     /// Recover an id from its index, as an instruction operand holds it
-    pub fn from_index(idx: u16) -> HostFnId
+    pub(crate) fn from_index(idx: u16) -> HostFnId
     {
         assert!((idx as usize) < NUM_HOST_FNS);
         unsafe { std::mem::transmute(idx) }
     }
 
     /// Get the host function this id refers to
-    pub fn get(self) -> &'static HostFn
+    pub(crate) fn get(self) -> &'static HostFn
     {
         &HOST_FNS[self as usize]
     }
@@ -288,7 +288,7 @@ def_host_fns! {
 /// Get a host constant by name
 /// Returns an AST expression node for the constant,
 /// because we want host constants to be resolved early
-pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
+pub(crate) fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
 {
     // This constant is only true inside the main unit
     if name == "MAIN_UNIT" {
@@ -306,7 +306,7 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
 }
 
 /// Get the current time stamp in milliseconds
-pub fn get_time_ms() -> u64
+pub(crate) fn get_time_ms() -> u64
 {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
@@ -314,20 +314,20 @@ pub fn get_time_ms() -> u64
 }
 
 /// Get the current time stamp in milliseconds since the unix epoch
-pub fn time_current_ms(actor: &mut Actor) -> HostResult
+pub(crate) fn time_current_ms(actor: &mut Actor) -> HostResult
 {
     Ok(actor.int64(get_time_ms() as i64))
 }
 
 /// Get the number of command-line arguments
-pub fn cmd_num_args(_actor: &mut Actor) -> HostResult
+pub(crate) fn cmd_num_args(_actor: &mut Actor) -> HostResult
 {
     let num_args = crate::REST_ARGS.lock().unwrap().len();
     Ok(Value::fixnum(num_args as i64))
 }
 
 /// Get a command-line argument string by index
-pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> HostResult
+pub(crate) fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> HostResult
 {
     let idx = unwrap_usize!(idx);
 
@@ -348,13 +348,13 @@ pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> HostResu
 }
 
 /// Get a command-line argument string by index
-pub fn cmd_get_arg(actor: &mut Actor, idx: Value) -> HostResult
+pub(crate) fn cmd_get_arg(actor: &mut Actor, idx: Value) -> HostResult
 {
     cmd_get_arg_or(actor, idx, Value::NIL)
 }
 
 /// Print a value to stdout
-pub fn print(_actor: &mut Actor, v: Value) -> HostResult
+pub(crate) fn print(_actor: &mut Actor, v: Value) -> HostResult
 {
     match v.type_of() {
         Type::String => print!("{}", v.as_str()),

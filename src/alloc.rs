@@ -3,17 +3,17 @@ use crate::value::Value;
 
 /// Initial size for a new heap. Kept small so that actors are cheap to
 /// spawn, since each one owns a heap. Heaps grow as needed.
-pub const INIT_SIZE: usize = 4 * 1024 * 1024;
+pub(crate) const INIT_SIZE: usize = 4 * 1024 * 1024;
 
 /// Initial size of a message allocator. These grow on demand, so this
 /// only has to cover ordinary message traffic.
-pub const MSG_INIT_SIZE: usize = 2 * 1024 * 1024;
+pub(crate) const MSG_INIT_SIZE: usize = 2 * 1024 * 1024;
 
 /// Address space reserved for a message allocator. A message allocator
 /// cannot be re-reserved while it holds messages, so it reserves enough
 /// up front to grow into. Reserving costs address space but no memory,
 /// and this is what bounds how large a single message can be.
-pub const MSG_RESERVE_SIZE: usize = 16 * 1024 * 1024 * 1024;
+pub(crate) const MSG_RESERVE_SIZE: usize = 16 * 1024 * 1024 * 1024;
 
 /// Alignment of every allocation
 const ALIGN: usize = 8;
@@ -27,7 +27,7 @@ const ALIGN: usize = 8;
 /// contiguous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Tag
+pub(crate) enum Tag
 {
     // Raw blocks: the header holds the size, and nothing else needs a
     // field of its own. Strings keep their inline bytes here, and the
@@ -85,9 +85,9 @@ const LEN_SHIFT: u32 = 8;
 const LEN_BITS: u64 = (1 << 50) - 1;
 
 /// Largest values each field can hold, checked where blocks are made
-pub const MAX_AUX24: usize = AUX24_BITS as usize;
-pub const MAX_NUM_SLOTS: usize = SLOTS_BITS as usize;
-pub const MAX_FIXED_LEN: usize = LEN_BITS as usize;
+pub(crate) const MAX_AUX24: usize = AUX24_BITS as usize;
+pub(crate) const MAX_NUM_SLOTS: usize = SLOTS_BITS as usize;
+pub(crate) const MAX_FIXED_LEN: usize = LEN_BITS as usize;
 
 /// Header word preceding every allocation.
 ///
@@ -150,13 +150,13 @@ pub const MAX_FIXED_LEN: usize = LEN_BITS as usize;
 /// ```
 #[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
-pub struct Header(u64);
+pub(crate) struct Header(u64);
 
 /// Size of the header preceding every allocation
-pub const HEADER_SIZE: usize = size_of::<Header>();
+pub(crate) const HEADER_SIZE: usize = size_of::<Header>();
 
 /// Payload size of every fixed-layout block: one pointer or one value
-pub const FIXED_SIZE: usize = 8;
+pub(crate) const FIXED_SIZE: usize = 8;
 
 impl Header
 {
@@ -201,13 +201,13 @@ impl Header
         Header(((len as u64) << LEN_SHIFT) | ((tag as u64) << TAG_SHIFT) | 1)
     }
 
-    pub fn is_forwarded(&self) -> bool
+    pub(crate) fn is_forwarded(&self) -> bool
     {
         self.0 & 1 == 0
     }
 
     /// Address the payload moved to. Only valid if the block is forwarded.
-    pub fn forward_addr(&self) -> *mut u8
+    pub(crate) fn forward_addr(&self) -> *mut u8
     {
         debug_assert!(self.is_forwarded());
         self.0 as *mut u8
@@ -219,7 +219,7 @@ impl Header
         ((self.0 >> TAG_SHIFT) & TAG_BITS) as u8
     }
 
-    pub fn tag(&self) -> Tag
+    pub(crate) fn tag(&self) -> Tag
     {
         Tag::from_u8(self.tag_u8())
     }
@@ -230,7 +230,7 @@ impl Header
     /// kind of block it is looking at, so the three layouts are decoded
     /// here with compares rather than a table: both candidates come out
     /// of the header word with no memory access of their own.
-    pub fn size(&self) -> usize
+    pub(crate) fn size(&self) -> usize
     {
         let t = self.tag_u8();
         let raw = ((self.0 >> RAW_SHIFT) & RAW_BITS) as usize;
@@ -248,26 +248,26 @@ impl Header
     /// Bytes a raw block was asked for, before the rounding up to a
     /// word that size() reports. This is a string's length and a
     /// table's capacity.
-    pub fn num_bytes(&self) -> usize
+    pub(crate) fn num_bytes(&self) -> usize
     {
         debug_assert!(self.tag_u8() < Tag::FIRST_SLOTS);
         ((self.0 >> RAW_SHIFT) & RAW_BITS) as usize
     }
 
     /// The class or function id of a block of slots
-    pub fn aux24(&self) -> usize
+    pub(crate) fn aux24(&self) -> usize
     {
         debug_assert!(self.tag_u8() >= Tag::FIRST_SLOTS && self.tag_u8() < Tag::FIRST_FIXED);
         ((self.0 >> AUX24_SHIFT) & AUX24_BITS) as usize
     }
 
-    pub fn num_slots(&self) -> usize
+    pub(crate) fn num_slots(&self) -> usize
     {
         debug_assert!(self.tag_u8() >= Tag::FIRST_SLOTS && self.tag_u8() < Tag::FIRST_FIXED);
         ((self.0 >> SLOTS_SHIFT) & SLOTS_BITS) as usize
     }
 
-    pub fn fixed_len(&self) -> usize
+    pub(crate) fn fixed_len(&self) -> usize
     {
         debug_assert!(self.tag_u8() >= Tag::FIRST_FIXED);
         ((self.0 >> LEN_SHIFT) & LEN_BITS) as usize
@@ -276,14 +276,14 @@ impl Header
     /// The low half of a slots header: the tag and the class or function
     /// id together. A field or method cache guards on this, which checks
     /// that the block is an object of the right class in one compare.
-    pub fn guard_key(&self) -> u32
+    pub(crate) fn guard_key(&self) -> u32
     {
         self.0 as u32
     }
 
     /// The key every object of a given class has. The slot count lives
     /// above the low half, so it plays no part in this.
-    pub fn object_key(class_id: usize) -> u32
+    pub(crate) fn object_key(class_id: usize) -> u32
     {
         Header::new_slots(Tag::Object, class_id, 0).guard_key()
     }
@@ -291,14 +291,14 @@ impl Header
     /// The class an object key was built from. A site that needs the
     /// class itself keeps the key and comes back through here, rather
     /// than carrying both.
-    pub fn class_id_of_key(key: u32) -> usize
+    pub(crate) fn class_id_of_key(key: u32) -> usize
     {
         (key >> AUX24_SHIFT) as usize
     }
 }
 
 /// Read the header of the block whose payload starts at a given address
-pub fn header_of(payload: *const u8) -> Header
+pub(crate) fn header_of(payload: *const u8) -> Header
 {
     unsafe { *(payload as *const Header).sub(1) }
 }
@@ -309,17 +309,17 @@ pub fn header_of(payload: *const u8) -> Header
 /// pointer: the capacity is already recorded in the block it points at,
 /// so there is nothing to carry alongside the pointer.
 /// View a table block as a slice, taking its length from its own header
-pub fn table_slice<'a, T>(p: *const T) -> &'a [T]
+pub(crate) fn table_slice<'a, T>(p: *const T) -> &'a [T]
 {
     unsafe { std::slice::from_raw_parts(p, table_len(p)) }
 }
 
-pub fn table_slice_mut<'a, T>(p: *mut T) -> &'a mut [T]
+pub(crate) fn table_slice_mut<'a, T>(p: *mut T) -> &'a mut [T]
 {
     unsafe { std::slice::from_raw_parts_mut(p, table_len(p)) }
 }
 
-pub fn table_len<T>(p: *const T) -> usize
+pub(crate) fn table_len<T>(p: *const T) -> usize
 {
     debug_assert!(!p.is_null());
     header_of(p as *const u8).num_bytes() / size_of::<T>()
@@ -328,7 +328,7 @@ pub fn table_len<T>(p: *const T) -> usize
 /// Change the length recorded in the header of a fixed-layout block.
 /// This is how an array or dict updates its length, since the header is
 /// where that lives.
-pub fn set_fixed_len(payload: *mut u8, len: usize)
+pub(crate) fn set_fixed_len(payload: *mut u8, len: usize)
 {
     assert!(len <= MAX_FIXED_LEN, "length too large to fit in a header");
 
@@ -341,25 +341,25 @@ pub fn set_fixed_len(payload: *mut u8, len: usize)
 }
 
 /// Record that a block has been copied, and where its payload moved to
-pub fn set_forwarded(payload: *mut u8, new_payload: *mut u8)
+pub(crate) fn set_forwarded(payload: *mut u8, new_payload: *mut u8)
 {
     debug_assert!(new_payload as usize % ALIGN == 0);
     unsafe { *(payload as *mut Header).sub(1) = Header(new_payload as u64) };
 }
 
 /// Put back a header that was overwritten with a forwarding address
-pub fn restore_header(payload: *mut u8, header: Header)
+pub(crate) fn restore_header(payload: *mut u8, header: Header)
 {
     unsafe { *(payload as *mut Header).sub(1) = header };
 }
 
 /// Round a size up to the allocation alignment
-pub fn align_up(size: usize) -> usize
+pub(crate) fn align_up(size: usize) -> usize
 {
     (size + (ALIGN - 1)) & !(ALIGN - 1)
 }
 
-pub struct Alloc
+pub(crate) struct Alloc
 {
     // Start of the reserved address range
     mem_block: *mut u8,
@@ -402,7 +402,7 @@ mod sys
     /// Reserve address space without committing memory to it. None of
     /// the range is accessible until it is committed. Returns null if
     /// the reservation fails.
-    pub fn reserve(size: usize) -> *mut u8
+    pub(crate) fn reserve(size: usize) -> *mut u8
     {
         let p = unsafe { libc::mmap(
             std::ptr::null_mut(),
@@ -422,7 +422,7 @@ mod sys
 
     /// Make a range inside a reservation readable and writable. The
     /// pages it hands back are zero-filled.
-    pub fn commit(addr: *mut u8, size: usize) -> bool
+    pub(crate) fn commit(addr: *mut u8, size: usize) -> bool
     {
         let ret = unsafe { libc::mprotect(
             addr as *mut libc::c_void,
@@ -435,7 +435,7 @@ mod sys
 
     /// Release the physical pages backing a range, leaving it reserved.
     /// Replacing the mapping is what frees the pages.
-    pub fn decommit(addr: *mut u8, size: usize) -> bool
+    pub(crate) fn decommit(addr: *mut u8, size: usize) -> bool
     {
         let p = unsafe { libc::mmap(
             addr as *mut libc::c_void,
@@ -450,12 +450,12 @@ mod sys
     }
 
     /// Give up a whole reservation, committed pages and all
-    pub fn release(addr: *mut u8, size: usize)
+    pub(crate) fn release(addr: *mut u8, size: usize)
     {
         unsafe { libc::munmap(addr as *mut libc::c_void, size) };
     }
 
-    pub fn page_size() -> usize
+    pub(crate) fn page_size() -> usize
     {
         unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
     }
@@ -480,7 +480,7 @@ mod sys
     /// Reserve address space without committing memory to it. None of
     /// the range is accessible until it is committed. Returns null if
     /// the reservation fails.
-    pub fn reserve(size: usize) -> *mut u8
+    pub(crate) fn reserve(size: usize) -> *mut u8
     {
         unsafe { VirtualAlloc(
             std::ptr::null(),
@@ -492,7 +492,7 @@ mod sys
 
     /// Make a range inside a reservation readable and writable. The
     /// pages it hands back are zero-filled.
-    pub fn commit(addr: *mut u8, size: usize) -> bool
+    pub(crate) fn commit(addr: *mut u8, size: usize) -> bool
     {
         let p = unsafe { VirtualAlloc(
             addr as *const c_void,
@@ -505,7 +505,7 @@ mod sys
     }
 
     /// Release the physical pages backing a range, leaving it reserved
-    pub fn decommit(addr: *mut u8, size: usize) -> bool
+    pub(crate) fn decommit(addr: *mut u8, size: usize) -> bool
     {
         unsafe { VirtualFree(addr as *mut c_void, size, MEM_DECOMMIT) != 0 }
     }
@@ -513,12 +513,12 @@ mod sys
     /// Give up a whole reservation, committed pages and all. This only
     /// works on the address the reservation started at, and the size
     /// has to be zero.
-    pub fn release(addr: *mut u8, _size: usize)
+    pub(crate) fn release(addr: *mut u8, _size: usize)
     {
         unsafe { VirtualFree(addr as *mut c_void, 0, MEM_RELEASE) };
     }
 
-    pub fn page_size() -> usize
+    pub(crate) fn page_size() -> usize
     {
         let mut info = SYSTEM_INFO::default();
         unsafe { GetSystemInfo(&mut info) };
@@ -541,19 +541,19 @@ fn reserve_range(size: usize) -> *mut u8
 
 impl Alloc
 {
-    pub fn new() -> Self
+    pub(crate) fn new() -> Self
     {
         Self::with_size(INIT_SIZE)
     }
 
     /// Allocator for incoming messages. These grow on demand as messages
     /// are copied in, and are reset once the receiver has drained them.
-    pub fn for_messages() -> Self
+    pub(crate) fn for_messages() -> Self
     {
         Self::with_reserve(MSG_INIT_SIZE, MSG_RESERVE_SIZE, true)
     }
 
-    pub fn with_size(mem_size_bytes: usize) -> Self
+    pub(crate) fn with_size(mem_size_bytes: usize) -> Self
     {
         // Reserve twice the initial size, so that the heap has room to
         // grow in place before the reservation has to be replaced
@@ -580,17 +580,17 @@ impl Alloc
         alloc
     }
 
-    pub fn mem_size(&self) -> usize
+    pub(crate) fn mem_size(&self) -> usize
     {
         self.mem_size
     }
 
-    pub fn bytes_used(&self) -> usize
+    pub(crate) fn bytes_used(&self) -> usize
     {
         self.next_idx
     }
 
-    pub fn bytes_free(&self) -> usize
+    pub(crate) fn bytes_free(&self) -> usize
     {
         assert!(self.next_idx <= self.mem_size);
         self.mem_size - self.next_idx
@@ -598,7 +598,7 @@ impl Alloc
 
     /// Size of the reserved address range
     #[allow(dead_code)] // used by the unit tests below
-    pub fn reserve_size(&self) -> usize
+    pub(crate) fn reserve_size(&self) -> usize
     {
         self.reserve_size
     }
@@ -609,7 +609,7 @@ impl Alloc
     /// is only legal while the allocator is empty. That is enough for the
     /// GC, which only ever grows a to-space before it starts copying into
     /// it. Everything committed is discarded.
-    pub fn grow_reserve(&mut self, new_reserve: usize)
+    pub(crate) fn grow_reserve(&mut self, new_reserve: usize)
     {
         if new_reserve <= self.reserve_size {
             return;
@@ -635,7 +635,7 @@ impl Alloc
     /// Grow the accessible memory to at least a given size.
     /// Existing allocations keep their addresses, and the newly
     /// committed memory is guaranteed to be zeroed.
-    pub fn grow(&mut self, new_size: usize)
+    pub(crate) fn grow(&mut self, new_size: usize)
     {
         let new_size = page_round_up(new_size, self.page_size);
 
@@ -666,7 +666,7 @@ impl Alloc
     /// Shrink the available memory to a smaller size, releasing the
     /// physical pages back to the system
     /// This is primarily used to test the GC
-    pub fn shrink_to(&mut self, new_size: usize)
+    pub(crate) fn shrink_to(&mut self, new_size: usize)
     {
         assert!(new_size <= self.mem_size);
         assert!(self.next_idx <= new_size);
@@ -698,7 +698,7 @@ impl Alloc
     /// collector copies whole blocks in. What it does not reach has to be
     /// zeroed with zero_up_to before anything relying on zeroed memory
     /// allocates from it again.
-    pub fn reset(&mut self)
+    pub(crate) fn reset(&mut self)
     {
         self.next_idx = 0;
     }
@@ -708,7 +708,7 @@ impl Alloc
     /// This is how a reset allocator is made safe to allocate from
     /// again, once we know how much of it an incoming copy overwrote.
     /// Anything past the offset was never written and is already zero.
-    pub fn zero_up_to(&mut self, end: usize)
+    pub(crate) fn zero_up_to(&mut self, end: usize)
     {
         let end = std::cmp::min(end, self.mem_size);
 
@@ -723,7 +723,7 @@ impl Alloc
 
     /// Payload pointer for the block starting at a given byte offset.
     /// The collector uses this to walk the heap block by block.
-    pub fn block_at(&self, offset: usize) -> *mut u8
+    pub(crate) fn block_at(&self, offset: usize) -> *mut u8
     {
         debug_assert!(offset + HEADER_SIZE <= self.next_idx);
         unsafe { self.mem_block.add(offset + HEADER_SIZE) }
@@ -735,7 +735,7 @@ impl Alloc
     /// so it is the header that has to be inside the region, not the
     /// address itself.
     #[allow(dead_code)] // used by the verify_gc heap walk
-    pub fn contains(&self, p: *const u8) -> bool
+    pub(crate) fn contains(&self, p: *const u8) -> bool
     {
         let addr = p as usize;
         let start = self.mem_block as usize;
@@ -792,14 +792,14 @@ impl Alloc
 
     /// Allocate a raw block: a string's inline bytes, or a table. The
     /// four spare header bits are the tag's to use.
-    pub fn alloc_raw(&mut self, tag: Tag, num_bytes: usize) -> *mut u8
+    pub(crate) fn alloc_raw(&mut self, tag: Tag, num_bytes: usize) -> *mut u8
     {
         self.bump(align_up(num_bytes), Header::new_raw(tag, num_bytes))
     }
 
     /// Allocate a block of slots, tagged with the class or function id
     /// the slots belong to
-    pub fn alloc_slots(&mut self, tag: Tag, aux24: usize, num_slots: usize) -> *mut Value
+    pub(crate) fn alloc_slots(&mut self, tag: Tag, aux24: usize, num_slots: usize) -> *mut Value
     {
         let size_bytes = num_slots * size_of::<Value>();
         let p = self.bump(size_bytes, Header::new_slots(tag, aux24, num_slots));
@@ -812,7 +812,7 @@ impl Alloc
     /// the table it points at and the bytes here are whatever the last
     /// heap left behind. Anything walking the heap in between would
     /// otherwise find a stale pointer to follow.
-    pub fn alloc_fixed(&mut self, tag: Tag, len: usize) -> *mut u8
+    pub(crate) fn alloc_fixed(&mut self, tag: Tag, len: usize) -> *mut u8
     {
         let p = self.bump(FIXED_SIZE, Header::new_fixed(tag, len));
         unsafe { std::ptr::write(p as *mut u64, 0) };
@@ -822,7 +822,7 @@ impl Alloc
     /// Allocate room for a block the collector is copying, keeping the
     /// header it already has. Everything the header records beyond the
     /// size survives the copy this way, with nothing to rebuild.
-    pub fn alloc_copy(&mut self, hdr: Header) -> *mut u8
+    pub(crate) fn alloc_copy(&mut self, hdr: Header) -> *mut u8
     {
         self.bump(hdr.size(), hdr)
     }
@@ -830,7 +830,7 @@ impl Alloc
     /// Allocate a variable-sized table of elements of a given type.
     /// The element count is recovered from the block header with
     /// table_len, so it is not carried alongside the pointer.
-    pub fn alloc_table<T>(&mut self, num_elems: usize, tag: Tag) -> *mut T
+    pub(crate) fn alloc_table<T>(&mut self, num_elems: usize, tag: Tag) -> *mut T
     {
         debug_assert!(align_of::<T>() <= ALIGN);
 
@@ -840,7 +840,7 @@ impl Alloc
 
     /// Allocate an eight-byte block holding a single value of a given
     /// type, such as a captured variable or a boxed number
-    pub fn alloc_boxed<T>(&mut self, val: T, tag: Tag) -> *mut T
+    pub(crate) fn alloc_boxed<T>(&mut self, val: T, tag: Tag) -> *mut T
     {
         debug_assert!(size_of::<T>() <= FIXED_SIZE && align_of::<T>() <= ALIGN);
 
@@ -855,14 +855,14 @@ impl Alloc
     }
 
     /// Box an integer that is too large to be a fixnum
-    pub fn heap_int64(&mut self, val: i64) -> Value
+    pub(crate) fn heap_int64(&mut self, val: i64) -> Value
     {
         debug_assert!(!Value::fits_fixnum(val));
         Value::int64_box(self.alloc_boxed(val, Tag::Int64))
     }
 
     /// Box a double that has no inline flonum encoding
-    pub fn heap_float64(&mut self, val: f64) -> Value
+    pub(crate) fn heap_float64(&mut self, val: f64) -> Value
     {
         debug_assert!(Value::try_flonum(val).is_none());
         Value::float64_box(self.alloc_boxed(val, Tag::Float64))

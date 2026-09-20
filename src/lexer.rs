@@ -39,7 +39,7 @@ fn get_file_id(name: &str) -> u32
 }
 
 /// Get the file name associated with a unique id
-pub fn name_from_id(id: u32) -> String
+pub(crate) fn name_from_id(id: u32) -> String
 {
     let id = id as usize;
     let map = get_file_id_map().lock().unwrap();
@@ -62,7 +62,7 @@ pub fn name_from_id(id: u32) -> String
 ///
 /// Layout: col_no in bits 0..14, line_no in 14..46, file_id in 46..64
 #[derive(Copy, Clone, Default, Eq, PartialEq, Hash)]
-pub struct SrcPos(u64);
+pub(crate) struct SrcPos(u64);
 
 const COL_BITS: u32 = 14;
 const LINE_BITS: u32 = 32;
@@ -70,19 +70,19 @@ const FILE_BITS: u32 = 18;
 
 /// Highest column a position can represent. Positions further right on
 /// the same line all report this column
-pub const MAX_COL_NO: u32 = (1 << COL_BITS) - 1;
+pub(crate) const MAX_COL_NO: u32 = (1 << COL_BITS) - 1;
 
 /// Highest line a position can represent
-pub const MAX_LINE_NO: u32 = ((1u64 << LINE_BITS) - 1) as u32;
+pub(crate) const MAX_LINE_NO: u32 = ((1u64 << LINE_BITS) - 1) as u32;
 
 /// Number of distinct source files a program can be built from
-pub const MAX_FILES: u32 = 1 << FILE_BITS;
+pub(crate) const MAX_FILES: u32 = 1 << FILE_BITS;
 
 const _: () = assert!(COL_BITS + LINE_BITS + FILE_BITS == 64);
 
 impl SrcPos
 {
-    pub fn new(file_id: u32, line_no: u32, col_no: u32) -> Self
+    pub(crate) fn new(file_id: u32, line_no: u32, col_no: u32) -> Self
     {
         // Running out of file ids is a hard limit rather than something
         // to degrade: a clamped id would name the wrong file
@@ -98,14 +98,14 @@ impl SrcPos
         )
     }
 
-    pub fn get_src_name(&self) -> String
+    pub(crate) fn get_src_name(&self) -> String
     {
         name_from_id(self.file_id())
     }
 
-    pub fn file_id(&self) -> u32 { (self.0 >> (COL_BITS + LINE_BITS)) as u32 }
-    pub fn line_no(&self) -> u32 { ((self.0 >> COL_BITS) as u32) & MAX_LINE_NO }
-    pub fn col_no(&self) -> u32 { (self.0 as u32) & MAX_COL_NO }
+    pub(crate) fn file_id(&self) -> u32 { (self.0 >> (COL_BITS + LINE_BITS)) as u32 }
+    pub(crate) fn line_no(&self) -> u32 { ((self.0 >> COL_BITS) as u32) & MAX_LINE_NO }
+    pub(crate) fn col_no(&self) -> u32 { (self.0 as u32) & MAX_COL_NO }
 }
 
 impl fmt::Display for SrcPos
@@ -124,15 +124,15 @@ impl fmt::Debug for SrcPos
 }
 
 #[derive(Debug, Clone)]
-pub struct ParseError
+pub(crate) struct ParseError
 {
-    pub msg: String,
-    pub pos: SrcPos,
+    pub(crate) msg: String,
+    pub(crate) pos: SrcPos,
 }
 
 impl ParseError
 {
-    pub fn new(input: &Lexer, msg: &str) -> Self
+    pub(crate) fn new(input: &Lexer, msg: &str) -> Self
     {
         ParseError {
             msg: msg.to_string(),
@@ -141,7 +141,7 @@ impl ParseError
     }
 
     /// Parse error with just an error message and position
-    pub fn with_pos<T>(msg: &str, pos: &SrcPos) -> Result<T, ParseError>
+    pub(crate) fn with_pos<T>(msg: &str, pos: &SrcPos) -> Result<T, ParseError>
     {
         Err(ParseError {
             msg: msg.to_string(),
@@ -164,19 +164,19 @@ impl fmt::Display for ParseError
 }
 
 /// Check if a character can be the start of an identifier
-pub fn is_ident_start(ch: char) -> bool
+pub(crate) fn is_ident_start(ch: char) -> bool
 {
     ch.is_ascii_alphabetic() || ch == '_'
 }
 
 /// Check if a character can be part of an identifier
-pub fn is_ident_ch(ch: char) -> bool
+pub(crate) fn is_ident_ch(ch: char) -> bool
 {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 /// Check if an identifier is a reserved keyword
-pub fn is_reserved(ident: &str) -> bool
+pub(crate) fn is_reserved(ident: &str) -> bool
 {
     matches!(ident,
         // Currently in use and potentially unusable
@@ -196,7 +196,7 @@ pub fn is_reserved(ident: &str) -> bool
 }
 
 #[derive(Debug, Clone)]
-pub struct Lexer
+pub(crate) struct Lexer
 {
     // Lexer string to be parsed
     input: Vec<char>,
@@ -205,18 +205,18 @@ pub struct Lexer
     idx: usize,
 
     // Source file id
-    pub file_id: u32,
+    pub(crate) file_id: u32,
 
     // Current line number
-    pub line_no: u32,
+    pub(crate) line_no: u32,
 
     // Current column number
-    pub col_no: u32,
+    pub(crate) col_no: u32,
 }
 
 impl Lexer
 {
-    pub fn from_file(file_name: &str) -> Result<Self, ParseError>
+    pub(crate) fn from_file(file_name: &str) -> Result<Self, ParseError>
     {
         let data = match fs::read_to_string(file_name) {
             Ok(data) => data,
@@ -231,7 +231,7 @@ impl Lexer
         Ok(Self::new(&data, file_name))
     }
 
-    pub fn new(input_str: &str, src_name: &str) -> Self
+    pub(crate) fn new(input_str: &str, src_name: &str) -> Self
     {
         let file_id = get_file_id(src_name);
 
@@ -244,25 +244,25 @@ impl Lexer
         }
     }
 
-    pub fn get_src_name(&self) -> String
+    pub(crate) fn get_src_name(&self) -> String
     {
         name_from_id(self.file_id)
     }
 
-    pub fn get_pos(&self) -> SrcPos
+    pub(crate) fn get_pos(&self) -> SrcPos
     {
         SrcPos::new(self.file_id, self.line_no, self.col_no)
     }
 
 
     /// Test if the end of the input has been reached
-    pub fn eof(&self) -> bool
+    pub(crate) fn eof(&self) -> bool
     {
         return self.idx >= self.input.len();
     }
 
     /// Peek at a character from the input
-    pub fn peek_ch(&self) -> char
+    pub(crate) fn peek_ch(&self) -> char
     {
         if self.idx >= self.input.len()
         {
@@ -273,7 +273,7 @@ impl Lexer
     }
 
     /// Peek at a character further ahead in the input
-    pub fn peek_ch_at(&self, offset: usize) -> char
+    pub(crate) fn peek_ch_at(&self, offset: usize) -> char
     {
         if self.idx + offset >= self.input.len()
         {
@@ -284,7 +284,7 @@ impl Lexer
     }
 
     /// Consume a character from the input
-    pub fn eat_ch(&mut self) -> char
+    pub(crate) fn eat_ch(&mut self) -> char
     {
         let ch = self.peek_ch();
 
@@ -305,7 +305,7 @@ impl Lexer
     }
 
     /// Match a single character in the input, no preceding whitespace allowed
-    pub fn match_char(&mut self, ch: char) -> bool
+    pub(crate) fn match_char(&mut self, ch: char) -> bool
     {
         if self.peek_ch() == ch {
             self.eat_ch();
@@ -316,7 +316,7 @@ impl Lexer
     }
 
     /// Peek for a sequence of characters
-    pub fn peek_chars(&mut self, chars: &[char]) -> bool
+    pub(crate) fn peek_chars(&mut self, chars: &[char]) -> bool
     {
         let end_pos = self.idx + chars.len();
 
@@ -335,7 +335,7 @@ impl Lexer
     }
 
     /// Match characters in the input, no preceding whitespace allowed
-    pub fn match_chars(&mut self, chars: &[char]) -> bool
+    pub(crate) fn match_chars(&mut self, chars: &[char]) -> bool
     {
         if !self.peek_chars(chars) {
             return false;
@@ -350,7 +350,7 @@ impl Lexer
     }
 
     /// Peek for a string
-    pub fn peek_str(&self, s: &str) -> bool
+    pub(crate) fn peek_str(&self, s: &str) -> bool
     {
         let mut idx = self.idx;
 
@@ -367,7 +367,7 @@ impl Lexer
     }
 
     /// Consume characters until the end of a single-line comment
-    pub fn eat_comment(&mut self)
+    pub(crate) fn eat_comment(&mut self)
     {
         loop
         {
@@ -379,7 +379,7 @@ impl Lexer
     }
 
     /// Consume characters until the end of a multi-line comment
-    pub fn eat_multi_comment(&mut self) -> Result<(), ParseError>
+    pub(crate) fn eat_multi_comment(&mut self) -> Result<(), ParseError>
     {
         let mut depth = 1;
 
@@ -408,7 +408,7 @@ impl Lexer
     }
 
     /// Consume whitespace
-    pub fn eat_ws(&mut self) -> Result<(), ParseError>
+    pub(crate) fn eat_ws(&mut self) -> Result<(), ParseError>
     {
         // Until the end of the whitespace
         loop
@@ -459,7 +459,7 @@ impl Lexer
     /// Match a string in the input, ignoring preceding whitespace
     /// Do not use this method to match a keyword which could be
     /// an identifier.
-    pub fn match_token(&mut self, token: &str) -> Result<bool, ParseError>
+    pub(crate) fn match_token(&mut self, token: &str) -> Result<bool, ParseError>
     {
         // Consume preceding whitespace
         self.eat_ws()?;
@@ -478,7 +478,7 @@ impl Lexer
     /// Match a keyword in the input, ignoring preceding whitespace
     /// This is different from match_token because there can't be a
     /// match if the following chars are also valid identifier chars.
-    pub fn match_keyword(&mut self, keyword: &str) -> Result<bool, ParseError>
+    pub(crate) fn match_keyword(&mut self, keyword: &str) -> Result<bool, ParseError>
     {
         // Consume preceding whitespace
         self.eat_ws()?;
@@ -504,13 +504,13 @@ impl Lexer
     }
 
     /// Shortcut for yielding a parse error wrapped in a result type
-    pub fn parse_error<T>(&self, msg: &str) -> Result<T, ParseError>
+    pub(crate) fn parse_error<T>(&self, msg: &str) -> Result<T, ParseError>
     {
         Err(ParseError::new(self, msg))
     }
 
     /// Produce an error if the input doesn't match a given token
-    pub fn expect_token(&mut self, token: &str) -> Result<(), ParseError>
+    pub(crate) fn expect_token(&mut self, token: &str) -> Result<(), ParseError>
     {
         if self.match_token(token)? {
             return Ok(())
@@ -520,7 +520,7 @@ impl Lexer
     }
 
     /// Parse a decimal integer value
-    pub fn parse_int(&mut self, radix: u32) -> Result<i128, ParseError>
+    pub(crate) fn parse_int(&mut self, radix: u32) -> Result<i128, ParseError>
     {
         let mut int_val: i128 = 0;
 
@@ -569,7 +569,7 @@ impl Lexer
     }
 
     /// Read the characters of a numeric value into a string
-    pub fn read_numeric(&mut self) -> Result<String, ParseError>
+    pub(crate) fn read_numeric(&mut self) -> Result<String, ParseError>
     {
         /// Read a run of digits, returning false if there is no first digit
         fn read_digits(input: &mut Lexer) -> Result<bool, ParseError>
@@ -649,7 +649,7 @@ impl Lexer
     }
 
     /// Parse a string literal
-    pub fn parse_str(&mut self, end_ch: char) -> Result<String, ParseError>
+    pub(crate) fn parse_str(&mut self, end_ch: char) -> Result<String, ParseError>
     {
         // Eat the opening character
         self.eat_ch();
@@ -743,7 +743,7 @@ impl Lexer
     }
 
     /// Parse a C-style alphanumeric identifier
-    pub fn parse_ident(&mut self) -> Result<String, ParseError>
+    pub(crate) fn parse_ident(&mut self) -> Result<String, ParseError>
     {
         let mut ident = String::new();
 

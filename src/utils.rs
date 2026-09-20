@@ -1,5 +1,5 @@
 /// Produce a string with comma separator for thousands for an integer
-pub fn thousands_sep<T: ToString>(n: T) -> String
+pub(crate) fn thousands_sep<T: ToString>(n: T) -> String
 {
     let num_str = n.to_string();
 

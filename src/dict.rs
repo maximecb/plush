@@ -50,7 +50,7 @@ impl TableSlot {
     }
 }
 
-pub struct Dict {
+pub(crate) struct Dict {
     // Relocated by the collector, which walks the table on its own.
     // The capacity is the length of the table block this points at, so
     // it is read back from that block's header rather than stored here
@@ -66,7 +66,7 @@ const _: () = assert!(size_of::<Dict>() == FIXED_SIZE);
 impl Dict {
     /// Bytes a dict with a given capacity occupies, counting the headers
     /// of both the dict and its slot table
-    pub fn alloc_size(capacity: usize) -> usize {
+    pub(crate) fn alloc_size(capacity: usize) -> usize {
         HEADER_SIZE + size_of::<Dict>() +
         HEADER_SIZE + std::cmp::max(capacity, 2) * size_of::<TableSlot>()
     }
@@ -92,7 +92,7 @@ impl Dict {
     /// the same order the collector puts them in, with the slots
     /// following the dict they belong to. No collection can happen
     /// between the two allocations: callers reserve the space up front.
-    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Value
+    pub(crate) fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Value
     {
         let capacity = std::cmp::max(capacity, 2);
         // alloc_fixed leaves the table pointer null, so the dict is
@@ -108,7 +108,7 @@ impl Dict {
     }
 
     /// Number of entries held, which lives in the block header
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         header_of(self.block()).fixed_len()
     }
 
@@ -161,16 +161,16 @@ impl Dict {
         }
     }
 
-    pub fn capacity(&self) -> usize {
+    pub(crate) fn capacity(&self) -> usize {
         table_len(self.table)
     }
 
-    pub const fn size_of_slot() -> usize {
+    pub(crate) const fn size_of_slot() -> usize {
         size_of::<TableSlot>()
     }
 
     /// Bytes the next set may need for a bigger table, zero if it fits
-    pub fn will_allocate(&self) -> usize {
+    pub(crate) fn will_allocate(&self) -> usize {
         if self.will_allocate_on_set() {
             return HEADER_SIZE + (self.capacity() + 1) * 2 * Dict::size_of_slot();
         }
@@ -190,7 +190,7 @@ impl Dict {
     }
 
     // Set the value associated with a given key
-    pub fn set(&mut self, field_name: *const Str, new_val: Value, alloc: &mut Alloc) {
+    pub(crate) fn set(&mut self, field_name: *const Str, new_val: Value, alloc: &mut Alloc) {
         if self.will_allocate_on_set() {
             self.double_size(alloc);
         }
@@ -208,11 +208,11 @@ impl Dict {
     }
 
     // Get the value associated with a given field
-    pub fn get(&mut self, field_name: &str) -> Option<Value> {
+    pub(crate) fn get(&mut self, field_name: &str) -> Option<Value> {
         (self.get_slot(field_name).value()).copied()
     }
 
-    pub fn has(&mut self, field_name: &str) -> bool {
+    pub(crate) fn has(&mut self, field_name: &str) -> bool {
         self.get_slot(field_name).is_occupied()
     }
 }

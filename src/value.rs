@@ -114,7 +114,7 @@ const FLONUM_ROT: u32 = 4;
 /// Fixnums and Int64 boxes are both `Int64`, flonums and Float64 boxes are
 /// both `Float64`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Type
+pub(crate) enum Type
 {
     Undef,
     Nil,
@@ -135,32 +135,32 @@ pub enum Type
 
 #[derive(Copy, Clone)]
 #[repr(transparent)]
-pub struct Value(u64);
+pub(crate) struct Value(u64);
 
 impl Value
 {
-    pub const NIL: Value = Value(IMM_NIL);
-    pub const TRUE: Value = Value(IMM_TRUE);
-    pub const FALSE: Value = Value(IMM_FALSE);
-    pub const UNDEF: Value = Value(IMM_UNDEF);
+    pub(crate) const NIL: Value = Value(IMM_NIL);
+    pub(crate) const TRUE: Value = Value(IMM_TRUE);
+    pub(crate) const FALSE: Value = Value(IMM_FALSE);
+    pub(crate) const UNDEF: Value = Value(IMM_UNDEF);
 
     /// The fixnum tag is zero, so this is the all-zero word. That makes it
     /// the cheapest value to store: nil and friends have to be materialized
     /// into a register first, where zero is already there
-    pub const FIXNUM_ZERO: Value = Value(TAG_FIXNUM);
+    pub(crate) const FIXNUM_ZERO: Value = Value(TAG_FIXNUM);
 
     /// Largest and smallest integers representable without boxing
-    pub const FIXNUM_MAX: i64 = (1 << 61) - 1;
-    pub const FIXNUM_MIN: i64 = -(1 << 61);
+    pub(crate) const FIXNUM_MAX: i64 = (1 << 61) - 1;
+    pub(crate) const FIXNUM_MIN: i64 = -(1 << 61);
 
     #[inline(always)]
-    pub const fn from_raw_bits(bits: u64) -> Value
+    pub(crate) const fn from_raw_bits(bits: u64) -> Value
     {
         Value(bits)
     }
 
     #[inline(always)]
-    pub const fn raw_bits(self) -> u64
+    pub(crate) const fn raw_bits(self) -> u64
     {
         self.0
     }
@@ -174,32 +174,32 @@ impl Value
     // Fixnums
 
     #[inline(always)]
-    pub const fn fits_fixnum(val: i64) -> bool
+    pub(crate) const fn fits_fixnum(val: i64) -> bool
     {
         val >= Value::FIXNUM_MIN && val <= Value::FIXNUM_MAX
     }
 
     #[inline(always)]
-    pub fn fixnum(val: i64) -> Value
+    pub(crate) fn fixnum(val: i64) -> Value
     {
         debug_assert!(Value::fits_fixnum(val));
         Value((val as u64) << 2)
     }
 
     #[inline(always)]
-    pub fn try_fixnum(val: i64) -> Option<Value>
+    pub(crate) fn try_fixnum(val: i64) -> Option<Value>
     {
         if Value::fits_fixnum(val) { Some(Value::fixnum(val)) } else { None }
     }
 
     #[inline(always)]
-    pub fn is_fixnum(self) -> bool
+    pub(crate) fn is_fixnum(self) -> bool
     {
         self.0 & NUM_MASK == TAG_FIXNUM
     }
 
     #[inline(always)]
-    pub fn as_fixnum(self) -> i64
+    pub(crate) fn as_fixnum(self) -> i64
     {
         debug_assert!(self.is_fixnum());
         (self.0 as i64) >> 2
@@ -209,20 +209,20 @@ impl Value
 
     /// Encode a double inline, or `None` if it falls outside the covered set
     #[inline(always)]
-    pub fn try_flonum(val: f64) -> Option<Value>
+    pub(crate) fn try_flonum(val: f64) -> Option<Value>
     {
         let bits = val.to_bits().wrapping_add(FLONUM_BIAS).rotate_left(FLONUM_ROT);
         if bits & NUM_MASK == TAG_FLONUM { Some(Value(bits)) } else { None }
     }
 
     #[inline(always)]
-    pub fn is_flonum(self) -> bool
+    pub(crate) fn is_flonum(self) -> bool
     {
         self.0 & NUM_MASK == TAG_FLONUM
     }
 
     #[inline(always)]
-    pub fn as_flonum(self) -> f64
+    pub(crate) fn as_flonum(self) -> f64
     {
         debug_assert!(self.is_flonum());
         f64::from_bits(self.0.rotate_right(FLONUM_ROT).wrapping_sub(FLONUM_BIAS))
@@ -231,76 +231,76 @@ impl Value
     // Immediates
 
     #[inline(always)]
-    pub fn bool_val(b: bool) -> Value
+    pub(crate) fn bool_val(b: bool) -> Value
     {
         if b { Value::TRUE } else { Value::FALSE }
     }
 
     #[inline(always)]
-    pub fn is_nil(self) -> bool { self.0 == IMM_NIL }
+    pub(crate) fn is_nil(self) -> bool { self.0 == IMM_NIL }
 
     #[inline(always)]
-    pub fn is_true(self) -> bool { self.0 == IMM_TRUE }
+    pub(crate) fn is_true(self) -> bool { self.0 == IMM_TRUE }
 
     #[inline(always)]
-    pub fn is_false(self) -> bool { self.0 == IMM_FALSE }
+    pub(crate) fn is_false(self) -> bool { self.0 == IMM_FALSE }
 
     #[inline(always)]
-    pub fn is_undef(self) -> bool { self.0 == IMM_UNDEF }
+    pub(crate) fn is_undef(self) -> bool { self.0 == IMM_UNDEF }
 
     #[inline(always)]
-    pub fn is_bool(self) -> bool
+    pub(crate) fn is_bool(self) -> bool
     {
         // True and False differ only in bit 3
         self.0 & !BOOL_BIT == IMM_FALSE
     }
 
     #[inline(always)]
-    pub fn as_bool(self) -> bool
+    pub(crate) fn as_bool(self) -> bool
     {
         debug_assert!(self.is_bool());
         self.0 == IMM_TRUE
     }
 
     #[inline(always)]
-    pub fn to_bool(self) -> Option<bool>
+    pub(crate) fn to_bool(self) -> Option<bool>
     {
         if self.is_bool() { Some(self.as_bool()) } else { None }
     }
 
     #[inline(always)]
-    pub fn fun(fun_id: FunId) -> Value
+    pub(crate) fn fun(fun_id: FunId) -> Value
     {
         Value(((usize::from(fun_id) as u64) << IMM_SHIFT) | IMM_FUN)
     }
 
     #[inline(always)]
-    pub fn is_fun(self) -> bool { self.0 as u8 as u64 == IMM_FUN }
+    pub(crate) fn is_fun(self) -> bool { self.0 as u8 as u64 == IMM_FUN }
 
     #[inline(always)]
-    pub fn as_fun(self) -> FunId
+    pub(crate) fn as_fun(self) -> FunId
     {
         debug_assert!(self.is_fun());
         FunId::from((self.0 >> IMM_SHIFT) as usize)
     }
 
     #[inline(always)]
-    pub fn to_fun(self) -> Option<FunId>
+    pub(crate) fn to_fun(self) -> Option<FunId>
     {
         if self.is_fun() { Some(self.as_fun()) } else { None }
     }
 
     #[inline(always)]
-    pub fn class(class_id: ClassId) -> Value
+    pub(crate) fn class(class_id: ClassId) -> Value
     {
         Value(((usize::from(class_id) as u64) << IMM_SHIFT) | IMM_CLASS)
     }
 
     #[inline(always)]
-    pub fn is_class(self) -> bool { self.0 as u8 as u64 == IMM_CLASS }
+    pub(crate) fn is_class(self) -> bool { self.0 as u8 as u64 == IMM_CLASS }
 
     #[inline(always)]
-    pub fn as_class(self) -> ClassId
+    pub(crate) fn as_class(self) -> ClassId
     {
         debug_assert!(self.is_class());
         ClassId::from((self.0 >> IMM_SHIFT) as usize)
@@ -308,7 +308,7 @@ impl Value
 
     #[inline(always)]
     #[allow(dead_code)]
-    pub fn to_class(self) -> Option<ClassId>
+    pub(crate) fn to_class(self) -> Option<ClassId>
     {
         if self.is_class() { Some(self.as_class()) } else { None }
     }
@@ -317,16 +317,16 @@ impl Value
     /// that the whole value fits in the immediate range an instruction
     /// can carry
     #[inline(always)]
-    pub fn host_fn(id: HostFnId) -> Value
+    pub(crate) fn host_fn(id: HostFnId) -> Value
     {
         Value(((id as u64) << IMM_SHIFT) | IMM_HOSTFN)
     }
 
     #[inline(always)]
-    pub fn is_host_fn(self) -> bool { self.0 as u8 as u64 == IMM_HOSTFN }
+    pub(crate) fn is_host_fn(self) -> bool { self.0 as u8 as u64 == IMM_HOSTFN }
 
     #[inline(always)]
-    pub fn as_host_fn_id(self) -> HostFnId
+    pub(crate) fn as_host_fn_id(self) -> HostFnId
     {
         debug_assert!(self.is_host_fn());
         let idx = (self.0 >> IMM_SHIFT) as u16;
@@ -335,13 +335,13 @@ impl Value
     }
 
     #[inline(always)]
-    pub fn as_host_fn(self) -> &'static HostFn
+    pub(crate) fn as_host_fn(self) -> &'static HostFn
     {
         self.as_host_fn_id().get()
     }
 
     #[inline(always)]
-    pub fn to_host_fn(self) -> Option<&'static HostFn>
+    pub(crate) fn to_host_fn(self) -> Option<&'static HostFn>
     {
         if self.is_host_fn() { Some(self.as_host_fn()) } else { None }
     }
@@ -349,13 +349,13 @@ impl Value
     // Heap pointers
 
     #[inline(always)]
-    pub fn is_heap(self) -> bool
+    pub(crate) fn is_heap(self) -> bool
     {
         self.0 & HEAP_MASK == TAG_PTR_ID
     }
 
     #[inline(always)]
-    pub fn heap_ptr(self) -> *mut u8
+    pub(crate) fn heap_ptr(self) -> *mut u8
     {
         debug_assert!(self.is_heap());
         (self.0 & !TAG_MASK) as *mut u8
@@ -363,7 +363,7 @@ impl Value
 
     /// Kind of block this value points at, read from the block header
     #[inline(always)]
-    pub fn heap_tag(self) -> Tag
+    pub(crate) fn heap_tag(self) -> Tag
     {
         header_of(self.heap_ptr()).tag()
     }
@@ -373,7 +373,7 @@ impl Value
     /// or method cache guards against: matching it proves both that this
     /// is an object and that its class is the one the site resolved to.
     #[inline(always)]
-    pub fn guard_key(self) -> u32
+    pub(crate) fn guard_key(self) -> u32
     {
         debug_assert!(self.is_heap());
         header_of(self.heap_ptr()).guard_key()
@@ -381,7 +381,7 @@ impl Value
 
     /// Retag a pointer that the collector moved
     #[inline(always)]
-    pub fn with_heap_ptr(self, p: *mut u8) -> Value
+    pub(crate) fn with_heap_ptr(self, p: *mut u8) -> Value
     {
         debug_assert!(self.is_heap());
         debug_assert!(p as u64 & TAG_MASK == 0);
@@ -417,135 +417,135 @@ impl Value
     // Boxed numbers
 
     #[inline(always)]
-    pub fn int64_box(p: *mut i64) -> Value { Value::ptr_val(p as *const u8) }
+    pub(crate) fn int64_box(p: *mut i64) -> Value { Value::ptr_val(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_int64_box(self) -> bool { self.is_ptr_val(Tag::Int64) }
+    pub(crate) fn is_int64_box(self) -> bool { self.is_ptr_val(Tag::Int64) }
 
     #[inline(always)]
-    pub fn float64_box(p: *mut f64) -> Value { Value::ptr_val(p as *const u8) }
+    pub(crate) fn float64_box(p: *mut f64) -> Value { Value::ptr_val(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_float64_box(self) -> bool { self.is_ptr_val(Tag::Float64) }
+    pub(crate) fn is_float64_box(self) -> bool { self.is_ptr_val(Tag::Float64) }
 
     // Heap objects
 
     #[inline(always)]
-    pub fn string(p: *const Str) -> Value { Value::ptr_val(p as *const u8) }
+    pub(crate) fn string(p: *const Str) -> Value { Value::ptr_val(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_string(self) -> bool { self.is_ptr_val(Tag::Str) }
+    pub(crate) fn is_string(self) -> bool { self.is_ptr_val(Tag::Str) }
 
     #[inline(always)]
-    pub fn as_string<'a>(self) -> &'a Str
+    pub(crate) fn as_string<'a>(self) -> &'a Str
     {
         debug_assert!(self.is_string());
         unsafe { &*(self.heap_ptr() as *const Str) }
     }
 
     #[inline(always)]
-    pub fn as_str<'a>(self) -> &'a str
+    pub(crate) fn as_str<'a>(self) -> &'a str
     {
         self.as_string().as_str()
     }
 
     #[inline(always)]
-    pub fn to_str<'a>(self) -> Option<&'a str>
+    pub(crate) fn to_str<'a>(self) -> Option<&'a str>
     {
         if self.is_string() { Some(self.as_str()) } else { None }
     }
 
     #[inline(always)]
-    pub fn object(p: *mut Object) -> Value { Value::ptr_id(p as *const u8) }
+    pub(crate) fn object(p: *mut Object) -> Value { Value::ptr_id(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_object(self) -> bool { self.is_ptr_id(Tag::Object) }
+    pub(crate) fn is_object(self) -> bool { self.is_ptr_id(Tag::Object) }
 
     #[inline(always)]
-    pub fn as_obj<'a>(self) -> &'a mut Object
+    pub(crate) fn as_obj<'a>(self) -> &'a mut Object
     {
         debug_assert!(self.is_object());
         unsafe { &mut *(self.heap_ptr() as *mut Object) }
     }
 
     #[inline(always)]
-    pub fn to_obj<'a>(self) -> Option<&'a mut Object>
+    pub(crate) fn to_obj<'a>(self) -> Option<&'a mut Object>
     {
         if self.is_object() { Some(self.as_obj()) } else { None }
     }
 
     #[inline(always)]
-    pub fn array(p: *mut Array) -> Value { Value::ptr_id(p as *const u8) }
+    pub(crate) fn array(p: *mut Array) -> Value { Value::ptr_id(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_array(self) -> bool { self.is_ptr_id(Tag::Array) }
+    pub(crate) fn is_array(self) -> bool { self.is_ptr_id(Tag::Array) }
 
     #[inline(always)]
-    pub fn as_arr<'a>(self) -> &'a mut Array
+    pub(crate) fn as_arr<'a>(self) -> &'a mut Array
     {
         debug_assert!(self.is_array());
         unsafe { &mut *(self.heap_ptr() as *mut Array) }
     }
 
     #[inline(always)]
-    pub fn to_arr<'a>(self) -> Option<&'a mut Array>
+    pub(crate) fn to_arr<'a>(self) -> Option<&'a mut Array>
     {
         if self.is_array() { Some(self.as_arr()) } else { None }
     }
 
     #[inline(always)]
-    pub fn bytearray(p: *mut ByteArray) -> Value { Value::ptr_id(p as *const u8) }
+    pub(crate) fn bytearray(p: *mut ByteArray) -> Value { Value::ptr_id(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_bytearray(self) -> bool { self.is_ptr_id(Tag::ByteArray) }
+    pub(crate) fn is_bytearray(self) -> bool { self.is_ptr_id(Tag::ByteArray) }
 
     #[inline(always)]
-    pub fn as_ba<'a>(self) -> &'a mut ByteArray
+    pub(crate) fn as_ba<'a>(self) -> &'a mut ByteArray
     {
         debug_assert!(self.is_bytearray());
         unsafe { &mut *(self.heap_ptr() as *mut ByteArray) }
     }
 
     #[inline(always)]
-    pub fn to_ba<'a>(self) -> Option<&'a mut ByteArray>
+    pub(crate) fn to_ba<'a>(self) -> Option<&'a mut ByteArray>
     {
         if self.is_bytearray() { Some(self.as_ba()) } else { None }
     }
 
     #[inline(always)]
-    pub fn dict(p: *mut Dict) -> Value { Value::ptr_id(p as *const u8) }
+    pub(crate) fn dict(p: *mut Dict) -> Value { Value::ptr_id(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_dict(self) -> bool { self.is_ptr_id(Tag::Dict) }
+    pub(crate) fn is_dict(self) -> bool { self.is_ptr_id(Tag::Dict) }
 
     #[inline(always)]
-    pub fn as_dict<'a>(self) -> &'a mut Dict
+    pub(crate) fn as_dict<'a>(self) -> &'a mut Dict
     {
         debug_assert!(self.is_dict());
         unsafe { &mut *(self.heap_ptr() as *mut Dict) }
     }
 
     #[inline(always)]
-    pub fn to_dict<'a>(self) -> Option<&'a mut Dict>
+    pub(crate) fn to_dict<'a>(self) -> Option<&'a mut Dict>
     {
         if self.is_dict() { Some(self.as_dict()) } else { None }
     }
 
     #[inline(always)]
-    pub fn closure(p: *mut Closure) -> Value { Value::ptr_id(p as *const u8) }
+    pub(crate) fn closure(p: *mut Closure) -> Value { Value::ptr_id(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_closure(self) -> bool { self.is_ptr_id(Tag::Closure) }
+    pub(crate) fn is_closure(self) -> bool { self.is_ptr_id(Tag::Closure) }
 
     #[inline(always)]
-    pub fn as_clos<'a>(self) -> &'a mut Closure
+    pub(crate) fn as_clos<'a>(self) -> &'a mut Closure
     {
         debug_assert!(self.is_closure());
         unsafe { &mut *(self.heap_ptr() as *mut Closure) }
     }
 
     #[inline(always)]
-    pub fn to_clos<'a>(self) -> Option<&'a mut Closure>
+    pub(crate) fn to_clos<'a>(self) -> Option<&'a mut Closure>
     {
         if self.is_closure() { Some(self.as_clos()) } else { None }
     }
@@ -554,7 +554,7 @@ impl Value
     /// directly or through a closure. Host functions are not among
     /// these: they are called through `to_host_fn` instead.
     #[inline(always)]
-    pub fn to_fun_id(self) -> Option<FunId>
+    pub(crate) fn to_fun_id(self) -> Option<FunId>
     {
         match self.to_clos() {
             Some(clos) => Some(clos.fun_id()),
@@ -563,20 +563,20 @@ impl Value
     }
 
     #[inline(always)]
-    pub fn cell(p: *mut Value) -> Value { Value::ptr_id(p as *const u8) }
+    pub(crate) fn cell(p: *mut Value) -> Value { Value::ptr_id(p as *const u8) }
 
     #[inline(always)]
-    pub fn is_cell(self) -> bool { self.is_ptr_id(Tag::Cell) }
+    pub(crate) fn is_cell(self) -> bool { self.is_ptr_id(Tag::Cell) }
 
     #[inline(always)]
-    pub fn as_cell<'a>(self) -> &'a mut Value
+    pub(crate) fn as_cell<'a>(self) -> &'a mut Value
     {
         debug_assert!(self.is_cell());
         unsafe { &mut *(self.heap_ptr() as *mut Value) }
     }
 
     #[inline(always)]
-    pub fn to_cell<'a>(self) -> Option<&'a mut Value>
+    pub(crate) fn to_cell<'a>(self) -> Option<&'a mut Value>
     {
         if self.is_cell() { Some(self.as_cell()) } else { None }
     }
@@ -584,25 +584,25 @@ impl Value
     // Numbers
 
     #[inline(always)]
-    pub fn is_int64(self) -> bool
+    pub(crate) fn is_int64(self) -> bool
     {
         self.is_fixnum() || self.is_int64_box()
     }
 
     #[inline(always)]
-    pub fn is_float64(self) -> bool
+    pub(crate) fn is_float64(self) -> bool
     {
         self.is_flonum() || self.is_float64_box()
     }
 
     #[inline(always)]
-    pub fn is_num(self) -> bool
+    pub(crate) fn is_num(self) -> bool
     {
         self.is_int64() || self.is_float64()
     }
 
     #[inline(always)]
-    pub fn to_i64(self) -> Option<i64>
+    pub(crate) fn to_i64(self) -> Option<i64>
     {
         if self.is_fixnum() {
             Some(self.as_fixnum())
@@ -614,7 +614,7 @@ impl Value
     }
 
     #[inline(always)]
-    pub fn to_f64(self) -> Option<f64>
+    pub(crate) fn to_f64(self) -> Option<f64>
     {
         if self.is_flonum() {
             Some(self.as_flonum())
@@ -627,7 +627,7 @@ impl Value
 
     /// Numeric value as a double, whatever the representation
     #[inline(always)]
-    pub fn num_as_f64(self) -> f64
+    pub(crate) fn num_as_f64(self) -> f64
     {
         debug_assert!(self.is_num());
 
@@ -638,26 +638,26 @@ impl Value
     }
 
     #[inline(always)]
-    pub fn to_u8(self) -> Option<u8> { self.to_i64().and_then(|v| u8::try_from(v).ok()) }
+    pub(crate) fn to_u8(self) -> Option<u8> { self.to_i64().and_then(|v| u8::try_from(v).ok()) }
 
     // Kept for symmetry with the other width conversions, though no host
     // function currently takes an i32 parameter
     #[allow(dead_code)]
     #[inline(always)]
-    pub fn to_i32(self) -> Option<i32> { self.to_i64().and_then(|v| i32::try_from(v).ok()) }
+    pub(crate) fn to_i32(self) -> Option<i32> { self.to_i64().and_then(|v| i32::try_from(v).ok()) }
 
     #[inline(always)]
-    pub fn to_u32(self) -> Option<u32> { self.to_i64().and_then(|v| u32::try_from(v).ok()) }
+    pub(crate) fn to_u32(self) -> Option<u32> { self.to_i64().and_then(|v| u32::try_from(v).ok()) }
 
     #[inline(always)]
-    pub fn to_u64(self) -> Option<u64> { self.to_i64().and_then(|v| u64::try_from(v).ok()) }
+    pub(crate) fn to_u64(self) -> Option<u64> { self.to_i64().and_then(|v| u64::try_from(v).ok()) }
 
     #[inline(always)]
-    pub fn to_usize(self) -> Option<usize> { self.to_i64().and_then(|v| usize::try_from(v).ok()) }
+    pub(crate) fn to_usize(self) -> Option<usize> { self.to_i64().and_then(|v| usize::try_from(v).ok()) }
 
     /// Language-level type, for cold paths. Hot paths should test the
     /// specific type they expect instead.
-    pub fn type_of(self) -> Type
+    pub(crate) fn type_of(self) -> Type
     {
         match self.tag() {
             0b000 | 0b100 => Type::Int64,

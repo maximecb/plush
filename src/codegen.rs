@@ -43,19 +43,19 @@ impl<'a> CodeGen<'a>
 
 /// Compiled function object
 #[derive(Copy, Clone)]
-pub struct CompiledFun
+pub(crate) struct CompiledFun
 {
-    pub entry_pc: usize,
+    pub(crate) entry_pc: usize,
 
     /// One past the last instruction. Every function compiles into the
     /// same instruction array, so this is what bounds one of them
-    pub end_pc: usize,
+    pub(crate) end_pc: usize,
 
-    pub num_params: usize,
+    pub(crate) num_params: usize,
 
     /// Registers the frame occupies. Arguments come first, then locals,
     /// then the temporaries an expression needs while it is evaluated
-    pub frame_size: usize,
+    pub(crate) frame_size: usize,
 }
 
 /// Assigns registers within one function's frame.
@@ -249,7 +249,7 @@ impl Function
         return true;
     }
 
-    pub fn gen_code(
+    pub(crate) fn gen_code(
         &self,
         actor: &mut Actor,
         prog: &Program,

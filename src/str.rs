@@ -5,11 +5,11 @@ use crate::value::Value;
 /// the address of the string itself, and the length comes from the
 /// block header.
 #[repr(C, align(8))]
-pub struct Str;
+pub(crate) struct Str;
 
 impl Str {
     /// Allocate a string, copying the utf-8 bytes into the block
-    pub fn new(s: &str, alloc: &mut Alloc) -> Value {
+    pub(crate) fn new(s: &str, alloc: &mut Alloc) -> Value {
         let p = alloc.alloc_raw(Tag::Str, s.len());
 
         unsafe {
@@ -20,7 +20,7 @@ impl Str {
     }
 
     /// Bytes a string of a given length occupies, header included
-    pub fn alloc_size(len: usize) -> usize {
+    pub(crate) fn alloc_size(len: usize) -> usize {
         HEADER_SIZE + align_up(len)
     }
 
@@ -28,7 +28,7 @@ impl Str {
         self as *const Str as *const u8
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         unsafe {
             std::str::from_utf8_unchecked(
                 std::slice::from_raw_parts(self.bytes(), self.len())
@@ -36,7 +36,7 @@ impl Str {
         }
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         header_of(self.bytes()).num_bytes()
     }
 }

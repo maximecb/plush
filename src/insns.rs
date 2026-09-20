@@ -1,8 +1,6 @@
-#![allow(dead_code)]
 #![allow(non_camel_case_types)]
 use std::fmt;
 use std::mem::transmute;
-use crate::host::HostFnId;
 
 // Instructions are one 64-bit word. The opcode occupies the low 8 bits.
 // Operands are packed from bit 8 upwards, except the last one, which is
@@ -175,7 +173,7 @@ macro_rules! def_opcodes {
             },
         )*
     ) => {
-        pub const NUM_OPCODES: usize = 0 $( + { let _ = stringify!($name); 1 } )*;
+        pub(crate) const NUM_OPCODES: usize = 0 $( + { let _ = stringify!($name); 1 } )*;
 
         // Opcodes are transmuted from a byte, so they have to cover it
         // densely. The highest opcode value stays below 255, which leaves
@@ -185,7 +183,7 @@ macro_rules! def_opcodes {
         /// Instruction opcodes
         #[derive(PartialEq, Eq, Copy, Clone, Debug)]
         #[repr(u8)]
-        pub enum Opcode
+        pub(crate) enum Opcode
         {
             $(
                 $(#[doc = $doc])*
@@ -195,7 +193,11 @@ macro_rules! def_opcodes {
 
         impl Opcode
         {
-            pub fn num_opnds(self) -> usize
+            // The accessors below describe the opcode table rather than
+            // being read by the interpreter, so only the tests call them
+
+            #[allow(dead_code)]
+            pub(crate) fn num_opnds(self) -> usize
             {
                 match self {
                     $(
@@ -204,7 +206,8 @@ macro_rules! def_opcodes {
                 }
             }
 
-            pub fn num_outs(self) -> usize
+            #[allow(dead_code)]
+            pub(crate) fn num_outs(self) -> usize
             {
                 match self {
                     $(
@@ -213,7 +216,8 @@ macro_rules! def_opcodes {
                 }
             }
 
-            pub fn name(self) -> &'static str
+            #[allow(dead_code)]
+            pub(crate) fn name(self) -> &'static str
             {
                 match self {
                     $(
@@ -222,7 +226,8 @@ macro_rules! def_opcodes {
                 }
             }
 
-            pub fn from_str(s: &str) -> Option<Self>
+            #[allow(dead_code)]
+            pub(crate) fn from_str(s: &str) -> Option<Self>
             {
                 match s {
                     $(
@@ -233,7 +238,7 @@ macro_rules! def_opcodes {
             }
 
             /// Whether this instruction has a pc-relative branch displacement
-            pub fn is_branch(self) -> bool
+            pub(crate) fn is_branch(self) -> bool
             {
                 match self {
                     $(
@@ -247,9 +252,9 @@ macro_rules! def_opcodes {
         $(
             $(#[doc = $doc])*
             #[derive(PartialEq, Eq, Copy, Clone, Debug)]
-            pub struct $name
+            pub(crate) struct $name
             {
-                $(pub $fname: opnd_type!($kind),)*
+                $(pub(crate) $fname: opnd_type!($kind),)*
             }
 
             const _: () = assert!(
@@ -260,7 +265,7 @@ macro_rules! def_opcodes {
             impl $name
             {
                 #[inline(always)]
-                pub fn decode(insn: Insn) -> Self
+                pub(crate) fn decode(insn: Insn) -> Self
                 {
                     debug_assert_eq!(insn.opcode(), Opcode::$name);
                     gen_decode!(insn, OPCODE_BITS, $($fname: $kind,)*);
@@ -274,7 +279,7 @@ macro_rules! def_opcodes {
             $(
                 $(#[doc = $doc])*
                 #[inline(always)]
-                pub fn $name($($fname: opnd_type!($kind)),*) -> Insn
+                pub(crate) fn $name($($fname: opnd_type!($kind)),*) -> Insn
                 {
                     $(check_opnd!($fname, $kind);)*
                     #[allow(unused_mut)]
@@ -286,7 +291,7 @@ macro_rules! def_opcodes {
 
             /// Get the branch displacement of a jump instruction, if it has one
             #[allow(unused_mut, unused_assignments, unused_variables)]
-            pub fn branch_disp(self) -> Option<i32>
+            pub(crate) fn branch_disp(self) -> Option<i32>
             {
                 match self.opcode() {
                     $(
@@ -306,7 +311,7 @@ macro_rules! def_opcodes {
             /// through. Instructions with no displacement are returned
             /// unchanged.
             #[allow(unused_variables)]
-            pub fn with_branch_disp(self, disp: i32) -> Insn
+            pub(crate) fn with_branch_disp(self, disp: i32) -> Insn
             {
                 debug_assert!(self.opcode().is_branch(), "not a branch instruction");
 
@@ -364,8 +369,9 @@ macro_rules! def_opcodes {
 // - Field and method names are NameIds, indices into an interned name
 //   table that lives outside the heap. Instructions hold no heap pointers,
 //   so the instruction stream is not scanned by the collector
-// - Sites that cache a lookup hold a CacheIdx instead of the cached data,
-//   which keeps them within one word and lets cache entries grow later
+// - Sites that cache a lookup hold a cache index instead of the cached
+//   data, which keeps them within one word and lets cache entries grow
+//   later. The entries themselves live next to the interpreter loop
 def_opcodes! {
     // Halt execution and produce an error. The position it happened at
     // comes from the actor's instruction position map, like any other
@@ -565,66 +571,30 @@ def_opcodes! {
     ret_imm40 { imm: i40 },
 }
 
-// Sketch of the side tables the instructions above index into. These will
-// likely move next to the code they are used by once the VM is written.
-
 /// Index into the program's interned name table, which holds field and
 /// method names. Names are immortal and live outside the heap, so they
 /// never move and never need to be traced
-pub type NameId = u32;
-
-/// Index into a function's array of inline cache entries
-pub type CacheIdx = u32;
-
-/// Cache for a field access site
-pub struct PropCache
-{
-    pub name: NameId,
-
-    // Class the field was last looked up on, and where it was found.
-    // The slot index is only valid for objects of that class
-    pub class_id: u32,
-    pub slot_idx: u32,
-}
-
-/// Cache for a call site whose callee is not statically known. Dynamic
-/// calls guard on the function they last resolved to, method calls on the
-/// class they last looked the name up on. A statically known callee needs
-/// no entry here: it becomes a call_pc instead
-pub struct CallCache
-{
-    pub name: NameId,
-    pub class_id: u32,
-
-    // Callee the site resolved to. The function id is both the guard and
-    // what the stack frame records, and the frame needs the entry point
-    // and its own size
-    pub fun_id: u32,
-    pub entry_pc: u32,
-    pub num_locals: u16,
-
-    // Host function a call_method_host site resolved to. That site guards
-    // on the type tag in the instruction, so this is only read on a hit
-    pub host_fn: HostFnId,
-}
+pub(crate) type NameId = u32;
 
 /// Interpreter instruction
 #[derive(PartialEq, Eq, Copy, Clone)]
-pub struct Insn(u64);
+pub(crate) struct Insn(u64);
 
 impl Insn
 {
     #[inline(always)]
-    pub fn opcode(&self) -> Opcode
+    pub(crate) fn opcode(&self) -> Opcode
     {
         let Insn(word) = self;
         debug_assert!((*word as u8 as usize) < NUM_OPCODES);
         unsafe { transmute(*word as u8) }
     }
 
-    /// Get the full u64 instruction word
+    /// Get the full u64 instruction word. Only the encoding tests
+    /// read this: the interpreter works through the typed accessors
+    #[allow(dead_code)]
     #[inline(always)]
-    pub fn word_u64(&self) -> u64
+    pub(crate) fn word_u64(&self) -> u64
     {
         let Insn(word) = self;
         *word

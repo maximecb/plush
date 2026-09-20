@@ -7,7 +7,7 @@ use crate::alloc::{
 use crate::*;
 use crate::host::HostResult;
 
-pub struct Array
+pub(crate) struct Array
 {
     // Relocated by the collector, which walks the table on its own.
     // The capacity is the length of the table block this points at, so
@@ -30,7 +30,7 @@ impl Array
 {
     /// Bytes an array with a given capacity occupies, counting the
     /// headers of both the array and its element table
-    pub fn alloc_size(capacity: usize) -> usize
+    pub(crate) fn alloc_size(capacity: usize) -> usize
     {
         HEADER_SIZE + size_of::<Array>() +
         HEADER_SIZE + capacity * size_of::<Value>()
@@ -42,7 +42,7 @@ impl Array
     /// the same order the collector puts them in, with the elements
     /// following the array they belong to. No collection can happen
     /// between the two allocations: callers reserve the space up front.
-    pub fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Value
+    pub(crate) fn with_capacity(capacity: usize, alloc: &mut Alloc) -> Value
     {
         // alloc_fixed leaves the element pointer null, so the array is
         // walkable between here and the table allocation below
@@ -53,7 +53,7 @@ impl Array
     }
 
     /// Allocate an array of a given size, with every element filled in
-    pub fn with_size(size: usize, fill_val: Value, alloc: &mut Alloc) -> Value
+    pub(crate) fn with_size(size: usize, fill_val: Value, alloc: &mut Alloc) -> Value
     {
         let arr = Self::with_capacity(size, alloc);
         arr.as_arr().resize(size, fill_val, alloc);
@@ -72,7 +72,7 @@ impl Array
         self as *const Array as *mut u8
     }
 
-    pub fn len(&self) -> usize
+    pub(crate) fn len(&self) -> usize
     {
         header_of(self.block()).fixed_len()
     }
@@ -82,7 +82,7 @@ impl Array
         set_fixed_len(self.block(), len);
     }
 
-    pub fn capacity(&self) -> usize
+    pub(crate) fn capacity(&self) -> usize
     {
         table_len(self.elems)
     }
@@ -121,7 +121,7 @@ impl Array
     /// for the missing element without costing a second register the way
     /// an Option would.
     #[inline(always)]
-    pub fn get(&self, idx: usize) -> Value
+    pub(crate) fn get(&self, idx: usize) -> Value
     {
         debug_assert!(self.len() <= self.capacity());
 
@@ -136,7 +136,7 @@ impl Array
     /// A write into the spare capacity would be silently dropped: the
     /// length does not cover it, and the next push overwrites it
     #[inline(always)]
-    pub fn set(&mut self, idx: usize, val: Value) -> bool
+    pub(crate) fn set(&mut self, idx: usize, val: Value) -> bool
     {
         debug_assert!(self.len() <= self.capacity());
 
@@ -148,11 +148,11 @@ impl Array
         true
     }
 
-    pub fn items(&self) -> &[Value] {
+    pub(crate) fn items(&self) -> &[Value] {
         &self.elems()[..self.len()]
     }
 
-    pub fn push(&mut self, val: Value, alloc: &mut Alloc)
+    pub(crate) fn push(&mut self, val: Value, alloc: &mut Alloc)
     {
         let len = self.len();
         let capacity = self.capacity();
@@ -168,7 +168,7 @@ impl Array
         self.set_len(len + 1);
     }
 
-    pub fn insert(&mut self, idx: usize, val: Value, alloc: &mut Alloc)
+    pub(crate) fn insert(&mut self, idx: usize, val: Value, alloc: &mut Alloc)
     {
         let len = self.len();
         let capacity = self.capacity();
@@ -184,7 +184,7 @@ impl Array
         self.set_len(len + 1);
     }
 
-    pub fn remove(&mut self, idx: usize) -> HostResult
+    pub(crate) fn remove(&mut self, idx: usize) -> HostResult
     {
         let len = self.len();
 
@@ -202,7 +202,7 @@ impl Array
     }
 
     /// Copy the `[start, end)` range of this array into a new array
-    pub fn slice(&self, start: usize, end: usize, alloc: &mut Alloc) -> Value
+    pub(crate) fn slice(&self, start: usize, end: usize, alloc: &mut Alloc) -> Value
     {
         let new_arr = Self::with_capacity(end - start, alloc);
         let src = &self.items()[start..end];
@@ -211,7 +211,7 @@ impl Array
         new_arr
     }
 
-    pub fn append(&mut self, other: &Array, alloc: &mut Alloc) {
+    pub(crate) fn append(&mut self, other: &Array, alloc: &mut Alloc) {
         let other_elems = other.items();
         let cur_len = self.len();
         let new_len = cur_len + other_elems.len();
@@ -224,7 +224,7 @@ impl Array
         self.set_len(new_len);
     }
 
-    pub fn resize(&mut self, new_len: usize, fill_val: Value, alloc: &mut Alloc)
+    pub(crate) fn resize(&mut self, new_len: usize, fill_val: Value, alloc: &mut Alloc)
     {
         // If the new length doesn't fit in the current table
         if new_len > self.capacity() {
@@ -244,7 +244,7 @@ impl Array
         self.set_len(new_len);
     }
 
-    pub fn pop(&mut self) -> HostResult
+    pub(crate) fn pop(&mut self) -> HostResult
     {
         let len = self.len();
 
@@ -267,7 +267,7 @@ impl Array
     }
 }
 
-pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fill_val: Value) -> HostResult
+pub(crate) fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fill_val: Value) -> HostResult
 {
     let num_elems = unwrap_usize!(num_elems);
 
@@ -279,7 +279,7 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fi
     Ok(Array::with_size(num_elems, fill_val, &mut actor.alloc))
 }
 
-pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> HostResult
+pub(crate) fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> HostResult
 {
     let arr = unwrap_arr!(array);
 
@@ -295,18 +295,18 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> HostRe
     Ok(Value::NIL)
 }
 
-pub fn array_pop(_actor: &mut Actor, array: Value) -> HostResult
+pub(crate) fn array_pop(_actor: &mut Actor, array: Value) -> HostResult
 {
     unwrap_arr!(array).pop()
 }
 
-pub fn array_remove(_actor: &mut Actor, array: Value, idx: Value) -> HostResult
+pub(crate) fn array_remove(_actor: &mut Actor, array: Value, idx: Value) -> HostResult
 {
     let idx = unwrap_usize!(idx);
     unwrap_arr!(array).remove(idx)
 }
 
-pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, mut val: Value) -> HostResult
+pub(crate) fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, mut val: Value) -> HostResult
 {
     let idx = unwrap_usize!(idx);
     let arr = unwrap_arr!(array);
@@ -328,7 +328,7 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, mut val: Va
     Ok(Value::NIL)
 }
 
-pub fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mut fill_val: Value) -> HostResult
+pub(crate) fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mut fill_val: Value) -> HostResult
 {
     let new_len = unwrap_usize!(new_size);
     let capacity = unwrap_arr!(array).capacity();
@@ -345,7 +345,7 @@ pub fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mu
     Ok(Value::NIL)
 }
 
-pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> HostResult
+pub(crate) fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> HostResult
 {
     let a0 = unwrap_arr!(self_array);
     let a1 = unwrap_arr!(other_array);
@@ -365,7 +365,7 @@ pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: V
 }
 
 /// Copy the `[start, end)` range of an array into a new array
-pub fn array_slice(actor: &mut Actor, mut array: Value, start: Value, end: Value) -> HostResult
+pub(crate) fn array_slice(actor: &mut Actor, mut array: Value, start: Value, end: Value) -> HostResult
 {
     let start = unwrap_usize!(start);
     let end = unwrap_usize!(end);

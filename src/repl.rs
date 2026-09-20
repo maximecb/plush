@@ -33,7 +33,7 @@ fn return_last_expr(prog: &mut Program, unit_fn: FunId)
 }
 
 /// Run the read-eval-print loop
-pub fn run()
+pub(crate) fn run()
 {
     let mut prog = Program::new();
     prog.repl = true;

@@ -142,7 +142,7 @@ fn addr_str(actor: &mut Actor, addr: Option<String>) -> HostResult
 /// Open a listening socket bound to the given address, e.g. "127.0.0.1:8080".
 /// Returns a socket id, or nil if the address could not be bound
 /// $net_listen(addr)
-pub fn net_listen(actor: &mut Actor, addr: Value) -> HostResult
+pub(crate) fn net_listen(actor: &mut Actor, addr: Value) -> HostResult
 {
     let addr = unwrap_str!(addr);
 
@@ -175,7 +175,7 @@ pub fn net_listen(actor: &mut Actor, addr: Value) -> HostResult
 /// Connect to a remote address, e.g. "example.com:80".
 /// Returns a socket id, or nil if the connection could not be established
 /// $net_connect(addr)
-pub fn net_connect(actor: &mut Actor, addr: Value) -> HostResult
+pub(crate) fn net_connect(actor: &mut Actor, addr: Value) -> HostResult
 {
     let addr = unwrap_str!(addr);
 
@@ -207,7 +207,7 @@ pub fn net_connect(actor: &mut Actor, addr: Value) -> HostResult
 /// Returns a socket id for the new connection, or nil if the listening
 /// socket was closed or the accept failed
 /// $net_accept(socket_id)
-pub fn net_accept(actor: &mut Actor, socket_id: Value) -> HostResult
+pub(crate) fn net_accept(actor: &mut Actor, socket_id: Value) -> HostResult
 {
     let listen_id = unwrap_u64!(socket_id);
 
@@ -258,7 +258,7 @@ pub fn net_accept(actor: &mut Actor, socket_id: Value) -> HostResult
 /// Get the address of the peer on a connected socket, as a string.
 /// Returns nil if the socket id is not a live connection
 /// $net_peer_addr(socket_id)
-pub fn net_peer_addr(actor: &mut Actor, socket_id: Value) -> HostResult
+pub(crate) fn net_peer_addr(actor: &mut Actor, socket_id: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
 
@@ -277,7 +277,7 @@ pub fn net_peer_addr(actor: &mut Actor, socket_id: Value) -> HostResult
 /// listener to port 0 and then asking for this reports the port assigned
 /// by the OS. Returns nil if the socket id is unknown
 /// $net_local_addr(socket_id)
-pub fn net_local_addr(actor: &mut Actor, socket_id: Value) -> HostResult
+pub(crate) fn net_local_addr(actor: &mut Actor, socket_id: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
 
@@ -297,7 +297,7 @@ pub fn net_local_addr(actor: &mut Actor, socket_id: Value) -> HostResult
 /// the read timeout elapses. Returns the number of bytes read, 0 once the
 /// connection is over, or nil if the read timed out
 /// $net_read(socket_id, byte_array)
-pub fn net_read(actor: &mut Actor, socket_id: Value, buf: Value) -> HostResult
+pub(crate) fn net_read(actor: &mut Actor, socket_id: Value, buf: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
     let buf = unwrap_ba!(buf);
@@ -332,7 +332,7 @@ pub fn net_read(actor: &mut Actor, socket_id: Value, buf: Value) -> HostResult
 /// over. There are no partial writes, so callers never have to retry a
 /// remainder the way POSIX write() asks them to
 /// $net_write(socket_id, byte_array, num_bytes)
-pub fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, num_bytes: Value) -> HostResult
+pub(crate) fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, num_bytes: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
     let buf = unwrap_ba!(buf);
@@ -365,7 +365,7 @@ pub fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, num_bytes: Val
 /// this end stays able to read. This is how to end a request that the peer
 /// reads to EOF without giving up the response
 /// $net_shutdown_write(socket_id)
-pub fn net_shutdown_write(_actor: &mut Actor, socket_id: Value) -> HostResult
+pub(crate) fn net_shutdown_write(_actor: &mut Actor, socket_id: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
 
@@ -384,7 +384,7 @@ pub fn net_shutdown_write(_actor: &mut Actor, socket_id: Value) -> HostResult
 /// net_accept, and closing a connection wakes one blocked in net_read.
 /// Closing an unknown or already closed socket does nothing
 /// $net_close(socket_id)
-pub fn net_close(_actor: &mut Actor, socket_id: Value) -> HostResult
+pub(crate) fn net_close(_actor: &mut Actor, socket_id: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
     let socket = net_state().lock().unwrap().sockets.remove(&socket_id);
@@ -402,7 +402,7 @@ pub fn net_close(_actor: &mut Actor, socket_id: Value) -> HostResult
 /// 0 clears it, making subsequent reads block indefinitely. Writes are not
 /// affected: they always run to completion
 /// $net_set_timeout(socket_id, timeout_ms)
-pub fn net_set_timeout(_actor: &mut Actor, socket_id: Value, timeout_ms: Value) -> HostResult
+pub(crate) fn net_set_timeout(_actor: &mut Actor, socket_id: Value, timeout_ms: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
     let timeout_ms = unwrap_u64!(timeout_ms);

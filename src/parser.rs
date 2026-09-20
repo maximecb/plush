@@ -1421,7 +1421,7 @@ fn parse_class(
 /// way. Keying them by the name the lexer was handed would let the entry
 /// file, usually named by a relative path, slip past the import cycle
 /// check and get parsed a second time under its canonical name.
-pub fn unit_key(src_name: &str) -> String
+pub(crate) fn unit_key(src_name: &str) -> String
 {
     match std::fs::canonicalize(src_name) {
         Ok(path) => path.display().to_string(),
@@ -1432,7 +1432,7 @@ pub fn unit_key(src_name: &str) -> String
 }
 
 /// Parse a single unit of source code (e.g. one source file)
-pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseError>
+pub(crate) fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseError>
 {
     let unit_key = unit_key(&input.get_src_name());
 
@@ -1645,7 +1645,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
     Ok(unit_fn_id)
 }
 
-pub fn parse_program(input: &mut Lexer) -> Result<Program, ParseError>
+pub(crate) fn parse_program(input: &mut Lexer) -> Result<Program, ParseError>
 {
     let main_pos = input.get_pos();
     let mut prog = Program::new();
@@ -1692,13 +1692,13 @@ pub fn parse_program(input: &mut Lexer) -> Result<Program, ParseError>
     Ok(prog)
 }
 
-pub fn parse_str(src: &str) -> Result<Program, ParseError>
+pub(crate) fn parse_str(src: &str) -> Result<Program, ParseError>
 {
     let mut input = Lexer::new(&src, "");
     parse_program(&mut input)
 }
 
-pub fn parse_file(file_name: &str) -> Result<Program, ParseError>
+pub(crate) fn parse_file(file_name: &str) -> Result<Program, ParseError>
 {
     let mut input = Lexer::from_file(file_name)?;
 

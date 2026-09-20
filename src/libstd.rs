@@ -6,13 +6,13 @@
 /// Key under which a module is registered in the program. Unit keys are
 /// canonical file paths, so this is shaped to not collide with one, and
 /// to read clearly in error messages
-pub fn unit_key(module_path: &str) -> String
+pub(crate) fn unit_key(module_path: &str) -> String
 {
     format!("<std>/{}.psh", module_path)
 }
 
 /// Get the source of a module given its unit key, if the key names one
-pub fn get_source(unit_key: &str) -> Option<&'static str>
+pub(crate) fn get_source(unit_key: &str) -> Option<&'static str>
 {
     let module_path = unit_key
         .strip_prefix("<std>/")?

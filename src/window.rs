@@ -39,7 +39,7 @@ fn init_sdl()
     }
 }
 
-pub fn with_sdl_context<F, R>(f: F) -> R
+pub(crate) fn with_sdl_context<F, R>(f: F) -> R
 where
     F: FnOnce(&sdl2::Sdl) -> R,
 {
@@ -77,7 +77,7 @@ struct Window<'a>
 unsafe impl Send for Window<'_> {}
 static WINDOW: Mutex<Option<Window>> = Mutex::new(None);
 
-pub fn window_create(
+pub(crate) fn window_create(
     actor: &mut Actor,
     width: Value,
     height: Value,
@@ -138,7 +138,7 @@ unsafe fn make_static<T>(t: &T) -> &'static T {
     core::mem::transmute(t)
 }
 
-pub fn window_draw_frame(
+pub(crate) fn window_draw_frame(
     actor: &mut Actor,
     window_id: Value,
     frame: Value,
@@ -205,7 +205,7 @@ pub fn window_draw_frame(
 /// Lock the mouse to a window for FPS-style mouse look. While locked, the
 /// cursor is hidden and confined to the window, and MOUSE_MOVE events keep
 /// reporting motion once the pointer reaches the window edge.
-pub fn window_lock_mouse(
+pub(crate) fn window_lock_mouse(
     actor: &mut Actor,
     window_id: Value,
     enabled: Value,
@@ -242,7 +242,7 @@ pub fn window_lock_mouse(
 }
 
 /// Poll for UI events
-pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
+pub(crate) fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
 {
     // This should only ever be called on the main thread
     assert!(actor.actor_id == 0);
