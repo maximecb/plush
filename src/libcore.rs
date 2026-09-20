@@ -121,28 +121,39 @@ pub(crate) fn float64_abs(actor: &mut Actor, v: Value) -> HostResult
     Ok(actor.float64(if v > 0.0 { v } else { -v }))
 }
 
+/// Convert an already rounded float into an integer value, rejecting NaN
+/// and values that don't fit in the integer range
+fn rounded_to_int(actor: &mut Actor, v: f64) -> HostResult
+{
+    // i64::MIN is exactly representable as a float, but i64::MAX isn't,
+    // so the upper bound is 2^63 and exclusive
+    const LOWER_BOUND: f64 = i64::MIN as f64;
+    const UPPER_BOUND: f64 = -LOWER_BOUND;
+
+    // Written as a negated test so that NaN is rejected too
+    if !(v >= LOWER_BOUND && v < UPPER_BOUND) {
+        error!("float value {} not in integer range", v);
+    }
+
+    Ok(actor.int64(v as i64))
+}
+
 pub(crate) fn float64_ceil(actor: &mut Actor, v: Value) -> HostResult
 {
-    // TODO: check that float value fits in integer range
     let v = unwrap_f64!(v);
-    let int_val = v.ceil() as i64;
-    Ok(actor.int64(int_val))
+    rounded_to_int(actor, v.ceil())
 }
 
 pub(crate) fn float64_floor(actor: &mut Actor, v: Value) -> HostResult
 {
-    // TODO: check that float value fits in integer range
     let v = unwrap_f64!(v);
-    let int_val = v.floor() as i64;
-    Ok(actor.int64(int_val))
+    rounded_to_int(actor, v.floor())
 }
 
 pub(crate) fn float64_trunc(actor: &mut Actor, v: Value) -> HostResult
 {
-    // TODO: check that float value fits in integer range
     let v = unwrap_f64!(v);
-    let int_val = v.trunc() as i64;
-    Ok(actor.int64(int_val))
+    rounded_to_int(actor, v.trunc())
 }
 
 pub(crate) fn float64_sin(actor: &mut Actor, v: Value) -> HostResult

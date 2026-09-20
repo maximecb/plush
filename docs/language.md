@@ -383,9 +383,9 @@ $println(rng.int(0, 100));
     -   `to_hex(digits)`: Get a zero-padded, lowercase hexadecimal string representation of this integer. Call `upper()` on the result if you want capitals.
 -   **Float64**
     -   `abs()`: Get the absolute value of this number.
-    -   `ceil()`: Returns the smallest integer greater than or equal to the float.
-    -   `floor()`: Returns the largest integer less than or equal to the float.
-    -   `trunc()`: Truncate the float and produce an integer value.
+    -   `ceil()`: Returns the smallest integer greater than or equal to the float. It's an error if the result doesn't fit in the integer range.
+    -   `floor()`: Returns the largest integer less than or equal to the float. It's an error if the result doesn't fit in the integer range.
+    -   `trunc()`: Truncate the float and produce an integer value. It's an error if the result doesn't fit in the integer range.
     -   `sin()`: Returns the sine of the float.
     -   `cos()`: Returns the cosine of the float.
     -   `tan()`: Returns the tangent of the float.

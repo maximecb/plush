@@ -3403,6 +3403,27 @@ mod tests
 
     #[test]
     #[should_panic(expected = "explicit panic")]
+    fn float64_ceil_infinite()
+    {
+        eval("return 1e999.ceil();");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn float64_floor_out_of_range()
+    {
+        eval("return 1e30.floor();");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn float64_trunc_nan()
+    {
+        eval("return (0.0 / 0.0).trunc();");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
     fn string_parse_int_bad_radix()
     {
         eval("return '10'.parse_int(1);");
