@@ -2248,7 +2248,7 @@ impl Actor
                     let opnds = insns::instanceof::decode(insn);
                     let val = get_reg!(opnds.val);
                     let class_id = ClassId::from(opnds.class_id as usize);
-                    set_reg_bool!(opnds.dst, crate::runtime::get_class_id(val) == class_id);
+                    set_reg_bool!(opnds.dst, crate::libcore::get_class_id(val) == class_id);
                 }
 
                 Opcode::instanceof_sub => {
@@ -2655,7 +2655,7 @@ impl Actor
 
                         // Call to a primitive e.g. Int64/Float64/immediate (not an object)
                         None => {
-                            let host_fn = match crate::runtime::get_method(self_val, self.name_str(name)) {
+                            let host_fn = match crate::libcore::get_method(self_val, self.name_str(name)) {
                                 None => {
                                     let method = self.name_str(name).to_string();
                                     error!("call to unknown method `{}`", method)
@@ -2718,7 +2718,7 @@ impl Actor
                     // overflows. The method itself settles those, and it is
                     // a plain Rust call, not a dispatch
                     if v0.type_of() == Type::Int64 {
-                        match crate::runtime::int64_idiv(self, v0, v1) {
+                        match crate::libcore::int64_idiv(self, v0, v1) {
                             Ok(r) => { set_reg!(opnds.start_reg, r); }
                             Err(msg) => error!("error during call to host function `idiv`:\n{}", msg),
                         }

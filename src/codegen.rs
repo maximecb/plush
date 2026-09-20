@@ -1146,7 +1146,7 @@ fn gen_call(
             // tag, so the site would look the method up on every call
             let host_fn = match base.expr.as_ref() {
                 Expr::Ref { decl: Decl::Class { id }, .. } =>
-                    crate::runtime::get_method(Value::class(*id), field),
+                    crate::libcore::get_method(Value::class(*id), field),
                 _ => None
             };
 

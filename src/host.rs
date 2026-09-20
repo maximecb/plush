@@ -149,7 +149,7 @@ use crate::array::*;
 use crate::audio::*;
 use crate::bytearray::*;
 use crate::net::*;
-use crate::runtime::*;
+use crate::libcore::*;
 use crate::window::*;
 
 def_host_fns! {
@@ -197,7 +197,7 @@ def_host_fns! {
         exit(1),
     }
 
-    // Methods on primitive types, found through `runtime::get_method`
+    // Methods on primitive types, found through `libcore::get_method`
     methods {
         to_s: true_to_s(1),
         to_s: false_to_s(1),

@@ -1497,9 +1497,9 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
                 )
             }
         } else {
-            let unit_key = crate::stdlib::unit_key(&import_path);
+            let unit_key = crate::libstd::unit_key(&import_path);
 
-            if crate::stdlib::get_source(&unit_key).is_none() {
+            if crate::libstd::get_source(&unit_key).is_none() {
                 return ParseError::with_pos(
                     &format!("unknown standard library module \"{}\"", import_path),
                     &pos
@@ -1549,7 +1549,7 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
         }
 
         // Standard library modules are baked into the binary
-        let mut input = match crate::stdlib::get_source(&import.full_path) {
+        let mut input = match crate::libstd::get_source(&import.full_path) {
             Some(src) => Lexer::new(src, &import.full_path),
             None => Lexer::from_file(&import.full_path)?
         };
@@ -2366,7 +2366,7 @@ mod tests
     }
 
     #[test]
-    fn stdlib_imports()
+    fn std_imports()
     {
         // Standard library modules are baked into the binary and
         // imported without a leading `./`

@@ -8,20 +8,20 @@
 /// to read clearly in error messages
 pub fn unit_key(module_path: &str) -> String
 {
-    format!("<stdlib>/{}.psh", module_path)
+    format!("<std>/{}.psh", module_path)
 }
 
 /// Get the source of a module given its unit key, if the key names one
 pub fn get_source(unit_key: &str) -> Option<&'static str>
 {
     let module_path = unit_key
-        .strip_prefix("<stdlib>/")?
+        .strip_prefix("<std>/")?
         .strip_suffix(".psh")?;
 
     let src = match module_path {
-        "image" => include_str!("../stdlib/image.psh"),
-        "random" => include_str!("../stdlib/random.psh"),
-        "sha256" => include_str!("../stdlib/sha256.psh"),
+        "image" => include_str!("../lib/std/image.psh"),
+        "random" => include_str!("../lib/std/random.psh"),
+        "sha256" => include_str!("../lib/std/sha256.psh"),
         _ => return None
     };
 

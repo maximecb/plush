@@ -822,7 +822,7 @@ impl ExprBox
                                 // and codegen calls them directly, so the
                                 // arity has to be settled here
                                 None => {
-                                    let host_fn = match crate::runtime::get_method(Value::class(*id), field) {
+                                    let host_fn = match crate::libcore::get_method(Value::class(*id), field) {
                                         Some(host_fn) => host_fn.get(),
                                         None => {
                                             return ParseError::with_pos(

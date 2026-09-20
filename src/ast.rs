@@ -497,7 +497,7 @@ impl Program
             repl: false,
         };
 
-        crate::runtime::init_runtime(&mut prog);
+        crate::libcore::init_runtime(&mut prog);
         prog
     }
 
