@@ -164,7 +164,7 @@ pub fn audio_open_output(actor: &mut Actor, sample_rate: Value, num_channels: Va
     });
 
     // For now just assume device id zero
-    Ok(Value::from(0))
+    Value::from(0).into()
 }
 
 /// Write samples to an audio device
@@ -201,7 +201,7 @@ pub fn audio_write_samples(_actor: &mut Actor, device_id: Value, samples: Value)
     // Notify the audio thread that samples are available
     cvar.notify_one();
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 // --- Audio Input ---
@@ -362,7 +362,7 @@ pub fn audio_open_input(actor: &mut Actor, sample_rate: Value, num_channels: Val
     });
 
     // For now just assume device id zero
-    Ok(Value::from(0))
+    Value::from(0).into()
 }
 
 /// Read samples from an audio input device into an existing ByteArray
@@ -409,5 +409,5 @@ pub fn audio_read_samples(_actor: &mut Actor, device_id: Value, num_samples: Val
 
     state.in_queue.drain(0..num_samples_to_read);
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::thread;
 use std::time::Duration;
 use crate::vm::{VM, Actor};
@@ -6,11 +7,115 @@ use crate::ast::{Expr, Function, Program};
 use crate::str::Str;
 use crate::*;
 
-/// Result type for host functions. The error string is boxed so that a
-/// host call's return value stays one pointer wide instead of the three
-/// words a bare `String` needs, which matters because every host call
-/// pays for this on the success path too
-pub type HostResult = Result<Value, Box<String>>;
+thread_local! {
+    /// Message for the failure a `HostResult` is currently carrying.
+    ///
+    /// An actor owns its thread, and a host function never re-enters the
+    /// interpreter, so at most one failure is ever in flight here: it is
+    /// written as the call returns and taken by the caller that receives
+    /// the `Value::ERR` standing for it
+    static PENDING_ERROR: Cell<Option<Box<String>>> = const { Cell::new(None) };
+}
+
+/// What a host function, and every other call that can fail the same way,
+/// returns: the value it produced, or `Value::ERR` if it failed.
+///
+/// A `Result` would be two words wide, and which of them holds the tag is
+/// Rust's choice rather than something we can rely on, so a JIT emitting
+/// the call could not know where to look. One word in the return register
+/// is a shape `repr(transparent)` pins down, and it leaves the success
+/// path with nothing to do but hand back the value it already has.
+///
+/// The message stays out of the returned word, which is what keeps the
+/// check down to a compare against one constant. It also keeps the error
+/// path from ever handing the collector a word that looks like a pointer
+/// but is not a value.
+#[must_use]
+#[derive(Copy, Clone)]
+#[repr(transparent)]
+pub struct HostResult(Value);
+
+/// The single word is the point of the type, not an incidental property:
+/// it is what lets a host call return in one register and what a JIT
+/// emitting that call will rely on. Adding a field to the struct, or
+/// dropping `repr(transparent)`, breaks the build here rather than
+/// quietly turning every host call back into a two-register return
+const _: () = assert!(size_of::<HostResult>() == 8);
+const _: () = assert!(size_of::<HostResult>() == size_of::<Value>());
+
+/// Succeeding is the common case, and a host function almost always ends
+/// on the value it just produced, so `val.into()` is how success is
+/// normally spelled. `HostResult::ok` is the same thing named, for the
+/// few places where the conversion would not be obvious from context
+impl From<Value> for HostResult
+{
+    #[inline(always)]
+    fn from(val: Value) -> HostResult
+    {
+        HostResult::ok(val)
+    }
+}
+
+impl HostResult
+{
+    #[inline(always)]
+    pub fn ok(val: Value) -> HostResult
+    {
+        debug_assert!(!val.is_err());
+        HostResult(val)
+    }
+
+    /// Fail with a message. Out of line and cold: formatting the message
+    /// is the caller's business, but boxing it and parking it here is
+    /// code every failing host function would otherwise carry inline,
+    /// which is what stops the simple ones from being leaf functions
+    #[cold]
+    #[inline(never)]
+    pub fn err(msg: String) -> HostResult
+    {
+        PENDING_ERROR.with(|e| e.set(Some(Box::new(msg))));
+        HostResult(Value::ERR)
+    }
+
+    #[inline(always)]
+    pub fn is_err(self) -> bool
+    {
+        self.0.is_err()
+    }
+
+    /// The value produced, which is only meaningful on the success path
+    #[inline(always)]
+    pub fn value(self) -> Value
+    {
+        debug_assert!(!self.is_err());
+        self.0
+    }
+
+    /// The value produced by a call that cannot fail, panicking with the
+    /// message if it did after all
+    #[inline(always)]
+    pub fn unwrap(self) -> Value
+    {
+        if self.is_err() {
+            panic!("{}", self.take_msg());
+        }
+
+        self.0
+    }
+
+    /// Take the message for the failure this result carries. Leaves the
+    /// slot empty, so a message is reported once and only once
+    #[cold]
+    pub fn take_msg(self) -> String
+    {
+        debug_assert!(self.is_err());
+
+        match PENDING_ERROR.with(|e| e.take()) {
+            Some(msg) => *msg,
+            None => "host call failed without reporting a message".to_string(),
+        }
+    }
+}
 
 /// Host function signature
 /// Note: the in/out arg count should be fixed so
@@ -316,14 +421,14 @@ pub fn get_time_ms() -> u64
 /// Get the current time stamp in milliseconds since the unix epoch
 pub fn time_current_ms(actor: &mut Actor) -> HostResult
 {
-    Ok(actor.int64(get_time_ms() as i64))
+    actor.int64(get_time_ms() as i64).into()
 }
 
 /// Get the number of command-line arguments
 pub fn cmd_num_args(_actor: &mut Actor) -> HostResult
 {
     let num_args = crate::REST_ARGS.lock().unwrap().len();
-    Ok(Value::fixnum(num_args as i64))
+    Value::fixnum(num_args as i64).into()
 }
 
 /// Get a command-line argument string by index
@@ -334,7 +439,7 @@ pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> HostResu
     let args = crate::REST_ARGS.lock().unwrap();
 
     if idx >= args.len() {
-        return Ok(default);
+        return default.into();
     }
 
     let arg_str = &args[idx];
@@ -344,7 +449,7 @@ pub fn cmd_get_arg_or(actor: &mut Actor, idx: Value, default: Value) -> HostResu
         &mut [],
     );
 
-    Ok(Str::new(arg_str, &mut actor.alloc))
+    Str::new(arg_str, &mut actor.alloc).into()
 }
 
 /// Get a command-line argument string by index
@@ -370,15 +475,20 @@ pub fn print(_actor: &mut Actor, v: Value) -> HostResult
     use std::io::Write;
     let _ = std::io::stdout().flush();
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Print a value to stdout, followed by a newline
 fn println(actor: &mut Actor, v: Value) -> HostResult
 {
-    print(actor, v)?;
+    let res = print(actor, v);
+
+    if res.is_err() {
+        return res;
+    }
+
     println!();
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Read one line of input from stdin
@@ -393,10 +503,10 @@ fn readln(actor: &mut Actor) -> HostResult
                 &mut [],
             );
 
-            Ok(Str::new(&line, &mut actor.alloc))
+            Str::new(&line, &mut actor.alloc).into()
         }
 
-        Err(_) => Ok(Value::NIL)
+        Err(_) => Value::NIL.into()
     }
 }
 
@@ -656,7 +766,7 @@ fn read_file(actor: &mut Actor, file_path: Value) -> HostResult
     }
 
     let bytes: Vec<u8> = match std::fs::read(file_path) {
-        Err(_) => return Ok(Value::NIL),
+        Err(_) => return Value::NIL.into(),
         Ok(bytes) => bytes
     };
 
@@ -667,7 +777,7 @@ fn read_file(actor: &mut Actor, file_path: Value) -> HostResult
 
     let ba = ByteArray::with_size(bytes.len(), &mut actor.alloc);
     unsafe { ba.as_ba().get_slice_mut(0, bytes.len()).copy_from_slice(&bytes) };
-    Ok(ba)
+    ba.into()
 }
 
 /// Read the contents of an entire file encoded as valid UTF-8
@@ -680,7 +790,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> HostResult
     }
 
     let s: String = match std::fs::read_to_string(file_path) {
-        Err(_) => return Ok(Value::NIL),
+        Err(_) => return Value::NIL.into(),
         Ok(s) => s
     };
 
@@ -689,7 +799,7 @@ fn read_file_utf8(actor: &mut Actor, file_path: Value) -> HostResult
         &mut [],
     );
 
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 /// Writes the contents of a ByteArray to a file
@@ -704,8 +814,8 @@ fn write_file(_actor: &mut Actor, file_path: Value, bytes: Value) -> HostResult
     }
 
     match std::fs::write(file_path, &bytes) {
-        Err(_) => Ok(Value::FALSE),
-        Ok(_) => Ok(Value::TRUE)
+        Err(_) => Value::FALSE.into(),
+        Ok(_) => Value::TRUE.into()
     }
 }
 
@@ -720,8 +830,8 @@ fn make_dir(_actor: &mut Actor, dir_path: Value) -> HostResult
     }
 
     match std::fs::create_dir_all(dir_path) {
-        Err(_) => Ok(Value::FALSE),
-        Ok(_) => Ok(Value::TRUE)
+        Err(_) => Value::FALSE.into(),
+        Ok(_) => Value::TRUE.into()
     }
 }
 
@@ -740,14 +850,14 @@ fn gc_shrink_heap(actor: &mut Actor, new_size: Value) -> HostResult
 
     actor.alloc.shrink_to(new_size);
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Manually trigger garbage collection in the current actor
 fn gc_collect(actor: &mut Actor) -> HostResult
 {
     actor.gc_collect(0, &mut []);
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Total committed capacity of the current actor's GC and message heaps
@@ -762,22 +872,24 @@ fn gc_mem_size(actor: &mut Actor) -> HostResult
     };
 
     let mem_size = actor.alloc.mem_size() + msg_mem_size;
-    Ok(actor.int64(mem_size as i64))
+    actor.int64(mem_size as i64).into()
 }
 
 /// Get the id of the current actor
 fn actor_id(actor: &mut Actor) -> HostResult
 {
-    Ok(actor.int64(actor.actor_id as i64))
+    actor.int64(actor.actor_id as i64).into()
 }
 
 /// Get the id of the parent actor
 fn actor_parent(actor: &mut Actor) -> HostResult
 {
-    Ok(match actor.parent_id {
+    let parent = match actor.parent_id {
         Some(actor_id) => actor.int64(actor_id as i64),
         None => Value::NIL,
-    })
+    };
+
+    parent.into()
 }
 
 /// Make the current actor sleep
@@ -785,7 +897,7 @@ fn actor_sleep(_actor: &mut Actor, msecs: Value) -> HostResult
 {
     let msecs = unwrap_u64!(msecs);
     thread::sleep(Duration::from_millis(msecs));
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Spawn a new actor
@@ -809,14 +921,14 @@ fn actor_spawn(actor: &mut Actor, fun: Value) -> HostResult
     }
 
     let actor_id = VM::new_actor(actor, fun, vec![]);
-    Ok(actor.int64(actor_id as i64))
+    actor.int64(actor_id as i64).into()
 }
 
 /// Wait for a thread to terminate, produce the return value
 fn actor_join(actor: &mut Actor, actor_id: Value) -> HostResult
 {
     let id = unwrap_u64!(actor_id);
-    Ok(VM::join_actor(&actor.vm, id)?)
+    VM::join_actor(&actor.vm, id)
 }
 
 /// Send a message to an actor
@@ -826,28 +938,26 @@ fn actor_send(actor: &mut Actor, actor_id: Value, msg: Value) -> HostResult
     let actor_id = unwrap_u64!(actor_id);
     let res = actor.send(actor_id, msg);
 
-    if res.is_ok() {
-        Ok(Value::TRUE)
-    } else {
-        Ok(Value::FALSE)
-    }
+    Value::bool_val(res.is_ok()).into()
 }
 
 /// Receive a message from the current actor's queue
 /// This will block until a message is available
 fn actor_recv(actor: &mut Actor) -> HostResult
 {
-    Ok(actor.recv())
+    actor.recv().into()
 }
 
 /// Receive a message from the current actor's queue
 /// This will block until a message is available
 fn actor_poll(actor: &mut Actor) -> HostResult
 {
-    Ok(match actor.try_recv() {
+    let msg = match actor.try_recv() {
         Some(msg_val) => msg_val,
         None => Value::NIL,
-    })
+    };
+
+    msg.into()
 }
 
 /// End program execution

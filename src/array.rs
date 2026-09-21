@@ -198,7 +198,7 @@ impl Array
 
         self.set_len(len - 1);
         self.clear_slot(len - 1);
-        Ok(removed)
+        removed.into()
     }
 
     /// Copy the `[start, end)` range of this array into a new array
@@ -255,7 +255,7 @@ impl Array
         self.set_len(len - 1);
         let popped = unsafe { *self.elems.add(len - 1) };
         self.clear_slot(len - 1);
-        Ok(popped)
+        popped.into()
     }
 
     /// Clear a slot past the end of the array. The collector scans the
@@ -276,7 +276,7 @@ pub fn array_with_size(actor: &mut Actor, _self: Value, num_elems: Value, mut fi
         &mut [&mut fill_val]
     );
 
-    Ok(Array::with_size(num_elems, fill_val, &mut actor.alloc))
+    Array::with_size(num_elems, fill_val, &mut actor.alloc).into()
 }
 
 pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> HostResult
@@ -292,7 +292,7 @@ pub fn array_push(actor: &mut Actor, mut array: Value, mut val: Value) -> HostRe
 
     let arr = array.as_arr();
     arr.push(val, &mut actor.alloc);
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn array_pop(_actor: &mut Actor, array: Value) -> HostResult
@@ -325,7 +325,7 @@ pub fn array_insert(actor: &mut Actor, mut array: Value, idx: Value, mut val: Va
 
     let arr = array.as_arr();
     arr.insert(idx, val, &mut actor.alloc);
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mut fill_val: Value) -> HostResult
@@ -342,7 +342,7 @@ pub fn array_resize(actor: &mut Actor, mut array: Value, mut new_size: Value, mu
 
     let arr = array.as_arr();
     arr.resize(new_len, fill_val, &mut actor.alloc);
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: Value) -> HostResult
@@ -361,7 +361,7 @@ pub fn array_append(actor: &mut Actor, mut self_array: Value, mut other_array: V
     let a0 = self_array.as_arr();
     let a1 = other_array.as_arr();
     a0.append(a1, &mut actor.alloc);
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Copy the `[start, end)` range of an array into a new array
@@ -380,5 +380,5 @@ pub fn array_slice(actor: &mut Actor, mut array: Value, start: Value, end: Value
         &mut [&mut array],
     );
 
-    Ok(array.as_arr().slice(start, end, &mut actor.alloc))
+    array.as_arr().slice(start, end, &mut actor.alloc).into()
 }

@@ -129,7 +129,7 @@ pub fn window_create(
     *global_window = Some(window);
 
     // TODO: return unique window id
-    Ok(Value::from(0))
+    Value::from(0).into()
 }
 
 // Needed because of the SDL2 crate's insane lifetime
@@ -199,7 +199,7 @@ pub fn window_draw_frame(
     // Update the screen with any rendering performed since the previous call
     window.canvas.present();
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Lock the mouse to a window for FPS-style mouse look. While locked, the
@@ -237,7 +237,7 @@ pub fn window_lock_mouse(
 
         // SDL reports failure through the setter's return value, which the
         // sdl2 crate discards, so we read the mode back instead
-        Ok(Value::from(mouse.relative_mouse_mode() == enabled))
+        Value::from(mouse.relative_mouse_mode() == enabled).into()
     })
 }
 

@@ -8,7 +8,7 @@ use crate::host::{HostFnId, HostResult};
 
 pub(crate) fn identity_method(_actor: &mut Actor, self_val: Value) -> HostResult
 {
-    Ok(self_val)
+    self_val.into()
 }
 
 // `to_f` on a float and `to_s` on a string both hand back self. They are
@@ -18,24 +18,24 @@ pub(crate) use self::identity_method as string_to_s;
 
 pub(crate) fn true_to_s(actor: &mut Actor, _v: Value) -> HostResult
 {
-    Ok(actor.intern_str("true"))
+    actor.intern_str("true").into()
 }
 
 pub(crate) fn false_to_s(actor: &mut Actor, _v: Value) -> HostResult
 {
-    Ok(actor.intern_str("false"))
+    actor.intern_str("false").into()
 }
 
 pub(crate) fn nil_to_s(actor: &mut Actor, _v: Value) -> HostResult
 {
-    Ok(actor.intern_str("nil"))
+    actor.intern_str("nil").into()
 }
 
 pub(crate) fn int64_abs(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     match v.checked_abs() {
-        Some(abs) => Ok(actor.int64(abs)),
+        Some(abs) => actor.int64(abs).into(),
         None => error!("integer overflow in abs()"),
     }
 }
@@ -44,14 +44,14 @@ pub(crate) fn int64_min(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let other = unwrap_i64!(other);
-    Ok(actor.int64(v.min(other)))
+    actor.int64(v.min(other)).into()
 }
 
 pub(crate) fn int64_max(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
     let other = unwrap_i64!(other);
-    Ok(actor.int64(v.max(other)))
+    actor.int64(v.max(other)).into()
 }
 
 /// Truncated integer division. The `/` operator always yields a float, so
@@ -62,7 +62,7 @@ pub(crate) fn int64_idiv(actor: &mut Actor, v: Value, other: Value) -> HostResul
     let other = unwrap_i64!(other);
 
     match v.checked_div(other) {
-        Some(q) => Ok(actor.int64(q)),
+        Some(q) => actor.int64(q).into(),
         None if other == 0 => error!("division by zero in idiv()"),
         None => error!("integer overflow in idiv()"),
     }
@@ -78,13 +78,13 @@ pub(crate) fn int64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) ->
         error!("min must be less than or equal to max in clip()");
     }
 
-    Ok(actor.int64(v.clamp(min, max)))
+    actor.int64(v.clamp(min, max)).into()
 }
 
 pub(crate) fn int64_to_f(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_i64!(v);
-    Ok(actor.float64(v as f64))
+    actor.float64(v as f64).into()
 }
 
 pub(crate) fn int64_to_s(actor: &mut Actor, v: Value) -> HostResult
@@ -93,7 +93,7 @@ pub(crate) fn int64_to_s(actor: &mut Actor, v: Value) -> HostResult
     let s = format!("{}", v);
 
     actor.gc_check(Str::alloc_size(32), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 pub(crate) fn int64_comma_sep(actor: &mut Actor, v: Value) -> HostResult
@@ -102,7 +102,7 @@ pub(crate) fn int64_comma_sep(actor: &mut Actor, v: Value) -> HostResult
     let s = utils::thousands_sep(v);
 
     actor.gc_check(Str::alloc_size(s.len()), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 pub(crate) fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> HostResult
@@ -112,13 +112,13 @@ pub(crate) fn int64_to_hex(actor: &mut Actor, v: Value, digits: Value) -> HostRe
     let s = format!("{:0width$x}", v, width = digits);
 
     actor.gc_check(Str::alloc_size(32 + digits), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 pub(crate) fn float64_abs(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
-    Ok(actor.float64(if v > 0.0 { v } else { -v }))
+    actor.float64(if v > 0.0 { v } else { -v }).into()
 }
 
 /// Convert an already rounded float into an integer value, rejecting NaN
@@ -135,7 +135,7 @@ fn rounded_to_int(actor: &mut Actor, v: f64) -> HostResult
         error!("float value {} not in integer range", v);
     }
 
-    Ok(actor.int64(v as i64))
+    actor.int64(v as i64).into()
 }
 
 pub(crate) fn float64_ceil(actor: &mut Actor, v: Value) -> HostResult
@@ -159,45 +159,45 @@ pub(crate) fn float64_trunc(actor: &mut Actor, v: Value) -> HostResult
 pub(crate) fn float64_sin(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
-    Ok(actor.float64(v.sin()))
+    actor.float64(v.sin()).into()
 }
 
 pub(crate) fn float64_cos(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
-    Ok(actor.float64(v.cos()))
+    actor.float64(v.cos()).into()
 }
 
 pub(crate) fn float64_tan(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
-    Ok(actor.float64(v.tan()))
+    actor.float64(v.tan()).into()
 }
 
 pub(crate) fn float64_atan(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
-    Ok(actor.float64(v.atan()))
+    actor.float64(v.atan()).into()
 }
 
 pub(crate) fn float64_sqrt(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
-    Ok(actor.float64(v.sqrt()))
+    actor.float64(v.sqrt()).into()
 }
 
 pub(crate) fn float64_min(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     let other = unwrap_f64!(other);
-    Ok(actor.float64(v.min(other)))
+    actor.float64(v.min(other)).into()
 }
 
 pub(crate) fn float64_max(actor: &mut Actor, v: Value, other: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     let other = unwrap_f64!(other);
-    Ok(actor.float64(v.max(other)))
+    actor.float64(v.max(other)).into()
 }
 
 pub(crate) fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) -> HostResult
@@ -211,26 +211,26 @@ pub(crate) fn float64_clip(actor: &mut Actor, v: Value, min: Value, max: Value) 
         error!("min must be less than or equal to max in clip()");
     }
 
-    Ok(actor.float64(v.clamp(min, max)))
+    actor.float64(v.clamp(min, max)).into()
 }
 
 pub(crate) fn float64_pow(actor: &mut Actor, v: Value, exponent: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
     let exponent = unwrap_f64!(exponent);
-    Ok(actor.float64(v.powf(exponent)))
+    actor.float64(v.powf(exponent)).into()
 }
 
 pub(crate) fn float64_exp(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
-    Ok(actor.float64(v.exp()))
+    actor.float64(v.exp()).into()
 }
 
 pub(crate) fn float64_ln(actor: &mut Actor, v: Value) -> HostResult
 {
     let v = unwrap_f64!(v);
-    Ok(actor.float64(v.ln()))
+    actor.float64(v.ln()).into()
 }
 
 pub(crate) fn float64_to_s(actor: &mut Actor, v: Value) -> HostResult
@@ -238,7 +238,7 @@ pub(crate) fn float64_to_s(actor: &mut Actor, v: Value) -> HostResult
     let v = unwrap_f64!(v);
     let s = format!("{}", v);
     actor.gc_check(Str::alloc_size(1024), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 pub(crate) fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Value) -> HostResult
@@ -247,7 +247,7 @@ pub(crate) fn float64_format_decimals(actor: &mut Actor, v: Value, decimals: Val
     let decimals = unwrap_usize!(decimals);
     let s = format!("{:.*}", decimals, num);
     actor.gc_check(Str::alloc_size(std::cmp::max(1024, decimals)), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 /// Create a single-character string from a codepoint integer value
@@ -267,7 +267,7 @@ pub(crate) fn string_from_codepoint(actor: &mut Actor, _class: Value, codepoint:
     s.push(ch);
 
     actor.gc_check(Str::alloc_size(s.len()), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 /// Decode a run of bytes from a ByteArray as UTF-8.
@@ -291,11 +291,11 @@ pub(crate) fn string_from_utf8(actor: &mut Actor, _class: Value, ba: Value, star
 
     let s = match std::str::from_utf8(bytes) {
         Ok(s) => s,
-        Err(_) => return Ok(Value::NIL),
+        Err(_) => return Value::NIL.into(),
     };
 
     actor.gc_check(Str::alloc_size(s.len()), &mut []);
-    Ok(Str::new(s, &mut actor.alloc))
+    Str::new(s, &mut actor.alloc).into()
 }
 
 /// Get the UTF-8 byte at the given index
@@ -304,7 +304,7 @@ pub(crate) fn string_byte_at(_actor: &mut Actor, s: Value, idx: Value) -> HostRe
     let s = unwrap_str!(s);
     let idx = unwrap_usize!(idx);
     match s.as_bytes().get(idx) {
-        Some(byte) => return Ok(Value::from(*byte)),
+        Some(byte) => return Value::from(*byte).into(),
         None => error!("string byte index out of bounds"),
     }
 }
@@ -322,20 +322,20 @@ pub(crate) fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> Ho
 
     // Indexing in the middle of a character
     if !s.is_char_boundary(byte_idx) {
-        return Ok(Value::NIL);
+        return Value::NIL.into();
     }
 
     let ch = s[byte_idx..].chars().next();
 
     let ch = match ch {
         // Not a valid character
-        None => return Ok(Value::NIL),
+        None => return Value::NIL.into(),
         Some(ch) => ch,
     };
 
     let ch_s = ch.to_string();
     actor.gc_check(Str::alloc_size(ch_s.len()), &mut []);
-    Ok(Str::new(&ch_s, &mut actor.alloc))
+    Str::new(&ch_s, &mut actor.alloc).into()
 }
 
 /// Try to parse the string as an integer with the given radix
@@ -349,8 +349,8 @@ pub(crate) fn string_parse_int(actor: &mut Actor, s: Value, radix: Value) -> Hos
     }
 
     match i64::from_str_radix(s, radix) {
-        Ok(int_val) => Ok(actor.int64(int_val)),
-        Err(_) => Ok(Value::NIL),
+        Ok(int_val) => actor.int64(int_val).into(),
+        Err(_) => Value::NIL.into(),
     }
 }
 
@@ -360,8 +360,8 @@ pub(crate) fn string_parse_float(actor: &mut Actor, s: Value) -> HostResult
     let s = unwrap_str!(s);
 
     match s.parse::<f64>() {
-        Ok(float_val) => Ok(actor.float64(float_val)),
-        Err(_) => Ok(Value::NIL),
+        Ok(float_val) => actor.float64(float_val).into(),
+        Err(_) => Value::NIL.into(),
     }
 }
 
@@ -371,7 +371,7 @@ pub(crate) fn string_trim(actor: &mut Actor, s: Value) -> HostResult
     let s = unwrap_str!(s);
     let s = s.trim().to_string();
     actor.gc_check(Str::alloc_size(s.len()), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 /// Uppercase a String
@@ -380,7 +380,7 @@ pub(crate) fn string_upper(actor: &mut Actor, s: Value) -> HostResult
     let s = unwrap_str!(s);
     let s = s.to_uppercase();
     actor.gc_check(Str::alloc_size(s.len()), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 /// Lowercase a String
@@ -389,7 +389,7 @@ pub(crate) fn string_lower(actor: &mut Actor, s: Value) -> HostResult
     let s = unwrap_str!(s);
     let s = s.to_lowercase();
     actor.gc_check(Str::alloc_size(s.len()), &mut []);
-    Ok(Str::new(&s, &mut actor.alloc))
+    Str::new(&s, &mut actor.alloc).into()
 }
 
 fn string_pad(actor: &mut Actor, input: Value, width: Value, padding: Value, left: bool) -> HostResult
@@ -404,7 +404,7 @@ fn string_pad(actor: &mut Actor, input: Value, width: Value, padding: Value, lef
 
     let input_width = input_s.chars().count();
     if input_width >= width {
-        return Ok(input);
+        return input.into();
     }
 
     let num_padding = width - input_width;
@@ -427,7 +427,7 @@ fn string_pad(actor: &mut Actor, input: Value, width: Value, padding: Value, lef
     }
 
     actor.gc_check(Str::alloc_size(output.len()), &mut []);
-    Ok(Str::new(&output, &mut actor.alloc))
+    Str::new(&output, &mut actor.alloc).into()
 }
 
 /// Pad a string on the left to a minimum character width
@@ -473,7 +473,7 @@ pub(crate) fn string_split(actor: &mut Actor, input: Value, sep: Value) -> HostR
         array.as_arr().push(str_val, &mut actor.alloc);
     }
 
-    Ok(array)
+    array.into()
 }
 
 pub fn init_runtime(prog: &mut Program)
@@ -532,14 +532,18 @@ pub(crate) fn dict_has(_actor: &mut Actor, d: Value, key: Value) -> HostResult
 {
     let d = unwrap_dict!(d);
     let key = unwrap_str!(key);
-    Ok(Value::from(d.has(key)))
+    Value::from(d.has(key)).into()
 }
 
 pub(crate) fn fun_dump_bytecode(actor: &mut Actor, f: Value) -> HostResult
 {
-    let dump = actor.dump_fun_bytecode(f)?;
+    let dump = match actor.dump_fun_bytecode(f) {
+        Ok(dump) => dump,
+        Err(msg) => return HostResult::err(msg),
+    };
+
     print!("{}", dump);
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Get the method associated with a core value

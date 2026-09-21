@@ -79,10 +79,13 @@ struct CallCache
 }
 
 
-// This error macro is used both inside host functions, whose error type
-// is boxed, and inside VM-internal slow paths, whose error type is a
-// plain `String`. `.into()` covers both: `Box<String>: From<String>` and
-// `String: From<String>` are both satisfied.
+// This error macro is used inside host functions and inside the VM's own
+// slow paths, which report failure the same way: they return `Value::ERR`
+// and leave the message where the caller can pick it up.
+//
+// The interpreter loop defines an `error!` of its own, which shadows this
+// one there. That one has nowhere to return to, so it reports the error
+// and ends the program instead.
 //
 // A host function's own name is redundant here: `call_host_unchecked`
 // already prefixes it onto the message for every call it dispatches, so
@@ -92,14 +95,14 @@ struct CallCache
 #[macro_export]
 macro_rules! error {
     ($requester: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
-        return Err(
-            format!($format_str $(, $arg)*).into()
+        return $crate::host::HostResult::err(
+            format!($format_str $(, $arg)*)
         );
     }};
 
     ($format_str:literal $(, $arg:expr)* $(,)?) => {{
-        return Err(
-            format!($format_str $(, $arg)*).into()
+        return $crate::host::HostResult::err(
+            format!($format_str $(, $arg)*)
         );
     }};
 }
@@ -248,21 +251,26 @@ fn shift_amount(insn: &str, amount: i64) -> Result<u32, String>
 macro_rules! num_slow_path {
     ($name: ident, $insn: literal, $checked: ident, $op: tt) => {
         #[cold]
-        fn $name(&mut self, v0: Value, v1: Value) -> Result<Value, String>
+        fn $name(&mut self, v0: Value, v1: Value) -> HostResult
         {
             if let (Some(a), Some(b)) = (v0.to_i64(), v1.to_i64()) {
                 return match a.$checked(b) {
-                    Some(r) => Ok(self.int64(r)),
-                    None => Err(int_op_error($insn, b)),
+                    Some(r) => self.int64(r).into(),
+                    None => HostResult::err(int_op_error($insn, b)),
                 };
             }
 
             if v0.is_num() && v1.is_num() {
                 let r = v0.num_as_f64() $op v1.num_as_f64();
-                return Ok(self.float64(r));
+                return self.float64(r).into();
             }
 
-            Err(format!("unsupported operand types for {}: {:?} and {:?}", $insn, v0, v1))
+            // Spelled out rather than through `error!`: the instruction
+            // name is a literal, and would bind as that macro's leading
+            // requester argument
+            HostResult::err(
+                format!("unsupported operand types for {}: {:?} and {:?}", $insn, v0, v1)
+            )
         }
     }
 }
@@ -272,41 +280,54 @@ macro_rules! num_slow_path {
 macro_rules! int_slow_path {
     ($name: ident, $insn: literal, $op: expr) => {
         #[cold]
-        fn $name(&mut self, v0: Value, v1: Value) -> Result<Value, String>
+        fn $name(&mut self, v0: Value, v1: Value) -> HostResult
         {
             let a = unwrap_i64!(v0, $insn);
             let b = unwrap_i64!(v1, $insn);
 
             let r: Result<i64, String> = ($op)(a, b);
-            Ok(self.int64(r?))
+
+            match r {
+                Ok(r) => self.int64(r).into(),
+                Err(msg) => HostResult::err(msg),
+            }
         }
     }
 }
 
-/// Slow path of a comparison: boxed integers, floats and strings
+/// Slow path of a comparison: boxed integers, floats and strings.
+/// The outcome is a boolean, handed back as a `Value` so that failure
+/// travels the same way it does everywhere else
 macro_rules! cmp_slow_path {
     ($name: ident, $insn: literal, $op: tt, $rev_op: tt) => {
         #[cold]
-        fn $name(v0: Value, v1: Value) -> Result<bool, String>
+        fn $name(v0: Value, v1: Value) -> HostResult
         {
+            macro_rules! yes_no {
+                ($b: expr) => { Value::bool_val($b).into() }
+            }
+
             if let (Some(a), Some(b)) = (v0.to_i64(), v1.to_i64()) {
-                return Ok(a $op b);
+                return yes_no!(a $op b);
             }
 
             if v0.is_num() && v1.is_num() {
                 return match (v0.to_i64(), v1.to_i64()) {
-                    (Some(a), None) => Ok(int_float_cmp!(a, v1.to_f64().unwrap(), $op)),
-                    (None, Some(b)) => Ok(int_float_cmp!(b, v0.to_f64().unwrap(), $rev_op)),
-                    (None, None) => Ok(v0.to_f64().unwrap() $op v1.to_f64().unwrap()),
+                    (Some(a), None) => yes_no!(int_float_cmp!(a, v1.to_f64().unwrap(), $op)),
+                    (None, Some(b)) => yes_no!(int_float_cmp!(b, v0.to_f64().unwrap(), $rev_op)),
+                    (None, None) => yes_no!(v0.to_f64().unwrap() $op v1.to_f64().unwrap()),
                     (Some(_), Some(_)) => unreachable!(),
                 };
             }
 
             if v0.is_string() && v1.is_string() {
-                return Ok(v0.as_str() $op v1.as_str());
+                return yes_no!(v0.as_str() $op v1.as_str());
             }
 
-            Err(format!("unsupported types in {}: {:?} and {:?}", $insn, v0, v1))
+            // See the note in `num_slow_path!` on not using `error!` here
+            HostResult::err(
+                format!("unsupported types in {}: {:?} and {:?}", $insn, v0, v1)
+            )
         }
     }
 }
@@ -883,12 +904,12 @@ impl Actor
     /// Kept out of line so that the interpreter loop carries only the
     /// cached case
     #[inline(never)]
-    fn get_field_slow(&mut self, obj: Value, cache: u32) -> Result<Value, String>
+    fn get_field_slow(&mut self, obj: Value, cache: u32) -> HostResult
     {
         let name = self.prop_caches[cache as usize].name;
 
         if !obj.is_heap() {
-            return Err(format!("get_field on non-object value {:?}", obj));
+            error!("get_field on non-object value {:?}", obj);
         }
 
         // The block header says what the value points at, so one load
@@ -902,12 +923,12 @@ impl Actor
                     None => {
                         let class_name = self.get_class_name(o.class_id());
                         let field_names = self.get_field_names(o.class_id());
-                        return Err(format!(
+                        error!(
                             "class `{}` has no field `{}`, known fields are: {}",
                             class_name,
                             self.name_str(name),
                             field_names,
-                        ));
+                        );
                     }
                 };
 
@@ -919,51 +940,52 @@ impl Actor
                 let val = o.get(slot_idx);
 
                 if val.is_undef() {
-                    return Err(format!("object field not initialized `{}`", self.name_str(name)));
+                    error!("object field not initialized `{}`", self.name_str(name));
                 }
 
-                Ok(val)
+                val.into()
             }
 
             Tag::Dict => {
                 let key = self.name_str(name);
 
                 match obj.as_dict().get(key) {
-                    Some(v) => Ok(v),
-                    None => Err(format!("key '{}' not found in dict", key))
+                    Some(v) => v.into(),
+                    None => HostResult::err(format!("key '{}' not found in dict", key))
                 }
             }
 
             Tag::Array => {
                 match self.name_str(name) {
-                    "len" => Ok(Value::fixnum(obj.as_arr().len() as i64)),
-                    _ => Err("field not found on array".to_string())
+                    "len" => Value::fixnum(obj.as_arr().len() as i64).into(),
+                    _ => HostResult::err("field not found on array".to_string())
                 }
             }
 
             Tag::ByteArray => {
                 match self.name_str(name) {
-                    "len" => Ok(Value::fixnum(obj.as_ba().num_bytes() as i64)),
-                    _ => Err("field not found on bytearray".to_string())
+                    "len" => Value::fixnum(obj.as_ba().num_bytes() as i64).into(),
+                    _ => HostResult::err("field not found on bytearray".to_string())
                 }
             }
 
             Tag::Str => {
                 match self.name_str(name) {
-                    "len" => Ok(Value::fixnum(obj.as_str().len() as i64)),
-                    _ => Err("field not found on string".to_string())
+                    "len" => Value::fixnum(obj.as_str().len() as i64).into(),
+                    _ => HostResult::err("field not found on string".to_string())
                 }
             }
 
-            _ => Err(format!("get_field on non-object value {:?}", obj))
+            _ => HostResult::err(format!("get_field on non-object value {:?}", obj))
         }
     }
 
     /// Resolve a field write the cached path did not handle: a dict, or
-    /// an object of a class this site has not seen
+    /// an object of a class this site has not seen. A write produces no
+    /// value of its own, so it reports success as nil
     #[inline(never)]
     fn set_field_slow(&mut self, mut obj: Value, mut val: Value, cache: u32)
-        -> Result<(), String>
+        -> HostResult
     {
         let name = self.prop_caches[cache as usize].name;
 
@@ -973,12 +995,12 @@ impl Actor
                 None => {
                     let class_name = self.get_class_name(o.class_id());
                     let field_names = self.get_field_names(o.class_id());
-                    return Err(format!(
+                    error!(
                         "class `{}` has no field `{}`, known fields are: {}",
                         class_name,
                         self.name_str(name),
                         field_names,
-                    ));
+                    );
                 }
             };
 
@@ -988,7 +1010,7 @@ impl Actor
             entry.slot_idx = slot_idx as u32;
 
             o.set(slot_idx, val);
-            return Ok(());
+            return Value::NIL.into();
         }
 
         if obj.is_dict() {
@@ -999,10 +1021,10 @@ impl Actor
             // name along with everything else
             let key = self.name_strs[name as usize];
             obj.as_dict().set(key.as_string() as *const Str, val, &mut self.alloc);
-            return Ok(());
+            return Value::NIL.into();
         }
 
-        Err("set_field on non-object/dict value".to_string())
+        error!("set_field on non-object/dict value")
     }
 
     /// Create a cache entry for a field access site
@@ -1372,18 +1394,18 @@ impl Actor
     /// Slow path for `add`: anything the fixnum fast path leaves over,
     /// which is boxed integers, floats and string concatenation
     #[cold]
-    fn add_slow(&mut self, mut v0: Value, mut v1: Value) -> Result<Value, String>
+    fn add_slow(&mut self, mut v0: Value, mut v1: Value) -> HostResult
     {
         if let (Some(a), Some(b)) = (v0.to_i64(), v1.to_i64()) {
             return match a.checked_add(b) {
-                Some(r) => Ok(self.int64(r)),
-                None => Err(int_op_error("add", b)),
+                Some(r) => self.int64(r).into(),
+                None => HostResult::err(int_op_error("add", b)),
             };
         }
 
         if v0.is_num() && v1.is_num() {
             let r = v0.num_as_f64() + v1.num_as_f64();
-            return Ok(self.float64(r));
+            return self.float64(r).into();
         }
 
         if v0.is_string() && v1.is_string() {
@@ -1394,21 +1416,21 @@ impl Actor
             self.gc_check(Str::alloc_size(len), &mut [&mut v0, &mut v1]);
 
             let cat = v0.as_str().to_owned() + v1.as_str();
-            return Ok(Str::new(&cat, &mut self.alloc));
+            return Str::new(&cat, &mut self.alloc).into();
         }
 
-        Err(format!("unsupported operand types for add: {:?} and {:?}", v0, v1))
+        error!("unsupported operand types for add: {:?} and {:?}", v0, v1)
     }
 
     /// Division always produces a float, whatever the operand types
-    fn div_num(&mut self, v0: Value, v1: Value) -> Result<Value, String>
+    fn div_num(&mut self, v0: Value, v1: Value) -> HostResult
     {
         if v0.is_num() && v1.is_num() {
             let r = v0.num_as_f64() / v1.num_as_f64();
-            return Ok(self.float64(r));
+            return self.float64(r).into();
         }
 
-        Err(format!("unsupported operand types for div: {:?} and {:?}", v0, v1))
+        error!("unsupported operand types for div: {:?} and {:?}", v0, v1)
     }
 
     num_slow_path!(sub_slow, "sub", checked_sub, -);
@@ -1426,15 +1448,15 @@ impl Actor
     /// comes through here: it is the one path that picks the callee at
     /// run time, so it is the one place the count is still unknown.
     #[inline(never)]
-    fn call_host(&mut self, host_fn: &HostFn, base_reg: usize, argc: usize) -> Result<(), String>
+    fn call_host(&mut self, host_fn: &HostFn, base_reg: usize, argc: usize) -> HostResult
     {
         if host_fn.num_params() != argc {
-            return Err(format!(
+            error!(
                 "incorrect argument count for host function `{}`, got {}, expected {}",
                 host_fn.name,
                 argc,
                 host_fn.num_params()
-            ));
+            );
         }
 
         self.call_host_unchecked(host_fn, base_reg, argc)
@@ -1452,9 +1474,12 @@ impl Actor
     /// cover the ones its function uses, which is the same premise
     /// `get_reg!` and `set_reg!` rest on.
     ///
+    /// The result is handed back as well as written, so that a caller has
+    /// only to test it for failure.
+    ///
     /// Kept out of line so its arity dispatch doesn't bloat the interpreter loop
     #[inline(never)]
-    fn call_host_unchecked(&mut self, host_fn: &HostFn, base_reg: usize, argc: usize) -> Result<(), String>
+    fn call_host_unchecked(&mut self, host_fn: &HostFn, base_reg: usize, argc: usize) -> HostResult
     {
         debug_assert_eq!(host_fn.num_params(), argc);
         debug_assert!(base_reg + argc <= self.stack.len());
@@ -1503,12 +1528,18 @@ impl Actor
 
         };
 
-        match result {
-            // A host function can collect, so the result is written back
-            // by index rather than through a reference taken beforehand
-            Ok(v) => { unsafe { *self.stack.get_unchecked_mut(base_reg) = v; } Ok(()) },
-            Err(e) => Err(format!("error during call to host function `{}`:\n{}", host_fn.name, e)),
+        if result.is_err() {
+            return HostResult::err(format!(
+                "error during call to host function `{}`:\n{}",
+                host_fn.name,
+                result.take_msg()
+            ));
         }
+
+        // A host function can collect, so the result is written back
+        // by index rather than through a reference taken beforehand
+        unsafe { *self.stack.get_unchecked_mut(base_reg) = result.value(); }
+        result
     }
 
     /// Report a runtime error, printing the message along with a stack
@@ -1657,15 +1688,20 @@ impl Actor
             ($reg: expr, $b: expr) => { set_reg!($reg, Value::bool_val($b)) }
         }
 
-        // Take the result of a slow path, reporting a type error the
-        // same way the instruction itself would
-        macro_rules! slow {
-            ($insn_name: literal, $res: expr) => {
-                match $res {
-                    Ok(v) => v,
-                    Err(msg) => error!($insn_name, "{}", msg),
+        // Take the value out of a `HostResult`, whether it came from a
+        // slow path, a host call or a field access. A failure has nowhere
+        // to propagate to from here, so it is reported against the
+        // instruction that caused it and ends the program
+        macro_rules! unwrap_result {
+            ($insn_name: literal, $res: expr) => {{
+                let res = $res;
+
+                if res.is_err() {
+                    error!($insn_name, "{}", res.take_msg());
                 }
-            }
+
+                res.value()
+            }}
         }
 
         // Arithmetic on the tagged words themselves. `$rhs` says how the
@@ -1696,7 +1732,7 @@ impl Actor
                     }
                 }
 
-                let r = slow!($insn, self.$slow_path(v0, v1));
+                let r = unwrap_result!($insn, self.$slow_path(v0, v1));
                 set_reg!(opnds.dst, r);
             }}
         }
@@ -1718,7 +1754,7 @@ impl Actor
                     }
                 }
 
-                let r = slow!($insn, self.$slow_path(v0, cst));
+                let r = unwrap_result!($insn, self.$slow_path(v0, cst));
                 set_reg!(opnds.dst, r);
             }}
         }
@@ -1736,7 +1772,7 @@ impl Actor
                     continue;
                 }
 
-                let r = slow!($insn, self.$slow_path(v0, v1));
+                let r = unwrap_result!($insn, self.$slow_path(v0, v1));
                 set_reg!(opnds.dst, r);
             }}
         }
@@ -1754,7 +1790,7 @@ impl Actor
                 } else if v0.is_flonum() && v1.is_flonum() {
                     v0.as_flonum() $op v1.as_flonum()
                 } else {
-                    slow!($insn, $slow_path(v0, v1))
+                    unwrap_result!($insn, $slow_path(v0, v1)).as_bool()
                 };
 
                 // `$negate` is a literal, so this settles at compile time
@@ -1776,7 +1812,7 @@ impl Actor
                 let taken = if v0.is_fixnum() {
                     (v0.raw_bits() as i64) $op (v1.raw_bits() as i64)
                 } else {
-                    slow!($insn, $slow_path(v0, v1))
+                    unwrap_result!($insn, $slow_path(v0, v1)).as_bool()
                 };
 
                 if taken != $negate {
@@ -1998,7 +2034,7 @@ impl Actor
                         }
                     }
 
-                    let r = slow!("div", self.div_num(v0, v1));
+                    let r = unwrap_result!("div", self.div_num(v0, v1));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2024,7 +2060,7 @@ impl Actor
                         }
                     }
 
-                    let r = slow!("modulo", self.modulo_slow(v0, v1));
+                    let r = unwrap_result!("modulo", self.modulo_slow(v0, v1));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2045,7 +2081,7 @@ impl Actor
                         continue;
                     }
 
-                    let r = slow!("bit_and", self.bit_and_slow(v0, Value::fixnum(mask)));
+                    let r = unwrap_result!("bit_and", self.bit_and_slow(v0, Value::fixnum(mask)));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2064,8 +2100,8 @@ impl Actor
                     }
 
                     let amount = Value::fixnum(opnds.shift as i64);
-                    let shifted = slow!("rshift", self.rshift_slow(v0, amount));
-                    let r = slow!("bit_and", self.bit_and_slow(shifted, Value::fixnum(mask)));
+                    let shifted = unwrap_result!("rshift", self.rshift_slow(v0, amount));
+                    let r = unwrap_result!("bit_and", self.bit_and_slow(shifted, Value::fixnum(mask)));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2098,7 +2134,7 @@ impl Actor
                         }
                     }
 
-                    let r = slow!("lshift", self.lshift_slow(v0, v1));
+                    let r = unwrap_result!("lshift", self.lshift_slow(v0, v1));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2119,7 +2155,7 @@ impl Actor
                         }
                     }
 
-                    let r = slow!("rshift", self.rshift_slow(v0, v1));
+                    let r = unwrap_result!("rshift", self.rshift_slow(v0, v1));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2137,7 +2173,7 @@ impl Actor
                     }
 
                     let amount = Value::fixnum(opnds.shift as i64);
-                    let r = slow!("lshift", self.lshift_slow(v0, amount));
+                    let r = unwrap_result!("lshift", self.lshift_slow(v0, amount));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2153,7 +2189,7 @@ impl Actor
                     }
 
                     let amount = Value::fixnum(opnds.shift as i64);
-                    let r = slow!("rshift", self.rshift_slow(v0, amount));
+                    let r = unwrap_result!("rshift", self.rshift_slow(v0, amount));
                     set_reg!(opnds.dst, r);
                 }
 
@@ -2322,10 +2358,7 @@ impl Actor
                         }
                     }
 
-                    let val = match self.get_field_slow(obj, opnds.cache) {
-                        Ok(val) => val,
-                        Err(msg) => error!("get_field", "{}", msg),
-                    };
+                    let val = unwrap_result!("get_field", self.get_field_slow(obj, opnds.cache));
                     set_reg!(opnds.dst, val);
                 }
 
@@ -2342,9 +2375,7 @@ impl Actor
                         continue;
                     }
 
-                    if let Err(msg) = self.set_field_slow(obj, val, opnds.cache) {
-                        error!("set_field", "{}", msg);
-                    }
+                    unwrap_result!("set_field", self.set_field_slow(obj, val, opnds.cache));
                 }
 
                 Opcode::get_index => {
@@ -2537,9 +2568,7 @@ impl Actor
 
                     // The callee is named in the instruction, so the arity
                     // was settled when the program was compiled
-                    if let Err(msg) = self.call_host_unchecked(host_fn, base_reg, opnds.argc as usize) {
-                        error!("{}", msg);
-                    }
+                    unwrap_result!("", self.call_host_unchecked(host_fn, base_reg, opnds.argc as usize));
                 }
 
                 // Call a function by id. The callee is statically known,
@@ -2592,9 +2621,7 @@ impl Actor
                     } else if let Some(f) = fun_val.to_host_fn() {
                         let base_reg = bp + opnds.start_reg as usize;
 
-                        if let Err(msg) = self.call_host(f, base_reg, opnds.argc as usize) {
-                            error!("{}", msg);
-                        }
+                        unwrap_result!("", self.call_host(f, base_reg, opnds.argc as usize));
 
                         continue;
                     }
@@ -2689,9 +2716,7 @@ impl Actor
 
                             let base_reg = bp + opnds.start_reg as usize;
 
-                            if let Err(msg) = self.call_host(host_fn.get(), base_reg, opnds.argc as usize) {
-                                error!("{}", msg);
-                            }
+                            unwrap_result!("", self.call_host(host_fn.get(), base_reg, opnds.argc as usize));
                         }
                     }
                 }
@@ -2718,11 +2743,13 @@ impl Actor
                     // overflows. The method itself settles those, and it is
                     // a plain Rust call, not a dispatch
                     if v0.type_of() == Type::Int64 {
-                        match crate::libcore::int64_idiv(self, v0, v1) {
-                            Ok(r) => { set_reg!(opnds.start_reg, r); }
-                            Err(msg) => error!("error during call to host function `idiv`:\n{}", msg),
+                        let res = crate::libcore::int64_idiv(self, v0, v1);
+
+                        if res.is_err() {
+                            error!("error during call to host function `idiv`:\n{}", res.take_msg());
                         }
 
+                        set_reg!(opnds.start_reg, res.value());
                         continue;
                     }
 
@@ -2749,9 +2776,7 @@ impl Actor
 
                         // This site only became `call_method_host` after a
                         // call the unspecialized form checked the arity of
-                        if let Err(msg) = self.call_host_unchecked(host_fn, base_reg, opnds.argc as usize) {
-                            error!("{}", msg);
-                        }
+                        unwrap_result!("", self.call_host_unchecked(host_fn, base_reg, opnds.argc as usize));
 
                         continue;
                     }
@@ -3001,13 +3026,13 @@ impl VM
     }
 
     // Wait for an actor to produce a result and return it.
-    pub fn join_actor(vm: &Arc<Mutex<VM>>, tid: u64) -> Result<Value, String>
+    pub fn join_actor(vm: &Arc<Mutex<VM>>, tid: u64) -> HostResult
     {
         // Get the join handle, then release the VM lock
         let mut vm = vm.lock().unwrap();
         let handle = match vm.threads.remove(&tid) {
             Some(handle) => handle,
-            None => return Err(format!("no actor with id {} to join, or it was already joined", tid)),
+            None => error!("no actor with id {} to join, or it was already joined", tid),
         };
         vm.actor_txs.remove(&tid);
         drop(vm);
@@ -3015,7 +3040,7 @@ impl VM
         // Note: there is no need to copy data when joining,
         // because the actor sending the data is done running
         match handle.join() {
-            Ok(val) => Ok(val),
+            Ok(val) => val.into(),
 
             // The actor reported its own error before dying, so there is
             // nothing useful to add here

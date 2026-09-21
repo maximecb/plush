@@ -132,11 +132,11 @@ fn addr_str(actor: &mut Actor, addr: Option<String>) -> HostResult
 {
     let addr = match addr {
         Some(addr) => addr,
-        None => return Ok(Value::NIL),
+        None => return Value::NIL.into(),
     };
 
     actor.gc_check(Str::alloc_size(addr.len()), &mut []);
-    Ok(Str::new(&addr, &mut actor.alloc))
+    Str::new(&addr, &mut actor.alloc).into()
 }
 
 /// Open a listening socket bound to the given address, e.g. "127.0.0.1:8080".
@@ -148,20 +148,20 @@ pub fn net_listen(actor: &mut Actor, addr: Value) -> HostResult
 
     let listener = match TcpListener::bind(addr) {
         Ok(listener) => listener,
-        Err(_) => return Ok(Value::NIL),
+        Err(_) => return Value::NIL.into(),
     };
 
     // The listener is non-blocking so that net_accept can poll it and stay
     // cancelable. net_accept sets each accepted stream back to blocking
     if listener.set_nonblocking(true).is_err() {
-        return Ok(Value::NIL);
+        return Value::NIL.into();
     }
 
     // Read the bound address back, so that binding port 0 and then asking
     // $net_local_addr reports the port the OS picked
     let local_addr = match listener.local_addr() {
         Ok(addr) => addr.to_string(),
-        Err(_) => return Ok(Value::NIL),
+        Err(_) => return Value::NIL.into(),
     };
 
     let id = add_socket(Socket::Listener {
@@ -169,7 +169,7 @@ pub fn net_listen(actor: &mut Actor, addr: Value) -> HostResult
         local_addr,
     });
 
-    Ok(actor.int64(id as i64))
+    actor.int64(id as i64).into()
 }
 
 /// Connect to a remote address, e.g. "example.com:80".
@@ -181,12 +181,12 @@ pub fn net_connect(actor: &mut Actor, addr: Value) -> HostResult
 
     let stream = match TcpStream::connect(addr) {
         Ok(stream) => stream,
-        Err(_) => return Ok(Value::NIL),
+        Err(_) => return Value::NIL.into(),
     };
 
     let peer_addr = match stream.peer_addr() {
         Ok(addr) => addr.to_string(),
-        Err(_) => return Ok(Value::NIL),
+        Err(_) => return Value::NIL.into(),
     };
 
     let local_addr = match stream.local_addr() {
@@ -200,7 +200,7 @@ pub fn net_connect(actor: &mut Actor, addr: Value) -> HostResult
         local_addr,
     });
 
-    Ok(actor.int64(id as i64))
+    actor.int64(id as i64).into()
 }
 
 /// Block until a connection arrives on a listening socket.
@@ -213,7 +213,7 @@ pub fn net_accept(actor: &mut Actor, socket_id: Value) -> HostResult
 
     let listener = match get_listener(listen_id) {
         Some(listener) => listener,
-        None => return Ok(Value::NIL),
+        None => return Value::NIL.into(),
     };
 
     // There is no portable way to interrupt a blocking accept, so the listener
@@ -226,19 +226,19 @@ pub fn net_accept(actor: &mut Actor, socket_id: Value) -> HostResult
 
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                 if !listener_present(listen_id) {
-                    return Ok(Value::NIL);
+                    return Value::NIL.into();
                 }
                 sleep(Duration::from_millis(ACCEPT_POLL_MS));
             }
 
-            Err(_) => return Ok(Value::NIL),
+            Err(_) => return Value::NIL.into(),
         }
     };
 
     // The accepted stream inherits the listener's non-blocking flag on some
     // platforms, so force it back to blocking
     if stream.set_nonblocking(false).is_err() {
-        return Ok(Value::NIL);
+        return Value::NIL.into();
     }
 
     let local_addr = match stream.local_addr() {
@@ -252,7 +252,7 @@ pub fn net_accept(actor: &mut Actor, socket_id: Value) -> HostResult
         local_addr,
     });
 
-    Ok(actor.int64(id as i64))
+    actor.int64(id as i64).into()
 }
 
 /// Get the address of the peer on a connected socket, as a string.
@@ -305,7 +305,7 @@ pub fn net_read(actor: &mut Actor, socket_id: Value, buf: Value) -> HostResult
     let stream = match get_stream(socket_id) {
         Some(stream) => stream,
         // Another actor may have closed this socket, which is not an error
-        None => return Ok(actor.int64(0)),
+        None => return actor.int64(0).into(),
     };
 
     // Read straight into the heap. Only this actor's own thread collects, and
@@ -316,14 +316,14 @@ pub fn net_read(actor: &mut Actor, socket_id: Value, buf: Value) -> HostResult
     // Read/Write are implemented for &TcpStream, so a shared handle suffices
     match (&*stream).read(slice) {
         // Ok(0) is the peer closing the connection, reported as 0 bytes
-        Ok(num_read) => Ok(actor.int64(num_read as i64)),
+        Ok(num_read) => actor.int64(num_read as i64).into(),
 
         // A read timeout is WouldBlock on Unix and TimedOut on Windows
         Err(ref e) if e.kind() == ErrorKind::WouldBlock
-                   || e.kind() == ErrorKind::TimedOut => Ok(Value::NIL),
+                   || e.kind() == ErrorKind::TimedOut => Value::NIL.into(),
 
         // A reset connection is over, same as an orderly close
-        Err(_) => Ok(actor.int64(0)),
+        Err(_) => actor.int64(0).into(),
     }
 }
 
@@ -348,7 +348,7 @@ pub fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, num_bytes: Val
 
     let stream = match get_stream(socket_id) {
         Some(stream) => stream,
-        None => return Ok(Value::NIL),
+        None => return Value::NIL.into(),
     };
 
     let slice: &[u8] = unsafe { buf.get_slice(0, num_bytes) };
@@ -356,8 +356,8 @@ pub fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, num_bytes: Val
     // write_all reports a socket that stopped accepting bytes as WriteZero,
     // so a short write can only reach us as an error
     match (&*stream).write_all(slice) {
-        Ok(()) => Ok(actor.int64(num_bytes as i64)),
-        Err(_) => Ok(Value::NIL),
+        Ok(()) => actor.int64(num_bytes as i64).into(),
+        Err(_) => Value::NIL.into(),
     }
 }
 
@@ -371,13 +371,13 @@ pub fn net_shutdown_write(_actor: &mut Actor, socket_id: Value) -> HostResult
 
     let stream = match get_stream(socket_id) {
         Some(stream) => stream,
-        None => return Ok(Value::NIL),
+        None => return Value::NIL.into(),
     };
 
     // Unlike net_close, the socket stays in the table, so reads keep working
     let _ = stream.shutdown(Shutdown::Write);
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Close a socket. Closing a listening socket cancels an actor blocked in
@@ -395,7 +395,7 @@ pub fn net_close(_actor: &mut Actor, socket_id: Value) -> HostResult
         let _ = stream.shutdown(Shutdown::Both);
     }
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Set the read timeout on a connected socket, in milliseconds. A timeout of
@@ -409,7 +409,7 @@ pub fn net_set_timeout(_actor: &mut Actor, socket_id: Value, timeout_ms: Value) 
 
     let stream = match get_stream(socket_id) {
         Some(stream) => stream,
-        None => return Ok(Value::NIL),
+        None => return Value::NIL.into(),
     };
 
     // A zero duration is rejected by the OS, so map 0 ms to "no timeout"
@@ -421,7 +421,7 @@ pub fn net_set_timeout(_actor: &mut Actor, socket_id: Value, timeout_ms: Value) 
 
     let _ = stream.set_read_timeout(timeout);
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 #[cfg(test)]

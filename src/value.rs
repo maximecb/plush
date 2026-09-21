@@ -22,7 +22,9 @@
 //! pointer tags exist solely to classify equality.
 //!
 //! Immediates hold a 5-bit subtag in bits 7..3, which makes the whole low
-//! byte a per-type constant, and a 56-bit payload in bits 63..8.
+//! byte a per-type constant, and a 56-bit payload in bits 63..8. One subtag
+//! is spent on `Value::ERR`, which is not a language-level value at all but
+//! the way a failed call reports itself, see `host::HostResult`.
 //!
 //! # Fixnums
 //!
@@ -106,6 +108,9 @@ const IMM_CLASS: u64 = 0x2D;
 const IMM_HOSTFN: u64 = 0x35;
 const BOOL_BIT: u64 = 0x08;
 
+/// Marks a failed call rather than a language-level value, see `Value::ERR`
+const IMM_ERR: u64 = 0x3D;
+
 /// Flonum encoding constants, see the module docs
 const FLONUM_BIAS: u64 = 0x6810_0000_0000_0000;
 const FLONUM_ROT: u32 = 4;
@@ -148,6 +153,26 @@ impl Value
     /// the cheapest value to store: nil and friends have to be materialized
     /// into a register first, where zero is already there
     pub const FIXNUM_ZERO: Value = Value(TAG_FIXNUM);
+
+    /// Stands in for a value a call failed to produce, so that a call can
+    /// report failure in the word it returns its result in. Only a
+    /// `HostResult` ever holds it, and the message it stands for is kept
+    /// aside, see `host::HostResult`.
+    ///
+    /// The payload bits are zero, as they are for every immediate, so a
+    /// caller tests the whole word against one small constant rather than
+    /// masking out a tag first. Nothing else decodes it: it is not a value
+    /// of any language-level type, so `type_of` rejects it along with the
+    /// subtags that mean nothing at all
+    pub const ERR: Value = Value(IMM_ERR);
+
+    /// True for `Value::ERR` alone. The payload of an immediate is zero,
+    /// so this compares the whole word rather than masking out a tag
+    #[inline(always)]
+    pub fn is_err(self) -> bool
+    {
+        self.0 == IMM_ERR
+    }
 
     /// Largest and smallest integers representable without boxing
     pub const FIXNUM_MAX: i64 = (1 << 61) - 1;

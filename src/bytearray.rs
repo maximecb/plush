@@ -255,7 +255,7 @@ impl ByteArray
             );
         }
 
-        Ok(Value::NIL)
+        Value::NIL.into()
     }
 
     /// Append bytes, growing the backing table when necessary. The bytearray
@@ -293,7 +293,7 @@ impl ByteArray
             );
         }
         byte_array.set_num_bytes(new_len);
-        Ok(Value::NIL)
+        Value::NIL.into()
     }
 }
 
@@ -307,7 +307,7 @@ pub fn ba_with_size(actor: &mut Actor, _self: Value, num_bytes: Value) -> HostRe
         &mut []
     );
 
-    Ok(ByteArray::with_size(num_bytes, &mut actor.alloc))
+    ByteArray::with_size(num_bytes, &mut actor.alloc).into()
 }
 
 pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResult
@@ -352,7 +352,7 @@ pub fn ba_resize(actor: &mut Actor, mut ba: Value, new_size: Value) -> HostResul
         ba_mut.set_num_bytes(new_size);
     }
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn ba_clear(_actor: &mut Actor, ba: Value) -> HostResult
@@ -364,7 +364,7 @@ pub fn ba_clear(_actor: &mut Actor, ba: Value) -> HostResult
     }
 
     ba.set_num_bytes(0);
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Report an access that reaches past the end of a bytearray. The host
@@ -403,7 +403,7 @@ pub fn ba_load_u32(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
     let num_bytes = ba.num_bytes();
 
     match ba.load::<u32>(byte_idx) {
-        Some(val) => Ok(Value::from(val)),
+        Some(val) => Value::from(val).into(),
         None => oob_error!(bytes: byte_idx, 4, num_bytes)
     }
 }
@@ -419,7 +419,7 @@ pub fn ba_store_u32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
         oob_error!(bytes: byte_idx, 4, num_bytes);
     }
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
@@ -429,7 +429,7 @@ pub fn ba_load_u16(_actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
     let num_bytes = ba.num_bytes();
 
     match ba.load::<u16>(byte_idx) {
-        Some(val) => Ok(Value::from(val as u32)),
+        Some(val) => Value::from(val as u32).into(),
         None => oob_error!(bytes: byte_idx, 2, num_bytes)
     }
 }
@@ -445,7 +445,7 @@ pub fn ba_store_u16(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
         oob_error!(bytes: byte_idx, 2, num_bytes);
     }
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
@@ -455,7 +455,7 @@ pub fn ba_load_f32(actor: &mut Actor, ba: Value, byte_idx: Value) -> HostResult
     let num_bytes = ba.num_bytes();
 
     match ba.load::<f32>(byte_idx) {
-        Some(val) => Ok(actor.float64(val as f64)),
+        Some(val) => actor.float64(val as f64).into(),
         None => oob_error!(bytes: byte_idx, 4, num_bytes)
     }
 }
@@ -471,7 +471,7 @@ pub fn ba_store_f32(_actor: &mut Actor, ba: Value, byte_idx: Value, val: Value) 
         oob_error!(bytes: byte_idx, 4, num_bytes);
     }
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> HostResult
@@ -481,7 +481,7 @@ pub fn ba_get_u32(_actor: &mut Actor, ba: Value, idx: Value) -> HostResult
     let num_elems = ba.num_elems::<u32>();
 
     match ba.get::<u32>(idx) {
-        Some(val) => Ok(Value::from(val)),
+        Some(val) => Value::from(val).into(),
         None => oob_error!(elems: idx, num_elems)
     }
 }
@@ -497,7 +497,7 @@ pub fn ba_set_u32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Host
         oob_error!(elems: idx, num_elems);
     }
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> HostResult
@@ -507,7 +507,7 @@ pub fn ba_get_f32(actor: &mut Actor, ba: Value, idx: Value) -> HostResult
     let num_elems = ba.num_elems::<f32>();
 
     match ba.get::<f32>(idx) {
-        Some(val) => Ok(actor.float64(val as f64)),
+        Some(val) => actor.float64(val as f64).into(),
         None => oob_error!(elems: idx, num_elems)
     }
 }
@@ -523,7 +523,7 @@ pub fn ba_set_f32(_actor: &mut Actor, ba: Value, idx: Value, val: Value) -> Host
         oob_error!(elems: idx, num_elems);
     }
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn ba_push_u8(actor: &mut Actor, ba: Value, val: Value) -> HostResult
@@ -658,7 +658,7 @@ pub fn ba_dot_f32(
     }
 
     if num == 0 {
-        return Ok(actor.float64(0.0));
+        return actor.float64(0.0).into();
     }
 
     // The span an operand covers, in f32 elements. Checked, because a large
@@ -702,7 +702,7 @@ pub fn ba_dot_f32(
         dot_f32_kernel(a_slice, a_stride, b_slice, b_stride, num)
     };
 
-    Ok(actor.float64(sum))
+    actor.float64(sum).into()
 }
 
 pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult
@@ -714,7 +714,7 @@ pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult
         error!("expected ByteArray size to be divisible by 4");
     }
 
-    Ok(Value::fixnum((len / 4) as i64))
+    Value::fixnum((len / 4) as i64).into()
 }
 
 pub fn ba_memcpy(_actor: &mut Actor, dst: Value, dst_idx: Value, src: Value, src_idx: Value, num_bytes: Value) -> HostResult
@@ -737,7 +737,7 @@ pub fn ba_zero_fill(_actor: &mut Actor, ba: Value) -> HostResult
     let ba = unwrap_ba!(ba);
     let slice = unsafe { ba.get_slice_mut(0, ba.num_bytes()) };
     slice.fill(0u8);
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: Value) -> HostResult
@@ -752,7 +752,7 @@ pub fn ba_fill_u32(_actor: &mut Actor, ba: Value, idx: Value, num: Value, val: V
         oob_error!(run: idx, num, num_elems);
     }
 
-    Ok(Value::NIL)
+    Value::NIL.into()
 }
 
 /// Format the bytes as lowercase hexadecimal, two digits per byte, with
@@ -776,7 +776,7 @@ pub fn ba_to_hex(actor: &mut Actor, ba: Value) -> HostResult
     let s = unsafe { std::str::from_utf8_unchecked(&out) };
 
     actor.gc_check(Str::alloc_size(s.len()), &mut []);
-    Ok(Str::new(s, &mut actor.alloc))
+    Str::new(s, &mut actor.alloc).into()
 }
 
 #[cfg(test)]
