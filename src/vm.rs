@@ -303,25 +303,25 @@ macro_rules! cmp_slow_path {
         #[cold]
         fn $name(v0: Value, v1: Value) -> HostResult
         {
-            macro_rules! yes_no {
+            macro_rules! bool_val {
                 ($b: expr) => { Value::bool_val($b).into() }
             }
 
             if let (Some(a), Some(b)) = (v0.to_i64(), v1.to_i64()) {
-                return yes_no!(a $op b);
+                return bool_val!(a $op b);
             }
 
             if v0.is_num() && v1.is_num() {
                 return match (v0.to_i64(), v1.to_i64()) {
-                    (Some(a), None) => yes_no!(int_float_cmp!(a, v1.to_f64().unwrap(), $op)),
-                    (None, Some(b)) => yes_no!(int_float_cmp!(b, v0.to_f64().unwrap(), $rev_op)),
-                    (None, None) => yes_no!(v0.to_f64().unwrap() $op v1.to_f64().unwrap()),
+                    (Some(a), None) => bool_val!(int_float_cmp!(a, v1.to_f64().unwrap(), $op)),
+                    (None, Some(b)) => bool_val!(int_float_cmp!(b, v0.to_f64().unwrap(), $rev_op)),
+                    (None, None) => bool_val!(v0.to_f64().unwrap() $op v1.to_f64().unwrap()),
                     (Some(_), Some(_)) => unreachable!(),
                 };
             }
 
             if v0.is_string() && v1.is_string() {
-                return yes_no!(v0.as_str() $op v1.as_str());
+                return bool_val!(v0.as_str() $op v1.as_str());
             }
 
             // See the note in `num_slow_path!` on not using `error!` here
