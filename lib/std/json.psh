@@ -1,0 +1,605 @@
+// JavaScript Object Notation, as described by RFC 8259
+//
+//   from json import parse_json, parse_json_file, Error;
+//
+//   let val = parse_json('{"name": "plush", "tags": [1, 2]}');
+//   $println(val.name);          // plush
+//   $println(val.tags[0]);       // 1
+//
+// JSON values map onto Plush values as you would expect: an object becomes
+// a dictionary, an array becomes an array, a string becomes a string, and
+// `true`, `false` and `null` become `true`, `false` and `nil`. A number
+// becomes an Int64 when it is written without a fraction or an exponent
+// and fits in 64 bits, and a Float64 otherwise.
+//
+// Malformed input produces an Error rather than ending the program, since
+// JSON that arrives over a network is not to be trusted. A parsed value is
+// never an object, so an Error cannot be mistaken for one, which is also
+// how a failure is told apart from a successful parse of `null`:
+//
+//   let req = parse_json(body);
+//
+//   if (req instanceof Error) {
+//       $println(req.msg);   // line 2, col 7: expected ':' after the key
+//       return;
+//   }
+//
+// Since a key that is absent is an error to read, check for one with the
+// `has()` method of dictionaries:
+//
+//   if (req.has("name"))
+//       $println(req.name);
+//
+// Bytes read from a socket or a file have to be decoded before they can be
+// parsed, and only text that is valid UTF-8 can be:
+//
+//   let body = String.from_utf8(buf, 0, num_read);
+//
+//   if (body == nil)
+//       return;
+//
+// The parser follows the grammar strictly: no trailing commas, no comments,
+// no single quotes, no unquoted keys, and no control characters inside
+// strings. It is lenient on three points, all of them about text that is
+// valid elsewhere and harmless here: a byte order mark at the start of the
+// text is skipped, a number too large for a Float64 becomes an infinity,
+// and an escaped surrogate that isn't part of a pair becomes U+FFFD, the
+// replacement character. Nesting deeper than MAX_DEPTH is rejected, so
+// that hostile input can't exhaust the interpreter's stack.
+
+let TAB = 9;         // \t
+let LF = 10;         // \n
+let CR = 13;         // \r
+let SPACE = 32;
+let QUOTE = 34;      // "
+let PLUS = 43;       // +
+let COMMA = 44;      // ,
+let MINUS = 45;      // -
+let DOT = 46;        // .
+let ZERO = 48;       // 0
+let NINE = 57;       // 9
+let COLON = 58;      // :
+let UPPER_E = 69;    // E
+let LBRACKET = 91;   // [
+let BACKSLASH = 92;  // \
+let RBRACKET = 93;   // ]
+let LOWER_E = 101;   // e
+let LOWER_U = 117;   // u
+let LBRACE = 123;    // {
+let RBRACE = 125;    // }
+
+// The escape letters that stand for a single character, and the characters
+// they produce, in matching order
+let ESCAPE_IN = '"\\/bfnrt';
+let ESCAPE_OUT = '"\\/\x08\x0C\n\r\t';
+
+// How deeply objects and arrays may nest
+let MAX_DEPTH = 200;
+
+// Returned in place of a value by anything in this module that can fail.
+// The msg field says what went wrong, and where, e.g.
+// "line 2, col 7: expected ':' after the key"
+class Error
+{
+    init(self, msg)
+    {
+        self.msg = msg;
+    }
+
+    to_s(self)
+    {
+        return self.msg;
+    }
+}
+
+// The value of a hexadecimal digit byte, or -1 if it isn't one
+fun hex_digit(b)
+{
+    if (b >= ZERO && b <= NINE)
+        return b - ZERO;
+    if (b >= 97 && b <= 102)
+        return b - 97 + 10;  // a to f
+    if (b >= 65 && b <= 70)
+        return b - 65 + 10;  // A to F
+
+    return -1;
+}
+
+// Appends the UTF-8 encoding of a codepoint to a byte array
+fun push_utf8(buf, cp)
+{
+    if (cp < 0x80) {
+        buf.push_u8(cp);
+    } else if (cp < 0x800) {
+        buf.push_u8(0xC0 | (cp >> 6));
+        buf.push_u8(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        buf.push_u8(0xE0 | (cp >> 12));
+        buf.push_u8(0x80 | ((cp >> 6) & 0x3F));
+        buf.push_u8(0x80 | (cp & 0x3F));
+    } else {
+        buf.push_u8(0xF0 | (cp >> 18));
+        buf.push_u8(0x80 | ((cp >> 12) & 0x3F));
+        buf.push_u8(0x80 | ((cp >> 6) & 0x3F));
+        buf.push_u8(0x80 | (cp & 0x3F));
+    }
+}
+
+// A recursive descent parser over the UTF-8 bytes of the text. Each method
+// returns either what it parsed or an Error, and an Error is handed back up
+// unchanged, so parsing stops at the first thing that is wrong.
+class JSONParser
+{
+    init(self, text)
+    {
+        assert(text instanceof String);
+
+        self.text = text;
+        self.pos = 0;
+        self.depth = 0;
+    }
+
+    // Produces an error naming the position parsing stopped at, so that a
+    // caller can write `return self.fail("...")`
+    fail(self, msg)
+    {
+        let var line = 1;
+        let var col = 1;
+
+        for (let var i = 0; i < self.pos; ++i) {
+            let b = self.text.byte_at(i);
+
+            if (b == LF) {
+                line = line + 1;
+                col = 1;
+            } else if ((b & 0xC0) != 0x80) {
+                // Continuation bytes belong to the character before them
+                col = col + 1;
+            }
+        }
+
+        return Error("line " + line.to_s() + ", col " + col.to_s() + ": " + msg);
+    }
+
+    // The byte at the current position, or -1 at the end of the text
+    peek(self)
+    {
+        if (self.pos >= self.text.len)
+            return -1;
+
+        return self.text.byte_at(self.pos);
+    }
+
+    // The text between two byte positions, as a string
+    slice(self, start, end)
+    {
+        let buf = ByteArray.with_size(0);
+
+        for (let var i = start; i < end; ++i)
+            buf.push_u8(self.text.byte_at(i));
+
+        return String.from_utf8(buf, 0, buf.len);
+    }
+
+    // Skips the whitespace JSON allows between tokens
+    eat_ws(self)
+    {
+        while (self.pos < self.text.len) {
+            let b = self.text.byte_at(self.pos);
+
+            if (b != SPACE && b != TAB && b != LF && b != CR)
+                break;
+
+            self.pos = self.pos + 1;
+        }
+    }
+
+    // Consumes one or more digits, returning false if there are none
+    eat_digits(self)
+    {
+        let start = self.pos;
+
+        while (self.pos < self.text.len) {
+            let b = self.text.byte_at(self.pos);
+
+            if (b < ZERO || b > NINE)
+                break;
+
+            self.pos = self.pos + 1;
+        }
+
+        return self.pos > start;
+    }
+
+    // Consumes a literal word, such as "true", if it is present here
+    eat_word(self, word)
+    {
+        if (self.pos + word.len > self.text.len)
+            return false;
+
+        for (let var i = 0; i < word.len; ++i) {
+            if (self.text.byte_at(self.pos + i) != word.byte_at(i))
+                return false;
+        }
+
+        self.pos = self.pos + word.len;
+        return true;
+    }
+
+    // Parses the whole text as a single value
+    parse(self)
+    {
+        // A byte order mark at the start of the text is ignored
+        if (self.text.len >= 3 &&
+            self.text.byte_at(0) == 0xEF &&
+            self.text.byte_at(1) == 0xBB &&
+            self.text.byte_at(2) == 0xBF) {
+            self.pos = 3;
+        }
+
+        let val = self.parse_value();
+        if (val instanceof Error)
+            return val;
+
+        self.eat_ws();
+        if (self.pos < self.text.len)
+            return self.fail("trailing characters after the value");
+
+        return val;
+    }
+
+    parse_value(self)
+    {
+        self.eat_ws();
+
+        let b = self.peek();
+
+        if (b == QUOTE)
+            return self.parse_string();
+        if (b == LBRACE)
+            return self.parse_object();
+        if (b == LBRACKET)
+            return self.parse_array();
+        if (b == MINUS || (b >= ZERO && b <= NINE))
+            return self.parse_number();
+
+        if (self.eat_word("true"))
+            return true;
+        if (self.eat_word("false"))
+            return false;
+        if (self.eat_word("null"))
+            return nil;
+
+        if (b == -1)
+            return self.fail("unexpected end of input");
+
+        return self.fail("expected a value");
+    }
+
+    // Parses an object, with the current position on the opening brace
+    parse_object(self)
+    {
+        // Input nested this deeply is refused, rather than parsing it and
+        // exhausting the interpreter's stack
+        if (self.depth >= MAX_DEPTH)
+            return self.fail("nesting is too deep");
+        self.depth = self.depth + 1;
+
+        self.pos = self.pos + 1;
+        let dict = {};
+
+        // An object with no members at all
+        self.eat_ws();
+        if (self.peek() == RBRACE) {
+            self.pos = self.pos + 1;
+            self.depth = self.depth - 1;
+            return dict;
+        }
+
+        loop {
+            self.eat_ws();
+            if (self.peek() != QUOTE)
+                return self.fail("expected a string key");
+
+            let key = self.parse_string();
+            if (key instanceof Error)
+                return key;
+
+            self.eat_ws();
+            if (self.peek() != COLON)
+                return self.fail("expected ':' after the key");
+            self.pos = self.pos + 1;
+
+            let val = self.parse_value();
+            if (val instanceof Error)
+                return val;
+
+            // A repeated key keeps the value that comes last
+            dict[key] = val;
+
+            self.eat_ws();
+            let b = self.peek();
+
+            if (b == COMMA) {
+                self.pos = self.pos + 1;
+                continue;
+            }
+
+            if (b == RBRACE) {
+                self.pos = self.pos + 1;
+                self.depth = self.depth - 1;
+                return dict;
+            }
+
+            return self.fail("expected ',' or '}' in object");
+        }
+    }
+
+    // Parses an array, with the current position on the opening bracket
+    parse_array(self)
+    {
+        if (self.depth >= MAX_DEPTH)
+            return self.fail("nesting is too deep");
+        self.depth = self.depth + 1;
+
+        self.pos = self.pos + 1;
+        let arr = [];
+
+        // An array with no elements at all
+        self.eat_ws();
+        if (self.peek() == RBRACKET) {
+            self.pos = self.pos + 1;
+            self.depth = self.depth - 1;
+            return arr;
+        }
+
+        loop {
+            let val = self.parse_value();
+            if (val instanceof Error)
+                return val;
+
+            arr.push(val);
+
+            self.eat_ws();
+            let b = self.peek();
+
+            if (b == COMMA) {
+                self.pos = self.pos + 1;
+                continue;
+            }
+
+            if (b == RBRACKET) {
+                self.pos = self.pos + 1;
+                self.depth = self.depth - 1;
+                return arr;
+            }
+
+            return self.fail("expected ',' or ']' in array");
+        }
+    }
+
+    // Parses a string, with the current position on the opening quote
+    parse_string(self)
+    {
+        self.pos = self.pos + 1;
+        let buf = ByteArray.with_size(0);
+
+        loop {
+            if (self.pos >= self.text.len)
+                return self.fail("unterminated string");
+
+            let b = self.text.byte_at(self.pos);
+
+            if (b == QUOTE) {
+                self.pos = self.pos + 1;
+                return String.from_utf8(buf, 0, buf.len);
+            }
+
+            if (b == BACKSLASH) {
+                self.pos = self.pos + 1;
+
+                let err = self.parse_escape(buf);
+                if (err != nil)
+                    return err;
+
+                continue;
+            }
+
+            // Control characters have to be written as an escape
+            if (b < 0x20)
+                return self.fail("unescaped control character in string");
+
+            buf.push_u8(b);
+            self.pos = self.pos + 1;
+        }
+    }
+
+    // Parses what follows a backslash, appending it to the buffer.
+    // Returns an Error if it isn't a valid escape, and nil otherwise.
+    parse_escape(self, buf)
+    {
+        let b = self.peek();
+
+        if (b == -1)
+            return self.fail("unterminated string");
+
+        for (let var i = 0; i < ESCAPE_IN.len; ++i) {
+            if (b == ESCAPE_IN.byte_at(i)) {
+                buf.push_u8(ESCAPE_OUT.byte_at(i));
+                self.pos = self.pos + 1;
+                return nil;
+            }
+        }
+
+        if (b == LOWER_U) {
+            self.pos = self.pos + 1;
+            return self.parse_unicode_escape(buf);
+        }
+
+        return self.fail("invalid escape sequence");
+    }
+
+    // Parses what follows a \u escape, appending the character it names
+    parse_unicode_escape(self, buf)
+    {
+        let var cp = self.read_hex4();
+
+        if (cp < 0)
+            return self.fail("\\u must be followed by four hexadecimal digits");
+
+        // Characters outside the basic plane are written as a pair of
+        // surrogates, which have to be put back together here
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            let start = self.pos;
+            let var low = -1;
+
+            if (self.pos + 1 < self.text.len &&
+                self.text.byte_at(self.pos) == BACKSLASH &&
+                self.text.byte_at(self.pos + 1) == LOWER_U) {
+                self.pos = self.pos + 2;
+                low = self.read_hex4();
+            }
+
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+            } else {
+                // What follows isn't the other half of the pair, so the
+                // escape stands for a character UTF-8 cannot hold
+                self.pos = start;
+                cp = 0xFFFD;
+            }
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            // The second half of a pair, with no first half before it
+            cp = 0xFFFD;
+        }
+
+        push_utf8(buf, cp);
+        return nil;
+    }
+
+    // Reads four hexadecimal digits as a number, or -1 if they aren't there
+    read_hex4(self)
+    {
+        if (self.pos + 4 > self.text.len)
+            return -1;
+
+        let var val = 0;
+
+        for (let var i = 0; i < 4; ++i) {
+            let digit = hex_digit(self.text.byte_at(self.pos + i));
+
+            if (digit < 0)
+                return -1;
+
+            val = (val << 4) | digit;
+        }
+
+        self.pos = self.pos + 4;
+        return val;
+    }
+
+    // Parses a number, with the current position on its first character
+    parse_number(self)
+    {
+        let start = self.pos;
+        let var neg = false;
+
+        if (self.peek() == MINUS) {
+            neg = true;
+            self.pos = self.pos + 1;
+        }
+
+        // The integer part is a lone zero, or digits not starting with one.
+        // Its value is accumulated as the digits are scanned, so that a
+        // plain integer needs no substring to be parsed from.
+        let digits_start = self.pos;
+        let var int_val = 0;
+
+        if (self.peek() == ZERO) {
+            self.pos = self.pos + 1;
+        } else {
+            while (self.pos < self.text.len) {
+                let b = self.text.byte_at(self.pos);
+
+                if (b < ZERO || b > NINE)
+                    break;
+
+                // Accumulating stops before the value could overflow, and
+                // the substring path takes over for numbers this long
+                if (self.pos - digits_start < 18)
+                    int_val = int_val * 10 + (b - ZERO);
+
+                self.pos = self.pos + 1;
+            }
+
+            if (self.pos == digits_start)
+                return self.fail("expected a digit");
+        }
+
+        let num_digits = self.pos - digits_start;
+
+        // A number written with a fraction or an exponent is a float, even
+        // when its value happens to be a whole number
+        let var is_int = true;
+
+        if (self.peek() == DOT) {
+            self.pos = self.pos + 1;
+            is_int = false;
+
+            if (!self.eat_digits())
+                return self.fail("expected a digit after the decimal point");
+        }
+
+        let e = self.peek();
+        if (e == LOWER_E || e == UPPER_E) {
+            self.pos = self.pos + 1;
+            is_int = false;
+
+            let sign = self.peek();
+            if (sign == PLUS || sign == MINUS)
+                self.pos = self.pos + 1;
+
+            if (!self.eat_digits())
+                return self.fail("expected a digit in the exponent");
+        }
+
+        // An integer of at most 18 digits was built as it was scanned
+        if (is_int && num_digits <= 18)
+            return neg ? -int_val : int_val;
+
+        let text = self.slice(start, self.pos);
+
+        if (is_int) {
+            let parsed = text.parse_int(10);
+
+            // An integer too large for 64 bits is kept as a float
+            if (parsed != nil)
+                return parsed;
+        }
+
+        let float_val = text.parse_float();
+        if (float_val == nil)
+            return self.fail("invalid number");
+
+        return float_val;
+    }
+}
+
+// Parses JSON text into a value, or an Error if the text is malformed
+fun parse_json(text)
+{
+    let parser = JSONParser(text);
+    return parser.parse();
+}
+
+// Parses a JSON file. Returns an Error if the file can't be read, does not
+// hold valid UTF-8, or is not valid JSON.
+fun parse_json_file(file_path)
+{
+    let text = $read_file_utf8(file_path);
+
+    if (text == nil)
+        return Error('could not read "' + file_path + '" as UTF-8 text');
+
+    return parse_json(text);
+}

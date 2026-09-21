@@ -1,0 +1,489 @@
+from json import parse_json, parse_json_file, Error;
+
+// Renders a parsed value compactly, so that a whole structure can be
+// compared in one assert. Floats get an "f" suffix, since a float that
+// holds a whole number prints the same as an integer. Dictionaries have
+// no way to list their keys, so they are shown as {} and checked by hand.
+fun show(val)
+{
+    if (val == nil)
+        return "null";
+
+    if (val instanceof String)
+        return '"' + val + '"';
+
+    if (val instanceof Float64)
+        return val.to_s() + "f";
+
+    if (val instanceof Array) {
+        let var s = "[";
+        for (let var i = 0; i < val.len; ++i) {
+            if (i > 0) s = s + ",";
+            s = s + show(val[i]);
+        }
+        return s + "]";
+    }
+
+    if (val instanceof Dict)
+        return "{}";
+
+    return val.to_s();
+}
+
+// Checks that text parses to a value that renders as expected
+fun check(text, expected)
+{
+    let val = parse_json(text);
+    assert(!(val instanceof Error));
+
+    let got = show(val);
+
+    if (got != expected) {
+        $println("parse_json(" + text + ")");
+        $println("  got:      " + got);
+        $println("  expected: " + expected);
+    }
+
+    assert(got == expected);
+}
+
+// Checks that text is rejected rather than parsed
+fun check_err(text)
+{
+    let err = parse_json(text);
+
+    if (!(err instanceof Error))
+        $println("expected an error for: " + text);
+
+    assert(err instanceof Error);
+    assert(err.msg instanceof String);
+    assert(err.to_s() == err.msg);
+}
+
+// Integers
+check("0", "0");
+check("-0", "0");
+check("42", "42");
+check("-42", "-42");
+check("9223372036854775807", "9223372036854775807");
+check("-9223372036854775808", "-9223372036854775808");
+assert(parse_json("-9223372036854775808") instanceof Int64);
+
+// Integers are accumulated as they are scanned up to 18 digits, and parsed
+// from a substring beyond that, so both sides of the boundary are checked
+check("999999999999999999", "999999999999999999");
+check("-999999999999999999", "-999999999999999999");
+check("1000000000000000000", "1000000000000000000");
+check("-1000000000000000000", "-1000000000000000000");
+check("100000000000000000", "100000000000000000");
+assert(parse_json("999999999999999999") instanceof Int64);
+assert(parse_json("1000000000000000000") instanceof Int64);
+assert(parse_json("999999999999999999.5") instanceof Float64);
+assert(parse_json("0000000000000000001") instanceof Error);
+
+// Anything written with a fraction or an exponent is a float
+check("1.0", "1f");
+check("3.5", "3.5f");
+check("-0.5", "-0.5f");
+check("-0.0", "-0f");
+check("1e2", "100f");
+check("1E2", "100f");
+check("1e+2", "100f");
+check("1e-2", "0.01f");
+check("0.5e1", "5f");
+check("1e0", "1f");
+check("0e0", "0f");
+check("0E+0", "0f");
+check("1.5E+2", "150f");
+
+// Leading zeros are allowed in an exponent, though not in the number
+check("1e007", "10000000f");
+check("1e-007", "0.0000001f");
+
+// An integer too large for 64 bits is kept as a float
+assert(parse_json("9223372036854775808") instanceof Float64);
+assert(parse_json("-9223372036854775809") instanceof Float64);
+assert(parse_json("123456789012345678901234567890") instanceof Float64);
+
+// A number too large for a float becomes an infinity rather than an error
+assert(parse_json("1e400") instanceof Float64);
+assert(parse_json("1e400") > 0.0);
+assert(parse_json("-1e400") < 0.0);
+assert(parse_json("1e-400") == 0.0);
+
+// A denormal, and a number with more digits than a float can hold
+assert(parse_json("2.2250738585072011e-308") > 0.0);
+assert(parse_json("0.1000000000000000055511151231257827") == 0.1);
+
+// Literals and strings
+check("true", "true");
+check("false", "false");
+check("null", "null");
+check('""', '""');
+check('"hello"', '"hello"');
+check('"café"', '"café"');
+check('"こんにちは"', '"こんにちは"');
+check('"a/b"', '"a/b"');
+check('" "', '" "');
+
+// Escape sequences
+assert(parse_json('"a\\nb"') == "a\nb");
+assert(parse_json('"\\/\\\\\\b\\f\\r\\t"') == "/\\\x08\x0C\r\t");
+assert(parse_json('"\\""') == '"');
+assert(parse_json('"\\u0041"') == "A");
+assert(parse_json('"\\u00e9"') == "é");
+assert(parse_json('"\\u00E9"') == "é");
+assert(parse_json('"\\u65e5"') == "日");
+assert(parse_json('"\\u0041\\u0042"') == "AB");
+assert(parse_json('"\\u0000"').len == 1);
+
+// A character that has a short escape can also be written the long way
+assert(parse_json('"\\u0022"') == '"');
+assert(parse_json('"\\u005C"') == "\\");
+assert(parse_json('"\\u002F"') == "/");
+assert(parse_json('"\\u000A"') == "\n");
+
+// Every width the UTF-8 encoder has to produce
+assert(parse_json('"\\u007F"').len == 1);
+assert(parse_json('"\\u0080"').len == 2);
+assert(parse_json('"\\u07FF"').len == 2);
+assert(parse_json('"\\u0800"').len == 3);
+assert(parse_json('"\\uFFFF"').len == 3);
+assert(parse_json('"\\uD800\\uDC00"').len == 4);
+
+// A character outside the basic plane, written as a surrogate pair
+assert(parse_json('"\\uD83D\\uDE00"') == "\u{1F600}");
+assert(parse_json('"a\\uD83D\\uDE00b"') == "a\u{1F600}b");
+assert(parse_json('"\\uD800\\uDC00"') == "\u{10000}");
+assert(parse_json('"\\uDBFF\\uDFFF"') == "\u{10FFFF}");
+
+// A surrogate that isn't part of a pair becomes the replacement character
+assert(parse_json('"\\uD800"') == "\u{FFFD}");
+assert(parse_json('"\\uDC00"') == "\u{FFFD}");
+assert(parse_json('"\\uD800A"') == "\u{FFFD}A");
+assert(parse_json('"\\uD800\\u0041"') == "\u{FFFD}A");
+assert(parse_json('"\\uD800\\uD800"') == "\u{FFFD}\u{FFFD}");
+assert(parse_json('"\\uDC00\\uD83D\\uDE00"') == "\u{FFFD}\u{1F600}");
+
+// What follows a lone high surrogate is still parsed as usual
+assert(parse_json('"\\uD83D\\n"') == "\u{FFFD}\n");
+assert(parse_json('"\\uD83D\\\\"') == "\u{FFFD}\\");
+check_err('"\\uD83D\\uZZZZ"');
+
+// A noncharacter and a byte order mark are ordinary characters in a string
+assert(parse_json('"\\uFFFE"').len == 3);
+assert(parse_json('"\\uFEFF"').len == 3);
+
+// Only characters below 0x20 have to be escaped
+assert(parse_json('"\x7F"').len == 1);
+check_err('"\x1F"');
+check_err('"a\0b"');
+
+// Arrays
+check("[]", "[]");
+check("[1]", "[1]");
+check("[1,2,3]", "[1,2,3]");
+check('[1, "a", true, false, null]', '[1,"a",true,false,null]');
+check("[1.0, 1]", "[1f,1]");
+check("[[1],[2,[3]]]", "[[1],[2,[3]]]");
+check("[[]]", "[[]]");
+check("[{}]", "[{}]");
+check("[null]", "[null]");
+check("[[],{},[{}]]", "[[],{},[{}]]");
+
+// Whitespace is allowed around every token
+check(" \t\r\n [ 1 , 2 ] \t\r\n ", "[1,2]");
+check("[\n  1,\n  2\n]", "[1,2]");
+check('{ "a" : 1 }', "{}");
+
+// A byte order mark at the start of the text is ignored
+check("\u{FEFF}[1]", "[1]");
+check_err("\u{FEFF}");
+check_err("\u{FEFF}\u{FEFF}[1]");
+check_err(" \u{FEFF}[1]");
+check_err("[1]\u{FEFF}");
+
+// Objects
+let obj = parse_json('{"a": 1, "b": [2, 3], "c": {"d": "x"}}');
+assert(obj instanceof Dict);
+assert(obj.a == 1);
+assert(show(obj.b) == "[2,3]");
+assert(obj.c.d == "x");
+assert(obj.has("a"));
+assert(!obj.has("e"));
+
+let empty = parse_json("{}");
+assert(empty instanceof Dict);
+assert(!empty.has("a"));
+
+// Keys go through the same unescaping as any other string
+let keys = parse_json('{"": 1, "a\\nb": 2, "café": 3, "\\u0041": 4, "1": 5}');
+assert(keys[""] == 1);
+assert(keys["a\nb"] == 2);
+assert(keys["café"] == 3);
+assert(keys.A == 4);
+assert(keys["1"] == 5);
+
+// A repeated key keeps the value that comes last, whatever its type
+assert(parse_json('{"a": 1, "a": 2}').a == 2);
+let repeated = parse_json('{"a": [1], "a": null}');
+assert(repeated.a == nil);
+assert(repeated.has("a"));
+
+// Objects and arrays nested in each other
+let nested = parse_json('{"items": [{"id": 1}, {"id": 2}]}');
+assert(nested.items.len == 2);
+assert(nested.items[1].id == 2);
+
+// An object with enough keys to make the dictionary grow
+let var big_obj_text = "{";
+for (let var i = 0; i < 500; ++i) {
+    if (i > 0) big_obj_text = big_obj_text + ",";
+    big_obj_text = big_obj_text + '"k' + i.to_s() + '":' + i.to_s();
+}
+big_obj_text = big_obj_text + "}";
+
+let big_obj = parse_json(big_obj_text);
+assert(big_obj.k0 == 0);
+assert(big_obj["k499"] == 499);
+assert(!big_obj.has("k500"));
+
+// An array long enough to be grown several times
+let var big_arr_text = "[";
+for (let var i = 0; i < 2000; ++i) {
+    if (i > 0) big_arr_text = big_arr_text + ",";
+    big_arr_text = big_arr_text + i.to_s();
+}
+big_arr_text = big_arr_text + "]";
+
+let big_arr = parse_json(big_arr_text);
+assert(big_arr.len == 2000);
+assert(big_arr[0] == 0);
+assert(big_arr[1999] == 1999);
+
+// Empty input, and text that holds no value
+check_err("");
+check_err("   ");
+check_err("\n");
+check_err(":");
+check_err(",");
+
+// Literals that aren't quite right
+check_err("nul");
+check_err("tru");
+check_err("truex");
+check_err("True");
+check_err("NULL");
+check_err("NaN");
+check_err("Infinity");
+check_err("-Infinity");
+check_err("undefined");
+
+// Malformed numbers
+check_err("-");
+check_err("+1");
+check_err(".5");
+check_err("-.5");
+check_err("1.");
+check_err("0.");
+check_err("1.e5");
+check_err("0.e1");
+check_err("1e");
+check_err("1e+");
+check_err("1e-");
+check_err("--1");
+check_err("01");
+check_err("00");
+check_err("-01");
+check_err("0x10");
+check_err("[01]");
+check_err("1,2");
+check_err("1.2.3");
+check_err("1e2e3");
+check_err("1 .5");
+
+// Malformed strings
+check_err('"abc');
+check_err('"a\nb"');
+check_err('"a\tb"');
+check_err("'a'");
+check_err('"\\q"');
+check_err('"\\"');
+check_err('"\\u12"');
+check_err('"\\uZZZZ"');
+check_err('"\\u"');
+check_err('"\\u123"');
+check_err('"\\u 041"');
+check_err('"\\U0041"');
+
+// Malformed arrays and objects
+check_err("[");
+check_err("]");
+check_err("[1");
+check_err("[[1]");
+check_err("[1,");
+check_err("[1,]");
+check_err("[1,2,]");
+check_err("[,1]");
+check_err("[,]");
+check_err("[1,,2]");
+check_err("[1 2]");
+check_err("[]]");
+check_err("{");
+check_err("}");
+check_err("{}}");
+check_err("{,}");
+check_err('{"a"}');
+check_err('{"a":}');
+check_err('{"a":1');
+check_err('{"a":1,}');
+check_err('{"a":1,,}');
+check_err('{"a":1,"b"}');
+check_err("{a:1}");
+check_err("{'a':1}");
+check_err('{"a" 1}');
+check_err("{1:2}");
+check_err("{:1}");
+check_err('"a": 1');
+
+// Nothing may follow the value
+check_err("[1] junk");
+check_err("{} {}");
+check_err("1 2");
+check_err("null null");
+check_err('"a" "b"');
+check_err("[1]\0");
+
+// Nesting is allowed up to a limit, so that input crafted to be deep
+// fails to parse instead of exhausting the interpreter's stack
+fun deep_array(depth)
+{
+    let var s = "";
+    for (let var i = 0; i < depth; ++i)
+        s = s + "[";
+    s = s + "1";
+    for (let var i = 0; i < depth; ++i)
+        s = s + "]";
+    return s;
+}
+
+fun deep_object(depth)
+{
+    let var s = "";
+    for (let var i = 0; i < depth; ++i)
+        s = s + '{"a":';
+    s = s + "1";
+    for (let var i = 0; i < depth; ++i)
+        s = s + "}";
+    return s;
+}
+
+// Objects and arrays count toward the same limit
+fun deep_mixed(pairs)
+{
+    let var s = "";
+    for (let var i = 0; i < pairs; ++i)
+        s = s + '[{"a":';
+    s = s + "1";
+    for (let var i = 0; i < pairs; ++i)
+        s = s + "}]";
+    return s;
+}
+
+assert(!(parse_json(deep_array(200)) instanceof Error));
+assert(!(parse_json(deep_object(200)) instanceof Error));
+assert(!(parse_json(deep_mixed(100)) instanceof Error));
+check_err(deep_array(201));
+check_err(deep_object(201));
+check_err(deep_mixed(101));
+check_err(deep_array(10000));
+assert(parse_json(deep_array(201)).msg == "line 1, col 201: nesting is too deep");
+
+// Nesting right at the limit still produces the whole structure
+let var innermost = parse_json(deep_array(200));
+for (let var i = 0; i < 200; ++i)
+    innermost = innermost[0];
+assert(innermost == 1);
+
+// Error messages say what the first problem is, and where
+assert(parse_json('{\n  "a" 1\n}').msg == "line 2, col 7: expected ':' after the key");
+assert(parse_json("[1, 2").msg == "line 1, col 6: expected ',' or ']' in array");
+assert(parse_json('["é", x]').msg == "line 1, col 7: expected a value");
+assert(parse_json("[1] junk").msg == "line 1, col 5: trailing characters after the value");
+assert(parse_json("").msg == "line 1, col 1: unexpected end of input");
+assert(parse_json('"a\\q"').msg == "line 1, col 4: invalid escape sequence");
+assert(parse_json('"abc').msg == "line 1, col 5: unterminated string");
+assert(parse_json('"a\nb"').msg == "line 1, col 3: unescaped control character in string");
+assert(parse_json("[1,\n2,\n3x]").msg == "line 3, col 2: expected ',' or ']' in array");
+
+// Line counting follows line feeds, so a Windows line ending works too
+assert(parse_json("[1,\r\n2x]").msg == "line 2, col 2: expected ',' or ']' in array");
+
+// An error prints as its message
+assert(parse_json("[").to_s() == "line 1, col 2: unexpected end of input");
+
+// Valid text holding just null gives nil, which is not an error
+assert(parse_json("null") == nil);
+assert(!(parse_json("null") instanceof Error));
+assert(!(parse_json("[null]")[0] instanceof Error));
+
+// A request body decoded from a buffer, as a server would read one. The
+// body can sit anywhere inside a larger buffer.
+let buf = ByteArray.with_size(0);
+buf.push_string('HTTP-ish header\r\n\r\n{"user": "ada", "id": 7}');
+let req = parse_json(String.from_utf8(buf, 19, buf.len - 19));
+assert(req.user == "ada");
+assert(req.id == 7);
+
+// An unreadable file gives an error rather than failing
+let file_err = parse_json_file("no/such/file.json");
+assert(file_err instanceof Error);
+assert(file_err.msg == 'could not read "no/such/file.json" as UTF-8 text');
+
+// A file that can be read but isn't JSON reports where it goes wrong
+assert(parse_json_file("README.md") instanceof Error);
+
+// The sample file, which covers most of the above in one document
+let data = parse_json_file("examples/data/test_data.json");
+assert(!(data instanceof Error));
+assert(data.test_suite == "JSON Parser Test Data");
+assert(data.version == 1.0);
+assert(data.version instanceof Float64);
+
+let simple = data.data.simple_types;
+assert(simple.string == "Hello, world!");
+assert(simple.integer == 42);
+assert(simple.integer instanceof Int64);
+assert(simple.float instanceof Float64);
+assert(simple.boolean_true == true);
+assert(simple.boolean_false == false);
+assert(simple.null_value == nil);
+assert(simple.has("null_value"));
+
+let special = data.data.special_strings;
+assert(special.unicode == "こんにちは世界");
+assert(special.escaped_chars == 'This is a string with a "quote" and a \\backslash\\.');
+assert(special.empty_string == "");
+
+let structures = data.data.nested_structures;
+assert(structures.object_in_object.level1.level2.key == "value");
+assert(show(structures.array_in_object.items) == '[1,"two",true,null]');
+assert(structures.object_in_array[0].id == 1);
+assert(structures.object_in_array[1].name == "Second Item");
+
+let arrays = data.data.arrays;
+assert(show(arrays.array_of_numbers) == "[1,2,3,4,5]");
+assert(show(arrays.array_of_strings) == '["a","b","c"]');
+assert(show(arrays.array_of_booleans) == "[true,false,true]");
+assert(arrays.mixed_array[3].key == "value");
+assert(arrays.empty_array.len == 0);
+
+assert(!data.data.edge_cases.empty_object.has("anything"));
+
+// Parsing a large document does not hold on to garbage
+$gc_collect();
+let before = $gc_mem_size();
+for (let var i = 0; i < 200; ++i)
+    assert(!(parse_json_file("examples/data/test_data.json") instanceof Error));
+$gc_collect();
+assert($gc_mem_size() < before * 4);
