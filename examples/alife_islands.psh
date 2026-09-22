@@ -2251,7 +2251,19 @@ fun draw_world(buf, snaps, cam_x, cam_y, zoom) {
 
 // Summed across the ring, except the tick count, which is per island and is
 // taken as the slowest, and the averages, which are averaged again
-fun draw_panel(buf, snaps, ticks_per_sec, zoom, paused, fast, status) {
+// Seconds as HH:MM:SS, zero padded so the column does not jitter as the
+// figures roll over
+fun hhmmss(secs) {
+    let h = secs.idiv(3600);
+    let m = secs.idiv(60) % 60;
+    let s = secs % 60;
+
+    return h.to_s().lpad(2, '0') + ":" +
+           m.to_s().lpad(2, '0') + ":" +
+           s.to_s().lpad(2, '0');
+}
+
+fun draw_panel(buf, snaps, ticks_per_sec, zoom, paused, fast, status, elapsed) {
     fill_rect(buf, VIEW_W, 0, PANEL_W, FRAME_HEIGHT, COL_PANEL);
 
     let x = VIEW_W + 10;
@@ -2301,6 +2313,10 @@ fun draw_panel(buf, snaps, ticks_per_sec, zoom, paused, fast, status) {
 
     draw_text(buf, x, y, "A-LIFE ISLANDS", COL_TEXT, 2);
     y = y + 26;
+
+    // Wall clock the run has been going, as against the tick counts below,
+    // which are the world's own clock
+    line("RUN TIME", hhmmss(elapsed), COL_TEXT);
 
     line("TOTAL TICKS", ticks.comma_sep(), COL_TEXT);
     line("TICKS/S", ticks_per_sec.comma_sep(), COL_TEXT);
@@ -2570,6 +2586,7 @@ let var drag_y = 0;
 
 let var last_draw = 0;
 let var sent_speed = -2;
+let start_ms = $time_current_ms();
 let var rate_time = $time_current_ms();
 let var rate_tick = 0;
 let var ticks_per_sec = 0;
@@ -2705,7 +2722,8 @@ loop {
     if (now >= last_draw + DRAW_PERIOD_MS) {
         fill_rect(frame_buffer, 0, 0, VIEW_W, FRAME_HEIGHT, COL_EMPTY);
         draw_world(frame_buffer, snaps, cam_x, cam_y, zoom);
-        draw_panel(frame_buffer, snaps, ticks_per_sec, zoom, paused, fast, status);
+        draw_panel(frame_buffer, snaps, ticks_per_sec, zoom, paused, fast, status,
+                   (now - start_ms).idiv(1000));
         $window_draw_frame(window, frame_buffer);
         last_draw = now;
     }
