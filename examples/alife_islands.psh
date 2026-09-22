@@ -101,10 +101,25 @@ let CELL_EMPTY = 7;
 // which gives an upper bound: measured, the population lands about 20% under
 // it, because agents carrying something pay CARRY_COST on top of living and
 // because a few plants always sit around waiting to be found
-let NUM_PLANTS = flag_int("--plants", 1740);
-let NUM_ROCKS = 1000;
-let NUM_LAKES = 14;
-let LAKE_STEPS = 60;
+// Terrain is grown rather than sprinkled, the way the original Gradient did
+// it. Scattering single cells at random gives a world with no shape: ponds
+// with no banks, and a plant density so even that the scent field comes out
+// nearly flat and there is no gradient left to climb
+let WATER_SEED_PROB = 0.0012;
+let WATER_PASSES = 23;
+
+// An empty cell with plants beside it is far likelier to become a plant than
+// one on its own, which is what turns scattered seeds into patches
+let PLANT_SEED_PROB = 0.004;
+let PLANT_SPREAD = 0.04;
+let PLANT_PASSES = 11;
+
+// Rock ridges, drawn as straight runs rather than confetti, which is what
+// gives the world corridors and dead ends. These are rock, not wall, so they
+// can be quarried and rebuilt by whoever wants to
+let RIDGE_MEAN = 10;
+let RIDGE_SD = 1;
+let RIDGE_MIN_LEN = 5;
 
 // Eating a plant leaves its seed behind, and the seed grows back into a
 // plant. Nothing in the world creates or destroys a plant, so the food
@@ -114,6 +129,12 @@ let LAKE_STEPS = 60;
 // plant count fixed, at most one plant per seed per hatch time can ever be
 // eaten, so the whole population lives inside that rate
 let SEED_HATCH = flag_int("--seed-hatch", 2400);
+
+// The seed list is walked in full rather than in hatching order, so it is
+// walked every few ticks instead of every tick. Measured, the walk costs
+// under 1% either way; this is headroom for a bigger world, and a seed
+// sprouting a few ticks late is nothing against a hatch time in the thousands
+let SEED_PERIOD = 8;
 let CORPSE_DECAY = 900;     // Ticks before an uneaten corpse disappears
 
 // --- Agent senses ---
@@ -227,7 +248,7 @@ let WATER_PER_DRINK = 250.0;
 let METAB_RATE = 1.0;
 let ENERGY_PER_UNIT = 2.0;
 let LIVING_COST = 1.0;
-let CARRY_COST = 0.5;
+let CARRY_COST = 0.25;
 
 // Above what a full set of starting reserves can ever buy, so an agent that
 // never eats cannot reproduce and the pressure to forage is real
@@ -241,13 +262,17 @@ let MAX_AGE = 20_000;
 
 // --- Evolution ---
 
+// How many random agents the world is kept topped up to until it can
+// sustain itself. This is the bootstrap lottery: the first lineage that can
+// forage has to be stumbled on by chance, so the rate of fresh genomes is
+// the rate at which tickets are drawn
 let MIN_POP = 25;
 // Not a balance knob: the population is meant to be limited by food, not by
 // this. With births costing exactly what a newborn is endowed with, the
 // energy the world supplies per tick is the plant flux, and every agent
 // burns LIVING_COST per tick, so the population settles at
 //
-//   (NUM_PLANTS / SEED_HATCH) * FOOD_PER_PLANT * ENERGY_PER_UNIT / LIVING_COST
+//   (total_plants / SEED_HATCH) * FOOD_PER_PLANT * ENERGY_PER_UNIT / LIVING_COST
 //
 // which is about 300, independent of how many plants an agent eats in its
 // life. This ceiling only exists so that a runaway cannot exhaust memory
@@ -470,6 +495,7 @@ class Agent
         self.energy = START_ENERGY;
         self.carried = ITEM_NONE;
         self.carried_food = 0.0;
+        self.carried_due = 0;
         self.age = 0;
         self.alive = true;
 
@@ -672,7 +698,10 @@ class Agent
             self.carried = ITEM_ROCK;
         }
         else if (terrain == CELL_SEED) {
+            // The seed keeps ripening in hand: carrying it holds on to when
+            // it is due, rather than starting it over on every drop
             self.carried = ITEM_SEED;
+            self.carried_due = island.seed_due.get_u32(idx);
         }
         else if (terrain == CELL_CORPSE) {
             // The carcass keeps its value while it is being hauled around
@@ -706,7 +735,7 @@ class Agent
         }
         else if (self.carried == ITEM_SEED) {
             island.set_terrain(idx, CELL_SEED);
-            island.plant_seed(idx);
+            island.plant_seed(idx, self.carried_due);
         }
         else if (self.carried == ITEM_CORPSE) {
             island.place_corpse(idx, self.carried_food);
@@ -769,8 +798,12 @@ class Island
 
         // Queues of pending world events. Every entry in one queue has the
         // same delay, so each is already in order and only the head is due
+        // Cells that currently hold a seed, and the tick each one is due to
+        // hatch. The due time lives per cell rather than in the list because
+        // a carried seed keeps its own, so the list can no longer be assumed
+        // to be in hatching order the way the corpse queue still is
         self.seeds = [];
-        self.seeds_head = 0;
+        self.seed_due = ByteArray.with_size(GRID_W * GRID_H * 4);
         self.corpses = [];
         self.corpses_head = 0;
 
@@ -784,6 +817,7 @@ class Island
         self.num_seeded = 0;
         self.num_died = 0;
         self.num_plants = 0;
+        self.total_plants = 0;
         self.num_eaten = 0;
 
         // What the population actually spends its ticks doing. The cheapest
@@ -811,34 +845,13 @@ class Island
             }
         }
 
-        // Lakes, grown by a random walk so they come out as blobs rather
-        // than as noise an agent could never learn to navigate
-        for (let var i = 0; i < NUM_LAKES; ++i) {
-            let var x = rng.int(BORDER + 2, GRID_W - BORDER - 2);
-            let var y = rng.int(BORDER + 2, GRID_H - BORDER - 2);
+        self.grow_water();
+        self.grow_ridges();
+        self.grow_plants();
 
-            for (let var step = 0; step < LAKE_STEPS; ++step) {
-                grid.set_u32(y * GRID_W + x, CELL_WATER);
-
-                let d = rng.int(0, 4);
-                x = (x + FRONT_X[d]).clip(BORDER, GRID_W - BORDER - 1);
-                y = (y + FRONT_Y[d]).clip(BORDER, GRID_H - BORDER - 1);
-            }
-        }
-
-        for (let var i = 0; i < NUM_PLANTS; ++i) {
-            let idx = self.random_empty();
-            if (idx >= 0) {
-                grid.set_u32(idx, CELL_PLANT);
-                self.num_plants = self.num_plants + 1;
-            }
-        }
-
-        for (let var i = 0; i < NUM_ROCKS; ++i) {
-            let idx = self.random_empty();
-            if (idx >= 0)
-                grid.set_u32(idx, CELL_ROCK);
-        }
+        // The plant count comes out of the growth rather than being chosen,
+        // so it is counted once here and then conserved for the whole run
+        self.total_plants = self.num_plants;
 
         self.build_openness();
         self.rebuild_sources();
@@ -850,6 +863,154 @@ class Island
             self.diffuse();
 
         self.seed_population();
+    }
+
+    // Cells of a given type among the eight around this one. The border
+    // means the interior never has to bounds check
+    count_neighbors(self, x, y, type)
+    {
+        let grid = self.grid;
+        let idx = y * GRID_W + x;
+        let var n = 0;
+
+        for (let var dy = -1; dy <= 1; ++dy) {
+            let row = idx + dy * GRID_W;
+            for (let var dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0)
+                    continue;
+                if ((grid.get_u32(row + dx) & 0xFF) == type)
+                    n = n + 1;
+            }
+        }
+
+        return n;
+    }
+
+    // Sparse seeds flooded outwards. The exponential term is what rounds the
+    // ponds off: a cell with four water neighbours floods about a third of
+    // the time, one with six almost certainly, so bays and notches fill in
+    // instead of leaving the ragged edges a random walk produces
+    grow_water(self)
+    {
+        let rng = self.rng;
+        let grid = self.grid;
+
+        for (let var y = BORDER; y < GRID_H - BORDER; ++y) {
+            for (let var x = BORDER; x < GRID_W - BORDER; ++x) {
+                if (rng.float(0.0, 1.0) < WATER_SEED_PROB)
+                    grid.set_u32(y * GRID_W + x, CELL_WATER);
+            }
+        }
+
+        for (let var pass = 0; pass < WATER_PASSES; ++pass) {
+            for (let var y = BORDER; y < GRID_H - BORDER; ++y) {
+                for (let var x = BORDER; x < GRID_W - BORDER; ++x) {
+                    let idx = y * GRID_W + x;
+                    if ((grid.get_u32(idx) & 0xFF) == CELL_WATER)
+                        continue;
+
+                    let n = self.count_neighbors(x, y, CELL_WATER);
+                    if (n == 0)
+                        continue;
+
+                    let nf = n.to_f();
+                    if (rng.float(0.0, 1.0) < 0.02 * nf + 0.004 * nf.exp())
+                        grid.set_u32(idx, CELL_WATER);
+                }
+            }
+        }
+    }
+
+    norm_int(self, mean, sd)
+    {
+        return (mean.to_f() + self.gauss.next() * sd.to_f() + 0.5).floor().max(0);
+    }
+
+    // Straight runs of rock, laid down row-wise and column-wise. Neither is
+    // allowed to sit right beside another, so they stay as separate ridges
+    // rather than merging into one slab
+    grow_ridges(self)
+    {
+        let rng = self.rng;
+        let grid = self.grid;
+
+        let max_len = (GRID_W.min(GRID_H)).idiv(4);
+        let used = Array.with_size(GRID_W.max(GRID_H), false);
+
+        for (let var axis = 0; axis < 2; ++axis) {
+            let horiz = axis == 0;
+            let span = horiz ? GRID_W : GRID_H;
+            let cross = horiz ? GRID_H : GRID_W;
+
+            for (let var i = 0; i < used.len; ++i)
+                used[i] = false;
+
+            let target = self.norm_int(RIDGE_MEAN, RIDGE_SD);
+            let var made = 0;
+
+            // Capped, since a run can be rejected for several reasons and
+            // there is no guarantee a valid one is ever drawn
+            for (let var tries = 0; made < target && tries < 400; ++tries) {
+                let c = rng.int(BORDER + 1, cross - BORDER - 1);
+                if (used[c - 1] || used[c] || used[c + 1])
+                    continue;
+
+                let a = rng.int(BORDER, span - BORDER);
+                let b = rng.int(BORDER, span - BORDER);
+                let len = (a - b).abs();
+                if (len < RIDGE_MIN_LEN || len > max_len)
+                    continue;
+
+                let step = b > a ? 1 : -1;
+                for (let var p = a; p != b; p = p + step) {
+                    let x = horiz ? p : c;
+                    let y = horiz ? c : p;
+                    let idx = y * GRID_W + x;
+
+                    // Runs stop at water, and the second axis also stops
+                    // where it would run flush against an existing ridge
+                    if ((grid.get_u32(idx) & 0xFF) == CELL_WATER)
+                        break;
+                    if (!horiz && self.count_neighbors(x, y, CELL_ROCK) > 1)
+                        break;
+
+                    grid.set_u32(idx, CELL_ROCK);
+                }
+
+                used[c] = true;
+                made = made + 1;
+            }
+        }
+    }
+
+    // Plants spread from isolated seeds, so they come out in patches. Even
+    // scatter would leave every coarse cell holding about the same count,
+    // and the scent field it feeds would have no gradient worth climbing.
+    // Nothing grows on the shoreline, which keeps food and water apart and
+    // makes the trip between them a problem worth solving
+    grow_plants(self)
+    {
+        let rng = self.rng;
+        let grid = self.grid;
+
+        for (let var pass = 0; pass < PLANT_PASSES; ++pass) {
+            for (let var y = BORDER; y < GRID_H - BORDER; ++y) {
+                for (let var x = BORDER; x < GRID_W - BORDER; ++x) {
+                    let idx = y * GRID_W + x;
+                    if ((grid.get_u32(idx) & 0xFF) != CELL_EMPTY)
+                        continue;
+
+                    if (self.count_neighbors(x, y, CELL_WATER) > 0)
+                        continue;
+
+                    let n = self.count_neighbors(x, y, CELL_PLANT);
+                    let p = n == 0 ? PLANT_SEED_PROB : PLANT_SPREAD * n.to_f();
+
+                    if (rng.float(0.0, 1.0) < p)
+                        self.set_terrain(idx, CELL_PLANT);
+                }
+            }
+        }
     }
 
     random_empty(self)
@@ -1018,13 +1179,45 @@ class Island
     {
         self.set_terrain(idx, CELL_SEED);
         self.num_eaten = self.num_eaten + 1;
-        self.plant_seed(idx);
+        self.plant_seed(idx, self.tick_count + SEED_HATCH);
     }
 
-    plant_seed(self, idx)
+    // Puts a seed on a cell, due at an absolute tick. A seed that came due
+    // while it was being carried is already past its time and hatches on the
+    // next pass, so carrying never costs the seed anything but never lets it
+    // sprout in hand either
+    plant_seed(self, idx, due)
     {
-        self.seeds.push(self.tick_count + SEED_HATCH);
+        self.seed_due.set_u32(idx, due);
         self.seeds.push(idx);
+    }
+
+    // Walked in full every tick, because the list is not in hatching order.
+    // Entries whose cell no longer holds a seed were picked up or built over
+    // and are dropped here, which is what keeps the list bounded
+    tick_seeds(self)
+    {
+        let seeds = self.seeds;
+        let due = self.seed_due;
+        let now = self.tick_count;
+        let var w = 0;
+
+        for (let var i = 0; i < seeds.len; ++i) {
+            let idx = seeds[i];
+
+            if ((self.grid.get_u32(idx) & 0xFF) != CELL_SEED)
+                continue;
+
+            if (due.get_u32(idx) > now) {
+                seeds[w] = idx;
+                w = w + 1;
+                continue;
+            }
+
+            self.set_terrain(idx, CELL_PLANT);
+        }
+
+        seeds.resize(w, nil);
     }
 
     place_corpse(self, idx, value)
@@ -1133,6 +1326,44 @@ class Island
         return -1;
     }
 
+    // The nearest bare cell, searched in widening rings. Unlike
+    // free_cell_near this does not give up after the eight neighbours, so
+    // what a dying agent was carrying always finds somewhere to land: the
+    // plant count has to be conserved exactly, and a seed that fell through
+    // the cracks because a crowd happened to be standing around would take a
+    // plant out of the world permanently
+    free_cell_around(self, x, y)
+    {
+        let grid = self.grid;
+        let max_r = GRID_W.max(GRID_H);
+
+        for (let var r = 1; r < max_r; ++r) {
+            for (let var dy = -r; dy <= r; ++dy) {
+                let ny = y + dy;
+                if (ny < BORDER || ny >= GRID_H - BORDER)
+                    continue;
+
+                // Only the edge of the ring, since everything inside it was
+                // covered by a previous, smaller ring
+                let edge = dy.abs() == r;
+                let step = edge ? 1 : 2 * r;
+
+                for (let var dx = -r; dx <= r; dx = dx + step) {
+                    let nx = x + dx;
+                    if (nx < BORDER || nx >= GRID_W - BORDER)
+                        continue;
+
+                    let idx = ny * GRID_W + nx;
+                    let cell = grid.get_u32(idx);
+                    if (is_bare(cell & 0xFF) && (cell >> 8) == 0)
+                        return idx;
+                }
+            }
+        }
+
+        return -1;
+    }
+
     // Nothing here decides who deserves to reproduce. An agent reproduces
     // because it chose to and had banked the energy to pay for it
     reproduce(self, parent)
@@ -1187,17 +1418,18 @@ class Island
         self.free_slots.push(agent.slot);
         self.num_died = self.num_died + 1;
 
-        // Whatever it was carrying falls beside it, so that dying holding a
-        // seed does not quietly remove a plant from the world for good
+        // Whatever it was carrying falls nearby, keeping its ripeness or its
+        // food value. The search widens until it finds ground, so a seed is
+        // never lost and the plant count stays exactly conserved
         if (agent.carried != ITEM_NONE) {
-            let spot = self.free_cell_near(agent.x, agent.y);
+            let spot = self.free_cell_around(agent.x, agent.y);
             if (spot >= 0) {
                 if (agent.carried == ITEM_ROCK) {
                     self.set_terrain(spot, CELL_ROCK);
                 }
                 else if (agent.carried == ITEM_SEED) {
                     self.set_terrain(spot, CELL_SEED);
-                    self.plant_seed(spot);
+                    self.plant_seed(spot, agent.carried_due);
                 }
                 else {
                     self.place_corpse(spot, agent.carried_food);
@@ -1283,7 +1515,9 @@ class Island
             pop.push(self.births[i]);
         self.births.resize(0, nil);
 
-        self.seeds_head = self.drain_queue(self.seeds, self.seeds_head, CELL_PLANT, CELL_SEED);
+        // Offset from the scent pass so the two do not land on the same tick
+        if (self.tick_count % SEED_PERIOD == 4)
+            self.tick_seeds();
         self.corpses_head = self.drain_queue(self.corpses, self.corpses_head, CELL_EMPTY, CELL_CORPSE);
 
         if (self.tick_count % SCENT_PERIOD == 0)
@@ -1370,6 +1604,20 @@ class Island
             total = total + self.pop[i].age;
 
         return total.idiv(self.pop.len);
+    }
+
+    // How far the population is from starving, on average. It climbs as
+    // foraging improves, and REPRO_COST is the level worth comparing it to
+    mean_energy(self)
+    {
+        if (self.pop.len == 0)
+            return 0;
+
+        let var total = 0.0;
+        for (let var i = 0; i < self.pop.len; ++i)
+            total = total + self.pop[i].energy;
+
+        return (total / self.pop.len.to_f()).floor();
     }
 }
 
@@ -1671,19 +1919,12 @@ fun draw_panel(buf, island, ticks_per_sec, zoom, paused, fast, status) {
     // Plants and seeds together are conserved, so this is the share of the
     // world's food that is grown and edible right now rather than waiting to
     // hatch. It falls as the population learns to forage and then settles
-    let avail = 100.0 * island.num_plants.to_f() / NUM_PLANTS.to_f();
+    let avail = 100.0 * island.num_plants.to_f() / island.total_plants.max(1).to_f();
     line("PLANTS AVAIL", avail.format_decimals(1) + "%", COL_TEXT);
 
     line("MEAN AGE", island.mean_age().comma_sep(), COL_TEXT);
+    line("MEAN ENERGY", island.mean_energy().comma_sep(), COL_TEXT);
     line("ZOOM", zoom.to_s(), COL_TEXT);
-
-    // Born over seeded is the number to watch: once it climbs and keeps
-    // climbing, the population is sustaining itself instead of being
-    // propped up by fresh random agents
-    let var ratio = "0.00";
-    if (island.num_seeded > 0)
-        ratio = (island.num_born.to_f() / island.num_seeded.to_f()).format_decimals(2);
-    line("BORN/SEED", ratio, COL_TEXT);
 
     let legend = [
         "DRAG   PAN",
