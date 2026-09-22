@@ -56,6 +56,27 @@ let MAX_TICKS = flag_int("--ticks", 0);
 // seed is printed so that a run worth keeping can be repeated with --seed
 let WORLD_SEED = flag_int("--seed", $time_current_ms());
 
+// --- Islands ---
+//
+// Each island is a world of its own, run by its own actor, and they are
+// joined in a ring by gates. Evolution is the part of this that parallelises
+// perfectly: the islands share nothing, so the throughput is the core count,
+// and long stretches of isolation let each one find its own local answer
+// before a handful of migrants carry it next door.
+//
+// They are laid out side by side in one coordinate space, so the camera pans
+// across the whole ring as if it were a single world. Each island already
+// carries a two-cell wall border, so neighbours in the layout are separated
+// by four cells of wall without anything extra being drawn
+let NUM_ISLANDS = flag_int("--islands", 4);
+
+// Ticks a gate stays shut, and how many may cross before it shuts again.
+// The gate is an opening in the wall that reads as ordinary ground, so
+// somebody wanders through it sooner or later without needing to be lured
+let GATE_PERIOD = flag_int("--gate-period", 300_000);
+let GATE_CROSSINGS = flag_int("--gate-crossings", 20);
+let GATE_WIDTH = 3;
+
 // --- Display ---
 
 let FRAME_WIDTH = 1024;
@@ -65,8 +86,7 @@ let VIEW_W = FRAME_WIDTH - PANEL_W;
 
 // Zoom is in pixels per cell. The floor is not 1 because a whole screen of
 // single-pixel cells costs one host call each and outruns the frame budget
-let ZOOM_LEVELS = [2, 3, 4, 6, 8, 12, 16];
-let DEFAULT_ZOOM = 2;
+let ZOOM_LEVELS = [1, 2, 3, 4, 6, 8, 12, 16];
 
 let DRAW_PERIOD_MS = 33;
 
@@ -74,7 +94,10 @@ let DRAW_PERIOD_MS = 33;
 // takes a couple of actions a second and you can actually follow what it is
 // doing. Fast mode is the one that runs flat out
 let SLOW_TICK_MS = 200;
-let FAST_SLICE_MS = 100;
+// How often the renderer asks the islands for a fresh picture. Well under
+// the frame rate, since a snapshot copies a grid per island and the world
+// does not change fast enough at a distance to be worth more
+let SNAP_PERIOD_MS = 100;
 
 // --- World ---
 
@@ -86,6 +109,44 @@ let WORLD_H = 128;
 let BORDER = 2;
 let GRID_W = WORLD_W + 2 * BORDER;
 let GRID_H = WORLD_H + 2 * BORDER;
+
+// The islands tiled into one rectangle, as square as the count allows, and
+// the combined coordinate space the camera moves over
+fun isqrt_ceil(n) {
+    let var r = 1;
+    while (r * r < n)
+        r = r + 1;
+    return r;
+}
+
+let TILE_COLS = isqrt_ceil(NUM_ISLANDS);
+let TILE_ROWS = (NUM_ISLANDS + TILE_COLS - 1).idiv(TILE_COLS);
+
+// Neighbours are laid down overlapping by one border, so the wall between
+// two islands is BORDER cells rather than twice that. Both islands draw wall
+// on those cells, so the overlap is invisible, and each island keeps the
+// full two-cell border its sensing depends on: the view reaches two cells
+// ahead, and that border is what lets it skip bounds checks altogether
+let TILE_STEP_X = GRID_W - BORDER;
+let TILE_STEP_Y = GRID_H - BORDER;
+let WORLD_CELLS_W = TILE_COLS * TILE_STEP_X + BORDER;
+let WORLD_CELLS_H = TILE_ROWS * TILE_STEP_Y + BORDER;
+
+// Opens on the whole ring, whatever its size, so a bigger island count is
+// still something you can take in at a glance before zooming in
+fun fit_zoom() {
+    let var best = 0;
+
+    for (let var i = 0; i < ZOOM_LEVELS.len; ++i) {
+        let z = ZOOM_LEVELS[i];
+        if (WORLD_CELLS_W * z <= VIEW_W && WORLD_CELLS_H * z <= FRAME_HEIGHT)
+            best = i;
+    }
+
+    return best;
+}
+
+let DEFAULT_ZOOM = fit_zoom();
 
 // A grid cell is the terrain type in the low byte and the occupying agent's
 // slot, plus one, above it. One read answers both questions
@@ -299,7 +360,7 @@ let MUT_RATE = 0.02;
 let MUT_SIGMA = 0.15;
 let MUT_RESET_PROB = 0.1;
 
-let SAVE_PATH = "alife_pop.bin";
+let SAVE_PREFIX = "alife_pop_";
 let SAVE_MAGIC = 0x464C4150;
 let SAVE_VERSION = 1;
 
@@ -515,6 +576,7 @@ class Agent
         self.carried_food = 0.0;
         self.carried_due = 0;
         self.hit_tick = -1;
+        self.emigrated = false;
         self.age = 0;
         self.alive = true;
 
@@ -654,8 +716,14 @@ class Agent
             let cell = island.grid.get_u32(dst);
 
             // The border means a move can never leave the grid
-            if (is_passable(cell & 0xFF) && (cell >> 8) == 0)
-                island.move_agent(self, dst);
+            if (is_passable(cell & 0xFF) && (cell >> 8) == 0) {
+                // Stepping into an open doorway carries you next door
+                let side = island.gate_at(dst);
+                if (side >= 0)
+                    island.emigrate(self, side);
+                else
+                    island.move_agent(self, dst);
+            }
         }
         else if (action == ACT_LEFT) {
             self.dir = (self.dir + 3) % 4;
@@ -875,6 +943,17 @@ class Island
         // not: a population still picking every action uniformly has not
         self.act_counts = Array.with_size(NUM_ACTIONS, 0);
 
+        // Gates. Index 0 leads to the next island around the ring and index
+        // 1 to the previous one. Emigrants are queued here rather than sent,
+        // so that this class stays free of any knowledge of actors: whoever
+        // is driving it flushes the outbox wherever it needs to go
+        self.gate_open = [false, false];
+        self.gate_count = [0, 0];
+        self.gate_cells = [self.gate_span(0), self.gate_span(1)];
+        self.outbox = [];
+        self.num_left = 0;
+        self.num_arrived = 0;
+
         self.generate();
     }
 
@@ -913,6 +992,136 @@ class Island
             self.diffuse();
 
         self.seed_population();
+    }
+
+    // --- Gates ---
+    //
+    // A gate is a few cells cut out of the middle of the east or west wall.
+    // Nothing marks it as special to an agent: it reads as ordinary ground,
+    // which is why one gets used without having to be advertised
+
+    gate_span(self, side)
+    {
+        let x = side == 0 ? GRID_W - BORDER - 1 : BORDER;
+        let y0 = (GRID_H - GATE_WIDTH).idiv(2);
+        let cells = [];
+
+        for (let var i = 0; i < GATE_WIDTH; ++i)
+            cells.push((y0 + i) * GRID_W + x);
+
+        return cells;
+    }
+
+    set_gate(self, side, open)
+    {
+        if (self.gate_open[side] == open)
+            return;
+
+        self.gate_open[side] = open;
+        self.gate_count[side] = 0;
+
+        let cells = self.gate_cells[side];
+        for (let var i = 0; i < cells.len; ++i) {
+            let idx = cells[i];
+
+            // Anything standing in the doorway when it shuts is simply
+            // walled in, so the cell is only changed when it is clear
+            let cell = self.grid.get_u32(idx);
+            if ((cell >> 8) != 0)
+                continue;
+
+            self.set_terrain(idx, open ? CELL_EMPTY : CELL_WALL);
+        }
+    }
+
+    // Which gate, if any, a cell belongs to
+    gate_at(self, idx)
+    {
+        for (let var side = 0; side < 2; ++side) {
+            if (!self.gate_open[side])
+                continue;
+
+            let cells = self.gate_cells[side];
+            for (let var i = 0; i < cells.len; ++i) {
+                if (cells[i] == idx)
+                    return side;
+            }
+        }
+
+        return -1;
+    }
+
+    // Packs an agent up and hands it to the outbox. What it was carrying is
+    // left behind, because plants are conserved per island and a seed taken
+    // through a gate would put both sides' books out
+    emigrate(self, agent, side)
+    {
+        if (agent.carried == ITEM_SEED) {
+            let spot = self.free_cell_around(agent.x, agent.y);
+            if (spot >= 0) {
+                self.set_terrain(spot, CELL_SEED);
+                self.plant_seed(spot, agent.carried_due);
+            }
+        }
+        agent.carried = ITEM_NONE;
+
+        // Its own energy and stores travel with it, so crossing neither
+        // costs nor creates anything
+        self.outbox.push([
+            side,
+            agent.genome,
+            agent.energy,
+            agent.food,
+            agent.water,
+            agent.age
+        ]);
+
+        // Released here rather than by the usual route: it left, so it
+        // leaves no carcass and does not count among the dead
+        let idx = agent.y * GRID_W + agent.x;
+        self.grid.set_u32(idx, self.grid.get_u32(idx) & 0xFF);
+        self.slots[agent.slot] = nil;
+        self.free_slots.push(agent.slot);
+
+        agent.alive = false;
+        agent.emigrated = true;
+        self.num_left = self.num_left + 1;
+
+        self.gate_count[side] = self.gate_count[side] + 1;
+        if (self.gate_count[side] >= GATE_CROSSINGS)
+            self.set_gate(side, false);
+    }
+
+    // An arrival is placed just inside the gate it came through, or anywhere
+    // free if the doorway is crowded
+    immigrate(self, record)
+    {
+        let side = record[0];
+        let entry = self.gate_cells[1 - side];
+
+        let var idx = -1;
+        for (let var i = 0; i < entry.len && idx < 0; ++i) {
+            let near = self.free_cell_around(entry[i] % GRID_W, entry[i].idiv(GRID_W));
+            if (near >= 0)
+                idx = near;
+        }
+
+        if (idx < 0)
+            idx = self.random_free_cell();
+        if (idx < 0)
+            return;
+
+        let agent = self.place_agent(record[1], idx);
+        if (agent == nil)
+            return;
+
+        agent.energy = record[2];
+        agent.food = record[3];
+        agent.water = record[4];
+        agent.age = record[5];
+
+        self.pop.push(agent);
+        self.num_arrived = self.num_arrived + 1;
     }
 
     // Cells of a given type among the eight around this one. The border
@@ -1558,7 +1767,7 @@ class Island
             if (agent.alive) {
                 pop[w] = agent;
                 w = w + 1;
-            } else {
+            } else if (!agent.emigrated) {
                 self.bury(agent);
             }
         }
@@ -1579,6 +1788,15 @@ class Island
             self.diffuse();
 
         self.seed_population();
+
+        // Long isolation, then a brief opening. The point of the quiet
+        // stretch is that each island gets to settle on its own answer
+        // before a few migrants carry it next door
+        if (NUM_ISLANDS > 1 && self.tick_count % GATE_PERIOD == 0) {
+            self.set_gate(0, true);
+            self.set_gate(1, true);
+        }
+
         self.tick_count = self.tick_count + 1;
     }
 
@@ -1647,6 +1865,51 @@ class Island
         }
 
         return loaded;
+    }
+
+    // Everything the renderer needs and nothing it does not. Sending the
+    // island itself would be simpler, but a message is deep copied and the
+    // population's genomes are about two megabytes of weights that the
+    // renderer never looks at, against seventy kilobytes for this
+    snapshot(self)
+    {
+        let grid = ByteArray.with_size(GRID_W * GRID_H * 4);
+        grid.memcpy(0, self.grid, 0, GRID_W * GRID_H * 4);
+
+        // Agents are looked up by slot while drawing, so their drawable
+        // state is packed into flat runs indexed the same way
+        let colors = ByteArray.with_size((MAX_POP + 1) * 4);
+        let dirs = ByteArray.with_size((MAX_POP + 1) * 4);
+        let hits = ByteArray.with_size((MAX_POP + 1) * 4);
+
+        let pop = self.pop;
+        for (let var i = 0; i < pop.len; ++i) {
+            let agent = pop[i];
+            colors.set_u32(agent.slot, agent.color);
+            dirs.set_u32(agent.slot, agent.dir);
+            hits.set_u32(agent.slot, agent.hit_tick == self.tick_count ? 1 : 0);
+        }
+
+        return {
+            grid: grid,
+            colors: colors,
+            dirs: dirs,
+            hits: hits,
+            tick_count: self.tick_count,
+            pop: pop.len,
+            born: self.num_born,
+            seeded: self.num_seeded,
+            died: self.num_died,
+            killed: self.num_killed,
+            eaten: self.num_eaten,
+            plants: self.num_plants,
+            total_plants: self.total_plants,
+            left: self.num_left,
+            arrived: self.num_arrived,
+            gates: self.gate_open[0] || self.gate_open[1],
+            mean_age: self.mean_age(),
+            mean_energy: self.mean_energy()
+        };
     }
 
     mean_age(self)
@@ -1890,50 +2153,38 @@ fun draw_text(buf, x, y, text, color, scale) {
 
 // The world, drawn cell by cell. Only the cells the viewport actually covers
 // are visited, so the cost is bounded by the smaller of world and screen
-fun draw_world(buf, island, cam_x, cam_y, zoom) {
-    let grid = island.grid;
-    let slots = island.slots;
+// One island, drawn at an offset into the combined world. Takes a snapshot
+// rather than an Island, since the renderer lives in the main actor and the
+// islands live in their own
+fun draw_island(buf, snap, origin_x, origin_y, cam_x, cam_y, zoom, shaped) {
+    let grid = snap.grid;
+    let colors = snap.colors;
+    let dirs = snap.dirs;
+    let hits = snap.hits;
 
-    // Below a few pixels a cell is too small to hold a shape, so it stays a
-    // flat square and the screen reads as a heat map instead
-    let shaped = zoom >= MIN_SHAPE_ZOOM;
-    if (shaped && zoom != shape_zoom)
-        build_shapes(zoom);
+    // The rows and columns of this island that fall inside the view
+    let j0 = (origin_y - cam_y) * zoom < 0 ? (cam_y - origin_y) : 0;
+    let i0 = (origin_x - cam_x) * zoom < 0 ? (cam_x - origin_x) : 0;
+    let j1 = GRID_H.min(cam_y + FRAME_HEIGHT.idiv(zoom) + 1 - origin_y);
+    let i1 = GRID_W.min(cam_x + VIEW_W.idiv(zoom) + 1 - origin_x);
 
-    let cells_w = (VIEW_W.idiv(zoom)) + 1;
-    let cells_h = (FRAME_HEIGHT.idiv(zoom)) + 1;
-
-    for (let var j = 0; j < cells_h; ++j) {
-        let wy = cam_y + j;
-        if (wy < 0 || wy >= GRID_H)
-            continue;
-
-        let py = j * zoom;
+    for (let var wy = j0.max(0); wy < j1; ++wy) {
+        let py = (origin_y + wy - cam_y) * zoom;
         let row = wy * GRID_W;
 
-        for (let var i = 0; i < cells_w; ++i) {
-            let wx = cam_x + i;
-            if (wx < 0 || wx >= GRID_W)
-                continue;
-
+        for (let var wx = i0.max(0); wx < i1; ++wx) {
             let cell = grid.get_u32(row + wx);
-            let px = i * zoom;
+            let px = (origin_x + wx - cam_x) * zoom;
             let slot = cell >> 8;
             let terrain = cell & 0xFF;
 
-            let var agent = nil;
-            if (slot != 0)
-                agent = slots[slot];
-
-            // Struck this very tick. Held for the whole tick rather than a
-            // single frame, so in slow mode it is a quarter second of red
-            // rather than something you have to be looking straight at
-            let hit = agent != nil && agent.hit_tick == island.tick_count;
+            let has_agent = slot != 0;
+            let hit = has_agent && hits.get_u32(slot) != 0;
 
             if (!shaped) {
                 let var flat = TERRAIN_COLORS[terrain];
-                if (agent != nil)
-                    flat = hit ? COL_HIT : agent.color;
+                if (has_agent)
+                    flat = hit ? COL_HIT : colors.get_u32(slot);
                 fill_rect(buf, px, py, zoom, zoom, flat);
                 continue;
             }
@@ -1948,7 +2199,7 @@ fun draw_world(buf, island, cam_x, cam_y, zoom) {
                 draw_terrain_runs(buf, px, py, shape);
             }
 
-            if (agent == nil)
+            if (!has_agent)
                 continue;
 
             // The cell behind the agent goes red, so the arrow stays its own
@@ -1957,16 +2208,80 @@ fun draw_world(buf, island, cam_x, cam_y, zoom) {
             if (hit)
                 fill_rect(buf, px, py, zoom, zoom, COL_HIT);
 
-            draw_agent_runs(buf, px, py, agent_shapes[agent.dir], agent.color);
+            draw_agent_runs(buf, px, py, agent_shapes[dirs.get_u32(slot)],
+                            colors.get_u32(slot));
         }
     }
 }
 
-fun draw_panel(buf, island, ticks_per_sec, zoom, paused, fast, status) {
+// The whole ring, laid out side by side so the camera crosses from one
+// island to the next without anything special happening at the seam
+fun draw_world(buf, snaps, cam_x, cam_y, zoom) {
+    let shaped = zoom >= MIN_SHAPE_ZOOM;
+    if (shaped && zoom != shape_zoom)
+        build_shapes(zoom);
+
+    for (let var i = 0; i < snaps.len; ++i) {
+        let snap = snaps[i];
+        if (snap == nil)
+            continue;
+
+        let ox = (i % TILE_COLS) * TILE_STEP_X;
+        let oy = i.idiv(TILE_COLS) * TILE_STEP_Y;
+
+        // Skip an island that falls entirely outside the view
+        if ((ox + GRID_W - cam_x) * zoom < 0 || (ox - cam_x) * zoom > VIEW_W)
+            continue;
+        if ((oy + GRID_H - cam_y) * zoom < 0 || (oy - cam_y) * zoom > FRAME_HEIGHT)
+            continue;
+
+        draw_island(buf, snap, ox, oy, cam_x, cam_y, zoom, shaped);
+    }
+}
+
+// Summed across the ring, except the tick count, which is per island and is
+// taken as the slowest, and the averages, which are averaged again
+fun draw_panel(buf, snaps, ticks_per_sec, zoom, paused, fast, status) {
     fill_rect(buf, VIEW_W, 0, PANEL_W, FRAME_HEIGHT, COL_PANEL);
 
     let x = VIEW_W + 10;
     let var y = 12;
+
+    let var ticks = 0;
+    let var pop = 0; let var born = 0; let var seeded = 0;
+    let var died = 0; let var killed = 0; let var eaten = 0;
+    let var plants = 0; let var total_plants = 0;
+    let var age = 0; let var energy = 0;
+    let var crossed = 0; let var have = 0; let var gates = false;
+
+    for (let var i = 0; i < snaps.len; ++i) {
+        let s = snaps[i];
+        if (s == nil)
+            continue;
+
+        // Summed, not the slowest island's count. Once the islands stop
+        // being alike a populated one ticks far slower than one still down
+        // at MIN_POP, so a minimum would report the laggard and hide the
+        // rest. The sum is the work the ring has actually done, and TICKS/S
+        // is the same quantity differenced, so the two agree
+        ticks = ticks + s.tick_count;
+        have = have + 1;
+        pop = pop + s.pop;
+        born = born + s.born;
+        seeded = seeded + s.seeded;
+        died = died + s.died;
+        killed = killed + s.killed;
+        eaten = eaten + s.eaten;
+        plants = plants + s.plants;
+        total_plants = total_plants + s.total_plants;
+        age = age + s.mean_age;
+        energy = energy + s.mean_energy;
+        crossed = crossed + s.arrived;
+        gates = gates || s.gates;
+    }
+
+    if (have == 0)
+        have = 1;
 
     fun line(label, value, color) {
         draw_text(buf, x, y, label, COL_DIM, 2);
@@ -1977,23 +2292,24 @@ fun draw_panel(buf, island, ticks_per_sec, zoom, paused, fast, status) {
     draw_text(buf, x, y, "A-LIFE ISLANDS", COL_TEXT, 2);
     y = y + 26;
 
-    line("TICK", island.tick_count.comma_sep(), COL_TEXT);
+    line("TOTAL TICKS", ticks.comma_sep(), COL_TEXT);
     line("TICKS/S", ticks_per_sec.comma_sep(), COL_TEXT);
-    line("AGENTS", island.pop.len.to_s(), COL_TEXT);
-    line("BORN", island.num_born.comma_sep(), COL_TEXT);
-    line("SEEDED", island.num_seeded.comma_sep(), COL_TEXT);
-    line("DIED", island.num_died.comma_sep(), COL_TEXT);
-    line("KILLED", island.num_killed.comma_sep(), COL_TEXT);
-    line("EATEN", island.num_eaten.comma_sep(), COL_TEXT);
+    line("AGENTS", pop.to_s(), COL_TEXT);
+    line("BORN", born.comma_sep(), COL_TEXT);
+    line("SEEDED", seeded.comma_sep(), COL_TEXT);
+    line("DIED", died.comma_sep(), COL_TEXT);
+    line("KILLED", killed.comma_sep(), COL_TEXT);
+    line("EATEN", eaten.comma_sep(), COL_TEXT);
 
     // Plants and seeds together are conserved, so this is the share of the
     // world's food that is grown and edible right now rather than waiting to
     // hatch. It falls as the population learns to forage and then settles
-    let avail = 100.0 * island.num_plants.to_f() / island.total_plants.max(1).to_f();
+    let avail = 100.0 * plants.to_f() / total_plants.max(1).to_f();
     line("PLANTS AVAIL", avail.format_decimals(1) + "%", COL_TEXT);
 
-    line("MEAN AGE", island.mean_age().comma_sep(), COL_TEXT);
-    line("MEAN ENERGY", island.mean_energy().comma_sep(), COL_TEXT);
+    line("MEAN AGE", age.idiv(have).comma_sep(), COL_TEXT);
+    line("MEAN ENERGY", energy.idiv(have).comma_sep(), COL_TEXT);
+    line("CROSSED", crossed.comma_sep(), gates ? COL_HIT : COL_TEXT);
     line("ZOOM", zoom.to_s(), COL_TEXT);
 
     let legend = [
@@ -2018,72 +2334,214 @@ fun draw_panel(buf, island, ticks_per_sec, zoom, paused, fast, status) {
         draw_text(buf, x, legend_y - 22, status, COL_TEXT, 2);
 }
 
+// --- Island actors ---
+//
+// One actor per island. They share nothing, so they run flat out on separate
+// cores, and migrants go straight from one to its neighbour without passing
+// through the main actor. An island never blocks on its mailbox: it polls
+// between batches of ticks, because a blocked island is one that has stopped
+// evolving
+
+let MSG_SETUP = 0;     // index, seed, actor ids around the ring
+let MSG_SPEED = 1;     // ms between ticks, or 0 to run flat out
+let MSG_SNAP = 2;      // send the renderer a fresh snapshot
+let MSG_MIGRANT = 3;   // an agent arriving from next door
+let MSG_SAVE = 4;      // write this island's population to its own file
+
+// How many ticks an island runs between mailbox polls when going flat out.
+// Small enough that a migrant or a snapshot request is never held up long
+let TICK_BATCH = 64;
+
+fun island_actor() {
+    let setup = $actor_recv();
+    let index = setup[1];
+    let ids = setup[3];
+    let parent = $actor_parent();
+
+    // Each island gets its own stream, so they do not evolve in lockstep
+    let island = Island(setup[2] + index * 7919);
+
+    // Around the ring. Gate 0 leads forward, gate 1 back
+    let neighbours = [
+        ids[(index + 1) % ids.len],
+        ids[(index + ids.len - 1) % ids.len]
+    ];
+
+    let var tick_ms = 0;
+    let var next_tick = 0;
+
+    loop {
+        loop {
+            let msg = $actor_poll();
+            if (msg == nil)
+                break;
+
+            let kind = msg[0];
+            if (kind == MSG_SPEED)
+                tick_ms = msg[1];
+            else if (kind == MSG_SNAP) {
+                let snap = island.snapshot();
+                snap.index = index;
+                $actor_send(parent, snap);
+            }
+            else if (kind == MSG_MIGRANT)
+                island.immigrate(msg[1]);
+            else if (kind == MSG_SAVE) {
+                // One file per island, since each holds its own population
+                let path = SAVE_PREFIX + index.to_s() + ".bin";
+                let n = island.save(path);
+                if (n >= 0)
+                    $println("Saved " + n.to_s() + " genomes to " + path);
+                else
+                    $println("Failed to save to " + path);
+            }
+        }
+
+        if (tick_ms == 0) {
+            for (let var i = 0; i < TICK_BATCH; ++i)
+                island.tick();
+        }
+        else {
+            let now = $time_current_ms();
+            if (now >= next_tick) {
+                island.tick();
+                next_tick = now + tick_ms;
+            } else {
+                $actor_sleep(2);
+            }
+        }
+
+        // Anybody who walked through a gate goes to whoever is on the other
+        // side of it
+        let outbox = island.outbox;
+        for (let var i = 0; i < outbox.len; ++i) {
+            let record = outbox[i];
+            $actor_send(neighbours[record[0]], [MSG_MIGRANT, record]);
+        }
+        outbox.resize(0, nil);
+    }
+}
+
+// Spawns the ring and tells every island who its neighbours are. The actor
+// ids only exist once everything has been spawned, which is why setup is a
+// message rather than an argument
+fun spawn_islands(seed) {
+    let ids = [];
+    for (let var i = 0; i < NUM_ISLANDS; ++i)
+        ids.push($actor_spawn(island_actor));
+
+    for (let var i = 0; i < NUM_ISLANDS; ++i)
+        $actor_send(ids[i], [MSG_SETUP, i, seed, ids]);
+
+    return ids;
+}
+
+fun broadcast(ids, msg) {
+    for (let var i = 0; i < ids.len; ++i)
+        $actor_send(ids[i], msg);
+}
+
 // --- Headless ---
 
-fun run_headless(island) {
+// Polls every island for a snapshot and blocks until they all answer. Only
+// used by the headless reporter, where there is nothing else to get on with
+fun gather(ids, snaps) {
+    broadcast(ids, [MSG_SNAP]);
+
+    for (let var got = 0; got < ids.len; ++got) {
+        let reply = $actor_recv();
+        snaps[reply.index] = reply;
+    }
+}
+
+fun run_headless(ids) {
     let limit = MAX_TICKS > 0 ? MAX_TICKS : 1000000;
-    let report_every = 20000;
+    let snaps = Array.with_size(ids.len, nil);
     let start = $time_current_ms();
 
-    $println("Running headless for " + limit.comma_sep() + " ticks, seed " + WORLD_SEED.to_s());
-    $println("tick  agents  born  seeded  died  killed  eaten  plants  mean_age  ticks/s");
-
-    let act_names = ["NOOP", "FWD", "LEFT", "RIGHT", "EAT", "PICK", "DROP", "REPRO"];
+    $println(
+        "Running headless to " + limit.comma_sep() + " ticks on " +
+        ids.len.to_s() + " island" + (ids.len == 1 ? "" : "s") +
+        ", seed " + WORLD_SEED.to_s()
+    );
+    $println("tick  agents  born  seeded  died  killed  eaten  plants  crossed  mean_age  ticks/s");
 
     let var last = start;
-    let var last_tick = 0;
+    let var last_total = 0;
 
-    for (let var t = 0; t < limit; ++t) {
-        island.tick();
+    loop {
+        $actor_sleep(1000);
+        gather(ids, snaps);
 
-        if ((t + 1) % report_every == 0) {
-            let now = $time_current_ms();
-            let rate = ((t + 1 - last_tick).to_f() * 1000.0 / (now - last).max(1).to_f()).floor();
+        // Summed across the ring, except the tick count, which is per island
+        // and is the slowest one, since that is what the run has reached
+        // The slowest island's count, so that --ticks means every island
+        // has run that far. The rate below is still the summed throughput
+        let var ticks = -1;
+        let var pop = 0; let var born = 0; let var seeded = 0;
+        let var died = 0; let var killed = 0; let var eaten = 0;
+        let var plants = 0; let var age = 0; let var total_ticks = 0;
+        let var crossed = 0;
 
-            $println(
-                island.tick_count.comma_sep().rpad(10, ' ') +
-                island.pop.len.to_s().rpad(8, ' ') +
-                island.num_born.comma_sep().rpad(8, ' ') +
-                island.num_seeded.comma_sep().rpad(8, ' ') +
-                island.num_died.comma_sep().rpad(8, ' ') +
-                island.num_killed.comma_sep().rpad(8, ' ') +
-                island.num_eaten.comma_sep().rpad(8, ' ') +
-                island.num_plants.comma_sep().rpad(8, ' ') +
-                island.mean_age().comma_sep().rpad(10, ' ') +
-                rate.comma_sep()
-            );
-
-            let var total = 0;
-            for (let var a = 0; a < NUM_ACTIONS; ++a)
-                total = total + island.act_counts[a];
-
-            let var line = "    actions:";
-            for (let var a = 0; a < NUM_ACTIONS; ++a) {
-                let pct = (100.0 * island.act_counts[a].to_f() / total.max(1).to_f());
-                line = line + " " + act_names[a] + " " + pct.format_decimals(0) + "%";
-            }
-            $println(line);
-
-            last = now;
-            last_tick = t + 1;
+        for (let var i = 0; i < snaps.len; ++i) {
+            let s = snaps[i];
+            ticks = ticks < 0 ? s.tick_count : ticks.min(s.tick_count);
+            total_ticks = total_ticks + s.tick_count;
+            pop = pop + s.pop;
+            born = born + s.born;
+            seeded = seeded + s.seeded;
+            died = died + s.died;
+            killed = killed + s.killed;
+            eaten = eaten + s.eaten;
+            plants = plants + s.plants;
+            age = age + s.mean_age;
+            crossed = crossed + s.arrived;
         }
-    }
 
-    let saved = island.save(SAVE_PATH);
-    if (saved >= 0)
-        $println("Saved " + saved.to_s() + " genomes to " + SAVE_PATH);
+        let now = $time_current_ms();
+        let rate = ((total_ticks - last_total).to_f() * 1000.0 /
+                    (now - last).max(1).to_f()).floor();
+
+        $println(
+            ticks.comma_sep().rpad(10, ' ') +
+            pop.to_s().rpad(8, ' ') +
+            born.comma_sep().rpad(8, ' ') +
+            seeded.comma_sep().rpad(8, ' ') +
+            died.comma_sep().rpad(8, ' ') +
+            killed.comma_sep().rpad(8, ' ') +
+            eaten.comma_sep().rpad(8, ' ') +
+            plants.comma_sep().rpad(8, ' ') +
+            crossed.comma_sep().rpad(9, ' ') +
+            age.idiv(snaps.len).comma_sep().rpad(10, ' ') +
+            rate.comma_sep()
+        );
+
+        last = now;
+        last_total = total_ticks;
+
+        if (ticks >= limit)
+            break;
+    }
 }
 
 // --- Main ---
 
 $println("World seed: " + WORLD_SEED.to_s() + "  (repeat this run with --seed " + WORLD_SEED.to_s() + ")");
 
-let island = Island(WORLD_SEED);
+let island_ids = spawn_islands(WORLD_SEED);
+broadcast(island_ids, [MSG_SPEED, 0]);
 
 if (HEADLESS) {
-    run_headless(island);
+    run_headless(island_ids);
     $exit(0);
 }
+
+// The last snapshot each island sent. The renderer never waits on one: it
+// draws whatever has arrived and asks again, so a busy island slows its own
+// picture down rather than the whole window
+let snaps = Array.with_size(NUM_ISLANDS, nil);
+let var snap_pending = false;
+let var last_snap = 0;
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "A-Life Islands", 0);
@@ -2101,7 +2559,7 @@ let var drag_x = 0;
 let var drag_y = 0;
 
 let var last_draw = 0;
-let var next_tick = 0;
+let var sent_speed = -2;
 let var rate_time = $time_current_ms();
 let var rate_tick = 0;
 let var ticks_per_sec = 0;
@@ -2109,8 +2567,8 @@ let var ticks_per_sec = 0;
 fun clamp_camera() {
     let cells_w = VIEW_W.idiv(zoom);
     let cells_h = FRAME_HEIGHT.idiv(zoom);
-    cam_x = cam_x.clip(0, (GRID_W - cells_w).max(0));
-    cam_y = cam_y.clip(0, (GRID_H - cells_h).max(0));
+    cam_x = cam_x.clip(0, (WORLD_CELLS_W - cells_w).max(0));
+    cam_y = cam_y.clip(0, (WORLD_CELLS_H - cells_h).max(0));
 }
 
 // Zooming keeps whatever is at the centre of the view at the centre
@@ -2139,6 +2597,15 @@ loop {
         if (event == nil)
             break;
 
+        // Snapshots land in the same mailbox as the window events. A
+        // snapshot is a dict and a window event is an object, so the two
+        // need nothing added to tell them apart
+        if (event instanceof Dict) {
+            snaps[event.index] = event;
+            snap_pending = false;
+            continue;
+        }
+
         if (event.kind == "CLOSE_WINDOW")
             $exit(0);
 
@@ -2162,15 +2629,9 @@ loop {
             else if (key == "DOWN")
                 cam_y = cam_y + 8;
             else if (key == "S") {
-                let n = island.save(SAVE_PATH);
-
-                if (n >= 0) {
-                    status = "SAVED " + n.to_s();
-                    $println("Saved " + n.to_s() + " genomes to " + SAVE_PATH);
-                } else {
-                    status = "SAVE FAILED";
-                    $println("Failed to save to " + SAVE_PATH);
-                }
+                // Each island writes its own file, and reports as it does
+                broadcast(island_ids, [MSG_SAVE]);
+                status = "SAVING";
             }
 
             clamp_camera();
@@ -2199,46 +2660,47 @@ loop {
         }
     }
 
-    if (!paused) {
-        if (fast) {
-            // Simulate for a slice and draw once, the way the original ran
-            let slice_start = $time_current_ms();
-            loop {
-                island.tick();
-                if ($time_current_ms() >= slice_start + FAST_SLICE_MS)
-                    break;
-            }
-        } else {
-            // One action at a time, on the clock. Catching up on a backlog
-            // is deliberately not done: after a pause or a slow frame the
-            // point is to keep watching, not to fast forward
-            let now_ms = $time_current_ms();
-            if (now_ms >= next_tick) {
-                island.tick();
-                next_tick = now_ms + SLOW_TICK_MS;
-            }
-        }
+    // The main actor no longer simulates anything: it only says how fast the
+    // islands should run, and they get on with it
+    let want_speed = paused ? -1 : (fast ? 0 : SLOW_TICK_MS);
+    if (want_speed != sent_speed) {
+        broadcast(island_ids, [MSG_SPEED, want_speed.max(0)]);
+        if (paused)
+            broadcast(island_ids, [MSG_SPEED, 1_000_000]);
+        sent_speed = want_speed;
     }
 
     let now = $time_current_ms();
 
+    // Asking again only once the last round has landed, so a slow island
+    // cannot pile up requests it will never catch up with
+    if (!snap_pending && now >= last_snap + SNAP_PERIOD_MS) {
+        broadcast(island_ids, [MSG_SNAP]);
+        snap_pending = true;
+        last_snap = now;
+    }
+
     if (now >= rate_time + 1000) {
-        ticks_per_sec = ((island.tick_count - rate_tick).to_f() * 1000.0 /
-                         (now - rate_time).to_f()).floor();
+        let var total = 0;
+        for (let var i = 0; i < snaps.len; ++i)
+            if (snaps[i] != nil)
+                total = total + snaps[i].tick_count;
+
+        ticks_per_sec = ((total - rate_tick).to_f() * 1000.0 /
+                         (now - rate_time).to_f()).floor().max(0);
         rate_time = now;
-        rate_tick = island.tick_count;
+        rate_tick = total;
     }
 
     if (now >= last_draw + DRAW_PERIOD_MS) {
         fill_rect(frame_buffer, 0, 0, VIEW_W, FRAME_HEIGHT, COL_EMPTY);
-        draw_world(frame_buffer, island, cam_x, cam_y, zoom);
-        draw_panel(frame_buffer, island, ticks_per_sec, zoom, paused, fast, status);
+        draw_world(frame_buffer, snaps, cam_x, cam_y, zoom);
+        draw_panel(frame_buffer, snaps, ticks_per_sec, zoom, paused, fast, status);
         $window_draw_frame(window, frame_buffer);
         last_draw = now;
     }
-    else if (!fast) {
-        // Nothing to draw and nothing due to simulate, so yield rather than
-        // spin. Fast mode never gets here, since it is always busy
-        $actor_sleep(2);
-    }
+
+    // The islands are off on their own actors, so this one has nothing to do
+    // between frames but wait for them
+    $actor_sleep(2);
 }
