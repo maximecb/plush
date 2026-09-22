@@ -1,4 +1,4 @@
-// Gradient Islands, an artificial life experiment
+// A-Life Islands, an artificial life experiment
 //
 // Agents with small recurrent neural nets live on a grid world, foraging for
 // plants and water. Nothing scores them: an agent that fails to feed runs out
@@ -51,7 +51,10 @@ fun flag_int(name, default) {
 
 let HEADLESS = has_flag("--headless");
 let MAX_TICKS = flag_int("--ticks", 0);
-let WORLD_SEED = flag_int("--seed", 1337);
+// A fresh world every run, since a fixed seed makes every run the same run:
+// the same founder wins and the population comes out the same colour. The
+// seed is printed so that a run worth keeping can be repeated with --seed
+let WORLD_SEED = flag_int("--seed", $time_current_ms());
 
 // --- Display ---
 
@@ -1654,7 +1657,7 @@ fun draw_panel(buf, island, ticks_per_sec, zoom, paused, fast, status) {
         y = y + 30;
     }
 
-    draw_text(buf, x, y, "GRADIENT ISLANDS", COL_TEXT, 2);
+    draw_text(buf, x, y, "A-LIFE ISLANDS", COL_TEXT, 2);
     y = y + 26;
 
     line("TICK", island.tick_count.comma_sep(), COL_TEXT);
@@ -1664,6 +1667,13 @@ fun draw_panel(buf, island, ticks_per_sec, zoom, paused, fast, status) {
     line("SEEDED", island.num_seeded.comma_sep(), COL_TEXT);
     line("DIED", island.num_died.comma_sep(), COL_TEXT);
     line("EATEN", island.num_eaten.comma_sep(), COL_TEXT);
+
+    // Plants and seeds together are conserved, so this is the share of the
+    // world's food that is grown and edible right now rather than waiting to
+    // hatch. It falls as the population learns to forage and then settles
+    let avail = 100.0 * island.num_plants.to_f() / NUM_PLANTS.to_f();
+    line("PLANTS AVAIL", avail.format_decimals(1) + "%", COL_TEXT);
+
     line("MEAN AGE", island.mean_age().comma_sep(), COL_TEXT);
     line("ZOOM", zoom.to_s(), COL_TEXT);
 
@@ -1755,6 +1765,8 @@ fun run_headless(island) {
 
 // --- Main ---
 
+$println("World seed: " + WORLD_SEED.to_s() + "  (repeat this run with --seed " + WORLD_SEED.to_s() + ")");
+
 let island = Island(WORLD_SEED);
 
 if (HEADLESS) {
@@ -1763,7 +1775,7 @@ if (HEADLESS) {
 }
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
-let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Gradient Islands", 0);
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "A-Life Islands", 0);
 
 let var zoom_idx = DEFAULT_ZOOM;
 let var zoom = ZOOM_LEVELS[zoom_idx];
