@@ -185,6 +185,24 @@ let ACT_PICK_UP = 5;
 let ACT_DROP = 6;
 let ACT_REPRODUCE = 7;
 
+// Attacking is not an action of its own: EAT strikes whatever agent is in
+// front and otherwise consumes what is there. An agent can only ever stand
+// on bare ground or a seed, neither of which EAT does anything with, so the
+// two cases can never be the same cell and there is nothing to disambiguate.
+//
+// Folding it in keeps the action count at eight. A ninth action would dilute
+// every useful one by a ninth, and the first lineage that can feed itself is
+// found by chance, so that rate is exactly what bootstrap depends on. It
+// also makes the loop tight: strike, strike, strike, and the carcass is now
+// the thing in front of you, taken with the same action.
+//
+// The cost is that predation comes for free with foraging rather than having
+// to be discovered, and offspring appear right beside their parent, so a
+// lineage that eats whatever is ahead of it eats its own young until
+// selection or the kin tag input teaches it otherwise
+let ATTACK_COST = 5.0;
+let ATTACK_DAMAGE = 50.0;
+
 let ITEM_NONE = 0;
 let ITEM_ROCK = 1;
 let ITEM_SEED = 2;
@@ -242,7 +260,7 @@ let FOOD_PER_PLANT = 250.0;
 // nothing, and deaths then feed births which feed deaths. At a flat 200 that
 // loop was enough to live on and the population never left MIN_POP in 900k
 // ticks, because nothing was pushing anyone to learn to forage
-let CORPSE_BODY_FOOD = 120.0;
+let CORPSE_BODY_FOOD = 60.0;
 let WATER_PER_DRINK = 250.0;
 
 let METAB_RATE = 1.0;
@@ -496,6 +514,7 @@ class Agent
         self.carried = ITEM_NONE;
         self.carried_food = 0.0;
         self.carried_due = 0;
+        self.hit_tick = -1;
         self.age = 0;
         self.alive = true;
 
@@ -661,28 +680,54 @@ class Agent
     eat(self, island)
     {
         let idx = self.front_idx();
-        let terrain = island.grid.get_u32(idx) & 0xFF;
+        let cell = island.grid.get_u32(idx);
 
+        // Somebody in the way is struck instead. Nothing else can be on
+        // their cell that EAT would have taken anyway
+        if ((cell >> 8) != 0) {
+            self.strike(island, cell >> 8);
+            return;
+        }
+
+        let terrain = cell & 0xFF;
+
+        // A meal that would overflow is taken up to the limit rather than
+        // refused. Refusing it meant a rich carcass was edible by nobody and
+        // simply rotted, so killing a well fed agent produced a meal for
+        // whoever came along hungry instead of for the one that did the work.
+        // Capping only ever destroys the surplus, so it cannot mint anything
         if (terrain == CELL_PLANT) {
-            if (self.food + FOOD_PER_PLANT > MAX_FOOD)
-                return;
-
-            self.food = self.food + FOOD_PER_PLANT;
+            self.food = (self.food + FOOD_PER_PLANT).min(MAX_FOOD);
             island.eat_plant(idx);
         }
         else if (terrain == CELL_CORPSE) {
-            let value = island.corpse_food.get_f32(idx);
-            if (self.food + value > MAX_FOOD)
-                return;
-
-            self.food = self.food + value;
+            self.food = (self.food + island.corpse_food.get_f32(idx)).min(MAX_FOOD);
             island.take_corpse(idx);
         }
         else if (terrain == CELL_WATER) {
-            if (self.water + WATER_PER_DRINK > MAX_WATER)
-                return;
+            self.water = (self.water + WATER_PER_DRINK).min(MAX_WATER);
+        }
+    }
 
-            self.water = self.water + WATER_PER_DRINK;
+    // Nothing stops an agent striking its own kin. Offspring appear right
+    // beside their parent, so a lineage that attacks whatever is in front of
+    // it eats its own young, and the tag of the agent ahead is already an
+    // input. Whether that gets used is left to selection
+    strike(self, island, slot)
+    {
+        let target = island.slots[slot];
+        if (target == nil || !target.alive)
+            return;
+
+        self.energy = self.energy - ATTACK_COST;
+        target.energy = target.energy - ATTACK_DAMAGE;
+        target.hit_tick = island.tick_count;
+
+        // Marked dead now rather than waiting for its own turn, so it cannot
+        // act again after a killing blow
+        if (target.energy <= 0.0) {
+            target.alive = false;
+            island.num_killed = island.num_killed + 1;
         }
     }
 
@@ -816,6 +861,11 @@ class Island
         self.num_born = 0;
         self.num_seeded = 0;
         self.num_died = 0;
+
+        // Deaths by violence, counted separately. These are a subset of
+        // num_died, so the two read together say how much of the dying is
+        // being done to each other rather than by starving
+        self.num_killed = 0;
         self.num_plants = 0;
         self.total_plants = 0;
         self.num_eaten = 0;
@@ -1492,7 +1542,12 @@ class Island
         for (let var i = 0; i < pop.len; ++i) {
             let agent = pop[i];
 
-            agent.metabolize();
+            // Something may have killed this one earlier in the same tick,
+            // in which case it neither digests nor acts, and the corpse it
+            // leaves is whatever it was holding at the moment it was struck
+            if (agent.alive)
+                agent.metabolize();
+
             if (agent.alive) {
                 agent.sense(self);
                 let action = agent.think();
@@ -1630,6 +1685,7 @@ let COL_WATER = rgb32(38, 78, 168);
 let COL_PLANT = rgb32(78, 214, 74);
 let COL_SEED = rgb32(150, 106, 52);
 let COL_CORPSE = rgb32(122, 44, 44);
+let COL_HIT = rgb32(220, 40, 40);
 let COL_PANEL = rgb32(16, 17, 15);
 let COL_TEXT = rgb32(190, 200, 185);
 let COL_DIM = rgb32(110, 118, 108);
@@ -1869,8 +1925,15 @@ fun draw_world(buf, island, cam_x, cam_y, zoom) {
             if (slot != 0)
                 agent = slots[slot];
 
+            // Struck this very tick. Held for the whole tick rather than a
+            // single frame, so in slow mode it is a quarter second of red
+            // rather than something you have to be looking straight at
+            let hit = agent != nil && agent.hit_tick == island.tick_count;
+
             if (!shaped) {
-                let flat = agent != nil ? agent.color : TERRAIN_COLORS[terrain];
+                let var flat = TERRAIN_COLORS[terrain];
+                if (agent != nil)
+                    flat = hit ? COL_HIT : agent.color;
                 fill_rect(buf, px, py, zoom, zoom, flat);
                 continue;
             }
@@ -1887,6 +1950,12 @@ fun draw_world(buf, island, cam_x, cam_y, zoom) {
 
             if (agent == nil)
                 continue;
+
+            // The cell behind the agent goes red, so the arrow stays its own
+            // colour and it is the one being hit that is marked, not the
+            // one doing the hitting
+            if (hit)
+                fill_rect(buf, px, py, zoom, zoom, COL_HIT);
 
             draw_agent_runs(buf, px, py, agent_shapes[agent.dir], agent.color);
         }
@@ -1914,6 +1983,7 @@ fun draw_panel(buf, island, ticks_per_sec, zoom, paused, fast, status) {
     line("BORN", island.num_born.comma_sep(), COL_TEXT);
     line("SEEDED", island.num_seeded.comma_sep(), COL_TEXT);
     line("DIED", island.num_died.comma_sep(), COL_TEXT);
+    line("KILLED", island.num_killed.comma_sep(), COL_TEXT);
     line("EATEN", island.num_eaten.comma_sep(), COL_TEXT);
 
     // Plants and seeds together are conserved, so this is the share of the
@@ -1956,7 +2026,7 @@ fun run_headless(island) {
     let start = $time_current_ms();
 
     $println("Running headless for " + limit.comma_sep() + " ticks, seed " + WORLD_SEED.to_s());
-    $println("tick  agents  born  seeded  died  eaten  plants  mean_age  ticks/s");
+    $println("tick  agents  born  seeded  died  killed  eaten  plants  mean_age  ticks/s");
 
     let act_names = ["NOOP", "FWD", "LEFT", "RIGHT", "EAT", "PICK", "DROP", "REPRO"];
 
@@ -1976,6 +2046,7 @@ fun run_headless(island) {
                 island.num_born.comma_sep().rpad(8, ' ') +
                 island.num_seeded.comma_sep().rpad(8, ' ') +
                 island.num_died.comma_sep().rpad(8, ' ') +
+                island.num_killed.comma_sep().rpad(8, ' ') +
                 island.num_eaten.comma_sep().rpad(8, ' ') +
                 island.num_plants.comma_sep().rpad(8, ' ') +
                 island.mean_age().comma_sep().rpad(10, ' ') +
