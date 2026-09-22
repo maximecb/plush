@@ -1,0 +1,134 @@
+// Benchmark for matrix-vector multiplication through the dot_f32 primitive
+//
+// The counterpart to mvec_mult.psh, which does the same product in plain
+// Plush over arrays of floats. That one measures the interpreter; this one
+// measures the kernel, so the two together say what the primitive is worth
+// at a given shape. Run them with the same arguments to compare.
+
+from random import Xoshiro128;
+
+let rng = Xoshiro128(1);
+
+let var num_inputs = 8192;
+if ($cmd_num_args() > 1) {
+    num_inputs = $cmd_get_arg(1).parse_int(10);
+}
+
+let var num_outputs = 32;
+if ($cmd_num_args() > 2) {
+    num_outputs = $cmd_get_arg(2).parse_int(10);
+}
+
+$println("Matrix size: " + num_outputs.to_s() + "x" + num_inputs.to_s());
+
+// A dense matrix as one flat run of f32, laid out row by row.
+//
+// Contiguous rows are the whole point. dot_f32 keeps a separate copy of its
+// kernel for the unit-stride case, where the bounds checks are settled once
+// for the run and the loop is free to vectorise. Rows held as their own
+// arrays could not be handed to it at all, and a column-major layout would
+// reach it only through the strided path, which is materially slower.
+class F32Matrix
+{
+    init(self, num_outputs, num_inputs)
+    {
+        self.data = ByteArray.with_size(num_outputs * num_inputs * 4);
+        self.num_outputs = num_outputs;
+        self.num_inputs = num_inputs;
+    }
+
+    // Fill every entry with a random value in [-1, 1)
+    randomize(self)
+    {
+        let data = self.data;
+
+        for (let var i = 0; i < self.num_outputs * self.num_inputs; ++i)
+            data.set_f32(i, rng.float(-1.0, 1.0));
+    }
+
+    // out[i] = sum over j of self[i][j] * vec[j]
+    //
+    // One host call per output row, each covering the row end to end. The
+    // work per call is a whole dot product, so the cost of making the call is
+    // spread over num_inputs multiplies instead of being paid per element.
+    // That ratio is why the gain grows with the row length
+    mul_vec(self, vec, out)
+    {
+        let data = self.data;
+        let n = self.num_inputs;
+
+        for (let var i = 0; i < self.num_outputs; ++i)
+            out[i] = data.dot_f32(i * n, 1, vec, 0, 1, n);
+    }
+}
+
+// Initialize matrix and vector with random values
+let matrix = F32Matrix(num_outputs, num_inputs);
+matrix.randomize();
+
+let vector = ByteArray.with_size(num_inputs * 4);
+for (let var i = 0; i < num_inputs; ++i)
+    vector.set_f32(i, rng.float(-1.0, 1.0));
+
+let result = Array.with_size(num_outputs, 0.0);
+
+// One multiplication is short enough that process startup would dominate
+// a wall clock measurement, so the timed section repeats it
+let NUM_ITERS = 10_000;
+let NUM_ROUNDS = 5;
+
+fun median(times) {
+    let sorted = times.slice(0, times.len);
+
+    for (let var i = 1; i < sorted.len; ++i) {
+        let v = sorted[i];
+        let var j = i - 1;
+        while (j >= 0 && sorted[j] > v) {
+            sorted[j + 1] = sorted[j];
+            j = j - 1;
+        }
+        sorted[j + 1] = v;
+    }
+
+    return sorted[sorted.len.idiv(2)];
+}
+
+// A warmup, discarded, so the first timed round is not the one paying for
+// cold caches
+matrix.mul_vec(vector, result);
+
+let times = [];
+
+for (let var round = 0; round < NUM_ROUNDS; ++round) {
+    let start_time = $time_current_ms();
+
+    for (let var iter = 0; iter < NUM_ITERS; ++iter)
+        matrix.mul_vec(vector, result);
+
+    times.push($time_current_ms() - start_time);
+}
+
+let elapsed_ms = median(times);
+let per_iter = elapsed_ms.to_f() / NUM_ITERS.to_f();
+
+// Each step of the inner loop is a multiply and an add, which is how a
+// matrix-vector product is normally counted
+let flops = (2 * NUM_ITERS * num_outputs * num_inputs).to_f();
+let mflops = flops / (elapsed_ms.max(1).to_f() * 1000.0);
+
+$println(
+    "Matrix-vector multiplication took " + elapsed_ms.to_s() + " ms for " +
+    NUM_ITERS.to_s() + " iterations, " + per_iter.format_decimals(3) + " ms per iteration."
+);
+$println(mflops.format_decimals(1) + " MFLOPS");
+
+// One row summed the long way round, as a check that the primitive is
+// computing the product and not merely computing something quickly. The two
+// differ only in the order the terms are added, so a mismatch beyond
+// rounding means the fast path is wrong
+let var check = 0.0;
+for (let var j = 0; j < num_inputs; ++j)
+    check = check + matrix.data.get_f32(j) * vector.get_f32(j);
+
+let diff = (check - result[0]).abs() / check.abs().max(1.0e-9);
+$println("row 0 against a plain sum: relative difference " + diff.format_decimals(9));
