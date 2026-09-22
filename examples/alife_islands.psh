@@ -98,7 +98,7 @@ let CELL_EMPTY = 7;
 // which gives an upper bound: measured, the population lands about 20% under
 // it, because agents carrying something pay CARRY_COST on top of living and
 // because a few plants always sit around waiting to be found
-let NUM_PLANTS = 1450;
+let NUM_PLANTS = flag_int("--plants", 1740);
 let NUM_ROCKS = 1000;
 let NUM_LAKES = 14;
 let LAKE_STEPS = 60;
@@ -110,8 +110,8 @@ let LAKE_STEPS = 60;
 // This is the knob that sets how much food the world can supply: with the
 // plant count fixed, at most one plant per seed per hatch time can ever be
 // eaten, so the whole population lives inside that rate
-let SEED_HATCH = flag_int("--seed-hatch", 2000);
-let CORPSE_DECAY = 200;     // Ticks before an uneaten corpse disappears
+let SEED_HATCH = flag_int("--seed-hatch", 2400);
+let CORPSE_DECAY = 900;     // Ticks before an uneaten corpse disappears
 
 // --- Agent senses ---
 //
@@ -205,15 +205,20 @@ let SCENT_SOURCE = 0.0025; // Injected per source cell per pass
 let START_FOOD = 150.0;
 let START_WATER = 800.0;
 let START_ENERGY = 150.0;
-let MAX_FOOD = 1000.0;
+let MAX_FOOD = 2000.0;
 let MAX_WATER = 1000.0;
-let MAX_ENERGY = 1000.0;
+let MAX_ENERGY = 2500.0;
 
 let FOOD_PER_PLANT = 250.0;
-// Scavenging is worth doing but is not a food supply of its own. An agent
-// dies with no energy left, so anything a corpse is worth is energy the
-// world invented: at 400 it was minting more food than the plants did
-let FOOD_PER_CORPSE = 100.0;
+
+// A corpse is worth whatever the agent still had, plus its body. That makes
+// carcasses genuinely rich, since an agent that dies of thirst or old age
+// dies with a full stomach, without the world inventing the food: an agent
+// dies with no energy left, so a flat corpse value is energy created out of
+// nothing, and deaths then feed births which feed deaths. At a flat 200 that
+// loop was enough to live on and the population never left MIN_POP in 900k
+// ticks, because nothing was pushing anyone to learn to forage
+let CORPSE_BODY_FOOD = 120.0;
 let WATER_PER_DRINK = 250.0;
 
 let METAB_RATE = 1.0;
@@ -229,7 +234,7 @@ let CARRY_COST = 0.5;
 // ceiling below hold. A non-eating agent still tops out at 300, well under
 // this, so an agent that never finds food can never reproduce
 let REPRO_COST = START_ENERGY + START_FOOD * ENERGY_PER_UNIT;
-let MAX_AGE = 20000;
+let MAX_AGE = 20_000;
 
 // --- Evolution ---
 
@@ -342,18 +347,6 @@ fun hsv_to_rgb(h, s, v) {
         (r * 255.0).floor().clip(0, 255),
         (g * 255.0).floor().clip(0, 255),
         (b * 255.0).floor().clip(0, 255)
-    );
-}
-
-// Blends a colour towards white, for the facing marker
-fun lighten(color, f) {
-    let r = (color >> 16) & 0xFF;
-    let g = (color >> 8) & 0xFF;
-    let b = color & 0xFF;
-    return rgb32(
-        (r + ((255 - r).to_f() * f).floor()).clip(0, 255),
-        (g + ((255 - g).to_f() * f).floor()).clip(0, 255),
-        (b + ((255 - b).to_f() * f).floor()).clip(0, 255)
     );
 }
 
@@ -473,6 +466,7 @@ class Agent
         self.water = START_WATER;
         self.energy = START_ENERGY;
         self.carried = ITEM_NONE;
+        self.carried_food = 0.0;
         self.age = 0;
         self.alive = true;
 
@@ -648,11 +642,12 @@ class Agent
             island.eat_plant(idx);
         }
         else if (terrain == CELL_CORPSE) {
-            if (self.food + FOOD_PER_CORPSE > MAX_FOOD)
+            let value = island.corpse_food.get_f32(idx);
+            if (self.food + value > MAX_FOOD)
                 return;
 
-            self.food = self.food + FOOD_PER_CORPSE;
-            island.set_terrain(idx, CELL_EMPTY);
+            self.food = self.food + value;
+            island.take_corpse(idx);
         }
         else if (terrain == CELL_WATER) {
             if (self.water + WATER_PER_DRINK > MAX_WATER)
@@ -670,14 +665,22 @@ class Agent
         let idx = self.front_idx();
         let terrain = island.grid.get_u32(idx) & 0xFF;
 
-        if (terrain == CELL_ROCK)
+        if (terrain == CELL_ROCK) {
             self.carried = ITEM_ROCK;
-        else if (terrain == CELL_SEED)
+        }
+        else if (terrain == CELL_SEED) {
             self.carried = ITEM_SEED;
-        else if (terrain == CELL_CORPSE)
+        }
+        else if (terrain == CELL_CORPSE) {
+            // The carcass keeps its value while it is being hauled around
             self.carried = ITEM_CORPSE;
-        else
+            self.carried_food = island.corpse_food.get_f32(idx);
+            island.take_corpse(idx);
             return;
+        }
+        else {
+            return;
+        }
 
         island.set_terrain(idx, CELL_EMPTY);
     }
@@ -703,12 +706,11 @@ class Agent
             island.plant_seed(idx);
         }
         else if (self.carried == ITEM_CORPSE) {
-            island.set_terrain(idx, CELL_CORPSE);
-            island.corpses.push(island.tick_count + CORPSE_DECAY);
-            island.corpses.push(idx);
+            island.place_corpse(idx, self.carried_food);
         }
 
         self.carried = ITEM_NONE;
+        self.carried_food = 0.0;
     }
 
     metabolize(self)
@@ -768,6 +770,11 @@ class Island
         self.seeds_head = 0;
         self.corpses = [];
         self.corpses_head = 0;
+
+        // How much food the carcass on each cell is worth. A plain array
+        // rather than a map, because it is read on every corpse an agent
+        // walks into and indexing a grid is a single load
+        self.corpse_food = ByteArray.with_size(GRID_W * GRID_H * 4);
 
         self.tick_count = 0;
         self.num_born = 0;
@@ -1017,6 +1024,22 @@ class Island
         self.seeds.push(idx);
     }
 
+    place_corpse(self, idx, value)
+    {
+        self.set_terrain(idx, CELL_CORPSE);
+        self.corpse_food.set_f32(idx, value);
+        self.corpses.push(self.tick_count + CORPSE_DECAY);
+        self.corpses.push(idx);
+    }
+
+    // Removes a carcass, whether it was eaten or picked up. The stored value
+    // is cleared so a later corpse on the same cell cannot inherit it
+    take_corpse(self, idx)
+    {
+        self.set_terrain(idx, CELL_EMPTY);
+        self.corpse_food.set_f32(idx, 0.0);
+    }
+
     move_agent(self, agent, dst)
     {
         let grid = self.grid;
@@ -1174,19 +1197,16 @@ class Island
                     self.plant_seed(spot);
                 }
                 else {
-                    self.set_terrain(spot, CELL_CORPSE);
-                    self.corpses.push(self.tick_count + CORPSE_DECAY);
-                    self.corpses.push(spot);
+                    self.place_corpse(spot, agent.carried_food);
                 }
             }
         }
 
-        // What an agent leaves behind is food for whoever finds it
-        if (is_bare(grid.get_u32(idx) & 0xFF)) {
-            self.set_terrain(idx, CELL_CORPSE);
-            self.corpses.push(self.tick_count + CORPSE_DECAY);
-            self.corpses.push(idx);
-        }
+        // What an agent leaves behind is its body and whatever it had not
+        // digested yet, so an agent that dies of thirst or of old age on a
+        // full stomach is a far richer find than one that starved
+        if (is_bare(grid.get_u32(idx) & 0xFF))
+            self.place_corpse(idx, agent.food + CORPSE_BODY_FOOD);
     }
 
     // --- Pending world events ---
@@ -1353,13 +1373,11 @@ class Island
 // --- Rendering ---
 
 let COL_EMPTY = rgb32(26, 28, 24);
-let COL_ROCK = rgb32(110, 108, 100);
+let COL_ROCK = rgb32(0x98, 0x98, 0x98);
 let COL_WALL = rgb32(206, 112, 30);
 let COL_WATER = rgb32(38, 78, 168);
 let COL_PLANT = rgb32(78, 214, 74);
-// A seed is a plant that has been eaten and will grow back, so it reads as a
-// dark version of the plant colour and a foraged patch shows as a dark trail
-let COL_SEED = rgb32(32, 78, 34);
+let COL_SEED = rgb32(150, 106, 52);
 let COL_CORPSE = rgb32(122, 44, 44);
 let COL_PANEL = rgb32(16, 17, 15);
 let COL_TEXT = rgb32(190, 200, 185);
@@ -1370,6 +1388,147 @@ let TERRAIN_COLORS = [
     COL_ROCK, COL_WALL, COL_WATER, COL_PLANT,
     COL_SEED, COL_CORPSE, COL_EMPTY, COL_EMPTY
 ];
+
+// --- Cell pictograms ---
+//
+// Each shape is built once per zoom level and kept as a flat list of
+// horizontal runs, since a run is exactly one fill_u32. Rebuilding on a zoom
+// change costs a few hundred operations and saves doing the shape arithmetic
+// per cell per frame.
+//
+// Water, wall and bare ground stay flat fills: they are background, and
+// giving them outlines would only make the foreground harder to pick out
+let MIN_SHAPE_ZOOM = 4;
+
+// Runs of a filled ellipse centred in a cell, as fractions of the cell size
+fun ellipse_runs(z, rx_frac, ry_frac, color) {
+    let runs = [];
+    let c = (z - 1).to_f() / 2.0;
+    let rx = rx_frac * z.to_f() / 2.0;
+    let ry = ry_frac * z.to_f() / 2.0;
+
+    for (let var y = 0; y < z; ++y) {
+        let dy = (y.to_f() - c) / ry;
+        if (dy * dy > 1.0)
+            continue;
+
+        let half = rx * (1.0 - dy * dy).sqrt();
+        let x0 = (c - half + 0.5).floor().max(0);
+        let x1 = (c + half + 0.5).floor().min(z - 1);
+        if (x1 < x0)
+            continue;
+
+        runs.push(y);
+        runs.push(x0);
+        runs.push(x1 - x0 + 1);
+        runs.push(color);
+    }
+
+    return runs;
+}
+
+// Runs of a filled diamond, which reads as leaves next to the round stones
+fun diamond_runs(z, frac, color) {
+    let runs = [];
+    let c = (z - 1).to_f() / 2.0;
+    let r = frac * z.to_f() / 2.0;
+
+    for (let var y = 0; y < z; ++y) {
+        let half = r - (y.to_f() - c).abs();
+        if (half < 0.0)
+            continue;
+
+        let x0 = (c - half + 0.5).floor().max(0);
+        let x1 = (c + half + 0.5).floor().min(z - 1);
+        if (x1 < x0)
+            continue;
+
+        runs.push(y);
+        runs.push(x0);
+        runs.push(x1 - x0 + 1);
+        runs.push(color);
+    }
+
+    return runs;
+}
+
+// A triangle filling the cell and pointing the way the agent is facing. The
+// shape carries no colour, because every agent draws it in its own
+fun arrow_runs(z, dir) {
+    let runs = [];
+
+    let c = (z - 1).to_f() / 2.0;
+
+    for (let var y = 0; y < z; ++y) {
+        let var x0 = 0;
+        let var len = 0;
+
+        if (dir == DIR_UP || dir == DIR_DOWN) {
+            // Half width grows from nothing at the apex to the whole cell at
+            // the base, measured either side of centre. Taking the width and
+            // then halving it instead leans the triangle to one side, which
+            // reads as a right triangle rather than as an arrow
+            let row = (dir == DIR_UP ? y : z - 1 - y).to_f();
+            let half = row / 2.0;
+            let a = (c - half + 0.5).floor().max(0);
+            let b = (c + half + 0.5).floor().min(z - 1);
+            x0 = a;
+            len = b - a + 1;
+        } else {
+            // Sideways. The reach has to be scaled across the whole cell the
+            // same way the vertical taper is: using the distance from centre
+            // directly only narrows the shape to half width, which comes out
+            // as a square with a small triangle stuck on it
+            let d = (y.to_f() - c).abs();
+            let reach = ((z - 1).to_f() * (1.0 - d / c) + 0.5).floor();
+            if (reach < 0)
+                continue;
+
+            len = reach + 1;
+            x0 = dir == DIR_LEFT ? z - 1 - reach : 0;
+        }
+
+        if (len <= 0)
+            continue;
+
+        runs.push(y);
+        runs.push(x0);
+        runs.push(len);
+    }
+
+    return runs;
+}
+
+let var shape_zoom = 0;
+let var terrain_shapes = nil;
+let var agent_shapes = nil;
+
+fun build_shapes(z) {
+    let shapes = Array.with_size(8, nil);
+
+    shapes[CELL_ROCK] = ellipse_runs(z, 0.9, 0.8, COL_ROCK);
+    shapes[CELL_PLANT] = diamond_runs(z, 1.0, COL_PLANT);
+    shapes[CELL_SEED] = ellipse_runs(z, 0.45, 0.8, COL_SEED);
+    shapes[CELL_CORPSE] = ellipse_runs(z, 0.8, 0.6, COL_CORPSE);
+
+    let arrows = Array.with_size(4, nil);
+    for (let var d = 0; d < 4; ++d)
+        arrows[d] = arrow_runs(z, d);
+
+    terrain_shapes = shapes;
+    agent_shapes = arrows;
+    shape_zoom = z;
+}
+
+fun draw_terrain_runs(buf, px, py, runs) {
+    for (let var i = 0; i < runs.len; i = i + 4)
+        fill_rect(buf, px + runs[i + 1], py + runs[i], runs[i + 2], 1, runs[i + 3]);
+}
+
+fun draw_agent_runs(buf, px, py, runs, color) {
+    for (let var i = 0; i < runs.len; i = i + 3)
+        fill_rect(buf, px + runs[i + 1], py + runs[i], runs[i + 2], 1, color);
+}
 
 // A 3x5 pixel font, one row of three bits per entry, so a glyph is five
 // small numbers and the whole alphabet fits in a literal
@@ -1428,6 +1587,12 @@ fun draw_world(buf, island, cam_x, cam_y, zoom) {
     let grid = island.grid;
     let slots = island.slots;
 
+    // Below a few pixels a cell is too small to hold a shape, so it stays a
+    // flat square and the screen reads as a heat map instead
+    let shaped = zoom >= MIN_SHAPE_ZOOM;
+    if (shaped && zoom != shape_zoom)
+        build_shapes(zoom);
+
     let cells_w = (VIEW_W.idiv(zoom)) + 1;
     let cells_h = (FRAME_HEIGHT.idiv(zoom)) + 1;
 
@@ -1447,36 +1612,32 @@ fun draw_world(buf, island, cam_x, cam_y, zoom) {
             let cell = grid.get_u32(row + wx);
             let px = i * zoom;
             let slot = cell >> 8;
+            let terrain = cell & 0xFF;
 
-            if (slot == 0) {
-                fill_rect(buf, px, py, zoom, zoom, TERRAIN_COLORS[cell & 0xFF]);
+            let var agent = nil;
+            if (slot != 0)
+                agent = slots[slot];
+
+            if (!shaped) {
+                let flat = agent != nil ? agent.color : TERRAIN_COLORS[terrain];
+                fill_rect(buf, px, py, zoom, zoom, flat);
                 continue;
             }
 
-            let agent = slots[slot];
-            if (agent == nil) {
-                fill_rect(buf, px, py, zoom, zoom, TERRAIN_COLORS[cell & 0xFF]);
+            // The ground goes down first and the pictogram sits on top, so a
+            // shape can be any outline without carrying its own background
+            let shape = terrain_shapes[terrain];
+            if (shape == nil) {
+                fill_rect(buf, px, py, zoom, zoom, TERRAIN_COLORS[terrain]);
+            } else {
+                fill_rect(buf, px, py, zoom, zoom, COL_EMPTY);
+                draw_terrain_runs(buf, px, py, shape);
+            }
+
+            if (agent == nil)
                 continue;
-            }
 
-            fill_rect(buf, px, py, zoom, zoom, agent.color);
-
-            // A brighter edge on the side the agent is facing, which is what
-            // makes a screen of dots readable as a screen of creatures
-            if (zoom >= 4) {
-                let marker = lighten(agent.color, 0.65);
-                let t = zoom.idiv(4).max(1);
-                let dir = agent.dir;
-
-                if (dir == DIR_UP)
-                    fill_rect(buf, px, py, zoom, t, marker);
-                else if (dir == DIR_DOWN)
-                    fill_rect(buf, px, py + zoom - t, zoom, t, marker);
-                else if (dir == DIR_LEFT)
-                    fill_rect(buf, px, py, t, zoom, marker);
-                else
-                    fill_rect(buf, px + zoom - t, py, t, zoom, marker);
-            }
+            draw_agent_runs(buf, px, py, agent_shapes[agent.dir], agent.color);
         }
     }
 }
