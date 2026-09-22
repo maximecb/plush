@@ -66,10 +66,11 @@ let ZOOM_LEVELS = [2, 3, 4, 6, 8, 12, 16];
 let DEFAULT_ZOOM = 2;
 
 let DRAW_PERIOD_MS = 33;
+
 // Slow mode is paced in wall clock time, not in frames, so that an agent
 // takes a couple of actions a second and you can actually follow what it is
 // doing. Fast mode is the one that runs flat out
-let SLOW_TICK_MS = 250;
+let SLOW_TICK_MS = 200;
 let FAST_SLICE_MS = 100;
 
 // --- World ---
@@ -93,8 +94,12 @@ let CELL_SEED = 4;
 let CELL_CORPSE = 5;
 let CELL_EMPTY = 7;
 
-let NUM_PLANTS = 1100;
-let NUM_ROCKS = 350;
+// Plant flux is what sets the population. See MAX_POP for the arithmetic,
+// which gives an upper bound: measured, the population lands about 20% under
+// it, because agents carrying something pay CARRY_COST on top of living and
+// because a few plants always sit around waiting to be found
+let NUM_PLANTS = 1450;
+let NUM_ROCKS = 1000;
 let NUM_LAKES = 14;
 let LAKE_STEPS = 60;
 
@@ -205,7 +210,10 @@ let MAX_WATER = 1000.0;
 let MAX_ENERGY = 1000.0;
 
 let FOOD_PER_PLANT = 250.0;
-let FOOD_PER_CORPSE = 400.0;
+// Scavenging is worth doing but is not a food supply of its own. An agent
+// dies with no energy left, so anything a corpse is worth is energy the
+// world invented: at 400 it was minting more food than the plants did
+let FOOD_PER_CORPSE = 100.0;
 let WATER_PER_DRINK = 250.0;
 
 let METAB_RATE = 1.0;
@@ -215,13 +223,27 @@ let CARRY_COST = 0.5;
 
 // Above what a full set of starting reserves can ever buy, so an agent that
 // never eats cannot reproduce and the pressure to forage is real
-let REPRO_COST = 400.0;
+// Exactly what a newborn is endowed with: START_ENERGY, plus START_FOOD at
+// ENERGY_PER_UNIT once it is metabolised. Matching the two makes a birth move
+// energy around instead of creating it, which is what makes the population
+// ceiling below hold. A non-eating agent still tops out at 300, well under
+// this, so an agent that never finds food can never reproduce
+let REPRO_COST = START_ENERGY + START_FOOD * ENERGY_PER_UNIT;
 let MAX_AGE = 20000;
 
 // --- Evolution ---
 
 let MIN_POP = 25;
-let MAX_POP = 400;
+// Not a balance knob: the population is meant to be limited by food, not by
+// this. With births costing exactly what a newborn is endowed with, the
+// energy the world supplies per tick is the plant flux, and every agent
+// burns LIVING_COST per tick, so the population settles at
+//
+//   (NUM_PLANTS / SEED_HATCH) * FOOD_PER_PLANT * ENERGY_PER_UNIT / LIVING_COST
+//
+// which is about 300, independent of how many plants an agent eats in its
+// life. This ceiling only exists so that a runaway cannot exhaust memory
+let MAX_POP = 5000;
 let MUT_RATE = 0.02;
 let MUT_SIGMA = 0.15;
 let MUT_RESET_PROB = 0.1;
