@@ -577,11 +577,12 @@ pub fn ba_push_string(actor: &mut Actor, mut ba: Value, mut string: Value) -> Ho
 /// shortens the chain each rounding error travels down. Eight measured 11%
 /// ahead of four on an 8192-element product, and sixteen fell back behind.
 ///
-/// LLVM compiles this to eight scalar chains, not vector adds: it won't pack
-/// a widening f32-to-f64 accumulate on its own. That leaves four FP ops per
-/// element against four pipes, and the loop measures at the one element per
-/// cycle this predicts. It's the arithmetic that runs out first, not the
-/// loads -- the rate holds from a 2 KB working set to a 512 KB one.
+/// Independent chains, which is what lets the loop vectorise: the sums use
+/// algebraic ops, so the compiler may reassociate them, and it packs the
+/// widening accumulate into 2-wide f64 fused multiply-adds. Denied that, it
+/// emitted eight scalar chains and ran at one element per cycle. It's the
+/// arithmetic that runs out first, not the loads -- the rate holds from a
+/// 2 KB working set to a 512 KB one.
 const DOT_UNROLL: usize = 8;
 
 // The accumulators are folded together in pairs, which needs a count that
@@ -596,6 +597,12 @@ const _: () = assert!(DOT_UNROLL.is_power_of_two());
 /// bits, which an f64 holds exactly, so only the sums round, at f64
 /// precision. The accuracy is free: the loads have to widen either way.
 ///
+/// The sums use the algebraic operations so the compiler can reassociate
+/// and vectorise them. Reordering costs no accuracy the f64 accumulators had
+/// not already bought, and fusing rounds once where a separate multiply and
+/// add round twice. It does give up bit-exact agreement between the
+/// contiguous and strided paths, which vectorise differently.
+///
 /// `inline(always)` so that the unit-stride caller's literal strides fold
 /// the index arithmetic away into contiguous loads.
 #[inline(always)]
@@ -606,7 +613,9 @@ fn dot_f32_kernel(a: &[f32], a_stride: usize, b: &[f32], b_stride: usize, num: u
     let mut i = 0;
     while i + DOT_UNROLL <= num {
         for k in 0..DOT_UNROLL {
-            acc[k] += a[(i + k) * a_stride] as f64 * b[(i + k) * b_stride] as f64;
+            let prod = (a[(i + k) * a_stride] as f64)
+                .algebraic_mul(b[(i + k) * b_stride] as f64);
+            acc[k] = acc[k].algebraic_add(prod);
         }
         i += DOT_UNROLL;
     }
@@ -617,14 +626,15 @@ fn dot_f32_kernel(a: &[f32], a_stride: usize, b: &[f32], b_stride: usize, num: u
     while width > 1 {
         width /= 2;
         for k in 0..width {
-            acc[k] += acc[k + width];
+            acc[k] = acc[k].algebraic_add(acc[k + width]);
         }
     }
     let mut sum = acc[0];
 
     // The elements left over when the count is not a multiple of the unroll
     while i < num {
-        sum += a[i * a_stride] as f64 * b[i * b_stride] as f64;
+        let prod = (a[i * a_stride] as f64).algebraic_mul(b[i * b_stride] as f64);
+        sum = sum.algebraic_add(prod);
         i += 1;
     }
 
@@ -831,7 +841,15 @@ mod tests
             let expected = dot_f32_kernel(&picked_a, 1, &picked_b, 1, n);
             let got = dot_f32_kernel(&a, 3, &b, 2, n);
 
-            assert_eq!(got, expected, "n={}", n);
+            // Close rather than equal: the contiguous path vectorises and
+            // the strided one does not, so the two sum in different orders
+            // and round differently in the last place. What matters here is
+            // that striding lands on the same elements
+            let err = (got - expected).abs();
+            assert!(
+                err <= 1e-12 * expected.abs().max(1.0),
+                "n={}, {} vs {}", n, got, expected
+            );
         }
     }
 
