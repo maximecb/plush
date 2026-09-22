@@ -1,0 +1,1733 @@
+// Gradient Islands, an artificial life experiment
+//
+// Agents with small recurrent neural nets live on a grid world, foraging for
+// plants and water. Nothing scores them: an agent that fails to feed runs out
+// of energy and dies, and one that banks enough energy can choose to
+// reproduce. Foraging is selected for only because the alternative is
+// extinction, so there is no fitness function anywhere in this file.
+//
+// Agents are coloured by projecting their genome onto two fixed random
+// vectors and taking the angle as a hue, so related agents share a colour and
+// you can watch lineages spread across the world.
+//
+// Inspired by Gradient (2011), https://github.com/maximecb/Gradient
+//
+// Controls:
+//   drag / arrows   pan
+//   Z / X           zoom out / in
+//   SPACE           pause
+//   F               fast mode, simulate hard and draw rarely
+//   S               save the population
+//   ESCAPE          quit
+//
+// There is deliberately no key that discards a population: a run that has
+// been evolving for an hour should not be one keystroke from gone.
+//
+// For long evolution runs, skip the window entirely:
+//   plush examples/alife_islands.psh --headless --ticks 1000000
+
+from random import Xoshiro128;
+
+// --- Command line ---
+
+fun has_flag(name) {
+    for (let var i = 0; i < $cmd_num_args(); ++i) {
+        if ($cmd_get_arg(i) == name)
+            return true;
+    }
+    return false;
+}
+
+fun flag_int(name, default) {
+    for (let var i = 0; i < $cmd_num_args() - 1; ++i) {
+        if ($cmd_get_arg(i) == name) {
+            let v = $cmd_get_arg(i + 1).parse_int(10);
+            if (v != nil)
+                return v;
+        }
+    }
+    return default;
+}
+
+let HEADLESS = has_flag("--headless");
+let MAX_TICKS = flag_int("--ticks", 0);
+let WORLD_SEED = flag_int("--seed", 1337);
+
+// --- Display ---
+
+let FRAME_WIDTH = 1024;
+let FRAME_HEIGHT = 768;
+let PANEL_W = 190;
+let VIEW_W = FRAME_WIDTH - PANEL_W;
+
+// Zoom is in pixels per cell. The floor is not 1 because a whole screen of
+// single-pixel cells costs one host call each and outruns the frame budget
+let ZOOM_LEVELS = [2, 3, 4, 6, 8, 12, 16];
+let DEFAULT_ZOOM = 2;
+
+let DRAW_PERIOD_MS = 33;
+// Slow mode is paced in wall clock time, not in frames, so that an agent
+// takes a couple of actions a second and you can actually follow what it is
+// doing. Fast mode is the one that runs flat out
+let SLOW_TICK_MS = 250;
+let FAST_SLICE_MS = 100;
+
+// --- World ---
+
+let WORLD_W = 128;
+let WORLD_H = 128;
+
+// A two-cell wall border means the view never needs a bounds check, and a
+// read past the edge comes back as wall, which is what an island edge is
+let BORDER = 2;
+let GRID_W = WORLD_W + 2 * BORDER;
+let GRID_H = WORLD_H + 2 * BORDER;
+
+// A grid cell is the terrain type in the low byte and the occupying agent's
+// slot, plus one, above it. One read answers both questions
+let CELL_ROCK = 0;
+let CELL_WALL = 1;
+let CELL_WATER = 2;
+let CELL_PLANT = 3;
+let CELL_SEED = 4;
+let CELL_CORPSE = 5;
+let CELL_EMPTY = 7;
+
+let NUM_PLANTS = 1100;
+let NUM_ROCKS = 350;
+let NUM_LAKES = 14;
+let LAKE_STEPS = 60;
+
+// Eating a plant leaves its seed behind, and the seed grows back into a
+// plant. Nothing in the world creates or destroys a plant, so the food
+// supply is fixed and farming is about moving seeds somewhere better rather
+// than making more of them. Picking a seed up restarts its clock
+// This is the knob that sets how much food the world can supply: with the
+// plant count fixed, at most one plant per seed per hatch time can ever be
+// eaten, so the whole population lives inside that rate
+let SEED_HATCH = flag_int("--seed-hatch", 2000);
+let CORPSE_DECAY = 200;     // Ticks before an uneaten corpse disappears
+
+// --- Agent senses ---
+//
+// The first three groups are sparse and are cleared by one fill_u32 per tick.
+// Everything after them is overwritten every tick anyway, and the bias sits
+// past the cleared region so it is written once and never again
+let VIEW_BASE = 0;     // 8 cells x 7 one-hot channels, empty is all-zeros
+let KIN_BASE = 56;     // Genetic tag of the agent directly ahead
+let CARRY_BASE = 58;   // Carried item, one-hot, nothing set when empty
+let SPARSE_LEN = 62;
+let SCENT_BASE = 62;   // Per channel: level, forward gradient, side gradient
+let BODY_BASE = 71;    // Food, water, energy
+let AGE_IDX = 74;
+
+// Noise, which the original Gradient also fed its agents. Without it a fresh
+// random brain picks the same action on every tick and simply freezes: argmax
+// over a recurrent net settles on one output and stays there. A few noise
+// inputs are what make an untrained agent wander instead, which is the only
+// way the first lineage ever stumbles onto food
+let RND_BASE = 75;
+let NUM_RND = 4;
+
+let BIAS_IDX = 79;
+let NUM_SENSORS = 80;
+
+let NUM_CHANNELS = 7;  // rock, wall, water, plant, seed, corpse, agent
+let CHAN_AGENT = 6;
+
+// --- Brain ---
+
+let NUM_HIDDEN = 16;
+let NUM_ACTIONS = 8;
+let NUM_INPUTS = NUM_SENSORS + NUM_HIDDEN;
+let NUM_WEIGHTS = NUM_HIDDEN * NUM_INPUTS + NUM_ACTIONS * NUM_HIDDEN;
+let ACT_BASE = NUM_HIDDEN * NUM_INPUTS;
+
+// ReLU, clamped so the recurrent loop cannot run away. Unlike a saturating
+// activation it stays graded in its active range instead of pinning to +-1
+let ACT_CAP = 8.0;
+
+let ACT_NOOP = 0;
+let ACT_FORWARD = 1;
+let ACT_LEFT = 2;
+let ACT_RIGHT = 3;
+let ACT_EAT = 4;
+let ACT_PICK_UP = 5;
+let ACT_DROP = 6;
+let ACT_REPRODUCE = 7;
+
+let ITEM_NONE = 0;
+let ITEM_ROCK = 1;
+let ITEM_SEED = 2;
+let ITEM_CORPSE = 3;
+
+// --- Scent ---
+//
+// Kept at a quarter resolution and padded by one cell, so a sample one step
+// off the agent's coarse cell never needs clamping. Close range is already
+// covered by the eight-cell view, so this only has to carry the long-range
+// gradient that makes foraging one mutation away from random
+let SCENT_PLANT = 0;
+let SCENT_WATER = 1;
+let SCENT_CORPSE = 2;
+let NUM_SCENTS = 3;
+
+let SCENT_SHIFT = 2;
+let SCENT_W = (GRID_W >> SCENT_SHIFT) + 2;
+let SCENT_H = (GRID_H >> SCENT_SHIFT) + 2;
+let SCENT_PLANE = SCENT_W * SCENT_H;
+
+// Decay sets how far the field carries: the gradient reaches roughly
+// sqrt(spread / (1 - decay)) coarse cells, so 0.995 is worth about 25 fine
+// cells while 0.9 would be worth 6, which is barely past the agent's own
+// eyes and would leave the field doing no work at all. The source is then
+// scaled so a typical cell sits near the middle of the squash rather than
+// pinned at the top, where differences stop being visible
+let SCENT_PERIOD = 8;      // Ticks between diffusion passes
+let SCENT_SPREAD = 0.20;   // Share of a cell handed to each neighbour
+let SCENT_DECAY = 0.995;
+let SCENT_SOURCE = 0.0025; // Injected per source cell per pass
+
+// --- Metabolism ---
+//
+// Food and water are burned a little at a time rather than banked all at
+// once, so that hunger and thirst are states an agent can sense and act on
+
+// Reserves are set so that a single successful meal is enough to pay for one
+// offspring, the way the original balanced it. Requiring a whole foraging
+// career instead makes the first lineage vanishingly unlikely to appear.
+// Water starts high so that food is the thing an agent has to go and find
+let START_FOOD = 150.0;
+let START_WATER = 800.0;
+let START_ENERGY = 150.0;
+let MAX_FOOD = 1000.0;
+let MAX_WATER = 1000.0;
+let MAX_ENERGY = 1000.0;
+
+let FOOD_PER_PLANT = 250.0;
+let FOOD_PER_CORPSE = 400.0;
+let WATER_PER_DRINK = 250.0;
+
+let METAB_RATE = 1.0;
+let ENERGY_PER_UNIT = 2.0;
+let LIVING_COST = 1.0;
+let CARRY_COST = 0.5;
+
+// Above what a full set of starting reserves can ever buy, so an agent that
+// never eats cannot reproduce and the pressure to forage is real
+let REPRO_COST = 400.0;
+let MAX_AGE = 20000;
+
+// --- Evolution ---
+
+let MIN_POP = 25;
+let MAX_POP = 400;
+let MUT_RATE = 0.02;
+let MUT_SIGMA = 0.15;
+let MUT_RESET_PROB = 0.1;
+
+let SAVE_PATH = "alife_pop.bin";
+let SAVE_MAGIC = 0x464C4150;
+let SAVE_VERSION = 1;
+
+// --- Directions ---
+
+let DIR_UP = 0;
+let DIR_RIGHT = 1;
+let DIR_DOWN = 2;
+let DIR_LEFT = 3;
+
+let FRONT_X = [0, 1, 0, -1];
+let FRONT_Y = [-1, 0, 1, 0];
+let SIDE_X = [1, 0, -1, 0];
+let SIDE_Y = [0, 1, 0, -1];
+
+// The 3x3 block reaching two cells forward, less the agent's own cell.
+// Directly ahead comes first, so the kin lookup does not have to search
+let VIEW_SIDE = [0, -1, 1, -1, 1, -1, 0, 1];
+let VIEW_FWD = [1, 0, 0, 1, 1, 2, 2, 2];
+
+fun build_view_offsets() {
+    let offs = Array.with_size(4 * 8, 0);
+
+    for (let var dir = 0; dir < 4; ++dir) {
+        for (let var i = 0; i < 8; ++i) {
+            let sx = VIEW_SIDE[i];
+            let fy = VIEW_FWD[i];
+            let dx = FRONT_X[dir] * fy + SIDE_X[dir] * sx;
+            let dy = FRONT_Y[dir] * fy + SIDE_Y[dir] * sx;
+            offs[dir * 8 + i] = dy * GRID_W + dx;
+        }
+    }
+
+    return offs;
+}
+
+let VIEW_OFFS = build_view_offsets();
+
+// Ground with nothing standing on it. Eaten ground counts, since the plant
+// that was there is gone until it grows back
+fun is_bare(terrain) {
+    return terrain == CELL_EMPTY;
+}
+
+// Only bare ground and loose seeds can be walked into
+fun is_passable(terrain) {
+    return is_bare(terrain) || terrain == CELL_SEED;
+}
+
+// --- Math helpers ---
+
+fun rgb32(r, g, b) {
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+fun atan2(y, x) {
+    if (x > 0.0)
+        return (y / x).atan();
+    if (x < 0.0) {
+        if (y >= 0.0)
+            return (y / x).atan() + 3.14159265358979;
+        return (y / x).atan() - 3.14159265358979;
+    }
+    if (y > 0.0)
+        return 1.5707963267949;
+    if (y < 0.0)
+        return -1.5707963267949;
+    return 0.0;
+}
+
+// Hue in [0, 1), saturation and value in [0, 1]
+fun hsv_to_rgb(h, s, v) {
+    let i = (h * 6.0).floor();
+    let f = h * 6.0 - i.to_f();
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+
+    let var r = v;
+    let var g = t;
+    let var b = p;
+
+    let sector = i % 6;
+    if (sector == 1) { r = q; g = v; b = p; }
+    else if (sector == 2) { r = p; g = v; b = t; }
+    else if (sector == 3) { r = p; g = q; b = v; }
+    else if (sector == 4) { r = t; g = p; b = v; }
+    else if (sector == 5) { r = v; g = p; b = q; }
+
+    return rgb32(
+        (r * 255.0).floor().clip(0, 255),
+        (g * 255.0).floor().clip(0, 255),
+        (b * 255.0).floor().clip(0, 255)
+    );
+}
+
+// Blends a colour towards white, for the facing marker
+fun lighten(color, f) {
+    let r = (color >> 16) & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = color & 0xFF;
+    return rgb32(
+        (r + ((255 - r).to_f() * f).floor()).clip(0, 255),
+        (g + ((255 - g).to_f() * f).floor()).clip(0, 255),
+        (b + ((255 - b).to_f() * f).floor()).clip(0, 255)
+    );
+}
+
+// --- Genomes ---
+//
+// A genome is one flat run of f32: the hidden rows first, each NUM_INPUTS
+// long, then the action rows, each NUM_HIDDEN long. Keeping it flat is what
+// makes mutation, the colour projection and, later, sending an agent to
+// another island all trivial, and it is what dot_f32 wants to read
+
+// Scaled by the fan-in, which keeps a unit's pre-activation near unit
+// variance instead of pinning it to the clamp on the very first tick
+let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
+
+class Gauss
+{
+    init(self, rng)
+    {
+        self.rng = rng;
+        self.spare = 0.0;
+        self.has_spare = false;
+    }
+
+    // Box-Muller, which produces two values at a time
+    next(self)
+    {
+        if (self.has_spare) {
+            self.has_spare = false;
+            return self.spare;
+        }
+
+        let u1 = self.rng.float(1.0e-9, 1.0);
+        let u2 = self.rng.float(0.0, 1.0);
+        let mag = (-2.0 * u1.ln()).sqrt();
+        let theta = 6.28318530717959 * u2;
+
+        self.spare = mag * theta.sin();
+        self.has_spare = true;
+        return mag * theta.cos();
+    }
+}
+
+fun new_genome(rng) {
+    let g = ByteArray.with_size(NUM_WEIGHTS * 4);
+
+    for (let var i = 0; i < NUM_WEIGHTS; ++i)
+        g.set_f32(i, rng.float(-W_SCALE, W_SCALE));
+
+    return g;
+}
+
+// Gaussian perturbation of a handful of weights, which is what lets a nearly
+// right behaviour be nudged into a right one. Drawing the count up front
+// instead of rolling against every weight saves a few thousand rng calls
+fun mutate_genome(rng, gauss, src) {
+    let g = ByteArray.with_size(NUM_WEIGHTS * 4);
+    g.memcpy(0, src, 0, NUM_WEIGHTS * 4);
+
+    let num_mut = (NUM_WEIGHTS.to_f() * MUT_RATE).floor().max(1);
+
+    for (let var i = 0; i < num_mut; ++i) {
+        let idx = rng.index(NUM_WEIGHTS);
+
+        // Most mutations nudge, a few redraw, which is how a lineage gets out
+        // of a corner that nudging alone cannot leave
+        if (rng.float(0.0, 1.0) < MUT_RESET_PROB)
+            g.set_f32(idx, rng.float(-W_SCALE, W_SCALE));
+        else
+            g.set_f32(idx, g.get_f32(idx) + gauss.next() * MUT_SIGMA);
+    }
+
+    return g;
+}
+
+// Two fixed random vectors, built from a constant seed so that a genome gets
+// the same colour in every run and on every island
+fun build_projection() {
+    let prng = Xoshiro128(0x5EED);
+    let p = ByteArray.with_size(2 * NUM_WEIGHTS * 4);
+
+    for (let var i = 0; i < 2 * NUM_WEIGHTS; ++i)
+        p.set_f32(i, prng.float(-1.0, 1.0));
+
+    return p;
+}
+
+let PROJ = build_projection();
+
+// The angle of a genome's 2D projection, taken as a hue. An angle needs no
+// normalising, which is why this is a hue and not an RGB triple: a random
+// projection of a high dimensional vector concentrates around its mean, and
+// mapping that straight to RGB would make every agent the same muddy brown
+fun genome_tags(genome) {
+    let p1 = PROJ.dot_f32(0, 1, genome, 0, 1, NUM_WEIGHTS);
+    let p2 = PROJ.dot_f32(NUM_WEIGHTS, 1, genome, 0, 1, NUM_WEIGHTS);
+
+    let hue = (atan2(p2, p1) / 6.28318530717959) + 0.5;
+    let color = hsv_to_rgb(hue.clip(0.0, 0.9999), 0.85, 0.95);
+
+    // Squashed into -1..1 for the neighbour who senses them
+    return [color, p1 / (1.0 + p1.abs()), p2 / (1.0 + p2.abs())];
+}
+
+// --- Agents ---
+
+class Agent
+{
+    init(self, genome, slot, x, y, dir)
+    {
+        self.genome = genome;
+        self.slot = slot;
+        self.x = x;
+        self.y = y;
+        self.dir = dir;
+
+        self.food = START_FOOD;
+        self.water = START_WATER;
+        self.energy = START_ENERGY;
+        self.carried = ITEM_NONE;
+        self.age = 0;
+        self.alive = true;
+
+        let inputs = ByteArray.with_size(NUM_INPUTS * 4);
+        inputs.set_f32(BIAS_IDX, 1.0);
+        self.inputs = inputs;
+        self.hidden = ByteArray.with_size(NUM_HIDDEN * 4);
+
+        let tags = genome_tags(genome);
+        self.color = tags[0];
+        self.tag1 = tags[1];
+        self.tag2 = tags[2];
+    }
+
+    // Reads the world into the input vector. Only the entries that are not
+    // zero get written, which is what makes the one-hot view cheap
+    sense(self, island)
+    {
+        let inputs = self.inputs;
+        let g = island.grid;
+        let slots = island.slots;
+
+        inputs.fill_u32(0, SPARSE_LEN, 0);
+
+        let pos = self.y * GRID_W + self.x;
+        let offs = VIEW_OFFS;
+        let base = self.dir * 8;
+
+        for (let var i = 0; i < 8; ++i) {
+            let cell = g.get_u32(pos + offs[base + i]);
+            let terrain = cell & 0xFF;
+
+            // Bare ground of either kind sets no bit, and the test is
+            // against the agent channel so a terrain past it cannot collide
+            if (terrain < CHAN_AGENT)
+                inputs.set_f32(i * NUM_CHANNELS + terrain, 1.0);
+
+            let slot = cell >> 8;
+            if (slot != 0) {
+                inputs.set_f32(i * NUM_CHANNELS + CHAN_AGENT, 1.0);
+
+                // Whoever is directly ahead is cell zero. Their tag is what
+                // makes telling kin from stranger an evolvable thing to do
+                if (i == 0) {
+                    let other = slots[slot];
+                    if (other != nil) {
+                        inputs.set_f32(KIN_BASE, other.tag1);
+                        inputs.set_f32(KIN_BASE + 1, other.tag2);
+                    }
+                }
+            }
+        }
+
+        if (self.carried != ITEM_NONE)
+            inputs.set_f32(CARRY_BASE + self.carried, 1.0);
+
+        // Scent, as a level and two gradients in the agent's own frame. A
+        // single positive weight on the forward gradient already produces a
+        // competent forager, which is the whole point of the scent field
+        let s = island.scent;
+        let cx = (self.x >> SCENT_SHIFT) + 1;
+        let cy = (self.y >> SCENT_SHIFT) + 1;
+        let here = cy * SCENT_W + cx;
+        let fwd = FRONT_Y[self.dir] * SCENT_W + FRONT_X[self.dir];
+        let side = SIDE_Y[self.dir] * SCENT_W + SIDE_X[self.dir];
+
+        for (let var c = 0; c < NUM_SCENTS; ++c) {
+            let o = c * SCENT_PLANE + here;
+
+            let v0 = s.get_f32(o);
+            let v1 = s.get_f32(o + fwd);
+            let v2 = s.get_f32(o + side);
+            let v3 = s.get_f32(o - side);
+
+            // Squashed into 0..1, so a difference of two is already bounded
+            // and the gradient stays usable at any distance from a source
+            let q0 = v0 / (1.0 + v0);
+            let i = SCENT_BASE + c * 3;
+            inputs.set_f32(i, q0);
+            inputs.set_f32(i + 1, v1 / (1.0 + v1) - q0);
+            inputs.set_f32(i + 2, v2 / (1.0 + v2) - v3 / (1.0 + v3));
+        }
+
+        let f = self.food;
+        let w = self.water;
+        let e = self.energy;
+        inputs.set_f32(BODY_BASE, f / (100.0 + f));
+        inputs.set_f32(BODY_BASE + 1, w / (100.0 + w));
+        inputs.set_f32(BODY_BASE + 2, e / (100.0 + e));
+        inputs.set_f32(AGE_IDX, self.age.to_f() / (1000.0 + self.age.to_f()));
+
+        let rng = island.rng;
+        for (let var i = 0; i < NUM_RND; ++i)
+            inputs.set_f32(RND_BASE + i, rng.float(-1.0, 1.0));
+    }
+
+    // The new hidden values land in their own buffer and are copied back only
+    // once the layer is done, so every unit reads the same previous state
+    think(self)
+    {
+        let w = self.genome;
+        let inputs = self.inputs;
+        let hidden = self.hidden;
+        let num_inputs = NUM_INPUTS;
+        let cap = ACT_CAP;
+
+        for (let var i = 0; i < NUM_HIDDEN; ++i) {
+            let sum = w.dot_f32(i * num_inputs, 1, inputs, 0, 1, num_inputs);
+            hidden.set_f32(i, sum.clip(0.0, cap));
+        }
+
+        inputs.memcpy(NUM_SENSORS * 4, hidden, 0, NUM_HIDDEN * 4);
+
+        let var best = 0;
+        let var best_val = -1.0e30;
+
+        for (let var i = 0; i < NUM_ACTIONS; ++i) {
+            let sum = w.dot_f32(ACT_BASE + i * NUM_HIDDEN, 1, hidden, 0, 1, NUM_HIDDEN);
+            if (sum > best_val) {
+                best_val = sum;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
+    front_idx(self)
+    {
+        return (self.y + FRONT_Y[self.dir]) * GRID_W + self.x + FRONT_X[self.dir];
+    }
+
+    act(self, island, action)
+    {
+        if (action == ACT_FORWARD) {
+            let dst = self.front_idx();
+            let cell = island.grid.get_u32(dst);
+
+            // The border means a move can never leave the grid
+            if (is_passable(cell & 0xFF) && (cell >> 8) == 0)
+                island.move_agent(self, dst);
+        }
+        else if (action == ACT_LEFT) {
+            self.dir = (self.dir + 3) % 4;
+        }
+        else if (action == ACT_RIGHT) {
+            self.dir = (self.dir + 1) % 4;
+        }
+        else if (action == ACT_EAT) {
+            self.eat(island);
+        }
+        else if (action == ACT_PICK_UP) {
+            self.pick_up(island);
+        }
+        else if (action == ACT_DROP) {
+            self.drop(island);
+        }
+        else if (action == ACT_REPRODUCE) {
+            island.reproduce(self);
+        }
+    }
+
+    eat(self, island)
+    {
+        let idx = self.front_idx();
+        let terrain = island.grid.get_u32(idx) & 0xFF;
+
+        if (terrain == CELL_PLANT) {
+            if (self.food + FOOD_PER_PLANT > MAX_FOOD)
+                return;
+
+            self.food = self.food + FOOD_PER_PLANT;
+            island.eat_plant(idx);
+        }
+        else if (terrain == CELL_CORPSE) {
+            if (self.food + FOOD_PER_CORPSE > MAX_FOOD)
+                return;
+
+            self.food = self.food + FOOD_PER_CORPSE;
+            island.set_terrain(idx, CELL_EMPTY);
+        }
+        else if (terrain == CELL_WATER) {
+            if (self.water + WATER_PER_DRINK > MAX_WATER)
+                return;
+
+            self.water = self.water + WATER_PER_DRINK;
+        }
+    }
+
+    pick_up(self, island)
+    {
+        if (self.carried != ITEM_NONE)
+            return;
+
+        let idx = self.front_idx();
+        let terrain = island.grid.get_u32(idx) & 0xFF;
+
+        if (terrain == CELL_ROCK)
+            self.carried = ITEM_ROCK;
+        else if (terrain == CELL_SEED)
+            self.carried = ITEM_SEED;
+        else if (terrain == CELL_CORPSE)
+            self.carried = ITEM_CORPSE;
+        else
+            return;
+
+        island.set_terrain(idx, CELL_EMPTY);
+    }
+
+    // What lands on the ground is decided by what is being carried, which is
+    // why there is no separate build action: dropping a rock is building
+    drop(self, island)
+    {
+        if (self.carried == ITEM_NONE)
+            return;
+
+        let idx = self.front_idx();
+        let cell = island.grid.get_u32(idx);
+
+        if (!is_bare(cell & 0xFF) || (cell >> 8) != 0)
+            return;
+
+        if (self.carried == ITEM_ROCK) {
+            island.set_terrain(idx, CELL_ROCK);
+        }
+        else if (self.carried == ITEM_SEED) {
+            island.set_terrain(idx, CELL_SEED);
+            island.plant_seed(idx);
+        }
+        else if (self.carried == ITEM_CORPSE) {
+            island.set_terrain(idx, CELL_CORPSE);
+            island.corpses.push(island.tick_count + CORPSE_DECAY);
+            island.corpses.push(idx);
+        }
+
+        self.carried = ITEM_NONE;
+    }
+
+    metabolize(self)
+    {
+        self.age = self.age + 1;
+
+        // Food and water are only useful together, so the scarcer one sets
+        // the rate and an agent has to find both to stay ahead of the cost
+        if (self.food > 0.0 && self.water > 0.0) {
+            let m = METAB_RATE.min(self.food).min(self.water);
+            self.food = self.food - m;
+            self.water = self.water - m;
+            self.energy = (self.energy + m * ENERGY_PER_UNIT).min(MAX_ENERGY);
+        }
+
+        self.energy = self.energy - LIVING_COST;
+        if (self.carried != ITEM_NONE)
+            self.energy = self.energy - CARRY_COST;
+
+        if (self.energy <= 0.0 || self.age >= MAX_AGE)
+            self.alive = false;
+    }
+}
+
+// --- Island ---
+//
+// One world and the population living in it. This class knows nothing about
+// actors or windows on purpose: V0 runs a single island right here in the
+// main actor, and giving each island an actor of its own later is a matter of
+// wrapping this in a message loop rather than rewriting it
+
+class Island
+{
+    init(self, seed)
+    {
+        self.rng = Xoshiro128(seed);
+        self.gauss = Gauss(self.rng);
+        self.seed_val = seed;
+
+        self.grid = ByteArray.with_size(GRID_W * GRID_H * 4);
+
+        // Two buffers, because a diffusion pass cannot read and write the
+        // same grid, plus the per-cell source counts that feed it
+        self.scent = ByteArray.with_size(NUM_SCENTS * SCENT_PLANE * 4);
+        self.scent_next = ByteArray.with_size(NUM_SCENTS * SCENT_PLANE * 4);
+        self.scent_src = ByteArray.with_size(NUM_SCENTS * SCENT_PLANE * 4);
+        self.scent_open = ByteArray.with_size(SCENT_PLANE * 4);
+
+        self.pop = [];
+        self.births = [];
+        self.slots = Array.with_size(MAX_POP + 1, nil);
+        self.free_slots = [];
+
+        // Queues of pending world events. Every entry in one queue has the
+        // same delay, so each is already in order and only the head is due
+        self.seeds = [];
+        self.seeds_head = 0;
+        self.corpses = [];
+        self.corpses_head = 0;
+
+        self.tick_count = 0;
+        self.num_born = 0;
+        self.num_seeded = 0;
+        self.num_died = 0;
+        self.num_plants = 0;
+        self.num_eaten = 0;
+
+        // What the population actually spends its ticks doing. The cheapest
+        // way to tell a world that has learned something from one that has
+        // not: a population still picking every action uniformly has not
+        self.act_counts = Array.with_size(NUM_ACTIONS, 0);
+
+        self.generate();
+    }
+
+    // --- World generation ---
+
+    generate(self)
+    {
+        let rng = self.rng;
+        let grid = self.grid;
+
+        for (let var y = 0; y < GRID_H; ++y) {
+            for (let var x = 0; x < GRID_W; ++x) {
+                let in_border =
+                    x < BORDER || y < BORDER ||
+                    x >= GRID_W - BORDER || y >= GRID_H - BORDER;
+
+                grid.set_u32(y * GRID_W + x, in_border ? CELL_WALL : CELL_EMPTY);
+            }
+        }
+
+        // Lakes, grown by a random walk so they come out as blobs rather
+        // than as noise an agent could never learn to navigate
+        for (let var i = 0; i < NUM_LAKES; ++i) {
+            let var x = rng.int(BORDER + 2, GRID_W - BORDER - 2);
+            let var y = rng.int(BORDER + 2, GRID_H - BORDER - 2);
+
+            for (let var step = 0; step < LAKE_STEPS; ++step) {
+                grid.set_u32(y * GRID_W + x, CELL_WATER);
+
+                let d = rng.int(0, 4);
+                x = (x + FRONT_X[d]).clip(BORDER, GRID_W - BORDER - 1);
+                y = (y + FRONT_Y[d]).clip(BORDER, GRID_H - BORDER - 1);
+            }
+        }
+
+        for (let var i = 0; i < NUM_PLANTS; ++i) {
+            let idx = self.random_empty();
+            if (idx >= 0) {
+                grid.set_u32(idx, CELL_PLANT);
+                self.num_plants = self.num_plants + 1;
+            }
+        }
+
+        for (let var i = 0; i < NUM_ROCKS; ++i) {
+            let idx = self.random_empty();
+            if (idx >= 0)
+                grid.set_u32(idx, CELL_ROCK);
+        }
+
+        self.build_openness();
+        self.rebuild_sources();
+
+        // Run the field to something near equilibrium before anyone lives in
+        // it, so the first generation is not born into a flat world. A slow
+        // decay needs roughly 1/(1 - decay) passes to settle
+        for (let var i = 0; i < 800; ++i)
+            self.diffuse();
+
+        self.seed_population();
+    }
+
+    random_empty(self)
+    {
+        let rng = self.rng;
+
+        for (let var tries = 0; tries < 200; ++tries) {
+            let x = rng.int(BORDER, GRID_W - BORDER);
+            let y = rng.int(BORDER, GRID_H - BORDER);
+            let idx = y * GRID_W + x;
+            if (self.grid.get_u32(idx) == CELL_EMPTY)
+                return idx;
+        }
+
+        return -1;
+    }
+
+    // How much of each coarse cell can hold scent at all. Walls and water do
+    // not conduct, so a field built this way flows around obstacles instead
+    // of straight through them
+    build_openness(self)
+    {
+        let step = 1 << SCENT_SHIFT;
+        let area = (step * step).to_f();
+
+        for (let var cy = 0; cy < SCENT_H; ++cy) {
+            for (let var cx = 0; cx < SCENT_W; ++cx) {
+                let x0 = (cx - 1) * step;
+                let y0 = (cy - 1) * step;
+                let var open = 0;
+
+                for (let var dy = 0; dy < step; ++dy) {
+                    for (let var dx = 0; dx < step; ++dx) {
+                        let x = x0 + dx;
+                        let y = y0 + dy;
+                        if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H)
+                            continue;
+
+                        let t = self.grid.get_u32(y * GRID_W + x) & 0xFF;
+                        if (t != CELL_WALL && t != CELL_WATER)
+                            open = open + 1;
+                    }
+                }
+
+                self.scent_open.set_f32(cy * SCENT_W + cx, open.to_f() / area);
+            }
+        }
+    }
+
+    // Source counts are kept up to date as cells change, so a diffusion pass
+    // never has to rescan the grid
+    rebuild_sources(self)
+    {
+        for (let var i = 0; i < NUM_SCENTS * SCENT_PLANE; ++i)
+            self.scent_src.set_f32(i, 0.0);
+
+        for (let var y = BORDER; y < GRID_H - BORDER; ++y) {
+            for (let var x = BORDER; x < GRID_W - BORDER; ++x) {
+                let t = self.grid.get_u32(y * GRID_W + x) & 0xFF;
+                let chan = self.source_channel(t);
+                if (chan >= 0)
+                    self.add_source(x, y, chan, 1.0);
+            }
+        }
+    }
+
+    source_channel(self, terrain)
+    {
+        if (terrain == CELL_PLANT)
+            return SCENT_PLANT;
+        if (terrain == CELL_WATER)
+            return SCENT_WATER;
+        if (terrain == CELL_CORPSE)
+            return SCENT_CORPSE;
+        return -1;
+    }
+
+    add_source(self, x, y, chan, amount)
+    {
+        let cx = (x >> SCENT_SHIFT) + 1;
+        let cy = (y >> SCENT_SHIFT) + 1;
+        let idx = chan * SCENT_PLANE + cy * SCENT_W + cx;
+        self.scent_src.set_f32(idx, self.scent_src.get_f32(idx) + amount);
+    }
+
+    // One five-point diffusion pass per channel. The west neighbour is the
+    // cell just written and the centre is the cell just read, so both are
+    // carried in locals and only two reads per cell actually happen
+    diffuse(self)
+    {
+        let cur = self.scent;
+        let next = self.scent_next;
+        let src = self.scent_src;
+        let open = self.scent_open;
+        let spread = SCENT_SPREAD;
+        let keep = 1.0 - 4.0 * SCENT_SPREAD;
+        let decay = SCENT_DECAY;
+
+        for (let var c = 0; c < NUM_SCENTS; ++c) {
+            let plane = c * SCENT_PLANE;
+
+            for (let var y = 1; y < SCENT_H - 1; ++y) {
+                let row = plane + y * SCENT_W;
+                let var west = cur.get_f32(row);
+                let var here = cur.get_f32(row + 1);
+
+                for (let var x = 1; x < SCENT_W - 1; ++x) {
+                    let i = row + x;
+                    let east = cur.get_f32(i + 1);
+                    let north = cur.get_f32(i - SCENT_W);
+                    let south = cur.get_f32(i + SCENT_W);
+
+                    let v =
+                        (here * keep + spread * (west + east + north + south)) * decay +
+                        src.get_f32(i) * SCENT_SOURCE;
+
+                    next.set_f32(i, v * open.get_f32(y * SCENT_W + x));
+
+                    west = here;
+                    here = east;
+                }
+            }
+        }
+
+        self.scent = next;
+        self.scent_next = cur;
+    }
+
+    // --- Cell updates ---
+    //
+    // Everything that changes terrain goes through here, so the scent source
+    // counts can never drift out of step with the grid
+
+    set_terrain(self, idx, terrain)
+    {
+        let grid = self.grid;
+        let cell = grid.get_u32(idx);
+        let old = cell & 0xFF;
+        if (old == terrain)
+            return;
+
+        let x = idx % GRID_W;
+        let y = idx.idiv(GRID_W);
+
+        let old_chan = self.source_channel(old);
+        if (old_chan >= 0)
+            self.add_source(x, y, old_chan, -1.0);
+
+        let new_chan = self.source_channel(terrain);
+        if (new_chan >= 0)
+            self.add_source(x, y, new_chan, 1.0);
+
+        // Counted here rather than at the call sites, so that every route a
+        // plant can appear or vanish by is accounted for exactly once
+        if (old == CELL_PLANT)
+            self.num_plants = self.num_plants - 1;
+        if (terrain == CELL_PLANT)
+            self.num_plants = self.num_plants + 1;
+
+        grid.set_u32(idx, terrain | (cell & 0xFFFFFF00));
+    }
+
+    // What is left where a plant stood is its seed, which grows back into a
+    // plant unless somebody carries it off first
+    eat_plant(self, idx)
+    {
+        self.set_terrain(idx, CELL_SEED);
+        self.num_eaten = self.num_eaten + 1;
+        self.plant_seed(idx);
+    }
+
+    plant_seed(self, idx)
+    {
+        self.seeds.push(self.tick_count + SEED_HATCH);
+        self.seeds.push(idx);
+    }
+
+    move_agent(self, agent, dst)
+    {
+        let grid = self.grid;
+        let src = agent.y * GRID_W + agent.x;
+
+        grid.set_u32(src, grid.get_u32(src) & 0xFF);
+        grid.set_u32(dst, (grid.get_u32(dst) & 0xFF) | (agent.slot << 8));
+
+        agent.x = dst % GRID_W;
+        agent.y = dst.idiv(GRID_W);
+    }
+
+    // --- Population ---
+
+    alloc_slot(self)
+    {
+        if (self.free_slots.len > 0)
+            return self.free_slots.pop();
+
+        for (let var i = 1; i <= MAX_POP; ++i) {
+            if (self.slots[i] == nil)
+                return i;
+        }
+
+        return 0;
+    }
+
+    place_agent(self, genome, idx)
+    {
+        let slot = self.alloc_slot();
+        if (slot == 0)
+            return nil;
+
+        let agent = Agent(
+            genome,
+            slot,
+            idx % GRID_W,
+            idx.idiv(GRID_W),
+            self.rng.int(0, 4)
+        );
+
+        self.slots[slot] = agent;
+        let grid = self.grid;
+        grid.set_u32(idx, (grid.get_u32(idx) & 0xFF) | (slot << 8));
+
+        return agent;
+    }
+
+    // An empty cell with nobody standing in it
+    random_free_cell(self)
+    {
+        let rng = self.rng;
+
+        for (let var tries = 0; tries < 200; ++tries) {
+            let x = rng.int(BORDER, GRID_W - BORDER);
+            let y = rng.int(BORDER, GRID_H - BORDER);
+            let idx = y * GRID_W + x;
+            let cell = self.grid.get_u32(idx);
+            if (is_bare(cell & 0xFF) && (cell >> 8) == 0)
+                return idx;
+        }
+
+        return -1;
+    }
+
+    free_cell_near(self, x, y)
+    {
+        let grid = self.grid;
+
+        for (let var dy = -1; dy <= 1; ++dy) {
+            for (let var dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0)
+                    continue;
+
+                let nx = x + dx;
+                let ny = y + dy;
+                if (nx < BORDER || ny < BORDER ||
+                    nx >= GRID_W - BORDER || ny >= GRID_H - BORDER)
+                    continue;
+
+                let idx = ny * GRID_W + nx;
+                let cell = grid.get_u32(idx);
+                if (is_bare(cell & 0xFF) && (cell >> 8) == 0)
+                    return idx;
+            }
+        }
+
+        return -1;
+    }
+
+    // Nothing here decides who deserves to reproduce. An agent reproduces
+    // because it chose to and had banked the energy to pay for it
+    reproduce(self, parent)
+    {
+        if (parent.energy < REPRO_COST)
+            return;
+        if (self.pop.len + self.births.len >= MAX_POP)
+            return;
+
+        let idx = self.free_cell_near(parent.x, parent.y);
+        if (idx < 0)
+            return;
+
+        parent.energy = parent.energy - REPRO_COST;
+
+        let genome = mutate_genome(self.rng, self.gauss, parent.genome);
+        let child = self.place_agent(genome, idx);
+        if (child == nil) {
+            parent.energy = parent.energy + REPRO_COST;
+            return;
+        }
+
+        self.births.push(child);
+        self.num_born = self.num_born + 1;
+    }
+
+    // Fresh random agents, to keep a world that has not solved foraging yet
+    // from emptying out completely
+    seed_population(self)
+    {
+        while (self.pop.len + self.births.len < MIN_POP) {
+            let idx = self.random_free_cell();
+            if (idx < 0)
+                return;
+
+            let agent = self.place_agent(new_genome(self.rng), idx);
+            if (agent == nil)
+                return;
+
+            self.pop.push(agent);
+            self.num_seeded = self.num_seeded + 1;
+        }
+    }
+
+    bury(self, agent)
+    {
+        let idx = agent.y * GRID_W + agent.x;
+        let grid = self.grid;
+
+        grid.set_u32(idx, grid.get_u32(idx) & 0xFF);
+        self.slots[agent.slot] = nil;
+        self.free_slots.push(agent.slot);
+        self.num_died = self.num_died + 1;
+
+        // Whatever it was carrying falls beside it, so that dying holding a
+        // seed does not quietly remove a plant from the world for good
+        if (agent.carried != ITEM_NONE) {
+            let spot = self.free_cell_near(agent.x, agent.y);
+            if (spot >= 0) {
+                if (agent.carried == ITEM_ROCK) {
+                    self.set_terrain(spot, CELL_ROCK);
+                }
+                else if (agent.carried == ITEM_SEED) {
+                    self.set_terrain(spot, CELL_SEED);
+                    self.plant_seed(spot);
+                }
+                else {
+                    self.set_terrain(spot, CELL_CORPSE);
+                    self.corpses.push(self.tick_count + CORPSE_DECAY);
+                    self.corpses.push(spot);
+                }
+            }
+        }
+
+        // What an agent leaves behind is food for whoever finds it
+        if (is_bare(grid.get_u32(idx) & 0xFF)) {
+            self.set_terrain(idx, CELL_CORPSE);
+            self.corpses.push(self.tick_count + CORPSE_DECAY);
+            self.corpses.push(idx);
+        }
+    }
+
+    // --- Pending world events ---
+    //
+    // Each queue holds pairs of due tick and cell index, oldest first. The
+    // head walks forward and the queue is compacted once it has fallen behind
+
+    // A seed only sprouts while the world has room for another plant.
+    // Without this, farming is a one-way ratchet: eaten plants grow back
+    // where they stood and dropped seeds add new ones on top, so the world
+    // fills up solid and there is nothing left to select for
+    drain_queue(self, queue, head, terrain, required)
+    {
+        let var h = head;
+
+        while (h < queue.len && queue[h] <= self.tick_count) {
+            let idx = queue[h + 1];
+            h = h + 2;
+
+            // The cell has to still hold what the entry was filed against.
+            // A seed that somebody picked up and carried off leaves a stale
+            // entry behind, and this is what stops it hatching where it no
+            // longer is. Dropping it files a fresh entry
+            if ((self.grid.get_u32(idx) & 0xFF) != required)
+                continue;
+
+            self.set_terrain(idx, terrain);
+        }
+
+        if (h > 4096) {
+            let remaining = queue.len - h;
+            for (let var i = 0; i < remaining; ++i)
+                queue[i] = queue[h + i];
+            queue.resize(remaining, nil);
+            return 0;
+        }
+
+        return h;
+    }
+
+    tick(self)
+    {
+        let pop = self.pop;
+
+        // Compacted in place while walking, which keeps removal linear and
+        // avoids the index bugs that splicing mid-loop invites
+        let var w = 0;
+        for (let var i = 0; i < pop.len; ++i) {
+            let agent = pop[i];
+
+            agent.metabolize();
+            if (agent.alive) {
+                agent.sense(self);
+                let action = agent.think();
+                self.act_counts[action] = self.act_counts[action] + 1;
+                agent.act(self, action);
+            }
+
+            if (agent.alive) {
+                pop[w] = agent;
+                w = w + 1;
+            } else {
+                self.bury(agent);
+            }
+        }
+        pop.resize(w, nil);
+
+        // Newborns join after the walk, so nobody acts on the tick they are
+        // born and the compaction above never sees a moving target
+        for (let var i = 0; i < self.births.len; ++i)
+            pop.push(self.births[i]);
+        self.births.resize(0, nil);
+
+        self.seeds_head = self.drain_queue(self.seeds, self.seeds_head, CELL_PLANT, CELL_SEED);
+        self.corpses_head = self.drain_queue(self.corpses, self.corpses_head, CELL_EMPTY, CELL_CORPSE);
+
+        if (self.tick_count % SCENT_PERIOD == 0)
+            self.diffuse();
+
+        self.seed_population();
+        self.tick_count = self.tick_count + 1;
+    }
+
+    // --- Persistence ---
+
+    save(self, path)
+    {
+        let n = self.pop.len;
+        let row = NUM_WEIGHTS * 4;
+        let out = ByteArray.with_size(16 + n * row);
+
+        out.store_u32(0, SAVE_MAGIC);
+        out.store_u32(4, SAVE_VERSION);
+        out.store_u32(8, NUM_WEIGHTS);
+        out.store_u32(12, n);
+
+        for (let var i = 0; i < n; ++i)
+            out.memcpy(16 + i * row, self.pop[i].genome, 0, row);
+
+        return $write_file(path, out) ? n : -1;
+    }
+
+    load(self, path)
+    {
+        let data = $read_file(path);
+        if (data == nil || data.len < 16)
+            return -1;
+
+        if (data.load_u32(0) != SAVE_MAGIC)
+            return -1;
+        if (data.load_u32(4) != SAVE_VERSION)
+            return -1;
+        if (data.load_u32(8) != NUM_WEIGHTS)
+            return -1;
+
+        let row = NUM_WEIGHTS * 4;
+        let n = data.load_u32(12).min(MAX_POP);
+        if (data.len < 16 + n * row)
+            return -1;
+
+        // Everyone alive makes way for the population being restored
+        for (let var i = 0; i < self.pop.len; ++i) {
+            let agent = self.pop[i];
+            let idx = agent.y * GRID_W + agent.x;
+            self.grid.set_u32(idx, self.grid.get_u32(idx) & 0xFF);
+            self.slots[agent.slot] = nil;
+            self.free_slots.push(agent.slot);
+        }
+        self.pop.resize(0, nil);
+
+        let var loaded = 0;
+        for (let var i = 0; i < n; ++i) {
+            let idx = self.random_free_cell();
+            if (idx < 0)
+                break;
+
+            let genome = ByteArray.with_size(row);
+            genome.memcpy(0, data, 16 + i * row, row);
+
+            let agent = self.place_agent(genome, idx);
+            if (agent == nil)
+                break;
+
+            self.pop.push(agent);
+            loaded = loaded + 1;
+        }
+
+        return loaded;
+    }
+
+    mean_age(self)
+    {
+        if (self.pop.len == 0)
+            return 0;
+
+        let var total = 0;
+        for (let var i = 0; i < self.pop.len; ++i)
+            total = total + self.pop[i].age;
+
+        return total.idiv(self.pop.len);
+    }
+}
+
+// --- Rendering ---
+
+let COL_EMPTY = rgb32(26, 28, 24);
+let COL_ROCK = rgb32(110, 108, 100);
+let COL_WALL = rgb32(206, 112, 30);
+let COL_WATER = rgb32(38, 78, 168);
+let COL_PLANT = rgb32(78, 214, 74);
+// A seed is a plant that has been eaten and will grow back, so it reads as a
+// dark version of the plant colour and a foraged patch shows as a dark trail
+let COL_SEED = rgb32(32, 78, 34);
+let COL_CORPSE = rgb32(122, 44, 44);
+let COL_PANEL = rgb32(16, 17, 15);
+let COL_TEXT = rgb32(190, 200, 185);
+let COL_DIM = rgb32(110, 118, 108);
+
+// Indexed by terrain value, so the gap at 6 is the agent channel's slot
+let TERRAIN_COLORS = [
+    COL_ROCK, COL_WALL, COL_WATER, COL_PLANT,
+    COL_SEED, COL_CORPSE, COL_EMPTY, COL_EMPTY
+];
+
+// A 3x5 pixel font, one row of three bits per entry, so a glyph is five
+// small numbers and the whole alphabet fits in a literal
+let FONT = {
+    "0": [7,5,5,5,7], "1": [2,6,2,2,7], "2": [7,1,7,4,7], "3": [7,1,7,1,7],
+    "4": [5,5,7,1,1], "5": [7,4,7,1,7], "6": [7,4,7,5,7], "7": [7,1,1,1,1],
+    "8": [7,5,7,5,7], "9": [7,5,7,1,7],
+    "A": [7,5,7,5,5], "B": [6,5,6,5,6], "C": [7,4,4,4,7], "D": [6,5,5,5,6],
+    "E": [7,4,7,4,7], "F": [7,4,7,4,4], "G": [7,4,5,5,7], "H": [5,5,7,5,5],
+    "I": [7,2,2,2,7], "J": [1,1,1,5,7], "K": [5,5,6,5,5], "L": [4,4,4,4,7],
+    "M": [5,7,7,5,5], "N": [6,5,5,5,5], "O": [7,5,5,5,7], "P": [7,5,7,4,4],
+    "Q": [7,5,5,7,1], "R": [7,5,6,5,5], "S": [7,4,7,1,7], "T": [7,2,2,2,2],
+    "U": [5,5,5,5,7], "V": [5,5,5,5,2], "W": [5,5,7,7,5], "X": [5,5,2,5,5],
+    "Y": [5,5,2,2,2], "Z": [7,1,2,4,7],
+    " ": [0,0,0,0,0], ":": [0,2,0,2,0], ".": [0,0,0,0,2], "/": [1,1,2,4,4],
+    "-": [0,0,7,0,0], "%": [5,1,2,4,5], "+": [0,2,7,2,0]
+};
+
+fun fill_rect(buf, x, y, w, h, color) {
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(FRAME_WIDTH);
+    let y1 = (y + h).min(FRAME_HEIGHT);
+    let run = x1 - x0;
+    if (run <= 0)
+        return;
+
+    for (let var py = y0; py < y1; ++py)
+        buf.fill_u32(py * FRAME_WIDTH + x0, run, color);
+}
+
+fun draw_text(buf, x, y, text, color, scale) {
+    let var cx = x;
+
+    for (let var i = 0; i < text.len; ++i) {
+        let ch = text.char_at(i);
+
+        if (FONT.has(ch)) {
+            let rows = FONT[ch];
+            for (let var r = 0; r < 5; ++r) {
+                let bits = rows[r];
+                for (let var c = 0; c < 3; ++c) {
+                    if (((bits >> (2 - c)) & 1) != 0)
+                        fill_rect(buf, cx + c * scale, y + r * scale, scale, scale, color);
+                }
+            }
+        }
+
+        cx = cx + 4 * scale;
+    }
+}
+
+// The world, drawn cell by cell. Only the cells the viewport actually covers
+// are visited, so the cost is bounded by the smaller of world and screen
+fun draw_world(buf, island, cam_x, cam_y, zoom) {
+    let grid = island.grid;
+    let slots = island.slots;
+
+    let cells_w = (VIEW_W.idiv(zoom)) + 1;
+    let cells_h = (FRAME_HEIGHT.idiv(zoom)) + 1;
+
+    for (let var j = 0; j < cells_h; ++j) {
+        let wy = cam_y + j;
+        if (wy < 0 || wy >= GRID_H)
+            continue;
+
+        let py = j * zoom;
+        let row = wy * GRID_W;
+
+        for (let var i = 0; i < cells_w; ++i) {
+            let wx = cam_x + i;
+            if (wx < 0 || wx >= GRID_W)
+                continue;
+
+            let cell = grid.get_u32(row + wx);
+            let px = i * zoom;
+            let slot = cell >> 8;
+
+            if (slot == 0) {
+                fill_rect(buf, px, py, zoom, zoom, TERRAIN_COLORS[cell & 0xFF]);
+                continue;
+            }
+
+            let agent = slots[slot];
+            if (agent == nil) {
+                fill_rect(buf, px, py, zoom, zoom, TERRAIN_COLORS[cell & 0xFF]);
+                continue;
+            }
+
+            fill_rect(buf, px, py, zoom, zoom, agent.color);
+
+            // A brighter edge on the side the agent is facing, which is what
+            // makes a screen of dots readable as a screen of creatures
+            if (zoom >= 4) {
+                let marker = lighten(agent.color, 0.65);
+                let t = zoom.idiv(4).max(1);
+                let dir = agent.dir;
+
+                if (dir == DIR_UP)
+                    fill_rect(buf, px, py, zoom, t, marker);
+                else if (dir == DIR_DOWN)
+                    fill_rect(buf, px, py + zoom - t, zoom, t, marker);
+                else if (dir == DIR_LEFT)
+                    fill_rect(buf, px, py, t, zoom, marker);
+                else
+                    fill_rect(buf, px + zoom - t, py, t, zoom, marker);
+            }
+        }
+    }
+}
+
+fun draw_panel(buf, island, ticks_per_sec, zoom, paused, fast, status) {
+    fill_rect(buf, VIEW_W, 0, PANEL_W, FRAME_HEIGHT, COL_PANEL);
+
+    let x = VIEW_W + 10;
+    let var y = 12;
+
+    fun line(label, value, color) {
+        draw_text(buf, x, y, label, COL_DIM, 2);
+        draw_text(buf, x, y + 12, value, color, 2);
+        y = y + 30;
+    }
+
+    draw_text(buf, x, y, "GRADIENT ISLANDS", COL_TEXT, 2);
+    y = y + 26;
+
+    line("TICK", island.tick_count.comma_sep(), COL_TEXT);
+    line("TICKS/S", ticks_per_sec.comma_sep(), COL_TEXT);
+    line("AGENTS", island.pop.len.to_s(), COL_TEXT);
+    line("BORN", island.num_born.comma_sep(), COL_TEXT);
+    line("SEEDED", island.num_seeded.comma_sep(), COL_TEXT);
+    line("DIED", island.num_died.comma_sep(), COL_TEXT);
+    line("EATEN", island.num_eaten.comma_sep(), COL_TEXT);
+    line("MEAN AGE", island.mean_age().comma_sep(), COL_TEXT);
+    line("ZOOM", zoom.to_s(), COL_TEXT);
+
+    // Born over seeded is the number to watch: once it climbs and keeps
+    // climbing, the population is sustaining itself instead of being
+    // propped up by fresh random agents
+    let var ratio = "0.00";
+    if (island.num_seeded > 0)
+        ratio = (island.num_born.to_f() / island.num_seeded.to_f()).format_decimals(2);
+    line("BORN/SEED", ratio, COL_TEXT);
+
+    let legend = [
+        "DRAG   PAN",
+        "ARROWS PAN",
+        "Z X    ZOOM",
+        "SPACE  PAUSE",
+        "F      FAST",
+        "S      SAVE",
+        "ESC    QUIT"
+    ];
+
+    let legend_y = FRAME_HEIGHT - 16 - legend.len * 14;
+    for (let var i = 0; i < legend.len; ++i)
+        draw_text(buf, x, legend_y + i * 14, legend[i], COL_DIM, 2);
+
+    if (paused)
+        draw_text(buf, x, legend_y - 42, "PAUSED", COL_TEXT, 2);
+    else if (fast)
+        draw_text(buf, x, legend_y - 42, "FAST", COL_TEXT, 2);
+
+    if (status != "")
+        draw_text(buf, x, legend_y - 22, status, COL_TEXT, 2);
+}
+
+// --- Headless ---
+
+fun run_headless(island) {
+    let limit = MAX_TICKS > 0 ? MAX_TICKS : 1000000;
+    let report_every = 20000;
+    let start = $time_current_ms();
+
+    $println("Running headless for " + limit.comma_sep() + " ticks, seed " + WORLD_SEED.to_s());
+    $println("tick  agents  born  seeded  died  eaten  plants  mean_age  ticks/s");
+
+    let act_names = ["NOOP", "FWD", "LEFT", "RIGHT", "EAT", "PICK", "DROP", "REPRO"];
+
+    let var last = start;
+    let var last_tick = 0;
+
+    for (let var t = 0; t < limit; ++t) {
+        island.tick();
+
+        if ((t + 1) % report_every == 0) {
+            let now = $time_current_ms();
+            let rate = ((t + 1 - last_tick).to_f() * 1000.0 / (now - last).max(1).to_f()).floor();
+
+            $println(
+                island.tick_count.comma_sep().rpad(10, ' ') +
+                island.pop.len.to_s().rpad(8, ' ') +
+                island.num_born.comma_sep().rpad(8, ' ') +
+                island.num_seeded.comma_sep().rpad(8, ' ') +
+                island.num_died.comma_sep().rpad(8, ' ') +
+                island.num_eaten.comma_sep().rpad(8, ' ') +
+                island.num_plants.comma_sep().rpad(8, ' ') +
+                island.mean_age().comma_sep().rpad(10, ' ') +
+                rate.comma_sep()
+            );
+
+            let var total = 0;
+            for (let var a = 0; a < NUM_ACTIONS; ++a)
+                total = total + island.act_counts[a];
+
+            let var line = "    actions:";
+            for (let var a = 0; a < NUM_ACTIONS; ++a) {
+                let pct = (100.0 * island.act_counts[a].to_f() / total.max(1).to_f());
+                line = line + " " + act_names[a] + " " + pct.format_decimals(0) + "%";
+            }
+            $println(line);
+
+            last = now;
+            last_tick = t + 1;
+        }
+    }
+
+    let saved = island.save(SAVE_PATH);
+    if (saved >= 0)
+        $println("Saved " + saved.to_s() + " genomes to " + SAVE_PATH);
+}
+
+// --- Main ---
+
+let island = Island(WORLD_SEED);
+
+if (HEADLESS) {
+    run_headless(island);
+    $exit(0);
+}
+
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Gradient Islands", 0);
+
+let var zoom_idx = DEFAULT_ZOOM;
+let var zoom = ZOOM_LEVELS[zoom_idx];
+let var cam_x = 0;
+let var cam_y = 0;
+let var paused = false;
+let var fast = true;
+let var status = "";
+
+let var dragging = false;
+let var drag_x = 0;
+let var drag_y = 0;
+
+let var last_draw = 0;
+let var next_tick = 0;
+let var rate_time = $time_current_ms();
+let var rate_tick = 0;
+let var ticks_per_sec = 0;
+
+fun clamp_camera() {
+    let cells_w = VIEW_W.idiv(zoom);
+    let cells_h = FRAME_HEIGHT.idiv(zoom);
+    cam_x = cam_x.clip(0, (GRID_W - cells_w).max(0));
+    cam_y = cam_y.clip(0, (GRID_H - cells_h).max(0));
+}
+
+// Zooming keeps whatever is at the centre of the view at the centre
+fun set_zoom(new_idx) {
+    let idx = new_idx.clip(0, ZOOM_LEVELS.len - 1);
+    if (idx == zoom_idx)
+        return;
+
+    let cx = cam_x + VIEW_W.idiv(zoom).idiv(2);
+    let cy = cam_y + FRAME_HEIGHT.idiv(zoom).idiv(2);
+
+    zoom_idx = idx;
+    zoom = ZOOM_LEVELS[idx];
+    cam_x = cx - VIEW_W.idiv(zoom).idiv(2);
+    cam_y = cy - FRAME_HEIGHT.idiv(zoom).idiv(2);
+    clamp_camera();
+}
+
+clamp_camera();
+
+loop {
+    // Drain the event queue without blocking, since the simulation has to
+    // keep running whether or not anything was clicked
+    loop {
+        let event = $actor_poll();
+        if (event == nil)
+            break;
+
+        if (event.kind == "CLOSE_WINDOW")
+            $exit(0);
+
+        if (event.kind == "KEY_DOWN") {
+            let key = event.key;
+
+            if (key == "ESCAPE")
+                $exit(0);
+            else if (key == "SPACE")
+                paused = !paused;
+            else if (key == "F")
+                fast = !fast;
+            else if (key == "X")
+                set_zoom(zoom_idx + 1);
+            else if (key == "Z")
+                set_zoom(zoom_idx - 1);
+            else if (key == "LEFT")
+                cam_x = cam_x - 8;
+            else if (key == "RIGHT")
+                cam_x = cam_x + 8;
+            else if (key == "UP")
+                cam_y = cam_y - 8;
+            else if (key == "DOWN")
+                cam_y = cam_y + 8;
+            else if (key == "S") {
+                let n = island.save(SAVE_PATH);
+                status = n >= 0 ? "SAVED " + n.to_s() : "SAVE FAILED";
+            }
+
+            clamp_camera();
+        }
+        else if (event.kind == "MOUSE_DOWN") {
+            dragging = true;
+            drag_x = event.x;
+            drag_y = event.y;
+        }
+        else if (event.kind == "MOUSE_UP") {
+            dragging = false;
+        }
+        else if (event.kind == "MOUSE_MOVE") {
+            if (dragging) {
+                cam_x = cam_x - (event.x - drag_x).idiv(zoom);
+                cam_y = cam_y - (event.y - drag_y).idiv(zoom);
+
+                // Only consume the motion that moved a whole cell, so the
+                // remainder is not thrown away on every event
+                drag_x = drag_x - (event.x - drag_x).idiv(zoom) * zoom;
+                drag_y = drag_y - (event.y - drag_y).idiv(zoom) * zoom;
+                drag_x = event.x;
+                drag_y = event.y;
+                clamp_camera();
+            }
+        }
+    }
+
+    if (!paused) {
+        if (fast) {
+            // Simulate for a slice and draw once, the way the original ran
+            let slice_start = $time_current_ms();
+            loop {
+                island.tick();
+                if ($time_current_ms() >= slice_start + FAST_SLICE_MS)
+                    break;
+            }
+        } else {
+            // One action at a time, on the clock. Catching up on a backlog
+            // is deliberately not done: after a pause or a slow frame the
+            // point is to keep watching, not to fast forward
+            let now_ms = $time_current_ms();
+            if (now_ms >= next_tick) {
+                island.tick();
+                next_tick = now_ms + SLOW_TICK_MS;
+            }
+        }
+    }
+
+    let now = $time_current_ms();
+
+    if (now >= rate_time + 1000) {
+        ticks_per_sec = ((island.tick_count - rate_tick).to_f() * 1000.0 /
+                         (now - rate_time).to_f()).floor();
+        rate_time = now;
+        rate_tick = island.tick_count;
+    }
+
+    if (now >= last_draw + DRAW_PERIOD_MS) {
+        fill_rect(frame_buffer, 0, 0, VIEW_W, FRAME_HEIGHT, COL_EMPTY);
+        draw_world(frame_buffer, island, cam_x, cam_y, zoom);
+        draw_panel(frame_buffer, island, ticks_per_sec, zoom, paused, fast, status);
+        $window_draw_frame(window, frame_buffer);
+        last_draw = now;
+    }
+    else if (!fast) {
+        // Nothing to draw and nothing due to simulate, so yield rather than
+        // spin. Fast mode never gets here, since it is always busy
+        $actor_sleep(2);
+    }
+}
