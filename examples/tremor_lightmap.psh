@@ -180,8 +180,9 @@ let MASK_G = 0x0000FF00;
 // The framebuffer consumer currently ignores alpha, so the span loop leaves
 // its high byte clear instead of ORing the same constant into every pixel.
 
-// The level everything starts from, before any lamp reaches it
-let AMBIENT = 0.13;
+// The level everything starts from, before any lamp reaches it. Maps may
+// override this with `ambient brightness=<0..1>`.
+let var AMBIENT = 0.13;
 
 // --- Player ---
 
@@ -1135,8 +1136,8 @@ fun field_int(tok, i, name) { return field(tok, i, name).parse_int(10); }
 
 // The keys every brush command takes: which texture goes on which face, how it
 // is applied, and whether the light is baked or forced. `emit=<face>` marks one
-// named face as an area source; `brightness`, `reach`, and optional
-// `emit_spacing` control the compiled emitter grid.
+// face as an area source; `brightness`, `reach`, and optional `emit_spacing`
+// control its compiled emitter grid.
 class BrushOpts {
     init(self) {
         self.tex = nil;
@@ -1481,6 +1482,11 @@ fun parse_map(path) {
             start_y = field_num(tok, 2, "y");
             start_z = field_num(tok, 3, "z");
             start_yaw = field_num(tok, 4, "yaw") * PI / 180.0;
+            continue;
+        }
+
+        if (cmd == "ambient") {
+            AMBIENT = field_num(tok, 1, "brightness").clip(0.0, 1.0);
             continue;
         }
 

@@ -1,4 +1,4 @@
-// The Sunken Vault, a level for examples/level_walk.psh
+// The Sunken Vault, a level for examples/tremor_lightmap.psh
 //
 // Brushes are convex solids; the space you walk through is what is left
 // between them. Coordinates are in meters. A texture tiles at 40 texels per
@@ -7,7 +7,7 @@
 // used below; nothing needs declaring up front.
 //
 //   spawn x= y= z= yaw=<degrees>
-//   light x= y= z= radius= brightness=
+//   ambient brightness=<0..1>
 //   box   x0= y0= z0= x1= y1= z1= [keys]
 //   ramp  x0= y0= z0= x1= y1= z1= dir=<px|nx|pz|nz> [keys]
 //   prism cx= cz= radius= y0= y1= sides= rot=<degrees> [keys]
@@ -22,12 +22,14 @@
 // fit to stretch a texture once across each face, flow to make it swim and
 // burn at full brightness whatever is around it,
 // turn to give the texture a quarter turn on the face.
+// emit=<top|bottom|nx|px|ny|py|nz|pz> marks a textured face as a light source;
+// brightness=, reach=, and emit_spacing= control its output and sample grid.
 //
-// Nothing here is lit by hand except the fixtures themselves: every other
-// surface takes its light from the lamps below, so the rooms go dark wherever
-// the lamps do not reach.
+// The existing lamp faces and lava tops supply direct light; ambient fill
+// keeps unlit passages readable.
 
 spawn x=0 y=1.4 z=-13 yaw=0
+ambient brightness=0.23
 
 // ===========================================================================
 // Entry crypt: interior x -4.8..4.8, z -17.6..-6.4, floor 0, ceiling 5.6
@@ -42,17 +44,14 @@ box   x0=-6.4 y0=0 z0=-19.2 x1=-4.8 y1=5.6 z1=-14 tex=stone_blocks
 box   x0=-6.4 y0=0 z0=-12.4 x1=-4.8 y1=5.6 z1=-4.8 tex=stone_blocks
 box   x0=-6.4 y0=0 z0=-14 x1=-4.8 y1=2.4 z1=-12.4 tex=stone_blocks
 box   x0=-6.4 y0=4 z0=-14 x1=-4.8 y1=5.6 z1=-12.4 tex=stone_blocks
-box   x0=-6.4 y0=2.4 z0=-14 x1=-5.6 y1=4 z1=-12.4 tex=stone_blocks px=light_bank light=15 fit
+box   x0=-6.4 y0=2.4 z0=-14 x1=-5.6 y1=4 z1=-12.4 tex=stone_blocks px=light_bank emit=px brightness=1 reach=8.5 emit_spacing=0.8 fit
 
 // East wall, with the same niche mirrored
 box   x0=4.8 y0=0 z0=-19.2 x1=6.4 y1=5.6 z1=-14 tex=stone_blocks
 box   x0=4.8 y0=0 z0=-12.4 x1=6.4 y1=5.6 z1=-4.8 tex=stone_blocks
 box   x0=4.8 y0=0 z0=-14 x1=6.4 y1=2.4 z1=-12.4 tex=stone_blocks
 box   x0=4.8 y0=4 z0=-14 x1=6.4 y1=5.6 z1=-12.4 tex=stone_blocks
-box   x0=5.6 y0=2.4 z0=-14 x1=6.4 y1=4 z1=-12.4 tex=stone_blocks nx=light_bank light=15 fit
-
-light x=-5.3 y=3.2 z=-13.2 radius=8.5 brightness=1.0
-light x=5.3 y=3.2 z=-13.2 radius=8.5 brightness=1.0
+box   x0=5.6 y0=2.4 z0=-14 x1=6.4 y1=4 z1=-12.4 tex=stone_blocks nx=light_bank emit=nx brightness=1 reach=8.5 emit_spacing=0.8 fit
 
 // South wall of the crypt, with an arched doorway at x -2.4..2.4
 box   x0=-6.4 y0=0 z0=-6.4 x1=-2.4 y1=5.6 z1=-4.8 tex=stone_blocks
@@ -69,15 +68,13 @@ box   x0=-4 y0=5.6 z0=-4.8 x1=4 y1=6.4 z1=0 tex=stone_large
 box   x0=-4 y0=0 z0=-4.8 x1=-2.4 y1=5.6 z1=0 tex=brick_tan
 box   x0=2.4 y0=0 z0=-4.8 x1=4 y1=5.6 z1=0 tex=brick_tan
 
-light x=0 y=4.25 z=-2.4 radius=6 brightness=0.45
-
 // ===========================================================================
 // The vault: interior x -14.4..14.4, z 0..32. The lava lake sits at y -4.4,
 // the stone bridge crosses it at y 0, and the ceiling is up at 16.
 // ===========================================================================
 
 // The lake, and the ledges at either end of it
-box   x0=-14.4 y0=-6.4 z0=3.2 x1=14.4 y1=-4.4 z1=27.2 tex=lava flow
+box   x0=-14.4 y0=-6.4 z0=3.2 x1=14.4 y1=-4.4 z1=27.2 tex=lava flow emit=top brightness=5.0 reach=16 emit_spacing=2.4
 box   x0=-14.4 y0=-6.4 z0=0 x1=14.4 y1=0 z1=3.2 tex=floor_stone top=floor_stone scale=20
 box   x0=-14.4 y0=-6.4 z0=27.2 x1=14.4 y1=0 z1=32 tex=floor_stone top=floor_stone scale=20
 
@@ -143,24 +140,20 @@ box   x0=-14.4 y0=11.4 z0=28.3 x1=14.4 y1=12.6 z1=29.3 tex=wood_dark turn
 box   x0=-16 y0=-6.4 z0=6.4 x1=-14.4 y1=0 z1=10.4 tex=stone_blocks
 box   x0=-16 y0=5.6 z0=6.4 x1=-14.4 y1=16 z1=10.4 tex=stone_blocks
 box   x0=-16 y0=0 z0=6.4 x1=-15.2 y1=5.6 z1=10.4 tex=brick_tan
-box   x0=-15.2 y0=1.6 z0=7.6 x1=-15.1 y1=4.4 z1=9.2 tex=stone_blocks px=light_bank light=15 fit
+box   x0=-15.2 y0=1.6 z0=7.6 x1=-15.1 y1=4.4 z1=9.2 tex=stone_blocks px=light_bank emit=px brightness=1 reach=9.5 emit_spacing=0.8 fit
 arch  axis=x a0=-15.2 a1=-14.4 c0=6.4 c1=10.4 ybase=4.4 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
 box   x0=-16 y0=-6.4 z0=14 x1=-14.4 y1=0 z1=18 tex=stone_blocks
 box   x0=-16 y0=5.6 z0=14 x1=-14.4 y1=16 z1=18 tex=stone_blocks
 box   x0=-16 y0=0 z0=14 x1=-15.2 y1=5.6 z1=18 tex=brick_tan
-box   x0=-15.2 y0=1.6 z0=15.2 x1=-15.1 y1=4.4 z1=16.8 tex=stone_blocks px=light_bank light=15 fit
+box   x0=-15.2 y0=1.6 z0=15.2 x1=-15.1 y1=4.4 z1=16.8 tex=stone_blocks px=light_bank emit=px brightness=1 reach=9.5 emit_spacing=0.8 fit
 arch  axis=x a0=-15.2 a1=-14.4 c0=14 c1=18 ybase=4.4 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
 
 box   x0=-16 y0=-6.4 z0=21.6 x1=-14.4 y1=0 z1=25.6 tex=stone_blocks
 box   x0=-16 y0=5.6 z0=21.6 x1=-14.4 y1=16 z1=25.6 tex=stone_blocks
 box   x0=-16 y0=0 z0=21.6 x1=-15.2 y1=5.6 z1=25.6 tex=brick_tan
-box   x0=-15.2 y0=1.6 z0=22.8 x1=-15.1 y1=4.4 z1=24.4 tex=stone_blocks px=light_bank light=15 fit
+box   x0=-15.2 y0=1.6 z0=22.8 x1=-15.1 y1=4.4 z1=24.4 tex=stone_blocks px=light_bank emit=px brightness=1 reach=9.5 emit_spacing=0.8 fit
 arch  axis=x a0=-15.2 a1=-14.4 c0=21.6 c1=25.6 ybase=4.4 ytop=5.6 segs=4 tex=sandstone_brick bottom=sandstone_brick
-
-light x=-14.8 y=3 z=8.4 radius=9.5 brightness=1.0
-light x=-14.8 y=3 z=16 radius=9.5 brightness=1.0
-light x=-14.8 y=3 z=23.6 radius=9.5 brightness=1.0
 
 // --- Buttresses along the west wall, angled where they meet it ---
 //
@@ -189,10 +182,8 @@ box   x0=8.8 y0=6.4 z0=10.6 x1=9.6 y1=8 z1=12.8 tex=sandstone_brick
 box   x0=8.8 y0=6.4 z0=7.4 x1=9.6 y1=7.2 z1=10.6 tex=sandstone_brick
 
 // Lamps set into the east wall above the gallery
-box   x0=14.2 y0=8 z0=6 x1=14.4 y1=9.6 z1=7.4 tex=brick_tan nx=light_square light=15 fit
-box   x0=14.2 y0=8 z0=9.8 x1=14.4 y1=9.6 z1=11.2 tex=brick_tan nx=light_square light=15 fit
-light x=13.8 y=8.75 z=6.7 radius=7.5 brightness=1.0
-light x=13.8 y=8.75 z=10.5 radius=7.5 brightness=1.0
+box   x0=14.2 y0=8 z0=6 x1=14.4 y1=9.6 z1=7.4 tex=brick_tan nx=light_square emit=nx brightness=1 reach=7.5 emit_spacing=0.8 fit
+box   x0=14.2 y0=8 z0=9.8 x1=14.4 y1=9.6 z1=11.2 tex=brick_tan nx=light_square emit=nx brightness=1 reach=7.5 emit_spacing=0.8 fit
 
 // A crate or two left on the gallery
 box   x0=10.5 y0=6.4 z0=4.5 x1=12.9 y1=8.8 z1=6.9 tex=crate_wood fit
@@ -200,45 +191,9 @@ box   x0=10.8 y0=8.8 z0=5.1 x1=12.6 y1=10.6 z1=6.7 tex=crate_wood fit
 
 // --- What the lava throws up into the room ---
 //
-// These sit in the open air over the lake, clear of the bridge pier at x
-// -2.4..2.4 and of the east plinth at x 9.6: a lamp inside either one is walled
-// off from the room and lights nothing.
-//
-// The lake runs z 3.2..27.2, so they are spaced about its middle at 15.2. A
-// lamp nearer one end than the other lights that end's ledge harder, and since
-// the two ledges face each other across the room the difference is there to be
-// compared.
-
-light x=-7.2 y=-3.25 z=8 radius=14 brightness=0.44
-light x=7.2 y=-3.25 z=8 radius=14 brightness=0.44
-light x=-7.2 y=-3.25 z=15.2 radius=14 brightness=0.44
-light x=7.2 y=-3.25 z=15.2 radius=14 brightness=0.44
-light x=-7.2 y=-3.25 z=22.4 radius=14 brightness=0.44
-light x=7.2 y=-3.25 z=22.4 radius=14 brightness=0.44
-light x=-7.5 y=-3.25 z=11.6 radius=12 brightness=0.34
-light x=7.5 y=-3.25 z=11.6 radius=12 brightness=0.34
-light x=-7.5 y=-3.25 z=18.8 radius=12 brightness=0.34
-light x=7.5 y=-3.25 z=18.8 radius=12 brightness=0.34
-
-// The glow the lake throws up onto the bridge and the ledges. These sit above
-// the deck on purpose: a floor takes nothing from a lamp underneath it. They
-// stand almost on top of the deck, so what they mostly light is the deck, and
-// they are the one thing that decides how bright it reads.
-light x=0 y=2.25 z=7.5 radius=14 brightness=0.42
-light x=0 y=2.25 z=15 radius=14 brightness=0.42
-light x=0 y=2.25 z=22.5 radius=14 brightness=0.42
-
-// High fill under the eaves. Mirrored: a single lamp to one side at each end
-// leans the whole bridge that way, and the lean reads as a mistake because
-// nothing up there is visible to explain it.
-light x=-7.5 y=10.5 z=12 radius=15.5 brightness=0.13
-light x=7.5 y=10.5 z=12 radius=15.5 brightness=0.13
-light x=-7.5 y=10.5 z=20.5 radius=15.5 brightness=0.13
-light x=7.5 y=10.5 z=20.5 radius=15.5 brightness=0.13
-light x=-6.5 y=3 z=2.75 radius=9.5 brightness=0.46
-light x=6.5 y=3 z=2.75 radius=9.5 brightness=0.46
-light x=-6.5 y=3 z=29.5 radius=9.5 brightness=0.46
-light x=6.5 y=3 z=29.5 radius=9.5 brightness=0.46
+// The existing lake surface provides the light. The stronger ambient level
+// keeps the bridge, ledges and high roof legible where direct lava light cannot
+// reach around solid geometry.
 
 // ===========================================================================
 // The reliquary: interior x -6.4..6.4, z 33.6..44.8, ceiling 7.2. A sunken
@@ -261,20 +216,16 @@ box   x0=3.2 y0=-2.4 z0=37.6 x1=8 y1=0 z1=42.4 tex=floor_checker
 // above the underside of the floor rather than flush with it: level with it,
 // the down-swing would pull the lava clear of the rim and open a gap all the
 // way round.
-box   x0=-3.2 y0=-4 z0=37.6 x1=3.2 y1=-2 z1=42.4 tex=lava_swirl flow
+box   x0=-3.2 y0=-4 z0=37.6 x1=3.2 y1=-2 z1=42.4 tex=lava_swirl flow emit=top brightness=1.4 reach=11.5 emit_spacing=1.6
 box   x0=-3.2 y0=-4.2 z0=37.4 x1=3.2 y1=-4 z1=42.6 tex=rock_craggy
 
 // An eight-sided pedestal standing in the pool
 prism cx=0 cz=40 radius=1.8 y0=-2.4 y1=2.4 sides=8 rot=22.5 tex=sandstone_brick top=sandstone_brick
 
-light x=0 y=-1 z=40 radius=11.5 brightness=0.85
-light x=0 y=5.25 z=35.75 radius=6.5 brightness=0.3
 
 // Torch niches either side of the door back out
-box   x0=-6.4 y0=2.4 z0=34 x1=-5.6 y1=4 z1=35.4 tex=brick_blue px=light_bank light=15 fit
-box   x0=5.6 y0=2.4 z0=34 x1=6.4 y1=4 z1=35.4 tex=brick_blue nx=light_bank light=15 fit
-light x=-5.3 y=3.2 z=34.7 radius=8 brightness=0.9
-light x=5.3 y=3.2 z=34.7 radius=8 brightness=0.9
+box   x0=-6.4 y0=2.4 z0=34 x1=-5.6 y1=4 z1=35.4 tex=brick_blue px=light_bank emit=px brightness=0.9 reach=8 emit_spacing=0.8 fit
+box   x0=5.6 y0=2.4 z0=34 x1=6.4 y1=4 z1=35.4 tex=brick_blue nx=light_bank emit=nx brightness=0.9 reach=8 emit_spacing=0.8 fit
 
 // ===========================================================================
 // The monolith chamber: interior x -84.8..-33.6, z 4..55.2, floor 6.4,
@@ -289,9 +240,8 @@ light x=5.3 y=3.2 z=34.7 radius=8 brightness=0.9
 // The door is left the size it always was, so the room opens out all at once
 // as you step through it rather than being announced by its entrance.
 //
-// The room is lit only by what the crosses give off, which is little, by the
-// well in the roof, and by one lamp inside the door. Everything else is meant
-// to be lost in the dark.
+// The crosses and the well lamps provide direct light. Ambient fill keeps the
+// entrance and the monolith visible outside their reach.
 // ===========================================================================
 
 // --- The corridor in from the ledge, and the stair shaft beyond it ---
@@ -366,7 +316,8 @@ arch  axis=x a0=-33.6 a1=-32 c0=26.4 c1=32.8 ybase=10 ytop=12 segs=4 tex=sandsto
 // puts the cut where the panels already end.
 //
 // The upright and the arms are cut as separate squares that meet rather than
-// overlap, so no two lamp faces are coplanar.
+// overlap, so no two lamp faces are coplanar. Every front-facing red tile
+// emits a small share of the total cross light; its narrow sides stay baked.
 
 // West wall
 box   x0=-86.4 y0=4.8 z0=2.4 x1=-85.6 y1=59.2 z1=56.8 tex=iron_brick
@@ -380,43 +331,43 @@ box   x0=-85.6 y0=19.2 z0=42.4 x1=-84.8 y1=25.6 z1=55.2 tex=iron_brick
 box   x0=-85.6 y0=25.6 z0=4 x1=-84.8 y1=48 z1=26.4 tex=iron_brick
 box   x0=-85.6 y0=25.6 z0=32.8 x1=-84.8 y1=48 z1=55.2 tex=iron_brick
 
-box   x0=-85.6 y0=12.8 z0=26.4 x1=-85.5 y1=16 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=16 z0=26.4 x1=-85.5 y1=19.2 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=19.2 z0=26.4 x1=-85.5 y1=22.4 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=22.4 z0=26.4 x1=-85.5 y1=25.6 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=25.6 z0=26.4 x1=-85.5 y1=28.8 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=28.8 z0=26.4 x1=-85.5 y1=32 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=32 z0=26.4 x1=-85.5 y1=35.2 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=35.2 z0=26.4 x1=-85.5 y1=38.4 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=38.4 z0=26.4 x1=-85.5 y1=41.6 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=41.6 z0=26.4 x1=-85.5 y1=44.8 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=44.8 z0=26.4 x1=-85.5 y1=48 z1=29.6 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=12.8 z0=26.4 x1=-85.5 y1=16 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=16 z0=26.4 x1=-85.5 y1=19.2 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=19.2 z0=26.4 x1=-85.5 y1=22.4 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=22.4 z0=26.4 x1=-85.5 y1=25.6 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=25.6 z0=26.4 x1=-85.5 y1=28.8 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=28.8 z0=26.4 x1=-85.5 y1=32 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=32 z0=26.4 x1=-85.5 y1=35.2 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=35.2 z0=26.4 x1=-85.5 y1=38.4 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=38.4 z0=26.4 x1=-85.5 y1=41.6 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=41.6 z0=26.4 x1=-85.5 y1=44.8 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=44.8 z0=26.4 x1=-85.5 y1=48 z1=29.6 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-85.6 y0=12.8 z0=29.6 x1=-85.5 y1=16 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=16 z0=29.6 x1=-85.5 y1=19.2 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=19.2 z0=29.6 x1=-85.5 y1=22.4 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=22.4 z0=29.6 x1=-85.5 y1=25.6 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=25.6 z0=29.6 x1=-85.5 y1=28.8 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=28.8 z0=29.6 x1=-85.5 y1=32 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=32 z0=29.6 x1=-85.5 y1=35.2 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=35.2 z0=29.6 x1=-85.5 y1=38.4 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=38.4 z0=29.6 x1=-85.5 y1=41.6 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=41.6 z0=29.6 x1=-85.5 y1=44.8 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=44.8 z0=29.6 x1=-85.5 y1=48 z1=32.8 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=12.8 z0=29.6 x1=-85.5 y1=16 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=16 z0=29.6 x1=-85.5 y1=19.2 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=19.2 z0=29.6 x1=-85.5 y1=22.4 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=22.4 z0=29.6 x1=-85.5 y1=25.6 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=25.6 z0=29.6 x1=-85.5 y1=28.8 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=28.8 z0=29.6 x1=-85.5 y1=32 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=32 z0=29.6 x1=-85.5 y1=35.2 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=35.2 z0=29.6 x1=-85.5 y1=38.4 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=38.4 z0=29.6 x1=-85.5 y1=41.6 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=41.6 z0=29.6 x1=-85.5 y1=44.8 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=44.8 z0=29.6 x1=-85.5 y1=48 z1=32.8 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-85.6 y0=19.2 z0=16.8 x1=-85.5 y1=22.4 z1=20 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=19.2 z0=20 x1=-85.5 y1=22.4 z1=23.2 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=19.2 z0=23.2 x1=-85.5 y1=22.4 z1=26.4 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=19.2 z0=32.8 x1=-85.5 y1=22.4 z1=36 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=19.2 z0=36 x1=-85.5 y1=22.4 z1=39.2 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=19.2 z0=39.2 x1=-85.5 y1=22.4 z1=42.4 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=19.2 z0=16.8 x1=-85.5 y1=22.4 z1=20 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=19.2 z0=20 x1=-85.5 y1=22.4 z1=23.2 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=19.2 z0=23.2 x1=-85.5 y1=22.4 z1=26.4 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=19.2 z0=32.8 x1=-85.5 y1=22.4 z1=36 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=19.2 z0=36 x1=-85.5 y1=22.4 z1=39.2 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=19.2 z0=39.2 x1=-85.5 y1=22.4 z1=42.4 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-85.6 y0=22.4 z0=16.8 x1=-85.5 y1=25.6 z1=20 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=22.4 z0=20 x1=-85.5 y1=25.6 z1=23.2 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=22.4 z0=23.2 x1=-85.5 y1=25.6 z1=26.4 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=22.4 z0=32.8 x1=-85.5 y1=25.6 z1=36 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=22.4 z0=36 x1=-85.5 y1=25.6 z1=39.2 tex=iron_brick px=light_strip_red light=15 fit
-box   x0=-85.6 y0=22.4 z0=39.2 x1=-85.5 y1=25.6 z1=42.4 tex=iron_brick px=light_strip_red light=15 fit
+box   x0=-85.6 y0=22.4 z0=16.8 x1=-85.5 y1=25.6 z1=20 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=22.4 z0=20 x1=-85.5 y1=25.6 z1=23.2 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=22.4 z0=23.2 x1=-85.5 y1=25.6 z1=26.4 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=22.4 z0=32.8 x1=-85.5 y1=25.6 z1=36 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=22.4 z0=36 x1=-85.5 y1=25.6 z1=39.2 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-85.6 y0=22.4 z0=39.2 x1=-85.5 y1=25.6 z1=42.4 tex=iron_brick px=light_strip_red emit=px brightness=0.03 reach=43 emit_spacing=3.2 fit
 
 // North wall
 box   x0=-86.4 y0=4.8 z0=2.4 x1=-32 y1=59.2 z1=3.2 tex=iron_brick
@@ -430,43 +381,43 @@ box   x0=-46.4 y0=19.2 z0=3.2 x1=-33.6 y1=25.6 z1=4 tex=iron_brick
 box   x0=-84.8 y0=25.6 z0=3.2 x1=-62.4 y1=48 z1=4 tex=iron_brick
 box   x0=-56 y0=25.6 z0=3.2 x1=-33.6 y1=48 z1=4 tex=iron_brick
 
-box   x0=-62.4 y0=12.8 z0=3.2 x1=-59.2 y1=16 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=16 z0=3.2 x1=-59.2 y1=19.2 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=19.2 z0=3.2 x1=-59.2 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=22.4 z0=3.2 x1=-59.2 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=25.6 z0=3.2 x1=-59.2 y1=28.8 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=28.8 z0=3.2 x1=-59.2 y1=32 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=32 z0=3.2 x1=-59.2 y1=35.2 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=35.2 z0=3.2 x1=-59.2 y1=38.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=38.4 z0=3.2 x1=-59.2 y1=41.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=41.6 z0=3.2 x1=-59.2 y1=44.8 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-62.4 y0=44.8 z0=3.2 x1=-59.2 y1=48 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-62.4 y0=12.8 z0=3.2 x1=-59.2 y1=16 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=16 z0=3.2 x1=-59.2 y1=19.2 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=19.2 z0=3.2 x1=-59.2 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=22.4 z0=3.2 x1=-59.2 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=25.6 z0=3.2 x1=-59.2 y1=28.8 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=28.8 z0=3.2 x1=-59.2 y1=32 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=32 z0=3.2 x1=-59.2 y1=35.2 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=35.2 z0=3.2 x1=-59.2 y1=38.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=38.4 z0=3.2 x1=-59.2 y1=41.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=41.6 z0=3.2 x1=-59.2 y1=44.8 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=44.8 z0=3.2 x1=-59.2 y1=48 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-59.2 y0=12.8 z0=3.2 x1=-56 y1=16 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=16 z0=3.2 x1=-56 y1=19.2 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=19.2 z0=3.2 x1=-56 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=22.4 z0=3.2 x1=-56 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=25.6 z0=3.2 x1=-56 y1=28.8 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=28.8 z0=3.2 x1=-56 y1=32 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=32 z0=3.2 x1=-56 y1=35.2 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=35.2 z0=3.2 x1=-56 y1=38.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=38.4 z0=3.2 x1=-56 y1=41.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=41.6 z0=3.2 x1=-56 y1=44.8 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-59.2 y0=44.8 z0=3.2 x1=-56 y1=48 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-59.2 y0=12.8 z0=3.2 x1=-56 y1=16 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=16 z0=3.2 x1=-56 y1=19.2 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=19.2 z0=3.2 x1=-56 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=22.4 z0=3.2 x1=-56 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=25.6 z0=3.2 x1=-56 y1=28.8 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=28.8 z0=3.2 x1=-56 y1=32 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=32 z0=3.2 x1=-56 y1=35.2 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=35.2 z0=3.2 x1=-56 y1=38.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=38.4 z0=3.2 x1=-56 y1=41.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=41.6 z0=3.2 x1=-56 y1=44.8 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=44.8 z0=3.2 x1=-56 y1=48 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-72 y0=19.2 z0=3.2 x1=-68.8 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-68.8 y0=19.2 z0=3.2 x1=-65.6 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-65.6 y0=19.2 z0=3.2 x1=-62.4 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-56 y0=19.2 z0=3.2 x1=-52.8 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-52.8 y0=19.2 z0=3.2 x1=-49.6 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-49.6 y0=19.2 z0=3.2 x1=-46.4 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-72 y0=19.2 z0=3.2 x1=-68.8 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-68.8 y0=19.2 z0=3.2 x1=-65.6 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-65.6 y0=19.2 z0=3.2 x1=-62.4 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-56 y0=19.2 z0=3.2 x1=-52.8 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-52.8 y0=19.2 z0=3.2 x1=-49.6 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-49.6 y0=19.2 z0=3.2 x1=-46.4 y1=22.4 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-72 y0=22.4 z0=3.2 x1=-68.8 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-68.8 y0=22.4 z0=3.2 x1=-65.6 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-65.6 y0=22.4 z0=3.2 x1=-62.4 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-56 y0=22.4 z0=3.2 x1=-52.8 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-52.8 y0=22.4 z0=3.2 x1=-49.6 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
-box   x0=-49.6 y0=22.4 z0=3.2 x1=-46.4 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red light=15 fit
+box   x0=-72 y0=22.4 z0=3.2 x1=-68.8 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-68.8 y0=22.4 z0=3.2 x1=-65.6 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-65.6 y0=22.4 z0=3.2 x1=-62.4 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-56 y0=22.4 z0=3.2 x1=-52.8 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-52.8 y0=22.4 z0=3.2 x1=-49.6 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-49.6 y0=22.4 z0=3.2 x1=-46.4 y1=25.6 z1=3.3 tex=iron_brick pz=light_strip_red emit=pz brightness=0.03 reach=43 emit_spacing=3.2 fit
 
 // South wall
 box   x0=-86.4 y0=4.8 z0=56 x1=-32 y1=59.2 z1=56.8 tex=iron_brick
@@ -480,43 +431,43 @@ box   x0=-46.4 y0=19.2 z0=55.2 x1=-33.6 y1=25.6 z1=56 tex=iron_brick
 box   x0=-84.8 y0=25.6 z0=55.2 x1=-62.4 y1=48 z1=56 tex=iron_brick
 box   x0=-56 y0=25.6 z0=55.2 x1=-33.6 y1=48 z1=56 tex=iron_brick
 
-box   x0=-62.4 y0=12.8 z0=55.9 x1=-59.2 y1=16 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=16 z0=55.9 x1=-59.2 y1=19.2 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=19.2 z0=55.9 x1=-59.2 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=22.4 z0=55.9 x1=-59.2 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=25.6 z0=55.9 x1=-59.2 y1=28.8 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=28.8 z0=55.9 x1=-59.2 y1=32 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=32 z0=55.9 x1=-59.2 y1=35.2 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=35.2 z0=55.9 x1=-59.2 y1=38.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=38.4 z0=55.9 x1=-59.2 y1=41.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=41.6 z0=55.9 x1=-59.2 y1=44.8 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-62.4 y0=44.8 z0=55.9 x1=-59.2 y1=48 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-62.4 y0=12.8 z0=55.9 x1=-59.2 y1=16 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=16 z0=55.9 x1=-59.2 y1=19.2 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=19.2 z0=55.9 x1=-59.2 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=22.4 z0=55.9 x1=-59.2 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=25.6 z0=55.9 x1=-59.2 y1=28.8 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=28.8 z0=55.9 x1=-59.2 y1=32 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=32 z0=55.9 x1=-59.2 y1=35.2 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=35.2 z0=55.9 x1=-59.2 y1=38.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=38.4 z0=55.9 x1=-59.2 y1=41.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=41.6 z0=55.9 x1=-59.2 y1=44.8 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-62.4 y0=44.8 z0=55.9 x1=-59.2 y1=48 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-59.2 y0=12.8 z0=55.9 x1=-56 y1=16 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=16 z0=55.9 x1=-56 y1=19.2 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=19.2 z0=55.9 x1=-56 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=22.4 z0=55.9 x1=-56 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=25.6 z0=55.9 x1=-56 y1=28.8 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=28.8 z0=55.9 x1=-56 y1=32 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=32 z0=55.9 x1=-56 y1=35.2 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=35.2 z0=55.9 x1=-56 y1=38.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=38.4 z0=55.9 x1=-56 y1=41.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=41.6 z0=55.9 x1=-56 y1=44.8 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-59.2 y0=44.8 z0=55.9 x1=-56 y1=48 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-59.2 y0=12.8 z0=55.9 x1=-56 y1=16 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=16 z0=55.9 x1=-56 y1=19.2 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=19.2 z0=55.9 x1=-56 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=22.4 z0=55.9 x1=-56 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=25.6 z0=55.9 x1=-56 y1=28.8 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=28.8 z0=55.9 x1=-56 y1=32 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=32 z0=55.9 x1=-56 y1=35.2 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=35.2 z0=55.9 x1=-56 y1=38.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=38.4 z0=55.9 x1=-56 y1=41.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=41.6 z0=55.9 x1=-56 y1=44.8 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-59.2 y0=44.8 z0=55.9 x1=-56 y1=48 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-72 y0=19.2 z0=55.9 x1=-68.8 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-68.8 y0=19.2 z0=55.9 x1=-65.6 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-65.6 y0=19.2 z0=55.9 x1=-62.4 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-56 y0=19.2 z0=55.9 x1=-52.8 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-52.8 y0=19.2 z0=55.9 x1=-49.6 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-49.6 y0=19.2 z0=55.9 x1=-46.4 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-72 y0=19.2 z0=55.9 x1=-68.8 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-68.8 y0=19.2 z0=55.9 x1=-65.6 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-65.6 y0=19.2 z0=55.9 x1=-62.4 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-56 y0=19.2 z0=55.9 x1=-52.8 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-52.8 y0=19.2 z0=55.9 x1=-49.6 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-49.6 y0=19.2 z0=55.9 x1=-46.4 y1=22.4 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
 
-box   x0=-72 y0=22.4 z0=55.9 x1=-68.8 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-68.8 y0=22.4 z0=55.9 x1=-65.6 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-65.6 y0=22.4 z0=55.9 x1=-62.4 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-56 y0=22.4 z0=55.9 x1=-52.8 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-52.8 y0=22.4 z0=55.9 x1=-49.6 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
-box   x0=-49.6 y0=22.4 z0=55.9 x1=-46.4 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red light=15 fit
+box   x0=-72 y0=22.4 z0=55.9 x1=-68.8 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-68.8 y0=22.4 z0=55.9 x1=-65.6 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-65.6 y0=22.4 z0=55.9 x1=-62.4 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-56 y0=22.4 z0=55.9 x1=-52.8 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-52.8 y0=22.4 z0=55.9 x1=-49.6 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
+box   x0=-49.6 y0=22.4 z0=55.9 x1=-46.4 y1=25.6 z1=56 tex=iron_brick nz=light_strip_red emit=nz brightness=0.03 reach=43 emit_spacing=3.2 fit
 
 // --- The roof ---
 //
@@ -528,11 +479,8 @@ box   x0=-49.6 y0=22.4 z0=55.9 x1=-46.4 y1=25.6 z1=56 tex=iron_brick nz=light_st
 // either side of it frame it exactly and the coffers left over still come out
 // even -- 7.2 m apiece, against the 12.8 m of the well.
 //
-// The well holds the only white light in the room, and it lands where it would
-// fall: on the top of the monolith, which stands directly under it. Two lamps
-// make it, since one cannot. The lamp up in the well shows the walls of the
-// well, and a second below the mouth does the falling: light does not carry
-// through the slab, so nothing above it can light what is below.
+// The four existing lamp panels cap the well. Their downward faces light the
+// well and its opening; the cross panels light the chamber below.
 
 box   x0=-86.4 y0=57.6 z0=2.4 x1=-65.6 y1=59.2 z1=56.8 tex=metal_dark
 box   x0=-52.8 y0=57.6 z0=2.4 x1=-32 y1=59.2 z1=56.8 tex=metal_dark
@@ -555,10 +503,10 @@ box   x0=-52.8 y0=57.6 z0=21.6 x1=-51.2 y1=78.4 z1=37.6 tex=metal_riveted
 box   x0=-67.2 y0=57.6 z0=21.6 x1=-51.2 y1=78.4 z1=23.2 tex=metal_riveted
 box   x0=-67.2 y0=57.6 z0=36 x1=-51.2 y1=78.4 z1=37.6 tex=metal_riveted
 
-box   x0=-65.6 y0=76.8 z0=23.2 x1=-59.2 y1=78.4 z1=29.6 tex=metal_riveted ny=light_bank light=15 fit
-box   x0=-65.6 y0=76.8 z0=29.6 x1=-59.2 y1=78.4 z1=36 tex=metal_riveted ny=light_bank light=15 fit
-box   x0=-59.2 y0=76.8 z0=23.2 x1=-52.8 y1=78.4 z1=29.6 tex=metal_riveted ny=light_bank light=15 fit
-box   x0=-59.2 y0=76.8 z0=29.6 x1=-52.8 y1=78.4 z1=36 tex=metal_riveted ny=light_bank light=15 fit
+box   x0=-65.6 y0=76.8 z0=23.2 x1=-59.2 y1=78.4 z1=29.6 tex=metal_riveted ny=light_bank emit=bottom brightness=0.25 reach=21.25 emit_spacing=3.2 fit
+box   x0=-65.6 y0=76.8 z0=29.6 x1=-59.2 y1=78.4 z1=36 tex=metal_riveted ny=light_bank emit=bottom brightness=0.25 reach=21.25 emit_spacing=3.2 fit
+box   x0=-59.2 y0=76.8 z0=23.2 x1=-52.8 y1=78.4 z1=29.6 tex=metal_riveted ny=light_bank emit=bottom brightness=0.25 reach=21.25 emit_spacing=3.2 fit
+box   x0=-59.2 y0=76.8 z0=29.6 x1=-52.8 y1=78.4 z1=36 tex=metal_riveted ny=light_bank emit=bottom brightness=0.25 reach=21.25 emit_spacing=3.2 fit
 
 // --- The monolith ---
 //
@@ -569,33 +517,6 @@ box   x0=-59.2 y0=76.8 z0=29.6 x1=-52.8 y1=78.4 z1=36 tex=metal_riveted ny=light
 box   x0=-64 y0=6.4 z0=23.6 x1=-54.4 y1=8.8 z1=35.6 tex=rock_slate
 box   x0=-61 y0=8.8 z0=24.2 x1=-57.4 y1=41.2 z1=35 tex=rock_slate
 
-// --- Light ---
-//
-// One lamp at the mouth of each cross recess, one up in the roof to bring the
-// ribs out of the dark, the pair the well needs, and a close pair grazing the
-// broad faces of the monolith so the slab keeps an edge instead of going flat
-// against the dark behind it. Nothing here is baked with shadows, so every
-// radius is kept short enough to die before it reaches the next room.
-//
-// The pair under the well is kept tight on purpose: at 20 m it dies well short
-// of the walls, so what it lights is the ribs around the mouth and the top of
-// the slab, and the floor stays as dark as the rest of the room.
-//
-// The pair has to sit outside the slab: a lamp buried in it would face the
-// backs of its own faces and light nothing.
-
-light x=-84 y=22.4 z=29.6 radius=43 brightness=0.34
-light x=-59.2 y=22.4 z=4.8 radius=43 brightness=0.34
-light x=-59.2 y=22.4 z=54.4 radius=43 brightness=0.34
-light x=-59.2 y=53 z=29.6 radius=42.5 brightness=0.22
-light x=-59.2 y=73.75 z=29.6 radius=21.25 brightness=1.00
-light x=-59.2 y=49.5 z=29.6 radius=22.5 brightness=0.60
-light x=-55.6 y=12.5 z=29.6 radius=15.75 brightness=0.30
-light x=-62.8 y=12.5 z=29.6 radius=15 brightness=0.22
-light x=-39 y=11.5 z=29.6 radius=17.5 brightness=0.20
-
-// The way in wants enough light to walk by, and no more
-light x=-17.5 y=3.5 z=29.6 radius=8 brightness=0.55
-light x=-22.5 y=6 z=29.6 radius=8.5 brightness=0.45
-light x=-27 y=8 z=29.6 radius=8.5 brightness=0.45
-light x=-31.25 y=11 z=29.6 radius=8 brightness=0.40
+// The red cross faces and the four existing panels at the top of the well are
+// the chamber's light sources. Ambient fill keeps the path and the monolith
+// visible outside their direct reach.
