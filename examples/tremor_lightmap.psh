@@ -164,7 +164,7 @@ let LM_V_CELL_SHIFT = 32 + LM_FRAC_BITS;
 // producing an unreasonable number of shadow rays.
 let AREA_LIGHT_SPACING = 0.8;
 let AREA_LIGHT_MAX_SAMPLES = 256;
-let AREA_LIGHT_OFFSET = 0.005;
+let AREA_LIGHT_OFFSET = 0.0025;
 
 // Retained only by the unused legacy subdivision helpers below. Lightmapped
 // setup never calls them.
@@ -1773,7 +1773,8 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz, light_ids) {
         // Anything solid in the way takes the lamp out entirely
         if (occluded(cx, cy, cz, L[0], L[1], L[2])) continue;
 
-        let atten = 1.0 - dist / radius;
+        let falloff = 1.0 - dist / radius;
+        let atten = falloff * falloff;
         lum = lum + L[4] * atten * (0.35 + 0.65 * ndotl);
     }
 
