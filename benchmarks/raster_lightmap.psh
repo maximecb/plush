@@ -1,8 +1,12 @@
 // Textured triangle rasterization with a bilinearly sampled 8-bit lightmap
-// Usage: plush benchmarks/raster_lightmap.psh [num_frames]
+// Usage: plush benchmarks/raster_lightmap.psh [num_frames] [mode]
 //
 // This matches the frame, texture, grid, lamps, and color multiply in raster_vertlight.psh.
 // Light comes from one byte every ten texture texels, sampled bilinearly.
+// Mode may be "angled", "validate", or "angled_validate".
+// Angled modes exercise both lightmap coordinates varying along a span.
+// A perspective renderer places these runs inside each corrected subspan.
+// Tremor.psh already advances u and v affinely inside such subspans.
 
 let FRAME_WIDTH = 1024;
 let FRAME_HEIGHT = 1024;
@@ -16,11 +20,10 @@ let TEX_MASK = TEX_SIZE - 1;
 // Samples at 0, 10, 20, ... 260 texels cover the 0..256 texture extent.
 let LM_STEP = 10;
 let LM_SIZE = 27;
-let LM_FRAC_BITS = 10;
-let LM_ONE = 1024.0;
-let LM_ONE_I = 1024;
+let LM_FRAC_BITS = 16;
+let LM_ONE = 65536.0;
+let LM_ONE_I = 65536;
 let LM_SCALE = LM_ONE / LM_STEP;
-let LM_BIAS_F = 32768.0;
 let LM_LIGHT_SHIFT = 2 * LM_FRAC_BITS;
 
 let SHADE_MAX = 255.0;
@@ -41,18 +44,22 @@ let U_MASK = TEX_MASK;
 let V_SHIFT = 32 + FP_BITS - TEX_SHIFT;
 let V_MASK = TEX_MASK << TEX_SHIFT;
 
-// Lightmap u and v each use 6.10 fixed point in a separate packed word.
-// A half-word bias prevents a negative u step from borrowing into v.
-let LM_U_SHIFT = LM_FRAC_BITS;
-let LM_V_SHIFT = 16 + LM_FRAC_BITS;
-let LM_COORD_MASK = 63;
-let LM_FRAC_MASK = 1023;
+// Lightmap u and v use 16.16 values packed into two 32-bit lanes.
+// Their coordinates stay small enough for the packed value to remain a fixnum.
+let LM_FRAC_MASK = 65535;
+let LM_U_CELL_MASK = 65535;
+let LM_U_CELL_SHIFT = LM_FRAC_BITS;
+let LM_V_FRAC_SHIFT = 32;
+let LM_V_CELL_SHIFT = 32 + LM_FRAC_BITS;
 
 let num_frames = $cmd_get_arg_or(1, "50").parse_int(10);
 if (num_frames == nil) {
     $println("expected an integer number of frames");
     $exit(1);
 }
+let mode = $cmd_get_arg_or(2, "");
+let angled = mode == "angled" || mode == "angled_validate";
+let validate = mode == "validate" || mode == "angled_validate";
 
 class Vertex {
     init(self, x, y, u, v) {
@@ -114,8 +121,16 @@ fun make_lightmap() {
     for (let var y = 0; y < LM_SIZE; ++y) {
         for (let var x = 0; x < LM_SIZE; ++x) {
             // One texture texel spans four screen pixels in this benchmark.
-            lm[y * LM_SIZE + x] = light_at((x * LM_STEP * 4).to_f(),
-                                            (y * LM_STEP * 4).to_f()).floor();
+            let u = (x * LM_STEP).to_f();
+            let v = (y * LM_STEP).to_f();
+            let var sx = u;
+            let var sy = v;
+            if (angled) {
+                // Invert the angled mapping used by the vertices below.
+                sx = 1.6 * (u - 32.0) - 0.8 * (v - 96.0);
+                sy = 0.8 * (u - 32.0) + 1.6 * (v - 96.0);
+            }
+            lm[y * LM_SIZE + x] = light_at(sx * 4.0, sy * 4.0).floor();
         }
     }
     return lm;
@@ -153,7 +168,7 @@ fun rasterize_tri_lightmap(v0, v1, v2, fb, tex, lm) {
     let dt = ((dvdx * FP_ONE).floor() << 32) + (dudx * FP_ONE).floor();
     let dlu = (dudx * LM_SCALE).floor();
     let dlv = (dvdx * LM_SCALE).floor();
-    let dlt = (dlv << 16) + dlu;
+    let dlt = (dlv << 32) + dlu;
     let dudx_fx = dudx * FP_ONE; let dudy_fx = dudy * FP_ONE;
     let dvdx_fx = dvdx * FP_ONE; let dvdy_fx = dvdy * FP_ONE;
     let ludx_fx = dudx * LM_SCALE; let ludy_fx = dudy * LM_SCALE;
@@ -180,8 +195,8 @@ fun rasterize_tri_lightmap(v0, v1, v2, fb, tex, lm) {
         let v_base = v0t + (0.5 - x0) * dvdx + y_off * dvdy;
         let var u_row = u_base * FP_ONE + FP_BIAS_F;
         let var v_row = v_base * FP_ONE + FP_BIAS_F;
-        let var lu_row = u_base * LM_SCALE + LM_BIAS_F;
-        let var lv_row = v_base * LM_SCALE + LM_BIAS_F;
+        let var lu_row = u_base * LM_SCALE;
+        let var lv_row = v_base * LM_SCALE;
         let var row = start_top * FRAME_WIDTH;
         let end_row = end_top * FRAME_WIDTH;
 
@@ -193,46 +208,72 @@ fun rasterize_tri_lightmap(v0, v1, v2, fb, tex, lm) {
             if (start_x < end_x) {
                 let var t = ((v_row + start_x * dvdx_fx).floor() << 32)
                           + (u_row + start_x * dudx_fx).floor();
-                let var lt = ((lv_row + start_x * lvdx_fx).floor() << 16)
+                let var lt = ((lv_row + start_x * lvdx_fx).floor() << 32)
                            + (lu_row + start_x * ludx_fx).floor();
                 let var i = row + start_x;
                 let end_i = row + end_x;
                 while (i < end_i) {
                     let var run = end_i - i;
                     let fu = lt & LM_FRAC_MASK;
-                    let fv = (lt >> 16) & LM_FRAC_MASK;
+                    let fv = (lt >> LM_V_FRAC_SHIFT) & LM_FRAC_MASK;
                     if (dlu > 0) {
-                        let n = (LM_ONE_I - fu + dlu - 1).idiv(dlu);
-                        if (n < run) run = n;
+                        if (fu + (run - 1) * dlu >= LM_ONE_I) {
+                            run = (LM_ONE_I - fu + dlu - 1).idiv(dlu);
+                        }
                     } else if (dlu < 0) {
-                        let n = fu.idiv(0 - dlu) + 1;
-                        if (n < run) run = n;
+                        if (fu + (run - 1) * dlu < 0) {
+                            run = fu.idiv(0 - dlu) + 1;
+                        }
                     }
                     if (dlv > 0) {
-                        let n = (LM_ONE_I - fv + dlv - 1).idiv(dlv);
-                        if (n < run) run = n;
+                        if (fv + (run - 1) * dlv >= LM_ONE_I) {
+                            let n = (LM_ONE_I - fv + dlv - 1).idiv(dlv);
+                            if (n < run) run = n;
+                        }
                     } else if (dlv < 0) {
-                        let n = fv.idiv(0 - dlv) + 1;
-                        if (n < run) run = n;
+                        if (fv + (run - 1) * dlv < 0) {
+                            let n = fv.idiv(0 - dlv) + 1;
+                            if (n < run) run = n;
+                        }
                     }
 
-                    let lu = ((lt >> LM_U_SHIFT) & LM_COORD_MASK) - 32;
-                    let lv = (lt >> LM_V_SHIFT) - 32;
+                    let lu = (lt >> LM_U_CELL_SHIFT) & LM_U_CELL_MASK;
+                    let lv = lt >> LM_V_CELL_SHIFT;
                     let a = lv * LM_SIZE + lu;
                     let l00 = lm[a]; let l10 = lm[a + 1];
                     let l01 = lm[a + LM_SIZE]; let l11 = lm[a + LM_SIZE + 1];
-                    let hu = l10 - l00;
-                    let hv = l01 - l00;
-                    let cross = l11 - l10 - l01 + l00;
+                    let var l = 0;
+                    let var dl = 0;
+                    let var ddl = 0;
 
-                    // Bilinear light is quadratic along an affine scanline.
-                    // First and second differences reproduce it within this
-                    // lumel cell using only two additions per pixel.
-                    let var l = (l00 << LM_LIGHT_SHIFT) + hu * fu * LM_ONE_I
-                              + hv * fv * LM_ONE_I + cross * fu * fv;
-                    let var dl = hu * dlu * LM_ONE_I + hv * dlv * LM_ONE_I
-                               + cross * (fu * dlv + fv * dlu + dlu * dlv);
-                    let ddl = 2 * cross * dlu * dlv;
+                    // A constant coordinate needs one blend along that axis.
+                    // The other axis then steps linearly without approximation.
+                    if (dlv == 0) {
+                        let left = (l00 << LM_FRAC_BITS) + (l01 - l00) * fv;
+                        let right = (l10 << LM_FRAC_BITS) + (l11 - l10) * fv;
+                        let slope = right - left;
+                        l = left * LM_ONE_I + slope * fu;
+                        dl = slope * dlu;
+                    } else if (dlu == 0) {
+                        let top = (l00 << LM_FRAC_BITS) + (l10 - l00) * fu;
+                        let bottom = (l01 << LM_FRAC_BITS) + (l11 - l01) * fu;
+                        let slope = bottom - top;
+                        l = top * LM_ONE_I + slope * fv;
+                        dl = slope * dlv;
+                    } else {
+                        // Bilinear light is quadratic along an affine scanline.
+                        // First and second differences reproduce it exactly.
+                        // Each pixel inside the lumel cell needs two additions.
+                        let hu = l10 - l00;
+                        let hv = l01 - l00;
+                        let cross = l11 - l10 - l01 + l00;
+                        l = (l00 << LM_LIGHT_SHIFT)
+                          + ((hu * fu + hv * fv) << LM_FRAC_BITS)
+                          + cross * fu * fv;
+                        dl = ((hu * dlu + hv * dlv) << LM_FRAC_BITS)
+                           + cross * (fu * dlv + fv * dlu + dlu * dlv);
+                        ddl = 2 * cross * dlu * dlv;
+                    }
                     let run_end = i + run;
                     if (ddl == 0) {
                         while (i < run_end) {
@@ -282,8 +323,8 @@ fun rasterize_tri_lightmap(v0, v1, v2, fb, tex, lm) {
         let v_base = v0t + (0.5 - x0) * dvdx + y_off * dvdy;
         let var u_row = u_base * FP_ONE + FP_BIAS_F;
         let var v_row = v_base * FP_ONE + FP_BIAS_F;
-        let var lu_row = u_base * LM_SCALE + LM_BIAS_F;
-        let var lv_row = v_base * LM_SCALE + LM_BIAS_F;
+        let var lu_row = u_base * LM_SCALE;
+        let var lv_row = v_base * LM_SCALE;
         let var row = start_bot * FRAME_WIDTH;
         let end_row = end_bot * FRAME_WIDTH;
 
@@ -295,42 +336,66 @@ fun rasterize_tri_lightmap(v0, v1, v2, fb, tex, lm) {
             if (start_x < end_x) {
                 let var t = ((v_row + start_x * dvdx_fx).floor() << 32)
                           + (u_row + start_x * dudx_fx).floor();
-                let var lt = ((lv_row + start_x * lvdx_fx).floor() << 16)
+                let var lt = ((lv_row + start_x * lvdx_fx).floor() << 32)
                            + (lu_row + start_x * ludx_fx).floor();
                 let var i = row + start_x;
                 let end_i = row + end_x;
                 while (i < end_i) {
                     let var run = end_i - i;
                     let fu = lt & LM_FRAC_MASK;
-                    let fv = (lt >> 16) & LM_FRAC_MASK;
+                    let fv = (lt >> LM_V_FRAC_SHIFT) & LM_FRAC_MASK;
                     if (dlu > 0) {
-                        let n = (LM_ONE_I - fu + dlu - 1).idiv(dlu);
-                        if (n < run) run = n;
+                        if (fu + (run - 1) * dlu >= LM_ONE_I) {
+                            run = (LM_ONE_I - fu + dlu - 1).idiv(dlu);
+                        }
                     } else if (dlu < 0) {
-                        let n = fu.idiv(0 - dlu) + 1;
-                        if (n < run) run = n;
+                        if (fu + (run - 1) * dlu < 0) {
+                            run = fu.idiv(0 - dlu) + 1;
+                        }
                     }
                     if (dlv > 0) {
-                        let n = (LM_ONE_I - fv + dlv - 1).idiv(dlv);
-                        if (n < run) run = n;
+                        if (fv + (run - 1) * dlv >= LM_ONE_I) {
+                            let n = (LM_ONE_I - fv + dlv - 1).idiv(dlv);
+                            if (n < run) run = n;
+                        }
                     } else if (dlv < 0) {
-                        let n = fv.idiv(0 - dlv) + 1;
-                        if (n < run) run = n;
+                        if (fv + (run - 1) * dlv < 0) {
+                            let n = fv.idiv(0 - dlv) + 1;
+                            if (n < run) run = n;
+                        }
                     }
 
-                    let lu = ((lt >> LM_U_SHIFT) & LM_COORD_MASK) - 32;
-                    let lv = (lt >> LM_V_SHIFT) - 32;
+                    let lu = (lt >> LM_U_CELL_SHIFT) & LM_U_CELL_MASK;
+                    let lv = lt >> LM_V_CELL_SHIFT;
                     let a = lv * LM_SIZE + lu;
                     let l00 = lm[a]; let l10 = lm[a + 1];
                     let l01 = lm[a + LM_SIZE]; let l11 = lm[a + LM_SIZE + 1];
-                    let hu = l10 - l00;
-                    let hv = l01 - l00;
-                    let cross = l11 - l10 - l01 + l00;
-                    let var l = (l00 << LM_LIGHT_SHIFT) + hu * fu * LM_ONE_I
-                              + hv * fv * LM_ONE_I + cross * fu * fv;
-                    let var dl = hu * dlu * LM_ONE_I + hv * dlv * LM_ONE_I
-                               + cross * (fu * dlv + fv * dlu + dlu * dlv);
-                    let ddl = 2 * cross * dlu * dlv;
+                    let var l = 0;
+                    let var dl = 0;
+                    let var ddl = 0;
+                    if (dlv == 0) {
+                        let left = (l00 << LM_FRAC_BITS) + (l01 - l00) * fv;
+                        let right = (l10 << LM_FRAC_BITS) + (l11 - l10) * fv;
+                        let slope = right - left;
+                        l = left * LM_ONE_I + slope * fu;
+                        dl = slope * dlu;
+                    } else if (dlu == 0) {
+                        let top = (l00 << LM_FRAC_BITS) + (l10 - l00) * fu;
+                        let bottom = (l01 << LM_FRAC_BITS) + (l11 - l01) * fu;
+                        let slope = bottom - top;
+                        l = top * LM_ONE_I + slope * fv;
+                        dl = slope * dlv;
+                    } else {
+                        let hu = l10 - l00;
+                        let hv = l01 - l00;
+                        let cross = l11 - l10 - l01 + l00;
+                        l = (l00 << LM_LIGHT_SHIFT)
+                          + ((hu * fu + hv * fv) << LM_FRAC_BITS)
+                          + cross * fu * fv;
+                        dl = ((hu * dlu + hv * dlv) << LM_FRAC_BITS)
+                           + cross * (fu * dlv + fv * dlu + dlu * dlv);
+                        ddl = 2 * cross * dlu * dlv;
+                    }
                     let run_end = i + run;
                     if (ddl == 0) {
                         while (i < run_end) {
@@ -368,11 +433,21 @@ fun rasterize_tri_lightmap(v0, v1, v2, fb, tex, lm) {
 let vertices = [];
 for (let var r = 0; r <= GRID_ROWS; ++r) {
     for (let var c = 0; c <= GRID_COLS; ++c) {
+        let tu = (c * TEX_SIZE) / GRID_COLS;
+        let tv = (r * TEX_SIZE) / GRID_ROWS;
+        let var u = tu;
+        let var v = tv;
+        if (angled) {
+            // Rotate and shear the mapping within the lightmap margins.
+            // Horizontal spans now change both u and v.
+            u = 0.5 * tu.to_f() + 0.25 * tv.to_f() + 32.0;
+            v = 0.0 - 0.25 * tu.to_f() + 0.5 * tv.to_f() + 96.0;
+        }
         vertices.push(Vertex(
             (c * FRAME_WIDTH) / GRID_COLS,
             (r * FRAME_HEIGHT) / GRID_ROWS,
-            (c * TEX_SIZE) / GRID_COLS,
-            (r * TEX_SIZE) / GRID_ROWS
+            u,
+            v
         ));
     }
 }
@@ -414,31 +489,41 @@ for (let var p = 0; p < FRAME_WIDTH * FRAME_HEIGHT; ++p) {
 
 $println(num_frames.to_s() + " frames of " + num_tris.to_s() + " lightmapped textured triangles");
 $println("lightmap: " + LM_SIZE.to_s() + "x" + LM_SIZE.to_s() + " bytes, 1 sample per " + LM_STEP.to_s() + " texture texels");
+if (angled) $println("mapping: angled (both lightmap coordinates vary along spans)");
 $println("total time: " + total_ms.to_s() + "ms");
 $println("fps: " + fps.format_decimals(1));
 $println("Mpixels/s: " + mpix.format_decimals(1));
 $println("RGB checksum: " + sum.to_s() + ", unwritten pixels: " + unlit.to_s());
 
-// Optionally compare against a direct bilinear lookup at every pixel. This
-// untimed check uses the grid's exact screen-to-texture mapping.
-if ($cmd_get_arg_or(2, "") == "validate") {
+// Optionally compare against a direct bilinear lookup at every pixel.
+// The untimed check uses the grid's exact screen-to-texture mapping.
+if (validate) {
     let var differing = 0;
     let var max_channel_error = 0;
     for (let var y = 0; y < FRAME_HEIGHT; ++y) {
-        let lv_fx = ((y.to_f() + 0.5) * LM_SCALE / 4.0).floor();
-        let lv = lv_fx >> LM_FRAC_BITS;
-        let fv = lv_fx & LM_FRAC_MASK;
         for (let var x = 0; x < FRAME_WIDTH; ++x) {
-            let lu_fx = ((x.to_f() + 0.5) * LM_SCALE / 4.0).floor();
+            let tx = (x.to_f() + 0.5) / 4.0;
+            let ty = (y.to_f() + 0.5) / 4.0;
+            let var tu = tx;
+            let var tv = ty;
+            if (angled) {
+                tu = 0.5 * tx + 0.25 * ty + 32.0;
+                tv = 0.0 - 0.25 * tx + 0.5 * ty + 96.0;
+            }
+            let lu_fx = (tu * LM_SCALE).floor();
+            let lv_fx = (tv * LM_SCALE).floor();
             let lu = lu_fx >> LM_FRAC_BITS;
             let fu = lu_fx & LM_FRAC_MASK;
+            let lv = lv_fx >> LM_FRAC_BITS;
+            let fv = lv_fx & LM_FRAC_MASK;
             let a = lv * LM_SIZE + lu;
             let l00 = lightmap[a]; let l10 = lightmap[a + 1];
             let l01 = lightmap[a + LM_SIZE]; let l11 = lightmap[a + LM_SIZE + 1];
             let top = (l00 << LM_FRAC_BITS) + (l10 - l00) * fu;
             let bot = (l01 << LM_FRAC_BITS) + (l11 - l01) * fu;
             let l = ((top << LM_FRAC_BITS) + (bot - top) * fv) >> LM_LIGHT_SHIFT;
-            let c = texture.get_u32((y >> 2) * TEX_SIZE + (x >> 2));
+            let c = texture.get_u32((tv.floor() & TEX_MASK) * TEX_SIZE
+                                  + (tu.floor() & TEX_MASK));
             let scaled = ((c & MASK_RB) | ((c & MASK_G) << 24)) * l;
             let expected = ((scaled >> 8) & MASK_RB) | ((scaled >> 32) & 0xFF00);
             let actual = frame_buffer.get_u32(y * FRAME_WIDTH + x) & 0xFFFFFF;
