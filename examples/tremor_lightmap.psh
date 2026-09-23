@@ -1,0 +1,3709 @@
+// Walk around a lightmapped level, Quake style
+//
+// The world is a set of convex brushes read from a .map file, each one given
+// as the half-spaces that bound it, which is how Quake's own map format works.
+// Faces fall out of intersecting those planes, so arches, ramps and angled
+// walls cost nothing extra: the renderer only ever sees convex polygons.
+//
+// Every frame the faces are handed to the rasterizer front to back, in an
+// order a BSP tree over their own planes makes exact, and an s-buffer keeps a
+// list of the parts of each scanline already covered, so a pixel is only ever
+// written once however much geometry stands behind it.
+//
+// A face given an alpha in the map is the exception, and the one thing the
+// front to back order cannot serve directly: what it blends over has not been
+// drawn yet. It is met like anything else and asks the s-buffer which parts of
+// it are in view, which is already the final answer at that moment, but claims
+// none of them; those spans are written down and replayed once the frame is
+// otherwise finished, in reverse, so each one blends over completed pixels and
+// glass behind glass falls out in the right order.
+//
+// What no polygon claimed is sky, and the s-buffer already knows which pixels
+// those are: its intervals are sorted and coalesced, so the gaps between them
+// need only be walked once a scanline and painted from a gradient baked along
+// the world's up axis. This runs between the two passes rather than after them
+// both, because the opaque pass is what decides where the sky is and the blend
+// pass needs it already there to composite against. Drawing the moon and stars
+// through the same walk is what lets a building eclipse them.
+//
+// The span loop is the one from examples/textured_cube.psh: u and v are packed
+// into the two halves of one integer so a single add steps both. Here it runs
+// over sub-spans, with the perspective divide done once per sub-span, which is
+// what keeps long walls and floors from shearing. How long a sub-span runs
+// follows how fast 1/z is changing, so a wall square to the eye is covered in
+// one piece and only a surface seen edge on pays for a divide every few pixels.
+//
+// Light is baked per face at load time into an 8-bit monochrome lightmap. The
+// rasterizer samples it bilinearly without subdividing the source polygons.
+//
+// Usage: plush examples/tremor_lightmap.psh [map file] [width] [height] [workers] [frames] [shot directory]
+//
+//   W A S D     move
+//   arrows      turn and look
+//   space       jump, or rise while noclipping
+//   c           sink, while noclipping
+//   n           toggle noclip
+//   escape / q  quit
+//
+// Given a frame count, it renders that many frames of a set tour of the level
+// without opening a window, and reports the time per frame and how many pixels
+// were written. Given a directory as well, it writes each viewpoint of the
+// tour there as a TGA screenshot.
+
+from image import Image, load_tga, save_tga;
+from ./monogram_font import Font;
+from random import Xoshiro128;
+
+let FRAME_WIDTH = $cmd_get_arg_or(2, "1280").parse_int(10);
+let FRAME_HEIGHT = $cmd_get_arg_or(3, "720").parse_int(10);
+
+let TEX_DIR = "examples/data/textures/";
+let MAP_PATH = $cmd_get_arg_or(1, "examples/data/lightmap_test.map");
+let NUM_RENDER_ACTORS = $cmd_get_arg_or(4, "8").parse_int(10);
+
+if (FRAME_WIDTH == nil || FRAME_HEIGHT == nil || FRAME_WIDTH < 1 || FRAME_HEIGHT < 1) {
+    $println("width and height must be positive integers");
+    $exit(1);
+}
+if (NUM_RENDER_ACTORS == nil || NUM_RENDER_ACTORS < 1 || NUM_RENDER_ACTORS > FRAME_HEIGHT) {
+    $println("worker count must be between 1 and " + FRAME_HEIGHT.to_s());
+    $exit(1);
+}
+
+// --- Units ---
+
+// World space is metric: positions, distances and speeds are all in meters
+// TEXELS_PER_METER defines the texture density and is what an unscaled
+// face's `scale` key defaults to.
+let TEXELS_PER_METER = 40.0;
+
+// Projection. FOCAL is half the frame width over the tangent of half the
+// horizontal field of view, so this is a 90 degree view.
+let FOCAL = FRAME_WIDTH.to_f() * 0.5;
+let CENTER_X = (FRAME_WIDTH.idiv(2)).to_f();
+let CENTER_Y = (FRAME_HEIGHT.idiv(2)).to_f();
+let NEAR = 0.2;
+
+// The span loop interpolates texture coordinates in fixed point, with u and v
+// packed into the two halves of one integer:
+//
+//   bits 63..32: v, as 16.16 fixed point
+//   bits 31..0:  u, as 16.16 fixed point
+//
+// Integers in this VM are 62-bit fixnums, and going past that boxes the value
+// and allocates, which would be ruinous per pixel. Both halves are therefore
+// wrapped into their texture dimensions before the sub-span starts, which
+// keeps them under 2^24, and then biased by EXC_FX so that a half stepping backwards
+// stays positive instead of borrowing from the half above it. The bias is a
+// whole number of texture widths, so the mask at lookup time removes it again.
+let FP_BITS = 16;
+let FP_ONE = 65536.0;
+let U_SHIFT = FP_BITS;
+let BIAS_TEXELS = 8192.0;
+
+// The longest a sub-span may run, and the matching cap on how far u or v may
+// travel in one pixel. Their product is the backwards step the bias has to
+// cover, and the bias in turn bounds how large the packed pair can grow: at a
+// length of 64 the packed value passes the 62-bit fixnum limit, and every
+// pixel would box.
+let SUB_MAX = 32;
+let GRAD_LIMIT_FX = 64;
+let GRAD_LIMIT = 64.0;
+let EXC_FX = (SUB_MAX * GRAD_LIMIT_FX) << FP_BITS;
+
+// How far 1/z may swing across one sub-span, as a fraction of itself. The
+// affine step between the ends of a sub-span is exact wherever 1/z holds
+// still, so this is what sets the length rather than a fixed count: a wall
+// square to the eye runs in one piece, a floor seen edge on is cut fine.
+let PERSP_TOL = 0.04;
+
+// --- Lighting ---
+
+// Light is applied per pixel, by scaling the texel as it is read rather than
+// by reading it from a pre-darkened copy of the texture.
+//
+// A table of darkened copies makes shading free per pixel, but it quantizes:
+// with sixteen copies a gradient shows sixteen bands. Scaling instead costs
+// arithmetic on every pixel and gives a continuous level, and it drops the
+// table, so a texture is its own size again rather than sixteen times it.
+//
+// The scale runs 0..255, so a channel product is at most 255 * 255 and stays
+// inside sixteen bits. That is what lets one multiply carry all three
+// channels: see the span loop. Stopping at 255 rather than 256 keeps the
+// product off the sixteenth bit. The endpoint clamps below keep the multiplier
+// in that range, making spilling one channel into the next impossible.
+let SHADE_MAX = 255.0;
+
+// Levels a map may ask for by name, which are turned into a scale on the same
+// curve everything else uses
+let NUM_LEVELS = 16;
+
+// How dark an unlit surface goes and how bright a fully lit one gets. Quake's
+// rooms are mostly dark with pools of light around the fixtures, so the floor
+// here is low and the lamps have to earn every step above it.
+let MIN_SHADE = 0.09;
+let MAX_SHADE = 1.0;
+
+// One lightmap sample covers ten texture texels. At the default texture scale
+// this is four monochrome lumels per meter.
+let LM_TEXEL_STEP = 10.0;
+let LM_FRAC_BITS = 16;
+let LM_ONE = 65536.0;
+let LM_ONE_I = 65536;
+let LM_SCALE = LM_ONE / LM_TEXEL_STEP;
+let LM_LIGHT_SHIFT = 2 * LM_FRAC_BITS;
+let LM_FRAC_MASK = 65535;
+let LM_U_CELL_MASK = 65535;
+let LM_U_CELL_SHIFT = LM_FRAC_BITS;
+let LM_V_FRAC_SHIFT = 32;
+let LM_V_CELL_SHIFT = 32 + LM_FRAC_BITS;
+
+// Retained only by the unused legacy subdivision helpers below. Lightmapped
+// setup never calls them.
+let LIGHT_GRID = 1.4;
+let LIGHT_DEPTH = 4;
+let LIGHT_TOL = 16.0;
+
+// Red and blue sit sixteen bits apart in a pixel, which is what lets them
+// share a multiply with green once green is moved out of the way
+let MASK_RB = 0x00FF00FF;
+let MASK_G = 0x0000FF00;
+
+// The framebuffer consumer currently ignores alpha, so the span loop leaves
+// its high byte clear instead of ORing the same constant into every pixel.
+
+// The level everything starts from, before any lamp reaches it
+let AMBIENT = 0.13;
+
+// --- Player ---
+
+let EYE_HEIGHT = 1.6;
+let PLAYER_RADIUS = 0.45;
+let PLAYER_HEIGHT = 1.7;
+let STEP_HEIGHT = 0.7;
+
+// The steepest ground that can be walked up, as rise over run. Anything above
+// it is a wall, however solid it is underneath: the buttresses leaning off the
+// courtyard and the slabs of a wall that tilts back were all climbable before,
+// since each step up them is short enough to look like a kerb.
+let MAX_CLIMB_SLOPE = 0.5;
+let STEEP_SLIDE_MAX_SPEED = 10.0;
+let WALK_SPEED = 7.5;
+let FLY_SPEED = 15.0;
+
+// A jump clears about 1.5 m, which is twice the height of a step and enough
+// to hop onto the low ledges, but nowhere near the parapet
+let GRAVITY = 22.5;
+let JUMP_SPEED = 8.25;
+let MAX_FALL_SPEED = 35.0;
+let TURN_SPEED = 2.6;
+let MOUSE_SENS = 0.0032;
+let PITCH_LIMIT = 1.2;
+
+let PI = 3.14159265358979;
+let PLANE_EPS = 0.00025;
+let BIG = 409.6;
+
+// --- Camera state ---
+
+let var cam_x = 0.0;
+let var cam_y = 1.6;
+let var cam_z = 0.0;
+let var cam_feet = 0.0;
+let var cam_vel_y = 0.0;
+let var cam_slide_speed = 0.0;
+let var on_ground = false;
+let var cam_yaw = 0.0;
+let var cam_pitch = 0.0;
+let var sin_yaw = 0.0;
+let var cos_yaw = 1.0;
+let var sin_pitch = 0.0;
+let var cos_pitch = 1.0;
+let var noclip = false;
+
+// --- Scratch buffers, reused so that drawing a frame allocates no arrays ---
+
+let MAX_VERTS = 32;
+
+let var aX = Array.with_size(MAX_VERTS, 0.0);
+let var aY = Array.with_size(MAX_VERTS, 0.0);
+let var aZ = Array.with_size(MAX_VERTS, 0.0);
+let var aU = Array.with_size(MAX_VERTS, 0.0);
+let var aV = Array.with_size(MAX_VERTS, 0.0);
+
+let var bX = Array.with_size(MAX_VERTS, 0.0);
+let var bY = Array.with_size(MAX_VERTS, 0.0);
+let var bZ = Array.with_size(MAX_VERTS, 0.0);
+let var bU = Array.with_size(MAX_VERTS, 0.0);
+let var bV = Array.with_size(MAX_VERTS, 0.0);
+
+// Projected vertices: screen position, and u/z, v/z, 1/z, which are the three
+// quantities that are linear in screen space
+let pX = Array.with_size(MAX_VERTS, 0.0);
+let pY = Array.with_size(MAX_VERTS, 0.0);
+let pUZ = Array.with_size(MAX_VERTS, 0.0);
+let pVZ = Array.with_size(MAX_VERTS, 0.0);
+let pW = Array.with_size(MAX_VERTS, 0.0);
+
+// Reciprocals of the sub-span lengths, so the per-sub-span gradient is a
+// multiply rather than a divide
+let INV_N = Array.with_size(SUB_MAX + 1, 0.0);
+for (let var i = 1; i <= SUB_MAX; ++i) INV_N[i] = 1.0 / i.to_f();
+
+// Gradients of the face being drawn, and its texture
+let var g_duzdx = 0.0; let var g_duzdy = 0.0;
+let var g_dvzdx = 0.0; let var g_dvzdy = 0.0;
+let var g_dwdx = 0.0;  let var g_dwdy = 0.0;
+let var g_uz0 = 0.0;   let var g_vz0 = 0.0;   let var g_w0 = 0.0;
+
+// The lightmap of the face being drawn and the texture-space origin of its
+// first sample. BSP fragments retain the original face's complete mapping.
+let var g_lm = nil;
+let var g_lm_w = 0;
+let var g_lm_h = 0;
+let var g_lm_u0 = 0.0; let var g_lm_v0 = 0.0;
+let var g_ref_x = 0.0; let var g_ref_y = 0.0;
+let var g_pix = nil;
+let var g_umask = 0;
+let var g_vshift = 0;
+let var g_vmask = 0;
+let var g_uwrap = 0;
+let var g_vwrap = 0;
+
+// How much of the destination the face lets through, 0 for an opaque one, and
+// the range the interpolated light multiplier is held to. Opaque faces run the
+// full scale; a blended one is capped at its own alpha, so that its share and
+// the destination's cannot together carry a channel past sixteen bits.
+let var g_inv_alpha = 0;
+
+// Whether the polygon being rasterized is one whose spans are being taken down
+// for the blending pass rather than drawn. It cannot change inside a polygon,
+// so the span loop reads it once and picks its scanline loop with it.
+let var g_collecting = false;
+
+let var bsp_root = nil;
+
+// Lava swell. The surface is cut into small quads at load and their corners
+// ride a pair of sine waves, one running along x and one along z, so the lava
+// actually moves rather than having its texture slid across it. The waves are
+// a function of world position, so neighbouring quads agree along the edge they
+// share and the surface stays watertight.
+let WAVE_AMP = 0.15;
+let WAVE_FREQ = 0.98;
+let LAVA_GRID = 1.0;
+let var warp_phase = 0.0;
+
+let var pixels_drawn = 0;
+let var rect_faces_skipped = 0;
+let var rect_nodes_skipped = 0;
+
+let frame_image = Image(FRAME_WIDTH, FRAME_HEIGHT);
+let frame_buffer = frame_image.bytes;
+
+// Each render actor owns one horizontal band. These remain full-frame in the
+// main actor and are changed only in the private heap of each worker.
+let var render_y0 = 0;
+let var render_y1 = FRAME_HEIGHT;
+let BAND_HEIGHT = 60;
+
+// --- The s-buffer ---
+
+// One covered interval of a scanline. The intervals of a scanline are kept
+// sorted, disjoint and coalesced, so what is left between them is exactly what
+// is still visible.
+//
+// They live in parallel arrays and link by index rather than being objects.
+// The whole structure is thrown away and rebuilt each frame, so handing them
+// out of a bump allocator that resets with it means drawing a frame allocates
+// nothing at all, and the collector never runs inside one.
+let MAX_SPANS = 16384;
+let NO_SPAN = 0 - 1;
+
+let sp_x0 = Array.with_size(MAX_SPANS, 0);
+let sp_x1 = Array.with_size(MAX_SPANS, 0);
+let sp_next = Array.with_size(MAX_SPANS, NO_SPAN);
+let var sp_top = 0;
+
+let sb_head = Array.with_size(FRAME_HEIGHT, NO_SPAN);
+let sb_full = ByteArray.with_size(FRAME_HEIGHT * 4);
+let var sb_num_full = 0;
+let var screen_done = false;
+
+let MAX_VIS = 128;
+let vis_x0 = Array.with_size(MAX_VIS, 0);
+let vis_x1 = Array.with_size(MAX_VIS, 0);
+
+// --- Faces held back to blend ---
+//
+// A face you can see through cannot be drawn where it is met, because what it
+// blends over has not been drawn yet: the traversal is front to back, so the
+// wall behind a pane of glass comes later. What it can do at that moment is ask
+// the s-buffer which parts of it are in view, since that answer is already
+// final, and write them down.
+//
+// The spans go in a flat pool and each face keeps a run of it. Once the opaque
+// pass has finished the frame, the faces are replayed in reverse, which is back
+// to front among themselves, and each one blends over a frame buffer that is by
+// then complete underneath it. Glass behind glass composites in the right order
+// for the same reason.
+let MAX_DEFER_FACES = 256;
+let MAX_DEFER_SPANS = 8192;
+
+let df_face = Array.with_size(MAX_DEFER_FACES, nil);
+let df_first = Array.with_size(MAX_DEFER_FACES, 0);
+let df_count = Array.with_size(MAX_DEFER_FACES, 0);
+let var df_num = 0;
+
+let ds_y = Array.with_size(MAX_DEFER_SPANS, 0);
+let ds_x0 = Array.with_size(MAX_DEFER_SPANS, 0);
+let ds_x1 = Array.with_size(MAX_DEFER_SPANS, 0);
+let var ds_top = 0;
+
+fun sbuf_reset() {
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) sb_head[y] = NO_SPAN;
+    sb_full.zero_fill();
+    sb_num_full = 0;
+    sp_top = 0;
+    screen_done = false;
+    df_num = 0;
+    ds_top = 0;
+}
+
+// Insert [x0, x1) into scanline y and report which parts of it were not already
+// covered, in vis_x0/vis_x1. The covered set becomes the union.
+fun sbuf_insert(y, x0, x1) {
+    if (sb_full.get_u32(y) != 0) return 0;
+
+    let var n_vis = 0;
+    let var prev = NO_SPAN;
+    let var cur = sb_head[y];
+
+    // Skip the intervals entirely left of x0. One ending exactly at x0 touches
+    // it, so it joins the run below and the two coalesce.
+    while (cur != NO_SPAN && sp_x1[cur] < x0) {
+        prev = cur;
+        cur = sp_next[cur];
+    }
+
+    // Walk the overlapped run: the gaps in it are what is visible, and the
+    // whole run merges into one interval
+    let var mx0 = x0;
+    let var mx1 = x1;
+    let var cx = x0;
+    let var scan = cur;
+    while (scan != NO_SPAN) {
+        let sx0 = sp_x0[scan];
+        if (sx0 > x1) break;
+        let sx1 = sp_x1[scan];
+
+        if (sx0 > cx && n_vis < MAX_VIS) {
+            vis_x0[n_vis] = cx;
+            vis_x1[n_vis] = sx0;
+            n_vis = n_vis + 1;
+        }
+        if (sx1 > cx) cx = sx1;
+        if (sx0 < mx0) mx0 = sx0;
+        if (sx1 > mx1) mx1 = sx1;
+        scan = sp_next[scan];
+    }
+    if (cx < x1 && n_vis < MAX_VIS) {
+        vis_x0[n_vis] = cx;
+        vis_x1[n_vis] = x1;
+        n_vis = n_vis + 1;
+    }
+
+    // Hidden behind what is already there, so the covered set is unchanged
+    if (n_vis == 0) return 0;
+
+    if (cur == scan) {
+        // Nothing overlapped: link in a new interval
+        if (sp_top >= MAX_SPANS) {
+            // The pool is spent. Retiring the scanline keeps what is already
+            // on it, which is the nearest geometry, and stops anything behind
+            // that from being let through out of order.
+            sb_full.set_u32(y, 1);
+            sb_num_full = sb_num_full + 1;
+            if (sb_num_full >= render_y1 - render_y0) screen_done = true;
+            return 0;
+        }
+
+        let s = sp_top;
+        sp_top = sp_top + 1;
+        sp_x0[s] = mx0;
+        sp_x1[s] = mx1;
+        sp_next[s] = scan;
+        if (prev == NO_SPAN) sb_head[y] = s; else sp_next[prev] = s;
+    } else {
+        // Widen the first interval of the run over the whole of it and drop the
+        // rest, which stay in the pool unused until the frame ends
+        sp_x0[cur] = mx0;
+        sp_x1[cur] = mx1;
+        sp_next[cur] = scan;
+    }
+
+    if (mx0 <= 0 && mx1 >= FRAME_WIDTH) {
+        sb_full.set_u32(y, 1);
+        sb_num_full = sb_num_full + 1;
+        if (sb_num_full >= render_y1 - render_y0) screen_done = true;
+    }
+    return n_vis;
+}
+
+// The same walk as `sbuf_insert`, reporting what of [x0, x1) is still visible
+// without claiming any of it.
+//
+// This is what a face you can see through asks instead. Front to back order
+// means the covered set at the moment a face is reached is exactly the geometry
+// nearer than it, so the gaps it comes back with are already the right answer
+// for which parts of it are in view. What it must not do is fill those gaps in:
+// whatever stands behind still has to be drawn, because the blend is going to
+// need it.
+fun sbuf_visible(y, x0, x1) {
+    if (sb_full.get_u32(y) != 0) return 0;
+
+    let var n_vis = 0;
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN && sp_x1[cur] < x0) cur = sp_next[cur];
+
+    let var cx = x0;
+    while (cur != NO_SPAN) {
+        let sx0 = sp_x0[cur];
+        if (sx0 > x1) break;
+
+        if (sx0 > cx && n_vis < MAX_VIS) {
+            vis_x0[n_vis] = cx;
+            vis_x1[n_vis] = sx0;
+            n_vis = n_vis + 1;
+        }
+        let sx1 = sp_x1[cur];
+        if (sx1 > cx) cx = sx1;
+        cur = sp_next[cur];
+    }
+    if (cx < x1 && n_vis < MAX_VIS) {
+        vis_x0[n_vis] = cx;
+        vis_x1[n_vis] = x1;
+        n_vis = n_vis + 1;
+    }
+    return n_vis;
+}
+
+// Is every pixel in this screen-space rectangle already covered? This is a
+// deliberately conservative polygon occlusion test: a polygon fits inside its
+// bounding rectangle, so covering the whole rectangle proves that the polygon
+// cannot contribute a pixel. The reverse is not true, but a missed rejection
+// only costs time and cannot change the image.
+fun sbuf_covers_rect(x0, y0, x1, y1) {
+    let var ry0 = y0.max(render_y0);
+    let ry1 = y1.min(render_y1);
+    if (ry0 >= ry1) return true;
+
+    for (let var y = ry0; y < ry1; ++y) {
+        if (sb_full.get_u32(y) != 0) continue;
+
+        let var cur = sb_head[y];
+        while (cur != NO_SPAN && sp_x1[cur] <= x0) cur = sp_next[cur];
+        if (cur == NO_SPAN || sp_x0[cur] > x0 || sp_x1[cur] < x1) return false;
+    }
+    return true;
+}
+
+// --- Colors ---
+
+fun color_lerp(a, b, t) {
+    let it = 1.0 - t;
+    let r = (((a >> 16) & 0xFF).to_f() * it + ((b >> 16) & 0xFF).to_f() * t).floor();
+    let g = (((a >> 8) & 0xFF).to_f() * it + ((b >> 8) & 0xFF).to_f() * t).floor();
+    let bl = ((a & 0xFF).to_f() * it + (b & 0xFF).to_f() * t).floor();
+    return 0xFF000000 | (r << 16) | (g << 8) | bl;
+}
+
+fun color_scale(c, t) {
+    let r = (((c >> 16) & 0xFF).to_f() * t).floor().min(255).max(0);
+    let g = (((c >> 8) & 0xFF).to_f() * t).floor().min(255).max(0);
+    let b = ((c & 0xFF).to_f() * t).floor().min(255).max(0);
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// Saturating per-channel add. SWAR: the per-byte carry-out is detected in one
+// shot and used to force the overflowed bytes to 0xFF.
+fun color_add_sat(a, b) {
+    let x = a & 0x00FFFFFF;
+    let y = b & 0x00FFFFFF;
+    let s = x + y;
+    let m = ((x & y) | ((x | y) & (s ^ -1))) & 0x00808080;
+    return 0xFF000000 | ((s | ((m << 1) - (m >> 7))) & 0x00FFFFFF);
+}
+
+// --- Sky ---
+//
+// The gradient runs along the world's up axis, so it is baked once into a table
+// indexed by height above the horizon and then sampled through the camera.
+// Pitch slides the whole table up or down the frame, which is what looking up
+// at the sky should do. There is no roll to follow, so the mapping is exact.
+
+let SKY_ZENITH = 0xFF0A0614;
+let SKY_HAZE = 0xFF2A2038;
+let SKY_NADIR = 0xFF08040E;
+
+// Indexed by row of a level view, where the horizon sits at the frame's center
+let bg_rows = Array.with_size(FRAME_HEIGHT, 0);
+for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+    if (y.to_f() < CENTER_Y) {
+        // Near-black at the zenith, warming into the haze at the horizon
+        let t = y.to_f() / CENTER_Y;
+        bg_rows[y] = color_lerp(SKY_ZENITH, SKY_HAZE, t * t * t);
+    } else {
+        // Below the horizon is open air falling away rather than a ground
+        // plane, so it drops off into the dark
+        let t = ((y.to_f() - CENTER_Y) / (FRAME_HEIGHT.to_f() - CENTER_Y) * 4.0).min(1.0);
+        bg_rows[y] = color_lerp(SKY_HAZE, SKY_NADIR, t);
+    }
+}
+
+// Where a screen row falls in the baked gradient. World up in eye space is
+// (0, cos_pitch, sin_pitch), and level with the horizon this is y -> y.
+fun sky_row(y) {
+    let vy = (CENTER_Y + (y.to_f() - CENTER_Y) * cos_pitch - FOCAL * sin_pitch).floor();
+    return bg_rows[vy.max(0).min(FRAME_HEIGHT - 1)];
+}
+
+// Paint the parts of [x0, x1) on scanline y that no polygon claimed. The
+// s-buffer's intervals are sorted, disjoint and coalesced, so the gaps between
+// them are already exactly what is still uncovered and one walk finds them all.
+fun sky_span(y, x0, x1, c) {
+    let fb = frame_buffer;
+    let row = y * FRAME_WIDTH;
+    let var cx = x0;
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN && sp_x1[cur] <= x0) cur = sp_next[cur];
+
+    while (cur != NO_SPAN) {
+        let sx0 = sp_x0[cur];
+        if (sx0 >= x1) break;
+        if (sx0 > cx) fb.fill_u32(row + cx, sx0 - cx, c);
+        let sx1 = sp_x1[cur];
+        if (sx1 > cx) cx = sx1;
+        cur = sp_next[cur];
+    }
+    if (cx < x1) fb.fill_u32(row + cx, x1 - cx, c);
+}
+
+// Is this pixel sky? The same walk, stopped at the first interval that reaches
+// it.
+fun sky_at(y, x) {
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN) {
+        if (sp_x0[cur] > x) return true;
+        if (sp_x1[cur] > x) return false;
+        cur = sp_next[cur];
+    }
+    return true;
+}
+
+// This replaces clearing the frame: every pixel is either covered by the opaque
+// pass or is sky, so nothing is left needing a background color under it.
+//
+// Reports whether the band had any sky at all, which is what keeps a level with
+// a roof over it from paying for a moon and stars it cannot see.
+fun draw_sky() {
+    let var any = false;
+    for (let var y = render_y0; y < render_y1; ++y) {
+        // The intervals are coalesced, so one reaching both edges is the only
+        // shape a fully covered row can take
+        let cur = sb_head[y];
+        if (cur != NO_SPAN && sp_x0[cur] <= 0 && sp_x1[cur] >= FRAME_WIDTH) continue;
+
+        sky_span(y, 0, FRAME_WIDTH, sky_row(y));
+        any = true;
+    }
+    return any;
+}
+
+// --- Moon and stars ---
+//
+// Both sit at fixed world directions, since the sky is effectively at infinity,
+// so they swing across the frame as the camera turns. Drawing them through
+// `sky_span` is what lets a building eclipse them: they only reach the pixels
+// the opaque pass left behind.
+
+let var proj_x = 0.0;
+let var proj_y = 0.0;
+
+// A direction at infinity: the same yaw then pitch the faces go through, with
+// no translation and no divide by distance. False when it is behind us.
+fun project_dir(dx, dy, dz) {
+    let rx = dx * cos_yaw - dz * sin_yaw;
+    let rz = dx * sin_yaw + dz * cos_yaw;
+    let ey = dy * cos_pitch - rz * sin_pitch;
+    let ez = rz * cos_pitch + dy * sin_pitch;
+    if (ez <= 0.01) return false;
+    let s = FOCAL / ez;
+    proj_x = CENTER_X + rx * s;
+    proj_y = CENTER_Y - ey * s;
+    return true;
+}
+
+let MOON_AZ = 0.107;       // Radians right of straight ahead
+let MOON_EL = 0.4054;      // Radians above the horizon
+let MOON_R = (FRAME_HEIGHT.idiv(29)).max(6);
+let MOON_HALO_R = MOON_R * 4;
+// One step every couple of pixels, otherwise the falloff shows as rings
+let MOON_HALO_STEPS = (MOON_HALO_R.idiv(2)).max(8);
+let MOON_COLOR = 0xFFF2F5FF;
+let MOON_GLOW = 0xFFA8C4FF;
+
+fun sky_disc(cx, cy, r, color) {
+    let y0 = (cy - r).max(render_y0);
+    let y1 = (cy + r + 1).min(render_y1);
+    let rr = (r * r).to_f();
+    for (let var y = y0; y < y1; ++y) {
+        let dy = (y - cy).to_f();
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+        let h = h2.sqrt().floor();
+        let xa = (cx - h).max(0);
+        let xb = (cx + h + 1).min(FRAME_WIDTH);
+        if (xa < xb) sky_span(y, xa, xb, color);
+    }
+}
+
+// Same shape, but each row is the gradient underneath plus the glow, so the
+// halo adds to the sky rather than painting over it
+fun glow_disc(cx, cy, r, add) {
+    let y0 = (cy - r).max(render_y0);
+    let y1 = (cy + r + 1).min(render_y1);
+    let rr = (r * r).to_f();
+    for (let var y = y0; y < y1; ++y) {
+        let dy = (y - cy).to_f();
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+        let h = h2.sqrt().floor();
+        let xa = (cx - h).max(0);
+        let xb = (cx + h + 1).min(FRAME_WIDTH);
+        if (xa < xb) sky_span(y, xa, xb, color_add_sat(sky_row(y), add));
+    }
+}
+
+fun draw_moon() {
+    let ce = MOON_EL.cos();
+    if (!project_dir(ce * MOON_AZ.sin(), MOON_EL.sin(), ce * MOON_AZ.cos())) return;
+    let mx = proj_x.floor();
+    let my = proj_y.floor();
+    if (mx < 0 - MOON_HALO_R || mx > FRAME_WIDTH + MOON_HALO_R) return;
+    if (my < render_y0 - MOON_HALO_R || my > render_y1 + MOON_HALO_R) return;
+
+    // Halo, drawn outside in so each smaller disc steps the falloff up
+    for (let var i = MOON_HALO_STEPS; i >= 1; --i) {
+        let t = i.to_f() / MOON_HALO_STEPS.to_f();
+        let k = 1.0 - t;
+        glow_disc(mx, my, MOON_R + (MOON_HALO_R.to_f() * t).floor(),
+                  color_scale(MOON_GLOW, k * k * 0.5));
+    }
+
+    sky_disc(mx, my, MOON_R, MOON_COLOR);
+
+    // A couple of maria, just enough that it reads as a moon and not a lamp
+    let m = color_scale(MOON_COLOR, 0.90);
+    sky_disc(mx - MOON_R.idiv(3), my - MOON_R.idiv(4), MOON_R.idiv(3), m);
+    sky_disc(mx + MOON_R.idiv(4), my + MOON_R.idiv(3), MOON_R.idiv(4), m);
+}
+
+let NUM_STARS = 400;
+let star_dx = Array.with_size(NUM_STARS, 0.0);
+let star_dy = Array.with_size(NUM_STARS, 0.0);
+let star_dz = Array.with_size(NUM_STARS, 0.0);
+let star_color = Array.with_size(NUM_STARS, 0);
+
+let star_rng = Xoshiro128(12345);
+
+// Spread over the whole dome, since the player can turn to face any of it
+for (let var i = 0; i < NUM_STARS; ++i) {
+    let az = star_rng.float(0.0, 1.0) * 6.2831853;
+    let el = 0.05 + star_rng.float(0.0, 1.0) * 1.4;
+    let ce = el.cos();
+    star_dx[i] = ce * az.sin();
+    star_dy[i] = el.sin();
+    star_dz[i] = ce * az.cos();
+    star_color[i] = color_scale(0xFFFFFFFF, 0.25 + star_rng.float(0.0, 1.0) * 0.6);
+}
+
+fun draw_stars() {
+    for (let var i = 0; i < NUM_STARS; ++i) {
+        if (!project_dir(star_dx[i], star_dy[i], star_dz[i])) continue;
+        let sx = proj_x.floor();
+        if (sx < 0 || sx >= FRAME_WIDTH) continue;
+        let sy = proj_y.floor();
+        if (sy < render_y0 || sy >= render_y1) continue;
+        if (sky_at(sy, sx)) frame_buffer.set_u32(sy * FRAME_WIDTH + sx, star_color[i]);
+    }
+}
+
+// --- Textures ---
+
+// Loads a texture, which the span loop needs to be power-of-two sized
+fun load_texture(path) {
+    let img = load_tga(path);
+    if (img == nil) {
+        $println(path + ": could not read an uncompressed 32-bit TGA");
+        $exit(1);
+    }
+
+    let w = img.width;
+    let h = img.height;
+    if (w < 1 || h < 1 || (w & (w - 1)) != 0 || (h & (h - 1)) != 0) {
+        $println(path + ": expected a power-of-two sized texture");
+        $exit(1);
+    }
+
+    return img;
+}
+
+// A texture and the masks the span loop uses to wrap its coordinates. Sizes
+// differ between textures, so these belong to the texture rather than being
+// global constants.
+class Texture {
+    init(self, name) {
+        let t = load_texture(TEX_DIR + name + ".tga");
+        self.name = name;
+        self.base = t.bytes;
+        self.width = t.width;
+        self.height = t.height;
+
+        let var shift = 0;
+        while ((1 << shift) < self.width) shift = shift + 1;
+        self.shift = shift;
+
+        self.umask = self.width - 1;
+        self.vshift = 32 + FP_BITS - shift;
+        self.vmask = (self.height - 1) << shift;
+        self.uwrap = (self.width << FP_BITS) - 1;
+        self.vwrap = (self.height << FP_BITS) - 1;
+
+        self.lit = nil;
+    }
+
+    // The texture as loaded. Shading happens per pixel now, so there is
+    // nothing to prepare and nothing to keep sixteen copies of.
+    shaded(self) {
+        return self.base;
+    }
+}
+
+// --- Geometry ---
+
+// A bounding half-space: the brush is the set of points with
+// nx*x + ny*y + nz*z <= d. The texture and flags of the face this plane cuts
+// ride along with it.
+class Plane {
+    init(self, nx, ny, nz, d) {
+        self.nx = nx;
+        self.ny = ny;
+        self.nz = nz;
+        self.d = d;
+        self.tex = nil;
+        self.light = -1;
+        self.fit = false;
+        self.flow = false;
+        self.scale = TEXELS_PER_METER;
+        self.turn = false;
+        self.flip = false;
+        self.alpha = 1.0;
+    }
+}
+
+// A convex solid, kept for collision and as the source of its own faces. The
+// box around it is worth having: it rejects most brushes outright, and it is
+// exact where the plane test below is not.
+class Brush {
+    init(self, planes) {
+        self.planes = planes;
+        self.x0 = 0.0; self.y0 = 0.0; self.z0 = 0.0;
+        self.x1 = 0.0; self.y1 = 0.0; self.z1 = 0.0;
+        self.alpha = 1.0;
+    }
+}
+
+// One face: a convex polygon on one plane, its vertices held flat as x, y, z
+// triples. Texture coordinates are world coordinates projected along whichever
+// axis the normal is most nearly parallel to, which is what Quake does too, and
+// what makes neighbouring brushes line up with no authoring.
+class Face {
+    init(self, verts, nx, ny, nz, d, tex, light, fit, flow, scale, turn, flip, alpha) {
+        self.v = verts;
+        self.nx = nx;
+        self.ny = ny;
+        self.nz = nz;
+        self.d = d;
+        self.tex = tex;
+        self.light = light;
+        self.fit = fit;
+        self.flow = flow;
+        self.scale = scale;
+        self.turn = turn;
+        self.flip = flip;
+        self.alpha = alpha;
+
+        // What the span loop actually wants: how much of the destination
+        // survives, as a 0..255 multiplier. The source side needs no number of
+        // its own because alpha is folded into the baked light instead, which
+        // leaves the opaque loop's one multiply doing the same work it did.
+        // Rounding to whole 255ths here is what makes the two sum to 255 and
+        // keeps a blended channel inside its sixteen bits.
+        self.alpha8 = (alpha * 255.0).floor().clip(0, 255);
+        self.inv_alpha8 = 255 - self.alpha8;
+
+        // A point inside the face, which `light_at` steps towards to ask
+        // whether a sample is walled in. Pieces cut off a face keep the whole
+        // face's point rather than taking their own, so that two of them
+        // meeting at a corner step the same way and find the same answer.
+        let nv = verts.len.idiv(3);
+        let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+        for (let var i = 0; i < nv; ++i) {
+            cx = cx + verts[i * 3]; cy = cy + verts[i * 3 + 1]; cz = cz + verts[i * 3 + 2];
+        }
+        let inv_nv = 1.0 / nv.to_f();
+        self.mid_x = cx * inv_nv; self.mid_y = cy * inv_nv; self.mid_z = cz * inv_nv;
+
+        let ax = nx.abs();
+        let ay = ny.abs();
+        let az = nz.abs();
+        let var taxis = 2;
+        if (ax >= ay && ax >= az) taxis = 0;
+        else if (ay >= ax && ay >= az) taxis = 1;
+        self.taxis = taxis;
+
+        // Set when the face is textured to fit, and when it is lit
+        self.su = 1.0; self.ou = 0.0;
+        self.sv = 1.0; self.ov = 0.0;
+        self.pix = nil;
+        self.umask = 0;
+        self.vshift = 0;
+        self.vmask = 0;
+        self.uwrap = 0;
+        self.vwrap = 0;
+
+        // One padded 8-bit lightmap belongs to the original brush face. BSP
+        // fragments share it and retain this texture-coordinate origin.
+        self.lm = nil;
+        self.lm_w = 0;
+        self.lm_h = 0;
+        self.lm_u0 = 0.0;
+        self.lm_v0 = 0.0;
+    }
+}
+
+let textures = [];
+let tex_by_name = {};
+let faces = [];
+let brushes = [];
+let lights = [];
+
+let var start_x = 0.0;
+let var start_y = 1.6;
+let var start_z = 0.0;
+let var start_yaw = 0.0;
+
+// Loads a texture the first time its name is used in the map, and hands back
+// the same instance every time after that
+fun get_tex(name) {
+    if (tex_by_name.has(name)) return tex_by_name[name];
+    let t = Texture(name);
+    textures.push(t);
+    tex_by_name[name] = t;
+    return t;
+}
+
+// The texture coordinates of a point on a face, before fit and flow. A wall
+// takes v from -y so that the texture is the right way up.
+fun axis_u(taxis, x, y, z) {
+    if (taxis == 0) return z;
+    return x;
+}
+
+fun axis_v(taxis, x, y, z) {
+    if (taxis == 1) return z;
+    return 0.0 - y;
+}
+
+// `turn` gives the face a quarter turn, u' = v and v' = -u, which is what lays
+// the grain of a texture along a beam instead of across it
+fun face_u(taxis, turn, x, y, z) {
+    if (turn) return axis_v(taxis, x, y, z);
+    return axis_u(taxis, x, y, z);
+}
+
+fun face_v(taxis, turn, x, y, z) {
+    if (turn) return 0.0 - axis_u(taxis, x, y, z);
+    return axis_v(taxis, x, y, z);
+}
+
+// The same in texels, with the face's fit or scale applied, which is what the
+// span loop carries. The baked light is a function of these, so it has to be
+// laid out on exactly the coordinates the loop hands it.
+fun texel_u(f, x, y, z) {
+    let var u = face_u(f.taxis, f.turn, x, y, z);
+    if (f.flip) u = 0.0 - u;
+    if (f.fit) return u * f.su + f.ou;
+    return u * f.scale;
+}
+
+fun texel_v(f, x, y, z) {
+    let v = face_v(f.taxis, f.turn, x, y, z);
+    if (f.fit) return v * f.sv + f.ov;
+    return v * f.scale;
+}
+
+// A big quad lying on the plane, ready to be cut down by the other planes of
+// its brush
+fun plane_quad(p) {
+    // Any direction not parallel to the normal will do to start from
+    let var ax = 0.0; let var ay = 0.0; let var az = 1.0;
+    if (p.nz.abs() > 0.9) { ax = 1.0; ay = 0.0; az = 0.0; }
+
+    // t1 = normalize(cross(n, a)), t2 = cross(n, t1)
+    let var t1x = p.ny * az - p.nz * ay;
+    let var t1y = p.nz * ax - p.nx * az;
+    let var t1z = p.nx * ay - p.ny * ax;
+    let len = (t1x * t1x + t1y * t1y + t1z * t1z).sqrt();
+    t1x = t1x / len; t1y = t1y / len; t1z = t1z / len;
+
+    let t2x = p.ny * t1z - p.nz * t1y;
+    let t2y = p.nz * t1x - p.nx * t1z;
+    let t2z = p.nx * t1y - p.ny * t1x;
+
+    // The point of the plane closest to the origin, and the corners around it
+    let cx = p.nx * p.d;
+    let cy = p.ny * p.d;
+    let cz = p.nz * p.d;
+
+    let out = [];
+    for (let var i = 0; i < 4; ++i) {
+        let var s1 = BIG; let var s2 = BIG;
+        if (i == 1 || i == 2) s1 = 0.0 - BIG;
+        if (i == 2 || i == 3) s2 = 0.0 - BIG;
+        out.push(cx + t1x * s1 + t2x * s2);
+        out.push(cy + t1y * s1 + t2y * s2);
+        out.push(cz + t1z * s1 + t2z * s2);
+    }
+    return out;
+}
+
+// Cut a polygon down to the part of it inside a plane, that is the part with
+// nx*x + ny*y + nz*z <= d. Returns a new vertex list.
+fun clip_poly(poly, nx, ny, nz, d) {
+    let n = poly.len.idiv(3);
+    let out = [];
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+
+        let xi = poly[i * 3]; let yi = poly[i * 3 + 1]; let zi = poly[i * 3 + 2];
+        let xj = poly[j * 3]; let yj = poly[j * 3 + 1]; let zj = poly[j * 3 + 2];
+
+        let di = nx * xi + ny * yi + nz * zi - d;
+        let dj = nx * xj + ny * yj + nz * zj - d;
+
+        if (di <= PLANE_EPS) {
+            out.push(xi); out.push(yi); out.push(zi);
+        }
+        if ((di > PLANE_EPS) != (dj > PLANE_EPS)) {
+            let t = di / (di - dj);
+            out.push(xi + (xj - xi) * t);
+            out.push(yi + (yj - yi) * t);
+            out.push(zi + (zj - zi) * t);
+        }
+    }
+    return out;
+}
+
+// Turn a convex brush into the faces of its surface: for each plane, the big
+// quad lying on it, cut down by every other plane of the brush
+fun brush_to_faces(planes) {
+    let out = [];
+    for (let var i = 0; i < planes.len; ++i) {
+        let p = planes[i];
+        if (p.tex == nil) continue;
+
+        let var poly = plane_quad(p);
+        for (let var j = 0; j < planes.len; ++j) {
+            if (j == i) continue;
+            let q = planes[j];
+            poly = clip_poly(poly, q.nx, q.ny, q.nz, q.d);
+            if (poly.len < 9) break;
+        }
+
+        if (poly.len < 9) continue;
+        out.push(Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale, p.turn,
+            p.flip, p.alpha));
+    }
+    return out;
+}
+
+// Fit mode maps the texture exactly once across the face, which is what the
+// doors, screens and light fixtures want
+fun set_fit(f) {
+    let width = f.tex.width.to_f();
+    let height = f.tex.height.to_f();
+    let n = f.v.len.idiv(3);
+
+    let var u0 = 0.0; let var u1 = 0.0;
+    let var v0 = 0.0; let var v1 = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
+        let var u = face_u(f.taxis, f.turn, x, y, z);
+        let v = face_v(f.taxis, f.turn, x, y, z);
+        if (f.flip) u = 0.0 - u;
+        if (i == 0) { u0 = u; u1 = u; v0 = v; v1 = v; }
+        if (u < u0) u0 = u;
+        if (u > u1) u1 = u;
+        if (v < v0) v0 = v;
+        if (v > v1) v1 = v;
+    }
+
+    if (u1 - u0 > 0.000025) { f.su = width / (u1 - u0); f.ou = 0.0 - f.su * u0; }
+    if (v1 - v0 > 0.000025) { f.sv = height / (v1 - v0); f.ov = 0.0 - f.sv * v0; }
+}
+
+// --- Map parsing ---
+
+fun tokenize(line) {
+    let body = line.split("//")[0];
+    let raw = body.split(" ");
+    let out = [];
+    for (let var i = 0; i < raw.len; ++i) {
+        let t = raw[i].trim();
+        if (t.len > 0) out.push(t);
+    }
+    return out;
+}
+
+fun parse_num(s) {
+    let f = s.parse_float();
+    if (f != nil) return f;
+    let i = s.parse_int(10);
+    if (i != nil) return i.to_f();
+    $println("bad number in map: " + s);
+    $exit(1);
+}
+
+// The value out of a `name=value` token at a fixed position in a command,
+// checking that its name is the one expected there
+fun field(tok, i, name) {
+    if (i >= tok.len) {
+        $println("missing " + name + "= in map line");
+        $exit(1);
+    }
+    let kv = tok[i].split("=");
+    if (kv.len != 2 || kv[0] != name) {
+        $println("expected " + name + "=, got " + tok[i]);
+        $exit(1);
+    }
+    return kv[1];
+}
+
+fun field_num(tok, i, name) { return parse_num(field(tok, i, name)); }
+fun field_int(tok, i, name) { return field(tok, i, name).parse_int(10); }
+
+// The keys every brush command takes: which texture goes on which face, how it
+// is applied, and whether the light is baked or forced
+class BrushOpts {
+    init(self) {
+        self.tex = nil;
+        self.top = nil;
+        self.bottom = nil;
+        self.side = nil;
+        self.nx = nil; self.px = nil;
+        self.ny = nil; self.py = nil;
+        self.nz = nil; self.pz = nil;
+        self.light = -1;
+        self.fit = false;
+        self.flow = false;
+        self.scale = TEXELS_PER_METER;
+        self.turn = false;
+        self.flip = false;
+
+        // 1 is opaque. Below that the face is blended over whatever stands
+        // behind it, and the whole face carries the one value.
+        self.alpha = 1.0;
+    }
+}
+
+fun parse_opts(tok, first) {
+    let o = BrushOpts();
+    for (let var i = first; i < tok.len; ++i) {
+        let t = tok[i];
+        if (t == "fit") { o.fit = true; continue; }
+        if (t == "flow") { o.flow = true; continue; }
+        if (t == "turn") { o.turn = true; continue; }
+        if (t == "flip") { o.flip = true; continue; }
+
+        let kv = t.split("=");
+        if (kv.len != 2) {
+            $println("bad map token: " + t);
+            $exit(1);
+        }
+        let key = kv[0];
+        let val = kv[1];
+
+        if (key == "light") { o.light = val.parse_int(10).clip(0, NUM_LEVELS - 1); continue; }
+        if (key == "scale") { o.scale = parse_num(val); continue; }
+        if (key == "alpha") { o.alpha = parse_num(val).clip(0.0, 1.0); continue; }
+
+        let tex = get_tex(val);
+
+        if (key == "tex") { o.tex = tex; continue; }
+        if (key == "top") { o.top = tex; continue; }
+        if (key == "bottom") { o.bottom = tex; continue; }
+        if (key == "side") { o.side = tex; continue; }
+        if (key == "nx") { o.nx = tex; continue; }
+        if (key == "px") { o.px = tex; continue; }
+        if (key == "ny") { o.ny = tex; continue; }
+        if (key == "py") { o.py = tex; continue; }
+        if (key == "nz") { o.nz = tex; continue; }
+        if (key == "pz") { o.pz = tex; continue; }
+
+        $println("unknown map key: " + key);
+        $exit(1);
+    }
+    return o;
+}
+
+fun make_plane(nx, ny, nz, d, tex, o) {
+    let p = Plane(nx, ny, nz, d);
+    p.tex = tex;
+    p.light = o.light;
+    p.fit = o.fit;
+    p.flow = o.flow;
+    p.scale = o.scale;
+    p.turn = o.turn;
+    p.flip = o.flip;
+    p.alpha = o.alpha;
+    return p;
+}
+
+// The texture for one face, falling back from the face key to the role key to
+// the catch-all
+fun pick(specific, role, o) {
+    if (specific != nil) return specific;
+    if (role != nil) return role;
+    return o.tex;
+}
+
+// The box around a brush, from the corners of every plane cut down by the rest.
+// This walks all the planes rather than only the textured ones, so that a brush
+// with hidden faces still gets the bounds of the whole solid.
+fun set_brush_bounds(b, planes) {
+    let var any = false;
+
+    for (let var i = 0; i < planes.len; ++i) {
+        let var poly = plane_quad(planes[i]);
+        for (let var j = 0; j < planes.len; ++j) {
+            if (j == i) continue;
+            let q = planes[j];
+            poly = clip_poly(poly, q.nx, q.ny, q.nz, q.d);
+            if (poly.len < 9) break;
+        }
+        if (poly.len < 9) continue;
+
+        let n = poly.len.idiv(3);
+        for (let var k = 0; k < n; ++k) {
+            let x = poly[k * 3];
+            let y = poly[k * 3 + 1];
+            let z = poly[k * 3 + 2];
+            if (!any) {
+                b.x0 = x; b.x1 = x; b.y0 = y; b.y1 = y; b.z0 = z; b.z1 = z;
+                any = true;
+            }
+            if (x < b.x0) b.x0 = x;
+            if (x > b.x1) b.x1 = x;
+            if (y < b.y0) b.y0 = y;
+            if (y > b.y1) b.y1 = y;
+            if (z < b.z0) b.z0 = z;
+            if (z > b.z1) b.z1 = z;
+        }
+    }
+}
+
+fun add_brush(planes) {
+    let b = Brush(planes);
+    set_brush_bounds(b, planes);
+
+    // A solid you can see through is one light passes through as well, so the
+    // clearest of its planes is what the shadow test goes by. It stays solid to
+    // walk into: a window is still a wall to the player.
+    for (let var i = 0; i < planes.len; ++i) {
+        if (planes[i].alpha < b.alpha) b.alpha = planes[i].alpha;
+    }
+    brushes.push(b);
+
+    let new_faces = brush_to_faces(planes);
+    for (let var i = 0; i < new_faces.len; ++i) faces.push(new_faces[i]);
+}
+
+// An axis-aligned box
+fun cmd_box(x0, y0, z0, x1, y1, z1, o) {
+    let planes = [];
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+    planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - z0, pick(o.nz, o.side, o), o));
+    planes.push(make_plane(0.0, 0.0, 1.0, z1, pick(o.pz, o.side, o), o));
+    add_brush(planes);
+}
+
+// A box with its top cut down to a slope, for ramps and buttresses. `dir` says
+// which side stays at full height.
+fun cmd_ramp(x0, y0, z0, x1, y1, z1, dir, o) {
+    let planes = [];
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - z0, pick(o.nz, o.side, o), o));
+    planes.push(make_plane(0.0, 0.0, 1.0, z1, pick(o.pz, o.side, o), o));
+
+    // The slope runs from the low edge up to the high edge, so its normal leans
+    // away from the high side
+    let var nx = 0.0;
+    let var nz = 0.0;
+    if (dir == "px") nx = 0.0 - (y1 - y0) / (x1 - x0);
+    else if (dir == "nx") nx = (y1 - y0) / (x1 - x0);
+    else if (dir == "pz") nz = 0.0 - (y1 - y0) / (z1 - z0);
+    else if (dir == "nz") nz = (y1 - y0) / (z1 - z0);
+    else {
+        $println("ramp direction must be px, nx, pz or nz, got " + dir);
+        $exit(1);
+    }
+
+    let len = (nx * nx + 1.0 + nz * nz).sqrt();
+    let ux = nx / len;
+    let uy = 1.0 / len;
+    let uz = nz / len;
+
+    // The slope passes through the top of the high edge
+    let var px = x1;
+    let var pz = z1;
+    if (dir == "nx") px = x0;
+    if (dir == "nz") pz = z0;
+
+    planes.push(make_plane(ux, uy, uz, ux * px + uy * y1 + uz * pz, pick(o.py, o.top, o), o));
+    add_brush(planes);
+}
+
+// A slab of even thickness on a plane that leans back as it rises, which is
+// what a wall that is not upright is made of. The line from (y0, z0) to
+// (y1, z1) is the face that looks into the room, and the solid runs `thick`
+// behind it, square to that face rather than along z, so a slab keeps its
+// thickness however far it leans. Bounded in x by x0..x1 and in y by y0..y1:
+// a mullion is a narrow one and a pane of glass a thin one, and both sit on
+// the same plane as the wall they divide.
+//
+// A ramp leans too, but everything under its slope is solid, which is right
+// for ground and wrong for a wall with a room on the other side of it.
+fun cmd_slab(x0, y0, z0, x1, y1, z1, thick, o) {
+    let dy = y1 - y0;
+    let dz = z1 - z0;
+    let len = (dy * dy + dz * dz).sqrt();
+    if (len < 0.000001 || thick <= 0.0) {
+        $println("a slab needs y1 above y0 and a thickness above zero");
+        $exit(1);
+    }
+
+    // Square to the run of the slab, pointing back into the room
+    let ny = dz / len;
+    let nz = 0.0 - dy / len;
+    let d = ny * y0 + nz * z0;
+
+    let planes = [];
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+    planes.push(make_plane(0.0, ny, nz, d, pick(o.nz, nil, o), o));
+    planes.push(make_plane(0.0, 0.0 - ny, 0.0 - nz, thick - d, pick(o.pz, nil, o), o));
+    add_brush(planes);
+}
+
+// A vertical column with `sides` flat faces, for pillars and pedestals
+fun cmd_prism(cx, cz, radius, y0, y1, sides, rot, o) {
+    let planes = [];
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+
+    for (let var i = 0; i < sides; ++i) {
+        let a = rot + 2.0 * PI * i.to_f() / sides.to_f();
+        let nx = a.cos();
+        let nz = a.sin();
+        planes.push(make_plane(nx, 0.0, nz, nx * cx + nz * cz + radius, pick(nil, o.side, o), o));
+    }
+    add_brush(planes);
+}
+
+// The solid above a doorway, cut away underneath into a faceted arch. This is
+// the shape Quake uses everywhere: a handful of flat segments reading as a
+// curve, each one an angled face.
+//
+//   axis    "x" or "z", the axis the wall is thick along
+//   a0, a1  how thick the wall is, along that axis
+//   c0, c1  the width of the opening, along the other horizontal axis
+//   ybase   the height the arch starts curving in at
+//   ytop    the top of the solid
+//   segs    how many facets the curve is cut into
+fun cmd_arch(axis, a0, a1, c0, c1, ybase, ytop, segs, o) {
+    let mid = (c0 + c1) * 0.5;
+    let radius = (c1 - c0) * 0.5;
+    let rise = ytop - ybase;
+
+    for (let var i = 0; i < segs; ++i) {
+        // Two points a step apart along the curve, in the plane of the opening
+        let t0 = PI * i.to_f() / segs.to_f();
+        let t1 = PI * (i + 1).to_f() / segs.to_f();
+        let ca0 = mid - radius * t0.cos();
+        let ca1 = mid - radius * t1.cos();
+        let ya0 = ybase + rise * t0.sin();
+        let ya1 = ybase + rise * t1.sin();
+
+        let planes = [];
+        if (axis == "x") {
+            planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - a0, pick(o.nx, o.side, o), o));
+            planes.push(make_plane(1.0, 0.0, 0.0, a1, pick(o.px, o.side, o), o));
+            planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - ca0, nil, o));
+            planes.push(make_plane(0.0, 0.0, 1.0, ca1, nil, o));
+        } else {
+            planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - a0, pick(o.nz, o.side, o), o));
+            planes.push(make_plane(0.0, 0.0, 1.0, a1, pick(o.pz, o.side, o), o));
+            planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - ca0, nil, o));
+            planes.push(make_plane(1.0, 0.0, 0.0, ca1, nil, o));
+        }
+        planes.push(make_plane(0.0, 1.0, 0.0, ytop, pick(o.py, o.top, o), o));
+
+        // The underside: the plane through both curve points, facing down into
+        // the opening
+        let dc = ca1 - ca0;
+        let dy = ya1 - ya0;
+        let len = (dc * dc + dy * dy).sqrt();
+        let var un = 0.0 - dy / len;
+        let var uy = dc / len;
+        if (uy > 0.0) { un = 0.0 - un; uy = 0.0 - uy; }
+
+        let var nx = 0.0;
+        let var nz = 0.0;
+        let var d = 0.0;
+        if (axis == "x") { nz = un; d = nz * ca0 + uy * ya0; }
+        else { nx = un; d = nx * ca0 + uy * ya0; }
+        planes.push(make_plane(nx, uy, nz, d, pick(nil, o.bottom, o), o));
+
+        add_brush(planes);
+    }
+}
+
+fun parse_map(path) {
+    let text = $read_file_utf8(path);
+    if (text == nil) {
+        $println("could not read " + path);
+        $exit(1);
+    }
+
+    let lines = text.split("\n");
+    for (let var li = 0; li < lines.len; ++li) {
+        let tok = tokenize(lines[li]);
+        if (tok.len == 0) continue;
+        let cmd = tok[0];
+
+        if (cmd == "spawn") {
+            start_x = field_num(tok, 1, "x");
+            start_y = field_num(tok, 2, "y");
+            start_z = field_num(tok, 3, "z");
+            start_yaw = field_num(tok, 4, "yaw") * PI / 180.0;
+            continue;
+        }
+
+        // A point light: where it is, how far it reaches, how strong it is
+        if (cmd == "light") {
+            lights.push([field_num(tok, 1, "x"), field_num(tok, 2, "y"), field_num(tok, 3, "z"),
+                field_num(tok, 4, "radius"), field_num(tok, 5, "brightness")]);
+            continue;
+        }
+
+        if (cmd == "box") {
+            cmd_box(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                parse_opts(tok, 7));
+            continue;
+        }
+
+        if (cmd == "ramp") {
+            cmd_ramp(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                field(tok, 7, "dir"), parse_opts(tok, 8));
+            continue;
+        }
+
+        if (cmd == "slab") {
+            cmd_slab(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                field_num(tok, 7, "thick"), parse_opts(tok, 8));
+            continue;
+        }
+
+        if (cmd == "prism") {
+            cmd_prism(field_num(tok, 1, "cx"), field_num(tok, 2, "cz"), field_num(tok, 3, "radius"),
+                field_num(tok, 4, "y0"), field_num(tok, 5, "y1"), field_int(tok, 6, "sides"),
+                field_num(tok, 7, "rot") * PI / 180.0, parse_opts(tok, 8));
+            continue;
+        }
+
+        if (cmd == "arch") {
+            cmd_arch(field(tok, 1, "axis"), field_num(tok, 2, "a0"), field_num(tok, 3, "a1"),
+                field_num(tok, 4, "c0"), field_num(tok, 5, "c1"), field_num(tok, 6, "ybase"),
+                field_num(tok, 7, "ytop"), field_int(tok, 8, "segs"), parse_opts(tok, 9));
+            continue;
+        }
+
+        $println("unknown map command: " + cmd);
+        $exit(1);
+    }
+}
+
+// --- Lighting ---
+
+// Does any brush stand between these two points? The segment is clipped
+// against the brush's half-spaces the way `plane_quad` clips a face, and the
+// brush bounds reject nearly all of them before that runs, which is what keeps
+// a linear walk over every brush cheap enough to do per sample.
+fun occluded(ax, ay, az, bx, by, bz) {
+    let dx = bx - ax; let dy = by - ay; let dz = bz - az;
+
+    let var lx = ax; let var hx = bx;
+    if (hx < lx) { lx = bx; hx = ax; }
+    let var ly = ay; let var hy = by;
+    if (hy < ly) { ly = by; hy = ay; }
+    let var lz = az; let var hz = bz;
+    if (hz < lz) { lz = bz; hz = az; }
+
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (b.alpha < 1.0) continue;
+        if (hx < b.x0 || lx > b.x1) continue;
+        if (hy < b.y0 || ly > b.y1) continue;
+        if (hz < b.z0 || lz > b.z1) continue;
+
+        let planes = b.planes;
+        let var t0 = 0.0;
+        let var t1 = 1.0;
+        let var miss = false;
+
+        for (let var j = 0; j < planes.len; ++j) {
+            let p = planes[j];
+            let num = p.nx * ax + p.ny * ay + p.nz * az - p.d;
+            let den = p.nx * dx + p.ny * dy + p.nz * dz;
+
+            // Parallel to the plane: outside it rules the brush out, inside it
+            // says nothing
+            if (den > 0.0 - 0.000001 && den < 0.000001) {
+                if (num > 0.0) { miss = true; break; }
+                continue;
+            }
+
+            let t = (0.0 - num) / den;
+            if (den > 0.0) { if (t < t1) t1 = t; }
+            else { if (t > t0) t0 = t; }
+            if (t0 > t1) { miss = true; break; }
+        }
+
+        // A sample sits about a centimeter off its own surface, which is not
+        // enough to clear a wall its face runs into at a corner. Requiring the
+        // segment to pass through some thickness is what keeps those seams
+        // from reading as occlusions and drawing a dark line down every join.
+        if (!miss && t1 - t0 > 0.002) return true;
+    }
+
+    return false;
+}
+
+// Is this point strictly inside a brush? Boundaries do not count: a sample
+// lifted off one surface routinely lands exactly on another.
+fun in_solid(x, y, z) {
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (x <= b.x0 || x >= b.x1) continue;
+        if (y <= b.y0 || y >= b.y1) continue;
+        if (z <= b.z0 || z >= b.z1) continue;
+
+        let planes = b.planes;
+        let var inside = true;
+        for (let var j = 0; j < planes.len; ++j) {
+            let p = planes[j];
+            if (p.nx * x + p.ny * y + p.nz * z - p.d > 0.0 - 0.00125) { inside = false; break; }
+        }
+        if (inside) return true;
+    }
+    return false;
+}
+
+// The light level at one point on a surface facing a given way. `tx, ty, tz`
+// is the middle of the whole face the point belongs to, not of the piece it is
+// being baked with, and says which way is inward along it. Answering the same
+// for every piece of a face is what keeps the reply the same at a point two of
+// them share.
+fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
+    // Lift the sample off the surface, so that a fixture sitting flush against
+    // a wall still counts as being in front of it
+    let cx = px + nx * 0.0125;
+    let cy = py + ny * 0.0125;
+    let cz = pz + nz * 0.0125;
+
+    let var lum = AMBIENT;
+    for (let var i = 0; i < lights.len; ++i) {
+        let L = lights[i];
+        let dx = L[0] - cx;
+        let dy = L[1] - cy;
+        let dz = L[2] - cz;
+        let dist2 = dx * dx + dy * dy + dz * dz;
+        let radius = L[3];
+        if (dist2 >= radius * radius) continue;
+
+        let dist = dist2.sqrt();
+        if (dist < 0.000025) { lum = lum + L[4]; continue; }
+
+        // Facing the light counts for most of it, but a surface edge on to it
+        // keeps a little, which softens the falloff around corners
+        let ndotl = (nx * dx + ny * dy + nz * dz) / dist;
+        if (ndotl <= 0.0) continue;
+
+        // Anything solid in the way takes the lamp out entirely
+        if (occluded(cx, cy, cz, L[0], L[1], L[2])) continue;
+
+        let atten = 1.0 - dist / radius;
+        lum = lum + L[4] * atten * (0.35 + 0.65 * ndotl);
+    }
+
+    // The curve is applied here rather than per level, so what gets
+    // interpolated across a face is the finished scale. It bends towards the
+    // dark end, where a step is worth more to the eye than it is up in the
+    // light.
+    let t = lum.clip(0.0, 1.0);
+    return ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+        .clip(0.0, SHADE_MAX);
+}
+
+// Solve a small system in place by Gauss-Jordan with partial pivoting. `a` is
+// `n` rows of `n + 1` columns, the last of them the right hand side.
+//
+// An unknown whose column has no usable pivot is left at zero and its column
+// skipped, rather than the whole solve failing. Columns are taken in order, so
+// what a piece is too degenerate to carry is dropped from the end: a triangle
+// supports a plane and loses the cross term, a sliver loses more.
+fun solve_system(a, n, out) {
+    let stride = n + 1;
+    let piv_row = Array.with_size(n, 0 - 1);
+    let var row = 0;
+
+    for (let var c = 0; c < n; ++c) {
+        let var best = row;
+        let var mag = 0.0;
+        for (let var r = row; r < n; ++r) {
+            let m = a[r * stride + c].abs();
+            if (m > mag) { mag = m; best = r; }
+        }
+        if (mag < 0.000001) continue;
+
+        if (best != row) {
+            for (let var k = c; k <= n; ++k) {
+                let t = a[row * stride + k];
+                a[row * stride + k] = a[best * stride + k];
+                a[best * stride + k] = t;
+            }
+        }
+
+        let inv = 1.0 / a[row * stride + c];
+        for (let var k = c; k <= n; ++k) a[row * stride + k] = a[row * stride + k] * inv;
+
+        for (let var r = 0; r < n; ++r) {
+            if (r == row) continue;
+            let m = a[r * stride + c];
+            if (m == 0.0) continue;
+            for (let var k = c; k <= n; ++k) {
+                a[r * stride + k] = a[r * stride + k] - m * a[row * stride + k];
+            }
+        }
+
+        piv_row[c] = row;
+        row = row + 1;
+    }
+
+    for (let var c = 0; c < n; ++c) {
+        if (piv_row[c] < 0) out[c] = 0.0;
+        else out[c] = a[piv_row[c] * stride + n];
+    }
+}
+
+// Bake one padded 8-bit lightmap over the whole brush face. The inverse texture
+// mapping is recovered from two independent edges, so fitted, turned, flipped,
+// sloped and arbitrarily oriented faces all sample the same world-space light.
+fun bake_face_light(f) {
+    let n = f.v.len.idiv(3);
+    let uv = Array.with_size(n, 0.0);
+    let vv = Array.with_size(n, 0.0);
+    let var umin = 0.0; let var umax = 0.0;
+    let var vmin = 0.0; let var vmax = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
+        uv[i] = texel_u(f, x, y, z);
+        vv[i] = texel_v(f, x, y, z);
+        if (i == 0) {
+            umin = uv[i]; umax = uv[i]; vmin = vv[i]; vmax = vv[i];
+        } else {
+            if (uv[i] < umin) umin = uv[i];
+            if (uv[i] > umax) umax = uv[i];
+            if (vv[i] < vmin) vmin = vv[i];
+            if (vv[i] > vmax) vmax = vv[i];
+        }
+    }
+
+    // Keep a full sample border around the polygon. It makes the two-by-two
+    // lookup safe even when a pixel centre rounds onto the outer grid line.
+    let cu0 = (umin / LM_TEXEL_STEP).floor() - 1;
+    let cv0 = (vmin / LM_TEXEL_STEP).floor() - 1;
+    let cu1 = (umax / LM_TEXEL_STEP).floor() + 2;
+    let cv1 = (vmax / LM_TEXEL_STEP).floor() + 2;
+    f.lm_u0 = cu0.to_f() * LM_TEXEL_STEP;
+    f.lm_v0 = cv0.to_f() * LM_TEXEL_STEP;
+    f.lm_w = cu1 - cu0 + 1;
+    f.lm_h = cv1 - cv0 + 1;
+    f.lm = ByteArray.with_size(f.lm_w * f.lm_h);
+
+    let var flat = 0.0 - 1.0;
+    if (f.flow) flat = SHADE_MAX;
+    else if (f.light >= 0) {
+        let t = f.light.to_f() / (NUM_LEVELS - 1).to_f();
+        flat = ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+            .clip(0.0, SHADE_MAX);
+    }
+
+    // Find the best-conditioned pair of texture-space edges from vertex zero.
+    let var bi = 1; let var bj = 2; let var best = 0.0;
+    for (let var i = 1; i < n; ++i) {
+        let dui = uv[i] - uv[0]; let dvi = vv[i] - vv[0];
+        for (let var j = i + 1; j < n; ++j) {
+            let duj = uv[j] - uv[0]; let dvj = vv[j] - vv[0];
+            let det = (dui * dvj - duj * dvi).abs();
+            if (det > best) { best = det; bi = i; bj = j; }
+        }
+    }
+    let du1 = uv[bi] - uv[0]; let dv1 = vv[bi] - vv[0];
+    let du2 = uv[bj] - uv[0]; let dv2 = vv[bj] - vv[0];
+    let inv_det = 1.0 / (du1 * dv2 - du2 * dv1);
+    let ex1 = f.v[bi * 3] - f.v[0];
+    let ey1 = f.v[bi * 3 + 1] - f.v[1];
+    let ez1 = f.v[bi * 3 + 2] - f.v[2];
+    let ex2 = f.v[bj * 3] - f.v[0];
+    let ey2 = f.v[bj * 3 + 1] - f.v[1];
+    let ez2 = f.v[bj * 3 + 2] - f.v[2];
+
+    for (let var y = 0; y < f.lm_h; ++y) {
+        let tv = f.lm_v0 + y.to_f() * LM_TEXEL_STEP;
+        for (let var x = 0; x < f.lm_w; ++x) {
+            let tu = f.lm_u0 + x.to_f() * LM_TEXEL_STEP;
+            let var su = tu; let var sv = tv;
+            let var has_pos = false; let var has_neg = false;
+            let var have_edge = false; let var best_d2 = 0.0;
+            let var edge_u = tu; let var edge_v = tv;
+
+            // A lightmap is rectangular but a face need not be. Extend the
+            // nearest edge value into padding instead of tracing from beyond
+            // the polygon, where an adjoining brush could put the sample on
+            // the wrong side of a corner.
+            for (let var i = 0; i < n; ++i) {
+                let var j = i + 1;
+                if (j == n) j = 0;
+                let eu = uv[j] - uv[i]; let ev = vv[j] - vv[i];
+                let pu = tu - uv[i]; let pv = tv - vv[i];
+                let side = eu * pv - ev * pu;
+                if (side > 0.000001) has_pos = true;
+                else if (side < 0.0 - 0.000001) has_neg = true;
+
+                let den = eu * eu + ev * ev;
+                if (den > 0.000001) {
+                    let q = ((pu * eu + pv * ev) / den).clip(0.0, 1.0);
+                    let qu = uv[i] + q * eu; let qv = vv[i] + q * ev;
+                    let du = tu - qu; let dv = tv - qv;
+                    let d2 = du * du + dv * dv;
+                    if (!have_edge || d2 < best_d2) {
+                        have_edge = true; best_d2 = d2;
+                        edge_u = qu; edge_v = qv;
+                    }
+                }
+            }
+
+            let outside = has_pos && has_neg;
+            if (outside) { su = edge_u; sv = edge_v; }
+            let ru = su - uv[0]; let rv = sv - vv[0];
+            let a = (ru * dv2 - du2 * rv) * inv_det;
+            let b = (du1 * rv - ru * dv1) * inv_det;
+            let var px = f.v[0] + a * ex1 + b * ex2;
+            let var py = f.v[1] + a * ey1 + b * ey2;
+            let var pz = f.v[2] + a * ez1 + b * ez2;
+
+            // Exact edge samples are moved a centimetre into the convex face.
+            // This is below a lumel's scale but keeps a shared brush boundary
+            // from deciding which side of the surface owns the ray origin.
+            if (outside || (have_edge && best_d2 < 0.0001)) {
+                let mx = f.mid_x - px; let my = f.mid_y - py; let mz = f.mid_z - pz;
+                let span = (mx * mx + my * my + mz * mz).sqrt();
+                if (span > 0.0125) {
+                    let step = 0.0125 / span;
+                    px = px + mx * step; py = py + my * step; pz = pz + mz * step;
+                }
+            }
+            let var l = flat;
+            if (l < 0.0) {
+                l = light_at(px, py, pz, f.nx, f.ny, f.nz,
+                    f.mid_x, f.mid_y, f.mid_z);
+            }
+            l = l * f.alpha;
+            f.lm[y * f.lm_w + x] = l.floor().clip(0, 255);
+        }
+    }
+}
+
+// --- Cutting faces up for lighting ---
+
+// Does interpolating the corner levels miss the light inside the face?
+//
+// This is a weaker test than flat shading needed, and that is the whole point.
+// Flat shading had to cut wherever the light changed at all, because one level
+// had to serve the whole piece. The baked fit reproduces any light bilinear in
+// u and v exactly, and the probes below sit where a bilinear level is the mean
+// of the corners around them, so what they measure is what the fit leaves
+// behind: a wall fading evenly from one end to the other is left whole, and
+// only a lamp pool sitting in the middle of a surface asks for pieces.
+fun light_curves(f) {
+    if (f.light >= 0 || f.flow) return false;
+
+    let n = f.v.len.idiv(3);
+    let vl = Array.with_size(n, 0.0);
+    let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+    let var mean = 0.0;
+
+    for (let var i = 0; i < n; ++i) {
+        cx = cx + f.v[i * 3]; cy = cy + f.v[i * 3 + 1]; cz = cz + f.v[i * 3 + 2];
+    }
+    let inv_n = 1.0 / n.to_f();
+    cx = cx * inv_n; cy = cy * inv_n; cz = cz * inv_n;
+
+    for (let var i = 0; i < n; ++i) {
+        vl[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
+            f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+        mean = mean + vl[i];
+    }
+    mean = mean * inv_n;
+
+    // The middle, where a lamp pool that the corners all miss shows up
+    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - mean).abs()
+        > LIGHT_TOL) {
+        return true;
+    }
+
+    // And the edge midpoints, where interpolation is the mean of two corners.
+    // A pool sitting against one edge misses the centre test but not this one.
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+
+        let mx = (f.v[i * 3] + f.v[j * 3]) * 0.5;
+        let my = (f.v[i * 3 + 1] + f.v[j * 3 + 1]) * 0.5;
+        let mz = (f.v[i * 3 + 2] + f.v[j * 3 + 2]) * 0.5;
+        let interp = (vl[i] + vl[j]) * 0.5;
+        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - interp).abs()
+            > LIGHT_TOL) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Halve a face across its longer side, gathering the planes the light asks to
+// be cut on rather than cutting as it goes.
+//
+// Cutting as it goes leaves a cut running half way across the piece next to it,
+// where the neighbour was already straight enough to be left whole. The level
+// along the edge they share is then one straight run on one side and two on the
+// other, and the shading steps at the T. Gathering first and running every
+// plane right across the face afterwards is what makes the pieces line up.
+fun collect_cuts(f, depth, cuts) {
+    if (depth <= 0 || !light_curves(f)) return;
+
+    let n = f.v.len.idiv(3);
+    let var axis = 0;
+    let var span = 0.0 - 1.0;
+    let var cut = 0.0;
+
+    for (let var a = 0; a < 3; ++a) {
+        if (a == f.taxis) continue;
+
+        let var lo = f.v[a];
+        let var hi = lo;
+        for (let var j = 1; j < n; ++j) {
+            let c = f.v[j * 3 + a];
+            if (c < lo) lo = c;
+            if (c > hi) hi = c;
+        }
+
+        if (hi - lo > span) {
+            span = hi - lo;
+            axis = a;
+            cut = (lo + hi) * 0.5;
+        }
+    }
+
+    if (span < LIGHT_GRID) return;
+
+    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+    if (axis == 0) nx = 1.0;
+    else if (axis == 1) ny = 1.0;
+    else nz = 1.0;
+
+    let parts = split_face(f, nx, ny, nz, cut);
+    if (parts.len < 2) return;
+
+    let list = cuts[axis];
+    let var seen = false;
+    for (let var i = 0; i < list.len; ++i) {
+        if ((list[i] - cut).abs() < 0.001) { seen = true; break; }
+    }
+    if (!seen) list.push(cut);
+
+    for (let var i = 0; i < parts.len; ++i) collect_cuts(parts[i], depth - 1, cuts);
+}
+
+// Cut a face on every plane gathered for it. A plane that misses a piece leaves
+// it whole, so a fragment the tree took out of the middle of a face is cut by
+// just the planes that cross it and still lines up with what is either side.
+fun apply_cuts(f, out) {
+    let cuts = f.cuts;
+    if (cuts == nil) { out.push(f); return; }
+
+    let var work = [f];
+    for (let var axis = 0; axis < 3; ++axis) {
+        let list = cuts[axis];
+        let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+        if (axis == 0) nx = 1.0;
+        else if (axis == 1) ny = 1.0;
+        else nz = 1.0;
+
+        for (let var c = 0; c < list.len; ++c) {
+            let next = [];
+            for (let var i = 0; i < work.len; ++i) {
+                let parts = split_face(work[i], nx, ny, nz, list[c]);
+                if (parts.len < 2) next.push(work[i]);
+                else { next.push(parts[0]); next.push(parts[1]); }
+            }
+            work = next;
+        }
+    }
+
+    for (let var i = 0; i < work.len; ++i) out.push(work[i]);
+}
+
+// --- Cutting faces up ---
+
+// Split a face in two at a plane, returning the pieces that survive. Both keep
+// everything else about the face they came from, the fit mapping and the baked
+// light included. Every one of those is a function of world position rather
+// than of the corners it was worked out from, so a piece that inherits one
+// lands exactly where that part of the whole face did. That is what lets the
+// tree cut a lit piece up without the fragments parting company: they read the
+// same light field instead of fitting one each.
+fun split_face(f, nx, ny, nz, d) {
+    let back = clip_poly(f.v, nx, ny, nz, d);
+    let front = clip_poly(f.v, 0.0 - nx, 0.0 - ny, 0.0 - nz, 0.0 - d);
+    let out = [];
+    if (back.len >= 9) {
+        let g = Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
+            f.flip, f.alpha);
+        g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        g.mid_x = f.mid_x; g.mid_y = f.mid_y; g.mid_z = f.mid_z;
+        g.lm = f.lm; g.lm_w = f.lm_w; g.lm_h = f.lm_h;
+        g.lm_u0 = f.lm_u0; g.lm_v0 = f.lm_v0;
+        out.push(g);
+    }
+    if (front.len >= 9) {
+        let g = Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
+            f.flip, f.alpha);
+        g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        g.mid_x = f.mid_x; g.mid_y = f.mid_y; g.mid_z = f.mid_z;
+        g.lm = f.lm; g.lm_w = f.lm_w; g.lm_h = f.lm_h;
+        g.lm_u0 = f.lm_u0; g.lm_v0 = f.lm_v0;
+        out.push(g);
+    }
+    return out;
+}
+
+// Slice a face along one axis at every grid line it crosses. Each cut takes
+// the piece below the line off the front and carries the remainder forward, so
+// this costs one split per piece rather than rescanning the whole list.
+fun slice_axis(f, axis, grid, out) {
+    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+    if (axis == 0) nx = 1.0;
+    else if (axis == 1) ny = 1.0;
+    else nz = 1.0;
+
+    let var rest = f;
+    loop {
+        let n = rest.v.len.idiv(3);
+        let var lo = rest.v[axis];
+        let var hi = lo;
+        for (let var j = 1; j < n; ++j) {
+            let c = rest.v[j * 3 + axis];
+            if (c < lo) lo = c;
+            if (c > hi) hi = c;
+        }
+
+        if (hi - lo <= grid + 0.0125) { out.push(rest); return; }
+
+        // Cut on the grid line just past the low edge, so that the quads of
+        // neighbouring faces line up. A cut landing within the clipper's
+        // epsilon of an edge would hand back a piece identical to the one it
+        // came from and this loop would never end, so keep clear of both ends.
+        let var cut = (lo / grid).floor().to_f() * grid + grid;
+        if (cut - lo < 0.025) cut = cut + grid;
+        if (cut > hi - 0.025) { out.push(rest); return; }
+
+        let parts = split_face(rest, nx, ny, nz, cut);
+        if (parts.len < 2) { out.push(rest); return; }
+
+        out.push(parts[0]);
+        rest = parts[1];
+    }
+}
+
+// Cut a face into a grid of pieces no larger than `grid` across. The lava uses
+// this: its corners have to be close enough together for a sine wave running
+// through them to read as a curve rather than as a fold.
+fun subdivide_grid(f, grid, out) {
+    let var work = [f];
+
+    for (let var axis = 0; axis < 3; ++axis) {
+        // A face has no extent along the axis it faces
+        if (axis == f.taxis) continue;
+
+        let next = [];
+        for (let var i = 0; i < work.len; ++i) slice_axis(work[i], axis, grid, next);
+        work = next;
+    }
+
+    for (let var i = 0; i < work.len; ++i) out.push(work[i]);
+}
+
+// --- BSP tree ---
+
+class BspNode {
+    init(self, nx, ny, nz, d) {
+        self.nx = nx;
+        self.ny = ny;
+        self.nz = nz;
+        self.d = d;
+        self.on = [];
+        self.front = nil;
+        self.back = nil;
+
+        // The box around everything in this subtree, filled in once the tree
+        // is built. Testing it against the view means a room the camera is not
+        // looking at costs one test instead of one per face.
+        self.cx = 0.0; self.cy = 0.0; self.cz = 0.0;
+        self.hx = 0.0; self.hy = 0.0; self.hz = 0.0;
+        self.empty = true;
+        self.moving = false;
+    }
+}
+
+let var bsp_splits = 0;
+let var bsp_nodes = 0;
+
+// Where a face sits relative to a plane: 0 on it, 1 in front, 2 behind, 3
+// across it
+fun classify(f, nx, ny, nz, d) {
+    let n = f.v.len.idiv(3);
+    let var lo = 0.0;
+    let var hi = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let s = nx * f.v[i * 3] + ny * f.v[i * 3 + 1] + nz * f.v[i * 3 + 2] - d;
+        if (i == 0) { lo = s; hi = s; }
+        if (s < lo) lo = s;
+        if (s > hi) hi = s;
+    }
+    if (hi <= PLANE_EPS && lo >= 0.0 - PLANE_EPS) return 0;
+    if (lo >= 0.0 - PLANE_EPS) return 1;
+    if (hi <= PLANE_EPS) return 2;
+    return 3;
+}
+
+fun score_plane(face_list, nx, ny, nz, d) {
+    let var front = 0;
+    let var back = 0;
+    let var cut = 0;
+    for (let var i = 0; i < face_list.len; ++i) {
+        let c = classify(face_list[i], nx, ny, nz, d);
+        if (c == 1) front = front + 1;
+        else if (c == 2) back = back + 1;
+        else if (c == 3) cut = cut + 1;
+    }
+
+    let var diff = front - back;
+    if (diff < 0) diff = 0 - diff;
+
+    // An axis-aligned plane cuts far fewer faces in a level built mostly of
+    // boxes, so it is worth a head start over an angled one
+    let var bonus = 0;
+    if (nx.abs() < 0.99 && ny.abs() < 0.99 && nz.abs() < 0.99) bonus = 6;
+    return diff + 8 * cut + bonus;
+}
+
+// The same geometric plane may occur on many faces, sometimes with the normal
+// reversed. Scoring it again spends a candidate without considering a new
+// partition of the faces.
+fun same_plane(a, b) {
+    let direct = (a.nx - b.nx).abs() <= PLANE_EPS
+        && (a.ny - b.ny).abs() <= PLANE_EPS
+        && (a.nz - b.nz).abs() <= PLANE_EPS
+        && (a.d - b.d).abs() <= PLANE_EPS;
+    if (direct) return true;
+
+    return (a.nx + b.nx).abs() <= PLANE_EPS
+        && (a.ny + b.ny).abs() <= PLANE_EPS
+        && (a.nz + b.nz).abs() <= PLANE_EPS
+        && (a.d + b.d).abs() <= PLANE_EPS;
+}
+
+fun add_unique_plane(candidate_list, f) {
+    for (let var i = 0; i < candidate_list.len; ++i) {
+        if (same_plane(candidate_list[i], f)) return false;
+    }
+    candidate_list.push(f);
+    return true;
+}
+
+fun bsp_build(face_list) {
+    if (face_list.len == 0) return nil;
+
+    // Candidate planes are the face planes themselves. Trying every one of them
+    // is quadratic, so a long list is sampled instead. Walk the other offsets
+    // through that sample when it contains duplicate planes, keeping the same
+    // scoring budget but replacing duplicates with distinct partitions.
+    let var step = 1;
+    if (face_list.len > 24) step = face_list.len.idiv(24);
+
+    let target = (face_list.len + step - 1).idiv(step);
+    let candidates = [];
+    let var offset = 0;
+    while (candidates.len < target && offset < step) {
+        let var i = offset;
+        while (i < face_list.len && candidates.len < target) {
+            add_unique_plane(candidates, face_list[i]);
+            i = i + step;
+        }
+        offset = offset + 1;
+    }
+
+    let var bf = candidates[0];
+    let var best_score = score_plane(face_list, bf.nx, bf.ny, bf.nz, bf.d);
+    for (let var i = 1; i < candidates.len; ++i) {
+        let f = candidates[i];
+        let s = score_plane(face_list, f.nx, f.ny, f.nz, f.d);
+        if (s < best_score) {
+            best_score = s;
+            bf = f;
+        }
+    }
+
+    let node = BspNode(bf.nx, bf.ny, bf.nz, bf.d);
+    bsp_nodes = bsp_nodes + 1;
+
+    let front_list = [];
+    let back_list = [];
+    for (let var k = 0; k < face_list.len; ++k) {
+        let f = face_list[k];
+        let c = classify(f, node.nx, node.ny, node.nz, node.d);
+
+        if (c == 0) { node.on.push(f); continue; }
+        if (c == 1) { front_list.push(f); continue; }
+        if (c == 2) { back_list.push(f); continue; }
+
+        let parts = split_face(f, node.nx, node.ny, node.nz, node.d);
+        for (let var q = 0; q < parts.len; ++q) {
+            let g = parts[q];
+            if (classify(g, node.nx, node.ny, node.nz, node.d) == 1) front_list.push(g);
+            else back_list.push(g);
+        }
+        bsp_splits = bsp_splits + 1;
+    }
+
+    node.front = bsp_build(front_list);
+    node.back = bsp_build(back_list);
+    return node;
+}
+
+// --- Rasterization ---
+
+// Clip the polygon in the a buffers against ax*x + ay*y + az*z + aw >= 0,
+// leaving the result in the a buffers again. Returns the vertex count.
+fun clip_plane(n, ax, ay, az, aw) {
+    let var m = 0;
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+
+        let di = ax * aX[i] + ay * aY[i] + az * aZ[i] + aw;
+        let dj = ax * aX[j] + ay * aY[j] + az * aZ[j] + aw;
+
+        if (di >= 0.0) {
+            bX[m] = aX[i]; bY[m] = aY[i]; bZ[m] = aZ[i];
+            bU[m] = aU[i]; bV[m] = aV[i];
+            m = m + 1;
+        }
+
+        if ((di >= 0.0) != (dj >= 0.0)) {
+            let t = di / (di - dj);
+            bX[m] = aX[i] + (aX[j] - aX[i]) * t;
+            bY[m] = aY[i] + (aY[j] - aY[i]) * t;
+            bZ[m] = aZ[i] + (aZ[j] - aZ[i]) * t;
+            bU[m] = aU[i] + (aU[j] - aU[i]) * t;
+            bV[m] = aV[i] + (aV[j] - aV[i]) * t;
+            m = m + 1;
+        }
+    }
+
+    // Swap the buffers rather than copying back
+    let tx = aX; aX = bX; bX = tx;
+    let ty = aY; aY = bY; bY = ty;
+    let tz = aZ; aZ = bZ; bZ = tz;
+    let tu = aU; aU = bU; bU = tu;
+    let tv = aV; aV = bV; bV = tv;
+    return m;
+}
+
+// Shade one perspective-correct texture subspan. Runs end at the first lightmap
+// cell boundary crossed in either axis, then exact finite differences evaluate
+// the bilinear patch. The usual axis-aligned case needs one add per pixel; an
+// oblique mapping needs two.
+fun shade_lightmap_run(t0, dt, lt0, dlt, dlu, dlv, first, end, blend) {
+    let pix = g_pix; let lm = g_lm; let lm_w = g_lm_w; let lm_h = g_lm_h;
+    let umask = g_umask; let vshift = g_vshift; let vmask = g_vmask;
+    let mask_rb = MASK_RB; let fb = frame_buffer; let inv_alpha = g_inv_alpha;
+    let var t = t0; let var lt = lt0; let var i = first;
+
+    while (i < end) {
+        let var run = end - i;
+        let var fu = lt & LM_FRAC_MASK;
+        let var fv = (lt >> LM_V_FRAC_SHIFT) & LM_FRAC_MASK;
+        if (dlu > 0) {
+            if (fu + (run - 1) * dlu >= LM_ONE_I) {
+                run = (LM_ONE_I - fu + dlu - 1).idiv(dlu);
+            }
+        } else if (dlu < 0) {
+            if (fu + (run - 1) * dlu < 0) run = fu.idiv(0 - dlu) + 1;
+        }
+        if (dlv > 0) {
+            if (fv + (run - 1) * dlv >= LM_ONE_I) {
+                let n = (LM_ONE_I - fv + dlv - 1).idiv(dlv);
+                if (n < run) run = n;
+            }
+        } else if (dlv < 0) {
+            if (fv + (run - 1) * dlv < 0) {
+                let n = fv.idiv(0 - dlv) + 1;
+                if (n < run) run = n;
+            }
+        }
+
+        let var lu = (lt >> LM_U_CELL_SHIFT) & LM_U_CELL_MASK;
+        let var lv = lt >> LM_V_CELL_SHIFT;
+        // Edge rounding can put the first or last covered pixel just outside
+        // the padded rectangle. Extend the border sample there.
+        if (lu >= 32768) { lu = 0; fu = 0; }
+        else if (lu >= lm_w - 1) { lu = lm_w - 2; fu = LM_ONE_I - 1; }
+        if (lv < 0) { lv = 0; fv = 0; }
+        else if (lv >= lm_h - 1) { lv = lm_h - 2; fv = LM_ONE_I - 1; }
+        let a = lv * lm_w + lu;
+        let l00 = lm[a]; let l10 = lm[a + 1];
+        let l01 = lm[a + lm_w]; let l11 = lm[a + lm_w + 1];
+        let var l = 0; let var dl = 0; let var ddl = 0;
+        if (dlv == 0) {
+            let left = (l00 << LM_FRAC_BITS) + (l01 - l00) * fv;
+            let right = (l10 << LM_FRAC_BITS) + (l11 - l10) * fv;
+            let slope = right - left;
+            l = left * LM_ONE_I + slope * fu;
+            dl = slope * dlu;
+        } else if (dlu == 0) {
+            let top = (l00 << LM_FRAC_BITS) + (l10 - l00) * fu;
+            let bottom = (l01 << LM_FRAC_BITS) + (l11 - l01) * fu;
+            let slope = bottom - top;
+            l = top * LM_ONE_I + slope * fv;
+            dl = slope * dlv;
+        } else {
+            let hu = l10 - l00; let hv = l01 - l00;
+            let cross = l11 - l10 - l01 + l00;
+            l = (l00 << LM_LIGHT_SHIFT)
+              + ((hu * fu + hv * fv) << LM_FRAC_BITS) + cross * fu * fv;
+            dl = ((hu * dlu + hv * dlv) << LM_FRAC_BITS)
+               + cross * (fu * dlv + fv * dlu + dlu * dlv);
+            ddl = 2 * cross * dlu * dlv;
+        }
+
+        let run_end = i + run;
+        while (i < run_end) {
+            let c = pix.get_u32(((t >> vshift) & vmask) | ((t >> U_SHIFT) & umask));
+            let src = ((c & mask_rb) | ((c & MASK_G) << 24)) * (l >> LM_LIGHT_SHIFT);
+            if (blend) {
+                let d = fb.get_u32(i);
+                let acc = src + ((d & mask_rb) | ((d & MASK_G) << 24)) * inv_alpha;
+                fb.set_u32(i, ((acc >> 8) & mask_rb) | ((acc >> 32) & 0xFF00));
+            } else {
+                fb.set_u32(i, ((src >> 8) & mask_rb) | ((src >> 32) & 0xFF00));
+            }
+            t = t + dt; l = l + dl; dl = dl + ddl; i = i + 1;
+        }
+        lt = lt + run * dlt;
+    }
+}
+
+// Walk the convex polygon in pX/pY scanline by scanline, hand each span to the
+// s-buffer, and draw whatever comes back as visible.
+fun raster_poly(m) {
+    let var top = 0;
+    let var y_min = pY[0];
+    let var bot = 0;
+    let var y_max = pY[0];
+    for (let var i = 1; i < m; ++i) {
+        if (pY[i] < y_min) { y_min = pY[i]; top = i; }
+        if (pY[i] > y_max) { y_max = pY[i]; bot = i; }
+    }
+
+    let var scan_y = y_min.floor();
+    if (scan_y < 0) scan_y = 0;
+    let var end_y = y_max.floor();
+    if (end_y > render_y1) end_y = render_y1;
+    if (scan_y >= end_y) return;
+
+    // Which way round the left chain runs, from the winding on screen
+    let var area = 0.0;
+    for (let var i = 0; i < m; ++i) {
+        let var j = i + 1;
+        if (j == m) j = 0;
+        area = area + pX[i] * pY[j] - pX[j] * pY[i];
+    }
+    let var step_l = 1;
+    if (area > 0.0) step_l = m - 1;
+    let step_r = m - step_l;
+
+    // Texture coordinates over z, and 1/z, at x = 0 of the current scanline.
+    // These stay floats: at x = 0 the value can sit far outside the polygon,
+    // which a float carries without losing the precision that matters once a
+    // span start brings it back inside.
+    let y_off = scan_y + 0.5 - g_ref_y;
+    let x_off = 0.5 - g_ref_x;
+    let var uz_row = g_uz0 + x_off * g_duzdx + y_off * g_duzdy;
+    let var vz_row = g_vz0 + x_off * g_dvzdx + y_off * g_dvzdy;
+    let var w_row = g_w0 + x_off * g_dwdx + y_off * g_dwdy;
+
+    let duzdx = g_duzdx; let dvzdx = g_dvzdx; let dwdx = g_dwdx;
+    let uwrap = g_uwrap;
+    let vwrap = g_vwrap;
+    let lm_u0 = g_lm_u0; let lm_v0 = g_lm_v0;
+    let collecting = g_collecting;
+
+    // Per chain: the corner reached so far, the current x, how far x moves per
+    // scanline, and the scanline its current edge runs out on
+    let var cl = top; let var xl = 0.0; let var dxl = 0.0; let var end_l = scan_y;
+    let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = scan_y;
+    let var row = scan_y * FRAME_WIDTH;
+
+    // Counted locally and handed to the global once the polygon is done, so
+    // the inner loops touch a register rather than a global per sub-span
+    let var span_px = 0;
+
+    while (scan_y < end_y) {
+        // Step either chain the current scanline has run past. Edges too short
+        // to cover a scanline are skipped by the same loop.
+        while (scan_y >= end_l && cl != bot) {
+            let ya = pY[cl];
+            let xa = pX[cl];
+            cl = (cl + step_l) % m;
+            let yb = pY[cl];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_l = e;
+            if (end_l > scan_y && yb > ya) {
+                dxl = (pX[cl] - xa) / (yb - ya);
+                xl = xa + (scan_y + 1 - ya) * dxl;
+            }
+        }
+        while (scan_y >= end_r && cr != bot) {
+            let ya = pY[cr];
+            let xa = pX[cr];
+            cr = (cr + step_r) % m;
+            let yb = pY[cr];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_r = e;
+            if (end_r > scan_y && yb > ya) {
+                dxr = (pX[cr] - xa) / (yb - ya);
+                xr = xa + (scan_y + 1 - ya) * dxr;
+            }
+        }
+
+        // Both edges hold for this band, so it runs with no further checks
+        let var band_end = end_l;
+        if (end_r < band_end) band_end = end_r;
+        if (band_end <= scan_y) { pixels_drawn = pixels_drawn + span_px; return; }
+
+        // A face you can see through only wants to know where it is visible, so
+        // it runs a band of its own: no interpolants to carry down the rows and
+        // no s-buffer to fill in. Which of the two runs is settled once a band
+        // rather than once a scanline, because it cannot change inside one.
+        if (collecting) {
+            while (scan_y < band_end) {
+                let var xa = xl.floor();
+                if (xa < 0) xa = 0;
+                let var xb = xr.floor();
+                if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+
+                if (scan_y >= render_y0 && xa < xb) {
+                    let n_vis = sbuf_visible(scan_y, xa, xb);
+                    for (let var k = 0; k < n_vis; ++k) {
+                        if (ds_top >= MAX_DEFER_SPANS) break;
+                        ds_y[ds_top] = scan_y;
+                        ds_x0[ds_top] = vis_x0[k];
+                        ds_x1[ds_top] = vis_x1[k];
+                        ds_top = ds_top + 1;
+                    }
+                }
+
+                xl = xl + dxl;
+                xr = xr + dxr;
+                scan_y = scan_y + 1;
+            }
+            continue;
+        }
+
+        while (scan_y < band_end) {
+            let var xa = xl.floor();
+            if (xa < 0) xa = 0;
+            let var xb = xr.floor();
+            if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+
+            // Start edge interpolation at the polygon's true first scanline,
+            // even when this actor owns a lower band. Advancing to the band
+            // one row at a time preserves the serial renderer's floating
+            // point rounding at polygon edges; this branch is per row, never
+            // in the pixel hot path.
+            if (scan_y >= render_y0 && xa < xb) {
+                let n_vis = sbuf_insert(scan_y, xa, xb);
+                for (let var k = 0; k < n_vis; ++k) {
+                    let var x = vis_x0[k];
+                    let piece_end = vis_x1[k];
+
+                    // Perspective values at the start of this piece
+                    let var uz = uz_row + x * duzdx;
+                    let var vz = vz_row + x * dvzdx;
+                    let var w = w_row + x * dwdx;
+                    let var z = 1.0 / w;
+                    let var u = uz * z;
+                    let var v = vz * z;
+
+                    // 1/z is what makes the affine step inside a sub-span
+                    // drift, so the length follows it: the longest run with
+                    // run * |dwdx| <= PERSP_TOL * w. The divide is hoisted
+                    // here, leaving a multiply per sub-span. A face square to
+                    // the eye has no swing at all and runs at full length.
+                    let var wscale = 0.0;
+                    let adw = dwdx.abs();
+                    if (adw > 0.0) wscale = PERSP_TOL / adw;
+
+                    while (x < piece_end) {
+                        let var run = SUB_MAX;
+                        if (wscale > 0.0) {
+                            let span_limit = w * wscale;
+                            if (span_limit < SUB_MAX.to_f()) {
+                                run = span_limit.floor();
+                                if (run < 1) run = 1;
+                            }
+                        }
+
+                        let var xe = x + run;
+                        if (xe > piece_end) xe = piece_end;
+                        let len = xe - x;
+
+                        // One divide per sub-span buys a correct u and v at its
+                        // far end; in between the step is affine
+                        let uz_e = uz + len * duzdx;
+                        let vz_e = vz + len * dvzdx;
+                        let w_e = w + len * dwdx;
+                        let z_e = 1.0 / w_e;
+                        let u_e = uz_e * z_e;
+                        let v_e = vz_e * z_e;
+
+                        let inv_len = INV_N[len];
+                        let var du = (u_e - u) * inv_len;
+                        let var dv = (v_e - v) * inv_len;
+                        if (du > GRAD_LIMIT) du = GRAD_LIMIT;
+                        else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
+                        if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
+                        else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
+
+                        let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & uwrap) + EXC_FX;
+                        let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & vwrap) + EXC_FX;
+                        let var t = (vfx << 32) + ufx;
+                        let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
+                        let dlu = (du * LM_SCALE).floor();
+                        let dlv = (dv * LM_SCALE).floor();
+                        let dlt = (dlv << 32) + dlu;
+                        let lu = ((u - lm_u0) * LM_SCALE).floor();
+                        let lv = ((v - lm_v0) * LM_SCALE).floor();
+                        let lt = (lv << 32) + lu;
+                        let i = row + x;
+                        let end_i = row + xe;
+                        span_px = span_px + len;
+                        shade_lightmap_run(t, dt, lt, dlt, dlu, dlv, i, end_i, false);
+                        uz = uz_e; vz = vz_e; w = w_e;
+                        u = u_e; v = v_e;
+                        x = xe;
+                    }
+                }
+            }
+
+            xl = xl + dxl;
+            xr = xr + dxr;
+            uz_row = uz_row + g_duzdy;
+            vz_row = vz_row + g_dvzdy;
+            w_row = w_row + g_dwdy;
+            row = row + FRAME_WIDTH;
+            scan_y = scan_y + 1;
+        }
+    }
+
+    pixels_drawn = pixels_drawn + span_px;
+}
+
+// Draw a run of spans taken down earlier, blending each pixel over what is
+// already in the frame buffer.
+//
+// There is no edge walking here: which pixels belong to the face was settled in
+// the first pass, and a row's starting values come straight off the gradients
+// rather than by stepping down from the top of the polygon. The sub-span loop
+// below is the one in `raster_poly`, repeated rather than shared because the
+// only way to share it would be a call per pixel.
+//
+// The blend is the same trick as the shading multiply. Both texel and
+// destination are unpacked so their three channels sit sixteen bits apart, each
+// is scaled by its own share, and the two are added while still packed: one
+// extra load, one extra multiply and an add over an opaque pixel. It cannot
+// carry between channels because the shares sum to 255 and a channel is at
+// most 255, which puts the worst case at 255 * 255, just inside sixteen bits.
+// That is the whole reason alpha is baked into the light rather than applied
+// here: the source share arrives already multiplied by it and already bounded.
+fun raster_spans(first, count) {
+    let duzdx = g_duzdx; let dvzdx = g_dvzdx; let dwdx = g_dwdx;
+    let uwrap = g_uwrap;
+    let vwrap = g_vwrap;
+    let lm_u0 = g_lm_u0; let lm_v0 = g_lm_v0;
+    let x_off = 0.5 - g_ref_x;
+
+    let var span_px = 0;
+    let end_s = first + count;
+
+    for (let var s = first; s < end_s; ++s) {
+        let scan_y = ds_y[s];
+        let piece_end = ds_x1[s];
+        let row = scan_y * FRAME_WIDTH;
+
+        let y_off = scan_y + 0.5 - g_ref_y;
+        let uz_row = g_uz0 + x_off * duzdx + y_off * g_duzdy;
+        let vz_row = g_vz0 + x_off * dvzdx + y_off * g_dvzdy;
+        let w_row = g_w0 + x_off * dwdx + y_off * g_dwdy;
+
+        let var x = ds_x0[s];
+        let var uz = uz_row + x * duzdx;
+        let var vz = vz_row + x * dvzdx;
+        let var w = w_row + x * dwdx;
+        let var z = 1.0 / w;
+        let var u = uz * z;
+        let var v = vz * z;
+
+        let var wscale = 0.0;
+        let adw = dwdx.abs();
+        if (adw > 0.0) wscale = PERSP_TOL / adw;
+
+        while (x < piece_end) {
+            let var run = SUB_MAX;
+            if (wscale > 0.0) {
+                let span_limit = w * wscale;
+                if (span_limit < SUB_MAX.to_f()) {
+                    run = span_limit.floor();
+                    if (run < 1) run = 1;
+                }
+            }
+
+            let var xe = x + run;
+            if (xe > piece_end) xe = piece_end;
+            let len = xe - x;
+
+            let uz_e = uz + len * duzdx;
+            let vz_e = vz + len * dvzdx;
+            let w_e = w + len * dwdx;
+            let z_e = 1.0 / w_e;
+            let u_e = uz_e * z_e;
+            let v_e = vz_e * z_e;
+
+            let inv_len = INV_N[len];
+            let var du = (u_e - u) * inv_len;
+            let var dv = (v_e - v) * inv_len;
+            if (du > GRAD_LIMIT) du = GRAD_LIMIT;
+            else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
+            if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
+            else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
+
+            let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & uwrap) + EXC_FX;
+            let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & vwrap) + EXC_FX;
+            let var t = (vfx << 32) + ufx;
+            let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
+            let dlu = (du * LM_SCALE).floor();
+            let dlv = (dv * LM_SCALE).floor();
+            let dlt = (dlv << 32) + dlu;
+            let lu = ((u - lm_u0) * LM_SCALE).floor();
+            let lv = ((v - lm_v0) * LM_SCALE).floor();
+            let lt = (lv << 32) + lu;
+            let i = row + x;
+            let end_i = row + xe;
+            span_px = span_px + len;
+            shade_lightmap_run(t, dt, lt, dlt, dlu, dlv, i, end_i, true);
+            uz = uz_e; vz = vz_e; w = w_e;
+            u = u_e; v = v_e;
+            x = xe;
+        }
+    }
+
+    pixels_drawn = pixels_drawn + span_px;
+}
+
+// Cull, transform, clip and project one face, and work out the gradients the
+// span loop runs on. Returns the vertex count left after clipping, or 0 if
+// there is nothing to draw.
+//
+// `cull` asks for the cheap rejection against the s-buffer, which only the
+// first pass wants: by the time a held back face is replayed the s-buffer holds
+// the whole frame, and a pane of glass is covered in it by the very wall it is
+// meant to be blended over. Everything else here reads only the face and the
+// camera, so the second pass gets gradients identical to the first.
+fun face_setup(f, cull) {
+    // Faces pointing away from the eye are the inside of a solid
+    if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return 0;
+
+    let taxis = f.taxis;
+    let turn = f.turn;
+    let flip = f.flip;
+    let scale = f.scale;
+    let n = f.v.len.idiv(3);
+    if (n > MAX_VERTS - 8) return 0;
+
+    for (let var i = 0; i < n; ++i) {
+        let wx = f.v[i * 3];
+        let var wy = f.v[i * 3 + 1];
+        let wz = f.v[i * 3 + 2];
+
+        // Lava swells: the corner itself rides two sine waves, one along x and
+        // one along z. The texture of a floor comes from x and z, so lifting y
+        // moves the surface without touching the mapping, and nothing seams.
+        if (f.flow) {
+            wy = wy + WAVE_AMP * (wx * WAVE_FREQ + warp_phase).sin()
+                    + WAVE_AMP * (wz * WAVE_FREQ + warp_phase * 0.83).sin();
+        }
+
+        let var u = face_u(taxis, turn, wx, wy, wz);
+        let var v = face_v(taxis, turn, wx, wy, wz);
+        if (flip) u = 0.0 - u;
+
+        if (f.fit) {
+            u = u * f.su + f.ou;
+            v = v * f.sv + f.ov;
+        } else {
+            u = u * scale;
+            v = v * scale;
+        }
+
+        // Into view space: yaw about the up axis, then pitch
+        let dx = wx - cam_x;
+        let dy = wy - cam_y;
+        let dz = wz - cam_z;
+        let rx = dx * cos_yaw - dz * sin_yaw;
+        let rz = dx * sin_yaw + dz * cos_yaw;
+
+        aX[i] = rx;
+        aY[i] = dy * cos_pitch - rz * sin_pitch;
+        aZ[i] = rz * cos_pitch + dy * sin_pitch;
+        aU[i] = u;
+        aV[i] = v;
+    }
+
+    // Only the near plane needs clipping: it is what keeps the projection from
+    // dividing by a z at or behind the eye. Clipping to the sides as well would
+    // put vertices exactly on the frame edge, where rounding drops them a hair
+    // inside and leaves an uncovered row along the border; the span and
+    // scanline clamps below handle off-screen geometry anyway.
+    let m = clip_plane(n, 0.0, 0.0, 1.0, 0.0 - NEAR);
+    if (m < 3) return 0;
+
+    let var box_x0 = 0.0; let var box_y0 = 0.0;
+    let var box_x1 = 0.0; let var box_y1 = 0.0;
+    for (let var i = 0; i < m; ++i) {
+        let w = 1.0 / aZ[i];
+        pX[i] = CENTER_X + FOCAL * aX[i] * w;
+        pY[i] = CENTER_Y - FOCAL * aY[i] * w;
+        pW[i] = w;
+        pUZ[i] = aU[i] * w;
+        pVZ[i] = aV[i] * w;
+
+        if (i == 0) {
+            box_x0 = pX[i]; box_x1 = pX[i];
+            box_y0 = pY[i]; box_y1 = pY[i];
+        } else {
+            if (pX[i] < box_x0) box_x0 = pX[i];
+            if (pX[i] > box_x1) box_x1 = pX[i];
+            if (pY[i] < box_y0) box_y0 = pY[i];
+            if (pY[i] > box_y1) box_y1 = pY[i];
+        }
+    }
+
+    // Match the rasterizer's floor-and-clamp convention. Requiring this
+    // enclosing rectangle to be covered is stronger than necessary, but lets
+    // a fully hidden face skip gradient setup and edge walking cheaply.
+    let rx0 = box_x0.floor().max(0);
+    let ry0 = box_y0.floor().max(0);
+    let rx1 = box_x1.floor().min(FRAME_WIDTH);
+    let ry1 = box_y1.floor().min(FRAME_HEIGHT);
+    if (cull && rx0 < rx1 && ry0 < ry1 && sbuf_covers_rect(rx0, ry0, rx1, ry1)) {
+        rect_faces_skipped = rect_faces_skipped + 1;
+        return 0;
+    }
+
+    // u/z, v/z and 1/z are linear in screen space, so their gradients come from
+    // any three vertices. The triple with the largest area is the best
+    // conditioned, which matters after clipping leaves near-collinear corners.
+    let var bi = 1;
+    let var bj = 2;
+    let var best = 0.0;
+    for (let var i = 1; i + 1 < m; ++i) {
+        let e1x = pX[i] - pX[0];
+        let e1y = pY[i] - pY[0];
+        let e2x = pX[i + 1] - pX[0];
+        let e2y = pY[i + 1] - pY[0];
+        let det = (e1x * e2y - e2x * e1y).abs();
+        if (det > best) { best = det; bi = i; bj = i + 1; }
+    }
+    if (best < 0.000001) return 0;
+
+    let x0 = pX[0]; let y0 = pY[0];
+    let e1x = pX[bi] - x0; let e1y = pY[bi] - y0;
+    let e2x = pX[bj] - x0; let e2y = pY[bj] - y0;
+    let inv_det = 1.0 / (e1x * e2y - e2x * e1y);
+
+    let uz0 = pUZ[0];
+    let d1u = pUZ[bi] - uz0;
+    let d2u = pUZ[bj] - uz0;
+    g_duzdx = (d1u * e2y - d2u * e1y) * inv_det;
+    g_duzdy = (d2u * e1x - d1u * e2x) * inv_det;
+
+    let vz0 = pVZ[0];
+    let d1v = pVZ[bi] - vz0;
+    let d2v = pVZ[bj] - vz0;
+    g_dvzdx = (d1v * e2y - d2v * e1y) * inv_det;
+    g_dvzdy = (d2v * e1x - d1v * e2x) * inv_det;
+
+    let w0 = pW[0];
+    let d1w = pW[bi] - w0;
+    let d2w = pW[bj] - w0;
+    g_dwdx = (d1w * e2y - d2w * e1y) * inv_det;
+    g_dwdy = (d2w * e1x - d1w * e2x) * inv_det;
+
+    g_lm = f.lm;
+    g_lm_w = f.lm_w;
+    g_lm_h = f.lm_h;
+    g_lm_u0 = f.lm_u0;
+    g_lm_v0 = f.lm_v0;
+
+    g_uz0 = uz0; g_vz0 = vz0; g_w0 = w0;
+    g_ref_x = x0; g_ref_y = y0;
+    g_pix = f.pix;
+    g_umask = f.umask;
+    g_vshift = f.vshift;
+    g_vmask = f.vmask;
+    g_uwrap = f.uwrap;
+    g_vwrap = f.vwrap;
+
+    // What the face lets through. Alpha is already folded into its samples.
+    g_inv_alpha = f.inv_alpha8;
+
+    return m;
+}
+
+// Draw one face, or, if you can see through it, take down where it is visible
+// and leave it for `draw_deferred`
+fun draw_face(f) {
+    if (f.alpha >= 1.0) {
+        let m = face_setup(f, true);
+        if (m > 0) raster_poly(m);
+        return;
+    }
+
+    if (df_num >= MAX_DEFER_FACES || ds_top >= MAX_DEFER_SPANS) return;
+
+    let first = ds_top;
+    g_collecting = true;
+    let m = face_setup(f, true);
+    if (m > 0) raster_poly(m);
+    g_collecting = false;
+
+    // Every part of it was hidden, so it never reaches the second pass
+    if (ds_top == first) return;
+
+    df_face[df_num] = f;
+    df_first[df_num] = first;
+    df_count[df_num] = ds_top - first;
+    df_num = df_num + 1;
+}
+
+// The second pass: the faces held back, replayed furthest first, each over a
+// frame buffer that is finished underneath it
+fun draw_deferred() {
+    for (let var i = df_num - 1; i >= 0; --i) {
+        let f = df_face[i];
+        if (face_setup(f, false) > 0) raster_spans(df_first[i], df_count[i]);
+    }
+}
+
+// The five planes of the view frustum, in world space, as normal and offset.
+// A point is inside a plane when nx*x + ny*y + nz*z - d >= 0.
+let fr_nx = Array.with_size(5, 0.0);
+let fr_ny = Array.with_size(5, 0.0);
+let fr_nz = Array.with_size(5, 0.0);
+let fr_d = Array.with_size(5, 0.0);
+
+fun set_frustum_plane(i, nx, ny, nz, d) {
+    fr_nx[i] = nx; fr_ny[i] = ny; fr_nz[i] = nz; fr_d[i] = d;
+}
+
+// Rebuild the frustum for where the camera is now. The camera's own axes come
+// straight out of the yaw and pitch the view transform uses.
+fun update_frustum() {
+    let fx = cos_pitch * sin_yaw;
+    let fy = sin_pitch;
+    let fz = cos_pitch * cos_yaw;
+
+    let rx = cos_yaw;
+    let ry = 0.0;
+    let rz = 0.0 - sin_yaw;
+
+    let ux = 0.0 - sin_pitch * sin_yaw;
+    let uy = cos_pitch;
+    let uz = 0.0 - sin_pitch * cos_yaw;
+
+    // How far the frustum opens out, per unit of depth
+    let tan_h = CENTER_X / FOCAL;
+    let tan_v = CENTER_Y / FOCAL;
+
+    set_frustum_plane(0, fx, fy, fz, fx * cam_x + fy * cam_y + fz * cam_z + NEAR);
+
+    let lx = rx + tan_h * fx; let ly = ry + tan_h * fy; let lz = rz + tan_h * fz;
+    set_frustum_plane(1, lx, ly, lz, lx * cam_x + ly * cam_y + lz * cam_z);
+
+    let sx = tan_h * fx - rx; let sy = tan_h * fy - ry; let sz = tan_h * fz - rz;
+    set_frustum_plane(2, sx, sy, sz, sx * cam_x + sy * cam_y + sz * cam_z);
+
+    let bx = ux + tan_v * fx; let by = uy + tan_v * fy; let bz = uz + tan_v * fz;
+    set_frustum_plane(3, bx, by, bz, bx * cam_x + by * cam_y + bz * cam_z);
+
+    let tx = tan_v * fx - ux; let ty = tan_v * fy - uy; let tz = tan_v * fz - uz;
+    set_frustum_plane(4, tx, ty, tz, tx * cam_x + ty * cam_y + tz * cam_z);
+}
+
+// Is this subtree's box entirely outside one of the frustum planes?
+fun node_hidden(node) {
+    if (node.empty) return true;
+
+    for (let var i = 0; i < 5; ++i) {
+        let nx = fr_nx[i];
+        let ny = fr_ny[i];
+        let nz = fr_nz[i];
+        let reach = nx.abs() * node.hx + ny.abs() * node.hy + nz.abs() * node.hz;
+        if (nx * node.cx + ny * node.cy + nz * node.cz - fr_d[i] + reach < 0.0) return true;
+    }
+    return false;
+}
+
+// Project a subtree's world-space box and reject it when the s-buffer already
+// covers the box's whole screen rectangle. If the box crosses the near plane,
+// projection is unbounded and its corners no longer give a useful enclosure,
+// so that case deliberately falls back to normal traversal.
+fun node_occluded(node) {
+    // Moving lava can leave the static box computed from its source face.
+    if (node.moving) return false;
+
+    let var box_x0 = 0.0; let var box_y0 = 0.0;
+    let var box_x1 = 0.0; let var box_y1 = 0.0;
+    for (let var i = 0; i < 8; ++i) {
+        let var wx = node.cx - node.hx;
+        let var wy = node.cy - node.hy;
+        let var wz = node.cz - node.hz;
+        if ((i & 1) != 0) wx = node.cx + node.hx;
+        if ((i & 2) != 0) wy = node.cy + node.hy;
+        if ((i & 4) != 0) wz = node.cz + node.hz;
+
+        let dx = wx - cam_x;
+        let dy = wy - cam_y;
+        let dz = wz - cam_z;
+        let vx = dx * cos_yaw - dz * sin_yaw;
+        let rz = dx * sin_yaw + dz * cos_yaw;
+        let vy = dy * cos_pitch - rz * sin_pitch;
+        let vz = rz * cos_pitch + dy * sin_pitch;
+        if (vz <= NEAR) return false;
+
+        let sx = CENTER_X + FOCAL * vx / vz;
+        let sy = CENTER_Y - FOCAL * vy / vz;
+        if (i == 0) {
+            box_x0 = sx; box_x1 = sx;
+            box_y0 = sy; box_y1 = sy;
+        } else {
+            if (sx < box_x0) box_x0 = sx;
+            if (sx > box_x1) box_x1 = sx;
+            if (sy < box_y0) box_y0 = sy;
+            if (sy > box_y1) box_y1 = sy;
+        }
+    }
+
+    let rx0 = box_x0.floor().max(0);
+    let ry0 = box_y0.floor().max(0);
+    let rx1 = box_x1.floor().min(FRAME_WIDTH);
+    let ry1 = box_y1.floor().min(FRAME_HEIGHT);
+    return rx0 < rx1 && ry0 < ry1 && sbuf_covers_rect(rx0, ry0, rx1, ry1);
+}
+
+// The box around everything in a subtree, from the faces it holds and the
+// boxes of its children
+fun compute_bounds(node) {
+    if (node == nil) return;
+    compute_bounds(node.front);
+    compute_bounds(node.back);
+
+    let var lo_x = 0.0; let var lo_y = 0.0; let var lo_z = 0.0;
+    let var hi_x = 0.0; let var hi_y = 0.0; let var hi_z = 0.0;
+    let var any = false;
+
+    for (let var i = 0; i < node.on.len; ++i) {
+        let f = node.on[i];
+        if (f.flow) node.moving = true;
+        let n = f.v.len.idiv(3);
+        for (let var k = 0; k < n; ++k) {
+            let x = f.v[k * 3];
+            let y = f.v[k * 3 + 1];
+            let z = f.v[k * 3 + 2];
+            if (!any) { lo_x = x; hi_x = x; lo_y = y; hi_y = y; lo_z = z; hi_z = z; any = true; }
+            if (x < lo_x) lo_x = x;
+            if (x > hi_x) hi_x = x;
+            if (y < lo_y) lo_y = y;
+            if (y > hi_y) hi_y = y;
+            if (z < lo_z) lo_z = z;
+            if (z > hi_z) hi_z = z;
+        }
+    }
+
+    for (let var c = 0; c < 2; ++c) {
+        let var child = node.front;
+        if (c == 1) child = node.back;
+        if (child == nil || child.empty) continue;
+        if (child.moving) node.moving = true;
+
+        let cl_x = child.cx - child.hx; let ch_x = child.cx + child.hx;
+        let cl_y = child.cy - child.hy; let ch_y = child.cy + child.hy;
+        let cl_z = child.cz - child.hz; let ch_z = child.cz + child.hz;
+
+        if (!any) {
+            lo_x = cl_x; hi_x = ch_x; lo_y = cl_y; hi_y = ch_y; lo_z = cl_z; hi_z = ch_z;
+            any = true;
+        }
+        if (cl_x < lo_x) lo_x = cl_x;
+        if (ch_x > hi_x) hi_x = ch_x;
+        if (cl_y < lo_y) lo_y = cl_y;
+        if (ch_y > hi_y) hi_y = ch_y;
+        if (cl_z < lo_z) lo_z = cl_z;
+        if (ch_z > hi_z) hi_z = ch_z;
+    }
+
+    node.empty = !any;
+    if (!any) return;
+
+    node.cx = (lo_x + hi_x) * 0.5;
+    node.cy = (lo_y + hi_y) * 0.5;
+    node.cz = (lo_z + hi_z) * 0.5;
+    node.hx = (hi_x - lo_x) * 0.5;
+    node.hy = (hi_y - lo_y) * 0.5;
+    node.hz = (hi_z - lo_z) * 0.5;
+}
+
+// Walk the tree from the eye: everything on the near side of a plane, then the
+// faces lying in it, then everything beyond
+fun bsp_draw(node) {
+    if (node == nil) return;
+    if (screen_done) return;
+    if (node_hidden(node)) return;
+    if (node_occluded(node)) {
+        rect_nodes_skipped = rect_nodes_skipped + 1;
+        return;
+    }
+
+    let side = node.nx * cam_x + node.ny * cam_y + node.nz * cam_z - node.d;
+
+    let var near_child = node.back;
+    let var far_child = node.front;
+    if (side >= 0.0) { near_child = node.front; far_child = node.back; }
+
+    bsp_draw(near_child);
+
+    let on = node.on;
+    for (let var i = 0; i < on.len; ++i) {
+        if (screen_done) return;
+        draw_face(on[i]);
+    }
+
+    bsp_draw(far_child);
+}
+
+fun render_frame() {
+    pixels_drawn = 0;
+    rect_faces_skipped = 0;
+    rect_nodes_skipped = 0;
+    sbuf_reset();
+    update_frustum();
+    bsp_draw(bsp_root);
+
+    // The opaque pass is what decides which pixels are sky, and the blend pass
+    // below needs the sky already under it, so this falls between the two
+    if (draw_sky()) {
+        draw_stars();
+        draw_moon();
+    }
+
+    // Everything opaque is down, so what was held back can be blended over it
+    draw_deferred();
+}
+
+class RenderBandRequest {
+    init(self, frame_id, y0, y1) {
+        self.frame_id = frame_id;
+        self.y0 = y0;
+        self.y1 = y1;
+        self.cam_x = cam_x;
+        self.cam_y = cam_y;
+        self.cam_z = cam_z;
+        self.cam_yaw = cam_yaw;
+        self.cam_pitch = cam_pitch;
+        self.sin_yaw = sin_yaw;
+        self.cos_yaw = cos_yaw;
+        self.sin_pitch = sin_pitch;
+        self.cos_pitch = cos_pitch;
+        self.warp_phase = warp_phase;
+    }
+}
+
+class RenderBandResult {
+    init(self, frame_id, actor_id, y0, num_bytes, pixels, num_pixels, num_faces_skipped, num_nodes_skipped) {
+        self.frame_id = frame_id;
+        self.actor_id = actor_id;
+        self.y0 = y0;
+        self.num_bytes = num_bytes;
+        self.pixels = pixels;
+        self.num_pixels = num_pixels;
+        self.num_faces_skipped = num_faces_skipped;
+        self.num_nodes_skipped = num_nodes_skipped;
+    }
+}
+
+// Workers are forked only after the map has been prepared, so actor spawning
+// gives each one a private copy of the finished BSP, textures and light data.
+// The main actor dynamically hands out small row bands, so a worker running on
+// a faster core naturally renders more of the frame.
+fun render_actor_loop() {
+    // Reused for every result. Sending copies it synchronously, so it is safe
+    // for the worker to overwrite once the next request arrives.
+    let pixels = ByteArray.with_size(BAND_HEIGHT * FRAME_WIDTH * 4);
+    let actor_id = $actor_id();
+
+    loop {
+        let msg = $actor_recv();
+        if (msg == nil) return;
+
+        render_y0 = msg.y0;
+        render_y1 = msg.y1;
+        cam_x = msg.cam_x;
+        cam_y = msg.cam_y;
+        cam_z = msg.cam_z;
+        cam_yaw = msg.cam_yaw;
+        cam_pitch = msg.cam_pitch;
+        sin_yaw = msg.sin_yaw;
+        cos_yaw = msg.cos_yaw;
+        sin_pitch = msg.sin_pitch;
+        cos_pitch = msg.cos_pitch;
+        warp_phase = msg.warp_phase;
+
+        render_frame();
+        let band_start = render_y0 * FRAME_WIDTH * 4;
+        let band_bytes = (render_y1 - render_y0) * FRAME_WIDTH * 4;
+        pixels.memcpy(0, frame_buffer, band_start, band_bytes);
+        $actor_send($actor_parent(), RenderBandResult(
+            msg.frame_id,
+            actor_id,
+            render_y0,
+            band_bytes,
+            pixels,
+            pixels_drawn,
+            rect_faces_skipped,
+            rect_nodes_skipped
+        ));
+    }
+}
+
+let var render_actor_ids = nil;
+let pending_ui_events = [];
+
+fun start_render_actors(num_actors) {
+    let ids = [];
+    for (let var i = 0; i < num_actors; ++i) {
+        ids.push($actor_spawn(render_actor_loop));
+    }
+    return ids;
+}
+
+fun render_frame_parallel(frame_id) {
+    let num_bands = (FRAME_HEIGHT + BAND_HEIGHT - 1).idiv(BAND_HEIGHT);
+    let var next_y = 0;
+
+    // Give every actor one band initially. From then on, whichever actor
+    // returns first receives the next one.
+    for (let var i = 0; i < render_actor_ids.len && next_y < FRAME_HEIGHT; ++i) {
+        let y1 = (next_y + BAND_HEIGHT).min(FRAME_HEIGHT);
+        $actor_send(render_actor_ids[i], RenderBandRequest(frame_id, next_y, y1));
+        next_y = y1;
+    }
+
+    pixels_drawn = 0;
+    rect_faces_skipped = 0;
+    rect_nodes_skipped = 0;
+
+    let var received = 0;
+    while (received < num_bands) {
+        let msg = $actor_recv();
+        if (msg instanceof UIEvent) {
+            pending_ui_events.push(msg);
+            continue;
+        }
+        if (msg == nil || msg.frame_id != frame_id) continue;
+
+        // Keep the returning actor busy before assembling its completed band.
+        if (next_y < FRAME_HEIGHT) {
+            let y1 = (next_y + BAND_HEIGHT).min(FRAME_HEIGHT);
+            $actor_send(msg.actor_id, RenderBandRequest(frame_id, next_y, y1));
+            next_y = y1;
+        }
+
+        frame_buffer.memcpy(
+            msg.y0 * FRAME_WIDTH * 4,
+            msg.pixels,
+            0,
+            msg.num_bytes
+        );
+        pixels_drawn = pixels_drawn + msg.num_pixels;
+        rect_faces_skipped = rect_faces_skipped + msg.num_faces_skipped;
+        rect_nodes_skipped = rect_nodes_skipped + msg.num_nodes_skipped;
+        received = received + 1;
+    }
+}
+
+fun stop_render_actors() {
+    for (let var i = 0; i < render_actor_ids.len; ++i) {
+        $actor_send(render_actor_ids[i], nil);
+    }
+    for (let var i = 0; i < render_actor_ids.len; ++i) {
+        $actor_join(render_actor_ids[i]);
+    }
+}
+
+// --- Player movement ---
+
+// How high the solid reaches on the vertical line through a point, or nil if
+// that line misses the brush entirely. This is what lets the player walk up a
+// ramp: the answer follows the slope.
+//
+// Normals need not be unit: this compares run against rise on the same normal.
+fun plane_is_walkable(p) {
+    if (p == nil) return true;
+    let run = (p.nx * p.nx + p.nz * p.nz).sqrt();
+    return run <= MAX_CLIMB_SLOPE * p.ny;
+}
+
+// With walkable_only set, ground too steep to climb answers nil so that the
+// brush reads as a wall. The result also carries the supporting plane because
+// a falling player that lands on a steep face has to slide along it.
+fun brush_top(b, x, z, walkable_only) {
+    let planes = b.planes;
+    let var lo = 0.0 - 1000000.0;
+    let var hi = 1000000.0;
+    let var hi_p = nil;
+
+    for (let var i = 0; i < planes.len; ++i) {
+        let p = planes[i];
+        let c = p.d - p.nx * x - p.nz * z;
+        if (p.ny > 0.0001) {
+            let y = c / p.ny;
+            if (y < hi) {
+                hi = y;
+                hi_p = p;
+            }
+        } else if (p.ny < 0.0 - 0.0001) {
+            let y = c / p.ny;
+            if (y > lo) lo = y;
+        } else {
+            // A vertical plane the line falls outside of rules the brush out
+            if (c < 0.0 - PLANE_EPS) return nil;
+        }
+    }
+
+    if (hi < lo) return nil;
+
+    if (walkable_only && !plane_is_walkable(hi_p)) return nil;
+    return [hi, hi_p];
+}
+
+// Does the player box run into this brush? The boxes are compared first: the
+// plane test below pushes each plane out by the box's reach along its normal,
+// which rounds the solid outward around its edges, and near the top of a ramp
+// that reads as a hit for a player standing clear above the slope.
+fun brush_hits(b, cx, cy, cz, hx, hy, hz) {
+    if (cx + hx <= b.x0 || cx - hx >= b.x1) return false;
+    if (cy + hy <= b.y0 || cy - hy >= b.y1) return false;
+    if (cz + hz <= b.z0 || cz - hz >= b.z1) return false;
+
+    let planes = b.planes;
+    for (let var i = 0; i < planes.len; ++i) {
+        let p = planes[i];
+        let r = p.nx.abs() * hx + p.ny.abs() * hy + p.nz.abs() * hz;
+        if (p.nx * cx + p.ny * cy + p.nz * cz - p.d > r) return false;
+    }
+    return true;
+}
+
+// How high a brush reaches anywhere under the player's feet, not just under
+// the middle of them. Sampling only the middle would leave the foot of a ramp
+// unclimbable: the player's box reaches the slope a step before their centre
+// does, so the brush reads as a wall rather than as something to step onto.
+//
+// The samples have to cover the whole footprint that blocked() collides with,
+// corners and all. A brush the player's box overlaps but no sample lands inside
+// reads as having no top, and blocked() then takes it for a wall: sampling
+// short of the radius is what used to stop the climb one step up a flight, the
+// box catching the next tread while every sample fell just clear of it.
+fun brush_top_near(b, x, z, walkable_only) {
+    let r = PLAYER_RADIUS;
+
+    // Nothing to sample if the footprint misses the brush altogether
+    if (x + r < b.x0 || x - r > b.x1) return nil;
+    if (z + r < b.z0 || z - r > b.z1) return nil;
+
+    let var best = nil;
+
+    for (let var i = 0; i < 3; ++i) {
+        let var sx = x;
+        if (i == 1) sx = x - r;
+        else if (i == 2) sx = x + r;
+
+        for (let var j = 0; j < 3; ++j) {
+            let var sz = z;
+            if (j == 1) sz = z - r;
+            else if (j == 2) sz = z + r;
+
+            let support = brush_top(b, sx, sz, walkable_only);
+            if (support == nil) continue;
+            if (best == nil || support[0] > best[0]) best = support;
+        }
+    }
+    return best;
+}
+
+fun blocked(x, feet, z) {
+    let cy = feet + 0.1 + (PLAYER_HEIGHT - 0.1) * 0.5;
+    let hy = (PLAYER_HEIGHT - 0.1) * 0.5;
+
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+
+        // Anything low enough to step onto is not something to walk into. The
+        // height is taken under the player, so a ramp is steppable where it is
+        // still low and solid once it has risen.
+        let support = brush_top_near(b, x, z, true);
+        if (support != nil && support[0] <= feet + STEP_HEIGHT) continue;
+
+        if (brush_hits(b, x, cy, z, PLAYER_RADIUS, hy, PLAYER_RADIUS)) return true;
+    }
+    return false;
+}
+
+// Advance the player by one frame. `mf` and `ms` are how hard they are pushing
+// forward and sideways, each -1, 0 or 1.
+fun move_player(dt, mf, ms, want_up, want_down) {
+    let var speed = WALK_SPEED;
+    if (noclip) speed = FLY_SPEED;
+    let step = speed * dt;
+
+    if (noclip) {
+        // Off the leash: move along the way the camera is actually pointing,
+        // pitch included, and pass through everything
+        cam_x = cam_x + (sin_yaw * cos_pitch * mf + cos_yaw * ms) * step;
+        cam_z = cam_z + (cos_yaw * cos_pitch * mf - sin_yaw * ms) * step;
+        cam_feet = cam_feet + sin_pitch * mf * step;
+
+        if (want_up) cam_feet = cam_feet + FLY_SPEED * dt;
+        if (want_down) cam_feet = cam_feet - FLY_SPEED * dt;
+
+        cam_vel_y = 0.0;
+        cam_slide_speed = 0.0;
+        on_ground = false;
+        cam_y = cam_feet + EYE_HEIGHT;
+        return;
+    }
+
+    // Walking. Forward is where the camera looks, flattened onto the floor.
+    if (mf != 0.0 || ms != 0.0) {
+        let dx = (sin_yaw * mf + cos_yaw * ms) * step;
+        let dz = (cos_yaw * mf - sin_yaw * ms) * step;
+
+        // One axis at a time, so that a wall slides instead of stopping
+        if (!blocked(cam_x + dx, cam_feet, cam_z)) cam_x = cam_x + dx;
+        if (!blocked(cam_x, cam_feet, cam_z + dz)) cam_z = cam_z + dz;
+    }
+
+    // A jump is a shove upwards; from there gravity has it
+    if (want_up && on_ground) {
+        cam_vel_y = JUMP_SPEED;
+        on_ground = false;
+    }
+
+    cam_vel_y = cam_vel_y - GRAVITY * dt;
+    if (cam_vel_y < 0.0 - MAX_FALL_SPEED) cam_vel_y = 0.0 - MAX_FALL_SPEED;
+
+    let var next_feet = cam_feet + cam_vel_y * dt;
+
+    if (cam_vel_y > 0.0) {
+        // On the way up, stop dead at a ceiling rather than rising through it
+        if (blocked(cam_x, next_feet, cam_z)) {
+            next_feet = cam_feet;
+            cam_vel_y = 0.0;
+        }
+        cam_feet = next_feet;
+        on_ground = false;
+    } else {
+        // On the way down, land on whatever is under us. The same test steps
+        // the player up onto low ledges as they walk into them, since it looks
+        // for ground within a step of their feet.
+        let ground = support_at(cam_x, cam_feet, cam_z, false);
+        if (ground != nil && next_feet <= ground[0]) {
+            cam_feet = ground[0];
+            cam_vel_y = 0.0;
+
+            let plane = ground[1];
+            on_ground = plane_is_walkable(plane);
+
+            // Accelerate along a steep face instead of starting at full slide
+            // speed on contact. For an upward-facing plane, its horizontal
+            // normal points downhill.
+            if (!on_ground && plane != nil) {
+                let run = (plane.nx * plane.nx + plane.nz * plane.nz).sqrt();
+                if (run > 0.0001) {
+                    let plen = (run * run + plane.ny * plane.ny).sqrt();
+                    let nrun = run / plen;
+                    let nup = plane.ny / plen;
+                    cam_slide_speed = (cam_slide_speed + GRAVITY * nrun * dt)
+                        .min(STEEP_SLIDE_MAX_SPEED);
+
+                    let along = cam_slide_speed * nup * dt / run;
+                    let slide_x = plane.nx * along;
+                    let slide_z = plane.nz * along;
+                    let old_x = cam_x;
+                    let old_z = cam_z;
+                    if (!blocked(cam_x + slide_x, cam_feet, cam_z)) cam_x = cam_x + slide_x;
+                    if (!blocked(cam_x, cam_feet, cam_z + slide_z)) cam_z = cam_z + slide_z;
+
+                    // Follow only the distance travelled along this face. At
+                    // its edge, retain the downward part of the slide velocity
+                    // and let regular falling take over.
+                    let lower = support_at(cam_x, cam_feet, cam_z, false);
+                    if (lower != nil && lower[1] == plane && lower[0] < cam_feet) {
+                        cam_feet = lower[0];
+                    } else if (lower != nil && lower[0] >= cam_feet - STEP_HEIGHT) {
+                        cam_feet = lower[0];
+                        on_ground = plane_is_walkable(lower[1]);
+                        if (on_ground) cam_slide_speed = 0.0;
+                    } else if (cam_x != old_x || cam_z != old_z) {
+                        cam_vel_y = 0.0 - cam_slide_speed * nrun;
+                        cam_slide_speed = 0.0;
+                    } else {
+                        cam_slide_speed = 0.0;
+                    }
+                }
+            } else {
+                cam_slide_speed = 0.0;
+            }
+        } else {
+            cam_feet = next_feet;
+            cam_slide_speed = 0.0;
+            on_ground = false;
+        }
+    }
+
+    cam_y = cam_feet + EYE_HEIGHT;
+}
+
+// The highest surface under the player that is within a step of their feet
+fun support_at(x, feet, z, walkable_only) {
+    let reach = feet + STEP_HEIGHT;
+    let var best = nil;
+
+    for (let var i = 0; i < brushes.len; ++i) {
+        let support = brush_top_near(brushes[i], x, z, walkable_only);
+        if (support == nil) continue;
+        if (support[0] > reach) continue;
+        if (best == nil || support[0] > best[0]) best = support;
+    }
+    return best;
+}
+
+// --- Setup ---
+
+parse_map(MAP_PATH);
+
+// Fit each face while it is still whole. The BSP may later cut it, and a
+// fragment fitted to itself would squeeze a whole texture into that fragment.
+for (let var i = 0; i < faces.len; ++i) {
+    if (faces[i].fit) set_fit(faces[i]);
+}
+
+// Bake every original face before the BSP divides anything. There is no
+// lighting-driven polygon subdivision: tree fragments share the same lightmap.
+let var num_lit_faces = 0;
+let light_start_ms = $time_current_ms();
+let lit_faces = [];
+
+for (let var i = 0; i < faces.len; ++i) {
+    let f = faces[i];
+    bake_face_light(f);
+    if (f.flow) {
+        // Flowing surfaces still need geometric tessellation for their wave;
+        // this is independent of lighting and each piece shares the map.
+        let pieces = [];
+        subdivide_grid(f, LAVA_GRID, pieces);
+        for (let var k = 0; k < pieces.len; ++k) {
+            lit_faces.push(pieces[k]);
+            num_lit_faces = num_lit_faces + 1;
+        }
+    } else {
+        lit_faces.push(f);
+        num_lit_faces = num_lit_faces + 1;
+    }
+}
+let light_ms = $time_current_ms() - light_start_ms;
+
+let num_map_faces = faces.len;
+let var lightmap_bytes = 0;
+for (let var i = 0; i < faces.len; ++i) {
+    lightmap_bytes = lightmap_bytes + faces[i].lm_w * faces[i].lm_h;
+}
+bsp_root = bsp_build(lit_faces);
+
+// Hang each piece's texture on it. The tree may have cut a face on the way in;
+// every fragment also carries the original face's complete lightmap.
+fun prepare_node(node) {
+    if (node == nil) return;
+
+    for (let var i = 0; i < node.on.len; ++i) {
+        let g = node.on[i];
+        g.pix = g.tex.shaded();
+        g.umask = g.tex.umask;
+        g.vshift = g.tex.vshift;
+        g.vmask = g.tex.vmask;
+        g.uwrap = g.tex.uwrap;
+        g.vwrap = g.tex.vwrap;
+    }
+
+    prepare_node(node.front);
+    prepare_node(node.back);
+}
+prepare_node(bsp_root);
+compute_bounds(bsp_root);
+let main_mem_bytes = $gc_mem_size();
+
+let var tex_bytes = 0;
+for (let var i = 0; i < textures.len; ++i) {
+    let t = textures[i];
+    tex_bytes = tex_bytes + t.width * t.height * 4;
+}
+
+$println(textures.len.to_s() + " textures, " + brushes.len.to_s() + " brushes, "
+    + num_map_faces.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
+    + lights.len.to_s() + " lights");
+$println("bsp: " + bsp_nodes.to_s() + " nodes, " + bsp_splits.to_s() + " splits, "
+    + (num_lit_faces + bsp_splits).to_s() + " pieces drawn from");
+$println("lighting: " + light_ms.to_s() + " ms to bake 8-bit lightmaps without subdivision");
+$println("lightmap memory: " + (lightmap_bytes.to_f() / 1048576.0).format_decimals(2) + " MiB");
+$println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB, shaded per pixel");
+$println("main actor GC/message heaps: "
+    + (main_mem_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB");
+
+cam_x = start_x;
+cam_z = start_z;
+cam_feet = start_y - EYE_HEIGHT;
+cam_y = start_y;
+cam_yaw = start_yaw;
+
+// A set tour of the level: x, y, z, yaw, pitch. Used by the headless mode
+// below, which renders the tour without opening a window, times it, and can
+// write each viewpoint out as a screenshot.
+let TOUR = [
+    [-7.0, 1.6, -7.0,  0.78,  0.0],
+    [-3.0, 1.6, -7.0,  1.57,  0.0],
+    [ 3.0, 1.6, -7.0,  0.78,  0.0],
+    [ 7.0, 1.6, -7.0, -0.25, -0.05],
+    [ 7.0, 1.6, -3.0,  0.0,  0.0],
+    [ 7.0, 1.6,  3.0,  0.45,  0.0],
+    [ 7.0, 1.6,  7.0,  2.25, -0.05],
+    [ 3.0, 1.6,  7.0, -1.57,  0.0],
+    [-3.0, 1.6,  7.0, -2.3,  0.0],
+    [-7.0, 1.6,  7.0,  3.14, -0.12],
+    [-10.8, 2.4, 8.8,  3.14, -0.25],
+    [-7.0, 1.6,  3.0,  3.14,  0.0]
+];
+
+let actor_start_ms = $time_current_ms();
+render_actor_ids = start_render_actors(NUM_RENDER_ACTORS);
+$println("render workers: " + NUM_RENDER_ACTORS.to_s() + " actors forked in "
+    + ($time_current_ms() - actor_start_ms).to_s() + " ms, dynamic "
+    + BAND_HEIGHT.to_s() + "-row bands");
+
+let BENCH_FRAMES = $cmd_get_arg_or(5, "0").parse_int(10);
+let SHOT_DIR = $cmd_get_arg_or(6, "");
+
+if (BENCH_FRAMES > 0) {
+    let var total_ms = 0;
+    let var worst_ms = 0;
+    let var total_pixels = 0;
+    let var total_rect_skipped = 0;
+    let var total_nodes_skipped = 0;
+
+    for (let var i = 0; i < BENCH_FRAMES; ++i) {
+        let view = TOUR[i % TOUR.len];
+        cam_x = view[0];
+        cam_y = view[1];
+        cam_feet = view[1] - EYE_HEIGHT;
+        cam_vel_y = 0.0;
+        cam_z = view[2];
+        cam_yaw = view[3];
+        cam_pitch = view[4];
+        sin_yaw = cam_yaw.sin();
+        cos_yaw = cam_yaw.cos();
+        sin_pitch = cam_pitch.sin();
+        cos_pitch = cam_pitch.cos();
+        warp_phase = i.to_f() * 0.21;
+
+        let t0 = $time_current_ms();
+        render_frame_parallel(i);
+        let ms = $time_current_ms() - t0;
+        total_ms = total_ms + ms;
+        total_pixels = total_pixels + pixels_drawn;
+        total_rect_skipped = total_rect_skipped + rect_faces_skipped;
+        total_nodes_skipped = total_nodes_skipped + rect_nodes_skipped;
+        if (ms > worst_ms) worst_ms = ms;
+
+        if (SHOT_DIR.len > 0 && i < TOUR.len) {
+            let path = SHOT_DIR + "/view" + i.to_s() + ".tga";
+            if (!save_tga(path, frame_image)) $println("could not write " + path);
+        }
+    }
+
+    let avg = total_ms.to_f() / BENCH_FRAMES.to_f();
+    let avg_px = total_pixels.to_f() / BENCH_FRAMES.to_f();
+    $println(BENCH_FRAMES.to_s() + " frames: " + avg.format_decimals(2) + " ms/frame ("
+        + (1000.0 / avg.max(0.001)).format_decimals(1) + " fps), worst " + worst_ms.to_s() + " ms");
+    $println("pixels drawn per frame: " + avg_px.floor().to_s() + " of "
+        + (FRAME_WIDTH * FRAME_HEIGHT).to_s() + ", overdraw "
+        + (avg_px / (FRAME_WIDTH * FRAME_HEIGHT).to_f()).format_decimals(3) + "x");
+    $println("rectangle-occluded faces per frame: "
+        + (total_rect_skipped.to_f() / BENCH_FRAMES.to_f()).format_decimals(1));
+    $println("rectangle-occluded BSP nodes per frame: "
+        + (total_nodes_skipped.to_f() / BENCH_FRAMES.to_f()).format_decimals(1));
+    stop_render_actors();
+    $exit(0);
+}
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Tremor", 0);
+let fps_font = Font(2, 0xFFFFFFFF, 0xFF000000);
+let FPS_FIELD_WIDTH = 5;
+let var fps_text = "FPS: " + "--".lpad(FPS_FIELD_WIDTH, " ");
+
+fun draw_fps_counter() {
+    let x0 = FRAME_WIDTH - fps_text.len * fps_font.char_w - 8;
+    for (let var i = 0; i < fps_text.len; ++i) {
+        fps_font.draw_char(frame_image, x0 + i * fps_font.char_w, 8, fps_text.char_at(i));
+    }
+}
+
+// Hide the cursor and aim with raw mouse motion. SDL suspends this while the
+// window is not focused and resumes it when focus returns.
+$window_lock_mouse(window, true);
+
+// --- Input state ---
+
+let var key_fwd = false;
+let var key_back = false;
+let var key_left = false;
+let var key_right = false;
+let var key_turn_l = false;
+let var key_turn_r = false;
+let var key_look_u = false;
+let var key_look_d = false;
+let var key_up = false;
+let var key_down = false;
+
+// The right mouse button jumps, tracked apart from SPACE so that releasing
+// one does not cancel the other
+let var mouse_up = false;
+
+fun set_key(key, down) {
+    if (key == 'W') key_fwd = down;
+    else if (key == 'S') key_back = down;
+    else if (key == 'A') key_left = down;
+    else if (key == 'D') key_right = down;
+    else if (key == 'LEFT') key_turn_l = down;
+    else if (key == 'RIGHT') key_turn_r = down;
+    else if (key == 'UP') key_look_u = down;
+    else if (key == 'DOWN') key_look_d = down;
+    else if (key == 'SPACE') key_up = down;
+    else if (key == 'C') key_down = down;
+}
+
+// --- Main loop ---
+
+let start_ms = $time_current_ms();
+let var last_ms = start_ms;
+let var frame_count = 0;
+let var render_ms_total = 0;
+let var last_report_ms = start_ms;
+let var render_frame_id = 0;
+
+loop {
+    let now_ms = $time_current_ms();
+    let var dt = (now_ms - last_ms).to_f() * 0.001;
+    last_ms = now_ms;
+    if (dt > 0.1) dt = 0.1;
+
+    let time_s = (now_ms - start_ms).to_f() * 0.001;
+
+    // Events first, so that turning responds in the frame the key arrives
+    let var quit = false;
+    loop {
+        let var msg = nil;
+        // These were queued in arrival order while render workers were
+        // running, so consume the oldest first. Using pop() here reversed a
+        // KEY_DOWN/KEY_UP pair and could leave the key stuck down.
+        if (pending_ui_events.len > 0) msg = pending_ui_events.remove(0);
+        else msg = $actor_poll();
+        if (msg == nil) break;
+        if (!(msg instanceof UIEvent)) continue;
+
+        if (msg.kind == 'CLOSE_WINDOW') {
+            quit = true; break;
+        }
+
+        if (msg.kind == 'KEY_DOWN') {
+            if (msg.key == 'ESCAPE' || msg.key == 'Q') {
+                quit = true;
+                break;
+            }
+            if (msg.key == 'N') {
+                noclip = !noclip;
+                $println('noclip=' + noclip.to_s());
+            }
+
+            set_key(msg.key, true);
+        }
+        else if (msg.kind == 'KEY_UP') {
+            set_key(msg.key, false);
+        }
+        else if (msg.kind == 'MOUSE_MOVE') {
+            cam_yaw = cam_yaw + msg.dx * MOUSE_SENS;
+            cam_pitch = cam_pitch - msg.dy * MOUSE_SENS;
+        }
+        else if (msg.kind == 'MOUSE_DOWN') {
+            if (msg.button == 'RIGHT') mouse_up = true;
+        }
+        else if (msg.kind == 'MOUSE_UP') {
+            if (msg.button == 'RIGHT') mouse_up = false;
+        }
+    }
+    if (quit) break;
+
+    // Turning and looking
+    if (key_turn_l) cam_yaw = cam_yaw - TURN_SPEED * dt;
+    if (key_turn_r) cam_yaw = cam_yaw + TURN_SPEED * dt;
+    if (key_look_u) cam_pitch = cam_pitch + TURN_SPEED * dt;
+    if (key_look_d) cam_pitch = cam_pitch - TURN_SPEED * dt;
+    cam_pitch = cam_pitch.clip(0.0 - PITCH_LIMIT, PITCH_LIMIT);
+
+    sin_yaw = cam_yaw.sin();
+    cos_yaw = cam_yaw.cos();
+    sin_pitch = cam_pitch.sin();
+    cos_pitch = cam_pitch.cos();
+
+    let var mf = 0.0;
+    let var ms = 0.0;
+    if (key_fwd) mf = mf + 1.0;
+    if (key_back) mf = mf - 1.0;
+    if (key_right) ms = ms + 1.0;
+    if (key_left) ms = ms - 1.0;
+
+    move_player(dt, mf, ms, key_up || mouse_up, key_down);
+
+    warp_phase = time_s * 1.1;
+
+    let render_start = $time_current_ms();
+    render_frame_parallel(render_frame_id);
+    render_frame_id = render_frame_id + 1;
+    render_ms_total = render_ms_total + ($time_current_ms() - render_start);
+
+    frame_count = frame_count + 1;
+    let report_ms = $time_current_ms();
+    if (report_ms - last_report_ms >= 1000) {
+        let render_ms = render_ms_total.to_f() / frame_count.to_f();
+        let fps = 1000.0 / render_ms.max(0.001);
+        let fps_count = fps.format_decimals(1);
+        fps_text = "FPS: " + fps_count.lpad(FPS_FIELD_WIDTH, " ");
+        $println("render: " + render_ms.format_decimals(1) + "ms (" + fps_count + " fps)");
+        frame_count = 0;
+        render_ms_total = 0;
+        last_report_ms = report_ms;
+    }
+
+    draw_fps_counter();
+    $window_draw_frame(window, frame_buffer);
+}
+
+stop_render_actors();
+
+// Give the cursor back before exiting
+$window_lock_mouse(window, false);
