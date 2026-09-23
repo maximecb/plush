@@ -158,6 +158,14 @@ let LM_U_CELL_SHIFT = LM_FRAC_BITS;
 let LM_V_FRAC_SHIFT = 32;
 let LM_V_CELL_SHIFT = 32 + LM_FRAC_BITS;
 
+// Emissive brush faces are sampled on a world-space grid and compiled to the
+// same point-emitter representation used by explicit point lights. Spacing is
+// author-overridable, while the cap prevents an accidentally huge face from
+// producing an unreasonable number of shadow rays.
+let AREA_LIGHT_SPACING = 0.8;
+let AREA_LIGHT_MAX_SAMPLES = 256;
+let AREA_LIGHT_OFFSET = 0.005;
+
 // Retained only by the unused legacy subdivision helpers below. Lightmapped
 // setup never calls them.
 let LIGHT_GRID = 1.4;
@@ -808,6 +816,9 @@ class Plane {
         self.turn = false;
         self.flip = false;
         self.alpha = 1.0;
+        self.emit_brightness = 0.0;
+        self.emit_reach = 0.0;
+        self.emit_spacing = AREA_LIGHT_SPACING;
     }
 }
 
@@ -889,6 +900,15 @@ class Face {
         self.lm_h = 0;
         self.lm_u0 = 0.0;
         self.lm_v0 = 0.0;
+
+        // Filled once all point and area emitters have been collected. The
+        // conservative list excludes lights whose spheres cannot touch this
+        // face or which lie entirely behind its plane.
+        self.light_ids = [];
+
+        self.emit_brightness = 0.0;
+        self.emit_reach = 0.0;
+        self.emit_spacing = AREA_LIGHT_SPACING;
     }
 }
 
@@ -897,6 +917,11 @@ let tex_by_name = {};
 let faces = [];
 let brushes = [];
 let lights = [];
+let var num_point_lights = 0;
+let var num_area_light_faces = 0;
+let var num_area_light_samples = 0;
+let var num_face_light_refs = 0;
+let var max_face_lights = 0;
 
 let var start_x = 0.0;
 let var start_y = 1.6;
@@ -1033,8 +1058,12 @@ fun brush_to_faces(planes) {
         }
 
         if (poly.len < 9) continue;
-        out.push(Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale, p.turn,
-            p.flip, p.alpha));
+        let f = Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale, p.turn,
+            p.flip, p.alpha);
+        f.emit_brightness = p.emit_brightness;
+        f.emit_reach = p.emit_reach;
+        f.emit_spacing = p.emit_spacing;
+        out.push(f);
     }
     return out;
 }
@@ -1105,7 +1134,9 @@ fun field_num(tok, i, name) { return parse_num(field(tok, i, name)); }
 fun field_int(tok, i, name) { return field(tok, i, name).parse_int(10); }
 
 // The keys every brush command takes: which texture goes on which face, how it
-// is applied, and whether the light is baked or forced
+// is applied, and whether the light is baked or forced. `emit=<face>` marks one
+// named face as an area source; `brightness`, `reach`, and optional
+// `emit_spacing` control the compiled emitter grid.
 class BrushOpts {
     init(self) {
         self.tex = nil;
@@ -1121,6 +1152,10 @@ class BrushOpts {
         self.scale = TEXELS_PER_METER;
         self.turn = false;
         self.flip = false;
+        self.emit = "";
+        self.emit_brightness = 1.0;
+        self.emit_reach = 10.0;
+        self.emit_spacing = AREA_LIGHT_SPACING;
 
         // 1 is opaque. Below that the face is blended over whatever stands
         // behind it, and the whole face carries the one value.
@@ -1148,6 +1183,13 @@ fun parse_opts(tok, first) {
         if (key == "light") { o.light = val.parse_int(10).clip(0, NUM_LEVELS - 1); continue; }
         if (key == "scale") { o.scale = parse_num(val); continue; }
         if (key == "alpha") { o.alpha = parse_num(val).clip(0.0, 1.0); continue; }
+        if (key == "emit") { o.emit = val; continue; }
+        if (key == "brightness") { o.emit_brightness = parse_num(val).max(0.0); continue; }
+        if (key == "reach") { o.emit_reach = parse_num(val).max(0.0); continue; }
+        if (key == "emit_spacing") {
+            o.emit_spacing = parse_num(val).max(0.05);
+            continue;
+        }
 
         let tex = get_tex(val);
 
@@ -1165,10 +1207,24 @@ fun parse_opts(tok, first) {
         $println("unknown map key: " + key);
         $exit(1);
     }
+    if (o.emit != "" && o.emit != "top" && o.emit != "bottom"
+        && o.emit != "nx" && o.emit != "px" && o.emit != "ny" && o.emit != "py"
+        && o.emit != "nz" && o.emit != "pz") {
+        $println("emit must be top, bottom, nx, px, ny, py, nz or pz");
+        $exit(1);
+    }
     return o;
 }
 
-fun make_plane(nx, ny, nz, d, tex, o) {
+fun emits_on(o, role) {
+    let var e = o.emit;
+    if (e == "") return false;
+    if (e == "top") e = "py";
+    else if (e == "bottom") e = "ny";
+    return e == role;
+}
+
+fun make_plane(nx, ny, nz, d, tex, o, role) {
     let p = Plane(nx, ny, nz, d);
     p.tex = tex;
     p.light = o.light;
@@ -1178,6 +1234,12 @@ fun make_plane(nx, ny, nz, d, tex, o) {
     p.turn = o.turn;
     p.flip = o.flip;
     p.alpha = o.alpha;
+    if (emits_on(o, role)) {
+        p.light = NUM_LEVELS - 1;
+        p.emit_brightness = o.emit_brightness;
+        p.emit_reach = o.emit_reach;
+        p.emit_spacing = o.emit_spacing;
+    }
     return p;
 }
 
@@ -1243,12 +1305,12 @@ fun add_brush(planes) {
 // An axis-aligned box
 fun cmd_box(x0, y0, z0, x1, y1, z1, o) {
     let planes = [];
-    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
-    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
-    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
-    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
-    planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - z0, pick(o.nz, o.side, o), o));
-    planes.push(make_plane(0.0, 0.0, 1.0, z1, pick(o.pz, o.side, o), o));
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o, "nx"));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o, "px"));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o, "ny"));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o, "py"));
+    planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - z0, pick(o.nz, o.side, o), o, "nz"));
+    planes.push(make_plane(0.0, 0.0, 1.0, z1, pick(o.pz, o.side, o), o, "pz"));
     add_brush(planes);
 }
 
@@ -1256,11 +1318,11 @@ fun cmd_box(x0, y0, z0, x1, y1, z1, o) {
 // which side stays at full height.
 fun cmd_ramp(x0, y0, z0, x1, y1, z1, dir, o) {
     let planes = [];
-    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
-    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
-    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
-    planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - z0, pick(o.nz, o.side, o), o));
-    planes.push(make_plane(0.0, 0.0, 1.0, z1, pick(o.pz, o.side, o), o));
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o, "nx"));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o, "px"));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o, "ny"));
+    planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - z0, pick(o.nz, o.side, o), o, "nz"));
+    planes.push(make_plane(0.0, 0.0, 1.0, z1, pick(o.pz, o.side, o), o, "pz"));
 
     // The slope runs from the low edge up to the high edge, so its normal leans
     // away from the high side
@@ -1286,7 +1348,8 @@ fun cmd_ramp(x0, y0, z0, x1, y1, z1, dir, o) {
     if (dir == "nx") px = x0;
     if (dir == "nz") pz = z0;
 
-    planes.push(make_plane(ux, uy, uz, ux * px + uy * y1 + uz * pz, pick(o.py, o.top, o), o));
+    planes.push(make_plane(ux, uy, uz, ux * px + uy * y1 + uz * pz,
+        pick(o.py, o.top, o), o, "py"));
     add_brush(planes);
 }
 
@@ -1315,26 +1378,27 @@ fun cmd_slab(x0, y0, z0, x1, y1, z1, thick, o) {
     let d = ny * y0 + nz * z0;
 
     let planes = [];
-    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
-    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
-    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
-    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
-    planes.push(make_plane(0.0, ny, nz, d, pick(o.nz, nil, o), o));
-    planes.push(make_plane(0.0, 0.0 - ny, 0.0 - nz, thick - d, pick(o.pz, nil, o), o));
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o, "nx"));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o, "px"));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o, "ny"));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o, "py"));
+    planes.push(make_plane(0.0, ny, nz, d, pick(o.nz, nil, o), o, "nz"));
+    planes.push(make_plane(0.0, 0.0 - ny, 0.0 - nz, thick - d, pick(o.pz, nil, o), o, "pz"));
     add_brush(planes);
 }
 
 // A vertical column with `sides` flat faces, for pillars and pedestals
 fun cmd_prism(cx, cz, radius, y0, y1, sides, rot, o) {
     let planes = [];
-    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
-    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o, "ny"));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o, "py"));
 
     for (let var i = 0; i < sides; ++i) {
         let a = rot + 2.0 * PI * i.to_f() / sides.to_f();
         let nx = a.cos();
         let nz = a.sin();
-        planes.push(make_plane(nx, 0.0, nz, nx * cx + nz * cz + radius, pick(nil, o.side, o), o));
+        planes.push(make_plane(nx, 0.0, nz, nx * cx + nz * cz + radius,
+            pick(nil, o.side, o), o, "side"));
     }
     add_brush(planes);
 }
@@ -1365,17 +1429,19 @@ fun cmd_arch(axis, a0, a1, c0, c1, ybase, ytop, segs, o) {
 
         let planes = [];
         if (axis == "x") {
-            planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - a0, pick(o.nx, o.side, o), o));
-            planes.push(make_plane(1.0, 0.0, 0.0, a1, pick(o.px, o.side, o), o));
-            planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - ca0, nil, o));
-            planes.push(make_plane(0.0, 0.0, 1.0, ca1, nil, o));
+            planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - a0,
+                pick(o.nx, o.side, o), o, "nx"));
+            planes.push(make_plane(1.0, 0.0, 0.0, a1, pick(o.px, o.side, o), o, "px"));
+            planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - ca0, nil, o, ""));
+            planes.push(make_plane(0.0, 0.0, 1.0, ca1, nil, o, ""));
         } else {
-            planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - a0, pick(o.nz, o.side, o), o));
-            planes.push(make_plane(0.0, 0.0, 1.0, a1, pick(o.pz, o.side, o), o));
-            planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - ca0, nil, o));
-            planes.push(make_plane(1.0, 0.0, 0.0, ca1, nil, o));
+            planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - a0,
+                pick(o.nz, o.side, o), o, "nz"));
+            planes.push(make_plane(0.0, 0.0, 1.0, a1, pick(o.pz, o.side, o), o, "pz"));
+            planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - ca0, nil, o, ""));
+            planes.push(make_plane(1.0, 0.0, 0.0, ca1, nil, o, ""));
         }
-        planes.push(make_plane(0.0, 1.0, 0.0, ytop, pick(o.py, o.top, o), o));
+        planes.push(make_plane(0.0, 1.0, 0.0, ytop, pick(o.py, o.top, o), o, "py"));
 
         // The underside: the plane through both curve points, facing down into
         // the opening
@@ -1391,7 +1457,7 @@ fun cmd_arch(axis, a0, a1, c0, c1, ybase, ytop, segs, o) {
         let var d = 0.0;
         if (axis == "x") { nz = un; d = nz * ca0 + uy * ya0; }
         else { nx = un; d = nx * ca0 + uy * ya0; }
-        planes.push(make_plane(nx, uy, nz, d, pick(nil, o.bottom, o), o));
+        planes.push(make_plane(nx, uy, nz, d, pick(nil, o.bottom, o), o, "ny"));
 
         add_brush(planes);
     }
@@ -1422,6 +1488,7 @@ fun parse_map(path) {
         if (cmd == "light") {
             lights.push([field_num(tok, 1, "x"), field_num(tok, 2, "y"), field_num(tok, 3, "z"),
                 field_num(tok, 4, "radius"), field_num(tok, 5, "brightness")]);
+            num_point_lights = num_point_lights + 1;
             continue;
         }
 
@@ -1466,6 +1533,138 @@ fun parse_map(path) {
 }
 
 // --- Lighting ---
+
+// Compile every emissive face to a grid of point emitters. The grid lives in
+// world space, so texture scale and `fit` do not change the lighting. Each
+// sample receives an equal share of the face's requested brightness, keeping
+// total output stable when `emit_spacing` changes.
+fun add_area_light(f) {
+    if (f.emit_brightness <= 0.0 || f.emit_reach <= 0.0) return;
+
+    let n = f.v.len.idiv(3);
+    let x0 = f.v[0]; let y0 = f.v[1]; let z0 = f.v[2];
+
+    // Use the longest polygon edge as one grid axis. The other is its in-plane
+    // perpendicular, which works for horizontal, vertical and sloped faces.
+    let var ux = 1.0; let var uy = 0.0; let var uz = 0.0; let var best = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+        let dx = f.v[j * 3] - f.v[i * 3];
+        let dy = f.v[j * 3 + 1] - f.v[i * 3 + 1];
+        let dz = f.v[j * 3 + 2] - f.v[i * 3 + 2];
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > best) { best = d2; ux = dx; uy = dy; uz = dz; }
+    }
+    if (best < 0.000001) return;
+    let inv_u = 1.0 / best.sqrt();
+    ux = ux * inv_u; uy = uy * inv_u; uz = uz * inv_u;
+    let vx = f.ny * uz - f.nz * uy;
+    let vy = f.nz * ux - f.nx * uz;
+    let vz = f.nx * uy - f.ny * ux;
+
+    let pu = Array.with_size(n, 0.0);
+    let pv = Array.with_size(n, 0.0);
+    let var u0 = 0.0; let var u1 = 0.0;
+    let var v0 = 0.0; let var v1 = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let dx = f.v[i * 3] - x0;
+        let dy = f.v[i * 3 + 1] - y0;
+        let dz = f.v[i * 3 + 2] - z0;
+        pu[i] = dx * ux + dy * uy + dz * uz;
+        pv[i] = dx * vx + dy * vy + dz * vz;
+        if (i == 0) { u0 = pu[i]; u1 = pu[i]; v0 = pv[i]; v1 = pv[i]; }
+        if (pu[i] < u0) u0 = pu[i];
+        if (pu[i] > u1) u1 = pu[i];
+        if (pv[i] < v0) v0 = pv[i];
+        if (pv[i] > v1) v1 = pv[i];
+    }
+
+    let span_u = u1 - u0; let span_v = v1 - v0;
+    let var nu = (span_u / f.emit_spacing).floor();
+    let var nv = (span_v / f.emit_spacing).floor();
+    if (nu < 1) nu = 1;
+    else if (nu.to_f() * f.emit_spacing < span_u - 0.000001) nu = nu + 1;
+    if (nv < 1) nv = 1;
+    else if (nv.to_f() * f.emit_spacing < span_v - 0.000001) nv = nv + 1;
+    while (nu * nv > AREA_LIGHT_MAX_SAMPLES) {
+        if (nu >= nv && nu > 1) nu = (nu + 1).idiv(2);
+        else if (nv > 1) nv = (nv + 1).idiv(2);
+        else break;
+    }
+
+    let cell_u = span_u / nu.to_f();
+    let cell_v = span_v / nv.to_f();
+    let points = [];
+    for (let var gy = 0; gy < nv; ++gy) {
+        let sv = v0 + (gy.to_f() + 0.5) * cell_v;
+        for (let var gx = 0; gx < nu; ++gx) {
+            let su = u0 + (gx.to_f() + 0.5) * cell_u;
+
+            // Reject grid cells whose centres lie outside a non-rectangular
+            // convex face. A fallback at the centroid handles very thin faces.
+            let var has_pos = false; let var has_neg = false;
+            for (let var i = 0; i < n; ++i) {
+                let var j = i + 1;
+                if (j == n) j = 0;
+                let side = (pu[j] - pu[i]) * (sv - pv[i])
+                         - (pv[j] - pv[i]) * (su - pu[i]);
+                if (side > 0.000001) has_pos = true;
+                else if (side < 0.0 - 0.000001) has_neg = true;
+            }
+            if (has_pos && has_neg) continue;
+
+            points.push(x0 + su * ux + sv * vx + f.nx * AREA_LIGHT_OFFSET);
+            points.push(y0 + su * uy + sv * vy + f.ny * AREA_LIGHT_OFFSET);
+            points.push(z0 + su * uz + sv * vz + f.nz * AREA_LIGHT_OFFSET);
+        }
+    }
+
+    if (points.len == 0) {
+        points.push(f.mid_x + f.nx * AREA_LIGHT_OFFSET);
+        points.push(f.mid_y + f.ny * AREA_LIGHT_OFFSET);
+        points.push(f.mid_z + f.nz * AREA_LIGHT_OFFSET);
+    }
+
+    let count = points.len.idiv(3);
+    let share = f.emit_brightness / count.to_f();
+    for (let var i = 0; i < count; ++i) {
+        lights.push([points[i * 3], points[i * 3 + 1], points[i * 3 + 2], f.emit_reach, share]);
+    }
+    num_area_light_faces = num_area_light_faces + 1;
+    num_area_light_samples = num_area_light_samples + count;
+}
+
+// Make a conservative per-face list before baking. The plane test rejects
+// lights behind the face, while point-to-AABB distance rejects light spheres
+// that cannot reach any part of it. Exact distance and shadows remain per
+// lumel, so this optimization cannot change the result.
+fun assign_face_lights(f) {
+    let n = f.v.len.idiv(3);
+    let var x0 = f.v[0]; let var x1 = x0;
+    let var y0 = f.v[1]; let var y1 = y0;
+    let var z0 = f.v[2]; let var z1 = z0;
+    for (let var i = 1; i < n; ++i) {
+        let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+        if (z < z0) z0 = z; if (z > z1) z1 = z;
+    }
+
+    let ids = [];
+    for (let var i = 0; i < lights.len; ++i) {
+        let L = lights[i];
+        if (f.nx * L[0] + f.ny * L[1] + f.nz * L[2] - f.d <= 0.0) continue;
+        let var dx = 0.0; let var dy = 0.0; let var dz = 0.0;
+        if (L[0] < x0) dx = x0 - L[0]; else if (L[0] > x1) dx = L[0] - x1;
+        if (L[1] < y0) dy = y0 - L[1]; else if (L[1] > y1) dy = L[1] - y1;
+        if (L[2] < z0) dz = z0 - L[2]; else if (L[2] > z1) dz = L[2] - z1;
+        if (dx * dx + dy * dy + dz * dz < L[3] * L[3]) ids.push(i);
+    }
+    f.light_ids = ids;
+    num_face_light_refs = num_face_light_refs + ids.len;
+    if (ids.len > max_face_lights) max_face_lights = ids.len;
+}
 
 // Does any brush stand between these two points? The segment is clipped
 // against the brush's half-spaces the way `plane_quad` clips a face, and the
@@ -1546,7 +1745,7 @@ fun in_solid(x, y, z) {
 // being baked with, and says which way is inward along it. Answering the same
 // for every piece of a face is what keeps the reply the same at a point two of
 // them share.
-fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
+fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz, light_ids) {
     // Lift the sample off the surface, so that a fixture sitting flush against
     // a wall still counts as being in front of it
     let cx = px + nx * 0.0125;
@@ -1554,8 +1753,8 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     let cz = pz + nz * 0.0125;
 
     let var lum = AMBIENT;
-    for (let var i = 0; i < lights.len; ++i) {
-        let L = lights[i];
+    for (let var i = 0; i < light_ids.len; ++i) {
+        let L = lights[light_ids[i]];
         let dx = L[0] - cx;
         let dy = L[1] - cy;
         let dz = L[2] - cz;
@@ -1759,7 +1958,7 @@ fun bake_face_light(f) {
             let var l = flat;
             if (l < 0.0) {
                 l = light_at(px, py, pz, f.nx, f.ny, f.nz,
-                    f.mid_x, f.mid_y, f.mid_z);
+                    f.mid_x, f.mid_y, f.mid_z, f.light_ids);
             }
             l = l * f.alpha;
             f.lm[y * f.lm_w + x] = l.floor().clip(0, 255);
@@ -1794,13 +1993,14 @@ fun light_curves(f) {
 
     for (let var i = 0; i < n; ++i) {
         vl[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
-            f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+            f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z, f.light_ids);
         mean = mean + vl[i];
     }
     mean = mean * inv_n;
 
     // The middle, where a lamp pool that the corners all miss shows up
-    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - mean).abs()
+    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z,
+        f.light_ids) - mean).abs()
         > LIGHT_TOL) {
         return true;
     }
@@ -1815,7 +2015,8 @@ fun light_curves(f) {
         let my = (f.v[i * 3 + 1] + f.v[j * 3 + 1]) * 0.5;
         let mz = (f.v[i * 3 + 2] + f.v[j * 3 + 2]) * 0.5;
         let interp = (vl[i] + vl[j]) * 0.5;
-        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - interp).abs()
+        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z,
+            f.light_ids) - interp).abs()
             > LIGHT_TOL) {
             return true;
         }
@@ -3395,6 +3596,11 @@ for (let var i = 0; i < faces.len; ++i) {
     if (faces[i].fit) set_fit(faces[i]);
 }
 
+// Area emitters are compiled only after every brush has produced its final
+// source faces. Then each receiver keeps just the emitters that can reach it.
+for (let var i = 0; i < faces.len; ++i) add_area_light(faces[i]);
+for (let var i = 0; i < faces.len; ++i) assign_face_lights(faces[i]);
+
 // Bake every original face before the BSP divides anything. There is no
 // lighting-driven polygon subdivision: tree fragments share the same lightmap.
 let var num_lit_faces = 0;
@@ -3456,8 +3662,12 @@ for (let var i = 0; i < textures.len; ++i) {
 }
 
 $println(textures.len.to_s() + " textures, " + brushes.len.to_s() + " brushes, "
-    + num_map_faces.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
-    + lights.len.to_s() + " lights");
+    + num_map_faces.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces");
+$println("lights: " + num_point_lights.to_s() + " point, " + num_area_light_faces.to_s()
+    + " area faces, " + num_area_light_samples.to_s() + " area samples");
+$println("light reach lists: "
+    + (num_face_light_refs.to_f() / num_map_faces.to_f()).format_decimals(1)
+    + " samples/face average, " + max_face_lights.to_s() + " maximum");
 $println("bsp: " + bsp_nodes.to_s() + " nodes, " + bsp_splits.to_s() + " splits, "
     + (num_lit_faces + bsp_splits).to_s() + " pieces drawn from");
 $println("lighting: " + light_ms.to_s() + " ms to bake 8-bit lightmaps without subdivision");
