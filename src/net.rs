@@ -8,6 +8,9 @@
 // for data. Programs handle multiple connections by spawning one actor per
 // socket. This subsystem deliberately spawns no threads of its own.
 //
+// Connects, reads and writes have default timeouts, so that an actor
+// blocked on a dead or unresponsive peer always wakes up.
+//
 // Errors are reported through return values, since a host error would kill
 // the program and a lost connection is routine. A socket id that is unknown
 // or already closed is treated as a connection that is over rather than as a
@@ -17,10 +20,10 @@
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crate::vm::Actor;
 use crate::value::*;
 use crate::str::Str;
@@ -30,6 +33,18 @@ use crate::*;
 /// How often net_accept wakes up to check whether its listening socket has
 /// been closed. This bounds how quickly a blocked accept notices a net_close
 const ACCEPT_POLL_MS: u64 = 20;
+
+/// Time budget for net_connect, across all addresses a host resolves to
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a write may wait on a peer that is not reading before we give
+/// up on the connection. Longer than the read timeout, since a timed out
+/// write ends the connection and should ride out brief network outages
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default read timeout, so that an actor blocked on a dead peer still wakes
+/// up. A timed out read returns 0 and leaves the connection open
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// An open socket, either listening or connected.
 ///
@@ -127,6 +142,25 @@ fn listener_present(socket_id: u64) -> bool
     matches!(state.sockets.get(&socket_id), Some(Socket::Listener { .. }))
 }
 
+/// Configure a freshly connected or accepted stream.
+/// Nagle's algorithm is disabled because net_write already sends a whole
+/// message at once, and delaying small messages only adds latency
+fn setup_stream(stream: &TcpStream) -> bool
+{
+    stream.set_nodelay(true).is_ok() &&
+    stream.set_read_timeout(Some(READ_TIMEOUT)).is_ok() &&
+    stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_ok()
+}
+
+/// Whether a run of len bytes starting at start fits in a byte array
+fn run_in_bounds(start: usize, len: usize, num_bytes: usize) -> bool
+{
+    match start.checked_add(len) {
+        Some(end) => end <= num_bytes,
+        None => false,
+    }
+}
+
 /// Allocate a Plush string for an address looked up in the socket table
 fn addr_str(actor: &mut Actor, addr: Option<String>) -> HostResult
 {
@@ -174,15 +208,42 @@ pub fn net_listen(actor: &mut Actor, addr: Value) -> HostResult
 
 /// Connect to a remote address, e.g. "example.com:80".
 /// Returns a socket id, or nil if the connection could not be established
+/// within CONNECT_TIMEOUT
 /// $net_connect(addr)
 pub fn net_connect(actor: &mut Actor, addr: Value) -> HostResult
 {
     let addr = unwrap_str!(addr);
 
-    let stream = match TcpStream::connect(addr) {
-        Ok(stream) => stream,
+    // Name resolution has no timeout in std, it is bounded by the system
+    // resolver's own settings
+    let addrs = match addr.to_socket_addrs() {
+        Ok(addrs) => addrs,
         Err(_) => return Value::NIL.into(),
     };
+
+    // Try each resolved address in turn, sharing one deadline
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let mut stream = None;
+    for sock_addr in addrs {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        if let Ok(s) = TcpStream::connect_timeout(&sock_addr, remaining) {
+            stream = Some(s);
+            break;
+        }
+    }
+
+    let stream = match stream {
+        Some(stream) => stream,
+        None => return Value::NIL.into(),
+    };
+
+    if !setup_stream(&stream) {
+        return Value::NIL.into();
+    }
 
     let peer_addr = match stream.peer_addr() {
         Ok(addr) => addr.to_string(),
@@ -237,7 +298,7 @@ pub fn net_accept(actor: &mut Actor, socket_id: Value) -> HostResult
 
     // The accepted stream inherits the listener's non-blocking flag on some
     // platforms, so force it back to blocking
-    if stream.set_nonblocking(false).is_err() {
+    if stream.set_nonblocking(false).is_err() || !setup_stream(&stream) {
         return Value::NIL.into();
     }
 
@@ -293,55 +354,75 @@ pub fn net_local_addr(actor: &mut Actor, socket_id: Value) -> HostResult
     addr_str(actor, addr)
 }
 
-/// Read from a socket into a byte array, blocking until data is available or
-/// the read timeout elapses. Returns the number of bytes read, 0 once the
-/// connection is over, or nil if the read timed out
-/// $net_read(socket_id, byte_array)
-pub fn net_read(actor: &mut Actor, socket_id: Value, buf: Value) -> HostResult
+/// Read up to max_len bytes from a socket into a byte array at index start,
+/// blocking until data is available or the read timeout elapses. Returns the
+/// number of bytes read, 0 if the read timed out, or nil once the connection
+/// is over
+/// $net_read(socket_id, byte_array, start, max_len)
+pub fn net_read(actor: &mut Actor, socket_id: Value, buf: Value, start: Value, max_len: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
     let buf = unwrap_ba!(buf);
+    let start = unwrap_usize!(start);
+    let max_len = unwrap_usize!(max_len);
+
+    // A zero-length read returns immediately, which is never useful
+    if max_len == 0 {
+        error!("net_read called with a max_len of 0");
+    }
+
+    if !run_in_bounds(start, max_len, buf.num_bytes()) {
+        error!(
+            "net_read asked for {} bytes at index {} of a byte array of {} bytes",
+            max_len,
+            start,
+            buf.num_bytes()
+        );
+    }
 
     let stream = match get_stream(socket_id) {
         Some(stream) => stream,
         // Another actor may have closed this socket, which is not an error
-        None => return actor.int64(0).into(),
+        None => return Value::NIL.into(),
     };
 
     // Read straight into the heap. Only this actor's own thread collects, and
     // it is blocked here for the duration, so nothing can move these bytes
-    let num_bytes = buf.num_bytes();
-    let slice: &mut [u8] = unsafe { buf.get_slice_mut(0, num_bytes) };
+    let slice: &mut [u8] = unsafe { buf.get_slice_mut(start, max_len) };
 
     // Read/Write are implemented for &TcpStream, so a shared handle suffices
     match (&*stream).read(slice) {
-        // Ok(0) is the peer closing the connection, reported as 0 bytes
+        // Ok(0) is the peer closing the connection, since max_len > 0
+        Ok(0) => Value::NIL.into(),
         Ok(num_read) => actor.int64(num_read as i64).into(),
 
-        // A read timeout is WouldBlock on Unix and TimedOut on Windows
+        // A read timeout is WouldBlock on Unix and TimedOut on Windows.
+        // No data arrived, but the connection may still be alive
         Err(ref e) if e.kind() == ErrorKind::WouldBlock
-                   || e.kind() == ErrorKind::TimedOut => Value::NIL.into(),
+                   || e.kind() == ErrorKind::TimedOut => actor.int64(0).into(),
 
         // A reset connection is over, same as an orderly close
-        Err(_) => actor.int64(0).into(),
+        Err(_) => Value::NIL.into(),
     }
 }
 
-/// Write the first num_bytes of a byte array to a socket, blocking until all
-/// of it has been written. Returns num_bytes, or nil if the connection is
-/// over. There are no partial writes, so callers never have to retry a
-/// remainder the way POSIX write() asks them to
-/// $net_write(socket_id, byte_array, num_bytes)
-pub fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, num_bytes: Value) -> HostResult
+/// Write len bytes of a byte array, starting at index start, to a socket,
+/// blocking until all of it has been written. Returns len, or nil if the
+/// connection is over. There are no partial writes, so callers never have to
+/// retry a remainder the way POSIX write() asks them to
+/// $net_write(socket_id, byte_array, start, len)
+pub fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, start: Value, len: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
     let buf = unwrap_ba!(buf);
-    let num_bytes = unwrap_usize!(num_bytes);
+    let start = unwrap_usize!(start);
+    let len = unwrap_usize!(len);
 
-    if num_bytes > buf.num_bytes() {
+    if !run_in_bounds(start, len, buf.num_bytes()) {
         error!(
-            "net_write asked to write {} bytes from a byte array of {} bytes",
-            num_bytes,
+            "net_write asked for {} bytes at index {} of a byte array of {} bytes",
+            len,
+            start,
             buf.num_bytes()
         );
     }
@@ -351,12 +432,22 @@ pub fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, num_bytes: Val
         None => return Value::NIL.into(),
     };
 
-    let slice: &[u8] = unsafe { buf.get_slice(0, num_bytes) };
+    let slice: &[u8] = unsafe { buf.get_slice(start, len) };
 
     // write_all reports a socket that stopped accepting bytes as WriteZero,
     // so a short write can only reach us as an error
     match (&*stream).write_all(slice) {
-        Ok(()) => actor.int64(num_bytes as i64).into(),
+        Ok(()) => actor.int64(len as i64).into(),
+
+        // A timed out write may have sent part of the message, so the stream
+        // can no longer be trusted. Shutting it down also ends reads from
+        // another actor. A timeout is WouldBlock on Unix, TimedOut on Windows
+        Err(ref e) if e.kind() == ErrorKind::WouldBlock
+                   || e.kind() == ErrorKind::TimedOut => {
+            let _ = stream.shutdown(Shutdown::Both);
+            Value::NIL.into()
+        }
+
         Err(_) => Value::NIL.into(),
     }
 }
@@ -398,9 +489,9 @@ pub fn net_close(_actor: &mut Actor, socket_id: Value) -> HostResult
     Value::NIL.into()
 }
 
-/// Set the read timeout on a connected socket, in milliseconds. A timeout of
-/// 0 clears it, making subsequent reads block indefinitely. Writes are not
-/// affected: they always run to completion
+/// Set the read timeout on a connected socket, in milliseconds, replacing
+/// the READ_TIMEOUT default. A timeout of 0 clears it, making subsequent
+/// reads block indefinitely. The write timeout is not affected
 /// $net_set_timeout(socket_id, timeout_ms)
 pub fn net_set_timeout(_actor: &mut Actor, socket_id: Value, timeout_ms: Value) -> HostResult
 {

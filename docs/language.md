@@ -496,11 +496,11 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$net_accept(socket_id)`: Blocks until a connection arrives on a listening socket. Returns a socket id for the new connection, or `nil` if the listening socket was closed.
 -   `$net_peer_addr(socket_id)`: Returns the address of the peer on a connected socket as a string, or `nil` if the socket is not a live connection.
 -   `$net_local_addr(socket_id)`: Returns the address a socket is bound to as a string, or `nil` if the socket id is unknown. Bind a listener to port `0` and read this back to find the port the OS assigned.
--   `$net_read(socket_id, byte_array)`: Reads into a `ByteArray`, blocking until data is available. Returns the number of bytes read, `0` once the connection is over, or `nil` if the read timed out.
--   `$net_write(socket_id, byte_array, num_bytes)`: Writes the first `num_bytes` of a `ByteArray`, blocking until all of it has been written. Returns `num_bytes`, or `nil` if the connection is over. There are no partial writes, so there is never a remainder to send in a second call.
+-   `$net_read(socket_id, byte_array, start, max_len)`: Reads up to `max_len` bytes into a `ByteArray` at index `start`, blocking until data is available. Returns the number of bytes read, `0` if the read timed out (10 seconds by default), or `nil` once the connection is over.
+-   `$net_write(socket_id, byte_array, start, len)`: Writes `len` bytes of a `ByteArray`, starting at index `start`, blocking until all of it has been written. Returns `len`, or `nil` if the connection is over. There are no partial writes. A write that makes no progress for 30 seconds fails and shuts the connection down.
 -   `$net_shutdown_write(socket_id)`: Shuts down the writing half of a connection, giving the peer an EOF while this end can still read. Use it to end a request that the peer reads to EOF, then keep reading for the response. Writing afterwards returns `nil`.
 -   `$net_close(socket_id)`: Closes a socket. Closing a listening socket cancels an actor blocked in `$net_accept()`, and closing a connection wakes one blocked in `$net_read()`. Closing an unknown or already closed socket does nothing.
--   `$net_set_timeout(socket_id, timeout_ms)`: Sets the read timeout on a connected socket, in milliseconds. A timeout of `0` clears it. Writes are unaffected and always run to completion.
+-   `$net_set_timeout(socket_id, timeout_ms)`: Sets the read timeout on a connected socket, in milliseconds, replacing the 10 second default. A timeout of `0` makes reads block indefinitely.
 -   `$exit(code)`: End program execution and produce the given exit code.
 
 ## Concurrency with Actors
@@ -531,13 +531,13 @@ fun handle_conn(sock) {
     let buf = ByteArray.with_size(4096);
 
     loop {
-        let num_read = $net_read(sock, buf);
+        let num_read = $net_read(sock, buf, 0, buf.len);
 
-        // 0 means the connection is over, so stop reading from it
-        if (num_read == 0)
+        // nil means the connection is over, 0 means the read timed out
+        if (num_read == nil)
             break;
 
-        $net_write(sock, buf, num_read);
+        $net_write(sock, buf, 0, num_read);
     }
 
     $net_close(sock);
@@ -560,18 +560,20 @@ Failures are reported as return values rather than as errors, because losing a c
 an error would end the program. A socket id that is unknown or already closed behaves like a connection
 that has ended, so closing a socket from one actor while another is blocked on it is safe.
 
-Note that `$net_read()` returns `0` for the end of a connection and `nil` for a timeout, which is the
-opposite of the POSIX convention where a read of zero bytes means "no data yet". Only `$net_read()` can
-return `nil` to mean "try again"; everywhere else in this API `nil` means the operation failed or the
-connection is finished.
+Throughout this API, `nil` means the operation failed or the connection is over. A `$net_read()` that
+times out returns `0` and leaves the connection open.
+
+Connects and reads time out after 10 seconds by default, and writes after 30 seconds, so an actor never
+blocks forever on a dead peer. Since a quiet connection may still be healthy, detecting a dead peer is up to the program,
+e.g. by sending heartbeat messages.
 
 A client that ends its request by closing the connection also gives up the response, since `$net_close()`
 shuts down both directions at once. When the peer reads to EOF to know the request is complete, use
 `$net_shutdown_write()` instead: it sends the EOF and leaves this end able to read.
 
 An actor cannot wait on both its mailbox and a socket at once, since both `$actor_recv()` and
-`$net_read()` block. An actor that has to do both should arm a read timeout with `$net_set_timeout()`
-and poll its mailbox with `$actor_poll()` each time a read returns `nil`.
+`$net_read()` block. Such an actor can poll its mailbox with `$actor_poll()` whenever a read returns `0`,
+shortening the timeout with `$net_set_timeout()` if needed.
 
 ## Debugging
 

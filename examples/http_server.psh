@@ -16,22 +16,21 @@ let MAX_HEAD = 16 * 1024;
 // Read until the blank line that ends the request head. Returns the head as
 // a string, or nil if the client went away or sent something unreasonable
 fun read_head(sock) {
-    let chunk = ByteArray.with_size(4096);
     let head = ByteArray.with_size(MAX_HEAD);
     let var len = 0;
 
     loop {
-        let num_read = $net_read(sock, chunk);
+        // The head is full and still has no end in sight
+        if (len == MAX_HEAD)
+            return nil;
 
-        // nil is the read timing out, 0 is the connection ending. Either
-        // way the rest of the head is never arriving
+        let num_read = $net_read(sock, head, len, MAX_HEAD - len);
+
+        // nil is the connection ending, 0 is 10 seconds passing with no
+        // data. Either way we give up on this client
         if (num_read == nil || num_read == 0)
             return nil;
 
-        if (len + num_read > MAX_HEAD)
-            return nil;
-
-        head.memcpy(len, chunk, 0, num_read);
         len = len + num_read;
 
         // Look for the CRLF CRLF that ends the head. Scanning from the
@@ -239,11 +238,6 @@ fun route(req) {
 
 fun handle_conn(sock) {
     let peer = $net_peer_addr(sock);
-
-    // A client that connects and then says nothing must not tie up this
-    // actor forever
-    $net_set_timeout(sock, 10000);
-
     let head = read_head(sock);
     let var resp = text("400 Bad Request", "Could not read request\n");
 
@@ -258,7 +252,7 @@ fun handle_conn(sock) {
         }
     }
 
-    $net_write(sock, resp, resp.len);
+    $net_write(sock, resp, 0, resp.len);
 
     // We wrote the whole response, so closing both directions is right here
     $net_close(sock);

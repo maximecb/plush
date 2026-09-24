@@ -36,10 +36,10 @@ fun main() {
         assert(sock != nil);
 
         let hello = str_bytes("hello");
-        assert($net_write(sock, hello, hello.len) == 5);
+        assert($net_write(sock, hello, 0, hello.len) == 5);
 
         let buf = ByteArray.with_size(64);
-        let num_read = $net_read(sock, buf);
+        let num_read = $net_read(sock, buf, 0, buf.len);
         assert(num_read == 5);
         assert(bytes_eq(buf, num_read, "hello"));
 
@@ -68,46 +68,46 @@ fun main() {
     let buf = ByteArray.with_size(64);
 
     // A listening socket and a connection are not interchangeable
-    assert($net_read(server, buf) == 0);
-    assert($net_write(server, buf, 1) == nil);
+    assert($net_read(server, buf, 0, buf.len) == nil);
+    assert($net_write(server, buf, 0, 1) == nil);
     assert($net_peer_addr(server) == nil);
     assert($net_accept(conn) == nil);
 
     // Echo back exactly the bytes that arrived, not the whole buffer
-    let num_read = $net_read(conn, buf);
+    let num_read = $net_read(conn, buf, 0, buf.len);
     assert(num_read == 5);
     assert(bytes_eq(buf, num_read, "hello"));
-    assert($net_write(conn, buf, num_read) == 5);
+    assert($net_write(conn, buf, 0, num_read) == 5);
 
-    // The client closes once it has the echo, which reads as 0 bytes
-    assert($net_read(conn, buf) == 0);
+    // The client closes once it has the echo, which reads as nil
+    assert($net_read(conn, buf, 0, buf.len) == nil);
     $net_close(conn);
 
     // Operating on a closed socket is not an error, just a finished one
-    assert($net_read(conn, buf) == 0);
-    assert($net_write(conn, buf, 1) == nil);
+    assert($net_read(conn, buf, 0, buf.len) == nil);
+    assert($net_write(conn, buf, 0, 1) == nil);
     assert($net_peer_addr(conn) == nil);
     $net_close(conn);
 
-    // A read that times out reports nil, which is distinct from the 0 that
-    // means the connection is over
+    // A read that times out reports 0 bytes, which is distinct from the nil
+    // that means the connection is over
     let quiet = $net_accept(server);
     assert(quiet != nil);
     assert($actor_recv() == "connected");
     $net_set_timeout(quiet, 50);
-    assert($net_read(quiet, buf) == nil);
+    assert($net_read(quiet, buf, 0, buf.len) == 0);
 
     // Once the client closes, a read reports the end of the connection.
     // Reads before the close lands keep timing out
     $actor_send(client, "close");
     let var ended = false;
     for (let var i = 0; i < 200; ++i) {
-        let res = $net_read(quiet, buf);
-        if (res == 0) {
+        let res = $net_read(quiet, buf, 0, buf.len);
+        if (res == nil) {
             ended = true;
             break;
         }
-        assert(res == nil);
+        assert(res == 0);
     }
     assert(ended);
     $net_close(quiet);
@@ -120,23 +120,22 @@ fun main() {
         assert(sock != nil);
 
         let req = str_bytes("request");
-        assert($net_write(sock, req, req.len) == 7);
+        assert($net_write(sock, req, 0, req.len) == 7);
         $net_shutdown_write(sock);
 
         // Writing after the shutdown fails instead of reaching the peer
-        assert($net_write(sock, req, req.len) == nil);
+        assert($net_write(sock, req, 0, req.len) == nil);
 
-        let chunk = ByteArray.with_size(64);
         let resp = ByteArray.with_size(64);
         let var got = 0;
 
         loop {
-            let num_read = $net_read(sock, chunk);
+            // Read straight into place instead of copying out of a chunk
+            let num_read = $net_read(sock, resp, got, resp.len - got);
 
-            if (num_read == 0)
+            if (num_read == nil)
                 break;
 
-            resp.memcpy(got, chunk, 0, num_read);
             got = got + num_read;
         }
 
@@ -150,9 +149,9 @@ fun main() {
     // The shutdown is what ends this loop: the client is still connected
     let var got = 0;
     loop {
-        let num_read = $net_read(req_conn, buf);
+        let num_read = $net_read(req_conn, buf, 0, buf.len);
 
-        if (num_read == 0)
+        if (num_read == nil)
             break;
 
         got = got + num_read;
@@ -160,7 +159,7 @@ fun main() {
     assert(got == 7);
 
     let response = str_bytes("response");
-    assert($net_write(req_conn, response, response.len) == 8);
+    assert($net_write(req_conn, response, 0, response.len) == 8);
     $net_close(req_conn);
     $actor_join(requester);
 
