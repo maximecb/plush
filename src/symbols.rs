@@ -893,24 +893,29 @@ impl ExprBox
 
                 // For each variable captured by the nested function
                 for (decl, _) in entries {
-                    match decl {
-                        // If this variable doesn't comes from this function,
-                        // then it must be captured by this closure
+                    let source = match decl {
+                        // A variable from an outer function lives in this
+                        // closure, so the child reads this closure's slot
                         Decl::Arg { src_fun, .. } |
                         Decl::Local { src_fun, .. } if src_fun != fun.id => {
-                            fun.reg_captured(&decl);
+                            let idx = fun.reg_captured(&decl);
+                            Decl::Captured {
+                                idx,
+                                mutable: decl.is_mutable()
+                            }
                         },
 
                         // If the variable is a mutable local from this function,
                         // register it as escaping and needing a mutable closure cell
                         Decl::Local { src_fun, mutable: true, .. } if src_fun == fun.id => {
                             fun.escaping.insert(decl);
+                            decl
                         },
 
-                        _ =>{}
+                        _ => decl
                     };
 
-                    captured.push(decl.clone());
+                    captured.push(source);
                 }
 
                 // Put the child function back in place

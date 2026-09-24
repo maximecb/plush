@@ -1055,9 +1055,14 @@ fn gen_captures(
         let top = regs.top();
 
         // Copy variables and cells captured by the closure.
-        // A mutable local is captured by its cell, not by its value
+        // Mutable variables pass their cell through each closure level
         let src = match decl {
             Decl::Local { idx, mutable: true, .. } => fun.params.len() as u16 + *idx as u16,
+            Decl::Captured { idx, mutable: true } => {
+                let cell = regs.alloc();
+                cg.push_insn(Insn::clos_get(cell, (*idx).try_into().unwrap()));
+                cell
+            }
             _ => gen_var_read(decl, fun, regs, cg, None)
         };
 
