@@ -1,0 +1,114 @@
+from datetime import DateTime;
+
+fun check(actual, expected)
+{
+    if (actual != expected) {
+        $println("  got:      " + actual.to_s());
+        $println("  expected: " + expected.to_s());
+    }
+    assert(actual == expected);
+}
+
+// Unix epoch
+let dt1 = DateTime.from_timestamp(0, 0);
+check(dt1.to_s(), "1970-01-01T00:00:00+00:00");
+check(dt1.date_s(), "1970-01-01");
+check(dt1.weekday_s(), "Thursday");
+check(dt1.part_of_day(), "night");
+
+// 2023-10-26 10:00:00 UTC
+let dt2 = DateTime.from_timestamp(1698314400000, 0);
+check(dt2.to_s(), "2023-10-26T10:00:00+00:00");
+check(dt2.weekday_s(), "Thursday");
+check(dt2.part_of_day(), "morning");
+
+// Negative and fractional offsets
+check(DateTime.from_timestamp(1698314400000, -4).to_s(), "2023-10-26T06:00:00-04:00");
+check(DateTime.from_timestamp(1698314400000, 5.5).to_s(), "2023-10-26T15:30:00+05:30");
+check(DateTime.from_timestamp(1698314400000, -9.5).to_s(), "2023-10-26T00:30:00-09:30");
+
+// An offset that moves the date back across a year boundary
+check(DateTime.from_timestamp(0, -5).to_s(), "1969-12-31T19:00:00-05:00");
+
+// Leap days
+let dt4 = DateTime.from_timestamp(1582977600000, 0);
+check(dt4.to_s(), "2020-02-29T12:00:00+00:00");
+check(dt4.weekday_s(), "Saturday");
+check(dt4.part_of_day(), "noon");
+check(DateTime.from_timestamp(951825600000, 0).to_s(), "2000-02-29T12:00:00+00:00");
+
+// Before the epoch, including a partial second
+check(DateTime.from_timestamp(-1, 0).to_s(), "1969-12-31T23:59:59+00:00");
+check(DateTime.from_timestamp(-86400000, 0).to_s(), "1969-12-31T00:00:00+00:00");
+check(DateTime.from_timestamp(-14182940000, 0).to_s(), "1969-07-20T20:17:40+00:00");
+check(DateTime.from_timestamp(-14182940000, 0).weekday_s(), "Sunday");
+
+// End of a non-leap year
+check(DateTime.from_timestamp(1703980800000, 0).to_s(), "2023-12-31T00:00:00+00:00");
+
+// ISO 8601 parsing
+let dt5 = DateTime.parse_iso8601("2025-11-04T01:32:42+00:00");
+check(dt5.year, 2025);
+check(dt5.month, 11);
+check(dt5.day, 4);
+check(dt5.hour, 1);
+check(dt5.minute, 32);
+check(dt5.second, 42);
+check(dt5.utc_offset_minutes, 0);
+check(dt5.to_s(), "2025-11-04T01:32:42+00:00");
+check(dt5.weekday_s(), "Tuesday");
+
+let dt7 = DateTime.parse_iso8601("2023-10-26T15:30:00+05:30");
+check(dt7.utc_offset_minutes, 330);
+check(dt7.to_s(), "2023-10-26T15:30:00+05:30");
+
+let dt8 = DateTime.parse_iso8601("2023-10-26T06:00:00-04:00");
+check(dt8.utc_offset_minutes, -240);
+check(dt8.to_s(), "2023-10-26T06:00:00-04:00");
+
+check(DateTime.parse_iso8601("2025-11-04T01:32:42Z").to_s(), "2025-11-04T01:32:42+00:00");
+check(DateTime.parse_iso8601("2024-02-29T00:00:00Z").date_s(), "2024-02-29");
+
+// Malformed or out of range strings are rejected
+check(DateTime.parse_iso8601(""), nil);
+check(DateTime.parse_iso8601("2025-11-04"), nil);
+check(DateTime.parse_iso8601("2025-11-04T01:32:42"), nil);
+check(DateTime.parse_iso8601("2025-11-04T01:32:42.123Z"), nil);
+check(DateTime.parse_iso8601("2025-11-04T01:32+00:00"), nil);
+check(DateTime.parse_iso8601("2025-11-4T01:32:42Z"), nil);
+check(DateTime.parse_iso8601("2025-13-04T01:32:42Z"), nil);
+check(DateTime.parse_iso8601("2023-02-29T01:32:42Z"), nil);
+check(DateTime.parse_iso8601("2025-11-04T24:00:00Z"), nil);
+check(DateTime.parse_iso8601("2025-11-04T01:60:00Z"), nil);
+check(DateTime.parse_iso8601("2025-11-04T01:32:42+5:00"), nil);
+check(DateTime.parse_iso8601("2025-11-04T+1:32:42Z"), nil);
+check(DateTime.parse_iso8601("2025-11-04T01:32:42Z+00:00"), nil);
+
+// Constructing a DateTime directly
+let dt9 = DateTime(812, 12, 25, 18, 5, 9, -90);
+check(dt9.to_s(), "0812-12-25T18:05:09-01:30");
+check(dt9.part_of_day(), "evening");
+
+// Converting back to a timestamp
+check(DateTime(1970, 1, 1, 0, 0, 0, 0).to_timestamp(), 0);
+check(DateTime.parse_iso8601("2023-10-26T10:00:00Z").to_timestamp(), 1698314400000);
+check(DateTime.parse_iso8601("2023-10-26T06:00:00-04:00").to_timestamp(), 1698314400000);
+check(DateTime.parse_iso8601("2023-10-26T15:30:00+05:30").to_timestamp(), 1698314400000);
+check(DateTime.parse_iso8601("1969-07-20T20:17:40Z").to_timestamp(), -14182940000);
+check(DateTime.parse_iso8601("2000-03-01T00:00:00Z").to_timestamp(), 951868800000);
+
+// Milliseconds are dropped, rounding down to the whole second
+check(DateTime.from_timestamp(1500, 0).to_timestamp(), 1000);
+check(DateTime.from_timestamp(-1500, 0).to_timestamp(), -2000);
+
+// Round trips through a DateTime, at different offsets
+let timestamps = [0, -1000, 951825600000, 1582977600000, 1698314400000, -14182940000, 253402214400000];
+let offsets = [0, -4, 5.5, -9.5, 14, -12];
+for (let var i = 0; i < timestamps.len; ++i) {
+    for (let var j = 0; j < offsets.len; ++j) {
+        let dt = DateTime.from_timestamp(timestamps[i], offsets[j]);
+        check(dt.to_timestamp(), timestamps[i]);
+        check(DateTime.parse_iso8601(dt.to_s()).to_timestamp(), timestamps[i]);
+    }
+}
+check(DateTime.from_timestamp(dt9.to_timestamp(), -1.5).to_s(), dt9.to_s());

@@ -1771,7 +1771,8 @@ mod tests
     #[test]
     fn imports()
     {
-        parse_ok("from ./examples/datetime import DateTime;");
+        parse_ok("from ./examples/hershey_font import draw_thick_line;");
+        parse_ok("from datetime import DateTime;");
         //parse_ok("from ./graphics import Vec3, Matrix;");
         //parse_ok("from ./csv import parse_csv;");
         //parse_ok("from ./foo/bar/bif import a, b, c;");
@@ -1792,7 +1793,7 @@ mod tests
         parse_fails_with("let f = |x, class| x;", &msg("class"));
         parse_fails_with("class while {}", &msg("while"));
         parse_fails_with("class Foo extends class {}", &msg("class"));
-        parse_fails_with("from ./examples/datetime import return;", &msg("return"));
+        parse_fails_with("from ./examples/hershey_font import return;", &msg("return"));
         parse_fails_with("$println(instanceof);", &msg("instanceof"));
         parse_fails_with("let x = import;", &msg("import"));
 

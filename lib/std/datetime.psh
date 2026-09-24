@@ -1,0 +1,264 @@
+// Calendar dates and times of day, in the proleptic Gregorian calendar
+//
+//   from datetime import DateTime;
+//
+//   let now = DateTime.from_timestamp($time_current_ms(), -4);
+//   $println(now.to_s());        // 2025-11-03T21:32:42-04:00
+//   $println(now.weekday_s());   // Monday
+//
+//   let dt = DateTime.parse_iso8601("2025-11-04T01:32:42Z");
+//   $println(dt.date_s());       // 2025-11-04
+//
+// A DateTime holds the local date and time along with the offset from UTC
+// that it was expressed in, in minutes. Seconds are whole, leap seconds are
+// not represented, and time zones are only known by their offset.
+//
+// ISO 8601 strings are accepted in the extended form
+// YYYY-MM-DDTHH:MM:SS followed by either Z or a +HH:MM/-HH:MM offset.
+// Anything else, including fractional seconds, is rejected with nil.
+
+let SECS_PER_DAY = 86400;
+
+// Division rounding towards negative infinity, for dates before 1970
+fun floor_div(a, b)
+{
+    let q = a.idiv(b);
+    return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q;
+}
+
+// Remainder with the sign of the divisor
+fun floor_mod(a, b)
+{
+    return a - floor_div(a, b) * b;
+}
+
+fun is_leap_year(year)
+{
+    return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+// Number of days in a month numbered from 1 to 12
+fun days_in_month(year, month)
+{
+    if (month == 2)
+        return is_leap_year(year) ? 29 : 28;
+    if (month == 4 || month == 6 || month == 9 || month == 11)
+        return 30;
+    return 31;
+}
+
+fun pad2(n)
+{
+    return n.to_s().lpad(2, "0");
+}
+
+// Parse a field of exactly `width` decimal digits, or return nil
+fun parse_digits(s, width)
+{
+    if (s.len != width)
+        return nil;
+
+    for (let var i = 0; i < width; ++i) {
+        let b = s.byte_at(i);
+        if (b < 48 || b > 57)
+            return nil;
+    }
+
+    return s.parse_int(10);
+}
+
+// Parse a HH:MM:SS or HH:MM string into an array of integers, or return nil
+fun parse_clock(s, num_fields)
+{
+    let parts = s.split(":");
+    if (parts.len != num_fields)
+        return nil;
+
+    let fields = [];
+    for (let var i = 0; i < num_fields; ++i) {
+        let n = parse_digits(parts[i], 2);
+        if (n == nil)
+            return nil;
+        fields.push(n);
+    }
+
+    return fields;
+}
+
+class DateTime
+{
+    init(self, year, month, day, hour, minute, second, utc_offset_minutes)
+    {
+        self.year = year;
+        self.month = month;
+        self.day = day;
+        self.hour = hour;
+        self.minute = minute;
+        self.second = second;
+        self.utc_offset_minutes = utc_offset_minutes;
+    }
+
+    // Convert a timestamp in milliseconds since the UNIX epoch to a DateTime,
+    // expressed at an offset from UTC given in hours, which may be fractional
+    from_timestamp(timestamp_ms, utc_offset_hours)
+    {
+        let utc_offset_minutes = (utc_offset_hours * 60).to_f().floor();
+        let secs = floor_div(timestamp_ms, 1000) + utc_offset_minutes * 60;
+        let days = floor_div(secs, SECS_PER_DAY);
+        let secs_today = secs - days * SECS_PER_DAY;
+
+        // Days since 1970-01-01 to a civil date, from Howard Hinnant's
+        // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
+        let z = days + 719468;
+        let era = floor_div(z, 146097);
+        let doe = z - era * 146097;
+        let yoe = (doe - doe.idiv(1460) + doe.idiv(36524) - doe.idiv(146096)).idiv(365);
+        let doy = doe - (365 * yoe + yoe.idiv(4) - yoe.idiv(100));
+        let mp = (5 * doy + 2).idiv(153);
+        let day = doy - (153 * mp + 2).idiv(5) + 1;
+        let month = (mp < 10) ? mp + 3 : mp - 9;
+        let year = yoe + era * 400 + ((month <= 2) ? 1 : 0);
+
+        return DateTime(
+            year,
+            month,
+            day,
+            secs_today.idiv(3600),
+            (secs_today % 3600).idiv(60),
+            secs_today % 60,
+            utc_offset_minutes
+        );
+    }
+
+    // Parse an ISO 8601 string such as 2025-11-04T01:32:42+00:00 into a
+    // DateTime, or return nil if it is malformed or out of range
+    parse_iso8601(date_str)
+    {
+        let parts = date_str.split("T");
+        if (parts.len != 2)
+            return nil;
+
+        let date_comps = parts[0].split("-");
+        if (date_comps.len != 3)
+            return nil;
+
+        let year = parse_digits(date_comps[0], 4);
+        let month = parse_digits(date_comps[1], 2);
+        let day = parse_digits(date_comps[2], 2);
+        if (year == nil || month == nil || day == nil)
+            return nil;
+        if (month < 1 || month > 12 || day < 1 || day > days_in_month(year, month))
+            return nil;
+
+        // Split the time of day from the UTC offset
+        let var clock_str = nil;
+        let var utc_offset_minutes = 0;
+        let zulu_parts = parts[1].split("Z");
+        let plus_parts = parts[1].split("+");
+        let minus_parts = parts[1].split("-");
+
+        if (zulu_parts.len == 2 && zulu_parts[1] == "") {
+            clock_str = zulu_parts[0];
+        } else if (plus_parts.len == 2 || minus_parts.len == 2) {
+            let sign = (plus_parts.len == 2) ? 1 : -1;
+            let offset_parts = (plus_parts.len == 2) ? plus_parts : minus_parts;
+            let offset = parse_clock(offset_parts[1], 2);
+            if (offset == nil || offset[0] > 23 || offset[1] > 59)
+                return nil;
+            clock_str = offset_parts[0];
+            utc_offset_minutes = sign * (offset[0] * 60 + offset[1]);
+        } else {
+            return nil;
+        }
+
+        let clock = parse_clock(clock_str, 3);
+        if (clock == nil || clock[0] > 23 || clock[1] > 59 || clock[2] > 59)
+            return nil;
+
+        return DateTime(year, month, day, clock[0], clock[1], clock[2], utc_offset_minutes);
+    }
+
+    // Convert to a timestamp in milliseconds since the UNIX epoch
+    to_timestamp(self)
+    {
+        // Civil date to days since 1970-01-01, from Howard Hinnant's
+        // https://howardhinnant.github.io/date_algorithms.html#days_from_civil
+        let y = (self.month <= 2) ? self.year - 1 : self.year;
+        let era = floor_div(y, 400);
+        let yoe = y - era * 400;
+        let mp = (self.month > 2) ? self.month - 3 : self.month + 9;
+        let doy = (153 * mp + 2).idiv(5) + self.day - 1;
+        let doe = yoe * 365 + yoe.idiv(4) - yoe.idiv(100) + doy;
+        let days = era * 146097 + doe - 719468;
+
+        let secs = (
+            days * SECS_PER_DAY +
+            self.hour * 3600 +
+            self.minute * 60 +
+            self.second -
+            self.utc_offset_minutes * 60
+        );
+
+        return secs * 1000;
+    }
+
+    // Format as ISO 8601, e.g. 2025-11-04T01:32:42+00:00
+    to_s(self)
+    {
+        let var sign = "+";
+        let var offset_mins = self.utc_offset_minutes;
+        if (offset_mins < 0) {
+            sign = "-";
+            offset_mins = -offset_mins;
+        }
+
+        return (
+            self.date_s() + "T" +
+            pad2(self.hour) + ":" +
+            pad2(self.minute) + ":" +
+            pad2(self.second) +
+            sign +
+            pad2(offset_mins.idiv(60)) + ":" +
+            pad2(offset_mins % 60)
+        );
+    }
+
+    // Format the date as YYYY-MM-DD, the ISO 8601 calendar date
+    date_s(self)
+    {
+        return (
+            self.year.to_s().lpad(4, "0") + "-" +
+            pad2(self.month) + "-" +
+            pad2(self.day)
+        );
+    }
+
+    // Name of the day of the week, using Sakamoto's method
+    weekday_s(self)
+    {
+        let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+        let y = (self.month < 3) ? self.year - 1 : self.year;
+        let day_idx = floor_mod(
+            y + floor_div(y, 4) - floor_div(y, 100) + floor_div(y, 400) + t[self.month - 1] + self.day,
+            7
+        );
+
+        let weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        return weekdays[day_idx];
+    }
+
+    part_of_day(self)
+    {
+        if (self.hour < 6)
+            return "night";
+        if (self.hour < 12)
+            return "morning";
+        if (self.hour == 12)
+            return "noon";
+        if (self.hour < 18)
+            return "afternoon";
+        if (self.hour < 22)
+            return "evening";
+        return "night";
+    }
+}

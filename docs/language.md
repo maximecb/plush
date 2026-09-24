@@ -343,10 +343,10 @@ import mutable globals declared with `let var`.
 Example usage:
 
 ```plush
-from ./datetime import DateTime;
+from ./geometry import Vec2;
 from ./font import Font, render_text;
 
-let date = DateTime();
+let pos = Vec2(10, 20);
 render_text("Hello world");
 ```
 
