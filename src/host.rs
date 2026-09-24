@@ -601,8 +601,8 @@ fn is_safe_path(file_path: &str) -> bool
         .and_then(|home| canonicalize(home).ok());
 
     // Treat the home directory itself as an unsafe sandbox root
-    if let Some(home) = home {
-        if cwd == home && file_path.starts_with(home) {
+    if let Some(home) = home.as_ref() {
+        if cwd == *home && file_path.starts_with(home) {
             return false;
         }
     }
@@ -617,7 +617,6 @@ fn is_safe_path(file_path: &str) -> bool
 
     // For each rest argument supplied on the command-line
     for arg in rest_args {
-
         let arg_path = PathBuf::from(arg);
 
         // If this is not a valid path, ignore it
@@ -626,6 +625,13 @@ fn is_safe_path(file_path: &str) -> bool
         }
 
         let arg_path = canonicalize(&arg_path).unwrap();
+
+        // Don't grant blanket access to the home directory
+        if let Some(home) = home.as_ref() {
+            if arg_path == *home {
+                return false;
+            }
+        }
 
         // We can allow access to files in directories
         // explicitly specified on the command-line
