@@ -565,7 +565,8 @@ times out returns `0` and leaves the connection open.
 
 Connects and reads time out after 10 seconds by default, and writes after 30 seconds, so an actor never
 blocks forever on a dead peer. Since a quiet connection may still be healthy, detecting a dead peer is up to the program,
-e.g. by sending heartbeat messages.
+e.g. by sending heartbeat messages. A connection that no call has used for an hour is closed
+automatically, which reclaims sockets left open by an actor that ended with an error.
 
 A client that ends its request by closing the connection also gives up the response, since `$net_close()`
 shuts down both directions at once. When the peer reads to EOF to know the request is complete, use

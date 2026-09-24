@@ -46,6 +46,15 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// up. A timed out read returns 0 and leaves the connection open
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A stream that no call has touched for this long, and that no call is
+/// blocked on, is assumed to have been leaked, e.g. by an actor that died
+/// before closing it. Live readers wake up every READ_TIMEOUT, so a stream
+/// in use is touched far more often than this
+const REAP_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// Minimum time between two sweeps of the socket table for leaked streams
+const REAP_INTERVAL: Duration = Duration::from_secs(60);
+
 /// An open socket, either listening or connected.
 ///
 /// Handles are held behind an Arc so a blocking operation can clone the handle,
@@ -66,7 +75,27 @@ enum Socket
         stream: Arc<TcpStream>,
         peer_addr: String,
         local_addr: String,
+
+        // When a call last used this stream, and how many calls are
+        // currently blocked on it. Used to reap leaked streams
+        last_used: Instant,
+        in_flight: usize,
     },
+}
+
+impl Socket
+{
+    /// Wrap a connected stream, with the addresses it was created with
+    fn from_stream(stream: TcpStream, peer_addr: String, local_addr: String) -> Self
+    {
+        Socket::Stream {
+            stream: Arc::new(stream),
+            peer_addr,
+            local_addr,
+            last_used: Instant::now(),
+            in_flight: 0,
+        }
+    }
 }
 
 /// Global table of open sockets.
@@ -82,6 +111,9 @@ struct NetState
 
     // Map of open sockets by id
     sockets: HashMap<u64, Socket>,
+
+    // When the table was last swept for leaked streams
+    last_reap: Instant,
 }
 
 impl Default for NetState
@@ -91,7 +123,35 @@ impl Default for NetState
         Self {
             next_id: 1,
             sockets: HashMap::new(),
+            last_reap: Instant::now(),
         }
+    }
+}
+
+impl NetState
+{
+    /// Remove streams that have sat unused for REAP_AFTER with no call
+    /// blocked on them, returning their handles so the caller can shut them
+    /// down. Listeners are never reaped: a program leaks few of them, and
+    /// silently closing one would stop a server from accepting
+    fn reap_stale(&mut self, now: Instant) -> Vec<Arc<TcpStream>>
+    {
+        self.last_reap = now;
+
+        let stale: Vec<u64> = self.sockets.iter().filter_map(|(id, socket)| {
+            match socket {
+                Socket::Stream { last_used, in_flight: 0, .. }
+                    if now.saturating_duration_since(*last_used) >= REAP_AFTER => Some(*id),
+                _ => None,
+            }
+        }).collect();
+
+        stale.iter().filter_map(|id| {
+            match self.sockets.remove(id) {
+                Some(Socket::Stream { stream, .. }) => Some(stream),
+                _ => None,
+            }
+        }).collect()
     }
 }
 
@@ -102,13 +162,32 @@ fn net_state() -> &'static Mutex<NetState>
     NET_STATE.get_or_init(|| Mutex::new(NetState::default()))
 }
 
-/// Insert a socket into the table and return its freshly assigned id
+/// Insert a socket into the table and return its freshly assigned id.
+/// This is also where leaked streams get reaped, since that matters most
+/// when new sockets keep being opened
 fn add_socket(socket: Socket) -> u64
 {
-    let mut state = net_state().lock().unwrap();
-    let id = state.next_id;
-    state.next_id += 1;
-    state.sockets.insert(id, socket);
+    let (id, stale) = {
+        let mut state = net_state().lock().unwrap();
+        let id = state.next_id;
+        state.next_id += 1;
+        state.sockets.insert(id, socket);
+
+        let now = Instant::now();
+        let stale = if now.saturating_duration_since(state.last_reap) >= REAP_INTERVAL {
+            state.reap_stale(now)
+        } else {
+            Vec::new()
+        };
+
+        (id, stale)
+    };
+
+    // Shutting down tells the peer the connection is over
+    for stream in stale {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+
     id
 }
 
@@ -123,13 +202,51 @@ fn get_listener(socket_id: u64) -> Option<Arc<TcpListener>>
     }
 }
 
-/// Look up a connected stream, cloning out its handle.
+/// Look up a connected stream, cloning out its handle, and mark it as used.
 /// Returns None if the id is unknown or refers to a listening socket
 fn get_stream(socket_id: u64) -> Option<Arc<TcpStream>>
 {
-    let state = net_state().lock().unwrap();
-    match state.sockets.get(&socket_id) {
-        Some(Socket::Stream { stream, .. }) => Some(stream.clone()),
+    let mut state = net_state().lock().unwrap();
+    match state.sockets.get_mut(&socket_id) {
+        Some(Socket::Stream { stream, last_used, .. }) => {
+            *last_used = Instant::now();
+            Some(stream.clone())
+        }
+        _ => None,
+    }
+}
+
+// This is a guard struct which serves to decrement the in-flight count
+// when a blocking call on a socket terminates
+struct InFlight
+{
+    socket_id: u64,
+}
+
+impl Drop for InFlight
+{
+    fn drop(&mut self)
+    {
+        // Avoid panicking while dropping if the lock was poisoned
+        if let Ok(mut state) = net_state().lock() {
+            if let Some(Socket::Stream { last_used, in_flight, .. }) = state.sockets.get_mut(&self.socket_id) {
+                *in_flight -= 1;
+                *last_used = Instant::now();
+            }
+        }
+    }
+}
+
+/// Look up a connected stream for a call that may block on it
+fn begin_blocking(socket_id: u64) -> Option<(Arc<TcpStream>, InFlight)>
+{
+    let mut state = net_state().lock().unwrap();
+    match state.sockets.get_mut(&socket_id) {
+        Some(Socket::Stream { stream, last_used, in_flight, .. }) => {
+            *last_used = Instant::now();
+            *in_flight += 1;
+            Some((stream.clone(), InFlight { socket_id }))
+        }
         _ => None,
     }
 }
@@ -255,11 +372,7 @@ pub fn net_connect(actor: &mut Actor, addr: Value) -> HostResult
         Err(_) => String::new(),
     };
 
-    let id = add_socket(Socket::Stream {
-        stream: Arc::new(stream),
-        peer_addr,
-        local_addr,
-    });
+    let id = add_socket(Socket::from_stream(stream, peer_addr, local_addr));
 
     actor.int64(id as i64).into()
 }
@@ -307,11 +420,7 @@ pub fn net_accept(actor: &mut Actor, socket_id: Value) -> HostResult
         Err(_) => String::new(),
     };
 
-    let id = add_socket(Socket::Stream {
-        stream: Arc::new(stream),
-        peer_addr: peer_addr.to_string(),
-        local_addr,
-    });
+    let id = add_socket(Socket::from_stream(stream, peer_addr.to_string(), local_addr));
 
     actor.int64(id as i64).into()
 }
@@ -380,8 +489,9 @@ pub fn net_read(actor: &mut Actor, socket_id: Value, buf: Value, start: Value, m
         );
     }
 
-    let stream = match get_stream(socket_id) {
-        Some(stream) => stream,
+    // The guard has to stay bound until the read is done
+    let (stream, _in_flight) = match begin_blocking(socket_id) {
+        Some(pair) => pair,
         // Another actor may have closed this socket, which is not an error
         None => return Value::NIL.into(),
     };
@@ -427,8 +537,9 @@ pub fn net_write(actor: &mut Actor, socket_id: Value, buf: Value, start: Value, 
         );
     }
 
-    let stream = match get_stream(socket_id) {
-        Some(stream) => stream,
+    // The guard has to stay bound until the write is done
+    let (stream, _in_flight) = match begin_blocking(socket_id) {
+        Some(pair) => pair,
         None => return Value::NIL.into(),
     };
 
@@ -537,13 +648,24 @@ mod tests
             local_addr: addr.to_string(),
         });
 
-        let stream_id = add_socket(Socket::Stream {
-            peer_addr: stream.peer_addr().unwrap().to_string(),
-            local_addr: stream.local_addr().unwrap().to_string(),
-            stream: Arc::new(stream),
-        });
+        let stream_id = add_socket(test_stream(stream));
 
         (listen_id, stream_id)
+    }
+
+    fn test_stream(stream: TcpStream) -> Socket
+    {
+        let peer_addr = stream.peer_addr().unwrap().to_string();
+        let local_addr = stream.local_addr().unwrap().to_string();
+        Socket::from_stream(stream, peer_addr, local_addr)
+    }
+
+    fn in_flight_count(state: &NetState, socket_id: u64) -> usize
+    {
+        match state.sockets.get(&socket_id) {
+            Some(Socket::Stream { in_flight, .. }) => *in_flight,
+            _ => panic!("no stream with id {}", socket_id),
+        }
     }
 
     #[test]
@@ -605,5 +727,63 @@ mod tests
         // A shut down stream reads as EOF rather than blocking
         let mut buf = [0u8; 8];
         assert_eq!((&*stream).read(&mut buf).unwrap(), 0);
+    }
+
+    // The guard from begin_blocking counts the call as in flight until it
+    // is dropped, even on an early return
+    #[test]
+    fn in_flight_guard_counts_blocking_calls()
+    {
+        let (listen_id, stream_id) = test_sockets();
+        assert!(begin_blocking(listen_id).is_none());
+
+        let first = begin_blocking(stream_id).unwrap();
+        let second = begin_blocking(stream_id).unwrap();
+        assert_eq!(in_flight_count(&net_state().lock().unwrap(), stream_id), 2);
+
+        drop(first);
+        drop(second);
+        assert_eq!(in_flight_count(&net_state().lock().unwrap(), stream_id), 0);
+
+        // A guard outliving its stream, as after net_close, is harmless
+        let guard = begin_blocking(stream_id).unwrap();
+        net_state().lock().unwrap().sockets.remove(&stream_id);
+        drop(guard);
+    }
+
+    // Reaping works on a table of its own, since sweeping the global one
+    // would take sockets out from under the other tests
+    #[test]
+    fn reaping_removes_only_idle_streams()
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut state = NetState::default();
+        state.sockets.insert(1, Socket::Listener {
+            listener: Arc::new(listener),
+            local_addr: addr.to_string(),
+        });
+        state.sockets.insert(2, test_stream(TcpStream::connect(addr).unwrap()));
+        state.sockets.insert(3, test_stream(TcpStream::connect(addr).unwrap()));
+
+        // Stream 3 has a call blocked on it
+        if let Some(Socket::Stream { in_flight, .. }) = state.sockets.get_mut(&3) {
+            *in_flight = 1;
+        }
+
+        // Nothing has been idle long enough yet
+        let now = Instant::now();
+        assert!(state.reap_stale(now).is_empty());
+        assert_eq!(state.sockets.len(), 3);
+
+        // Past the idle limit, only the stream nobody is blocked on goes
+        let later = now + REAP_AFTER + Duration::from_secs(1);
+        let reaped = state.reap_stale(later);
+        assert_eq!(reaped.len(), 1);
+        assert!(!state.sockets.contains_key(&2));
+        assert!(state.sockets.contains_key(&1));
+        assert!(state.sockets.contains_key(&3));
+        assert_eq!(state.last_reap, later);
     }
 }
