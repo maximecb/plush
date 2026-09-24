@@ -2359,9 +2359,13 @@ fun raster_poly(m) {
                     while (x < piece_end) {
                         let var run = SUB_MAX;
                         if (wscale > 0.0) {
-                            let n = (w * wscale).floor();
-                            if (n < run) run = n;
-                            if (run < 1) run = 1;
+                            // Compare as a float so a near-zero dwdx can't
+                            // overflow the integer conversion
+                            let nf = w * wscale;
+                            if (nf < SUB_MAX.to_f()) {
+                                run = nf.floor();
+                                if (run < 1) run = 1;
+                            }
                         }
 
                         let var xe = x + run;
