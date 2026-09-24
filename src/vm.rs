@@ -18,23 +18,22 @@ use crate::gc::{undo_forwarding, Copier, StrTable, UndoLog};
 use crate::host::*;
 use crate::str::Str;
 use crate::value::*;
+use crate::insns::Insn;
+
 use std::mem::size_of;
 use std::ops::{Add, Sub, Mul};
 
 /// How many bytes of undrained messages a sender will let pile up in a
 /// receiver's message allocator before waiting for it to catch up.
-///
-/// This is backpressure, not a limit on message size: a message that is
-/// already being copied grows the buffer past this point if it needs to.
-/// It exists because the buffer is only reclaimed in one go, when the
-/// receiver has drained its queue, so without it a fast sender would grow
-/// the buffer without bound.
 const MSG_BACKLOG_LIMIT: usize = 64 * 1024 * 1024;
 
-/// Interpreter instructions, one 64-bit word each. The opcode occupies
-/// the low bits and the operands are packed above it, so an instruction
-/// holds no heap pointers and the collector never walks the code
-pub use crate::insns::Insn;
+// Value stack size limit
+const STACK_LIMIT: usize = 256 * 1024;
+
+/// How many frames of a backtrace to print from the top and the bottom of
+/// the stack. A stack overflow has too many frames to print them all
+const BACKTRACE_TOP: usize = 20;
+const BACKTRACE_BOTTOM: usize = 5;
 
 /// Cache for a field access site. The name is what the site was compiled
 /// for; the key and slot are what it last resolved to.
@@ -1575,6 +1574,16 @@ impl Actor
         let frames = self.frames.clone();
 
         for (idx, frame) in frames.iter().enumerate().rev() {
+            // Deep stacks only show the frames nearest the top and bottom
+            let from_top = frames.len() - 1 - idx;
+            if from_top >= BACKTRACE_TOP && idx >= BACKTRACE_BOTTOM {
+                if from_top == BACKTRACE_TOP {
+                    let num_omitted = frames.len() - BACKTRACE_TOP - BACKTRACE_BOTTOM;
+                    eprintln!("... {} frames omitted ...", num_omitted);
+                }
+                continue;
+            }
+
             let cur_pc = match frames.get(idx + 1) {
                 Some(callee) => callee.ret_addr.checked_sub(1),
                 None => cur_pc,
@@ -1827,6 +1836,14 @@ impl Actor
         macro_rules! push_frame {
             ($fun_val: expr, $start_reg: expr, $entry_pc: expr, $frame_size: expr) => {{
                 let new_bp = bp + ($start_reg as usize);
+                let new_top = new_bp + ($frame_size as usize);
+
+                // Codegen never sets a call up in r0, so every frame starts
+                // above its caller's and this also bounds the frame count
+                if new_top > STACK_LIMIT {
+                    std::hint::cold_path();
+                    self.report_error("", "stack overflow, the call nesting is too deep", Some(pc - 1));
+                }
 
                 self.frames.push(StackFrame {
                     fun: $fun_val,
@@ -1843,7 +1860,7 @@ impl Actor
                 // zero rather than nil is measurably faster, and codegen
                 // writes every register before it reads one, so nothing
                 // but the collector ever sees these
-                self.stack.resize(bp + ($frame_size as usize), Value::FIXNUM_ZERO);
+                self.stack.resize(new_top, Value::FIXNUM_ZERO);
             }}
         }
 

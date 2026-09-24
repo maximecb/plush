@@ -1,0 +1,34 @@
+// Recursion far deeper than typical programs need stays within the stack
+// limit, including through a method and with larger frames
+
+fun depth(n) {
+    if (n == 0)
+        return 0;
+    return depth(n - 1) + 1;
+}
+
+assert(depth(100_000) == 100_000);
+
+// Several live locals per frame
+fun sum_to(n) {
+    if (n == 0)
+        return 0;
+    let a = n;
+    let b = a * 2;
+    let c = b - a;
+    return sum_to(n - 1) + c;
+}
+
+assert(sum_to(10_000) == 50_005_000);
+
+class Counter {
+    init(self) {}
+
+    count(self, n) {
+        if (n == 0)
+            return 0;
+        return self.count(n - 1) + 1;
+    }
+}
+
+assert(Counter().count(50_000) == 50_000);

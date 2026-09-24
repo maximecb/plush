@@ -82,13 +82,17 @@ impl Regs
     /// Start a function, with the temporaries placed above its variables
     fn new(fun: &Function) -> Self
     {
-        let temp_base: u16 = (fun.params.len() + fun.num_locals)
+        let num_vars: u16 = (fun.params.len() + fun.num_locals)
             .try_into()
             .expect("function has too many arguments and locals");
 
-        // A frame always has room for r0: a call writes its return value
-        // there, and a constructor reads self from it
-        Self { temp_base, next: temp_base, max: std::cmp::max(temp_base, 1) }
+        // Reserve r0 in functions with arguments and no variables,
+        // so that a function always causes the value stack to grow.
+        // Otherwise we would need to check both the value stack and
+        // the frame stack limit to detect a stack overflow.
+        let temp_base = std::cmp::max(num_vars, 1);
+
+        Self { temp_base, next: temp_base, max: temp_base }
     }
 
     /// First free register, which `free_to` takes back down to
@@ -124,7 +128,7 @@ impl Regs
     /// taken, so nothing living in them may still be needed
     fn alloc_from(&mut self, start: u16, n: u16)
     {
-        debug_assert!(start <= self.next);
+        debug_assert!(start >= self.temp_base && start <= self.next);
         let end = start.checked_add(n).expect("frame is too large");
         self.next = std::cmp::max(self.next, end);
         self.max = std::cmp::max(self.max, self.next);
