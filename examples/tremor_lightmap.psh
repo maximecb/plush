@@ -2392,10 +2392,27 @@ fun clip_plane(n, ax, ay, az, aw) {
     return m;
 }
 
-// Shade one perspective-correct texture subspan. Runs end at the first lightmap
-// cell boundary crossed in either axis, then exact finite differences evaluate
-// the bilinear patch. The usual axis-aligned case needs one add per pixel; an
-// oblique mapping needs two.
+// Sample the lightmap bilinearly at one packed coordinate. Span lighting below
+// uses this at its ends, rather than evaluating a bilinear patch per pixel.
+fun sample_lightmap(lt, lm, lm_w, lm_h) {
+    let var fu = lt & LM_FRAC_MASK;
+    let var fv = (lt >> LM_V_FRAC_SHIFT) & LM_FRAC_MASK;
+    let var lu = (lt >> LM_U_CELL_SHIFT) & LM_U_CELL_MASK;
+    let var lv = lt >> LM_V_CELL_SHIFT;
+    if (lu >= 32768) { lu = 0; fu = 0; }
+    else if (lu >= lm_w - 1) { lu = lm_w - 2; fu = LM_ONE_I - 1; }
+    if (lv < 0) { lv = 0; fv = 0; }
+    else if (lv >= lm_h - 1) { lv = lm_h - 2; fv = LM_ONE_I - 1; }
+    let a = lv * lm_w + lu;
+    let top = (lm[a] << LM_FRAC_BITS) + (lm[a + 1] - lm[a]) * fu;
+    let bottom = (lm[a + lm_w] << LM_FRAC_BITS)
+               + (lm[a + lm_w + 1] - lm[a + lm_w]) * fu;
+    return (top << LM_FRAC_BITS) + (bottom - top) * fv;
+}
+
+// Shade one perspective-correct texture subspan. Long runs still split near
+// lightmap cell boundaries, but never below eight pixels for this visual test.
+// The lighting between two bilinear endpoint samples is simply linear.
 fun shade_lightmap_run(t0, dt, lt0, dlt, dlu, dlv, first, end, blend) {
     let pix = g_pix; let lm = g_lm; let lm_w = g_lm_w; let lm_h = g_lm_h;
     let umask = g_umask; let vshift = g_vshift; let vmask = g_vmask;
@@ -2404,59 +2421,35 @@ fun shade_lightmap_run(t0, dt, lt0, dlt, dlu, dlv, first, end, blend) {
 
     while (i < end) {
         let var run = end - i;
-        let var fu = lt & LM_FRAC_MASK;
-        let var fv = (lt >> LM_V_FRAC_SHIFT) & LM_FRAC_MASK;
-        if (dlu > 0) {
-            if (fu + (run - 1) * dlu >= LM_ONE_I) {
-                run = (LM_ONE_I - fu + dlu - 1).idiv(dlu);
+        if (run > 8) {
+            let fu = lt & LM_FRAC_MASK;
+            let fv = (lt >> LM_V_FRAC_SHIFT) & LM_FRAC_MASK;
+            if (dlu > 0) {
+                if (fu + (run - 1) * dlu >= LM_ONE_I) {
+                    run = (LM_ONE_I - fu + dlu - 1).idiv(dlu);
+                }
+            } else if (dlu < 0) {
+                if (fu + (run - 1) * dlu < 0) run = fu.idiv(0 - dlu) + 1;
             }
-        } else if (dlu < 0) {
-            if (fu + (run - 1) * dlu < 0) run = fu.idiv(0 - dlu) + 1;
-        }
-        if (dlv > 0) {
-            if (fv + (run - 1) * dlv >= LM_ONE_I) {
-                let n = (LM_ONE_I - fv + dlv - 1).idiv(dlv);
-                if (n < run) run = n;
+            if (dlv > 0) {
+                if (fv + (run - 1) * dlv >= LM_ONE_I) {
+                    let n = (LM_ONE_I - fv + dlv - 1).idiv(dlv);
+                    if (n < run) run = n;
+                }
+            } else if (dlv < 0) {
+                if (fv + (run - 1) * dlv < 0) {
+                    let n = fv.idiv(0 - dlv) + 1;
+                    if (n < run) run = n;
+                }
             }
-        } else if (dlv < 0) {
-            if (fv + (run - 1) * dlv < 0) {
-                let n = fv.idiv(0 - dlv) + 1;
-                if (n < run) run = n;
-            }
+            if (run < 8) run = 8;
         }
 
-        let var lu = (lt >> LM_U_CELL_SHIFT) & LM_U_CELL_MASK;
-        let var lv = lt >> LM_V_CELL_SHIFT;
-        // Edge rounding can put the first or last covered pixel just outside
-        // the padded rectangle. Extend the border sample there.
-        if (lu >= 32768) { lu = 0; fu = 0; }
-        else if (lu >= lm_w - 1) { lu = lm_w - 2; fu = LM_ONE_I - 1; }
-        if (lv < 0) { lv = 0; fv = 0; }
-        else if (lv >= lm_h - 1) { lv = lm_h - 2; fv = LM_ONE_I - 1; }
-        let a = lv * lm_w + lu;
-        let l00 = lm[a]; let l10 = lm[a + 1];
-        let l01 = lm[a + lm_w]; let l11 = lm[a + lm_w + 1];
-        let var l = 0; let var dl = 0; let var ddl = 0;
-        if (dlv == 0) {
-            let left = (l00 << LM_FRAC_BITS) + (l01 - l00) * fv;
-            let right = (l10 << LM_FRAC_BITS) + (l11 - l10) * fv;
-            let slope = right - left;
-            l = left * LM_ONE_I + slope * fu;
-            dl = slope * dlu;
-        } else if (dlu == 0) {
-            let top = (l00 << LM_FRAC_BITS) + (l10 - l00) * fu;
-            let bottom = (l01 << LM_FRAC_BITS) + (l11 - l01) * fu;
-            let slope = bottom - top;
-            l = top * LM_ONE_I + slope * fv;
-            dl = slope * dlv;
-        } else {
-            let hu = l10 - l00; let hv = l01 - l00;
-            let cross = l11 - l10 - l01 + l00;
-            l = (l00 << LM_LIGHT_SHIFT)
-              + ((hu * fu + hv * fv) << LM_FRAC_BITS) + cross * fu * fv;
-            dl = ((hu * dlu + hv * dlv) << LM_FRAC_BITS)
-               + cross * (fu * dlv + fv * dlu + dlu * dlv);
-            ddl = 2 * cross * dlu * dlv;
+        let var l = sample_lightmap(lt, lm, lm_w, lm_h);
+        let var dl = 0;
+        if (run > 1) {
+            let last = sample_lightmap(lt + (run - 1) * dlt, lm, lm_w, lm_h);
+            dl = (last - l).idiv(run - 1);
         }
 
         let run_end = i + run;
@@ -2470,7 +2463,7 @@ fun shade_lightmap_run(t0, dt, lt0, dlt, dlu, dlv, first, end, blend) {
             } else {
                 fb.set_u32(i, ((src >> 8) & mask_rb) | ((src >> 32) & 0xFF00));
             }
-            t = t + dt; l = l + dl; dl = dl + ddl; i = i + 1;
+            t = t + dt; l = l + dl; i = i + 1;
         }
         lt = lt + run * dlt;
     }
