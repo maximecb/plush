@@ -535,6 +535,23 @@ pub(crate) fn dict_has(_actor: &mut Actor, d: Value, key: Value) -> HostResult
     Value::from(d.has(key)).into()
 }
 
+/// Array of the keys of a dict, in no particular order
+pub(crate) fn dict_keys(actor: &mut Actor, mut d: Value) -> HostResult
+{
+    let len = unwrap_dict!(d).len();
+
+    // Only the array is allocated: its elements are the dict's own key
+    // strings, which are immutable and so can be shared
+    actor.gc_check(Array::alloc_size(len), &mut [&mut d]);
+
+    let array = Array::with_capacity(len, &mut actor.alloc);
+    for key in d.as_dict().keys() {
+        array.as_arr().push(Value::string(key), &mut actor.alloc);
+    }
+
+    array.into()
+}
+
 pub(crate) fn fun_dump_bytecode(actor: &mut Actor, f: Value) -> HostResult
 {
     let dump = match actor.dump_fun_bytecode(f) {
@@ -628,6 +645,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "to_hex") => ba_to_hex,
 
         (Type::Dict, "has") => dict_has,
+        (Type::Dict, "keys") => dict_keys,
 
         (Type::Fun, "dump_bytecode") => fun_dump_bytecode,
         (Type::Closure, "dump_bytecode") => fun_dump_bytecode,

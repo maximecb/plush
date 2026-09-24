@@ -450,6 +450,7 @@ $println(rng.int(0, 100));
     -   `to_hex()`: Get the bytes as a lowercase hexadecimal string, two digits per byte, with nothing between them.
 -   **Dict**
     -   `has(key)`: Check if the dictionary contains this key.
+    -   `keys()`: Get a new array of the dictionary's keys, in no particular order.
 -   **Function**
     -   `dump_bytecode()`: Print the bytecode this function compiled to, as a debugging aid.
 

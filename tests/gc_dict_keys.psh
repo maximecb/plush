@@ -1,0 +1,23 @@
+// Dict.keys() allocates, so it has to survive collections that move both
+// the dict it reads and the key strings it shares
+
+$gc_shrink_heap(4_000);
+
+let dict = {};
+for (let var i = 0; i < 500; ++i)
+{
+    dict[i.to_s()] = i;
+}
+
+for (let var itrs = 0; itrs < 200; ++itrs)
+{
+    let keys = dict.keys();
+    assert(keys.len == 500);
+
+    let var sum = 0;
+    for (let var i = 0; i < keys.len; ++i)
+    {
+        sum = sum + dict[keys[i]];
+    }
+    assert(sum == 124_750);
+}

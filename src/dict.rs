@@ -215,6 +215,13 @@ impl Dict {
     pub fn has(&mut self, field_name: &str) -> bool {
         self.get_slot(field_name).is_occupied()
     }
+
+    /// Keys of the entries held, in table order
+    pub fn keys(&self) -> impl Iterator<Item = *const Str> + '_ {
+        table_slice(self.table).iter()
+            .filter(|slot| slot.is_occupied())
+            .map(|slot| slot.key)
+    }
 }
 
 #[cfg(test)]
