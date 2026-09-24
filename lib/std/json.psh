@@ -46,6 +46,26 @@
 // and an escaped surrogate that isn't part of a pair becomes U+FFFD, the
 // replacement character. Nesting deeper than MAX_DEPTH is rejected, so
 // that hostile input can't exhaust the interpreter's stack.
+//
+// Values are turned into JSON text with format_json(), or written straight
+// to a file with write_json_file(). Dictionary keys come out sorted, so the
+// same value always gives the same text:
+//
+//   $println(format_json({b: [1, 2.5], a: nil}));  // {"a":null,"b":[1,2.5]}
+//
+// An object is formatted by calling its to_json() method, which returns a
+// value to format in its place, typically a dictionary:
+//
+//   class User
+//   {
+//       init(self, name) { self.name = name; }
+//       to_json(self) { return {name: self.name}; }
+//   }
+//
+// Values with no JSON form are an error rather than being silently
+// converted: ByteArrays, NaN and the infinities, and objects without a
+// to_json() method. A float is always written with a fraction or an
+// exponent, e.g. 1.0 as "1.0", so that it reads back as a float.
 
 let TAB = 9;         // \t
 let LF = 10;         // \n
@@ -602,4 +622,158 @@ fun parse_json_file(file_path)
         return Error('could not read "' + file_path + '" as UTF-8 text');
 
     return parse_json(text);
+}
+
+// Sorts an array of strings in place, with a bottom-up merge sort
+fun sort_strings(arr)
+{
+    let var src = arr;
+    let var dst = Array.with_size(arr.len, nil);
+
+    for (let var width = 1; width < arr.len; width = width * 2) {
+        for (let var lo = 0; lo < arr.len; lo = lo + 2 * width) {
+            let mid = (lo + width).min(arr.len);
+            let hi = (lo + 2 * width).min(arr.len);
+            let var i = lo;
+            let var j = mid;
+
+            for (let var k = lo; k < hi; ++k) {
+                if (i < mid && (j >= hi || src[i] <= src[j])) {
+                    dst[k] = src[i];
+                    ++i;
+                } else {
+                    dst[k] = src[j];
+                    ++j;
+                }
+            }
+        }
+
+        let tmp = src;
+        src = dst;
+        dst = tmp;
+    }
+
+    // The last pass may have left the sorted run in the scratch array
+    if (src != arr) {
+        for (let var i = 0; i < arr.len; ++i)
+            arr[i] = src[i];
+    }
+}
+
+// Appends a string as a quoted JSON string
+fun push_json_string(out, s)
+{
+    out.push_u8(QUOTE);
+
+    for (let var i = 0; i < s.len; ++i) {
+        let b = s.byte_at(i);
+
+        if (b == QUOTE) {
+            out.push_string('\\"');
+        } else if (b == BACKSLASH) {
+            out.push_string('\\\\');
+        } else if (b == LF) {
+            out.push_string('\\n');
+        } else if (b == CR) {
+            out.push_string('\\r');
+        } else if (b == TAB) {
+            out.push_string('\\t');
+        } else if (b < 0x20) {
+            out.push_string('\\u');
+            out.push_string(b.to_hex(4));
+        } else {
+            // Other characters, including multibyte ones, are copied as is
+            out.push_u8(b);
+        }
+    }
+
+    out.push_u8(QUOTE);
+}
+
+// Appends a float, which must be finite
+fun push_json_float(out, val)
+{
+    // NaN and the infinities have no JSON form
+    assert(val - val == 0.0);
+
+    let s = val.to_s();
+    out.push_string(s);
+
+    // A float with no fraction is written without one, e.g. 1.0 as "1",
+    // which would read back as an integer
+    for (let var i = 0; i < s.len; ++i) {
+        let b = s.byte_at(i);
+        if (b == DOT || b == LOWER_E || b == UPPER_E)
+            return;
+    }
+
+    out.push_string(".0");
+}
+
+// Appends the JSON form of a value to a byte array
+fun push_json(out, val)
+{
+    if (val == nil) {
+        out.push_string("null");
+    } else if (val == true) {
+        out.push_string("true");
+    } else if (val == false) {
+        out.push_string("false");
+    } else if (val instanceof Int64) {
+        out.push_string(val.to_s());
+    } else if (val instanceof Float64) {
+        push_json_float(out, val);
+    } else if (val instanceof String) {
+        push_json_string(out, val);
+    } else if (val instanceof Array) {
+        out.push_u8(LBRACKET);
+
+        for (let var i = 0; i < val.len; ++i) {
+            if (i > 0)
+                out.push_u8(COMMA);
+            push_json(out, val[i]);
+        }
+
+        out.push_u8(RBRACKET);
+    } else if (val instanceof Dict) {
+        // Keys are sorted so that the same dict always gives the same text
+        let keys = val.keys();
+        sort_strings(keys);
+
+        out.push_u8(LBRACE);
+
+        for (let var i = 0; i < keys.len; ++i) {
+            if (i > 0)
+                out.push_u8(COMMA);
+            push_json_string(out, keys[i]);
+            out.push_u8(COLON);
+            push_json(out, val[keys[i]]);
+        }
+
+        out.push_u8(RBRACE);
+    } else {
+        // Bytes have no JSON form, encode them as a string first, e.g. with
+        // the to_hex() method
+        assert(!(val instanceof ByteArray));
+
+        // Anything else must be an object whose to_json() method returns a
+        // value that can be formatted in its place
+        push_json(out, val.to_json());
+    }
+}
+
+// Formats a value as compact JSON text
+fun format_json(val)
+{
+    let out = ByteArray.with_size(0);
+    push_json(out, val);
+    return String.from_utf8(out, 0, out.len);
+}
+
+// Writes a value to a file as JSON text. Returns true on success
+fun write_json_file(file_path, val)
+{
+    let out = ByteArray.with_size(0);
+    push_json(out, val);
+    return $write_file(file_path, out);
 }

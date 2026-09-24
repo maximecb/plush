@@ -1,0 +1,101 @@
+from json import parse_json, format_json, sort_strings;
+
+// A value that formats through its to_json() method
+class Point
+{
+    init(self, x, y)
+    {
+        self.x = x;
+        self.y = y;
+    }
+
+    to_json(self)
+    {
+        return {x: self.x, y: self.y};
+    }
+}
+
+// An object whose to_json() returns other objects, which format in turn
+class Path
+{
+    init(self, points)
+    {
+        self.points = points;
+    }
+
+    to_json(self)
+    {
+        return {points: self.points};
+    }
+}
+
+fun check(val, expected)
+{
+    let text = format_json(val);
+
+    if (text != expected) {
+        $println("format_json gave " + text + ", expected " + expected);
+        assert(false);
+    }
+}
+
+// Scalars
+check(nil, "null");
+check(true, "true");
+check(false, "false");
+check(0, "0");
+check(-42, "-42");
+check(9223372036854775807, "9223372036854775807");
+check("", '""');
+check("hello", '"hello"');
+
+// Floats always keep a fraction or exponent, so they read back as floats
+check(1.0, "1.0");
+check(-3.0, "-3.0");
+check(-0.0, "-0.0");
+check(2.5, "2.5");
+check(0.1, "0.1");
+check(1e-10, "0.0000000001");
+assert(parse_json(format_json(1.0)) instanceof Float64);
+assert(parse_json(format_json(1e300)) == 1e300);
+assert(parse_json(format_json(1.0 / 3.0)) == 1.0 / 3.0);
+
+// Escapes
+check('a"b', '"a\\"b"');
+check('a\\b', '"a\\\\b"');
+check('line\nbreak\r\ttab', '"line\\nbreak\\r\\ttab"');
+check('\x01\x1F', '"\\u0001\\u001f"');
+check('/', '"/"');
+check('caf\u{E9} \u{1F600}', '"caf\u{E9} \u{1F600}"');
+
+// Arrays and dicts, with keys in sorted order
+check([], "[]");
+check({}, "{}");
+check([1, [2, []], "x"], '[1,[2,[]],"x"]');
+check({b: 1, a: 2, c: {z: nil, y: [true]}}, '{"a":2,"b":1,"c":{"y":[true],"z":null}}');
+check({"": 1, "a b": 2, 'q"': 3}, '{"":1,"a b":2,"q\\"":3}');
+
+// Objects format through to_json(), including nested ones
+check(Point(1, 2), '{"x":1,"y":2}');
+check(Path([Point(0, 0), Point(3, 4.5)]), '{"points":[{"x":0,"y":0},{"x":3,"y":4.5}]}');
+check([Point(1, 1)], '[{"x":1,"y":1}]');
+
+// Formatting what was parsed gives back the same text
+let text = '{"a":[1,2.5,"s\\n",null,true,false],"b":{"c":{}}}';
+assert(format_json(parse_json(text)) == text);
+
+// Sorting, including enough keys for many merge passes and an odd count
+let words = ["pear", "apple", "fig", "", "banana", "apple", "b"];
+sort_strings(words);
+assert(format_json(words) == '["","apple","apple","b","banana","fig","pear"]');
+
+let many = [];
+for (let var i = 0; i < 1001; ++i)
+    many.push(((i * 7919) % 1001).to_s());
+sort_strings(many);
+for (let var i = 1; i < many.len; ++i)
+    assert(many[i - 1] <= many[i]);
+
+let empty = [];
+sort_strings(empty);
+assert(empty.len == 0);
