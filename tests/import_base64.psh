@@ -1,0 +1,71 @@
+from base64 import base64_encode, base64_decode;
+from base64 import base64url_encode, base64url_decode;
+from base64 import base64url_encode_unpadded, base64url_decode_unpadded;
+
+// RFC 4648 standard Base64 vectors
+let plain = ["", "f", "fo", "foo", "foob", "fooba", "foobar"];
+let encoded = ["", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy"];
+
+for (let var i = 0; i < plain.len; ++i) {
+    let bytes = ByteArray.with_size(0);
+    bytes.push_string(plain[i]);
+    assert(base64_encode(bytes) == encoded[i]);
+    assert(base64_decode(encoded[i]).to_hex() == bytes.to_hex());
+}
+
+// Base64url uses a different alphabet and can omit padding explicitly
+let binary = ByteArray.with_size(2);
+binary[0] = 0xFB;
+binary[1] = 0xFF;
+assert(base64_encode(binary) == "+/8=");
+assert(base64url_encode(binary) == "-_8=");
+assert(base64url_encode_unpadded(binary) == "-_8");
+assert(base64url_decode("-_8=").to_hex() == "fbff");
+assert(base64url_decode_unpadded("-_8").to_hex() == "fbff");
+
+// Exercise partial groups and every possible byte value
+let data = ByteArray.with_size(256);
+for (let var i = 0; i < data.len; ++i)
+    data[i] = i;
+
+let all_bytes_base64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==";
+assert(base64_encode(data) == all_bytes_base64);
+assert(base64_decode(all_bytes_base64).to_hex() == data.to_hex());
+
+for (let var n = 0; n <= 256; ++n) {
+    let bytes = ByteArray.with_size(n);
+    bytes.memcpy(0, data, 0, n);
+
+    assert(base64_decode(base64_encode(bytes)).to_hex() == bytes.to_hex());
+    assert(base64url_decode(base64url_encode(bytes)).to_hex() == bytes.to_hex());
+    assert(base64url_decode_unpadded(base64url_encode_unpadded(bytes)).to_hex() == bytes.to_hex());
+}
+
+// Reject wrong alphabets, lengths, padding, whitespace, and nonzero pad bits
+assert(base64_decode("-_8=") == nil);
+assert(base64url_decode("+/8=") == nil);
+assert(base64_decode("Zg") == nil);
+assert(base64url_decode("-_8") == nil);
+assert(base64url_decode_unpadded("-_8=") == nil);
+assert(base64url_decode_unpadded("A") == nil);
+assert(base64_decode("Zg===") == nil);
+assert(base64_decode("Z=g=") == nil);
+assert(base64_decode("Zg==\n") == nil);
+assert(base64_decode("Zh==") == nil);
+assert(base64_decode("Zm9=") == nil);
+
+let malformed_padded = [
+    "A", "A===", "AA=A", "AA==AA==", "A\x00A=", "A A=", "éAA", "AB==", "AAB=",
+];
+for (let var i = 0; i < malformed_padded.len; ++i) {
+    assert(base64_decode(malformed_padded[i]) == nil);
+    assert(base64url_decode(malformed_padded[i]) == nil);
+}
+
+let malformed_unpadded = ["A", "AA=", "AA==", "A+", "A/", "A\n", "éAA", "AB", "AAB"];
+for (let var i = 0; i < malformed_unpadded.len; ++i)
+    assert(base64url_decode_unpadded(malformed_unpadded[i]) == nil);
+
+// A complete group is valid with either padding convention
+assert(base64url_decode("Zm9v").to_hex() == "666f6f");
+assert(base64url_decode_unpadded("Zm9v").to_hex() == "666f6f");

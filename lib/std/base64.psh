@@ -1,0 +1,159 @@
+// Base64 and Base64url encoding of ByteArrays
+//
+//   from base64 import base64_encode, base64_decode;
+//   let text = base64_encode(bytes);
+//   let original = base64_decode(text);
+//
+// Encoders return ASCII Strings. Decoders return ByteArrays or nil.
+// Invalid alphabets, lengths, padding, and unused bits produce nil.
+// Standard Base64 and Base64url use different alphabets.
+// Base64url also has explicit unpadded functions.
+
+let BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+let BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+// Encodes a ByteArray with the selected alphabet and padding convention
+fun encode_base64(bytes, alphabet, padded)
+{
+    assert(bytes instanceof ByteArray);
+
+    let full_groups = bytes.len.idiv(3);
+    let remaining = bytes.len % 3;
+    let var out_len = full_groups * 4;
+    if (remaining > 0)
+        out_len = out_len + (padded ? 4 : remaining + 1);
+
+    let out = ByteArray.with_size(out_len);
+    let var i = 0;
+    let var j = 0;
+
+    while (i + 3 <= bytes.len) {
+        let a = bytes[i];
+        let b = bytes[i + 1];
+        let c = bytes[i + 2];
+        out[j] = alphabet.byte_at(a >> 2);
+        out[j + 1] = alphabet.byte_at(((a & 3) << 4) | (b >> 4));
+        out[j + 2] = alphabet.byte_at(((b & 15) << 2) | (c >> 6));
+        out[j + 3] = alphabet.byte_at(c & 63);
+        i = i + 3;
+        j = j + 4;
+    }
+
+    if (remaining > 0) {
+        let a = bytes[i];
+        let b = remaining == 2 ? bytes[i + 1] : 0;
+        out[j] = alphabet.byte_at(a >> 2);
+        out[j + 1] = alphabet.byte_at(((a & 3) << 4) | (b >> 4));
+
+        if (remaining == 2) {
+            out[j + 2] = alphabet.byte_at((b & 15) << 2);
+        } else if (padded) {
+            out[j + 2] = 61;
+        }
+
+        if (padded)
+            out[j + 3] = 61;
+    }
+
+    return String.from_utf8(out, 0, out.len);
+}
+
+// Returns the value of one alphabet character, or nil if invalid
+fun base64_digit(ch, url_safe)
+{
+    if (ch >= 65 && ch <= 90) return ch - 65;
+    if (ch >= 97 && ch <= 122) return ch - 97 + 26;
+    if (ch >= 48 && ch <= 57) return ch - 48 + 52;
+
+    if (url_safe) {
+        if (ch == 45) return 62;
+        if (ch == 95) return 63;
+    } else {
+        if (ch == 43) return 62;
+        if (ch == 47) return 63;
+    }
+
+    return nil;
+}
+
+// Decodes one alphabet and padding convention, checking unused bits
+fun decode_base64(text, url_safe, padded)
+{
+    assert(text instanceof String);
+
+    let n = text.len;
+    if (padded && n % 4 != 0)
+        return nil;
+
+    let var data_len = n;
+    if (padded) {
+        if (data_len > 0 && text.byte_at(data_len - 1) == 61)
+            data_len = data_len - 1;
+        if (data_len > 0 && text.byte_at(data_len - 1) == 61)
+            data_len = data_len - 1;
+    }
+
+    if (data_len % 4 == 1)
+        return nil;
+
+    let out = ByteArray.with_size((data_len * 6).idiv(8));
+    let var acc = 0;
+    let var bits = 0;
+    let var j = 0;
+
+    for (let var i = 0; i < data_len; ++i) {
+        let digit = base64_digit(text.byte_at(i), url_safe);
+        if (digit == nil)
+            return nil;
+
+        acc = (acc << 6) | digit;
+        bits = bits + 6;
+        if (bits >= 8) {
+            bits = bits - 8;
+            out[j] = (acc >> bits) & 0xFF;
+            j = j + 1;
+            acc = acc & ((1 << bits) - 1);
+        }
+    }
+
+    if (acc != 0)
+        return nil;
+
+    return out;
+}
+
+// Encodes bytes as padded standard Base64
+fun base64_encode(bytes)
+{
+    return encode_base64(bytes, BASE64_ALPHABET, true);
+}
+
+// Decodes padded standard Base64, or returns nil for malformed text
+fun base64_decode(text)
+{
+    return decode_base64(text, false, true);
+}
+
+// Encodes bytes as padded Base64url
+fun base64url_encode(bytes)
+{
+    return encode_base64(bytes, BASE64URL_ALPHABET, true);
+}
+
+// Decodes padded Base64url, or returns nil for malformed text
+fun base64url_decode(text)
+{
+    return decode_base64(text, true, true);
+}
+
+// Encodes bytes as unpadded Base64url
+fun base64url_encode_unpadded(bytes)
+{
+    return encode_base64(bytes, BASE64URL_ALPHABET, false);
+}
+
+// Decodes unpadded Base64url, or returns nil for malformed text
+fun base64url_decode_unpadded(text)
+{
+    return decode_base64(text, true, false);
+}
