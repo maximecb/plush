@@ -1584,6 +1584,13 @@ pub fn parse_unit(input: &mut Lexer, prog: &mut Program) -> Result<FunId, ParseE
             // If this is a function declaration, add it to the
             // list of functions declared in this unit
             if let Expr::Fun { fun_id, .. } = init_expr.expr.as_ref() {
+                if funs.contains_key(var_name) {
+                    return ParseError::with_pos(
+                        &format!("duplicate function name \"{}\"", var_name),
+                        &stmt.pos
+                    );
+                }
+
                 funs.insert(var_name.clone(), *fun_id);
             }
             // If this is an immutable global (potentially exportable)
@@ -1980,6 +1987,22 @@ mod tests
     fn host_call()
     {
         parse_ok("$println(123);");
+    }
+
+    #[test]
+    fn duplicate_top_level_functions()
+    {
+        parse_ok("fun first() {} fun second() {}");
+        parse_fails_with(
+            "fun first() {} fun first() {}",
+            "duplicate function name \"first\""
+        );
+        parse_fails("let first = || {}; fun first() {}");
+
+        let mut input = Lexer::new("fun first() {}\nfun first() {}", "src");
+        let err = parse_program(&mut input).unwrap_err();
+        assert_eq!(err.pos.line_no(), 2);
+        assert_eq!(err.pos.col_no(), 1);
     }
 
     #[test]
