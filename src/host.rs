@@ -394,21 +394,18 @@ def_host_fns! {
 /// Get a host constant by name
 /// Returns an AST expression node for the constant,
 /// because we want host constants to be resolved early
-pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Expr
+pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Option<Expr>
 {
     // This constant is only true inside the main unit
     if name == "MAIN_UNIT" {
         if fun.id == prog.main_fn {
-            return Expr::True;
+            return Some(Expr::True);
         } else {
-            return Expr::False;
+            return Some(Expr::False);
         }
     }
 
-    match HostFnId::from_name(name) {
-        Some(host_fn) => Expr::HostFn(host_fn),
-        None => panic!("unknown host constant `{name}`")
-    }
+    HostFnId::from_name(name).map(Expr::HostFn)
 }
 
 /// Get the current time stamp in milliseconds

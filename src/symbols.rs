@@ -729,7 +729,13 @@ impl ExprBox
             }
 
             Expr::HostConst(name) => {
-                *self.expr = crate::host::get_host_const(&name, fun, prog);
+                *self.expr = match crate::host::get_host_const(&name, fun, prog) {
+                    Some(expr) => expr,
+                    None => return ParseError::with_pos(
+                        &format!("unknown host constant `{}`", name),
+                        &self.pos
+                    )
+                };
             }
 
             Expr::Ref { .. } => {}
@@ -1007,6 +1013,22 @@ mod tests
     fn calls()
     {
         succeeds("fun foo() {} fun main() { foo(); }");
+    }
+
+    #[test]
+    fn host_constants()
+    {
+        succeeds("$println(123);");
+        succeeds("let main_unit = $MAIN_UNIT; fun f() { return $MAIN_UNIT; }");
+
+        let mut input = Lexer::new("let x = 1;\n$unknown_host_function();", "src");
+        let mut prog = parse_program(&mut input).unwrap();
+        let err = prog.resolve_syms().unwrap_err();
+        assert_eq!(err.msg, "unknown host constant `unknown_host_function`");
+        assert_eq!(err.pos.line_no(), 2);
+        assert_eq!(err.pos.col_no(), 1);
+
+        fails("let f = $unknown_host_function;");
     }
 
     #[test]
