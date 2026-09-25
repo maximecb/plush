@@ -1,0 +1,262 @@
+// SHA-512 hashing
+//
+//   from sha512 import sha512;
+//   $println(sha512("abc").to_hex());
+//
+// Data that arrives in pieces can be hashed incrementally:
+//
+//   let h = SHA512();
+//   h.update(chunk1);
+//   h.update(chunk2);
+//   let digest = h.digest();
+//
+// Digests are 64-byte ByteArrays in big-endian order.
+// ByteArray integer reads are little-endian.
+// Each word uses two 32-bit halves because Plush fixnums cannot hold 64 bits.
+
+// Round constants as (high, low) 32-bit pairs
+let K = [
+    0x428a2f98, 0xd728ae22, 0x71374491, 0x23ef65cd,
+    0xb5c0fbcf, 0xec4d3b2f, 0xe9b5dba5, 0x8189dbbc,
+    0x3956c25b, 0xf348b538, 0x59f111f1, 0xb605d019,
+    0x923f82a4, 0xaf194f9b, 0xab1c5ed5, 0xda6d8118,
+    0xd807aa98, 0xa3030242, 0x12835b01, 0x45706fbe,
+    0x243185be, 0x4ee4b28c, 0x550c7dc3, 0xd5ffb4e2,
+    0x72be5d74, 0xf27b896f, 0x80deb1fe, 0x3b1696b1,
+    0x9bdc06a7, 0x25c71235, 0xc19bf174, 0xcf692694,
+    0xe49b69c1, 0x9ef14ad2, 0xefbe4786, 0x384f25e3,
+    0x0fc19dc6, 0x8b8cd5b5, 0x240ca1cc, 0x77ac9c65,
+    0x2de92c6f, 0x592b0275, 0x4a7484aa, 0x6ea6e483,
+    0x5cb0a9dc, 0xbd41fbd4, 0x76f988da, 0x831153b5,
+    0x983e5152, 0xee66dfab, 0xa831c66d, 0x2db43210,
+    0xb00327c8, 0x98fb213f, 0xbf597fc7, 0xbeef0ee4,
+    0xc6e00bf3, 0x3da88fc2, 0xd5a79147, 0x930aa725,
+    0x06ca6351, 0xe003826f, 0x14292967, 0x0a0e6e70,
+    0x27b70a85, 0x46d22ffc, 0x2e1b2138, 0x5c26c926,
+    0x4d2c6dfc, 0x5ac42aed, 0x53380d13, 0x9d95b3df,
+    0x650a7354, 0x8baf63de, 0x766a0abb, 0x3c77b2a8,
+    0x81c2c92e, 0x47edaee6, 0x92722c85, 0x1482353b,
+    0xa2bfe8a1, 0x4cf10364, 0xa81a664b, 0xbc423001,
+    0xc24b8b70, 0xd0f89791, 0xc76c51a3, 0x0654be30,
+    0xd192e819, 0xd6ef5218, 0xd6990624, 0x5565a910,
+    0xf40e3585, 0x5771202a, 0x106aa070, 0x32bbd1b8,
+    0x19a4c116, 0xb8d2d0c8, 0x1e376c08, 0x5141ab53,
+    0x2748774c, 0xdf8eeb99, 0x34b0bcb5, 0xe19b48a8,
+    0x391c0cb3, 0xc5c95a63, 0x4ed8aa4a, 0xe3418acb,
+    0x5b9cca4f, 0x7763e373, 0x682e6ff3, 0xd6b2b8a3,
+    0x748f82ee, 0x5defb2fc, 0x78a5636f, 0x43172f60,
+    0x84c87814, 0xa1f0ab72, 0x8cc70208, 0x1a6439ec,
+    0x90befffa, 0x23631e28, 0xa4506ceb, 0xde82bde9,
+    0xbef9a3f7, 0xb2c67915, 0xc67178f2, 0xe372532b,
+    0xca273ece, 0xea26619c, 0xd186b8c7, 0x21c0c207,
+    0xeada7dd6, 0xcde0eb1e, 0xf57d4f7f, 0xee6ed178,
+    0x06f067aa, 0x72176fba, 0x0a637dc5, 0xa2c898a6,
+    0x113f9804, 0xbef90dae, 0x1b710b35, 0x131c471b,
+    0x28db77f5, 0x23047d84, 0x32caab7b, 0x40c72493,
+    0x3c9ebe0a, 0x15c9bebc, 0x431d67c4, 0x9c100d4c,
+    0x4cc5d4be, 0xcb3e42b6, 0x597f299c, 0xfc657e2a,
+    0x5fcb6fab, 0x3ad6faec, 0x6c44198c, 0x4a475817,
+];
+
+// Mixes one 128-byte block into the state h.
+// The hasher reuses the schedule arrays across blocks.
+fun compress(h, w_hi, w_lo, bytes, offset)
+{
+    let MASK = 0xFFFFFFFF;
+
+    let var ah = h[0]; let var al = h[1];
+    let var bh = h[2]; let var bl = h[3];
+    let var ch = h[4]; let var cl = h[5];
+    let var dh = h[6]; let var dl = h[7];
+    let var eh = h[8]; let var el = h[9];
+    let var fh = h[10]; let var fl = h[11];
+    let var gh = h[12]; let var gl = h[13];
+    let var hh = h[14]; let var hl = h[15];
+
+    // Read the 16 big-endian 64-bit words of this block
+    for (let var i = 0; i < 16; ++i) {
+        let j = offset + i * 8;
+        w_hi[i] = (bytes[j] << 24) | (bytes[j + 1] << 16) | (bytes[j + 2] << 8) | bytes[j + 3];
+        w_lo[i] = (bytes[j + 4] << 24) | (bytes[j + 5] << 16) | (bytes[j + 6] << 8) | bytes[j + 7];
+    }
+
+    // Extend into the remaining 64 words
+    for (let var i = 16; i < 80; ++i) {
+        // S0 = rotr(x, 1) ^ rotr(x, 8) ^ (x >> 7)
+        let xh = w_hi[i - 15];
+        let xl = w_lo[i - 15];
+        let s0h = ((xh >> 1) | ((xl & 0x1) << 31)) ^ ((xh >> 8) | ((xl & 0xFF) << 24)) ^ (xh >> 7);
+        let s0l = ((xl >> 1) | ((xh & 0x1) << 31)) ^ ((xl >> 8) | ((xh & 0xFF) << 24)) ^ ((xl >> 7) | ((xh & 0x7F) << 25));
+
+        // S1 = rotr(y, 19) ^ rotr(y, 61) ^ (y >> 6)
+        let yh = w_hi[i - 2];
+        let yl = w_lo[i - 2];
+        let s1h = ((yh >> 19) | ((yl & 0x7FFFF) << 13)) ^ ((yl >> 29) | ((yh & 0x1FFFFFFF) << 3)) ^ (yh >> 6);
+        let s1l = ((yl >> 19) | ((yh & 0x7FFFF) << 13)) ^ ((yh >> 29) | ((yl & 0x1FFFFFFF) << 3)) ^ ((yl >> 6) | ((yh & 0x3F) << 26));
+
+        let lo = w_lo[i - 16] + s0l + w_lo[i - 7] + s1l;
+        w_hi[i] = (w_hi[i - 16] + s0h + w_hi[i - 7] + s1h + (lo >> 32)) & MASK;
+        w_lo[i] = lo & MASK;
+    }
+
+    for (let var i = 0; i < 80; ++i) {
+        // S1 = rotr(e, 14) ^ rotr(e, 18) ^ rotr(e, 41)
+        let s1h = ((eh >> 14) | ((el & 0x3FFF) << 18)) ^ ((eh >> 18) | ((el & 0x3FFFF) << 14)) ^ ((el >> 9) | ((eh & 0x1FF) << 23));
+        let s1l = ((el >> 14) | ((eh & 0x3FFF) << 18)) ^ ((el >> 18) | ((eh & 0x3FFFF) << 14)) ^ ((eh >> 9) | ((el & 0x1FF) << 23));
+
+        let chh = (eh & fh) ^ ((eh ^ MASK) & gh);
+        let chl = (el & fl) ^ ((el ^ MASK) & gl);
+
+        let t1l = hl + s1l + chl + K[2 * i + 1] + w_lo[i];
+        let t1h = (hh + s1h + chh + K[2 * i] + w_hi[i] + (t1l >> 32)) & MASK;
+
+        // S0 = rotr(a, 28) ^ rotr(a, 34) ^ rotr(a, 39)
+        let s0h = ((ah >> 28) | ((al & 0xFFFFFFF) << 4)) ^ ((al >> 2) | ((ah & 0x3) << 30)) ^ ((al >> 7) | ((ah & 0x7F) << 25));
+        let s0l = ((al >> 28) | ((ah & 0xFFFFFFF) << 4)) ^ ((ah >> 2) | ((al & 0x3) << 30)) ^ ((ah >> 7) | ((al & 0x7F) << 25));
+
+        let majh = (ah & bh) ^ (ah & ch) ^ (bh & ch);
+        let majl = (al & bl) ^ (al & cl) ^ (bl & cl);
+
+        // Low half of t1 is kept unmasked, its carry is folded in below
+        let t1lm = t1l & MASK;
+
+        hh = gh; hl = gl;
+        gh = fh; gl = fl;
+        fh = eh; fl = el;
+
+        let el2 = dl + t1lm;
+        eh = (dh + t1h + (el2 >> 32)) & MASK;
+        el = el2 & MASK;
+
+        dh = ch; dl = cl;
+        ch = bh; cl = bl;
+        bh = ah; bl = al;
+
+        let al2 = t1lm + s0l + majl;
+        ah = (t1h + s0h + majh + (al2 >> 32)) & MASK;
+        al = al2 & MASK;
+    }
+
+    let var t = h[1] + al; h[0] = (h[0] + ah + (t >> 32)) & MASK; h[1] = t & MASK;
+    t = h[3] + bl; h[2] = (h[2] + bh + (t >> 32)) & MASK; h[3] = t & MASK;
+    t = h[5] + cl; h[4] = (h[4] + ch + (t >> 32)) & MASK; h[5] = t & MASK;
+    t = h[7] + dl; h[6] = (h[6] + dh + (t >> 32)) & MASK; h[7] = t & MASK;
+    t = h[9] + el; h[8] = (h[8] + eh + (t >> 32)) & MASK; h[9] = t & MASK;
+    t = h[11] + fl; h[10] = (h[10] + fh + (t >> 32)) & MASK; h[11] = t & MASK;
+    t = h[13] + gl; h[12] = (h[12] + gh + (t >> 32)) & MASK; h[13] = t & MASK;
+    t = h[15] + hl; h[14] = (h[14] + hh + (t >> 32)) & MASK; h[15] = t & MASK;
+}
+
+// Returns the bytes of a ByteArray or String
+fun to_bytes(data)
+{
+    if (data instanceof String) {
+        let bytes = ByteArray.with_size(0);
+        bytes.push_string(data);
+        return bytes;
+    }
+
+    assert(data instanceof ByteArray);
+    return data;
+}
+
+// Incremental SHA-512 hasher
+class SHA512
+{
+    init(self)
+    {
+        self.h = [
+            0x6a09e667, 0xf3bcc908, 0xbb67ae85, 0x84caa73b,
+            0x3c6ef372, 0xfe94f82b, 0xa54ff53a, 0x5f1d36f1,
+            0x510e527f, 0xade682d1, 0x9b05688c, 0x2b3e6c1f,
+            0x1f83d9ab, 0xfb41bd6b, 0x5be0cd19, 0x137e2179,
+        ];
+
+        self.w_hi = Array.with_size(80, 0);
+        self.w_lo = Array.with_size(80, 0);
+
+        // The start of an incomplete block, waiting for more data
+        self.buf = ByteArray.with_size(128);
+        self.buf_len = 0;
+
+        // Message length so far, in bytes
+        self.msg_len = 0;
+    }
+
+    // Appends data to the message, as a ByteArray or a String
+    update(self, data)
+    {
+        let bytes = to_bytes(data);
+        let n = bytes.len;
+        let var i = 0;
+
+        self.msg_len = self.msg_len + n;
+
+        // Complete a block started by an earlier update
+        if (self.buf_len > 0) {
+            let take = (128 - self.buf_len).min(n);
+            self.buf.memcpy(self.buf_len, bytes, 0, take);
+            self.buf_len = self.buf_len + take;
+            i = take;
+
+            if (self.buf_len < 128) {
+                return;
+            }
+
+            compress(self.h, self.w_hi, self.w_lo, self.buf, 0);
+            self.buf_len = 0;
+        }
+
+        // Whole blocks are read straight from the input
+        while (i + 128 <= n) {
+            compress(self.h, self.w_hi, self.w_lo, bytes, i);
+            i = i + 128;
+        }
+
+        // Keep the rest for later
+        self.buf.memcpy(0, bytes, i, n - i);
+        self.buf_len = n - i;
+    }
+
+    // Returns the digest of the message so far as 64 bytes.
+    // The hasher remains unchanged so more data can be appended afterwards.
+    digest(self)
+    {
+        let h = self.h.slice(0, 16);
+
+        // Padding is a 1 bit, zeros, then a 128-bit big-endian bit length.
+        // The upper 64 bits are zero for in-memory data.
+        let tail_len = self.buf_len < 112 ? 128 : 256;
+        let tail = ByteArray.with_size(tail_len);
+        tail.zero_fill();
+        tail.memcpy(0, self.buf, 0, self.buf_len);
+        tail[self.buf_len] = 0x80;
+
+        let bit_len = self.msg_len * 8;
+        for (let var i = 0; i < 8; ++i) {
+            tail[tail_len - 1 - i] = (bit_len >> (i * 8)) & 0xFF;
+        }
+
+        for (let var offset = 0; offset < tail_len; offset = offset + 128) {
+            compress(h, self.w_hi, self.w_lo, tail, offset);
+        }
+
+        let out = ByteArray.with_size(64);
+        for (let var i = 0; i < 16; ++i) {
+            out[i * 4] = h[i] >> 24;
+            out[i * 4 + 1] = (h[i] >> 16) & 0xFF;
+            out[i * 4 + 2] = (h[i] >> 8) & 0xFF;
+            out[i * 4 + 3] = h[i] & 0xFF;
+        }
+
+        return out;
+    }
+}
+
+// Returns the SHA-512 digest of a ByteArray or String, as 64 bytes
+fun sha512(data)
+{
+    let hasher = SHA512();
+    hasher.update(data);
+    return hasher.digest();
+}

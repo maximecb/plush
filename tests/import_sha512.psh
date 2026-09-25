@@ -1,0 +1,75 @@
+from sha512 import SHA512, sha512;
+
+// Standard test vectors
+assert(sha512("").to_hex() == "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e");
+assert(sha512("abc").to_hex() == "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+assert(
+    sha512("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq").to_hex() ==
+    "204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c33596fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445"
+);
+
+// A ByteArray gives the same digest as the equivalent String
+let abc = ByteArray.with_size(3);
+abc[0] = 97;
+abc[1] = 98;
+abc[2] = 99;
+assert(sha512(abc).to_hex() == sha512("abc").to_hex());
+assert(sha512("abc").len == 64);
+
+// Non-ASCII strings are hashed as their UTF-8 bytes
+assert(sha512("é").to_hex() == "9e2ad28633f24451bd4f3c1cb20586a21a44c3aeedbdc01b9cc8fa72917ea7bd689c82b8bf1fef89b911cf8cc46fa2c1ccc10087b2094fd4d3350ecd88526a2c");
+
+// Check padding on both sides of the 112-byte and 128-byte boundaries
+let data = ByteArray.with_size(256);
+for (let var i = 0; i < data.len; ++i)
+    data[i] = (i * 7 + 3) & 0xFF;
+
+let lengths = [111, 112, 127, 128, 129, 255, 256];
+let expected = [
+    "68cffa6d0d76f309c9ce0d35280939f8e25990c43b7b086ccdf709be35b07d4ddba599541ff2b1c19d34ea49aeafb9659adb7ac3c0b078bb30a22d57fc6687ef",
+    "d0865c524d1dddf7c23b799c413f5adcd7caefd3f66a9b49750ec81066012c25a8bcf94ddea6dc525691673097ca40e0101e897fc97218cfdb0704084e2bef4b",
+    "e0b6a20f1c0c88970a9340152cd5a1c1ecf3d3b8de55102741879438079473540133b812706e5dbec322c8c9523b6fc8c6d16ee626e87ad5fe3d2916afedc369",
+    "99b16f17aa0b969a5b8f08f367719d516e330ccd2660b6f0688ec031dbc783de50a1cd185a2568dba75070a2403d17d4741d163578515dfd2ff756ddfe4d47b1",
+    "a1556e29185778aa5991e34b8884c840d589f0fbb4b8ed590e51e9ac4eb03a008125000db2671f8fe7f485b59a77b518670078ecb41a54b4cd02a7f1d2ca4c6d",
+    "c2e3bb67012f9eb526202efa59997933f7d3e75e7ded738818bc27d94977f4573afddb1b2793745701e62affa3b7a1c8262c992a321f488a6b1942a4795bab98",
+    "e49c208e41556e859d1a52d14784a061c2d5ae2c8690a5360e9f9344f60861c1362a9ec05a9f08a4167b3da41bdd122a387413dd06976470e4beff5053f2ac71",
+];
+
+for (let var i = 0; i < lengths.len; ++i) {
+    let n = lengths[i];
+    let msg = ByteArray.with_size(n);
+    msg.memcpy(0, data, 0, n);
+    assert(sha512(msg).to_hex() == expected[i]);
+
+    // Feed the same bytes in small pieces and across a block boundary
+    let h = SHA512();
+    let var offset = 0;
+    while (offset < n) {
+        let take = (n - offset).min(17);
+        let chunk = ByteArray.with_size(take);
+        chunk.memcpy(0, msg, offset, take);
+        h.update(chunk);
+        offset = offset + take;
+    }
+    assert(h.digest().to_hex() == expected[i]);
+}
+
+// Hashers keep separate state, and digest does not consume either one
+let first = SHA512();
+let second = SHA512();
+first.update("a");
+second.update("ab");
+first.update("b");
+assert(first.digest().to_hex() == second.digest().to_hex());
+first.update("c");
+assert(first.digest().to_hex() == sha512("abc").to_hex());
+assert(second.digest().to_hex() == sha512("ab").to_hex());
+
+// One million 'a' characters, fed in chunks
+let chunk = ByteArray.with_size(1000);
+for (let var i = 0; i < chunk.len; ++i)
+    chunk[i] = 97;
+let million = SHA512();
+for (let var i = 0; i < 1000; ++i)
+    million.update(chunk);
+assert(million.digest().to_hex() == "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b");
