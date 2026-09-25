@@ -1525,6 +1525,11 @@ impl Actor
                 fun(self, a0, a1, a2, a3, a4, a5, a6)
             }
 
+            FnPtr::Fn8(fun) => {
+                let (a0, a1, a2, a3, a4, a5, a6, a7) = (arg!(0), arg!(1), arg!(2), arg!(3), arg!(4), arg!(5), arg!(6), arg!(7));
+                fun(self, a0, a1, a2, a3, a4, a5, a6, a7)
+            }
+
         };
 
         if result.is_err() {

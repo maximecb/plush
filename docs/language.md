@@ -447,6 +447,7 @@ $println(rng.int(0, 100));
     -   `zero_fill()`: Overwrite the contents of the `ByteArray` with zeros.
     -   `fill_u32(start_index, count, value)`: Fills a portion of the `ByteArray` with a repeated 32-bit unsigned integer value.
     -   `dot_f32(idx_a, stride_a, b, idx_b, stride_b, count)`: Dot product of two runs of `f32` values, `count` elements long. An `f64` accumulator is used, so the result is more accurate than the same sum done in `f32`.
+    -   `axpy_f32(idx_y, stride_y, x, idx_x, stride_x, count, a)`: Computes `y += a * x` over two runs of `f32` values, `count` elements long, where `y` is this `ByteArray`. The runs may overlap, in which case the result matches the equivalent element-by-element loop.
     -   `to_hex()`: Get the bytes as a lowercase hexadecimal string, two digits per byte, with nothing between them.
 -   **Dict**
     -   `has(key)`: Check if the dictionary contains this key.

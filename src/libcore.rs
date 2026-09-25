@@ -642,6 +642,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "zero_fill") => ba_zero_fill,
         (Type::ByteArray, "fill_u32") => ba_fill_u32,
         (Type::ByteArray, "dot_f32") => ba_dot_f32,
+        (Type::ByteArray, "axpy_f32") => ba_axpy_f32,
         (Type::ByteArray, "to_hex") => ba_to_hex,
 
         (Type::Dict, "has") => dict_has,

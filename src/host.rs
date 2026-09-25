@@ -132,6 +132,7 @@ pub enum FnPtr
     // Arities are only listed once a host function needs them, which is
     // why this jumps from five to seven
     Fn7(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value) -> HostResult),
+    Fn8(fn(actor: &mut Actor, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, a6: Value, a7: Value) -> HostResult),
 }
 
 // This struct is needed in part because Rust doesn't allow direct
@@ -157,6 +158,7 @@ impl HostFn
             Fn4(_) => 4,
             Fn5(_) => 5,
             Fn7(_) => 7,
+            Fn8(_) => 8,
         }
     }
 }
@@ -172,6 +174,7 @@ macro_rules! host_fn_ptr {
     (4, $f:path) => { FnPtr::Fn4($f) };
     (5, $f:path) => { FnPtr::Fn5($f) };
     (7, $f:path) => { FnPtr::Fn7($f) };
+    (8, $f:path) => { FnPtr::Fn8($f) };
 }
 
 /// Declare the table of host functions, in two groups. An entry names
@@ -376,6 +379,7 @@ def_host_fns! {
         push_u32: ba_push_u32(2),
         push_string: ba_push_string(2),
         dot_f32: ba_dot_f32(7),
+        axpy_f32: ba_axpy_f32(8),
         to_hex: ba_to_hex(1),
         num_u32: ba_num_u32(1),
         memcpy: ba_memcpy(5),

@@ -641,6 +641,14 @@ fn dot_f32_kernel(a: &[f32], a_stride: usize, b: &[f32], b_stride: usize, num: u
     sum
 }
 
+/// One past the last element a strided run reads, for a nonzero count.
+/// Checked, because a large count times a large stride would otherwise
+/// wrap past the bounds test
+fn span(idx: usize, stride: usize, num: usize) -> Option<usize>
+{
+    (num - 1).checked_mul(stride)?.checked_add(idx)?.checked_add(1)
+}
+
 /// Dot product of two runs of f32 values, each described by a start index,
 /// a stride, and a shared element count. The two runs may live in the same
 /// bytearray, and are only read.
@@ -669,13 +677,6 @@ pub fn ba_dot_f32(
 
     if num == 0 {
         return actor.float64(0.0).into();
-    }
-
-    // The span an operand covers, in f32 elements. Checked, because a large
-    // count times a large stride would otherwise wrap past the bounds test
-    fn span(idx: usize, stride: usize, num: usize) -> Option<usize>
-    {
-        (num - 1).checked_mul(stride)?.checked_add(idx)?.checked_add(1)
     }
 
     let a_span = match span(a_idx, a_stride, num) {
@@ -713,6 +714,102 @@ pub fn ba_dot_f32(
     };
 
     actor.float64(sum).into()
+}
+
+/// y += a * x over `num` f32 elements, taken `stride` elements apart in
+/// each operand. Both slices start at the first element touched and end
+/// at the last, so the indices below are in bounds.
+///
+/// Done in f32 throughout. Nothing accumulates across elements, and each
+/// result is stored back as an f32, so f64 would only buy a fraction of an
+/// ulp while halving the vector width. The algebraic ops let the compiler
+/// contract the multiply and add into an FMA.
+#[inline(always)]
+fn axpy_f32_kernel(y: &mut [f32], y_stride: usize, a: f32, x: &[f32], x_stride: usize, num: usize)
+{
+    for i in 0..num {
+        let yi = &mut y[i * y_stride];
+        *yi = yi.algebraic_add(a.algebraic_mul(x[i * x_stride]));
+    }
+}
+
+/// y += a * x, where y is the receiver. Each of the two runs is described
+/// by a start index and a stride, with a shared element count. They may
+/// live in the same bytearray, and even overlap.
+pub fn ba_axpy_f32(
+    _actor: &mut Actor,
+    y: Value,
+    y_idx: Value,
+    y_stride: Value,
+    x: Value,
+    x_idx: Value,
+    x_stride: Value,
+    num: Value,
+    a: Value,
+) -> HostResult
+{
+    let y_ba = unwrap_ba!(y);
+    let x_ba = unwrap_ba!(x);
+    let y_idx = unwrap_usize!(y_idx);
+    let y_stride = unwrap_usize!(y_stride);
+    let a = unwrap_f64!(a) as f32;
+    let x_idx = unwrap_usize!(x_idx);
+    let x_stride = unwrap_usize!(x_stride);
+    let num = unwrap_usize!(num);
+
+    if y_stride < 1 || x_stride < 1 {
+        error!("expected strides to be at least 1");
+    }
+
+    if num == 0 {
+        return Value::NIL.into();
+    }
+
+    let y_span = match span(y_idx, y_stride, num) {
+        Some(v) => v,
+        None => error!("axpy_f32 index range overflows"),
+    };
+    let x_span = match span(x_idx, x_stride, num) {
+        Some(v) => v,
+        None => error!("axpy_f32 index range overflows"),
+    };
+
+    let y_len = y_ba.num_bytes() / size_of::<f32>();
+    let x_len = x_ba.num_bytes() / size_of::<f32>();
+
+    if y_span > y_len || x_span > x_len {
+        error!(
+            "axpy_f32 touches f32 elements up to {} and {}, past the ends at {} and {}",
+            y_span - 1, x_span - 1, y_len, x_len
+        );
+    }
+
+    // Overlapping runs can't be borrowed as a mutable and a shared slice.
+    // They go element by element through raw pointers instead, which gives
+    // the same result as the equivalent loop written in Plush
+    let same_ba = std::ptr::eq(y_ba.bytes, x_ba.bytes);
+    if same_ba && y_idx < x_span && x_idx < y_span {
+        unsafe {
+            let base = y_ba.bytes as *mut f32;
+            for i in 0..num {
+                let yp = base.add(y_idx + i * y_stride);
+                let xv = *base.add(x_idx + i * x_stride);
+                *yp = (*yp).algebraic_add(a.algebraic_mul(xv));
+            }
+        }
+        return Value::NIL.into();
+    }
+
+    let y_slice = unsafe { y_ba.get_slice_mut::<f32>(y_idx, y_span - y_idx) };
+    let x_slice = unsafe { x_ba.get_slice::<f32>(x_idx, x_span - x_idx) };
+
+    if y_stride == 1 && x_stride == 1 {
+        axpy_f32_kernel(y_slice, 1, a, x_slice, 1, num);
+    } else {
+        axpy_f32_kernel(y_slice, y_stride, a, x_slice, x_stride, num);
+    }
+
+    Value::NIL.into()
 }
 
 pub fn ba_num_u32(_actor: &mut Actor, ba: Value) -> HostResult

@@ -1,0 +1,67 @@
+// Fill a bytearray with the given f32 values
+fun make(vals) {
+    let ba = ByteArray.with_size(vals.len * 4);
+    for (let var i = 0; i < vals.len; ++i) {
+        ba.set_f32(i, vals[i]);
+    }
+    return ba;
+}
+
+// Check f32 elements against the expected values
+fun check(ba, vals) {
+    for (let var i = 0; i < vals.len; ++i) {
+        assert(ba.get_f32(i) == vals[i]);
+    }
+}
+
+// Basic contiguous axpy between two bytearrays
+let y = make([1.0, 2.0, 3.0, 4.0]);
+let x = make([10.0, 20.0, 30.0, 40.0]);
+y.axpy_f32(0, 1, x, 0, 1, 4, 0.5);
+check(y, [6.0, 12.0, 18.0, 24.0]);
+
+// Zero count leaves y untouched
+y.axpy_f32(0, 1, x, 0, 1, 0, 2.0);
+check(y, [6.0, 12.0, 18.0, 24.0]);
+
+// Offsets and strides: y[1], y[3] += 2 * x[0], x[2]
+let y2 = make([0.0, 1.0, 0.0, 1.0]);
+y2.axpy_f32(1, 2, x, 0, 2, 2, 2.0);
+check(y2, [0.0, 21.0, 0.0, 61.0]);
+
+// Two disjoint halves of the same bytearray: second half += first half
+let ba = make([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+ba.axpy_f32(4, 1, ba, 0, 1, 4, 1.0);
+check(ba, [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0]);
+
+// Exact aliasing, y += a * y
+let s = make([1.0, 2.0, 3.0]);
+s.axpy_f32(0, 1, s, 0, 1, 3, 1.0);
+check(s, [2.0, 4.0, 6.0]);
+
+// Overlapping runs behave like the equivalent loop, which reads
+// each x element after the previous y element was written
+let p = make([1.0, 1.0, 1.0, 1.0, 1.0]);
+p.axpy_f32(1, 1, p, 0, 1, 4, 1.0);
+check(p, [1.0, 2.0, 3.0, 4.0, 5.0]);
+
+// A run long enough to exercise the vectorized loop, against a
+// plain loop, using exactly representable values
+let n = 1003;
+let u = ByteArray.with_size(n * 4);
+let v = ByteArray.with_size(n * 4);
+let w = ByteArray.with_size(n * 4);
+for (let var i = 0; i < n; ++i) {
+    u.set_f32(i, (i % 17).to_f() - 8.0);
+    v.set_f32(i, (i % 5).to_f() * 0.25);
+    w.set_f32(i, (i % 17).to_f() - 8.0);
+}
+u.axpy_f32(0, 1, v, 0, 1, n, -1.5);
+for (let var i = 0; i < n; ++i) {
+    w.set_f32(i, w.get_f32(i) + -1.5 * v.get_f32(i));
+}
+for (let var i = 0; i < n; ++i) {
+    assert(u.get_f32(i) == w.get_f32(i));
+}
+
+$println("ba_axpy_f32 ok");
