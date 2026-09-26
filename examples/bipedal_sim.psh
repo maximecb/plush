@@ -1,0 +1,617 @@
+// A small 3D rigid-body biped playground. Units: metres, kilograms, seconds,
+// radians and newton-metres. +Y is up, +Z is forward, +X is the robot's left.
+//
+// Usage: plush examples/bipedal_sim.psh [seed]
+//        plush examples/bipedal_sim.psh --headless [seconds] [seed] [shot.tga|-] [hold]
+//        plush examples/bipedal_sim.psh --bench [frames] [seed] [orbit]
+// Controls: R random reset, SPACE pause, N single step, arrows orbit,
+//           W/S zoom, H toggle pose motors, ESC quit.
+//
+// The neutral body is 1.78 m tall and weighs 80 kg. Box inertia, small fixed
+// steps and position-based rigid-body constraints keep this implementation
+// compact. All body boxes collide with the floor; there is no self-collision.
+// The default is a passive fall, not a balance or walking controller.
+//
+// Joint ranges loosely follow adult ROM reference values, rounded for this
+// model: https://archive.cdc.gov/www_cdc_gov/ncbddd/jointrom/index.html
+// Shoulder abduction is restricted to 80 degrees in this simplified model.
+// Motor torque/speed settings are approximate engineering choices, not a
+// fitted human muscle model. Human torque depends on angle and speed:
+// https://pubmed.ncbi.nlm.nih.gov/17485097/
+//
+// A controller can call joint.set_target(Vec3(x, y, z)) in radians and enable
+// joint.enabled. Targets are range-clamped, slew-limited and driven by bounded
+// torque with a simple torque-speed envelope. Impacts can exceed motor speed;
+// skeletal stops/contact forces are not limited by muscle strength.
+
+from image import Image, save_tga;
+from random import Xoshiro128;
+
+let PI = 3.141592653589793;
+let DEG = PI / 180.0;
+let STEP = 1.0 / 240.0;
+let ITERATIONS = 12;
+let WIDTH = 800;
+let HEIGHT = 600;
+let BRIGHTNESS = 1.25;
+let UP = Vec3(0.0, 1.0, 0.0);
+let AXES = [Vec3(1.0, 0.0, 0.0), UP, Vec3(0.0, 0.0, 1.0)];
+
+class Vec3 {
+    init(self, x, y, z) { self.x = x; self.y = y; self.z = z; }
+    add(self, b) { return Vec3(self.x + b.x, self.y + b.y, self.z + b.z); }
+    sub(self, b) { return Vec3(self.x - b.x, self.y - b.y, self.z - b.z); }
+    mul(self, s) { return Vec3(self.x * s, self.y * s, self.z * s); }
+    dot(self, b) { return self.x * b.x + self.y * b.y + self.z * b.z; }
+    cross(self, b) {
+        return Vec3(self.y * b.z - self.z * b.y,
+                    self.z * b.x - self.x * b.z, self.x * b.y - self.y * b.x);
+    }
+    length(self) { return self.dot(self).sqrt(); }
+    unit(self) { return self.mul(1.0 / self.length().max(0.000000001)); }
+    at(self, i) { if (i == 0) return self.x; if (i == 1) return self.y; return self.z; }
+}
+
+fun zero() { return Vec3(0.0, 0.0, 0.0); }
+fun atan2(y, x) {
+    if (x > 0.0) return (y / x).atan();
+    if (x < 0.0) return (y / x).atan() + (y >= 0.0 ? PI : -PI);
+    if (y == 0.0) return 0.0;
+    return y > 0.0 ? PI * 0.5 : -PI * 0.5;
+}
+
+class Quat {
+    init(self, w, x, y, z) { self.w = w; self.x = x; self.y = y; self.z = z; }
+    conj(self) { return Quat(self.w, -self.x, -self.y, -self.z); }
+    mul(self, b) {
+        return Quat(self.w*b.w - self.x*b.x - self.y*b.y - self.z*b.z,
+                    self.w*b.x + self.x*b.w + self.y*b.z - self.z*b.y,
+                    self.w*b.y - self.x*b.z + self.y*b.w + self.z*b.x,
+                    self.w*b.z + self.x*b.y - self.y*b.x + self.z*b.w);
+    }
+    unit(self) {
+        let s = 1.0 / (self.w*self.w + self.x*self.x + self.y*self.y + self.z*self.z).sqrt();
+        return Quat(self.w*s, self.x*s, self.y*s, self.z*s);
+    }
+    rotate(self, v) {
+        // Expand the two cross products to avoid six temporary vectors in
+        // this inner physics operation. Keep the arithmetic order unchanged.
+        let x = self.x; let y = self.y; let z = self.z; let w = self.w;
+        let tx = (y*v.z-z*v.y)*2.0;
+        let ty = (z*v.x-x*v.z)*2.0;
+        let tz = (x*v.y-y*v.x)*2.0;
+        return Vec3((v.x+tx*w)+(y*tz-z*ty),
+                    (v.y+ty*w)+(z*tx-x*tz), (v.z+tz*w)+(x*ty-y*tx));
+    }
+    // Euler convention: Rz(z) Ry(y) Rx(x). Y stays away from +/-90 degrees.
+    angles(self) {
+        let s = (2.0 * (self.w*self.y - self.z*self.x)).clip(-1.0, 1.0);
+        return Vec3(atan2(2.0*(self.w*self.x + self.y*self.z),
+                          1.0 - 2.0*(self.x*self.x + self.y*self.y)),
+                    atan2(s, (1.0 - s*s).max(0.0).sqrt()),
+                    atan2(2.0*(self.w*self.z + self.x*self.y),
+                          1.0 - 2.0*(self.y*self.y + self.z*self.z)));
+    }
+}
+
+fun identity() { return Quat(1.0, 0.0, 0.0, 0.0); }
+fun rotation(v) {
+    let a = v.length();
+    if (a < 0.00000001) return Quat(1.0, v.x*0.5, v.y*0.5, v.z*0.5).unit();
+    let s = (a*0.5).sin() / a;
+    return Quat((a*0.5).cos(), v.x*s, v.y*s, v.z*s);
+}
+fun euler(v) {
+    return rotation(Vec3(0.0, 0.0, v.z)).mul(rotation(Vec3(0.0, v.y, 0.0)))
+        .mul(rotation(Vec3(v.x, 0.0, 0.0)));
+}
+
+class Body {
+    init(self, name, mass, size, pos, color) {
+        self.name = name; self.mass = mass; self.im = 1.0 / mass;
+        self.size = size; self.p = pos; self.q = identity();
+        self.v = zero(); self.w = zero(); self.color = color;
+        self.old_p = pos; self.old_q = self.q;
+        self.ii = Vec3(12.0 / (mass*(size.y*size.y + size.z*size.z)),
+                       12.0 / (mass*(size.x*size.x + size.z*size.z)),
+                       12.0 / (mass*(size.x*size.x + size.y*size.y)));
+        self.corners = [];
+        for (let var i = 0; i < 8; ++i) {
+            self.corners.push(Vec3((i & 1) == 0 ? -size.x*0.5 : size.x*0.5,
+                                   (i & 2) == 0 ? -size.y*0.5 : size.y*0.5,
+                                   (i & 4) == 0 ? -size.z*0.5 : size.z*0.5));
+        }
+        self.support = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    }
+    inertia(self, v) {
+        let a = self.q.conj().rotate(v);
+        return self.q.rotate(Vec3(a.x*self.ii.x, a.y*self.ii.y, a.z*self.ii.z));
+    }
+    turn(self, angle) { self.q = rotation(angle).mul(self.q).unit(); }
+    world(self, local) { return self.p.add(self.q.rotate(local)); }
+    weight(self, r, n) { let c = r.cross(n); return self.im + c.dot(self.inertia(c)); }
+    move(self, impulse, r) {
+        self.p = self.p.add(impulse.mul(self.im));
+        self.turn(self.inertia(r.cross(impulse)));
+    }
+    impulse(self, impulse, r) {
+        self.v = self.v.add(impulse.mul(self.im));
+        self.w = self.w.add(self.inertia(r.cross(impulse)));
+    }
+}
+
+class Joint {
+    init(self, name, a, b, anchor, lo, hi, torque, speed) {
+        self.name = name; self.a = a; self.b = b;
+        self.ra = anchor.sub(a.p); self.rb = anchor.sub(b.p);
+        self.lo = lo.mul(DEG); self.hi = hi.mul(DEG);
+        self.torque = torque; self.speed = speed;
+        self.target = zero(); self.command = zero(); self.enabled = false;
+        self.last_torque = zero();
+    }
+    angles(self) { return self.a.q.conj().mul(self.b.q).angles(); }
+    set_target(self, v) {
+        self.target = Vec3(v.x.clip(self.lo.x, self.hi.x),
+                           v.y.clip(self.lo.y, self.hi.y), v.z.clip(self.lo.z, self.hi.z));
+    }
+    // The gradient of each Euler coordinate with respect to relative world
+    // rotation. Reciprocal axes handle coupled flexion/twist correctly.
+    gradients(self, angles) {
+        let cz = angles.z.cos(); let sz = angles.z.sin();
+        let cy = angles.y.cos(); let sy = angles.y.sin();
+        return [self.a.q.rotate(Vec3(cz/cy, sz/cy, 0.0)),
+                self.a.q.rotate(Vec3(-sz, cz, 0.0)),
+                self.a.q.rotate(Vec3(cz*sy/cy, sz*sy/cy, 1.0))];
+    }
+    motors(self, dt) {
+        let angles = self.angles();
+        let axes = self.gradients(angles);
+        let commands = []; let torques = [];
+        for (let var i = 0; i < 3; ++i) {
+            let axis = axes[i];
+            let velocity = self.b.w.sub(self.a.w).dot(axis);
+            let speed = self.speed.at(i);
+            let command = self.command.at(i) + (self.target.at(i) - self.command.at(i)).clip(-speed*dt, speed*dt);
+            commands.push(command);
+            // Backward-Euler damping avoids overshooting on low-inertia feet.
+            let weight = axis.dot(self.a.inertia(axis).add(self.b.inertia(axis)));
+            let damping = self.enabled ? 6.0 : 0.35;
+            let drive = self.enabled ? 90.0*(command - angles.at(i)) : 0.0;
+            let var torque = (drive - damping*velocity) / (1.0 + damping*dt*weight);
+            let var cap = self.torque.at(i);
+            if (torque*velocity > 0.0) cap *= (1.0 - velocity.abs()/speed).max(0.0);
+            torque = torque.clip(-cap, cap);
+            if (self.lo.at(i) == self.hi.at(i)) torque = 0.0;
+            torques.push(torque);
+            let impulse = axis.mul(torque*dt);
+            self.a.w = self.a.w.sub(self.a.inertia(impulse));
+            self.b.w = self.b.w.add(self.b.inertia(impulse));
+        }
+        self.command = Vec3(commands[0], commands[1], commands[2]);
+        self.last_torque = Vec3(torques[0], torques[1], torques[2]);
+    }
+    solve(self) {
+        // Angular stops use the bodies' inverse inertia, so a light limb moves
+        // more than the torso. These are skeletal constraints, not actuators.
+        let var angles = self.angles();
+        for (let var i = 0; i < 3; ++i) {
+            let a = angles.at(i);
+            let error = a - a.clip(self.lo.at(i), self.hi.at(i));
+            if (error.abs() < 0.00001) continue;
+            let axis = self.gradients(angles)[i];
+            let ia = self.a.inertia(axis); let ib = self.b.inertia(axis);
+            let impulse = error.clip(-0.2, 0.2) / axis.dot(ia.add(ib));
+            self.a.turn(ia.mul(impulse));
+            self.b.turn(ib.mul(-impulse));
+            // Only a correction changes the relative angles for the next axis.
+            if (i < 2) angles = self.angles();
+        }
+        // Solve the anchor along three axes. Recompute the arms after each
+        // correction because rotating a body also moves its anchor.
+        for (let var i = 0; i < 3; ++i) {
+            let ra = self.a.q.rotate(self.ra); let rb = self.b.q.rotate(self.rb);
+            let n = AXES[i];
+            let error = self.b.p.add(rb).sub(self.a.p.add(ra)).dot(n);
+            let impulse = n.mul(error / (self.a.weight(ra, n) + self.b.weight(rb, n)));
+            self.a.move(impulse, ra);
+            self.b.move(impulse.mul(-1.0), rb);
+        }
+    }
+}
+
+// A signed-distance contact interface leaves room for ramps/triangle meshes.
+// Replace sample() and draw() together when adding terrain. The first version
+// is an infinite plane; the checkerboard only depicts its central patch.
+class Ground {
+    // Increment revision after changing terrain geometry or appearance.
+    init(self) { self.revision = 0; }
+    sample(self, p) { return p.y; }
+    normal(self, p) { return UP; }
+    draw(self, renderer) {
+        for (let var z = -6; z < 6; ++z) {
+            for (let var x = -6; x < 6; ++x) {
+                let color = ((x + z) & 1) == 0 ? 0x566776 : 0x657988;
+                renderer.quad(Vec3(x*0.5, 0.0, z*0.5), Vec3(x*0.5, 0.0, (z+1)*0.5),
+                              Vec3((x+1)*0.5, 0.0, (z+1)*0.5), Vec3((x+1)*0.5, 0.0, z*0.5), color);
+            }
+        }
+    }
+}
+
+class Simulator {
+    init(self, seed) {
+        self.ground = Ground(); self.rng = Xoshiro128(seed); self.reset();
+    }
+    body(self, name, mass, size, pos, color) {
+        let b = Body(name, mass, size, pos, color); self.bodies.push(b); return b;
+    }
+    joint(self, name, a, b, p, lo, hi, torque, speed) {
+        let j = Joint(name, a, b, p, lo, hi, torque, speed); self.joints.push(j); return j;
+    }
+    reset(self) {
+        self.bodies = []; self.joints = []; self.time = 0.0; self.hold = false;
+        let pelvis = self.body("Pelvis", 12.0, Vec3(0.30, 0.20, 0.22), Vec3(0.0, 1.03, 0.0), 0xDEE5E9);
+        let torso = self.body("Torso", 30.0, Vec3(0.39, 0.41, 0.23), Vec3(0.0, 1.335, 0.0), 0xE7EDF0);
+        let head = self.body("Head", 5.0, Vec3(0.18, 0.21, 0.19), Vec3(0.0, 1.675, 0.0), 0xF0C66C);
+        self.joint("Waist", pelvis, torso, Vec3(0.0, 1.13, 0.0), Vec3(-35.0,-30.0,-25.0), Vec3(35.0,30.0,25.0), Vec3(140.0,70.0,100.0), Vec3(4.0,3.0,3.0));
+        self.joint("Neck", torso, head, Vec3(0.0, 1.55, 0.0), Vec3(-40.0,-60.0,-35.0), Vec3(45.0,60.0,35.0), Vec3(20.0,15.0,15.0), Vec3(3.0,3.0,3.0));
+        for (let var side = 0; side < 2; ++side) {
+            let s = side == 0 ? -1.0 : 1.0;
+            let name = side == 0 ? "Right " : "Left ";
+            let color = side == 0 ? 0xE58B55 : 0x51B9C6;
+            let thigh = self.body(name+"thigh", 8.0, Vec3(0.135,0.43,0.15), Vec3(s*0.105,0.765,0.0), color);
+            let shin = self.body(name+"shin", 3.5, Vec3(0.105,0.43,0.115), Vec3(s*0.105,0.335,0.0), color);
+            let foot = self.body(name+"foot", 1.5, Vec3(0.12,0.12,0.26), Vec3(s*0.105,0.06,0.065), 0x364759);
+            self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,-40.0,-30.0), Vec3(18.0,40.0,30.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
+            self.joint(name+"knee", thigh, shin, Vec3(s*0.105,0.55,0.0), zero(), Vec3(138.0,0.0,0.0), Vec3(160.0,0.0,0.0), Vec3(10.0,1.0,1.0));
+            self.joint(name+"ankle", shin, foot, Vec3(s*0.105,0.12,0.0), Vec3(-15.0,0.0,-20.0), Vec3(55.0,0.0,20.0), Vec3(120.0,0.0,35.0), Vec3(6.0,1.0,3.0));
+            let upper = self.body(name+"upper arm", 2.0, Vec3(0.085,0.29,0.10), Vec3(s*0.245,1.345,0.0), color);
+            let lower = self.body(name+"forearm", 1.5, Vec3(0.075,0.30,0.085), Vec3(s*0.245,1.05,0.0), color);
+            self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-169.0,-60.0,side == 0 ? -80.0 : -15.0), Vec3(45.0,60.0,side == 0 ? 15.0 : 80.0), Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
+            self.joint(name+"elbow", upper, lower, Vec3(s*0.245,1.20,0.0), Vec3(-145.0,0.0,0.0), zero(), Vec3(55.0,0.0,0.0), Vec3(8.0,1.0,1.0));
+        }
+        // Perturb a valid articulated pose, then rebuild down the tree so no
+        // anchor starts stretched. A small forward lean makes the fall clear.
+        pelvis.q = euler(Vec3(self.rng.float(0.06,0.16), self.rng.float(-0.15,0.15), self.rng.float(-0.10,0.10)));
+        for (let var i = 0; i < self.joints.len; ++i) {
+            let j = self.joints[i];
+            let pose = Vec3(self.rng.float(-0.12,0.12).clip(j.lo.x,j.hi.x),
+                            self.rng.float(-0.04,0.04).clip(j.lo.y,j.hi.y),
+                            self.rng.float(-0.06,0.06).clip(j.lo.z,j.hi.z));
+            j.b.q = j.a.q.mul(euler(pose));
+            j.b.p = j.a.world(j.ra).sub(j.b.q.rotate(j.rb));
+            j.set_target(pose); j.command = pose;
+        }
+        let var bottom = 100.0;
+        for (let var i = 0; i < self.bodies.len; ++i) {
+            let b = self.bodies[i];
+            for (let var k = 0; k < 8; ++k) bottom = bottom.min(b.world(b.corners[k]).y);
+        }
+        for (let var i = 0; i < self.bodies.len; ++i) {
+            let b = self.bodies[i]; b.p = b.p.add(Vec3(0.0,0.025-bottom,0.0));
+        }
+    }
+    toggle_hold(self) {
+        self.hold = !self.hold;
+        for (let var i = 0; i < self.joints.len; ++i) self.joints[i].enabled = self.hold;
+    }
+    contacts(self, b) {
+        for (let var i = 0; i < 8; ++i) {
+            let r = b.q.rotate(b.corners[i]); let p = b.p.add(r);
+            let d = self.ground.sample(p);
+            if (d >= 0.0) continue;
+            let n = self.ground.normal(p);
+            let impulse = -d / b.weight(r,n);
+            b.move(n.mul(impulse), r);
+            b.support[i] += impulse;
+        }
+    }
+    step(self) {
+        for (let var i = 0; i < self.joints.len; ++i) self.joints[i].motors(STEP);
+        for (let var i = 0; i < self.bodies.len; ++i) {
+            let b = self.bodies[i]; b.old_p = b.p; b.old_q = b.q;
+            b.v = b.v.add(Vec3(0.0,-9.81*STEP,0.0));
+            b.p = b.p.add(b.v.mul(STEP)); b.turn(b.w.mul(STEP));
+            for (let var k = 0; k < 8; ++k) b.support[k] = 0.0;
+        }
+        for (let var pass = 0; pass < ITERATIONS; ++pass) {
+            // Alternate traversal to reduce directional bias in the chain.
+            for (let var i = 0; i < self.joints.len; ++i) {
+                let idx = (pass & 1) == 0 ? i : self.joints.len-1-i;
+                self.joints[idx].solve();
+            }
+            for (let var i = 0; i < self.bodies.len; ++i) self.contacts(self.bodies[i]);
+        }
+        for (let var i = 0; i < self.bodies.len; ++i) {
+            let b = self.bodies[i];
+            b.v = b.p.sub(b.old_p).mul(1.0/STEP);
+            let dq = b.q.mul(b.old_q.conj());
+            let axis = Vec3(dq.x,dq.y,dq.z);
+            let len = axis.length();
+            let sign = dq.w < 0.0 ? -1.0 : 1.0;
+            b.w = axis.mul(sign*2.0*atan2(len,dq.w.abs()) / (STEP*len.max(0.000000001)));
+            // Inelastic normal impulses and Coulomb friction. The positional
+            // normal correction supplies the resting weight/friction budget.
+            for (let var k = 0; k < 8; ++k) {
+                if (b.support[k] == 0.0) continue;
+                let r = b.q.rotate(b.corners[k]);
+                let n = self.ground.normal(b.p.add(r));
+                let velocity = b.v.add(b.w.cross(r));
+                let vn = velocity.dot(n);
+                let normal_impulse = (-vn / b.weight(r,n)).max(0.0);
+                b.impulse(n.mul(normal_impulse), r);
+                let after = b.v.add(b.w.cross(r));
+                let tangent = after.sub(n.mul(after.dot(n)));
+                let speed = tangent.length();
+                if (speed > 0.000001) {
+                    let t = tangent.mul(1.0/speed);
+                    let friction = (speed/b.weight(r,t)).min(0.65*(normal_impulse + b.support[k]/STEP));
+                    b.impulse(t.mul(-friction), r);
+                }
+            }
+        }
+        self.time += STEP;
+    }
+    render(self, renderer) {
+        renderer.begin(self.ground);
+        for (let var i = 0; i < self.bodies.len; ++i) renderer.body(self.bodies[i]);
+    }
+    // Return maximum anchor gap, penetration, angular limit error, and energy.
+    // Headless mode checks these throughout a fall, not just in the last frame.
+    metrics(self) {
+        let var gap = 0.0; let var depth = 0.0; let var angle = 0.0; let var energy = 0.0;
+        for (let var i = 0; i < self.joints.len; ++i) {
+            let j = self.joints[i];
+            gap = gap.max(j.a.world(j.ra).sub(j.b.world(j.rb)).length());
+            let a = j.angles();
+            for (let var k = 0; k < 3; ++k) angle = angle.max((a.at(k)-a.at(k).clip(j.lo.at(k),j.hi.at(k))).abs());
+        }
+        for (let var i = 0; i < self.bodies.len; ++i) {
+            let b = self.bodies[i];
+            assert(b.p.dot(b.p) < 10000.0);
+            let w = b.q.conj().rotate(b.w);
+            energy += 0.5*b.mass*b.v.dot(b.v) + 0.5*(w.x*w.x/b.ii.x + w.y*w.y/b.ii.y + w.z*w.z/b.ii.z);
+            for (let var k = 0; k < 8; ++k) depth = depth.max(-self.ground.sample(b.world(b.corners[k])));
+        }
+        return [gap,depth,angle,energy];
+    }
+}
+
+// Perspective projection with near clipping, backface culling, interpolated
+// vertex lighting and a depth buffer. The scanline loop follows the approach
+// in benchmarks/raster_vertlight.psh, with solid colors instead of textures.
+class ScreenVertex {
+    init(self, x, y, z, light) { self.x = x; self.y = y; self.z = z; self.light = light; }
+}
+
+class Renderer {
+    init(self) {
+        self.image = Image(WIDTH,HEIGHT); self.depth = ByteArray.with_size(WIDTH*HEIGHT*4);
+        self.yaw = 0.65; self.pitch = 0.28; self.distance = 3.8;
+        self.target = Vec3(0.0,0.85,0.0);
+        self.faces = [[0,4,6,2],[1,3,7,5],[0,1,5,4],[2,6,7,3],[0,2,3,1],[4,5,7,6]];
+        self.ground_pixels = ByteArray.with_size(WIDTH*HEIGHT*4);
+        self.ground_depth = ByteArray.with_size(WIDTH*HEIGHT*4);
+        self.cached_ground = nil;
+    }
+    begin(self, ground) {
+        self.eye = self.target.add(Vec3(self.yaw.sin()*self.pitch.cos(),self.pitch.sin(),self.yaw.cos()*self.pitch.cos()).mul(self.distance));
+        self.forward = self.target.sub(self.eye).unit();
+        self.right = self.forward.cross(UP).unit(); self.up = self.right.cross(self.forward);
+        // Both color and depth are cached, so body/ground occlusion is identical
+        // to drawing the static floor again. Any camera change invalidates it.
+        if (self.cached_ground == ground && self.cached_revision == ground.revision
+            && self.cached_yaw == self.yaw && self.cached_pitch == self.pitch
+            && self.cached_distance == self.distance
+            && self.cached_target.x == self.target.x && self.cached_target.y == self.target.y
+            && self.cached_target.z == self.target.z) {
+            self.image.bytes.memcpy(0,self.ground_pixels,0,WIDTH*HEIGHT*4);
+            self.depth.memcpy(0,self.ground_depth,0,WIDTH*HEIGHT*4);
+            return;
+        }
+        self.image.clear(0xFF28384A); self.depth.fill_u32(0,WIDTH*HEIGHT,0);
+        ground.draw(self);
+        self.ground_pixels.memcpy(0,self.image.bytes,0,WIDTH*HEIGHT*4);
+        self.ground_depth.memcpy(0,self.depth,0,WIDTH*HEIGHT*4);
+        self.cached_ground = ground; self.cached_revision = ground.revision;
+        self.cached_yaw = self.yaw; self.cached_pitch = self.pitch; self.cached_distance = self.distance;
+        self.cached_target = Vec3(self.target.x,self.target.y,self.target.z);
+    }
+    camera(self, p) {
+        let d = p.sub(self.eye); return Vec3(d.dot(self.right),d.dot(self.up),d.dot(self.forward));
+    }
+    light(self, p, n) {
+        let to_light = Vec3(-3.0,5.0,4.0).sub(p);
+        let d2 = to_light.dot(to_light);
+        return BRIGHTNESS * (0.28 + 0.72*n.dot(to_light.unit()).max(0.0)/(1.0+0.012*d2));
+    }
+    body(self, b) {
+        let vertices = [];
+        for (let var i = 0; i < 8; ++i) vertices.push(b.world(b.corners[i]));
+        for (let var i = 0; i < 6; ++i) {
+            let f = self.faces[i];
+            self.quad(vertices[f[0]],vertices[f[1]],vertices[f[2]],vertices[f[3]],b.color);
+        }
+        // A dark visor marks the front of the head, making orientation clear.
+        if (b.name == "Head") {
+            self.quad(b.world(Vec3(-0.075,-0.005,0.096)),b.world(Vec3(0.075,-0.005,0.096)),
+                      b.world(Vec3(0.075,0.065,0.096)),b.world(Vec3(-0.075,0.065,0.096)),0x223D50);
+        }
+    }
+    quad(self, a, b, c, d, color) {
+        let n = b.sub(a).cross(c.sub(a)).unit();
+        if (n.dot(self.eye.sub(a)) <= 0.0) return;
+        let points = [a,b,c,d]; let poly = [];
+        for (let var i = 0; i < 4; ++i) {
+            let p = self.camera(points[i]); poly.push(ScreenVertex(p.x,p.y,p.z,self.light(points[i],n)));
+        }
+        // Sutherland-Hodgman near-plane clipping, including vertex light.
+        let clipped = [];
+        let var prev = poly[3];
+        for (let var i = 0; i < 4; ++i) {
+            let p = poly[i];
+            if ((p.z >= 0.08) != (prev.z >= 0.08)) {
+                let t = (0.08-prev.z)/(p.z-prev.z);
+                clipped.push(ScreenVertex(prev.x+t*(p.x-prev.x),prev.y+t*(p.y-prev.y),0.08,prev.light+t*(p.light-prev.light)));
+            }
+            if (p.z >= 0.08) clipped.push(p);
+            prev = p;
+        }
+        for (let var i = 0; i < clipped.len; ++i) {
+            let p = clipped[i]; let inv = 1.0/p.z;
+            p.x = WIDTH*0.5 + 620.0*p.x*inv; p.y = HEIGHT*0.5 - 620.0*p.y*inv;
+            p.z = inv; p.light *= inv;
+        }
+        for (let var i = 1; i+1 < clipped.len; ++i) self.triangle(clipped[0],clipped[i],clipped[i+1],color);
+    }
+    triangle(self, a, b, c, color) {
+        let dx1 = b.x-a.x; let dy1 = b.y-a.y; let dx2 = c.x-a.x; let dy2 = c.y-a.y;
+        let det = dx1*dy2-dx2*dy1;
+        if (det.abs() < 0.000001) return;
+        let zx = ((b.z-a.z)*dy2-(c.z-a.z)*dy1)/det;
+        let zy = ((c.z-a.z)*dx1-(b.z-a.z)*dx2)/det;
+        let lx = ((b.light-a.light)*dy2-(c.light-a.light)*dy1)/det;
+        let ly = ((c.light-a.light)*dx1-(b.light-a.light)*dx2)/det;
+        let y0 = (a.y.min(b.y).min(c.y)-0.5).ceil().max(0);
+        let y1 = (a.y.max(b.y).max(c.y)-0.5).ceil().min(HEIGHT);
+        let vertices = [a,b,c];
+        let r = (color >> 16) & 255; let g = (color >> 8) & 255; let blue = color & 255;
+        let fb = self.image.bytes; let depth = self.depth;
+        for (let var y = y0; y < y1; ++y) {
+            let py = y+0.5; let var left = 1.0e20; let var right = -1.0e20;
+            for (let var e = 0; e < 3; ++e) {
+                let p = vertices[e]; let q = vertices[(e+1)%3];
+                if ((p.y <= py && q.y > py) || (q.y <= py && p.y > py)) {
+                    let x = p.x+(py-p.y)*(q.x-p.x)/(q.y-p.y);
+                    left = left.min(x); right = right.max(x);
+                }
+            }
+            // Clip as floats before converting, including empty scanlines.
+            if (left >= right) continue;
+            let x0 = (left-0.5).clip(0.0,WIDTH.to_f()).ceil();
+            let x1 = (right-0.5).clip(0.0,WIDTH.to_f()).ceil();
+            let var z = a.z+zx*(x0+0.5-a.x)+zy*(py-a.y);
+            let var light = a.light+lx*(x0+0.5-a.x)+ly*(py-a.y);
+            let var idx = y*WIDTH+x0; let end = y*WIDTH+x1;
+            while (idx < end) {
+                if (z > depth.get_f32(idx)) {
+                    let shade = (light/z).clip(0.0,1.0);
+                    fb.set_u32(idx,0xFF000000 | ((r*shade).floor() << 16) | ((g*shade).floor() << 8) | (blue*shade).floor());
+                    depth.set_f32(idx,z);
+                }
+                z += zx; light += lx; ++idx;
+            }
+        }
+    }
+}
+
+// Measure a fixed workload, independently of display refresh and frame pacing.
+// Four physics steps advance 1/60 s. Interleave runs when comparing versions.
+if ($cmd_get_arg_or(1,"") == "--bench") {
+    let frames = $cmd_get_arg_or(2,"180").parse_int(10);
+    let bench_seed = $cmd_get_arg_or(3,"1").parse_int(10);
+    if (frames == nil || bench_seed == nil) { $println("Expected integer frames and seed"); $exit(1); }
+    if (frames <= 0) { $println("Frames must be positive"); $exit(1); }
+    let bench_sim = Simulator(bench_seed); let bench_renderer = Renderer();
+    bench_sim.render(bench_renderer);
+    let var physics_ms = 0; let var render_ms = 0;
+    for (let var frame = 0; frame < frames; ++frame) {
+        if ($cmd_get_arg_or(4,"") == "orbit") bench_renderer.yaw += 0.01;
+        let start = $time_current_ms();
+        for (let var i = 0; i < 4; ++i) bench_sim.step();
+        let middle = $time_current_ms();
+        bench_sim.render(bench_renderer);
+        let end = $time_current_ms();
+        physics_ms += middle-start; render_ms += end-middle;
+    }
+    $println("Physics (1/60 s): " + (physics_ms.to_f()/frames).format_decimals(3)
+        + " ms; render: " + (render_ms.to_f()/frames).format_decimals(3) + " ms/frame");
+    $println("Final energy: " + bench_sim.metrics()[3].format_decimals(3) + " J");
+    let var checksum = 0;
+    for (let var i = 0; i < WIDTH*HEIGHT; ++i) checksum = (checksum*31 + bench_renderer.image.bytes.get_u32(i)) & 0xFFFFFFFF;
+    $println("Frame checksum: " + checksum.to_s());
+    $exit(0);
+}
+
+let headless = $cmd_get_arg_or(1,"") == "--headless";
+let var duration = 8.0;
+let var seed = $time_current_ms();
+if (headless) {
+    duration = $cmd_get_arg_or(2,"8").parse_float();
+    seed = $cmd_get_arg_or(3,"1").parse_int(10);
+} else if ($cmd_get_arg(1) != nil) {
+    seed = $cmd_get_arg(1).parse_int(10);
+}
+if (seed == nil || duration == nil) {
+    $println("Usage: plush examples/bipedal_sim.psh [seed] | --headless [seconds] [seed] [shot.tga]");
+    $exit(1);
+}
+if (!(duration > 0.0 && duration <= 3600.0)) { $println("Seconds must be in (0, 3600]"); $exit(1); }
+let sim = Simulator(seed);
+let renderer = Renderer();
+$println("Biped: 1.78 m, 80 kg, 13 bodies. Seed: " + seed.to_s());
+if (headless) {
+    if ($cmd_get_arg_or(5,"") == "hold") sim.toggle_hold();
+    let count = (duration/STEP).ceil();
+    let maxima = [0.0,0.0,0.0,0.0];
+    for (let var i = 0; i < count; ++i) {
+        sim.step();
+        let m = sim.metrics();
+        for (let var k = 0; k < 4; ++k) maxima[k] = maxima[k].max(m[k]);
+        assert(m[0] < 0.04);
+        assert(m[1] < 0.025);
+        assert(m[2] < 12.0*DEG);
+        assert(m[3] < 2000.0);
+    }
+    sim.render(renderer);
+    let path = $cmd_get_arg(4);
+    if (path != nil && path != "-") assert(save_tga(path,renderer.image));
+    $println("Simulated " + sim.time.format_decimals(2) + " s; max anchor gap " + (maxima[0]*1000.0).format_decimals(2) + " mm; penetration " + (maxima[1]*1000.0).format_decimals(2) + " mm; limit error " + (maxima[2]/DEG).format_decimals(2) + " deg");
+    $println("Peak kinetic energy " + maxima[3].format_decimals(2) + " J; final " + sim.metrics()[3].format_decimals(3) + " J");
+    $exit(0);
+}
+
+$println("R reset | SPACE pause | N step | Arrows orbit | W/S zoom | H pose motors | ESC quit");
+let window = $window_create(WIDTH,HEIGHT,"Biped | R reset | SPACE pause | N step | Arrows orbit | W/S zoom | H motors",0);
+let var paused = false; let var accumulator = 0.0; let var last_ms = $time_current_ms();
+let var left = false; let var right = false; let var up = false; let var down = false;
+let var closer = false; let var farther = false;
+loop {
+    let start = $time_current_ms();
+    let dt = ((start-last_ms)*0.001).clip(0.0,0.05); last_ms = start;
+    let var quit = false;
+    loop {
+        let msg = $actor_poll(); if (msg == nil) break;
+        if (!(msg instanceof UIEvent)) continue;
+        if (msg.kind == 'CLOSE_WINDOW') { quit = true; break; }
+        if (msg.kind != 'KEY_DOWN' && msg.kind != 'KEY_UP') continue;
+        let pressed = msg.kind == 'KEY_DOWN';
+        if (msg.key == 'LEFT') left = pressed;
+        if (msg.key == 'RIGHT') right = pressed;
+        if (msg.key == 'UP') up = pressed;
+        if (msg.key == 'DOWN') down = pressed;
+        if (msg.key == 'W') closer = pressed;
+        if (msg.key == 'S') farther = pressed;
+        if (!pressed) continue;
+        if (msg.key == 'ESCAPE') { quit = true; break; }
+        if (msg.key == 'R') { sim.reset(); accumulator = 0.0; }
+        if (msg.key == 'SPACE') { paused = !paused; accumulator = 0.0; $println(paused ? "Paused" : "Running"); }
+        if (msg.key == 'N') { paused = true; accumulator = 0.0; for (let var i = 0; i < 4; ++i) sim.step(); }
+        if (msg.key == 'H') { sim.toggle_hold(); $println(sim.hold ? "Pose motors ON (no balance controller)" : "Passive joints"); }
+    }
+    if (quit) break;
+    if (left) renderer.yaw -= dt;
+    if (right) renderer.yaw += dt;
+    if (up) renderer.pitch += dt*0.7;
+    if (down) renderer.pitch -= dt*0.7;
+    if (closer) renderer.distance -= dt*2.0;
+    if (farther) renderer.distance += dt*2.0;
+    renderer.pitch = renderer.pitch.clip(0.05,1.35); renderer.distance = renderer.distance.clip(2.2,8.0);
+    if (!paused) {
+        accumulator += dt;
+        while (accumulator >= STEP) { sim.step(); accumulator -= STEP; }
+    }
+    sim.render(renderer); $window_draw_frame(window,renderer.image.bytes);
+    let remaining = 16-($time_current_ms()-start);
+    if (remaining > 0) $actor_sleep(remaining);
+}
