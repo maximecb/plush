@@ -6,6 +6,8 @@
 //        plush examples/bipedal_sim.psh --bench [frames] [seed] [orbit]
 //        plush examples/bipedal_sim.psh --evaluate [episode_seed] [model_seed]
 //        plush examples/bipedal_sim.psh --policy [episode_seed] [model_seed]
+//        plush examples/bipedal_sim.psh --train [episode_seed] [model_seed]
+//        plush examples/bipedal_sim.psh --train-headless [trials] [episode_seed] [model_seed]
 // Controls: R random reset, SPACE pause, N single step, arrows orbit,
 //           W/S zoom, H toggle pose motors, ESC quit.
 // Policy mode replays each episode; R tries the next starting pose.
@@ -738,6 +740,129 @@ fun evaluate_controller(controller, episode_seed, max_seconds) {
     return episode.result();
 }
 
+// Two fixed starting poses make a candidate's score comparable to the current
+// best and discourage improving a single lucky stance.
+fun training_fitness(controller, episode_seed) {
+    let a = evaluate_controller(controller,episode_seed,EPISODE_SECONDS);
+    let b = evaluate_controller(controller,episode_seed+1,EPISODE_SECONDS);
+    return 0.5*(a.fitness+b.fitness);
+}
+
+fun network_arrays(network) {
+    return [network.w1,network.b1,network.w2,network.b2,network.w3,network.b3];
+}
+
+fun copy_network(dst, src) {
+    let a = network_arrays(dst); let b = network_arrays(src);
+    for (let var i = 0; i < a.len; ++i) {
+        assert(a[i].len == b[i].len);
+        a[i].memcpy(0,b[i],0,b[i].len);
+    }
+}
+
+// Actor messages own their byte arrays; the trainer can mutate its next
+// candidate without changing a model that is already queued for the viewer.
+fun network_snapshot(network) {
+    let arrays = network_arrays(network); let snapshot = [];
+    for (let var i = 0; i < arrays.len; ++i) {
+        let copy = ByteArray.with_size(arrays[i].len);
+        copy.memcpy(0,arrays[i],0,copy.len);
+        snapshot.push(copy);
+    }
+    return snapshot;
+}
+
+fun load_network_snapshot(network, snapshot) {
+    let arrays = network_arrays(network);
+    assert(snapshot.len == arrays.len);
+    for (let var i = 0; i < arrays.len; ++i) {
+        assert(snapshot[i].len == arrays[i].len);
+        arrays[i].memcpy(0,snapshot[i],0,arrays[i].len);
+    }
+}
+
+// Sparse parameter perturbations let each trial test a local change. We bias
+// picks toward the final layer and motor biases, which have a direct effect.
+fun mutate_network(network, rng, sigma) {
+    let arrays = network_arrays(network);
+    let count = rng.int(4,25);
+    for (let var i = 0; i < count; ++i) {
+        let pick = rng.int(0,10);
+        let group = pick < 2 ? 0 : pick < 3 ? 1 : pick < 4 ? 2
+                  : pick < 5 ? 3 : pick < 8 ? 4 : 5;
+        let array = arrays[group];
+        let idx = rng.int(0,array.len >> 2);
+        let scale = group == 5 ? sigma : sigma*0.5;
+        array.set_f32(idx,array.get_f32(idx)+rng.float(-scale,scale));
+    }
+}
+
+class HillClimber {
+    init(self, episode_seed, model_seed) {
+        self.episode_seed = episode_seed;
+        self.best = Controller(model_seed,biped_torque_limits());
+        self.candidate = Controller(model_seed,biped_torque_limits());
+        self.rng = Xoshiro128(episode_seed+model_seed*7919+17);
+        self.best_fitness = training_fitness(self.best,episode_seed);
+        self.trials = 0;
+        self.failures = 0;
+        self.sigma = 0.18;
+    }
+    step(self) {
+        copy_network(self.candidate.network,self.best.network);
+        mutate_network(self.candidate.network,self.rng,self.sigma);
+        let score = training_fitness(self.candidate,self.episode_seed);
+        self.trials += 1;
+        if (score > self.best_fitness+0.000001) {
+            let old = self.best;
+            self.best = self.candidate;
+            self.candidate = old;
+            self.best_fitness = score;
+            self.failures = 0;
+            self.sigma = (self.sigma*0.98).max(0.025);
+            return true;
+        }
+        self.failures += 1;
+        if (self.failures >= 40) {
+            self.sigma = (self.sigma*1.25).min(0.6);
+            self.failures = 0;
+        }
+        return false;
+    }
+}
+
+fun training_worker() {
+    let config = $actor_recv();
+    let trainer = HillClimber(config[0],config[1]);
+    $println("Training: initial two-pose fitness " + trainer.best_fitness.format_decimals(3));
+    let var last_sent_ms = $time_current_ms();
+    let var last_report_ms = last_sent_ms;
+    let var pending = false;
+    loop {
+        let message = $actor_poll();
+        if (message == "stop") break;
+        if (trainer.step()) {
+            pending = true;
+            $println("Trial " + trainer.trials.to_s() + ": best fitness "
+                + trainer.best_fitness.format_decimals(3));
+        }
+        let now = $time_current_ms();
+        if (pending && now-last_sent_ms >= 5000) {
+            $actor_send($actor_parent(),["model",trainer.best_fitness,
+                                          trainer.trials,network_snapshot(trainer.best.network)]);
+            last_sent_ms = now;
+            pending = false;
+        }
+        if (now-last_report_ms >= 10000) {
+            $println("Training: " + trainer.trials.to_s() + " trials, best "
+                + trainer.best_fitness.format_decimals(3) + ", mutation size "
+                + trainer.sigma.format_decimals(3));
+            last_report_ms = now;
+        }
+    }
+    return trainer.trials;
+}
+
 // Perspective projection with near clipping, backface culling, interpolated
 // vertex lighting and a depth buffer. The scanline loop follows the approach
 // in benchmarks/raster_vertlight.psh, with solid colors instead of textures.
@@ -994,6 +1119,24 @@ if ($cmd_get_arg_or(1,"") == "--evaluate") {
     $exit(0);
 }
 
+if ($cmd_get_arg_or(1,"") == "--train-headless") {
+    let trials = $cmd_get_arg_or(2,"20").parse_int(10);
+    let episode_seed = $cmd_get_arg_or(3,"1").parse_int(10);
+    let model_seed = $cmd_get_arg_or(4,"1").parse_int(10);
+    if (trials == nil || episode_seed == nil || model_seed == nil || trials <= 0) {
+        $println("Expected positive trial count and integer episode/model seeds"); $exit(1);
+    }
+    let trainer = HillClimber(episode_seed,model_seed);
+    $println("Initial two-pose fitness: " + trainer.best_fitness.format_decimals(3));
+    for (let var i = 0; i < trials; ++i) {
+        if (trainer.step()) $println("Trial " + trainer.trials.to_s() + ": best fitness "
+            + trainer.best_fitness.format_decimals(3));
+    }
+    $println("After " + trainer.trials.to_s() + " trials: best fitness "
+        + trainer.best_fitness.format_decimals(3));
+    $exit(0);
+}
+
 // Measure a fixed workload, independently of display refresh and frame pacing.
 // Four physics steps advance 1/60 s. Interleave runs when comparing versions.
 if ($cmd_get_arg_or(1,"") == "--bench") {
@@ -1024,26 +1167,33 @@ if ($cmd_get_arg_or(1,"") == "--bench") {
 
 let headless = $cmd_get_arg_or(1,"") == "--headless";
 let policy_mode = $cmd_get_arg_or(1,"") == "--policy";
+let train_mode = $cmd_get_arg_or(1,"") == "--train";
+let viewer_mode = policy_mode || train_mode;
 let var duration = 8.0;
 let var seed = $time_current_ms();
 let var model_seed = 1;
 if (headless) {
     duration = $cmd_get_arg_or(2,"8").parse_float();
     seed = $cmd_get_arg_or(3,"1").parse_int(10);
-} else if (policy_mode) {
+} else if (viewer_mode) {
     seed = $cmd_get_arg_or(2,"1").parse_int(10);
     model_seed = $cmd_get_arg_or(3,"1").parse_int(10);
 } else if ($cmd_get_arg(1) != nil) {
     seed = $cmd_get_arg(1).parse_int(10);
 }
 if (seed == nil || model_seed == nil || duration == nil) {
-    $println("Usage: plush examples/bipedal_sim.psh [seed] | --policy [episode_seed] [model_seed] | --headless [seconds] [seed] [shot.tga]");
+    $println("Usage: plush examples/bipedal_sim.psh [seed] | --policy [episode_seed] [model_seed] | --train [episode_seed] [model_seed] | --headless [seconds] [seed] [shot.tga]");
     $exit(1);
 }
 if (!(duration > 0.0 && duration <= 3600.0)) { $println("Seconds must be in (0, 3600]"); $exit(1); }
-let controller = policy_mode ? Controller(model_seed,biped_torque_limits()) : nil;
-let var episode = policy_mode ? PolicyEpisode(controller,seed,EPISODE_SECONDS) : nil;
-let var sim = policy_mode ? episode.sim : Simulator(seed);
+let var worker_id = nil;
+if (train_mode) {
+    worker_id = $actor_spawn(training_worker);
+    $actor_send(worker_id,[seed,model_seed]);
+}
+let controller = viewer_mode ? Controller(model_seed,biped_torque_limits()) : nil;
+let var episode = viewer_mode ? PolicyEpisode(controller,seed,EPISODE_SECONDS) : nil;
+let var sim = viewer_mode ? episode.sim : Simulator(seed);
 let renderer = Renderer();
 $println("Biped: 1.78 m, 80 kg, 13 bodies. Seed: " + seed.to_s());
 if (headless) {
@@ -1067,17 +1217,22 @@ if (headless) {
     $exit(0);
 }
 
-if (policy_mode) {
+if (train_mode) {
+    $println("Hill climbing in a background actor; watching the best policy. Episodes replay after a short pause.");
+    $println("R next pose | SPACE pause | N step | Arrows orbit | W/S zoom | ESC quit");
+} else if (policy_mode) {
     $println("Watching untrained policy (model seed " + model_seed.to_s() + "). Episodes replay after a short pause.");
     $println("R next pose | SPACE pause | N step | Arrows orbit | W/S zoom | ESC quit");
 } else {
     $println("R reset | SPACE pause | N step | Arrows orbit | W/S zoom | H pose motors | ESC quit");
 }
-let title = policy_mode ? "Biped policy | R next pose | SPACE pause | N step | Arrows orbit | W/S zoom"
-                        : "Biped | R reset | SPACE pause | N step | Arrows orbit | W/S zoom | H motors";
+let title = train_mode ? "Biped training | R next pose | SPACE pause | N step | Arrows orbit | W/S zoom"
+            : policy_mode ? "Biped policy | R next pose | SPACE pause | N step | Arrows orbit | W/S zoom"
+            : "Biped | R reset | SPACE pause | N step | Arrows orbit | W/S zoom | H motors";
 let window = $window_create(WIDTH,HEIGHT,title,0);
 let var paused = false; let var accumulator = 0.0; let var last_ms = $time_current_ms();
 let var replay_ms = 0;
+let var viewer_revision = 0; let var reported_revision = -1;
 let var left = false; let var right = false; let var up = false; let var down = false;
 let var closer = false; let var farther = false;
 loop {
@@ -1086,6 +1241,18 @@ loop {
     let var quit = false;
     loop {
         let msg = $actor_poll(); if (msg == nil) break;
+        if (train_mode && msg instanceof Array && msg[0] == "model") {
+            load_network_snapshot(controller.network,msg[3]);
+            episode = PolicyEpisode(controller,seed,EPISODE_SECONDS);
+            sim = episode.sim;
+            renderer.target.z = 0.0;
+            accumulator = 0.0;
+            replay_ms = 0;
+            viewer_revision += 1;
+            $println("Viewer updated at trial " + msg[2].to_s() + ", fitness "
+                + msg[1].format_decimals(3));
+            continue;
+        }
         if (!(msg instanceof UIEvent)) continue;
         if (msg.kind == 'CLOSE_WINDOW') { quit = true; break; }
         if (msg.kind != 'KEY_DOWN' && msg.kind != 'KEY_UP') continue;
@@ -1099,12 +1266,13 @@ loop {
         if (!pressed) continue;
         if (msg.key == 'ESCAPE') { quit = true; break; }
         if (msg.key == 'R') {
-            if (policy_mode) {
+            if (viewer_mode) {
                 seed += 1;
                 episode = PolicyEpisode(controller,seed,EPISODE_SECONDS);
                 sim = episode.sim;
                 renderer.target.z = 0.0;
                 replay_ms = 0;
+                reported_revision = -1;
                 $println("Episode seed: " + seed.to_s());
             } else sim.reset();
             accumulator = 0.0;
@@ -1113,10 +1281,10 @@ loop {
         if (msg.key == 'N') {
             paused = true; accumulator = 0.0;
             for (let var i = 0; i < 4; ++i) {
-                if (policy_mode) episode.step(); else sim.step();
+                if (viewer_mode) episode.step(); else sim.step();
             }
         }
-        if (msg.key == 'H' && !policy_mode) { sim.toggle_hold(); $println(sim.hold ? "Pose motors ON (no balance controller)" : "Passive joints"); }
+        if (msg.key == 'H' && !viewer_mode) { sim.toggle_hold(); $println(sim.hold ? "Pose motors ON (no balance controller)" : "Passive joints"); }
     }
     if (quit) break;
     if (left) renderer.yaw -= dt;
@@ -1126,13 +1294,16 @@ loop {
     if (closer) renderer.distance -= dt*2.0;
     if (farther) renderer.distance += dt*2.0;
     renderer.pitch = renderer.pitch.clip(0.05,1.35); renderer.distance = renderer.distance.clip(2.2,45.0);
-    if (policy_mode) {
+    if (viewer_mode) {
         if (episode.done && replay_ms == 0) {
-            let result = episode.result();
-            $println("Fitness: " + result.fitness.format_decimals(3)
-                + " | forward: " + result.progress.format_decimals(3) + " m"
-                + " | time: " + result.seconds.format_decimals(3) + " s"
-                + " | fell: " + result.fell.to_s());
+            if (!train_mode || reported_revision != viewer_revision) {
+                let result = episode.result();
+                $println("Fitness: " + result.fitness.format_decimals(3)
+                    + " | forward: " + result.progress.format_decimals(3) + " m"
+                    + " | time: " + result.seconds.format_decimals(3) + " s"
+                    + " | fell: " + result.fell.to_s());
+                reported_revision = viewer_revision;
+            }
             replay_ms = $time_current_ms()+1200;
         }
         if (!paused && episode.done && $time_current_ms() >= replay_ms) {
@@ -1156,4 +1327,8 @@ loop {
     sim.render(renderer); $window_draw_frame(window,renderer.image.bytes);
     let remaining = 16-($time_current_ms()-start);
     if (remaining > 0) $actor_sleep(remaining);
+}
+if (train_mode) {
+    $actor_send(worker_id,"stop");
+    $println("Training stopped after " + $actor_join(worker_id).to_s() + " trials");
 }
