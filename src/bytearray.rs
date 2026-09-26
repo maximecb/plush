@@ -570,71 +570,52 @@ pub fn ba_push_string(actor: &mut Actor, mut ba: Value, mut string: Value) -> Ho
     ByteArray::push_bytes(actor, ba, string.as_bytes())
 }
 
-/// How many independent accumulators the dot product kernel keeps.
-///
-/// One accumulator would make every add wait for the previous one. Splitting
-/// the sum into chains that only meet at the end removes that dependency, and
-/// shortens the chain each rounding error travels down. Eight measured 11%
-/// ahead of four on an 8192-element product, and sixteen fell back behind.
-///
-/// Independent chains, which is what lets the loop vectorise: the sums use
-/// algebraic ops, so the compiler may reassociate them, and it packs the
-/// widening accumulate into 2-wide f64 fused multiply-adds. Denied that, it
-/// emitted eight scalar chains and ran at one element per cycle. It's the
-/// arithmetic that runs out first, not the loads -- the rate holds from a
-/// 2 KB working set to a 512 KB one.
-const DOT_UNROLL: usize = 8;
-
-// The accumulators are folded together in pairs, which needs a count that
-// halves evenly
-const _: () = assert!(DOT_UNROLL.is_power_of_two());
+/// Independent accumulators in the strided dot product loop
+const DOT_STRIDED_CHAINS: usize = 8;
 
 /// Sum of the products of `num` pairs of f32 values, taken `stride` elements
 /// apart in each operand. Both slices start at the first element to be read
 /// and end at the last, so the indices below are in bounds.
 ///
-/// The products are formed in f64. Two 24-bit significands multiply to 48
-/// bits, which an f64 holds exactly, so only the sums round, at f64
-/// precision. The accuracy is free: the loads have to widen either way.
+/// The products are rounded to f32, about 2^-24 relative error each, the
+/// same as the inputs already carry. The sum is kept in f64. Multiplying
+/// before widening saves a conversion per product, ~19% faster than
+/// forming exact f64 products.
 ///
-/// The sums use the algebraic operations so the compiler can reassociate
-/// and vectorise them. Reordering costs no accuracy the f64 accumulators had
-/// not already bought, and fusing rounds once where a separate multiply and
-/// add round twice. It does give up bit-exact agreement between the
-/// contiguous and strided paths, which vectorise differently.
+/// For contiguous operands, a single algebraic accumulator is the shape
+/// LLVM's loop vectorizer recognizes as a reduction: it picks the vector
+/// width and splits the sum into interleaved chains itself. An array of
+/// accumulators unrolled by hand made it deinterleave the loads with
+/// shuffles instead, at half the speed. Strided operands don't vectorize,
+/// so there the independent chains have to be written out.
 ///
 /// `inline(always)` so that the unit-stride caller's literal strides fold
-/// the index arithmetic away into contiguous loads.
+/// the branch and index arithmetic away into contiguous loads.
 #[inline(always)]
 fn dot_f32_kernel(a: &[f32], a_stride: usize, b: &[f32], b_stride: usize, num: usize) -> f64
 {
-    let mut acc = [0.0f64; DOT_UNROLL];
+    // Plain multiplies, so they can't be contracted back into f64 fmas
+    if a_stride == 1 && b_stride == 1 {
+        let mut sum = 0.0f64;
+        for i in 0..num {
+            sum = sum.algebraic_add((a[i] * b[i]) as f64);
+        }
+        return sum;
+    }
 
+    let mut acc = [0.0f64; DOT_STRIDED_CHAINS];
     let mut i = 0;
-    while i + DOT_UNROLL <= num {
-        for k in 0..DOT_UNROLL {
-            let prod = (a[(i + k) * a_stride] as f64)
-                .algebraic_mul(b[(i + k) * b_stride] as f64);
-            acc[k] = acc[k].algebraic_add(prod);
+    while i + DOT_STRIDED_CHAINS <= num {
+        for k in 0..DOT_STRIDED_CHAINS {
+            let prod = a[(i + k) * a_stride] * b[(i + k) * b_stride];
+            acc[k] = acc[k].algebraic_add(prod as f64);
         }
-        i += DOT_UNROLL;
+        i += DOT_STRIDED_CHAINS;
     }
 
-    // Folded in pairs, halving the accumulators each round, which keeps the
-    // tree of additions shallow. Both bounds are constants, so it is free
-    let mut width = DOT_UNROLL;
-    while width > 1 {
-        width /= 2;
-        for k in 0..width {
-            acc[k] = acc[k].algebraic_add(acc[k + width]);
-        }
-    }
-    let mut sum = acc[0];
-
-    // The elements left over when the count is not a multiple of the unroll
+    let mut sum = acc.iter().fold(0.0f64, |s, &x| s.algebraic_add(x));
     while i < num {
-        let prod = (a[i * a_stride] as f64).algebraic_mul(b[i * b_stride] as f64);
-        sum = sum.algebraic_add(prod);
+        sum = sum.algebraic_add((a[i * a_stride] * b[i * b_stride]) as f64);
         i += 1;
     }
 
@@ -915,7 +896,7 @@ mod tests
 
             let mut expected = 0.0f64;
             for i in 0..n {
-                expected += a[i] as f64 * b[i] as f64;
+                expected += (a[i] * b[i]) as f64;
             }
 
             let got = dot_f32_kernel(&a, 1, &b, 1, n);
@@ -951,8 +932,8 @@ mod tests
     }
 
     /// Accumulating in f64 keeps a sum that f32 could not hold. The
-    /// products here are exact, and so is their f64 sum, so this asks for
-    /// the exact answer.
+    /// products here are exact even in f32, and so is their f64 sum, so
+    /// this asks for the exact answer.
     #[test]
     fn accumulates_in_f64()
     {
