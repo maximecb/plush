@@ -313,17 +313,34 @@ class Simulator {
             self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-169.0,-60.0,side == 0 ? -80.0 : -15.0), Vec3(45.0,60.0,side == 0 ? 15.0 : 80.0), Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
             self.joint(name+"elbow", upper, lower, Vec3(s*0.245,1.20,0.0), Vec3(-145.0,0.0,0.0), zero(), Vec3(55.0,0.0,0.0), Vec3(8.0,1.0,1.0));
         }
-        // Perturb a valid articulated pose, then rebuild down the tree so no
-        // anchor starts stretched. A small forward lean makes the fall clear.
+        // Sample a shared stride and leg spread, then add small independent
+        // offsets. Either foot can lead; outward hip rotation widens the stance.
+        // Rebuild down the tree so every randomized pose has connected joints.
+        let stagger = self.rng.float(-0.32,0.32);
+        let spread = self.rng.float(-0.015,0.25);
+        let hip_bias = self.rng.float(-0.12,-0.04);
         pelvis.q = euler(Vec3(self.rng.float(0.06,0.16), self.rng.float(-0.15,0.15), self.rng.float(-0.10,0.10)));
+        let level_feet = euler(Vec3(0.0,pelvis.q.angles().y,0.0));
         for (let var i = 0; i < self.joints.len; ++i) {
             let j = self.joints[i];
-            let pose = Vec3(self.rng.float(-0.12,0.12).clip(j.lo.x,j.hi.x),
-                            self.rng.float(-0.04,0.04).clip(j.lo.y,j.hi.y),
-                            self.rng.float(-0.06,0.06).clip(j.lo.z,j.hi.z));
+            let var pose = Vec3(self.rng.float(-0.12,0.12),
+                                self.rng.float(-0.04,0.04), self.rng.float(-0.06,0.06));
+            if (j.name == "Right hip" || j.name == "Left hip") {
+                let side = j.name == "Right hip" ? -1.0 : 1.0;
+                pose = Vec3(hip_bias + side*stagger + self.rng.float(-0.04,0.04),
+                            pose.y, side*spread + self.rng.float(-0.01,0.01));
+            }
+            if (j.name == "Right knee" || j.name == "Left knee") {
+                pose = Vec3(self.rng.float(0.06,0.32),0.0,0.0);
+            }
+            if (j.name == "Right ankle" || j.name == "Left ankle") {
+                // Aim the soles toward level, subject to the ankle stops.
+                // Different knee bends can still leave one foot slightly raised.
+                pose = j.a.q.conj().mul(level_feet).angles();
+            }
+            j.set_target(pose); pose = j.target; j.command = pose;
             j.b.q = j.a.q.mul(euler(pose));
             j.b.p = j.a.world(j.ra).sub(j.b.q.rotate(j.rb));
-            j.set_target(pose); j.command = pose;
         }
         let var bottom = 100.0;
         for (let var i = 0; i < self.bodies.len; ++i) {
