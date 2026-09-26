@@ -36,6 +36,7 @@ let PI = 3.141592653589793;
 let DEG = PI / 180.0;
 let STEP = 1.0 / 240.0;
 let EPISODE_SECONDS = 10.0;
+let UPRIGHT_WEIGHT = 0.1;  // Fitness bonus per second before falling
 let CONTROL_SUBSTEPS = 4;
 let ITERATIONS = 12;
 let WIDTH = 800;
@@ -726,15 +727,17 @@ class PolicyEpisode {
         self.done = self.fell || self.steps >= self.max_steps;
     }
     result(self) {
+        // Fitness is displacement projected on the forward vector, so sideways
+        // travel earns nothing and only moving backwards scores negative. A
+        // bonus per second before falling rewards learning to balance
         let progress = self.sim.pelvis.p.sub(self.starting_pelvis).dot(TRACK_FORWARD);
-        let off_track = (self.max_lateral-TRACK_WIDTH*0.5).max(0.0);
-        let fitness = progress-self.max_lateral-4.0*off_track;
+        let fitness = progress + UPRIGHT_WEIGHT * self.sim.time;
         return EpisodeResult(fitness,progress,self.max_lateral,self.sim.time,
                              self.fell,self.sim.head.p.y,self.fall_height);
     }
 }
 
-// Project pelvis travel onto the track and separately penalize lateral drift.
+// Runs one episode to completion and returns its result.
 fun evaluate_controller(controller, episode_seed, max_seconds) {
     let episode = PolicyEpisode(controller,episode_seed,max_seconds);
     while (!episode.done) episode.step();
@@ -774,42 +777,28 @@ fun load_network_snapshot(network, snapshot) {
     }
 }
 
-// Uniform crossover over whole neurons: each neuron takes its incoming weights
-// and bias from one parent, so the features it computes stay intact
-fun crossover_network(dst, a, b, rng)
-{
-    let d = network_arrays(dst);
-    let pa = network_arrays(a);
-    let pb = network_arrays(b);
-
-    for (let var k = 0; k < d.len; k += 2) {
-        let rows = d[k + 1].len >> 2;
-        let row_bytes = d[k].len.idiv(rows);
-
-        for (let var row = 0; row < rows; ++row) {
-            let src = rng.bool() ? pa : pb;
-            d[k].memcpy(row * row_bytes, src[k], row * row_bytes, row_bytes);
-            d[k + 1].set_f32(row, src[k + 1].get_f32(row));
-        }
-    }
-}
-
 // --- Island genetic algorithm ---
 //
 // Each island is an actor evolving its own population. Every individual is
-// scored by its mean over EVAL_EPISODES episodes from random starting poses.
-// The top half reproduce through mutation, with occasional crossover, and
-// every MIGRATION_PERIOD generations islands send a few individuals to their
-// neighbours around a ring
+// scored by its mean over EVAL_EPISODES episodes, from starting poses that are
+// redrawn each generation and shared by the whole population. Scores feed an
+// exponential moving average, so individuals that survive several generations
+// build up a reliable estimate of their fitness.
+//
+// The NUM_ELITES best by moving average survive unchanged and are evaluated
+// again. The rest of the population is replaced by mutated children of the
+// NUM_PARENTS best on this generation's score alone. Every MIGRATION_PERIOD
+// generations islands send a few elites to their neighbours around a ring
 
 let NUM_ISLANDS = 8;
-let POP_SIZE = 32;
-let NUM_PARENTS = 16;
+let POP_SIZE = 64;
+let NUM_ELITES = 16;
+let NUM_PARENTS = 24;
 let EVAL_EPISODES = 1;
+let FITNESS_ALPHA = 0.25;  // Weight of the latest score in the moving average
 let MUTATION_PROB = 0.02;
 let MUTATION_SIGMA = 0.18;
 let MUTATION_RESET_PROB = 0.1;
-let CROSSOVER_PROB = 0.05;
 let MIGRATION_PERIOD = 100;
 let NUM_MIGRANTS = 1;  // Sent to each neighbour, so an island receives two
 
@@ -819,7 +808,9 @@ let VIEWER_PERIOD_MS = 10000;
 let MSG_SETUP = 0;     // Island index, seed, actor ids around the ring
 let MSG_MIGRANT = 1;   // A network snapshot arriving from a neighbour
 let MSG_STOP = 2;
-let MSG_REPORT = 3;    // Island index, generation, best, prev best, mean, ms taken, best snapshot
+// Island index, generation, best, prev best, mean, elite average, elite age,
+// ms taken, elite snapshot
+let MSG_REPORT = 3;
 
 // Standard normal sample using Box-Muller
 fun gauss(rng)
@@ -873,8 +864,8 @@ class Island
     {
         self.rng = Xoshiro128(seed);
 
-        // Children are written into next_pop, then the two are swapped, so
-        // networks are allocated once rather than every generation
+        // The next generation is written into next_pop, then the two are
+        // swapped, so networks are allocated once rather than every generation
         let limits = biped_torque_limits();
         self.pop = [];
         self.next_pop = [];
@@ -883,8 +874,18 @@ class Island
             self.next_pop.push(Controller(0, limits));
         }
 
+        // This generation's score, the moving average, and how many
+        // generations each individual has been evaluated for
         self.fitness = Array.with_size(POP_SIZE, 0.0);
-        self.order = Array.with_size(POP_SIZE, 0);
+        self.avg = Array.with_size(POP_SIZE, 0.0);
+        self.age = Array.with_size(POP_SIZE, 0);
+        self.next_avg = Array.with_size(POP_SIZE, 0.0);
+        self.next_age = Array.with_size(POP_SIZE, 0);
+
+        // Indices sorted by this generation's score and by moving average
+        self.by_score = Array.with_size(POP_SIZE, 0);
+        self.by_avg = Array.with_size(POP_SIZE, 0);
+
         self.immigrants = [];
         self.generation = 0;
         self.best_fitness = 0.0;
@@ -892,82 +893,120 @@ class Island
         self.mean_fitness = 0.0;
     }
 
-    // Adds one episode from a fresh random starting pose to an individual's
-    // mean fitness. Fitness is zeroed at the start of each generation
-    evaluate(self, i)
+    // Picks this generation's starting poses. Every individual is scored on
+    // the same ones, so rankings reflect the policies rather than the poses
+    draw_seeds(self)
     {
-        let episode_seed = self.rng.int(0, 0x40000000);
-        let result = evaluate_controller(self.pop[i], episode_seed, EPISODE_SECONDS);
+        self.episode_seeds = [];
+        for (let var k = 0; k < EVAL_EPISODES; ++k)
+            self.episode_seeds.push(self.rng.int(0, 0x40000000));
+    }
+
+    // Adds episode k to an individual's mean fitness. Fitness is zeroed at
+    // the start of each generation
+    evaluate(self, i, k)
+    {
+        let result = evaluate_controller(self.pop[i], self.episode_seeds[k], EPISODE_SECONDS);
         self.fitness[i] += result.fitness / EVAL_EPISODES;
     }
 
-    // Sorts the population by fitness, best first
+    // Folds this generation's scores into the moving averages, then sorts
+    // the population both ways, best first
     rank(self)
     {
         let var total = 0.0;
         for (let var i = 0; i < POP_SIZE; ++i) {
-            self.order[i] = i;
-            total += self.fitness[i];
+            let f = self.fitness[i];
+            total += f;
+
+            // A new individual's average starts at its first score
+            if (self.age[i] == 0)
+                self.avg[i] = f;
+            else
+                self.avg[i] += FITNESS_ALPHA * (f - self.avg[i]);
+            self.age[i] += 1;
         }
 
-        for (let var i = 1; i < POP_SIZE; ++i) {
-            let idx = self.order[i];
-            let var j = i - 1;
-            while (j >= 0 && self.fitness[self.order[j]] < self.fitness[idx]) {
-                self.order[j + 1] = self.order[j];
-                j -= 1;
-            }
-            self.order[j + 1] = idx;
-        }
+        sort_indices(self.by_score, self.fitness);
+        sort_indices(self.by_avg, self.avg);
 
         // The first generation has no previous best
         if (self.generation > 0)
             self.prev_best = self.best_fitness;
-        self.best_fitness = self.fitness[self.order[0]];
+        self.best_fitness = self.fitness[self.by_score[0]];
         self.mean_fitness = total / POP_SIZE;
     }
 
-    best(self)
+    // Index of the individual with the best moving average
+    elite(self)
     {
-        return self.pop[self.order[0]];
+        return self.by_avg[0];
     }
 
-    // A snapshot of a random parent, to send to a neighbouring island
+    // A snapshot of a random elite, to send to a neighbouring island
     emigrant(self)
     {
-        let parent = self.pop[self.order[self.rng.index(NUM_PARENTS)]];
-        return network_snapshot(parent.network);
+        let elite = self.pop[self.by_avg[self.rng.index(NUM_ELITES)]];
+        return network_snapshot(elite.network);
     }
 
-    // Each parent has two mutated children. Must be called after rank()
+    // Keeps the elites and replaces everyone else with children of this
+    // generation's top scorers. Must be called after rank()
     reproduce(self)
     {
-        for (let var i = 0; i < POP_SIZE; ++i) {
-            let child = self.next_pop[i].network;
-            let parent = self.pop[self.order[i % NUM_PARENTS]].network;
-
-            if (self.rng.float(0.0, 1.0) < CROSSOVER_PROB) {
-                let other = self.pop[self.order[self.rng.index(NUM_PARENTS)]].network;
-                crossover_network(child, parent, other, self.rng);
-            } else {
-                copy_network(child, parent);
-            }
-
-            mutate_network(child, self.rng, MUTATION_SIGMA);
-            self.fitness[i] = 0.0;
+        for (let var i = 0; i < NUM_ELITES; ++i) {
+            let src = self.by_avg[i];
+            copy_network(self.next_pop[i].network, self.pop[src].network);
+            self.next_avg[i] = self.avg[src];
+            self.next_age[i] = self.age[src];
         }
 
-        // Immigrants replace the children of the lowest ranked parents, and
-        // arrive unmutated so the next generation scores them as they are
-        let num = self.immigrants.len.min(POP_SIZE);
+        for (let var i = NUM_ELITES; i < POP_SIZE; ++i) {
+            let child = self.next_pop[i].network;
+            let parent = self.pop[self.by_score[(i - NUM_ELITES) % NUM_PARENTS]].network;
+            copy_network(child, parent);
+            mutate_network(child, self.rng, MUTATION_SIGMA);
+            self.next_avg[i] = 0.0;
+            self.next_age[i] = 0;
+        }
+
+        // Immigrants replace the last children, and arrive unmutated so the
+        // next generation scores them as they are
+        let num = self.immigrants.len.min(POP_SIZE - NUM_ELITES);
         for (let var i = 0; i < num; ++i)
             load_network_snapshot(self.next_pop[POP_SIZE - 1 - i].network, self.immigrants[i]);
         self.immigrants.resize(0, nil);
 
-        let tmp = self.pop;
+        for (let var i = 0; i < POP_SIZE; ++i)
+            self.fitness[i] = 0.0;
+
+        let tmp_pop = self.pop;
         self.pop = self.next_pop;
-        self.next_pop = tmp;
+        self.next_pop = tmp_pop;
+        let tmp_avg = self.avg;
+        self.avg = self.next_avg;
+        self.next_avg = tmp_avg;
+        let tmp_age = self.age;
+        self.age = self.next_age;
+        self.next_age = tmp_age;
         self.generation += 1;
+    }
+}
+
+// Fills order with the indices of values, sorted from highest to lowest
+fun sort_indices(order, values)
+{
+    for (let var i = 0; i < order.len; ++i)
+        order[i] = i;
+
+    for (let var i = 1; i < order.len; ++i) {
+        let idx = order[i];
+        let var j = i - 1;
+        while (j >= 0 && values[order[j]] < values[idx]) {
+            order[j + 1] = order[j];
+            j -= 1;
+        }
+        order[j + 1] = idx;
     }
 }
 
@@ -988,9 +1027,10 @@ fun island_actor()
 
     loop {
         let start_ms = $time_current_ms();
+        island.draw_seeds();
 
         for (let var n = 0; n < POP_SIZE * EVAL_EPISODES; ++n) {
-            island.evaluate(n.idiv(EVAL_EPISODES));
+            island.evaluate(n.idiv(EVAL_EPISODES), n % EVAL_EPISODES);
 
             // Poll between episodes, since a generation can take minutes
             loop {
@@ -1005,6 +1045,7 @@ fun island_actor()
         }
 
         island.rank();
+        let elite = island.elite();
         $actor_send(parent, [
             MSG_REPORT,
             index,
@@ -1012,8 +1053,10 @@ fun island_actor()
             island.best_fitness,
             island.prev_best,
             island.mean_fitness,
+            island.avg[elite],
+            island.age[elite],
             $time_current_ms() - start_ms,
-            network_snapshot(island.best().network)
+            network_snapshot(island.pop[elite].network)
         ]);
 
         if (ids.len > 1 && (island.generation + 1) % MIGRATION_PERIOD == 0) {
@@ -1066,7 +1109,8 @@ fun print_report(msg)
         ": best " + msg[3].format_decimals(3) +
         ", prev " + delta +
         ", mean " + msg[5].format_decimals(3) +
-        ", " + (msg[6].to_f() / 1000.0).format_decimals(1) + " s"
+        ", elite " + msg[6].format_decimals(3) + " (age " + msg[7].to_s() + ")" +
+        ", " + (msg[8].to_f() / 1000.0).format_decimals(1) + " s"
     );
 }
 
@@ -1529,18 +1573,17 @@ loop {
     }
     if (quit) break;
 
-    // Periodically switch to the best of the latest island reports. Their
-    // scores are noisy, so the all-time best score would mostly track the
-    // luckiest evaluation rather than progress
+    // Periodically switch to the island elite with the best moving average,
+    // which is less noisy than any single generation's score
     if (new_reports && start - last_viewer_ms >= VIEWER_PERIOD_MS) {
         let var best = nil;
         for (let var i = 0; i < island_reports.len; ++i) {
             let report = island_reports[i];
-            if (report != nil && (best == nil || report[3] > best[3]))
+            if (report != nil && (best == nil || report[6] > best[6]))
                 best = report;
         }
 
-        load_network_snapshot(controller.network, best[7]);
+        load_network_snapshot(controller.network, best[9]);
         episode = PolicyEpisode(controller, seed, EPISODE_SECONDS);
         sim = episode.sim;
         renderer.target.z = 0.0;
@@ -1551,7 +1594,7 @@ loop {
         last_viewer_ms = start;
         $println(
             "Viewer: island " + best[1].to_s() + ", generation " + best[2].to_s() +
-            ", fitness " + best[3].format_decimals(3)
+            ", elite " + best[6].format_decimals(3) + " (age " + best[7].to_s() + ")"
         );
     }
 
