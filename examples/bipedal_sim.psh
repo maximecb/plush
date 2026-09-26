@@ -42,6 +42,10 @@ let UPRIGHT_WEIGHT = 2.0;
 // Coefficient of friction between the soles and the ground, as for rubber
 // on a track surface
 let FRICTION = 1.0;
+// An episode ends in a fall once the torso is below this fraction of its
+// starting height, or tilted more than 45 degrees from vertical
+let FALL_HEIGHT_FRACTION = 0.65;
+let FALL_TILT_COS = 0.7071067811865476;
 let CONTROL_SUBSTEPS = 4;
 let ITERATIONS = 12;
 let WIDTH = 800;
@@ -54,11 +58,11 @@ let TRACK_WIDTH = 3.0;
 let TRACK_LENGTH = 60.0;
 // Active joint axes in Simulator.joints order. The knee/elbow only bend on X;
 // the ankle uses X and Z. Each pair is [joint index, local Euler axis].
-let CONTROL_AXES = [[0,0],[0,1],[0,2], [1,0],[1,1],[1,2],
-                    [2,0],[2,1],[2,2], [3,0], [4,0],[4,2],
-                    [5,0],[5,1],[5,2], [6,0],
-                    [7,0],[7,1],[7,2], [8,0], [9,0],[9,2],
-                    [10,0],[10,1],[10,2], [11,0]];
+// The neck and elbows are locked, as are the waist's twist and side bend,
+// the hips' twist and the shoulders' side swing, so each has zero range.
+let CONTROL_AXES = [[0,0],
+                    [2,0],[2,2], [3,0], [4,0],[4,2], [5,0],
+                    [7,0],[7,2], [8,0], [9,0],[9,2], [10,0]];
 let CONTROL_JOINT_AXES = CONTROL_AXES.len;
 let CONTROL_FOOT_POINTS = 8;
 let CONTROL_OUTPUTS = CONTROL_JOINT_AXES;
@@ -282,8 +286,8 @@ class Joint {
 }
 
 // Sensors for a controller policy. Angles and angular speeds follow
-// CONTROL_AXES: waist XYZ, neck XYZ, then each side's hip XYZ, knee X,
-// ankle XZ, shoulder XYZ and elbow X. Locked axes are omitted.
+// CONTROL_AXES: waist X, then each side's hip XZ, knee X, ankle XZ and
+// shoulder X. Locked axes are omitted.
 // Contact order for each foot is heel -X, heel +X, toe -X, toe +X, where X
 // is local to that foot. Distances/loads can be converted with foot_contact().
 class BipedObservation {
@@ -459,11 +463,9 @@ class Controller
 
 // Default torque limits mirror the active axes in Simulator.reset().
 fun biped_torque_limits() {
-    return [140.0,70.0,100.0, 20.0,15.0,15.0,
-            200.0,80.0,110.0, 160.0, 120.0,35.0,
-            70.0,35.0,60.0, 55.0,
-            200.0,80.0,110.0, 160.0, 120.0,35.0,
-            70.0,35.0,60.0, 55.0];
+    return [140.0,
+            200.0,110.0, 160.0, 120.0,35.0, 70.0,
+            200.0,110.0, 160.0, 120.0,35.0, 70.0];
 }
 
 // A signed-distance contact interface leaves room for ramps/triangle meshes.
@@ -558,9 +560,9 @@ class Simulator {
         let pelvis = self.body("Pelvis", 12.0, Vec3(0.30, 0.20, 0.22), Vec3(0.0, 1.03, 0.0), 0x344764);
         let torso = self.body("Torso", 30.0, Vec3(0.39, 0.41, 0.23), Vec3(0.0, 1.335, 0.0), 0xDC3F3B);
         let head = self.body("Head", 5.0, Vec3(0.18, 0.21, 0.19), Vec3(0.0, 1.675, 0.0), 0xE9DBC1);
-        self.pelvis = pelvis; self.head = head; self.feet = [];
-        self.joint("Waist", pelvis, torso, Vec3(0.0, 1.13, 0.0), Vec3(-35.0,-30.0,-25.0), Vec3(35.0,30.0,25.0), Vec3(140.0,70.0,100.0), Vec3(4.0,3.0,3.0));
-        self.joint("Neck", torso, head, Vec3(0.0, 1.55, 0.0), Vec3(-40.0,-60.0,-35.0), Vec3(45.0,60.0,35.0), Vec3(20.0,15.0,15.0), Vec3(3.0,3.0,3.0));
+        self.pelvis = pelvis; self.torso = torso; self.head = head; self.feet = [];
+        self.joint("Waist", pelvis, torso, Vec3(0.0, 1.13, 0.0), Vec3(-35.0,0.0,0.0), Vec3(35.0,0.0,0.0), Vec3(140.0,70.0,100.0), Vec3(4.0,3.0,3.0));
+        self.joint("Neck", torso, head, Vec3(0.0, 1.55, 0.0), zero(), zero(), Vec3(20.0,15.0,15.0), Vec3(3.0,3.0,3.0));
         for (let var side = 0; side < 2; ++side) {
             let s = side == 0 ? -1.0 : 1.0;
             let name = side == 0 ? "Right " : "Left ";
@@ -568,13 +570,13 @@ class Simulator {
             let shin = self.body(name+"shin", 3.5, Vec3(0.105,0.43,0.115), Vec3(s*0.105,0.335,0.0), 0x435E80);
             let foot = self.body(name+"foot", 1.5, Vec3(0.12,0.12,0.26), Vec3(s*0.105,0.06,0.065), 0xF2D09A);
             self.feet.push(foot);
-            self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,-40.0,-30.0), Vec3(18.0,40.0,30.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
+            self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,0.0,-30.0), Vec3(18.0,0.0,30.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
             self.joint(name+"knee", thigh, shin, Vec3(s*0.105,0.55,0.0), zero(), Vec3(138.0,0.0,0.0), Vec3(160.0,0.0,0.0), Vec3(10.0,1.0,1.0));
             self.joint(name+"ankle", shin, foot, Vec3(s*0.105,0.12,0.0), Vec3(-15.0,0.0,-20.0), Vec3(55.0,0.0,20.0), Vec3(120.0,0.0,35.0), Vec3(6.0,1.0,3.0));
             let upper = self.body(name+"upper arm", 2.0, Vec3(0.085,0.29,0.10), Vec3(s*0.245,1.345,0.0), 0xB52E34);
             let lower = self.body(name+"forearm", 1.5, Vec3(0.075,0.30,0.085), Vec3(s*0.245,1.05,0.0), 0xE04A42);
-            self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-169.0,-60.0,side == 0 ? -80.0 : -15.0), Vec3(45.0,60.0,side == 0 ? 15.0 : 80.0), Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
-            self.joint(name+"elbow", upper, lower, Vec3(s*0.245,1.20,0.0), Vec3(-145.0,0.0,0.0), zero(), Vec3(55.0,0.0,0.0), Vec3(8.0,1.0,1.0));
+            self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-169.0,0.0,0.0), Vec3(45.0,0.0,0.0), Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
+            self.joint(name+"elbow", upper, lower, Vec3(s*0.245,1.20,0.0), zero(), zero(), Vec3(55.0,0.0,0.0), Vec3(8.0,1.0,1.0));
         }
         // Sample a shared stride and leg spread, then add small independent
         // offsets. Either foot can lead; outward hip rotation widens the stance.
@@ -621,7 +623,7 @@ class Simulator {
         self.hold = !self.hold;
         for (let var i = 0; i < self.joints.len; ++i) self.joints[i].enabled = self.hold;
     }
-    // Hold a policy's 26 torque commands until the next control update. Motor
+    // Hold a policy's torque commands until the next control update. Motor
     // torque and speed limits are still enforced inside Joint.motors().
     set_policy_torques(self, torques) {
         assert(torques.len == CONTROL_OUTPUTS*4);
@@ -833,20 +835,18 @@ fun filter_up(prev, obs, base)
 }
 
 class EpisodeResult {
-    init(self, fitness, progress, max_lateral, seconds, fell, head_height, fall_height) {
+    init(self, fitness, progress, max_lateral, seconds, fell) {
         self.fitness = fitness;
         self.progress = progress;
         self.max_lateral = max_lateral;
         self.seconds = seconds;
         self.fell = fell;
-        self.head_height = head_height;
-        self.fall_height = fall_height;
     }
 }
 
 // The evaluator, trainer and viewer use the same observation, torque and
 // stop logic. With a recorder, every control step is also recorded as a
-// transition for the dynamics model
+// transition for training
 class PolicyEpisode {
     init(self, controller, episode_seed, max_seconds, recorder) {
         assert(max_seconds > 0.0 && max_seconds <= EPISODE_SECONDS);
@@ -857,7 +857,7 @@ class PolicyEpisode {
         self.up = nil;
         controller.reset();
         self.previous_head_velocity = self.sim.head.v;
-        self.fall_height = 0.65*self.sim.head.p.y;
+        self.fall_height = FALL_HEIGHT_FRACTION*self.sim.torso.p.y;
         self.starting_pelvis = self.sim.pelvis.p;
         self.max_lateral = self.sim.pelvis.p.x.abs();
         self.fell = false;
@@ -912,7 +912,9 @@ class PolicyEpisode {
         self.sim.step();
         self.steps += 1;
         self.max_lateral = self.max_lateral.max(self.sim.pelvis.p.x.abs());
-        self.fell = self.sim.head.p.y < self.fall_height;
+        // The robot has fallen once its torso is low or tilted too far
+        let torso = self.sim.torso;
+        self.fell = torso.p.y < self.fall_height || torso.q.rotate(UP).y < FALL_TILT_COS;
         self.done = self.fell || self.steps >= self.max_steps;
 
         // The last control step may be cut short by a fall
@@ -925,8 +927,7 @@ class PolicyEpisode {
         // bonus per second before falling rewards learning to balance
         let progress = self.sim.pelvis.p.sub(self.starting_pelvis).dot(TRACK_FORWARD);
         let fitness = progress + UPRIGHT_WEIGHT * self.sim.time;
-        return EpisodeResult(fitness,progress,self.max_lateral,self.sim.time,
-                             self.fell,self.sim.head.p.y,self.fall_height);
+        return EpisodeResult(fitness,progress,self.max_lateral,self.sim.time,self.fell);
     }
 }
 
@@ -968,7 +969,7 @@ let ROW_FELL = ROW_PROGRESS + 1;
 let ROW_SIZE = ROW_FELL + 1;
 
 // The critic's buffer holds as many transitions as fit in this budget
-let BUFFER_BYTES = 1 << 30;
+let BUFFER_BYTES = 3 << 29;  // 1.5 GiB
 let BUFFER_SIZE = BUFFER_BYTES.idiv(ROW_SIZE * 4);
 
 // The buffer is saved this often, and when training stops, and loaded when
@@ -1890,13 +1891,23 @@ class Renderer {
                       b.world(Vec3(0.091,0.067,-0.045)),b.world(Vec3(0.091,0.067,0.098)),0x151720);
         }
         if (b.name == "Torso") {
-            // Cream piping and a silver zip detail the red jacket.
-            self.quad(b.world(Vec3(-0.195,0.10,0.116)),b.world(Vec3(0.195,0.10,0.116)),
-                      b.world(Vec3(0.195,0.135,0.116)),b.world(Vec3(-0.195,0.135,0.116)),0xF3EAD5);
-            self.quad(b.world(Vec3(0.195,0.10,-0.116)),b.world(Vec3(-0.195,0.10,-0.116)),
-                      b.world(Vec3(-0.195,0.135,-0.116)),b.world(Vec3(0.195,0.135,-0.116)),0xF3EAD5);
+            // A silver zip details the red jacket.
             self.quad(b.world(Vec3(-0.008,-0.20,0.117)),b.world(Vec3(0.008,-0.20,0.117)),
                       b.world(Vec3(0.008,0.20,0.117)),b.world(Vec3(-0.008,0.20,0.117)),0xD1DFD6);
+        }
+        let right_leg = b.name == "Right thigh" || b.name == "Right shin";
+        if (right_leg || b.name == "Left thigh" || b.name == "Left shin") {
+            // A cream stripe runs down the outer side of each trouser leg.
+            let x = (right_leg ? -0.5 : 0.5)*b.size.x + (right_leg ? -0.001 : 0.001);
+            let y0 = -0.5*b.size.y; let y1 = 0.5*b.size.y;
+            let w = 0.018;
+            if (right_leg) {
+                self.quad(b.world(Vec3(x,y0,-w)),b.world(Vec3(x,y0,w)),
+                          b.world(Vec3(x,y1,w)),b.world(Vec3(x,y1,-w)),0xF3EAD5);
+            } else {
+                self.quad(b.world(Vec3(x,y0,w)),b.world(Vec3(x,y0,-w)),
+                          b.world(Vec3(x,y1,-w)),b.world(Vec3(x,y1,w)),0xF3EAD5);
+            }
         }
     }
     quad(self, a, b, c, d, color) {
