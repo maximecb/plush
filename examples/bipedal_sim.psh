@@ -38,6 +38,22 @@ let BRIGHTNESS = 1.25;
 // either end. At 5 m/s the marked section provides twelve seconds of travel.
 let TRACK_WIDTH = 3.0;
 let TRACK_LENGTH = 60.0;
+// Active joint axes in Simulator.joints order. The knee/elbow only bend on X;
+// the ankle uses X and Z. Each pair is [joint index, local Euler axis].
+let CONTROL_AXES = [[0,0],[0,1],[0,2], [1,0],[1,1],[1,2],
+                    [2,0],[2,1],[2,2], [3,0], [4,0],[4,2],
+                    [5,0],[5,1],[5,2], [6,0],
+                    [7,0],[7,1],[7,2], [8,0], [9,0],[9,2],
+                    [10,0],[10,1],[10,2], [11,0]];
+let CONTROL_JOINT_AXES = CONTROL_AXES.len;
+let CONTROL_FOOT_POINTS = 8;
+let CONTROL_OUTPUTS = CONTROL_JOINT_AXES;
+let CONTROL_SPEEDS_OFFSET = CONTROL_JOINT_AXES;
+let CONTROL_HEAD_OFFSET = 2*CONTROL_JOINT_AXES;
+let CONTROL_COMMAND_OFFSET = CONTROL_HEAD_OFFSET+6;
+let CONTROL_CONTACT_OFFSET = CONTROL_COMMAND_OFFSET+3;
+let CONTROL_PREVIOUS_OFFSET = CONTROL_CONTACT_OFFSET+CONTROL_FOOT_POINTS;
+let CONTROL_INPUTS = CONTROL_PREVIOUS_OFFSET+CONTROL_OUTPUTS;
 let UP = Vec3(0.0, 1.0, 0.0);
 let AXES = [Vec3(1.0, 0.0, 0.0), UP, Vec3(0.0, 0.0, 1.0)];
 let SUN_DIRECTION = Vec3(-3.0,5.0,-4.0).unit();
@@ -223,6 +239,139 @@ class Joint {
             self.b.move(impulse.mul(-1.0), rb);
         }
     }
+}
+
+// Sensors for a controller policy. Angles and angular speeds follow
+// CONTROL_AXES: waist XYZ, neck XYZ, then each side's hip XYZ, knee X,
+// ankle XZ, shoulder XYZ and elbow X. Locked axes are omitted.
+// Contact order for each foot is heel -X, heel +X, toe -X, toe +X, where X
+// is local to that foot. Distances/loads can be converted with foot_contact().
+class BipedObservation {
+    init(self) {
+        self.angles = ByteArray.with_size(CONTROL_JOINT_AXES*4);
+        self.speeds = ByteArray.with_size(CONTROL_JOINT_AXES*4);
+        self.contacts = ByteArray.with_size(CONTROL_FOOT_POINTS*4);
+        // Head accelerometer readings are specific force in units of g,
+        // measured in head-local coordinates: rest reads roughly +1 on Y.
+        self.head_accel_g = Vec3(0.0,1.0,0.0);
+        self.head_gyro = zero();
+        // Desired lateral m/s, yaw rad/s, and forward m/s respectively.
+        self.command = zero();
+    }
+    set_contact(self, index, distance_m, normal_force_n) {
+        assert(index >= 0 && index < CONTROL_FOOT_POINTS);
+        self.contacts.set_f32(index,foot_contact(distance_m,normal_force_n));
+    }
+}
+
+// A continuous contact signal. Proximity starts at 4 cm, and pressure raises
+// a close corner from 0.5 toward 1.0. Use the same scale for all eight points.
+fun foot_contact(distance_m, normal_force_n) {
+    let proximity = ((0.04-distance_m)/0.04).clip(0.0,1.0);
+    let pressure = (normal_force_n/120.0).clip(0.0,1.0);
+    return proximity*(0.5+0.5*pressure);
+}
+
+// F32 row-major weights and reusable buffers follow benchmarks/mlp.psh. The
+// public weights and biases can later be updated by a trainer; forward() only
+// performs inference and reuses its output buffer on the next call.
+class MLP {
+    init(self, inputs, hidden, outputs, seed) {
+        assert(inputs > 0 && hidden > 0 && outputs > 0);
+        self.inputs = inputs; self.hidden = hidden; self.outputs = outputs;
+        let rng = Xoshiro128(seed);
+        self.w1 = self.random_weights(hidden,inputs,rng,(6.0/inputs).sqrt());
+        self.w2 = self.random_weights(hidden,hidden,rng,(6.0/hidden).sqrt());
+        self.w3 = self.random_weights(outputs,hidden,rng,(3.0/hidden).sqrt());
+        self.b1 = ByteArray.with_size(hidden*4);
+        self.b2 = ByteArray.with_size(hidden*4);
+        self.b3 = ByteArray.with_size(outputs*4);
+        self.h1 = ByteArray.with_size(hidden*4);
+        self.h2 = ByteArray.with_size(hidden*4);
+        self.out = ByteArray.with_size(outputs*4);
+    }
+    random_weights(self, rows, cols, rng, bound) {
+        let w = ByteArray.with_size(rows*cols*4);
+        for (let var i = 0; i < rows*cols; ++i) {
+            w.set_f32(i,rng.float(-bound,bound));
+        }
+        return w;
+    }
+    layer(self, w, bias, rows, cols, input, output, relu) {
+        for (let var row = 0; row < rows; ++row) {
+            let var value = w.dot_f32(row*cols,1,input,0,1,cols)+bias.get_f32(row);
+            if (relu) value = value.max(0.0);
+            output.set_f32(row,value);
+        }
+    }
+    forward(self, input) {
+        assert(input.len == self.inputs*4);
+        self.layer(self.w1,self.b1,self.hidden,self.inputs,input,self.h1,true);
+        self.layer(self.w2,self.b2,self.hidden,self.hidden,self.h1,self.h2,true);
+        self.layer(self.w3,self.b3,self.outputs,self.hidden,self.h2,self.out,false);
+        return self.out;
+    }
+}
+
+// One torque value per joint axis in the order BipedObservation documents.
+// The controller has no reference to Simulator and cannot apply the torques.
+// Each forward() returns a reused f32 buffer, in newton-metres. reset() clears
+// the previous-action input before a new episode. The simulator will still
+// need actuator speed limits when these torques are eventually connected.
+class Controller {
+    init(self, seed, torque_limits) {
+        assert(torque_limits.len == CONTROL_OUTPUTS);
+        self.limits = torque_limits;
+        self.network = MLP(CONTROL_INPUTS,64,CONTROL_OUTPUTS,seed);
+        self.input = ByteArray.with_size(CONTROL_INPUTS*4);
+        self.torques = ByteArray.with_size(CONTROL_OUTPUTS*4);
+        self.previous = ByteArray.with_size(CONTROL_OUTPUTS*4);
+    }
+    reset(self) { self.previous.zero_fill(); }
+    forward(self, observation) {
+        assert(observation.angles.len == CONTROL_JOINT_AXES*4);
+        assert(observation.speeds.len == CONTROL_JOINT_AXES*4);
+        assert(observation.contacts.len == CONTROL_FOOT_POINTS*4);
+        let input = self.input;
+        for (let var i = 0; i < CONTROL_JOINT_AXES; ++i) {
+            input.set_f32(i,(observation.angles.get_f32(i)/PI).clip(-1.0,1.0));
+            input.set_f32(CONTROL_SPEEDS_OFFSET+i,(observation.speeds.get_f32(i)/10.0).clip(-1.0,1.0));
+        }
+        let a = observation.head_accel_g;
+        let g = observation.head_gyro;
+        let cmd = observation.command;
+        let head = [a.x/8.0,a.y/8.0,a.z/8.0,
+                    g.x/10.0,g.y/10.0,g.z/10.0];
+        for (let var i = 0; i < head.len; ++i) {
+            input.set_f32(CONTROL_HEAD_OFFSET+i,head[i].clip(-1.0,1.0));
+        }
+        input.set_f32(CONTROL_COMMAND_OFFSET,(cmd.x/5.0).clip(-1.0,1.0));
+        input.set_f32(CONTROL_COMMAND_OFFSET+1,(cmd.y/5.0).clip(-1.0,1.0));
+        input.set_f32(CONTROL_COMMAND_OFFSET+2,(cmd.z/5.0).clip(-1.0,1.0));
+        for (let var i = 0; i < CONTROL_FOOT_POINTS; ++i) {
+            input.set_f32(CONTROL_CONTACT_OFFSET+i,observation.contacts.get_f32(i).clip(0.0,1.0));
+        }
+        for (let var i = 0; i < CONTROL_OUTPUTS; ++i) {
+            input.set_f32(CONTROL_PREVIOUS_OFFSET+i,self.previous.get_f32(i));
+        }
+        let raw = self.network.forward(input);
+        for (let var i = 0; i < CONTROL_OUTPUTS; ++i) {
+            let x = raw.get_f32(i);
+            let action = x/(1.0+x.abs());
+            self.previous.set_f32(i,action);
+            self.torques.set_f32(i,action*self.limits[i]);
+        }
+        return self.torques;
+    }
+}
+
+// Default torque limits mirror the active axes in Simulator.reset().
+fun biped_torque_limits() {
+    return [140.0,70.0,100.0, 20.0,15.0,15.0,
+            200.0,80.0,110.0, 160.0, 120.0,35.0,
+            70.0,35.0,60.0, 55.0,
+            200.0,80.0,110.0, 160.0, 120.0,35.0,
+            70.0,35.0,60.0, 55.0];
 }
 
 // A signed-distance contact interface leaves room for ramps/triangle meshes.
