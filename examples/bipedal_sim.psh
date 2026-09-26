@@ -230,14 +230,22 @@ class Joint {
 // is an infinite plane with a painted running track and surrounding grass.
 class Ground {
     // Increment revision after changing terrain geometry or appearance.
-    init(self) { self.revision = 0; }
+    init(self) {
+        self.revision = 0;
+        self.paint = []; self.base = []; self.built = false;
+    }
     sample(self, p) { return p.y; }
     normal(self, p) { return UP; }
     patch(self, renderer, x0, z0, x1, z1, height, color) {
-        renderer.quad(Vec3(x0,height,z0),Vec3(x0,height,z1),
-                      Vec3(x1,height,z1),Vec3(x1,height,z0),color);
+        let patch = [Vec3(x0,height,z0),Vec3(x0,height,z1),
+                     Vec3(x1,height,z1),Vec3(x1,height,z0),color];
+        if (height > 0.0) self.paint.push(patch);
+        else self.base.push(patch);
     }
     draw(self, renderer) {
+        if (self.built) {
+            self.draw_patches(renderer); return;
+        }
         let half = TRACK_WIDTH*0.5;
         let paint = 0xF3EAD5;
         // Short strips keep the existing vertex lighting smooth along the
@@ -276,6 +284,18 @@ class Ground {
                 self.patch(renderer,x,TRACK_LENGTH+row*0.25,
                            x+TRACK_WIDTH/12.0,TRACK_LENGTH+(row+1)*0.25,0.002,color);
             }
+        }
+        self.built = true;
+        self.draw_patches(renderer);
+    }
+    draw_patches(self, renderer) {
+        // All paint is 2 mm above the ground. The camera remains above the
+        // plane, so paint is always in front of base geometry along a ray.
+        for (let var i = 0; i < self.paint.len; ++i) {
+            let p = self.paint[i]; renderer.quad(p[0],p[1],p[2],p[3],p[4]);
+        }
+        for (let var i = 0; i < self.base.len; ++i) {
+            let p = self.base[i]; renderer.quad(p[0],p[1],p[2],p[3],p[4]);
         }
     }
 }
@@ -447,6 +467,68 @@ class ScreenVertex {
     init(self, x, y, z, light) { self.x = x; self.y = y; self.z = z; self.light = light; }
 }
 
+// The ground pass submits its opaque polygons in layer order, paint first.
+// Each scanline stores a sorted union of covered intervals. Inserting a span
+// reports only its uncovered pieces, so covered pixels never reach the inner
+// raster loop. This is the compact opaque case of Tremor's S-buffer.
+class SBuffer {
+    init(self) {
+        self.head = Array.with_size(HEIGHT,-1);
+        self.x0 = []; self.x1 = []; self.next = [];
+        self.visible_x0 = Array.with_size(WIDTH,0);
+        self.visible_x1 = Array.with_size(WIDTH,0);
+        self.used = 0;
+    }
+    reset(self) {
+        for (let var y = 0; y < HEIGHT; ++y) self.head[y] = -1;
+        self.used = 0;
+    }
+    allocate(self, x0, x1, next) {
+        let i = self.used; self.used += 1;
+        if (i == self.x0.len) {
+            self.x0.push(x0); self.x1.push(x1); self.next.push(next);
+        } else {
+            self.x0[i] = x0; self.x1[i] = x1; self.next[i] = next;
+        }
+        return i;
+    }
+    insert(self, y, x0, x1) {
+        let var prev = -1;
+        let var cur = self.head[y];
+        while (cur != -1 && self.x1[cur] < x0) {
+            prev = cur; cur = self.next[cur];
+        }
+        let var count = 0;
+        let var mx0 = x0; let var mx1 = x1;
+        let var cursor = x0; let var scan = cur;
+        while (scan != -1 && self.x0[scan] <= x1) {
+            let sx0 = self.x0[scan]; let sx1 = self.x1[scan];
+            if (cursor < sx0) {
+                self.visible_x0[count] = cursor;
+                self.visible_x1[count] = sx0.min(x1);
+                count += 1;
+            }
+            cursor = cursor.max(sx1);
+            mx0 = mx0.min(sx0); mx1 = mx1.max(sx1);
+            scan = self.next[scan];
+        }
+        if (cursor < x1) {
+            self.visible_x0[count] = cursor;
+            self.visible_x1[count] = x1;
+            count += 1;
+        }
+        if (count == 0) return 0;
+        if (cur == scan) {
+            let item = self.allocate(mx0,mx1,scan);
+            if (prev == -1) self.head[y] = item;
+            else self.next[prev] = item;
+        } else {
+            self.x0[cur] = mx0; self.x1[cur] = mx1; self.next[cur] = scan;
+        }
+        return count;
+    }
+}
+
 class Renderer {
     init(self) {
         self.image = Image(WIDTH,HEIGHT); self.depth = ByteArray.with_size(WIDTH*HEIGHT*4);
@@ -456,6 +538,7 @@ class Renderer {
         self.ground_pixels = ByteArray.with_size(WIDTH*HEIGHT*4);
         self.ground_depth = ByteArray.with_size(WIDTH*HEIGHT*4);
         self.cached_ground = nil;
+        self.sbuffer = SBuffer(); self.floor_pass = false;
     }
     begin(self, ground) {
         self.eye = self.target.add(Vec3(self.yaw.sin()*self.pitch.cos(),self.pitch.sin(),self.yaw.cos()*self.pitch.cos()).mul(self.distance));
@@ -473,7 +556,9 @@ class Renderer {
             return;
         }
         self.image.clear(0xFF28384A); self.depth.fill_u32(0,WIDTH*HEIGHT,0);
+        self.sbuffer.reset(); self.floor_pass = true;
         ground.draw(self);
+        self.floor_pass = false;
         self.ground_pixels.memcpy(0,self.image.bytes,0,WIDTH*HEIGHT*4);
         self.ground_depth.memcpy(0,self.depth,0,WIDTH*HEIGHT*4);
         self.cached_ground = ground; self.cached_revision = ground.revision;
@@ -527,6 +612,7 @@ class Renderer {
     }
     quad(self, a, b, c, d, color) {
         let n = b.sub(a).cross(c.sub(a)).unit();
+        // Cull backfaces before projection, clipping or S-buffer insertion.
         if (n.dot(self.eye.sub(a)) <= 0.0) return;
         let points = [a,b,c,d]; let poly = [];
         for (let var i = 0; i < 4; ++i) {
@@ -564,6 +650,13 @@ class Renderer {
         let vertices = [a,b,c];
         let r = (color >> 16) & 255; let g = (color >> 8) & 255; let blue = color & 255;
         let fb = self.image.bytes; let depth = self.depth;
+        let floor_pass = self.floor_pass;
+        let sbuffer = self.sbuffer;
+        // Outdoor light is directional, so every vertex on a planar face has
+        // the same shade. The S-buffer makes its ground pixels write only once.
+        let floor_shade = (a.light/a.z).clip(0.0,1.0);
+        let floor_pixel = 0xFF000000 | ((r*floor_shade).floor() << 16)
+                         | ((g*floor_shade).floor() << 8) | (blue*floor_shade).floor();
         for (let var y = y0; y < y1; ++y) {
             let py = y+0.5; let var left = 1.0e20; let var right = -1.0e20;
             for (let var e = 0; e < 3; ++e) {
@@ -577,6 +670,21 @@ class Renderer {
             if (left >= right) continue;
             let x0 = (left-0.5).clip(0.0,WIDTH.to_f()).ceil();
             let x1 = (right-0.5).clip(0.0,WIDTH.to_f()).ceil();
+            if (floor_pass) {
+                let count = sbuffer.insert(y,x0,x1);
+                for (let var piece = 0; piece < count; ++piece) {
+                    let start_x = sbuffer.visible_x0[piece];
+                    let var zi = a.z+zx*(start_x+0.5-a.x)+zy*(py-a.y);
+                    let var pixel_idx = y*WIDTH+start_x;
+                    let end_idx = y*WIDTH+sbuffer.visible_x1[piece];
+                    while (pixel_idx < end_idx) {
+                        fb.set_u32(pixel_idx,floor_pixel);
+                        depth.set_f32(pixel_idx,zi);
+                        zi += zx; ++pixel_idx;
+                    }
+                }
+                continue;
+            }
             let var z = a.z+zx*(x0+0.5-a.x)+zy*(py-a.y);
             let var light = a.light+lx*(x0+0.5-a.x)+ly*(py-a.y);
             let var idx = y*WIDTH+x0; let end = y*WIDTH+x1;
