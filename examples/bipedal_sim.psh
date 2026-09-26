@@ -34,8 +34,14 @@ let ITERATIONS = 12;
 let WIDTH = 800;
 let HEIGHT = 600;
 let BRIGHTNESS = 1.25;
+// A 60 m straight in the robot's forward direction, plus 4 m of runoff at
+// either end. At 5 m/s the marked section provides twelve seconds of travel.
+let TRACK_WIDTH = 3.0;
+let TRACK_LENGTH = 60.0;
 let UP = Vec3(0.0, 1.0, 0.0);
 let AXES = [Vec3(1.0, 0.0, 0.0), UP, Vec3(0.0, 0.0, 1.0)];
+let SUN_DIRECTION = Vec3(-3.0,5.0,-4.0).unit();
+let FILL_DIRECTION = Vec3(3.0,4.0,5.0).unit();
 
 class Vec3 {
     init(self, x, y, z) { self.x = x; self.y = y; self.z = z; }
@@ -221,18 +227,54 @@ class Joint {
 
 // A signed-distance contact interface leaves room for ramps/triangle meshes.
 // Replace sample() and draw() together when adding terrain. The first version
-// is an infinite plane; the checkerboard only depicts its central patch.
+// is an infinite plane with a painted running track and surrounding grass.
 class Ground {
     // Increment revision after changing terrain geometry or appearance.
     init(self) { self.revision = 0; }
     sample(self, p) { return p.y; }
     normal(self, p) { return UP; }
+    patch(self, renderer, x0, z0, x1, z1, height, color) {
+        renderer.quad(Vec3(x0,height,z0),Vec3(x0,height,z1),
+                      Vec3(x1,height,z1),Vec3(x1,height,z0),color);
+    }
     draw(self, renderer) {
-        for (let var z = -6; z < 6; ++z) {
-            for (let var x = -6; x < 6; ++x) {
-                let color = ((x + z) & 1) == 0 ? 0x566776 : 0x657988;
-                renderer.quad(Vec3(x*0.5, 0.0, z*0.5), Vec3(x*0.5, 0.0, (z+1)*0.5),
-                              Vec3((x+1)*0.5, 0.0, (z+1)*0.5), Vec3((x+1)*0.5, 0.0, z*0.5), color);
+        let half = TRACK_WIDTH*0.5;
+        let paint = 0xF3EAD5;
+        // Short strips keep the existing vertex lighting smooth along the
+        // straight. The entire surface is still cached while the camera rests.
+        for (let var z = -12; z < TRACK_LENGTH+12; z += 2) {
+            let grass = ((z >> 1) & 1) == 0 ? 0x718574 : 0x758978;
+            if (z < -4 || z >= TRACK_LENGTH+4) {
+                self.patch(renderer,-16.0,z.to_f(),16.0,z+2.0,0.0,grass);
+                continue;
+            }
+            self.patch(renderer,-16.0,z.to_f(),-half-0.18,z+2.0,0.0,grass);
+            self.patch(renderer,half+0.18,z.to_f(),16.0,z+2.0,0.0,grass);
+            self.patch(renderer,-half-0.18,z.to_f(),-half,z+2.0,0.0,0xC4B69C);
+            self.patch(renderer,half,z.to_f(),half+0.18,z+2.0,0.0,0xC4B69C);
+            let rubber = ((z/10).floor() & 1) == 0 ? 0xBF7058 : 0xB96A53;
+            self.patch(renderer,-half,z.to_f(),half,z+2.0,0.0,rubber);
+            self.patch(renderer,-half+0.05,z.to_f(),-half+0.10,z+2.0,0.002,paint);
+            self.patch(renderer,half-0.10,z.to_f(),half-0.05,z+2.0,0.002,paint);
+        }
+        // The robot starts at the broad start line. Edge ticks every 5 m and
+        // paired ticks every 10 m make progress and scale visible during a run.
+        self.patch(renderer,-half,0.0,half,0.10,0.002,paint);
+        for (let var z = 5; z < TRACK_LENGTH; z += 5) {
+            self.patch(renderer,-half,z.to_f(),-half+0.35,z+0.06,0.002,paint);
+            self.patch(renderer,half-0.35,z.to_f(),half,z+0.06,0.002,paint);
+            if (z % 10 == 0) {
+                self.patch(renderer,-half,z+0.16,-half+0.35,z+0.22,0.002,paint);
+                self.patch(renderer,half-0.35,z+0.16,half,z+0.22,0.002,paint);
+            }
+        }
+        // A two-row chequered finish at 60 m, followed by the runoff area.
+        for (let var row = 0; row < 2; ++row) {
+            for (let var col = 0; col < 12; ++col) {
+                let x = -half + col*TRACK_WIDTH/12.0;
+                let color = ((row+col) & 1) == 0 ? paint : 0x344352;
+                self.patch(renderer,x,TRACK_LENGTH+row*0.25,
+                           x+TRACK_WIDTH/12.0,TRACK_LENGTH+(row+1)*0.25,0.002,color);
             }
         }
     }
@@ -250,23 +292,24 @@ class Simulator {
     }
     reset(self) {
         self.bodies = []; self.joints = []; self.time = 0.0; self.hold = false;
-        let pelvis = self.body("Pelvis", 12.0, Vec3(0.30, 0.20, 0.22), Vec3(0.0, 1.03, 0.0), 0xDEE5E9);
-        let torso = self.body("Torso", 30.0, Vec3(0.39, 0.41, 0.23), Vec3(0.0, 1.335, 0.0), 0xE7EDF0);
-        let head = self.body("Head", 5.0, Vec3(0.18, 0.21, 0.19), Vec3(0.0, 1.675, 0.0), 0xF0C66C);
+        // Eighties sportswear: red jacket, navy trousers, cream trainers
+        // and an ivory head shell. Both sides belong to the same outfit.
+        let pelvis = self.body("Pelvis", 12.0, Vec3(0.30, 0.20, 0.22), Vec3(0.0, 1.03, 0.0), 0x344764);
+        let torso = self.body("Torso", 30.0, Vec3(0.39, 0.41, 0.23), Vec3(0.0, 1.335, 0.0), 0xDC3F3B);
+        let head = self.body("Head", 5.0, Vec3(0.18, 0.21, 0.19), Vec3(0.0, 1.675, 0.0), 0xE9DBC1);
         self.joint("Waist", pelvis, torso, Vec3(0.0, 1.13, 0.0), Vec3(-35.0,-30.0,-25.0), Vec3(35.0,30.0,25.0), Vec3(140.0,70.0,100.0), Vec3(4.0,3.0,3.0));
         self.joint("Neck", torso, head, Vec3(0.0, 1.55, 0.0), Vec3(-40.0,-60.0,-35.0), Vec3(45.0,60.0,35.0), Vec3(20.0,15.0,15.0), Vec3(3.0,3.0,3.0));
         for (let var side = 0; side < 2; ++side) {
             let s = side == 0 ? -1.0 : 1.0;
             let name = side == 0 ? "Right " : "Left ";
-            let color = side == 0 ? 0xE58B55 : 0x51B9C6;
-            let thigh = self.body(name+"thigh", 8.0, Vec3(0.135,0.43,0.15), Vec3(s*0.105,0.765,0.0), color);
-            let shin = self.body(name+"shin", 3.5, Vec3(0.105,0.43,0.115), Vec3(s*0.105,0.335,0.0), color);
-            let foot = self.body(name+"foot", 1.5, Vec3(0.12,0.12,0.26), Vec3(s*0.105,0.06,0.065), 0x364759);
+            let thigh = self.body(name+"thigh", 8.0, Vec3(0.135,0.43,0.15), Vec3(s*0.105,0.765,0.0), 0x344764);
+            let shin = self.body(name+"shin", 3.5, Vec3(0.105,0.43,0.115), Vec3(s*0.105,0.335,0.0), 0x435E80);
+            let foot = self.body(name+"foot", 1.5, Vec3(0.12,0.12,0.26), Vec3(s*0.105,0.06,0.065), 0xF2D09A);
             self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,-40.0,-30.0), Vec3(18.0,40.0,30.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
             self.joint(name+"knee", thigh, shin, Vec3(s*0.105,0.55,0.0), zero(), Vec3(138.0,0.0,0.0), Vec3(160.0,0.0,0.0), Vec3(10.0,1.0,1.0));
             self.joint(name+"ankle", shin, foot, Vec3(s*0.105,0.12,0.0), Vec3(-15.0,0.0,-20.0), Vec3(55.0,0.0,20.0), Vec3(120.0,0.0,35.0), Vec3(6.0,1.0,3.0));
-            let upper = self.body(name+"upper arm", 2.0, Vec3(0.085,0.29,0.10), Vec3(s*0.245,1.345,0.0), color);
-            let lower = self.body(name+"forearm", 1.5, Vec3(0.075,0.30,0.085), Vec3(s*0.245,1.05,0.0), color);
+            let upper = self.body(name+"upper arm", 2.0, Vec3(0.085,0.29,0.10), Vec3(s*0.245,1.345,0.0), 0xB52E34);
+            let lower = self.body(name+"forearm", 1.5, Vec3(0.075,0.30,0.085), Vec3(s*0.245,1.05,0.0), 0xE04A42);
             self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-169.0,-60.0,side == 0 ? -80.0 : -15.0), Vec3(45.0,60.0,side == 0 ? 15.0 : 80.0), Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
             self.joint(name+"elbow", upper, lower, Vec3(s*0.245,1.20,0.0), Vec3(-145.0,0.0,0.0), zero(), Vec3(55.0,0.0,0.0), Vec3(8.0,1.0,1.0));
         }
@@ -387,7 +430,7 @@ class ScreenVertex {
 class Renderer {
     init(self) {
         self.image = Image(WIDTH,HEIGHT); self.depth = ByteArray.with_size(WIDTH*HEIGHT*4);
-        self.yaw = 0.65; self.pitch = 0.28; self.distance = 3.8;
+        self.yaw = 2.8; self.pitch = 0.28; self.distance = 4.2;
         self.target = Vec3(0.0,0.85,0.0);
         self.faces = [[0,4,6,2],[1,3,7,5],[0,1,5,4],[2,6,7,3],[0,2,3,1],[4,5,7,6]];
         self.ground_pixels = ByteArray.with_size(WIDTH*HEIGHT*4);
@@ -421,9 +464,10 @@ class Renderer {
         let d = p.sub(self.eye); return Vec3(d.dot(self.right),d.dot(self.up),d.dot(self.forward));
     }
     light(self, p, n) {
-        let to_light = Vec3(-3.0,5.0,4.0).sub(p);
-        let d2 = to_light.dot(to_light);
-        return BRIGHTNESS * (0.28 + 0.72*n.dot(to_light.unit()).max(0.0)/(1.0+0.012*d2));
+        // Outdoor sunlight and soft fill keep the full straight illuminated,
+        // including the far end, and make both sides of the outfit readable.
+        return BRIGHTNESS * (0.28 + 0.50*n.dot(SUN_DIRECTION).max(0.0)
+                                 + 0.20*n.dot(FILL_DIRECTION).max(0.0));
     }
     body(self, b) {
         let vertices = [];
@@ -432,10 +476,42 @@ class Renderer {
             let f = self.faces[i];
             self.quad(vertices[f[0]],vertices[f[1]],vertices[f[2]],vertices[f[3]],b.color);
         }
-        // A dark visor marks the front of the head, making orientation clear.
+        // Chunky trapezoidal sunglasses: separate tinted lenses, a bridge,
+        // side arms and small reflections distinguish them from a robot visor.
         if (b.name == "Head") {
-            self.quad(b.world(Vec3(-0.075,-0.005,0.096)),b.world(Vec3(0.075,-0.005,0.096)),
-                      b.world(Vec3(0.075,0.065,0.096)),b.world(Vec3(-0.075,0.065,0.096)),0x223D50);
+            for (let var side = 0; side < 2; ++side) {
+                let x = side == 0 ? -0.087 : 0.007;
+                self.quad(b.world(Vec3(x+0.010,0.006,0.098)),b.world(Vec3(x+0.070,0.006,0.098)),
+                          b.world(Vec3(x+0.080,0.070,0.098)),b.world(Vec3(x,0.070,0.098)),0x151720);
+                self.quad(b.world(Vec3(x+0.016,0.015,0.100)),b.world(Vec3(x+0.064,0.015,0.100)),
+                          b.world(Vec3(x+0.070,0.058,0.100)),b.world(Vec3(x+0.010,0.058,0.100)),0x334052);
+                self.quad(b.world(Vec3(x+0.014,0.047,0.101)),b.world(Vec3(x+0.036,0.047,0.101)),
+                          b.world(Vec3(x+0.044,0.055,0.101)),b.world(Vec3(x+0.016,0.055,0.101)),0x91AAA9);
+            }
+            self.quad(b.world(Vec3(-0.010,0.042,0.099)),b.world(Vec3(0.010,0.042,0.099)),
+                      b.world(Vec3(0.010,0.060,0.099)),b.world(Vec3(-0.010,0.060,0.099)),0x151720);
+            self.quad(b.world(Vec3(-0.091,0.047,-0.045)),b.world(Vec3(-0.091,0.047,0.098)),
+                      b.world(Vec3(-0.091,0.067,0.098)),b.world(Vec3(-0.091,0.067,-0.045)),0x151720);
+            self.quad(b.world(Vec3(0.091,0.047,0.098)),b.world(Vec3(0.091,0.047,-0.045)),
+                      b.world(Vec3(0.091,0.067,-0.045)),b.world(Vec3(0.091,0.067,0.098)),0x151720);
+        }
+        if (b.name == "Torso") {
+            // Charcoal shoulder panels and hem, cream piping and a silver zip
+            // give the red jacket a classic eighties tracksuit treatment.
+            self.quad(b.world(Vec3(-0.195,0.135,0.116)),b.world(Vec3(0.195,0.135,0.116)),
+                      b.world(Vec3(0.195,0.205,0.116)),b.world(Vec3(-0.195,0.205,0.116)),0x292B36);
+            self.quad(b.world(Vec3(0.195,0.135,-0.116)),b.world(Vec3(-0.195,0.135,-0.116)),
+                      b.world(Vec3(-0.195,0.205,-0.116)),b.world(Vec3(0.195,0.205,-0.116)),0x292B36);
+            self.quad(b.world(Vec3(-0.195,-0.205,0.116)),b.world(Vec3(0.195,-0.205,0.116)),
+                      b.world(Vec3(0.195,-0.17,0.116)),b.world(Vec3(-0.195,-0.17,0.116)),0x292B36);
+            self.quad(b.world(Vec3(0.195,-0.205,-0.116)),b.world(Vec3(-0.195,-0.205,-0.116)),
+                      b.world(Vec3(-0.195,-0.17,-0.116)),b.world(Vec3(0.195,-0.17,-0.116)),0x292B36);
+            self.quad(b.world(Vec3(-0.195,0.10,0.116)),b.world(Vec3(0.195,0.10,0.116)),
+                      b.world(Vec3(0.195,0.135,0.116)),b.world(Vec3(-0.195,0.135,0.116)),0xF3EAD5);
+            self.quad(b.world(Vec3(0.195,0.10,-0.116)),b.world(Vec3(-0.195,0.10,-0.116)),
+                      b.world(Vec3(-0.195,0.135,-0.116)),b.world(Vec3(0.195,0.135,-0.116)),0xF3EAD5);
+            self.quad(b.world(Vec3(-0.008,-0.20,0.117)),b.world(Vec3(0.008,-0.20,0.117)),
+                      b.world(Vec3(0.008,0.20,0.117)),b.world(Vec3(-0.008,0.20,0.117)),0xD1DFD6);
         }
     }
     quad(self, a, b, c, d, color) {
@@ -606,7 +682,7 @@ loop {
     if (down) renderer.pitch -= dt*0.7;
     if (closer) renderer.distance -= dt*2.0;
     if (farther) renderer.distance += dt*2.0;
-    renderer.pitch = renderer.pitch.clip(0.05,1.35); renderer.distance = renderer.distance.clip(2.2,8.0);
+    renderer.pitch = renderer.pitch.clip(0.05,1.35); renderer.distance = renderer.distance.clip(2.2,45.0);
     if (!paused) {
         accumulator += dt;
         while (accumulator >= STEP) { sim.step(); accumulator -= STEP; }
