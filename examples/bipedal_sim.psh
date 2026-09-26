@@ -811,7 +811,7 @@ let MUTATION_SIGMA = 0.18;
 let MUTATION_RESET_PROB = 0.1;
 let CROSSOVER_PROB = 0.05;
 let MIGRATION_PERIOD = 100;
-let NUM_MIGRANTS = 2;
+let NUM_MIGRANTS = 1;  // Sent to each neighbour, so an island receives two
 
 // How often the viewer switches to the best model the islands have reported
 let VIEWER_PERIOD_MS = 10000;
@@ -819,7 +819,7 @@ let VIEWER_PERIOD_MS = 10000;
 let MSG_SETUP = 0;     // Island index, seed, actor ids around the ring
 let MSG_MIGRANT = 1;   // A network snapshot arriving from a neighbour
 let MSG_STOP = 2;
-let MSG_REPORT = 3;    // Island index, generation, best, mean, ms taken, best snapshot
+let MSG_REPORT = 3;    // Island index, generation, best, prev best, mean, ms taken, best snapshot
 
 // Standard normal sample using Box-Muller
 fun gauss(rng)
@@ -888,6 +888,7 @@ class Island
         self.immigrants = [];
         self.generation = 0;
         self.best_fitness = 0.0;
+        self.prev_best = nil;
         self.mean_fitness = 0.0;
     }
 
@@ -919,6 +920,9 @@ class Island
             self.order[j + 1] = idx;
         }
 
+        // The first generation has no previous best
+        if (self.generation > 0)
+            self.prev_best = self.best_fitness;
         self.best_fitness = self.fitness[self.order[0]];
         self.mean_fitness = total / POP_SIZE;
     }
@@ -1006,6 +1010,7 @@ fun island_actor()
             index,
             island.generation,
             island.best_fitness,
+            island.prev_best,
             island.mean_fitness,
             $time_current_ms() - start_ms,
             network_snapshot(island.best().network)
@@ -1049,10 +1054,19 @@ fun stop_islands(ids)
 
 fun print_report(msg)
 {
+    // Change in best fitness since the previous generation, positive is better
+    let var delta = "n/a";
+    if (msg[4] != nil) {
+        let d = msg[3] - msg[4];
+        delta = (d >= 0.0 ? "+" : "") + d.format_decimals(3);
+    }
+
     $println(
         "Island " + msg[1].to_s() + ", generation " + msg[2].to_s() +
-        ": best " + msg[3].format_decimals(3) + ", mean " + msg[4].format_decimals(3) +
-        ", " + (msg[5].to_f() / 1000.0).format_decimals(1) + " s"
+        ": best " + msg[3].format_decimals(3) +
+        ", prev " + delta +
+        ", mean " + msg[5].format_decimals(3) +
+        ", " + (msg[6].to_f() / 1000.0).format_decimals(1) + " s"
     );
 }
 
@@ -1526,7 +1540,7 @@ loop {
                 best = report;
         }
 
-        load_network_snapshot(controller.network, best[6]);
+        load_network_snapshot(controller.network, best[7]);
         episode = PolicyEpisode(controller, seed, EPISODE_SECONDS);
         sim = episode.sim;
         renderer.target.z = 0.0;
