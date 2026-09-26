@@ -19,7 +19,8 @@
 //
 // Joint ranges loosely follow adult ROM reference values, rounded for this
 // model: https://archive.cdc.gov/www_cdc_gov/ncbddd/jointrom/index.html
-// Shoulder abduction is restricted to 80 degrees in this simplified model.
+// Shoulder swing, hip spread and ankle extension are narrowed further to
+// what walking and running use, and joints unused for locomotion are locked.
 // Motor torque/speed settings are approximate engineering choices, not a
 // fitted human muscle model. Human torque depends on angle and speed:
 // https://pubmed.ncbi.nlm.nih.gov/17485097/
@@ -561,7 +562,7 @@ class Simulator {
         let torso = self.body("Torso", 30.0, Vec3(0.39, 0.41, 0.23), Vec3(0.0, 1.335, 0.0), 0xDC3F3B);
         let head = self.body("Head", 5.0, Vec3(0.18, 0.21, 0.19), Vec3(0.0, 1.675, 0.0), 0xE9DBC1);
         self.pelvis = pelvis; self.torso = torso; self.head = head; self.feet = [];
-        self.joint("Waist", pelvis, torso, Vec3(0.0, 1.13, 0.0), Vec3(-35.0,0.0,0.0), Vec3(35.0,0.0,0.0), Vec3(140.0,70.0,100.0), Vec3(4.0,3.0,3.0));
+        self.joint("Waist", pelvis, torso, Vec3(0.0, 1.13, 0.0), Vec3(-15.0,0.0,0.0), Vec3(30.0,0.0,0.0), Vec3(140.0,70.0,100.0), Vec3(4.0,3.0,3.0));
         self.joint("Neck", torso, head, Vec3(0.0, 1.55, 0.0), zero(), zero(), Vec3(20.0,15.0,15.0), Vec3(3.0,3.0,3.0));
         for (let var side = 0; side < 2; ++side) {
             let s = side == 0 ? -1.0 : 1.0;
@@ -570,12 +571,12 @@ class Simulator {
             let shin = self.body(name+"shin", 3.5, Vec3(0.105,0.43,0.115), Vec3(s*0.105,0.335,0.0), 0x435E80);
             let foot = self.body(name+"foot", 1.5, Vec3(0.12,0.12,0.26), Vec3(s*0.105,0.06,0.065), 0xF2D09A);
             self.feet.push(foot);
-            self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,0.0,-30.0), Vec3(18.0,0.0,30.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
+            self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,0.0,-15.0), Vec3(18.0,0.0,15.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
             self.joint(name+"knee", thigh, shin, Vec3(s*0.105,0.55,0.0), zero(), Vec3(138.0,0.0,0.0), Vec3(160.0,0.0,0.0), Vec3(10.0,1.0,1.0));
-            self.joint(name+"ankle", shin, foot, Vec3(s*0.105,0.12,0.0), Vec3(-15.0,0.0,-20.0), Vec3(55.0,0.0,20.0), Vec3(120.0,0.0,35.0), Vec3(6.0,1.0,3.0));
+            self.joint(name+"ankle", shin, foot, Vec3(s*0.105,0.12,0.0), Vec3(-15.0,0.0,-20.0), Vec3(44.0,0.0,20.0), Vec3(120.0,0.0,35.0), Vec3(6.0,1.0,3.0));
             let upper = self.body(name+"upper arm", 2.0, Vec3(0.085,0.29,0.10), Vec3(s*0.245,1.345,0.0), 0xB52E34);
             let lower = self.body(name+"forearm", 1.5, Vec3(0.075,0.30,0.085), Vec3(s*0.245,1.05,0.0), 0xE04A42);
-            self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-169.0,0.0,0.0), Vec3(45.0,0.0,0.0), Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
+            self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-70.0,0.0,0.0), Vec3(45.0,0.0,0.0), Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
             self.joint(name+"elbow", upper, lower, Vec3(s*0.245,1.20,0.0), zero(), zero(), Vec3(55.0,0.0,0.0), Vec3(8.0,1.0,1.0));
         }
         // Sample a shared stride and leg spread, then add small independent
