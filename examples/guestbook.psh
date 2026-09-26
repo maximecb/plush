@@ -1,0 +1,1488 @@
+// Plush guestbook client
+//
+//   plush guestbook.psh [--local | --localhost | server_address]
+//
+// Connects to the guestbook at plushlang.org by default, to a server on
+// this machine with --local or --localhost, or to the given address, e.g.
+// example.com:1337.
+//
+// Connects to a Plush guestbook server, lets you register or log in, then
+// shows the latest messages and lets you sign the guestbook. The message
+// list scrolls with the scrollbar on the right or the up and down arrow keys,
+// and older messages load as you scroll down.
+//
+// The server speaks one JSON object per line in each direction. Passwords
+// are never sent: the client sends a SHA-256 hash of the password instead.
+
+from image import Image, rgb;
+from json import parse_json, format_json;
+from sha256 import sha256;
+from ./monogram_font import Font;
+
+let DEFAULT_SERVER = "plushlang.org:1337";
+let LOCAL_SERVER = "127.0.0.1:1337";
+
+let WIDTH = 900;
+let HEIGHT = 720;
+
+// Size of a character with the font at scale 2
+let CHAR_W = 14;
+let CHAR_H = 24;
+
+let MAX_MSG_LEN = 512;
+let MAX_NAME_LEN = 16;
+let MAX_PASS_LEN = 64;
+let MIN_PASS_LEN = 4;
+
+// Messages fetched per request, and how often to check for new ones
+let PAGE_SIZE = 32;
+let POLL_MS = 5000;
+
+// Prefix hashed with passwords, which the server expects
+let HASH_PREFIX = "plush_guestbook:";
+
+// Colors
+let BG = rgb(22, 18, 38);
+let PANEL = rgb(34, 29, 58);
+let FIELD = rgb(48, 42, 80);
+let BORDER = rgb(92, 82, 140);
+let FOCUS = rgb(160, 140, 240);
+let TEXT = rgb(236, 232, 248);
+let DIM = rgb(150, 140, 185);
+let ERROR = rgb(255, 120, 120);
+let SUCCESS = rgb(130, 220, 140);
+let BUTTON = rgb(110, 90, 200);
+let REGISTER_BUTTON = rgb(30, 145, 120);
+let BUTTON_TEXT = rgb(255, 255, 255);
+let DANGER = rgb(140, 50, 70);
+let CANCEL = rgb(40, 130, 75);
+
+// One color per letter of the logo, in rainbow order
+let RAINBOW = [
+    rgb(232, 64, 64),
+    rgb(245, 145, 40),
+    rgb(245, 212, 50),
+    rgb(80, 200, 95),
+    rgb(70, 140, 240),
+];
+
+// Teddy bear colors
+let FUR = rgb(176, 118, 72);
+let FUR_LIGHT = rgb(232, 196, 150);
+let FUR_DARK = rgb(64, 38, 24);
+
+// Letters of the logo, one string per horizontal stripe, IBM logo style
+let LOGO_LETTERS = [
+    [
+        "########.",
+        "###...###",
+        "###...###",
+        "###...###",
+        "########.",
+        "###......",
+        "###......",
+        "###......",
+    ],
+    [
+        "###......",
+        "###......",
+        "###......",
+        "###......",
+        "###......",
+        "###......",
+        "#########",
+        "#########",
+    ],
+    [
+        "###...###",
+        "###...###",
+        "###...###",
+        "###...###",
+        "###...###",
+        "###...###",
+        "#########",
+        ".#######.",
+    ],
+    [
+        ".########",
+        "###......",
+        "###......",
+        "###......",
+        ".#######.",
+        "......###",
+        "......###",
+        "########.",
+    ],
+    [
+        "###...###",
+        "###...###",
+        "###...###",
+        "#########",
+        "#########",
+        "###...###",
+        "###...###",
+        "###...###",
+    ],
+];
+
+let NUM_STRIPES = 8;
+let LETTER_COLS = 9;
+
+// Intro animation timing, in milliseconds: the letters appear one by one,
+// then the bear, then the bear's sunglasses drop onto its face
+let LETTER_START_MS = 300;
+let LETTER_EVERY_MS = 380;
+let STRIPE_MS = 35;
+let BEAR_MS = 2350;
+let SHADES_MS = 2850;
+let SHADES_DROP_MS = 350;
+let TAGLINE_MS = 3350;
+let INTRO_END_MS = 4000;
+let SLIDE_MS = 450;
+
+// Height the sunglasses drop from, in the bear's units
+let SHADES_DROP = 45;
+
+// Logo sizes: cell width, stripe height and gap between stripes, and how
+// far up the bear is moved to line up with the letters, in pixels
+let BIG_LOGO = {cell: 10, stripe: 10, gap: 5, bear_up: 3};
+let SMALL_LOGO = {cell: 3, stripe: 3, gap: 1, bear_up: 1};
+
+// Vertical position of the big logo during the intro and on the login screen
+let INTRO_LOGO_Y = 270;
+let LOGIN_LOGO_Y = 80;
+
+// Layout of the guestbook screen
+let COMPOSE_Y = 64;
+let COMPOSE_LINES = 3;
+let PANEL_Y = 208;
+let MARGIN = 16;
+let SCROLLBAR_W = 12;
+let TEXT_PAD = 12;
+
+// Characters per line in the compose box and the message list
+let COMPOSE_COLS = (WIDTH - 2 * MARGIN - 2 * TEXT_PAD).idiv(CHAR_W);
+let MSG_COLS = (WIDTH - 2 * MARGIN - SCROLLBAR_W - 2 * TEXT_PAD).idiv(CHAR_W);
+
+// Splits a string into an array of single-character strings
+fun chars(s)
+{
+    let out = [];
+    let var i = 0;
+
+    while (i < s.len) {
+        let ch = s.char_at(i);
+
+        if (ch == nil) {
+            i = i + 1;
+            continue;
+        }
+
+        out.push(ch);
+        i = i + ch.len;
+    }
+
+    return out;
+}
+
+// Joins an array of strings into one
+fun join(parts)
+{
+    let out = ByteArray.with_size(0);
+
+    for (let var i = 0; i < parts.len; ++i)
+        out.push_string(parts[i]);
+
+    return String.from_utf8(out, 0, out.len);
+}
+
+// Number of characters in a string
+fun num_chars(s)
+{
+    return chars(s).len;
+}
+
+// Wraps text into lines of at most cols characters, breaking at spaces
+// where possible
+fun wrap(text, cols)
+{
+    let cs = chars(text);
+    cs.push(" ");
+
+    let lines = [];
+    let var line = [];
+    let var word = [];
+
+    for (let var i = 0; i < cs.len; ++i) {
+        if (cs[i] != " ") {
+            word.push(cs[i]);
+            continue;
+        }
+
+        let sep = line.len > 0 ? 1 : 0;
+
+        if (line.len + sep + word.len <= cols) {
+            if (sep == 1)
+                line.push(" ");
+            line.append(word);
+        } else {
+            if (line.len > 0)
+                lines.push(join(line));
+
+            // Words longer than a line are split
+            while (word.len > cols) {
+                lines.push(join(word.slice(0, cols)));
+                word = word.slice(cols, word.len);
+            }
+
+            line = word;
+        }
+
+        word = [];
+    }
+
+    if (line.len > 0 || lines.len == 0)
+        lines.push(join(line));
+
+    return lines;
+}
+
+// Describes how long ago a Unix timestamp was
+fun time_ago(time)
+{
+    let secs = $time_current_ms().idiv(1000) - time;
+
+    if (secs < 60) return "just now";
+
+    let mins = secs.idiv(60);
+    if (mins < 60) return mins.to_s() + " min ago";
+
+    let hours = mins.idiv(60);
+    if (hours < 24) return hours.to_s() + (hours == 1 ? " hour ago" : " hours ago");
+
+    let days = hours.idiv(24);
+    if (days < 30) return days.to_s() + (days == 1 ? " day ago" : " days ago");
+
+    let months = days.idiv(30);
+    if (months < 12) return months.to_s() + (months == 1 ? " month ago" : " months ago");
+
+    let years = days.idiv(365);
+    return years.to_s() + (years == 1 ? " year ago" : " years ago");
+}
+
+// Picks a rainbow color for a username, so that each user keeps theirs
+fun name_color(name)
+{
+    let var sum = 0;
+
+    for (let var i = 0; i < name.len; ++i)
+        sum = sum + name.byte_at(i);
+
+    return RAINBOW[sum % RAINBOW.len];
+}
+
+// Tests if a byte can be part of a username: an ASCII letter or digit, or
+// an underscore
+fun is_name_byte(b)
+{
+    return (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95;
+}
+
+// Tests if a username has only the characters the server accepts
+fun valid_username(name)
+{
+    if (name.len < 2 || name.len > MAX_NAME_LEN)
+        return false;
+
+    for (let var i = 0; i < name.len; ++i) {
+        if (!is_name_byte(name.byte_at(i)))
+            return false;
+    }
+
+    return true;
+}
+
+// Hash of a password, as the server expects it
+fun password_hash(password)
+{
+    return sha256(HASH_PREFIX + password).to_hex();
+}
+
+// Draws a filled ellipse
+fun fill_ellipse(img, cx, cy, rx, ry, color)
+{
+    for (let var dy = -ry; dy <= ry; ++dy) {
+        let t = dy.to_f() / ry;
+        let half = (rx * (1.0 - t * t).max(0.0).sqrt()).floor();
+        img.fill_rect(cx - half, cy + dy, 2 * half + 1, 1, color);
+    }
+}
+
+// Draws the outline of a rectangle
+fun draw_rect(img, x, y, w, h, color)
+{
+    img.fill_rect(x, y, w, 1, color);
+    img.fill_rect(x, y + h - 1, w, 1, color);
+    img.fill_rect(x, y, 1, h, color);
+    img.fill_rect(x + w - 1, y, 1, h, color);
+}
+
+// Draws a teddy bear in a size by size box. If shades_y is not nil, the
+// bear wears sunglasses, shades_y units below where they sit on its face,
+// so that they can be animated falling into place. Without them, its eyes
+// show.
+fun draw_bear(img, x, y, size, shades_y)
+{
+    let s = size / 100.0;
+
+    // Draws an ellipse given in the bear's 100 by 100 coordinates
+    fun part(cx, cy, rx, ry, color) {
+        fill_ellipse(img, x + (cx * s).floor(), y + (cy * s).floor(), (rx * s).floor().max(1), (ry * s).floor().max(1), color);
+    }
+
+    // Ears
+    part(24, 19, 10, 10, FUR);
+    part(76, 19, 10, 10, FUR);
+    part(24, 19, 5, 5, FUR_LIGHT);
+    part(76, 19, 5, 5, FUR_LIGHT);
+
+    // Body, arms and feet
+    part(50, 78, 28, 22, FUR);
+    part(50, 81, 16, 13, FUR_LIGHT);
+    part(21, 74, 9, 13, FUR);
+    part(79, 74, 9, 13, FUR);
+    part(32, 94, 12, 6, FUR);
+    part(68, 94, 12, 6, FUR);
+
+    // Head, muzzle, nose and eyes
+    part(50, 40, 32, 29, FUR);
+    part(50, 54, 13, 9, FUR_LIGHT);
+    part(50, 50, 5, 3, FUR_DARK);
+    part(38, 38, 4, 4, FUR_DARK);
+    part(62, 38, 4, 4, FUR_DARK);
+
+    if (shades_y != nil) {
+        let sy = 36 + shades_y;
+        part(38, sy, 10, 6, FUR_DARK);
+        part(62, sy, 10, 6, FUR_DARK);
+        img.fill_rect(x + (44 * s).floor(), y + ((sy - 2) * s).floor(), (12 * s).floor().max(1), (3 * s).floor().max(1), FUR_DARK);
+    }
+}
+
+// Height of the logo for a given size
+fun logo_height(size)
+{
+    return NUM_STRIPES * (size.stripe + size.gap) - size.gap;
+}
+
+// Width of the logo, letters and bear, for a given size
+fun logo_width(size)
+{
+    return 56 * size.cell + logo_height(size);
+}
+
+// Draws the logo: the letters of PLUSH in rainbow colors, each made of
+// horizontal stripes, followed by the teddy bear. letter_stripes says how
+// many stripes of each letter to draw. The bear is only drawn if show_bear
+// is true, with its sunglasses at shades_y (see draw_bear).
+fun draw_logo(img, x, y, size, letter_stripes, show_bear, shades_y)
+{
+    let period = size.stripe + size.gap;
+
+    for (let var i = 0; i < LOGO_LETTERS.len; ++i) {
+        let rows = LOGO_LETTERS[i];
+        let lx = x + i * (LETTER_COLS + 2) * size.cell;
+
+        for (let var r = 0; r < letter_stripes[i]; ++r) {
+            let row = rows[r];
+            let var c = 0;
+
+            // Draw each run of filled cells as one bar
+            while (c < LETTER_COLS) {
+                if (row.byte_at(c) != 35) {
+                    c = c + 1;
+                    continue;
+                }
+
+                let start = c;
+                while (c < LETTER_COLS && row.byte_at(c) == 35)
+                    c = c + 1;
+
+                img.fill_rect(lx + start * size.cell, y + r * period, (c - start) * size.cell, size.stripe, RAINBOW[i]);
+            }
+        }
+    }
+
+    if (show_bear)
+        draw_bear(img, x + 56 * size.cell, y - size.bear_up, logo_height(size), shades_y);
+}
+
+// Draws the complete logo
+fun draw_full_logo(img, x, y, size)
+{
+    draw_logo(img, x, y, size, [8, 8, 8, 8, 8], true, 0);
+}
+
+// Actor that connects to the server, then reads lines from the socket and
+// forwards each parsed message to the main actor. gen tells messages from
+// an old connection apart from the current one.
+fun net_actor(addr, gen)
+{
+    let parent = $actor_parent();
+    let sock = $net_connect(addr);
+
+    if (sock == nil) {
+        $actor_send(parent, {net: "failed", gen: gen});
+        return;
+    }
+
+    // Wait for data as long as it takes, the server sends nothing when idle
+    $net_set_timeout(sock, 0);
+    $actor_send(parent, {net: "connected", gen: gen, sock: sock});
+
+    let buf = ByteArray.with_size(1 << 20);
+    let var len = 0;
+
+    loop {
+        let num_read = $net_read(sock, buf, len, buf.len - len);
+
+        if (num_read == nil || (num_read == 0 && len == buf.len))
+            break;
+
+        len = len + num_read;
+
+        // Forward every complete line
+        let var start = 0;
+        for (let var i = 0; i < len; ++i) {
+            if (buf[i] == 10) {
+                let line = String.from_utf8(buf, start, i - start);
+                start = i + 1;
+
+                if (line != nil) {
+                    let msg = parse_json(line);
+                    if (msg instanceof Dict)
+                        $actor_send(parent, {net: "msg", gen: gen, msg: msg});
+                }
+            }
+        }
+
+        buf.memcpy(0, buf, start, len - start);
+        len = len - start;
+    }
+
+    $actor_send(parent, {net: "closed", gen: gen});
+}
+
+// State of the client and its three screens: the intro animation, the
+// login screen and the guestbook itself
+class App
+{
+    // Creates the client for a given server address
+    init(self, addr)
+    {
+        self.addr = addr;
+        self.frame = Image(WIDTH, HEIGHT);
+        self.panel = Image(WIDTH - 2 * MARGIN, HEIGHT - PANEL_Y - MARGIN);
+        self.fonts = {};
+
+        self.screen = "intro";
+        self.start_ms = $time_current_ms();
+        self.login_start_ms = 0;
+        self.dirty = true;
+        self.cursor_on = true;
+
+        // Connection to the server
+        self.conn = "connecting";
+        self.sock = nil;
+        self.gen = 0;
+        self.pending = [];
+        self.total_views = nil;
+        self.messages_today = nil;
+        self.num_accounts = nil;
+
+        // Login screen, in "login" or "register" mode. The fields are the
+        // username, password and password confirmation, as arrays of
+        // characters. The confirmation only shows when registering.
+        self.mode = "login";
+        self.fields = [[], [], []];
+        self.focus = 0;
+        self.status = "";
+        self.status_color = DIM;
+
+        // Logged in user, and credentials to log in again after reconnecting
+        self.username = nil;
+        self.is_admin = false;
+        self.auth = nil;
+
+        // Messages, newest first, with their wrapped lines
+        self.messages = [];
+        self.msg_ids = {};
+        self.scroll_y = 0;
+        self.loading_older = false;
+        self.no_more_older = false;
+        self.compose = [];
+
+        // Clickable areas of the last frame drawn, and scrollbar dragging
+        self.buttons = [];
+        self.drag_offset = nil;
+
+        // Id of the message the admin is about to delete, which then shows
+        // the categories to delete it as
+        self.deleting = nil;
+    }
+
+    // Returns a font for a text color on a background color
+    font(self, color, bg)
+    {
+        let key = color.to_s() + ":" + bg.to_s();
+
+        if (!self.fonts.has(key))
+            self.fonts[key] = Font(2, color, bg);
+
+        return self.fonts[key];
+    }
+
+    // Draws a line of text into an image
+    text(self, img, x, y, str, color, bg)
+    {
+        let font = self.font(color, bg);
+        let cs = chars(str);
+
+        for (let var i = 0; i < cs.len; ++i)
+            font.draw_char(img, x + i * CHAR_W, y, cs[i]);
+    }
+
+    // Draws a line of text centered horizontally in the frame
+    centered(self, y, str, color)
+    {
+        self.text(self.frame, (WIDTH - num_chars(str) * CHAR_W).idiv(2), y, str, color, BG);
+    }
+
+    // Shows a status message on the login or guestbook screen
+    set_status(self, msg, color)
+    {
+        self.status = msg;
+        self.status_color = color;
+        self.dirty = true;
+    }
+
+    // Starts connecting to the server, in a new network actor
+    connect(self)
+    {
+        self.gen = self.gen + 1;
+        self.conn = "connecting";
+        self.sock = nil;
+        self.pending = [];
+        self.loading_older = false;
+        self.dirty = true;
+
+        let addr = self.addr;
+        let gen = self.gen;
+        $actor_spawn(|| net_actor(addr, gen));
+    }
+
+    // Drops the connection, which the network actor notices and reports
+    disconnect(self)
+    {
+        if (self.sock != nil)
+            $net_close(self.sock);
+
+        self.sock = nil;
+        self.conn = "closed";
+    }
+
+    // Sends a request to the server. info is kept with it, to handle the
+    // response, which comes back in the same order as the requests.
+    send(self, req, info)
+    {
+        if (self.conn != "connected")
+            return false;
+
+        let out = ByteArray.with_size(0);
+        out.push_string(format_json(req));
+        out.push_u8(10);
+
+        if ($net_write(self.sock, out, 0, out.len) == nil) {
+            self.disconnect();
+            return false;
+        }
+
+        self.pending.push({req: req, info: info});
+        return true;
+    }
+
+    // Handles a message from the mailbox: a UI event, a timer tick, or a
+    // message from the network actor
+    handle(self, msg)
+    {
+        if (msg instanceof UIEvent) {
+            self.handle_ui(msg);
+            return;
+        }
+
+        if (msg == "tick") {
+            self.on_tick();
+            return;
+        }
+
+        if (msg instanceof Dict && msg.has("net"))
+            self.handle_net(msg);
+    }
+
+    // Checks for news every few seconds, and reconnects when disconnected
+    on_tick(self)
+    {
+        if (self.screen == "intro")
+            return;
+
+        if (self.conn == "failed" || self.conn == "closed") {
+            self.connect();
+            return;
+        }
+
+        if (self.screen == "main" && self.pending.len == 0) {
+            self.request_newer();
+            self.send({type: "stats"}, nil);
+        }
+    }
+
+    // Handles a message from the network actor
+    handle_net(self, msg)
+    {
+        if (msg.gen != self.gen)
+            return;
+
+        self.dirty = true;
+
+        if (msg.net == "failed") {
+            self.conn = "failed";
+            if (self.screen != "main")
+                self.set_status("Could not connect to " + self.addr + ", retrying...", ERROR);
+            return;
+        }
+
+        if (msg.net == "connected") {
+            self.conn = "connected";
+            self.sock = msg.sock;
+            if (self.status_color == ERROR)
+                self.set_status("", DIM);
+            return;
+        }
+
+        if (msg.net == "closed") {
+            self.conn = "closed";
+            self.sock = nil;
+            self.pending = [];
+            self.loading_older = false;
+            return;
+        }
+
+        self.handle_response(msg.msg);
+    }
+
+    // Handles a response from the server
+    handle_response(self, res)
+    {
+        // The hello comes unprompted when connecting
+        if (res.type == "hello") {
+            if (!res.ok) {
+                self.set_status(res.error, ERROR);
+                return;
+            }
+
+            self.total_views = res.total_views;
+            self.messages_today = res.has("messages_today") ? res.messages_today : nil;
+            self.num_accounts = res.has("num_accounts") ? res.num_accounts : nil;
+
+            // Log back in after a reconnection
+            if (self.auth != nil)
+                self.send({type: "login", username: self.auth.username, hash: self.auth.hash}, {silent: true});
+
+            return;
+        }
+
+        if (self.pending.len == 0)
+            return;
+
+        let sent = self.pending.remove(0);
+        let req = sent.req;
+        let info = sent.info;
+
+        if (req.type == "login" || req.type == "register") {
+            if (res.ok) {
+                self.username = res.username;
+                self.is_admin = res.status == "ADMIN";
+                self.auth = {username: req.username, hash: req.hash};
+
+                if (self.screen != "main")
+                    self.enter_main();
+                else
+                    self.request_newer();
+            } else {
+                if (info != nil && info.silent) {
+                    self.auth = nil;
+                    self.screen = "login";
+                }
+                self.set_status(res.error, ERROR);
+            }
+            return;
+        }
+
+        if (req.type == "get_messages") {
+            if (info.mode == "older")
+                self.loading_older = false;
+
+            if (res.ok) {
+                self.add_messages(res.messages);
+
+                if (info.mode != "newer" && res.messages.len < req.limit)
+                    self.no_more_older = true;
+            }
+            return;
+        }
+
+        if (req.type == "post") {
+            if (res.ok) {
+                self.compose = [];
+                self.set_status("Thanks for signing the guestbook!", SUCCESS);
+                self.request_newer();
+            } else {
+                self.set_status(res.error, ERROR);
+            }
+            return;
+        }
+
+        if (req.type == "delete") {
+            if (res.ok)
+                self.remove_message(req.id);
+            else
+                self.set_status(res.error, ERROR);
+            return;
+        }
+
+        if (req.type == "stats" && res.ok) {
+            self.total_views = res.total_views;
+            self.messages_today = res.has("messages_today") ? res.messages_today : nil;
+            self.num_accounts = res.has("num_accounts") ? res.num_accounts : nil;
+        }
+    }
+
+    // Switches to the guestbook screen and fetches the latest messages
+    enter_main(self)
+    {
+        self.screen = "main";
+        self.messages = [];
+        self.msg_ids = {};
+        self.scroll_y = 0;
+        self.no_more_older = false;
+        self.loading_older = false;
+        self.set_status("", DIM);
+        self.send({type: "get_messages", limit: PAGE_SIZE}, {mode: "latest"});
+    }
+
+    // Asks for messages newer than the newest one we have
+    request_newer(self)
+    {
+        if (self.messages.len == 0)
+            self.send({type: "get_messages", limit: PAGE_SIZE}, {mode: "latest"});
+        else
+            self.send({type: "get_messages", after: self.messages[0].id, limit: PAGE_SIZE}, {mode: "newer"});
+    }
+
+    // Height of a message in the list, in pixels
+    block_height(self, msg)
+    {
+        return CHAR_H + msg.lines.len * CHAR_H + 18;
+    }
+
+    // Total height of the message list
+    content_height(self)
+    {
+        let var h = 8;
+
+        for (let var i = 0; i < self.messages.len; ++i)
+            h = h + self.block_height(self.messages[i]);
+
+        return h + 2 * CHAR_H;
+    }
+
+    // Adds messages from the server to the list, keeping it sorted from
+    // newest to oldest. If the user has scrolled down, the view is kept on
+    // the same messages as new ones appear above.
+    add_messages(self, new_msgs)
+    {
+        for (let var i = 0; i < new_msgs.len; ++i) {
+            let m = new_msgs[i];
+            let key = m.id.to_s();
+
+            if (self.msg_ids.has(key))
+                continue;
+
+            let msg = {id: m.id, username: m.username, text: m.text, time: m.time, lines: wrap(m.text, MSG_COLS)};
+            self.msg_ids[key] = true;
+
+            let var pos = 0;
+            while (pos < self.messages.len && self.messages[pos].id > m.id)
+                pos = pos + 1;
+
+            self.messages.insert(pos, msg);
+
+            if (pos == 0 && self.scroll_y > 0 && self.messages.len > 1)
+                self.scroll_y = self.scroll_y + self.block_height(msg);
+        }
+
+        self.dirty = true;
+    }
+
+    // Removes a message from the list, after the admin deleted it
+    remove_message(self, id)
+    {
+        for (let var i = 0; i < self.messages.len; ++i) {
+            if (self.messages[i].id == id) {
+                self.messages.remove(i);
+                break;
+            }
+        }
+
+        self.dirty = true;
+    }
+
+    // Validates the form and sends a login or register request, depending
+    // on the mode of the login screen
+    submit_login(self)
+    {
+        let type = self.mode;
+        let username = join(self.fields[0]);
+        let password = join(self.fields[1]);
+
+        if (!valid_username(username)) {
+            self.set_status("Usernames are 2 to 16 letters, digits or _", ERROR);
+            return;
+        }
+
+        if (password.len == 0) {
+            self.set_status("Please enter a password", ERROR);
+            return;
+        }
+
+        if (type == "register") {
+            if (num_chars(password) < MIN_PASS_LEN) {
+                self.set_status("Please use at least " + MIN_PASS_LEN.to_s() + " characters for your password", ERROR);
+                return;
+            }
+
+            if (join(self.fields[2]) != password) {
+                self.set_status("The passwords don't match", ERROR);
+                return;
+            }
+        }
+
+        if (self.conn != "connected") {
+            self.set_status("Not connected to the server yet, please try again", ERROR);
+            return;
+        }
+
+        self.send({type: type, username: username, hash: password_hash(password)}, nil);
+        self.set_status(type == "login" ? "Logging in..." : "Creating your account...", DIM);
+    }
+
+    // Sends the message being written
+    submit_post(self)
+    {
+        let text = join(self.compose).trim();
+
+        if (num_chars(text) < 3) {
+            self.set_status("Your message is a bit short", ERROR);
+            return;
+        }
+
+        if (!self.send({type: "post", text: text}, nil)) {
+            self.set_status("Not connected to the server, reconnecting...", ERROR);
+            return;
+        }
+
+        self.set_status("Sending...", DIM);
+    }
+
+    // Logs out, reconnecting so that the server forgets the session
+    log_out(self)
+    {
+        self.auth = nil;
+        self.username = nil;
+        self.is_admin = false;
+        self.mode = "login";
+        self.fields = [[], [], []];
+        self.focus = 0;
+        self.screen = "login";
+        self.set_status("", DIM);
+        self.disconnect();
+        self.connect();
+    }
+
+    // Switches the login screen between logging in and registering
+    set_mode(self, mode)
+    {
+        self.mode = mode;
+        self.fields[2] = [];
+        self.focus = self.fields[0].len == 0 ? 0 : 1;
+        self.set_status("", DIM);
+    }
+
+    // Moves from the intro to the login screen, sliding the logo up unless
+    // the intro was skipped
+    start_login(self, slide)
+    {
+        self.screen = "login";
+        self.login_start_ms = slide ? $time_current_ms() : 0;
+        self.dirty = true;
+    }
+
+    // Scrolls the message list, staying within bounds
+    scroll_to(self, y)
+    {
+        let max_scroll = (self.content_height() - self.panel.height).max(0);
+        self.scroll_y = y.clip(0, max_scroll);
+        self.dirty = true;
+    }
+
+    // Geometry of the scrollbar, in frame coordinates
+    scrollbar(self)
+    {
+        let track_h = self.panel.height;
+        let content_h = self.content_height();
+        let thumb_h = (track_h * track_h).idiv(content_h.max(track_h)).max(24);
+        let max_scroll = (content_h - track_h).max(0);
+        let thumb_y = max_scroll == 0 ? 0 : ((track_h - thumb_h) * self.scroll_y).idiv(max_scroll);
+
+        return {
+            x: MARGIN + self.panel.width - SCROLLBAR_W,
+            y: PANEL_Y,
+            h: track_h,
+            thumb_y: PANEL_Y + thumb_y,
+            thumb_h: thumb_h,
+            max_scroll: max_scroll,
+        };
+    }
+
+    // Handles a UI event
+    handle_ui(self, ev)
+    {
+        self.dirty = true;
+
+        if (self.screen == "intro") {
+            if (ev.kind == "KEY_DOWN" || ev.kind == "MOUSE_DOWN")
+                self.start_login(false);
+            return;
+        }
+
+        if (ev.kind == "MOUSE_DOWN" && ev.button == "LEFT") {
+            self.mouse_down(ev.x, ev.y);
+            return;
+        }
+
+        if (ev.kind == "MOUSE_UP") {
+            self.drag_offset = nil;
+            return;
+        }
+
+        if (ev.kind == "MOUSE_MOVE") {
+            if (self.drag_offset != nil) {
+                let bar = self.scrollbar();
+                let span = (bar.h - bar.thumb_h).max(1);
+                self.scroll_to(((ev.y - self.drag_offset - bar.y) * bar.max_scroll).idiv(span));
+            }
+            return;
+        }
+
+        if (ev.kind == "TEXT_INPUT") {
+            self.text_input(ev.text);
+            return;
+        }
+
+        if (ev.kind == "KEY_DOWN")
+            self.key_down(ev.key);
+    }
+
+    // Handles a left click: on the scrollbar, or on a button
+    mouse_down(self, x, y)
+    {
+        if (self.screen == "main") {
+            let bar = self.scrollbar();
+
+            if (x >= bar.x && x < bar.x + SCROLLBAR_W && y >= bar.y && y < bar.y + bar.h) {
+                if (y >= bar.thumb_y && y < bar.thumb_y + bar.thumb_h)
+                    self.drag_offset = y - bar.thumb_y;
+                else if (y < bar.thumb_y)
+                    self.scroll_to(self.scroll_y - self.panel.height);
+                else
+                    self.scroll_to(self.scroll_y + self.panel.height);
+                return;
+            }
+        }
+
+        for (let var i = 0; i < self.buttons.len; ++i) {
+            let b = self.buttons[i];
+
+            if (x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) {
+                self.click(b.action, b.arg);
+                return;
+            }
+        }
+    }
+
+    // Performs the action of a clicked button
+    click(self, action, arg)
+    {
+        if (action == "focus") {
+            self.focus = arg;
+        } else if (action == "submit") {
+            self.submit_login();
+        } else if (action == "mode") {
+            self.set_mode(arg);
+        } else if (action == "send") {
+            self.submit_post();
+        } else if (action == "logout") {
+            self.log_out();
+        } else if (action == "start_delete") {
+            self.deleting = arg;
+        } else if (action == "cancel_delete") {
+            self.deleting = nil;
+        } else if (action == "delete") {
+            self.send({type: "delete", id: arg.id, mod_tag: arg.tag}, nil);
+            self.deleting = nil;
+        }
+    }
+
+    // Handles typed text, for the focused field
+    text_input(self, text)
+    {
+        let cs = chars(text);
+
+        for (let var i = 0; i < cs.len; ++i) {
+            let ch = cs[i];
+
+            if (self.screen == "login") {
+                let field = self.fields[self.focus];
+
+                if (self.focus == 0) {
+                    if (field.len < MAX_NAME_LEN && ch.len == 1 && is_name_byte(ch.byte_at(0)))
+                        field.push(ch);
+                } else if (field.len < MAX_PASS_LEN) {
+                    field.push(ch);
+                }
+            } else if (self.screen == "main" && self.compose.len < MAX_MSG_LEN) {
+                self.compose.push(ch);
+            }
+        }
+    }
+
+    // Handles special keys
+    key_down(self, key)
+    {
+        if (self.screen == "login") {
+            let num_fields = self.mode == "register" ? 3 : 2;
+
+            if (key == "TAB")
+                self.focus = (self.focus + 1) % num_fields;
+            else if (key == "RETURN")
+                self.submit_login();
+            else if (key == "BACKSPACE" && self.fields[self.focus].len > 0)
+                self.fields[self.focus].pop();
+            return;
+        }
+
+        if (self.screen == "main") {
+            if (key == "ESCAPE")
+                self.deleting = nil;
+            else if (key == "RETURN")
+                self.submit_post();
+            else if (key == "BACKSPACE" && self.compose.len > 0)
+                self.compose.pop();
+            else if (key == "UP")
+                self.scroll_to(self.scroll_y - 2 * CHAR_H);
+            else if (key == "DOWN")
+                self.scroll_to(self.scroll_y + 2 * CHAR_H);
+        }
+    }
+
+    // Tests if the screen is animating and must be redrawn on every frame
+    animating(self)
+    {
+        let now = $time_current_ms();
+
+        if (self.screen == "intro")
+            return true;
+
+        return self.screen == "login" && now - self.login_start_ms < SLIDE_MS + 50;
+    }
+
+    // Updates state that depends on time: the end of the intro, the cursor
+    // blink, and fetching older messages near the bottom of the list
+    update(self)
+    {
+        let now = $time_current_ms();
+
+        if (self.screen == "intro" && now - self.start_ms >= INTRO_END_MS)
+            self.start_login(true);
+
+        let cursor_on = (now.idiv(500) % 2) == 0;
+        if (cursor_on != self.cursor_on) {
+            self.cursor_on = cursor_on;
+            self.dirty = true;
+        }
+
+        if (self.screen == "main" && !self.loading_older && !self.no_more_older && self.messages.len > 0) {
+            let remaining = self.content_height() - self.scroll_y - self.panel.height;
+
+            if (remaining < 200) {
+                let oldest = self.messages[self.messages.len - 1].id;
+
+                if (self.send({type: "get_messages", before: oldest, limit: PAGE_SIZE}, {mode: "older"}))
+                    self.loading_older = true;
+            }
+        }
+    }
+
+    // Tests if the frame needs to be drawn again
+    needs_redraw(self)
+    {
+        return self.dirty || self.animating();
+    }
+
+    // Draws the current screen into the frame
+    render(self)
+    {
+        self.buttons = [];
+        self.frame.clear(BG);
+
+        if (self.screen == "intro")
+            self.render_intro();
+        else if (self.screen == "login")
+            self.render_login();
+        else
+            self.render_main();
+
+        self.dirty = false;
+    }
+
+    // Draws the intro: the letters of the logo appear one by one, stripe by
+    // stripe, then the teddy bear, then its sunglasses drop into place
+    render_intro(self)
+    {
+        let t = $time_current_ms() - self.start_ms;
+        let stripes = [];
+
+        for (let var i = 0; i < LOGO_LETTERS.len; ++i) {
+            let letter_t = t - (LETTER_START_MS + i * LETTER_EVERY_MS);
+            stripes.push(letter_t < 0 ? 0 : (letter_t.idiv(STRIPE_MS) + 1).min(NUM_STRIPES));
+        }
+
+        // The sunglasses fall quickly, then slow down as they land
+        let var shades_y = nil;
+        if (t >= SHADES_MS) {
+            let p = ((t - SHADES_MS).to_f() / SHADES_DROP_MS).min(1.0);
+            shades_y = -SHADES_DROP * (1.0 - p) * (1.0 - p);
+        }
+
+        let x = (WIDTH - logo_width(BIG_LOGO)).idiv(2);
+        draw_logo(self.frame, x, INTRO_LOGO_Y, BIG_LOGO, stripes, t >= BEAR_MS, shades_y);
+
+        if (t >= TAGLINE_MS)
+            self.centered(INTRO_LOGO_Y + logo_height(BIG_LOGO) + 40, "guestbook", DIM);
+    }
+
+    // Draws a text field with its label
+    field(self, x, y, w, label, value, index)
+    {
+        let h = 38;
+        let focused = self.focus == index;
+
+        self.text(self.frame, x, y, label, DIM, BG);
+        let box_y = y + CHAR_H + 4;
+
+        self.frame.fill_rect(x, box_y, w, h, FIELD);
+        draw_rect(self.frame, x, box_y, w, h, focused ? FOCUS : BORDER);
+
+        // Show the end of the value if it doesn't fit
+        let max_chars = (w - 2 * TEXT_PAD).idiv(CHAR_W) - 1;
+        let start = (value.len - max_chars).max(0);
+        let shown = join(value.slice(start, value.len));
+        let text_y = box_y + (h - CHAR_H).idiv(2);
+        self.text(self.frame, x + TEXT_PAD, text_y, shown, TEXT, FIELD);
+
+        if (focused && self.cursor_on)
+            self.text(self.frame, x + TEXT_PAD + num_chars(shown) * CHAR_W, text_y, "＿", FOCUS, FIELD);
+
+        self.buttons.push({x: x, y: box_y, w: w, h: h, action: "focus", arg: index});
+    }
+
+    // Draws a button and registers it for clicks
+    button(self, x, y, w, h, label, color, action, arg)
+    {
+        self.frame.fill_rect(x, y, w, h, color);
+        let tx = x + (w - num_chars(label) * CHAR_W).idiv(2);
+        self.text(self.frame, tx, y + (h - CHAR_H).idiv(2), label, BUTTON_TEXT, color);
+        self.buttons.push({x: x, y: y, w: w, h: h, action: action, arg: arg});
+    }
+
+    // Draws the login screen, after the logo has slid up into place
+    render_login(self)
+    {
+        let t = ($time_current_ms() - self.login_start_ms).min(SLIDE_MS);
+        let p = t.to_f() / SLIDE_MS;
+        let ease = 1.0 - (1.0 - p) * (1.0 - p);
+        let logo_y = INTRO_LOGO_Y + ((LOGIN_LOGO_Y - INTRO_LOGO_Y) * ease).floor();
+
+        draw_full_logo(self.frame, (WIDTH - logo_width(BIG_LOGO)).idiv(2), logo_y, BIG_LOGO);
+
+        if (t < SLIDE_MS)
+            return;
+
+        let w = 360;
+        let x = (WIDTH - w).idiv(2);
+        let bw = 170;
+
+        // Passwords are shown as stars
+        fun stars(field) {
+            let out = [];
+            for (let var i = 0; i < field.len; ++i)
+                out.push("*");
+            return out;
+        }
+
+        if (self.mode == "register") {
+            self.centered(216, "Create your account", TEXT);
+            self.field(x, 252, w, "Username", self.fields[0], 0);
+            self.field(x, 326, w, "Password", stars(self.fields[1]), 1);
+            self.field(x, 400, w, "Confirm password", stars(self.fields[2]), 2);
+            self.button(x, 484, bw, 40, "Back", BUTTON, "mode", "login");
+            self.button(x + w - bw, 484, bw, 40, "Register", REGISTER_BUTTON, "submit", nil);
+            self.centered(538, self.status, self.status_color);
+            self.centered(HEIGHT - 76, "Tab switches fields, Enter registers", DIM);
+        } else {
+            self.centered(220, "Sign the Plush guestbook!", TEXT);
+            self.field(x, 270, w, "Username", self.fields[0], 0);
+            self.field(x, 348, w, "Password", stars(self.fields[1]), 1);
+            self.button(x, 434, bw, 40, "Log in", BUTTON, "submit", nil);
+            self.button(x + w - bw, 434, bw, 40, "Register", REGISTER_BUTTON, "mode", "register");
+            self.centered(492, self.status, self.status_color);
+            self.centered(HEIGHT - 76, "Tab switches fields, Enter logs in", DIM);
+        }
+
+        let conn_text =
+            self.conn == "connected" ? "Connected to " + self.addr :
+            self.conn == "connecting" ? "Connecting to " + self.addr + "..." :
+            "Not connected";
+        self.centered(HEIGHT - 44, conn_text, self.conn == "connected" ? SUCCESS : DIM);
+    }
+
+    // Draws the guestbook screen: a header, the box to write a message,
+    // and the list of messages
+    render_main(self)
+    {
+        let frame = self.frame;
+
+        // Header, with a small logo, the guestbook's stats and the user. The
+        // stats that older servers don't send are left out.
+        draw_full_logo(frame, MARGIN, 14, SMALL_LOGO);
+        self.text(frame, MARGIN + logo_width(SMALL_LOGO) + 12, 17, "guestbook", DIM, BG);
+
+        if (self.total_views != nil) {
+            let var stats = self.total_views.comma_sep() + (self.total_views == 1 ? " view" : " views");
+            if (self.messages_today != nil)
+                stats = stats + ", " + self.messages_today.comma_sep() + (self.messages_today == 1 ? " message today" : " messages today");
+            self.text(frame, WIDTH - MARGIN - num_chars(stats) * CHAR_W, 4, stats, DIM, BG);
+        }
+
+        let who = (self.is_admin ? "admin " : "") + self.username;
+        let logout_w = 8 * CHAR_W;
+        let who_x = WIDTH - MARGIN - logout_w - 12 - num_chars(who) * CHAR_W;
+        self.text(frame, who_x, 30, who, name_color(self.username), BG);
+        self.button(WIDTH - MARGIN - logout_w, 30, logout_w, CHAR_H, "log out", FIELD, "logout", nil);
+
+        // Left out when a long username leaves no room next to the title
+        if (self.num_accounts != nil) {
+            let accounts = self.num_accounts.comma_sep() + (self.num_accounts == 1 ? " account" : " accounts");
+            let accounts_x = who_x - 24 - num_chars(accounts) * CHAR_W;
+            let title_end = MARGIN + logo_width(SMALL_LOGO) + 12 + num_chars("guestbook") * CHAR_W;
+
+            if (accounts_x >= title_end + 12)
+                self.text(frame, accounts_x, 30, accounts, DIM, BG);
+        }
+
+        // Box to write a message, showing its last lines
+        let box_w = WIDTH - 2 * MARGIN;
+        let box_h = COMPOSE_LINES * CHAR_H + 2 * TEXT_PAD;
+        frame.fill_rect(MARGIN, COMPOSE_Y, box_w, box_h, FIELD);
+        draw_rect(frame, MARGIN, COMPOSE_Y, box_w, box_h, FOCUS);
+
+        let tx = MARGIN + TEXT_PAD;
+        let ty = COMPOSE_Y + TEXT_PAD;
+
+        if (self.compose.len == 0) {
+            self.text(frame, tx + CHAR_W, ty, "Write a message and press Enter...", DIM, FIELD);
+            if (self.cursor_on)
+                self.text(frame, tx, ty, "＿", FOCUS, FIELD);
+        } else {
+            let lines = wrap(join(self.compose), COMPOSE_COLS);
+            let first = (lines.len - COMPOSE_LINES).max(0);
+
+            for (let var i = first; i < lines.len; ++i)
+                self.text(frame, tx, ty + (i - first) * CHAR_H, lines[i], TEXT, FIELD);
+
+            if (self.cursor_on) {
+                let last = lines[lines.len - 1];
+                let cx = tx + num_chars(last) * CHAR_W;
+                self.text(frame, cx.min(MARGIN + box_w - TEXT_PAD - CHAR_W), ty + (lines.len - 1 - first) * CHAR_H, "＿", FOCUS, FIELD);
+            }
+        }
+
+        // Character count, status and send button
+        let row_y = COMPOSE_Y + box_h + 10;
+        let count = self.compose.len.to_s() + "/" + MAX_MSG_LEN.to_s();
+        self.text(frame, MARGIN, row_y + 6, count, self.compose.len >= MAX_MSG_LEN ? ERROR : DIM, BG);
+        if (self.conn == "connected")
+            self.text(frame, MARGIN + 10 * CHAR_W, row_y + 6, self.status, self.status_color, BG);
+        else
+            self.text(frame, MARGIN + 10 * CHAR_W, row_y + 6, "Connection lost, reconnecting...", ERROR, BG);
+
+        self.button(WIDTH - MARGIN - 110, row_y, 110, 36, "Send", BUTTON, "send", nil);
+
+        self.render_messages();
+        frame.blit(self.panel, MARGIN, PANEL_Y);
+
+        // Scrollbar
+        let bar = self.scrollbar();
+        frame.fill_rect(bar.x, bar.y, SCROLLBAR_W, bar.h, FIELD);
+        frame.fill_rect(bar.x + 2, bar.thumb_y, SCROLLBAR_W - 4, bar.thumb_h, self.drag_offset != nil ? FOCUS : BORDER);
+    }
+
+    // Draws the visible messages into the panel image
+    render_messages(self)
+    {
+        let panel = self.panel;
+        panel.clear(PANEL);
+
+        let text_w = panel.width - SCROLLBAR_W;
+        let var y = 8 - self.scroll_y;
+
+        for (let var i = 0; i < self.messages.len; ++i) {
+            let msg = self.messages[i];
+            let h = self.block_height(msg);
+
+            if (y + h > 0 && y < panel.height) {
+                self.text(panel, TEXT_PAD, y, msg.username, name_color(msg.username), PANEL);
+                self.text(panel, TEXT_PAD + (num_chars(msg.username) + 2) * CHAR_W, y, time_ago(msg.time), DIM, PANEL);
+
+                for (let var j = 0; j < msg.lines.len; ++j)
+                    self.text(panel, TEXT_PAD, y + (j + 1) * CHAR_H, msg.lines[j], TEXT, PANEL);
+
+                if (self.is_admin)
+                    self.admin_buttons(msg, y, text_w);
+
+                panel.fill_rect(TEXT_PAD, y + h - 9, text_w - 2 * TEXT_PAD, 1, FIELD);
+            }
+
+            y = y + h;
+        }
+
+        let var footer = "";
+        if (self.messages.len == 0)
+            footer = self.no_more_older ? "No messages yet, be the first to sign!" : "Loading messages...";
+        else if (self.no_more_older)
+            footer = "You've reached the first message";
+        else
+            footer = "Loading older messages...";
+
+        if (y < panel.height)
+            self.text(panel, (text_w - num_chars(footer) * CHAR_W).idiv(2), y + 8, footer, DIM, PANEL);
+    }
+
+    // Draws a small button in the message list, from its right edge at x.
+    // Returns the x coordinate of its left edge.
+    list_button(self, x, y, label, color, action, arg)
+    {
+        let w = (num_chars(label) + 1) * CHAR_W;
+        let left = x - w;
+        self.panel.fill_rect(left, y, w, CHAR_H, color);
+        self.text(self.panel, left + CHAR_W.idiv(2), y, label, BUTTON_TEXT, color);
+
+        // Only clickable where it's visible
+        if (y >= 0 && y + CHAR_H <= self.panel.height)
+            self.buttons.push({x: MARGIN + left, y: PANEL_Y + y, w: w, h: CHAR_H, action: action, arg: arg});
+
+        return left;
+    }
+
+    // Draws the admin's delete button for a message. Once clicked, it is
+    // replaced by a button for each category to delete the message as, and
+    // one to cancel.
+    admin_buttons(self, msg, y, text_w)
+    {
+        let var x = text_w - TEXT_PAD;
+
+        if (self.deleting != msg.id) {
+            self.list_button(x, y, "delete", DANGER, "start_delete", msg.id);
+            return;
+        }
+
+        x = self.list_button(x, y, "cancel", CANCEL, "cancel_delete", nil) - 12;
+
+        // Drawn from right to left, so that they read hate, spam, other
+        let tags = ["other", "spam", "hate"];
+        for (let var i = 0; i < tags.len; ++i)
+            x = self.list_button(x, y, tags[i], DANGER, "delete", {id: msg.id, tag: tags[i]}) - 6;
+    }
+}
+
+// Server address from the command line: --local or --localhost for a
+// server on this machine, an address, or the default server
+fun server_addr()
+{
+    let arg = $cmd_get_arg_or(1, DEFAULT_SERVER);
+    return arg == "--local" || arg == "--localhost" ? LOCAL_SERVER : arg;
+}
+
+// Opens the window and runs the client until the window is closed
+fun main()
+{
+    let app = App(server_addr());
+    let window = $window_create(WIDTH, HEIGHT, "Plush Guestbook", 0);
+
+    app.connect();
+
+    // Wakes us up every few seconds to check for new messages
+    $actor_spawn(|| {
+        loop {
+            $actor_sleep(POLL_MS);
+            $actor_send($actor_parent(), "tick");
+        }
+    });
+
+    loop {
+        loop {
+            let msg = $actor_poll();
+
+            if (msg == nil)
+                break;
+
+            if (msg instanceof UIEvent && msg.kind == "CLOSE_WINDOW")
+                $exit(0);
+
+            app.handle(msg);
+        }
+
+        app.update();
+
+        if (app.needs_redraw()) {
+            app.render();
+            $window_draw_frame(window, app.frame.bytes);
+        }
+
+        $actor_sleep(16);
+    }
+}
+
+if ($MAIN_UNIT) {
+    main();
+}
