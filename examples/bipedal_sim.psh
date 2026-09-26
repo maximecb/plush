@@ -38,7 +38,10 @@ let STEP = 1.0 / 240.0;
 let EPISODE_SECONDS = 10.0;
 // Fitness bonus per second before falling. It outweighs diving forward, so
 // that controllers learn to balance before they learn to walk
-let UPRIGHT_WEIGHT = 1.0;
+let UPRIGHT_WEIGHT = 2.0;
+// Coefficient of friction between the soles and the ground, as for rubber
+// on a track surface
+let FRICTION = 1.0;
 let CONTROL_SUBSTEPS = 4;
 let ITERATIONS = 12;
 let WIDTH = 800;
@@ -177,6 +180,8 @@ class Body {
                                    (i & 4) == 0 ? -size.z*0.5 : size.z*0.5));
         }
         self.support = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        // Tangential positional impulse from static friction this step
+        self.traction = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     }
     inertia(self, v) {
         let a = self.q.conj().rotate(v);
@@ -642,6 +647,22 @@ class Simulator {
             let impulse = -d / b.weight(r,n);
             b.move(n.mul(impulse), r);
             b.support[i] += impulse;
+
+            // Static friction: undo the corner's sliding along the ground
+            // since the start of the step, within the friction cone of the
+            // normal correction so far. Otherwise joint projections drag
+            // planted feet sideways, which velocity friction cannot undo.
+            let rc = b.q.rotate(b.corners[i]);
+            let slide = b.p.add(rc).sub(b.old_p.add(b.old_q.rotate(b.corners[i])));
+            let tangential = slide.sub(n.mul(slide.dot(n)));
+            let length = tangential.length();
+            let budget = FRICTION*b.support[i] - b.traction[i];
+            if (length > 0.000000001 && budget > 0.0) {
+                let t = tangential.mul(1.0/length);
+                let traction = (length/b.weight(rc,t)).min(budget);
+                b.move(t.mul(-traction), rc);
+                b.traction[i] += traction;
+            }
         }
     }
     step(self) {
@@ -650,7 +671,7 @@ class Simulator {
             let b = self.bodies[i]; b.old_p = b.p; b.old_q = b.q;
             b.v = b.v.add(Vec3(0.0,-9.81*STEP,0.0));
             b.p = b.p.add(b.v.mul(STEP)); b.turn(b.w.mul(STEP));
-            for (let var k = 0; k < 8; ++k) b.support[k] = 0.0;
+            for (let var k = 0; k < 8; ++k) { b.support[k] = 0.0; b.traction[k] = 0.0; }
         }
         for (let var pass = 0; pass < ITERATIONS; ++pass) {
             // Alternate traversal to reduce directional bias in the chain.
@@ -683,7 +704,7 @@ class Simulator {
                 let speed = tangent.length();
                 if (speed > 0.000001) {
                     let t = tangent.mul(1.0/speed);
-                    let friction = (speed/b.weight(r,t)).min(0.65*(normal_impulse + b.support[k]/STEP));
+                    let friction = (speed/b.weight(r,t)).min(FRICTION*(normal_impulse + b.support[k]/STEP));
                     b.impulse(t.mul(-friction), r);
                 }
             }
@@ -938,15 +959,24 @@ let CRITIC_INPUTS = IN_ACTION + CONTROL_OUTPUTS;
 let CRITIC_HIDDEN = 256;
 
 // A transition holds the critic input, the critic input for the next step,
-// the reward, and whether the robot fell, which ends the episode
+// the forward progress made, and whether the robot fell, which ends the
+// episode. The reward adds the upright bonus to the progress when training,
+// so saved transitions stay valid if UPRIGHT_WEIGHT changes
 let ROW_NEXT = CRITIC_INPUTS;
-let ROW_REWARD = 2 * CRITIC_INPUTS;
-let ROW_FELL = ROW_REWARD + 1;
+let ROW_PROGRESS = 2 * CRITIC_INPUTS;
+let ROW_FELL = ROW_PROGRESS + 1;
 let ROW_SIZE = ROW_FELL + 1;
 
 // The critic's buffer holds as many transitions as fit in this budget
 let BUFFER_BYTES = 1 << 30;
 let BUFFER_SIZE = BUFFER_BYTES.idiv(ROW_SIZE * 4);
+
+// The buffer is saved this often, and when training stops, and loaded when
+// training starts. The header records the layout, which must match
+let SAVE_PERIOD_MS = 300_000;
+let BUFFER_PATH = "bipedal_replay.bin";
+let BUFFER_HEADER_PATH = "bipedal_replay.hdr";
+let BUFFER_MAGIC = 0x42525031;
 
 let GAMMA = 0.99;                // Discount per control step
 let MIN_TRANSITIONS = 10_000;    // Collected before the critic trains
@@ -1211,7 +1241,7 @@ class EpisodeLog
             else
                 rows.memcpy((next + IN_ACTION) * 4, last_action, 0, CONTROL_OUTPUTS * 4);
 
-            rows.set_f32(base + ROW_REWARD, self.progress[i] + UPRIGHT_WEIGHT * CONTROL_DT);
+            rows.set_f32(base + ROW_PROGRESS, self.progress[i]);
             rows.set_f32(base + ROW_FELL, self.fell[i]);
         }
         return [MSG_DATA, self.count, rows];
@@ -1233,13 +1263,14 @@ class CriticTrainer
         self.target = Network(sizes, 0);
         self.target.copy_from(self.critic);
 
-        self.rows = ByteArray.with_size(BUFFER_SIZE * ROW_SIZE * 4);
         self.count = 0;
         self.next = 0;
+        self.transitions = 0;
+        if (!self.load())
+            self.rows = ByteArray.with_size(BUFFER_SIZE * ROW_SIZE * 4);
         self.input = ByteArray.with_size(CRITIC_INPUTS * 4);
         self.dout = ByteArray.with_size(4);
 
-        self.transitions = 0;
         self.updates = 0;
         self.td_sq = 0.0;
         self.q_sum = 0.0;
@@ -1257,6 +1288,60 @@ class CriticTrainer
         self.transitions += count;
     }
 
+    // Writes the whole buffer as it is, which needs no copy, then a header
+    // saying how much of it is filled and where the ring continues
+    save(self)
+    {
+        let start = $time_current_ms();
+        if (!$write_file(BUFFER_PATH, self.rows)) {
+            $println("Critic: failed to save the replay buffer to " + BUFFER_PATH);
+            return;
+        }
+
+        let header = ByteArray.with_size(6 * 4);
+        header.set_u32(0, BUFFER_MAGIC);
+        header.set_u32(1, ROW_SIZE);
+        header.set_u32(2, BUFFER_SIZE);
+        header.set_u32(3, self.count);
+        header.set_u32(4, self.next);
+        header.set_u32(5, self.transitions);
+        assert($write_file(BUFFER_HEADER_PATH, header));
+
+        $println(
+            "Critic: saved " + self.count.comma_sep() + " transitions to " + BUFFER_PATH +
+            " in " + ($time_current_ms() - start).to_s() + " ms"
+        );
+    }
+
+    // Takes the saved buffer if there is one with the same layout. Returns
+    // whether it did
+    load(self)
+    {
+        let header = $read_file(BUFFER_HEADER_PATH);
+        if (header == nil)
+            return false;
+
+        let matches = header.len == 6 * 4 && header.get_u32(0) == BUFFER_MAGIC &&
+            header.get_u32(1) == ROW_SIZE && header.get_u32(2) == BUFFER_SIZE;
+        if (!matches) {
+            $println("Critic: ignoring " + BUFFER_PATH + ", which was saved with a different layout");
+            return false;
+        }
+
+        let rows = $read_file(BUFFER_PATH);
+        if (rows == nil || rows.len != BUFFER_SIZE * ROW_SIZE * 4) {
+            $println("Critic: ignoring " + BUFFER_PATH + ", which is missing or incomplete");
+            return false;
+        }
+
+        self.rows = rows;
+        self.count = header.get_u32(3);
+        self.next = header.get_u32(4);
+        self.transitions = header.get_u32(5);
+        $println("Critic: loaded " + self.count.comma_sep() + " transitions from " + BUFFER_PATH);
+        return true;
+    }
+
     // One minibatch of temporal-difference updates. The target is the reward
     // plus the discounted value of the next step, from the target critic,
     // and nothing more after a fall
@@ -1267,7 +1352,7 @@ class CriticTrainer
         for (let var s = 0; s < CRITIC_BATCH; ++s) {
             let base = self.rng.index(self.count) * ROW_SIZE;
 
-            let var y = rows.get_f32(base + ROW_REWARD);
+            let var y = rows.get_f32(base + ROW_PROGRESS) + UPRIGHT_WEIGHT * CONTROL_DT;
             if (rows.get_f32(base + ROW_FELL) < 0.5) {
                 input.memcpy(0, rows, (base + ROW_NEXT) * 4, CRITIC_INPUTS * 4);
                 y += GAMMA * self.target.forward(input).get_f32(0);
@@ -1325,20 +1410,27 @@ fun critic_actor()
 
     let var sent = false;
     let var last_stats_ms = $time_current_ms();
+    let var last_save_ms = last_stats_ms;
     let var last_updates = 0;
 
     loop {
         // Until there is enough data, just wait for more
         let var msg = trainer.count < MIN_TRANSITIONS ? $actor_recv() : $actor_poll();
         while (msg != nil) {
-            if (msg[0] == MSG_STOP)
+            if (msg[0] == MSG_STOP) {
+                trainer.save();
                 return trainer.updates;
+            }
             if (msg[0] == MSG_DATA)
                 trainer.add(msg);
             msg = $actor_poll();
         }
 
         let now = $time_current_ms();
+        if (now - last_save_ms >= SAVE_PERIOD_MS) {
+            trainer.save();
+            last_save_ms = $time_current_ms();
+        }
         if (now - last_stats_ms >= STATS_PERIOD_MS) {
             let seconds = (now - last_stats_ms).to_f() / 1000.0;
             $actor_send(parent, trainer.stats_message(seconds, trainer.updates - last_updates));
