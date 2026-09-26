@@ -64,13 +64,19 @@ let EPISODE_CONTROL_STEPS = (EPISODE_SECONDS / CONTROL_DT + 0.5).floor();
 let FOOT_SENSOR_CORNERS = [0,1,4,5];
 
 // Encoded observation layout, shared by the controller and the dynamics
-// model. Values are scaled into [-1, 1], contacts into [0, 1]
+// model. Values are scaled into [-1, 1], contacts into [0, 1]. The up
+// direction is estimated from the head's sensors by filter_up()
 let OBS_ANGLES = 0;
 let OBS_SPEEDS = OBS_ANGLES + CONTROL_JOINT_AXES;
 let OBS_ACCEL = OBS_SPEEDS + CONTROL_JOINT_AXES;
 let OBS_GYRO = OBS_ACCEL + 3;
-let OBS_CONTACTS = OBS_GYRO + 3;
+let OBS_UP = OBS_GYRO + 3;
+let OBS_CONTACTS = OBS_UP + 3;
 let OBS_SIZE = OBS_CONTACTS + CONTROL_FOOT_POINTS;
+
+// Fraction of the way the up estimate moves toward the accelerometer's
+// reading at each control step, which sets how quickly gyro drift is undone
+let UP_FILTER_GAIN = 0.02;
 
 // The controller sees the observation and its own previous action
 let CONTROL_INPUTS = OBS_SIZE + CONTROL_OUTPUTS;
@@ -760,6 +766,45 @@ fun encode_observation(observation, out)
         out.set_f32(OBS_CONTACTS + i, observation.contacts.get_f32(i).clip(0.0, 1.0));
 }
 
+// Complementary filter estimating the up direction in the head frame, from
+// the encoded accelerometer and gyro readings at base in obs. The previous
+// estimate is turned by the gyro reading, then pulled slightly toward the
+// accelerometer, which reads the opposite of gravity when the head is not
+// accelerating. The first estimate comes from the accelerometer alone. The
+// new estimate is written into obs and returned. Model rollouts run this on
+// predicted readings, so the model never has to predict the estimate itself
+fun filter_up(prev, obs, base)
+{
+    let ax = obs.get_f32(base + OBS_ACCEL) * 8.0;
+    let ay = obs.get_f32(base + OBS_ACCEL + 1) * 8.0;
+    let az = obs.get_f32(base + OBS_ACCEL + 2) * 8.0;
+    let accel_len = (ax * ax + ay * ay + az * az).sqrt();
+
+    let var up = UP;
+    if (prev == nil) {
+        if (accel_len > 0.1)
+            up = Vec3(ax, ay, az);
+    } else {
+        // A direction fixed in the world turns against the head's rotation
+        let w = Vec3(
+            obs.get_f32(base + OBS_GYRO) * 10.0,
+            obs.get_f32(base + OBS_GYRO + 1) * 10.0,
+            obs.get_f32(base + OBS_GYRO + 2) * 10.0
+        );
+        up = prev.add(prev.cross(w).mul(CONTROL_DT));
+
+        // Only trust the accelerometer near 1 g, when it mostly reads gravity
+        if (accel_len > 0.5 && accel_len < 1.5)
+            up = up.mul(1.0 - UP_FILTER_GAIN).add(Vec3(ax, ay, az).mul(UP_FILTER_GAIN / accel_len));
+    }
+
+    up = up.unit();
+    obs.set_f32(base + OBS_UP, up.x);
+    obs.set_f32(base + OBS_UP + 1, up.y);
+    obs.set_f32(base + OBS_UP + 2, up.z);
+    return up;
+}
+
 // The encoded first observation of the episode with this seed, identical to
 // what PolicyEpisode sees at its first control step
 fun start_observation(seed, out)
@@ -768,6 +813,7 @@ fun start_observation(seed, out)
     let observation = BipedObservation();
     observe_biped(sim, observation, sim.head.v, CONTROL_DT);
     encode_observation(observation, out);
+    filter_up(nil, out, 0);
 }
 
 class EpisodeResult {
@@ -792,6 +838,7 @@ class PolicyEpisode {
         self.controller = controller;
         self.observation = BipedObservation();
         self.obs = ByteArray.with_size(OBS_SIZE * 4);
+        self.up = nil;
         controller.reset();
         self.previous_head_velocity = self.sim.head.v;
         self.fall_height = 0.65*self.sim.head.p.y;
@@ -819,6 +866,7 @@ class PolicyEpisode {
         self.previous_head_velocity = observe_biped(
             self.sim, self.observation, self.previous_head_velocity, CONTROL_DT);
         encode_observation(self.observation, self.obs);
+        self.up = filter_up(self.up, self.obs, 0);
 
         if (self.recorder != nil && self.steps > 0) {
             let progress = self.sim.pelvis.p.sub(self.last_pelvis).dot(TRACK_FORWARD);
@@ -1090,6 +1138,15 @@ class DynamicsModel
                 let v = input.get_f32(IN_PREV_OBS + j) + delta;
                 input.set_f32(j, v.clip(obs_lo.get_f32(j), obs_hi.get_f32(j)));
             }
+
+            // The up estimate is the same filter the robot runs, fed the
+            // predicted sensor readings, rather than a prediction itself
+            let up = Vec3(
+                input.get_f32(IN_PREV_OBS + OBS_UP),
+                input.get_f32(IN_PREV_OBS + OBS_UP + 1),
+                input.get_f32(IN_PREV_OBS + OBS_UP + 2)
+            );
+            filter_up(up, input, 0);
 
             let raw_progress = out.get_f32(OUT_PROGRESS) * std.get_f32(OUT_PROGRESS) + mean.get_f32(OUT_PROGRESS);
             let progress = raw_progress.clip(out_lo.get_f32(OUT_PROGRESS), out_hi.get_f32(OUT_PROGRESS));
