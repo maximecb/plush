@@ -774,22 +774,6 @@ fun load_network_snapshot(network, snapshot) {
     }
 }
 
-// Sparse parameter perturbations let each trial test a local change. We bias
-// picks toward the final layer and motor biases, which have a direct effect.
-fun mutate_network(network, rng, sigma) {
-    let arrays = network_arrays(network);
-    let count = rng.int(4,25);
-    for (let var i = 0; i < count; ++i) {
-        let pick = rng.int(0,10);
-        let group = pick < 2 ? 0 : pick < 3 ? 1 : pick < 4 ? 2
-                  : pick < 5 ? 3 : pick < 8 ? 4 : 5;
-        let array = arrays[group];
-        let idx = rng.int(0,array.len >> 2);
-        let scale = group == 5 ? sigma : sigma*0.5;
-        array.set_f32(idx,array.get_f32(idx)+rng.float(-scale,scale));
-    }
-}
-
 // Uniform crossover over whole neurons: each neuron takes its incoming weights
 // and bias from one parent, so the features it computes stay intact
 fun crossover_network(dst, a, b, rng)
@@ -813,15 +797,18 @@ fun crossover_network(dst, a, b, rng)
 // --- Island genetic algorithm ---
 //
 // Each island is an actor evolving its own population. Every individual is
-// scored on a single episode from a random starting pose, so fitness is noisy.
+// scored by its mean over EVAL_EPISODES episodes from random starting poses.
 // The top half reproduce through mutation, with occasional crossover, and
 // every MIGRATION_PERIOD generations islands send a few individuals to their
 // neighbours around a ring
 
 let NUM_ISLANDS = 8;
-let POP_SIZE = 64;
-let NUM_PARENTS = 32;
+let POP_SIZE = 32;
+let NUM_PARENTS = 16;
+let EVAL_EPISODES = 1;
+let MUTATION_PROB = 0.02;
 let MUTATION_SIGMA = 0.18;
+let MUTATION_RESET_PROB = 0.1;
 let CROSSOVER_PROB = 0.05;
 let MIGRATION_PERIOD = 100;
 let NUM_MIGRANTS = 2;
@@ -833,6 +820,52 @@ let MSG_SETUP = 0;     // Island index, seed, actor ids around the ring
 let MSG_MIGRANT = 1;   // A network snapshot arriving from a neighbour
 let MSG_STOP = 2;
 let MSG_REPORT = 3;    // Island index, generation, best, mean, ms taken, best snapshot
+
+// Standard normal sample using Box-Muller
+fun gauss(rng)
+{
+    let u1 = rng.float(1.0e-9, 1.0);
+    let u2 = rng.float(0.0, 1.0);
+    return (-2.0 * u1.ln()).sqrt() * (6.28318530717959 * u2).cos();
+}
+
+// Each parameter is mutated with probability MUTATION_PROB. Rather than
+// rolling for every parameter, jump straight to the next mutated one, since
+// the gaps between them are geometrically distributed. Output biases get the
+// full sigma since they act on the torques directly
+fun mutate_network(network, rng, sigma)
+{
+    let arrays = network_arrays(network);
+    let log_keep = (1.0 - MUTATION_PROB).ln();
+
+    // Initialization ranges from MLP, one per layer, used by resets
+    let bounds = [
+        (6.0 / network.inputs).sqrt(),
+        (6.0 / network.hidden).sqrt(),
+        (3.0 / network.hidden).sqrt()
+    ];
+
+    for (let var group = 0; group < arrays.len; ++group) {
+        let array = arrays[group];
+        let len = array.len >> 2;
+        let scale = group == 5 ? sigma : sigma * 0.5;
+        let bound = bounds[group >> 1];
+
+        let var idx = -1;
+        loop {
+            idx += 1 + (rng.float(1.0e-9, 1.0).ln() / log_keep).floor();
+            if (idx >= len)
+                break;
+
+            // Most mutations nudge, a few redraw, which lets a lineage get
+            // out of a corner that nudging alone cannot leave
+            if (rng.float(0.0, 1.0) < MUTATION_RESET_PROB)
+                array.set_f32(idx, rng.float(-bound, bound));
+            else
+                array.set_f32(idx, array.get_f32(idx) + gauss(rng) * scale);
+        }
+    }
+}
 
 class Island
 {
@@ -858,11 +891,13 @@ class Island
         self.mean_fitness = 0.0;
     }
 
-    // Scores one individual on a fresh random starting pose
+    // Adds one episode from a fresh random starting pose to an individual's
+    // mean fitness. Fitness is zeroed at the start of each generation
     evaluate(self, i)
     {
         let episode_seed = self.rng.int(0, 0x40000000);
-        self.fitness[i] = evaluate_controller(self.pop[i], episode_seed, EPISODE_SECONDS).fitness;
+        let result = evaluate_controller(self.pop[i], episode_seed, EPISODE_SECONDS);
+        self.fitness[i] += result.fitness / EVAL_EPISODES;
     }
 
     // Sorts the population by fitness, best first
@@ -915,6 +950,7 @@ class Island
             }
 
             mutate_network(child, self.rng, MUTATION_SIGMA);
+            self.fitness[i] = 0.0;
         }
 
         // Immigrants replace the children of the lowest ranked parents, and
@@ -949,8 +985,8 @@ fun island_actor()
     loop {
         let start_ms = $time_current_ms();
 
-        for (let var i = 0; i < POP_SIZE; ++i) {
-            island.evaluate(i);
+        for (let var n = 0; n < POP_SIZE * EVAL_EPISODES; ++n) {
+            island.evaluate(n.idiv(EVAL_EPISODES));
 
             // Poll between episodes, since a generation can take minutes
             loop {
@@ -1480,8 +1516,8 @@ loop {
     if (quit) break;
 
     // Periodically switch to the best of the latest island reports. Their
-    // scores come from single noisy episodes, so the all-time best score
-    // would mostly track the luckiest episode rather than progress
+    // scores are noisy, so the all-time best score would mostly track the
+    // luckiest evaluation rather than progress
     if (new_reports && start - last_viewer_ms >= VIEWER_PERIOD_MS) {
         let var best = nil;
         for (let var i = 0; i < island_reports.len; ++i) {
