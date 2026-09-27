@@ -51,3 +51,37 @@ for (let var i = 0; i < 10000; ++i)
 assert((sum / 10000.0 - 2.0).abs() < 0.2);
 assert((sum_sq / 10000.0 - 9.0).abs() < 0.8);
 assert(normal_rng.normal(7.0, 0.0) == 7.0);
+
+// Shuffling preserves the elements and is reproducible from a seed
+let shuffle_rng = Xoshiro128(123);
+let shuffle_fresh = Xoshiro128(123);
+let values = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+let same_values = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+let counts_after_shuffle = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+shuffle_rng.shuffle(values);
+shuffle_fresh.shuffle(same_values);
+for (let var i = 0; i < values.len; ++i) {
+    assert(values[i] == same_values[i]);
+    counts_after_shuffle[values[i]] = counts_after_shuffle[values[i]] + 1;
+}
+for (let var i = 0; i < counts_after_shuffle.len; ++i)
+    assert(counts_after_shuffle[i] == 1);
+
+// Empty and singleton arrays need no draws
+let empty = [];
+let singleton = [7];
+shuffle_rng.shuffle(empty);
+shuffle_rng.shuffle(singleton);
+assert(empty.len == 0);
+assert(singleton[0] == 7);
+assert(shuffle_rng.next_u32() == shuffle_fresh.next_u32());
+
+// Each element reaches the first position with roughly equal frequency
+let first_counts = [0, 0, 0];
+for (let var i = 0; i < 3000; ++i) {
+    let sample = [0, 1, 2];
+    shuffle_rng.shuffle(sample);
+    first_counts[sample[0]] = first_counts[sample[0]] + 1;
+}
+for (let var i = 0; i < first_counts.len; ++i)
+    assert(first_counts[i] > 800);
