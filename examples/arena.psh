@@ -89,7 +89,7 @@ let OUTPUT_BASE = HIDDEN * NUM_INPUTS;
 let FORGET_BASE = OUTPUT_BASE + OUTPUTS * HIDDEN;
 let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
 
-// Rays cover 120 degrees with finer spacing near the centre of view.
+// View rays cover 120 degrees with finer spacing near the centre of view.
 let RAY_ANGLE = [];
 let RAY_X = [];
 let RAY_Y = [];
@@ -130,10 +130,40 @@ fun mutate(rng, parent) {
     return weights;
 }
 
+fun random_name(rng) {
+    let consonants = "BDFGKLMNPRSTVZ";
+    let vowels = "AEIOU";
+    let var name = "";
+    let syllables = 2 + rng.index(3);
+    for (let var i = 0; i < syllables; ++i) {
+        name = name + consonants.char_at(rng.index(consonants.len));
+        name = name + vowels.char_at(rng.index(vowels.len));
+    }
+    return name;
+}
+
+// Cosmetic genes never enter the neural network's perception or weights.
+fun birth(rng, parent) {
+    let colors = [];
+    for (let var i = 0; i < 3; ++i) {
+        colors.push(parent == nil ? 80 + rng.index(176) :
+                    (parent.colors[i] + rng.index(33) - 16).max(80).min(255));
+    }
+    return Individual(parent == nil ? new_genome(rng) : mutate(rng, parent.weights),
+                      0, random_name(rng), colors);
+}
+
 class Individual {
-    init(self, weights, age) {
+    init(self, weights, age, name, colors) {
         self.weights = weights;
         self.age = age;
+        self.name = name;
+        self.colors = colors;
+    }
+
+    color(self) {
+        return 0xFF_00_00_00 | (self.colors[0] << 16) |
+               (self.colors[1] << 8) | self.colors[2];
     }
 }
 
@@ -696,7 +726,7 @@ fun check_room_connected(arena) {
 }
 
 fun check_movement() {
-    let fighter = Fighter(Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0));
+    let fighter = Fighter(Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "TEST", [80, 201, 255]));
     let arena = Arena(20, 20, nil);
     let vision_arena = Arena(20, 20, nil);
     let enemy = Fighter(fighter.individual);
@@ -712,7 +742,7 @@ fun check_movement() {
     gate_weights.set_f32(FORGET_UNITS * NUM_INPUTS + NUM_SENSORS - 1, 1.0);
     gate_weights.set_f32(OUTPUT_BASE, 1.0);
     gate_weights.set_f32(FORGET_BASE, 1.0);
-    let gated = Fighter(Individual(gate_weights, 0));
+    let gated = Fighter(Individual(gate_weights, 0, "GATE", [255, 155, 87]));
     let var gated_actions = gated.think();
     assert(gated_actions[0] == 0.5);
     assert(gated.inputs.get_f32(NUM_SENSORS) == 0.0);
@@ -875,6 +905,22 @@ fun check_movement() {
 }
 
 if (has_flag("--check-movement")) {
+    let identity_rng = Xoshiro128(123);
+    let parent = birth(identity_rng, nil);
+    let original_color = parent.color();
+    let var color_changed = false;
+    for (let var i = 0; i < 100; ++i) {
+        let child = birth(identity_rng, parent);
+        assert(child.name.len >= 4 && child.name.len <= 8);
+        assert(child.age == 0 && child.colors != parent.colors);
+        for (let var channel = 0; channel < 3; ++channel) {
+            assert(child.colors[channel] >= 80 && child.colors[channel] <= 255);
+            assert((child.colors[channel] - parent.colors[channel]).abs() <= 16);
+        }
+        if (child.color() != original_color)
+            color_changed = true;
+    }
+    assert(color_changed && parent.color() == original_color);
     check_movement();
     $exit(0);
 }
@@ -885,7 +931,7 @@ class Island {
         self.rng = Xoshiro128(seed + index * 7919);
         self.population = [];
         for (let var i = 0; i < POP_SIZE; ++i)
-            self.population.push(Individual(new_genome(self.rng), 0));
+            self.population.push(birth(self.rng, nil));
         self.pending_migrants = [];
         self.matches = 0;
         self.episodes = 0;
@@ -936,7 +982,11 @@ class Island {
             first_weights: self.population[self.first_idx].weights,
             second_weights: self.population[self.second_idx].weights,
             first_age: self.population[self.first_idx].age,
-            second_age: self.population[self.second_idx].age
+            second_age: self.population[self.second_idx].age,
+            first_name: self.population[self.first_idx].name,
+            second_name: self.population[self.second_idx].name,
+            first_colors: self.population[self.first_idx].colors,
+            second_colors: self.population[self.second_idx].colors
         };
     }
 
@@ -956,7 +1006,7 @@ class Island {
                     youngest = idx;
             }
             let migrant = self.pending_migrants[m];
-            self.population[youngest] = Individual(migrant[0], migrant[1]);
+            self.population[youngest] = Individual(migrant[0], migrant[1], migrant[2], migrant[3]);
             replaced[youngest] = true;
             self.migrants_received = self.migrants_received + 1;
         }
@@ -979,7 +1029,7 @@ class Island {
             let winner_idx = win_first ? self.first_idx : self.second_idx;
             let loser_idx = win_first ? self.second_idx : self.first_idx;
             let winner = self.population[winner_idx];
-            self.population[loser_idx] = Individual(mutate(self.rng, winner.weights), 0);
+            self.population[loser_idx] = birth(self.rng, winner);
         }
         self.matches = self.matches + 1;
         self.episodes = self.episodes + EPISODES;
@@ -1042,7 +1092,8 @@ fun island_actor() {
                     let side = island.rng.index(2) == 0 ? -1 : 1;
                     let neighbour = (island.index + ids.len + side) % ids.len;
                     let donor = island.population[island.rng.index(POP_SIZE)];
-                    $actor_send(ids[neighbour], [MSG_MIGRANT, [donor.weights, donor.age]]);
+                    $actor_send(ids[neighbour], [MSG_MIGRANT,
+                                [donor.weights, donor.age, donor.name, donor.colors]]);
                     island.migrants_sent = island.migrants_sent + 1;
                     $println("Migration: island " + island.index.to_s() + " -> " +
                              neighbour.to_s() + " at match " + island.matches.to_s() +
@@ -1154,25 +1205,59 @@ fun draw_pistol(buf, grip_x, grip_y, angle, metres) {
     let right_y = c;
     let rear_x = grip_x - (c * metres * 0.11).floor();
     let rear_y = grip_y - (s * metres * 0.11).floor();
-    let muzzle_x = grip_x + (c * metres * 0.18).floor();
-    let muzzle_y = grip_y + (s * metres * 0.18).floor();
-    let handle_x = grip_x - (c * metres * 0.09).floor() +
-                   (right_x * metres * 0.19).floor();
-    let handle_y = grip_y - (s * metres * 0.09).floor() +
-                   (right_y * metres * 0.19).floor();
+    let muzzle_x = grip_x + (c * metres * 0.238).floor();
+    let muzzle_y = grip_y + (s * metres * 0.238).floor();
+    let handle_top_x = grip_x - (c * metres * 0.05).floor();
+    let handle_top_y = grip_y - (s * metres * 0.05).floor();
+    let handle_x = handle_top_x + (right_x * metres * 0.12).floor();
+    let handle_y = handle_top_y + (right_y * metres * 0.12).floor();
+    let half_handle = (metres * 0.12).floor().max(1);
     let guard_x = grip_x + (c * metres * 0.08).floor() +
                   (right_x * metres * 0.08).floor();
     let guard_y = grip_y + (s * metres * 0.08).floor() +
                   (right_y * metres * 0.08).floor();
-    draw_segment(buf, grip_x, grip_y, handle_x, handle_y, 3, COL_BG);
-    draw_segment(buf, grip_x, grip_y, handle_x, handle_y, 2, COL_GUN_SHADOW);
-    draw_segment(buf, handle_x, handle_y, guard_x, guard_y, 0, COL_GUN_HIGHLIGHT);
-    draw_segment(buf, rear_x, rear_y, muzzle_x, muzzle_y, 3, COL_BG);
-    draw_segment(buf, rear_x, rear_y, muzzle_x, muzzle_y, 2, COL_GUN);
+    // Taper a single trapezoid toward its flat base, with a backward lean.
+    let handle_bound = half_handle + 5;
+    for (let var dy = -handle_bound; dy <= handle_bound; ++dy) {
+        for (let var dx = -handle_bound; dx <= handle_bound; ++dx) {
+            let down = -dx.to_f() * s + dy.to_f() * c;
+            let forward = dx.to_f() * c + dy.to_f() * s;
+            let t = ((down + half_handle.to_f()) / (2 * half_handle).to_f()).max(0.0).min(1.0);
+            let center = -t * (2 * half_handle).to_f() * 0.10;
+            let half_width = 3.0 - t * 1.25;
+            let edge = half_width - (forward - center).abs();
+            if (down.abs() <= (half_handle + 1).to_f() && edge >= -1.0)
+                fill_rect(buf, handle_x + dx, handle_y + dy, 1, 1, COL_BG);
+            if (down.abs() <= half_handle.to_f() && edge > -0.5) {
+                // Smooth the sloping edges so this small grip reads as one shape.
+                let coverage = (edge + 0.5).min(1.0);
+                let var shade = 0xFF_00_00_00;
+                for (let var shift = 0; shift <= 16; shift = shift + 8) {
+                    let bg = (COL_BG >> shift) & 255;
+                    let fg = (COL_GUN_SHADOW >> shift) & 255;
+                    shade = shade | ((bg.to_f() + (fg - bg).to_f() * coverage).floor() << shift);
+                }
+                fill_rect(buf, handle_x + dx, handle_y + dy, 1, 1, shade);
+            }
+        }
+    }
+    draw_segment(buf, handle_top_x, handle_top_y, guard_x, guard_y, 0, COL_GUN_SHADOW);
+    // A rectangular slide gives the pickup a flat top and squared ends.
+    let slide_x = (rear_x + muzzle_x).idiv(2);
+    let slide_y = (rear_y + muzzle_y).idiv(2);
+    let half_slide = (metres * 0.174).floor().max(1);
+    let slide_thickness = (3.0 * 0.8).floor();
+    draw_body(buf, slide_x, slide_y, angle, half_slide + 1, slide_thickness + 1,
+              (half_slide + 5).to_f(), COL_BG);
+    draw_body(buf, slide_x, slide_y, angle, half_slide, slide_thickness,
+              (half_slide + 5).to_f(), COL_GUN);
     draw_segment(buf, rear_x - right_x.floor(), rear_y - right_y.floor(),
                  muzzle_x - right_x.floor(), muzzle_y - right_y.floor(),
                  0, COL_GUN_HIGHLIGHT);
-    draw_disc(buf, muzzle_x, muzzle_y, 2, COL_GUN_SHADOW);
+    draw_segment(buf, muzzle_x - (right_x * slide_thickness).floor(),
+                 muzzle_y - (right_y * slide_thickness).floor(),
+                 muzzle_x + (right_x * slide_thickness).floor(),
+                 muzzle_y + (right_y * slide_thickness).floor(), 0, COL_GUN_SHADOW);
 }
 
 fun draw_body(buf, x, y, angle, half_length, half_width, radius, color) {
@@ -1239,10 +1324,17 @@ fun draw_fighter(buf, x, y, angle, hp, attack_ticks, gun_ammo, color, scale) {
     let thrust = gun_ammo > 0 ? 0.0 :
                  attack_ticks == 2 ? 0.20 : attack_ticks == 1 ? 0.10 : 0.0;
     let side_offset = gun_ammo > 0 ? 0.0 : 0.22;
-    let hand_x = x + (c * metres * (0.09 + thrust) + right_x * metres * side_offset).floor();
-    let hand_y = y + (s * metres * (0.09 + thrust) + right_y * metres * side_offset).floor();
+    let forward_offset = gun_ammo > 0 ? 0.32 : 0.09 + thrust;
+    let hand_x = x + (c * metres * forward_offset + right_x * metres * side_offset).floor();
+    let hand_y = y + (s * metres * forward_offset + right_y * metres * side_offset).floor();
     if (gun_ammo > 0) {
-        draw_pistol(buf, hand_x, hand_y, angle, metres);
+        // From above, the slide hides the grip and points ahead of the hands.
+        let muzzle_x = hand_x + (c * metres * 0.28).floor();
+        let muzzle_y = hand_y + (s * metres * 0.28).floor();
+        draw_segment(buf, hand_x, hand_y, muzzle_x, muzzle_y, 3, COL_BG);
+        draw_segment(buf, hand_x, hand_y, muzzle_x, muzzle_y, 2, COL_GUN);
+        draw_segment(buf, hand_x, hand_y, muzzle_x, muzzle_y, 0, COL_GUN_HIGHLIGHT);
+        draw_disc(buf, muzzle_x, muzzle_y, 1, COL_GUN_SHADOW);
     } else {
         let blade_x = hand_x + (c * metres * 0.08).floor();
         let blade_y = hand_y + (s * metres * 0.08).floor();
@@ -1263,6 +1355,8 @@ fun replay_snapshot(config, duel) {
     return {
         index: config.index, match_no: config.match_no,
         first_age: config.first_age, second_age: config.second_age,
+        first_name: a.individual.name, second_name: b.individual.name,
+        first_color: a.individual.color(), second_color: b.individual.color(),
         oldest_side: config.oldest_side,
         room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
         tiles: duel.arena.tiles,
@@ -1332,9 +1426,9 @@ fun render(buf, snap, agg, view_speed, paused) {
                          ox + (snap.bex * scale).floor(), oy + (snap.bey * scale).floor(),
                          0, COL_SHOT);
         draw_fighter(buf, ox + (snap.ax * scale).floor(), oy + (snap.ay * scale).floor(),
-                     snap.adir, snap.ahp, snap.astab, snap.aammo, COL_A, scale);
+                     snap.adir, snap.ahp, snap.astab, snap.aammo, snap.first_color, scale);
         draw_fighter(buf, ox + (snap.bx * scale).floor(), oy + (snap.by * scale).floor(),
-                     snap.bdir, snap.bhp, snap.bstab, snap.bammo, COL_B, scale);
+                     snap.bdir, snap.bhp, snap.bstab, snap.bammo, snap.second_color, scale);
     }
 
     let px = VIEW_W + 20;
@@ -1354,14 +1448,14 @@ fun render(buf, snap, agg, view_speed, paused) {
         draw_text(buf, px, 291, "EPISODE " + (snap.episode + 1).comma_sep() +
                   "/" + EPISODES.comma_sep(), COL_TEXT);
         draw_text(buf, px, 314, "TIME " + snap.tick.idiv(10).comma_sep() + "/30", COL_TEXT);
-        draw_text(buf, px, 343, "BLUE AGE " + snap.first_age.comma_sep(), COL_A);
-        draw_text(buf, px, 366, "BLUE KILLS " + snap.kills_a.comma_sep(), COL_A);
+        draw_text(buf, px, 343, snap.first_name + " AGE " + snap.first_age.comma_sep(), snap.first_color);
+        draw_text(buf, px, 366, "KILLS " + snap.kills_a.comma_sep(), snap.first_color);
         draw_text(buf, px + 160, 366,
-                  snap.aammo > 0 ? "GUN " + snap.aammo.comma_sep() : "KNIFE", COL_A);
-        draw_text(buf, px, 394, "ORANGE AGE " + snap.second_age.comma_sep(), COL_B);
-        draw_text(buf, px, 417, "ORANGE KILLS " + snap.kills_b.comma_sep(), COL_B);
+                  snap.aammo > 0 ? "GUN " + snap.aammo.comma_sep() : "KNIFE", snap.first_color);
+        draw_text(buf, px, 394, snap.second_name + " AGE " + snap.second_age.comma_sep(), snap.second_color);
+        draw_text(buf, px, 417, "KILLS " + snap.kills_b.comma_sep(), snap.second_color);
         draw_text(buf, px + 160, 417,
-                  snap.bammo > 0 ? "GUN " + snap.bammo.comma_sep() : "KNIFE", COL_B);
+                  snap.bammo > 0 ? "GUN " + snap.bammo.comma_sep() : "KNIFE", snap.second_color);
         draw_text(buf, px, 445, "ROOM " + snap.room_w.comma_sep() + " X " + snap.room_h.comma_sep(), COL_TEXT);
     } else {
         draw_text(buf, px, 245, "WAITING FOR MATCH", COL_TEXT);
@@ -1376,7 +1470,7 @@ fun render(buf, snap, agg, view_speed, paused) {
 
 if (has_flag("--check-render")) {
     let test_weights = ByteArray.with_size(NUM_WEIGHTS * 4);
-    let test_agent = Individual(test_weights, 0);
+    let test_agent = Individual(test_weights, 0, "TEST", [80, 201, 255]);
     let test_duel = Match(test_agent, test_agent, 7);
     let test_config = {index: 0, match_no: 0, first_age: 0, second_age: 0,
                        oldest_side: 0};
@@ -1403,6 +1497,26 @@ if (has_flag("--check-render")) {
             if (test_frame.get_u32((test_player_y + dy) * FRAME_W + test_player_x + dx) == COL_GUN)
                 held_gun_visible = true;
     assert(held_gun_visible);
+    // The held slide stays ahead of the head at every facing direction.
+    for (let var direction = 0; direction < 8; ++direction) {
+        let angle = direction.to_f() * TAU / 8.0;
+        test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+        draw_fighter(test_frame, 100, 100, angle, HEALTH, 0, GUN_AMMO,
+                     test_agent.color(), PIXELS_PER_METRE);
+        assert(test_frame.get_u32(100 * FRAME_W + 100) == COL_SKIN);
+        let var visible = false;
+        for (let var y = 65; y <= 135; ++y) {
+            for (let var x = 65; x <= 135; ++x) {
+                if (test_frame.get_u32(y * FRAME_W + x) == COL_GUN) {
+                    visible = true;
+                    let forward = (x - 100).to_f() * angle.cos() +
+                                  (y - 100).to_f() * angle.sin();
+                    assert(forward > PIXELS_PER_METRE.to_f() * BODY_RADIUS * 0.48);
+                }
+            }
+        }
+        assert(visible);
+    }
     test_shooter.shot_ticks = SHOT_TRACE_TICKS;
     test_shooter.shot_start_x = test_duel.gun_x - 0.3;
     test_shooter.shot_start_y = test_duel.gun_y;
@@ -1495,8 +1609,10 @@ loop {
         view_config = next_offer;
         next_offer = nil;
         view_duel = Match(
-            Individual(view_config.first_weights, view_config.first_age),
-            Individual(view_config.second_weights, view_config.second_age),
+            Individual(view_config.first_weights, view_config.first_age,
+                       view_config.first_name, view_config.first_colors),
+            Individual(view_config.second_weights, view_config.second_age,
+                       view_config.second_name, view_config.second_colors),
             view_config.seed
         );
         $println("Viewing island " + view_config.index.to_s() + " match " +
