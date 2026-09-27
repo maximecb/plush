@@ -18,8 +18,10 @@
 // Energy check: --check-energy verifies replenishment, action costs, and exhaustion.
 // Map check: --check-maps validates varied layouts, clearance, and spawning.
 // Evolution check: --check-evolution verifies tie replacement and migration.
+// Checkpoint check: --check-checkpoint verifies selection and named weight mapping.
 
 from random import Xoshiro128;
+from json import parse_json, format_json, write_json_file, Error;
 
 fun has_flag(name) {
     for (let var i = 0; i < $cmd_num_args(); ++i)
@@ -94,6 +96,8 @@ let MAX_OBSTACLE_FRACTION = 0.28;
 let ROOM_LAYOUT_CHANCE = 0.7;
 let MIGRATE_PERIOD = flag_int("--migrate-period", 2_000).max(1);
 let MATCH_OFFER_INTERVAL_MS = 1500;
+let SAVE_INTERVAL_MS = 5 * 60 * 1000;
+let SAVE_PATH = "examples/data/arena.json";
 
 let VIEW_BINS = 7;
 let VIEW_MIDDLE = VIEW_BINS.idiv(2);
@@ -124,6 +128,137 @@ for (let var i = 0; i < VIEW_BINS; ++i) {
     RAY_ANGLE.push(angle);
     RAY_X.push(angle.cos());
     RAY_Y.push(angle.sin());
+}
+// Names, rather than positions, identify weight columns across schema changes.
+let INPUT_NAMES = [];
+for (let var i = 0; i < VIEW_BINS; ++i)
+    INPUT_NAMES.push("wall_ray_" + (i - VIEW_MIDDLE).to_s());
+let BODY_NAMES = ["health", "forward_speed", "strafe_speed", "turn_speed",
+                  "attack_cooldown", "random", "gun_ammo", "energy", "bias"];
+let VISION_NAMES = ["opponent_visible", "opponent_angle", "opponent_proximity",
+                    "opponent_has_gun", "pickup_gun_visible", "pickup_gun_angle",
+                    "pickup_gun_proximity"];
+for (let var i = 0; i < VISION_NAMES.len; ++i)
+    INPUT_NAMES.push(VISION_NAMES[i]);
+for (let var i = 0; i < BODY_NAMES.len; ++i)
+    INPUT_NAMES.push(BODY_NAMES[i]);
+let OUTPUT_NAMES = ["forward", "turn", "strafe", "attack"];
+for (let var i = 0; i < RECURRENT; ++i) {
+    let name = "memory_" + i.to_s();
+    INPUT_NAMES.push(name);
+    OUTPUT_NAMES.push(name);
+}
+assert(INPUT_NAMES.len == NUM_INPUTS && OUTPUT_NAMES.len == OUTPUTS + RECURRENT);
+
+fun name_index(names, target) {
+    for (let var i = 0; i < names.len; ++i)
+        if (names[i] == target)
+            return i;
+    return -1;
+}
+
+fun valid_weight(value) {
+    return (value instanceof Float64 || value instanceof Int64) &&
+           value > -1.0e6 && value < 1.0e6;
+}
+
+fun restore_genome(rng, saved, old_inputs, old_outputs) {
+    if (!(saved instanceof Dict) || !saved.has("hidden") || !saved.has("output") ||
+        !(saved.hidden instanceof Array) || !(saved.output instanceof Array))
+        return nil;
+    let weights = new_genome(rng);
+    for (let var h = 0; h < HIDDEN.min(saved.hidden.len); ++h) {
+        let row = saved.hidden[h];
+        if (!(row instanceof Array))
+            return nil;
+        for (let var old_i = 0; old_i < old_inputs.len.min(row.len); ++old_i) {
+            let current_i = name_index(INPUT_NAMES, old_inputs[old_i]);
+            if (current_i >= 0) {
+                if (!valid_weight(row[old_i]))
+                    return nil;
+                weights.set_f32(h * NUM_INPUTS + current_i, row[old_i]);
+            }
+        }
+    }
+    for (let var old_o = 0; old_o < old_outputs.len.min(saved.output.len); ++old_o) {
+        let current_o = name_index(OUTPUT_NAMES, old_outputs[old_o]);
+        if (current_o < 0)
+            continue;
+        let row = saved.output[old_o];
+        if (!(row instanceof Array))
+            return nil;
+        for (let var h = 0; h < HIDDEN.min(row.len); ++h) {
+            if (!valid_weight(row[h]))
+                return nil;
+            weights.set_f32(OUTPUT_BASE + current_o * HIDDEN + h, row[h]);
+        }
+    }
+    return weights;
+}
+
+fun encode_individual(individual) {
+    let hidden = [];
+    let output = [];
+    for (let var h = 0; h < HIDDEN; ++h) {
+        let row = [];
+        for (let var i = 0; i < NUM_INPUTS; ++i)
+            row.push(individual.weights.get_f32(h * NUM_INPUTS + i));
+        hidden.push(row);
+    }
+    for (let var o = 0; o < OUTPUT_NAMES.len; ++o) {
+        let row = [];
+        for (let var h = 0; h < HIDDEN; ++h)
+            row.push(individual.weights.get_f32(OUTPUT_BASE + o * HIDDEN + h));
+        output.push(row);
+    }
+    return {age: individual.age, name: individual.name, colors: individual.colors,
+            hidden: hidden, output: output};
+}
+
+fun decode_individual(rng, saved, old_inputs, old_outputs) {
+    if (!(saved instanceof Dict) || !saved.has("age") || !saved.has("name") ||
+        !saved.has("colors") || !(saved.age instanceof Int64) || saved.age < 0 ||
+        !(saved.name instanceof String) || saved.name.len > 8 ||
+        !(saved.colors instanceof Array) || saved.colors.len != 3)
+        return nil;
+    for (let var i = 0; i < 3; ++i)
+        if (!(saved.colors[i] instanceof Int64) ||
+            saved.colors[i] < 0 || saved.colors[i] > 255)
+            return nil;
+    let weights = restore_genome(rng, saved, old_inputs, old_outputs);
+    if (weights == nil)
+        return nil;
+    return Individual(weights, saved.age, saved.name, saved.colors);
+}
+
+fun read_checkpoint() {
+    if (has_flag("--fresh-start"))
+        return nil;
+    let text = $read_file_utf8(SAVE_PATH);
+    if (text == nil)
+        return nil;
+    let saved = parse_json(text);
+    if (saved instanceof Error || !(saved instanceof Dict) || !saved.has("format") ||
+        saved.format != 1 || !saved.has("inputs") || !saved.has("outputs") ||
+        !saved.has("islands") || !(saved.inputs instanceof Array) ||
+        !(saved.outputs instanceof Array) || !(saved.islands instanceof Array)) {
+        $println("Could not load arena checkpoint; starting fresh");
+        return nil;
+    }
+    $println("Loaded arena checkpoint from " + SAVE_PATH);
+    return saved;
+}
+
+fun saved_island(saved, index) {
+    if (saved == nil)
+        return nil;
+    for (let var i = 0; i < saved.islands.len; ++i) {
+        let island = saved.islands[i];
+        if (island instanceof Dict && island.has("index") && island.index == index &&
+            island.has("individuals") && island.individuals instanceof Array)
+            return island;
+    }
+    return nil;
 }
 fun new_genome(rng) {
     let weights = ByteArray.with_size(NUM_WEIGHTS * 4);
@@ -1407,12 +1542,20 @@ if (has_flag("--check-movement")) {
 }
 
 class Island {
-    init(self, index, seed) {
+    init(self, index, seed, checkpoint) {
         self.index = index;
         self.rng = Xoshiro128(seed + index * 7919);
         self.population = [];
         for (let var i = 0; i < POP_SIZE; ++i)
             self.population.push(birth(self.rng, nil));
+        if (checkpoint != nil) {
+            for (let var i = 0; i < POP_SIZE.min(checkpoint.individuals.len); ++i) {
+                let restored = decode_individual(self.rng, checkpoint.individuals[i],
+                                                 checkpoint.inputs, checkpoint.outputs);
+                if (restored != nil)
+                    self.population[i] = restored;
+            }
+        }
         self.pending_migrants = [];
         self.matches = 0;
         self.episodes = 0;
@@ -1550,10 +1693,29 @@ class Island {
             oldest: oldest, mean_age: age_sum.idiv(POP_SIZE)
         };
     }
+
+    elite_snapshot(self) {
+        let selected = Array.with_size(POP_SIZE, false);
+        let individuals = [];
+        for (let var rank = 0; rank < POP_SIZE.min(4); ++rank) {
+            let var best = -1;
+            for (let var i = 0; i < POP_SIZE; ++i) {
+                if (!selected[i] &&
+                    (best < 0 || self.population[i].age > self.population[best].age))
+                    best = i;
+            }
+            selected[best] = true;
+            let agent = self.population[best];
+            individuals.push({age: agent.age, name: agent.name, colors: agent.colors,
+                              weights: agent.weights});
+        }
+        return {kind: "CHECKPOINT", index: self.index, matches: self.matches,
+                individuals: individuals};
+    }
 }
 
 if (has_flag("--check-evolution")) {
-    let island = Island(0, 123);
+    let island = Island(0, 123, nil);
     island.first_idx = 0;
     island.second_idx = 1;
     let var first = island.population[0];
@@ -1585,15 +1747,88 @@ if (has_flag("--check-evolution")) {
     $exit(0);
 }
 
+if (has_flag("--check-checkpoint")) {
+    let island = Island(0, 123, nil);
+    for (let var i = 0; i < POP_SIZE; ++i)
+        island.population[i].age = 0;
+    island.population[0].age = 2;
+    island.population[1].age = 100;
+    island.population[2].age = 5;
+    island.population[3].age = 99;
+    island.population[4].age = 98;
+    island.population[5].age = 97;
+    let elites = island.elite_snapshot();
+    assert(elites.individuals.len == 4);
+    assert(elites.individuals[0].age == 100 && elites.individuals[1].age == 99 &&
+           elites.individuals[2].age == 98 && elites.individuals[3].age == 97);
+    let encoded = encode_individual(elites.individuals[0]);
+    let decoded = parse_json(format_json(encoded));
+    assert(!(decoded instanceof Error));
+    let restored = decode_individual(Xoshiro128(7), decoded, INPUT_NAMES, OUTPUT_NAMES);
+    assert(restored.age == encoded.age && restored.name == encoded.name);
+    for (let var c = 0; c < 3; ++c)
+        assert(restored.colors[c] == encoded.colors[c]);
+    for (let var i = 0; i < NUM_WEIGHTS; ++i)
+        assert(restored.weights.get_f32(i) == elites.individuals[0].weights.get_f32(i));
+
+    // An unknown old input is ignored, while a newly added current input
+    // retains its small random initializer instead of shifting other columns.
+    let old_inputs = ["retired_sensor"];
+    for (let var i = 0; i < INPUT_NAMES.len; ++i)
+        if (INPUT_NAMES[i] != "energy")
+            old_inputs.push(INPUT_NAMES[i]);
+    let shifted = encode_individual(elites.individuals[0]);
+    for (let var h = 0; h < HIDDEN; ++h) {
+        let row = [0.75];
+        for (let var i = 0; i < INPUT_NAMES.len; ++i)
+            if (INPUT_NAMES[i] != "energy")
+                row.push(shifted.hidden[h][i]);
+        shifted.hidden[h] = row;
+    }
+    let baseline = new_genome(Xoshiro128(7));
+    let var remapped = decode_individual(Xoshiro128(7), shifted, old_inputs, OUTPUT_NAMES);
+    let energy_index = name_index(INPUT_NAMES, "energy");
+    for (let var h = 0; h < HIDDEN; ++h) {
+        for (let var i = 0; i < NUM_INPUTS; ++i) {
+            let idx = h * NUM_INPUTS + i;
+            let expected = i == energy_index ? baseline.get_f32(idx) :
+                           elites.individuals[0].weights.get_f32(idx);
+            assert(remapped.weights.get_f32(idx) == expected);
+        }
+    }
+    let old_outputs = ["retired_action"];
+    for (let var i = 0; i < OUTPUT_NAMES.len; ++i)
+        if (OUTPUT_NAMES[i] != "memory_9")
+            old_outputs.push(OUTPUT_NAMES[i]);
+    let shifted_outputs = encode_individual(elites.individuals[0]);
+    let rows = [Array.with_size(HIDDEN, 0.75)];
+    for (let var i = 0; i < OUTPUT_NAMES.len; ++i)
+        if (OUTPUT_NAMES[i] != "memory_9")
+            rows.push(shifted_outputs.output[i]);
+    shifted_outputs.output = rows;
+    remapped = decode_individual(Xoshiro128(7), shifted_outputs, INPUT_NAMES, old_outputs);
+    for (let var o = 0; o < OUTPUT_NAMES.len; ++o) {
+        for (let var h = 0; h < HIDDEN; ++h) {
+            let idx = OUTPUT_BASE + o * HIDDEN + h;
+            let expected = OUTPUT_NAMES[o] == "memory_9" ? baseline.get_f32(idx) :
+                           elites.individuals[0].weights.get_f32(idx);
+            assert(remapped.weights.get_f32(idx) == expected);
+        }
+    }
+    $println("checkpoint checks passed");
+    $exit(0);
+}
+
 let MSG_SETUP = 0;
 let MSG_SNAPSHOT = 1;
 let MSG_MIGRANT = 3;
+let MSG_CHECKPOINT = 4;
 let BATCH = 32;
 
 fun island_actor() {
     let setup = $actor_recv();
     let ids = setup[3];
-    let island = Island(setup[1], setup[2]);
+    let island = Island(setup[1], setup[2], setup[4]);
     let parent = $actor_parent();
 
     loop {
@@ -1603,6 +1838,8 @@ fun island_actor() {
                 break;
             if (msg[0] == MSG_SNAPSHOT)
                 $actor_send(parent, island.snapshot());
+            else if (msg[0] == MSG_CHECKPOINT)
+                $actor_send(parent, island.elite_snapshot());
             else if (msg[0] == MSG_MIGRANT)
                 island.receive(msg[1]);
         }
@@ -1633,13 +1870,48 @@ fun island_actor() {
     }
 }
 
-fun spawn_islands() {
+fun spawn_islands(saved) {
     let ids = [];
     for (let var i = 0; i < NUM_ISLANDS; ++i)
         ids.push($actor_spawn(island_actor));
-    for (let var i = 0; i < NUM_ISLANDS; ++i)
-        $actor_send(ids[i], [MSG_SETUP, i, SEED, ids]);
+    for (let var i = 0; i < NUM_ISLANDS; ++i) {
+        let saved_data = saved_island(saved, i);
+        let checkpoint = saved_data == nil ? nil :
+            {inputs: saved.inputs, outputs: saved.outputs,
+             individuals: saved_data.individuals};
+        $actor_send(ids[i], [MSG_SETUP, i, SEED, ids, checkpoint]);
+    }
     return ids;
+}
+
+fun gather_checkpoints(ids) {
+    let snaps = Array.with_size(ids.len, nil);
+    for (let var i = 0; i < ids.len; ++i)
+        $actor_send(ids[i], [MSG_CHECKPOINT]);
+    for (let var i = 0; i < ids.len; ++i) {
+        let snap = $actor_recv();
+        assert(snap.kind == "CHECKPOINT");
+        snaps[snap.index] = snap;
+    }
+    return snaps;
+}
+
+fun save_checkpoint(snaps) {
+    let islands = [];
+    for (let var i = 0; i < snaps.len; ++i) {
+        let snap = snaps[i];
+        let individuals = [];
+        for (let var j = 0; j < snap.individuals.len; ++j)
+            individuals.push(encode_individual(snap.individuals[j]));
+        islands.push({index: snap.index, matches: snap.matches,
+                      individuals: individuals});
+    }
+    let document = {format: 1, saved_at_ms: $time_current_ms(),
+                    inputs: INPUT_NAMES, outputs: OUTPUT_NAMES, islands: islands};
+    if (write_json_file(SAVE_PATH, document))
+        $println("Saved arena checkpoint to " + SAVE_PATH);
+    else
+        $println("Could not save arena checkpoint to " + SAVE_PATH);
 }
 
 fun gather(ids) {
@@ -1656,6 +1928,7 @@ fun gather(ids) {
 fun run_headless(ids) {
     let limit = MAX_MATCHES > 0 ? MAX_MATCHES : 1000;
     let start = $time_current_ms();
+    let var last_save_ms = start;
     $println("seed " + SEED.to_s() + "  islands " + NUM_ISLANDS.to_s() +
              "  population " + POP_SIZE.to_s() + "  matches/island " + limit.to_s());
     $println("island  matches  kills  zero  oldest  mean_age  sent  received");
@@ -1672,8 +1945,14 @@ fun run_headless(ids) {
                      s.migrants_sent.to_s().rpad(6, ' ') + s.migrants_received.to_s());
         }
         if (finished) {
+            save_checkpoint(gather_checkpoints(ids));
             $println("elapsed_ms " + ($time_current_ms() - start).to_s());
             return;
+        }
+        let now = $time_current_ms();
+        if (now >= last_save_ms + SAVE_INTERVAL_MS) {
+            save_checkpoint(gather_checkpoints(ids));
+            last_save_ms = now;
         }
         $actor_sleep(1000);
     }
@@ -2056,7 +2335,7 @@ if (has_flag("--check-render")) {
     $exit(0);
 }
 
-let island_ids = spawn_islands();
+let island_ids = spawn_islands(read_checkpoint());
 if (HEADLESS) {
     run_headless(island_ids);
     $exit(0);
@@ -2080,6 +2359,10 @@ let var last_stats_request = 0;
 let var last_rate_ms = 0;
 let var last_total_matches = 0;
 let var matches_per_sec = 0;
+let var checkpoint_pending = false;
+let var checkpoint_snaps = Array.with_size(NUM_ISLANDS, nil);
+let var checkpoint_received = 0;
+let var last_checkpoint_ms = $time_current_ms();
 
 loop {
     loop {
@@ -2106,6 +2389,15 @@ loop {
                         last_rate_ms = sample_time;
                     }
                 }
+            } else if (msg.kind == "CHECKPOINT" && checkpoint_pending &&
+                       checkpoint_snaps[msg.index] == nil) {
+                checkpoint_snaps[msg.index] = msg;
+                checkpoint_received = checkpoint_received + 1;
+                if (checkpoint_received == NUM_ISLANDS) {
+                    save_checkpoint(checkpoint_snaps);
+                    checkpoint_pending = false;
+                    last_checkpoint_ms = $time_current_ms();
+                }
             }
         }
         else if (msg.kind == "CLOSE_WINDOW")
@@ -2125,6 +2417,13 @@ loop {
     }
 
     let now = $time_current_ms();
+    if (!checkpoint_pending && now >= last_checkpoint_ms + SAVE_INTERVAL_MS) {
+        checkpoint_snaps = Array.with_size(NUM_ISLANDS, nil);
+        checkpoint_received = 0;
+        for (let var i = 0; i < island_ids.len; ++i)
+            $actor_send(island_ids[i], [MSG_CHECKPOINT]);
+        checkpoint_pending = true;
+    }
     if (!stats_pending && now >= last_stats_request + 1000) {
         for (let var i = 0; i < island_ids.len; ++i)
             $actor_send(island_ids[i], [MSG_SNAPSHOT]);
