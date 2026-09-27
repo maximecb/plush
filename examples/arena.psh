@@ -60,15 +60,20 @@ let TURN_ACCEL = 10.0;
 let LINEAR_DRAG = 1.5;
 let TURN_DRAG = 2.0;
 // Mechanical-work equivalents, not dietary energy or a detailed fatigue model.
-// Human cycling measurements: ~151 W critical power and ~19 kJ work reserve.
+// Human cycling measurements suggest ~150 W sustained mechanical power.
 // https://doi.org/10.1113/EP091429
-// These defaults approximate a 75 kg adult; recovery is deliberately linear.
+// The smaller burst reserve is gameplay tuning for 30-second episodes.
 let BODY_MASS = 75.0;
-let MAX_ENERGY = 15_000.0;
+let MAX_ENERGY = 1_500.0;
 let RECOVERY_POWER = 150.0;
+// Running costs about 4 J/kg/metre metabolically. Use a fixed 25% conversion
+// into our mechanical-work budget, not a detailed model of walking/running gaits.
+// https://pubmed.ncbi.nlm.nih.gov/3569218/
+let LOCOMOTION_J_PER_KG_METRE = 4.0 * 0.25;
 // Stab impact energies are tens of joules; allow extra work for arm recovery.
 // https://pubmed.ncbi.nlm.nih.gov/10464927/
-let STAB_ENERGY = 75.0;
+// At 100 J, attacking every 0.5 seconds exceeds the 150 W recovery budget.
+let STAB_ENERGY = 100.0;
 // Approximate trigger work: 20 N through 5 mm. Propellant supplies bullet energy.
 let SHOT_ENERGY = 0.1;
 let HEALTH = 100.0;
@@ -83,7 +88,7 @@ let SHOT_TRACE_TICKS = 4;
 let ATTACK_COOLDOWN = 5;
 let ATTACK_ANIM_TICKS = 2;
 let NOTCH_CHANCE = 0.4;
-let MIGRATE_PERIOD = flag_int("--migrate-period", 4_000).max(1);
+let MIGRATE_PERIOD = flag_int("--migrate-period", 2_000).max(1);
 let MATCH_OFFER_INTERVAL_MS = 1500;
 
 let VIEW_BINS = 17;
@@ -467,27 +472,9 @@ class Fighter {
         let accel_scale = (ax * ax + ay * ay).sqrt().max(FORWARD_ACCEL) / FORWARD_ACCEL;
         ax = ax / accel_scale;
         ay = ay / accel_scale;
-        // Separate active effort from passive drag, which costs no reserve.
-        // Charge F * distance, including effort spent maintaining speed or braking.
-        // Speed * DT + 0.5 * |a| * DT^2 estimates the distance under that effort.
-        // This conservative effort model also charges sideways acceleration.
-        let effort_x = ax + self.vx * LINEAR_DRAG;
-        let effort_y = ay + self.vy * LINEAR_DRAG;
-        let effort = (effort_x * effort_x + effort_y * effort_y).sqrt();
-        let speed = (self.vx * self.vx + self.vy * self.vy).sqrt();
-        let linear_cost = BODY_MASS * effort * speed * DT;
-        let quadratic_cost = 0.5 * BODY_MASS * effort * effort * DT * DT;
-        let var effort_scale = 1.0;
-        if (linear_cost + quadratic_cost > self.energy) {
-            // Solve linear_cost * u + quadratic_cost * u^2 = available joules.
-            effort_scale = 2.0 * self.energy /
-                (linear_cost + (linear_cost * linear_cost +
-                               4.0 * quadratic_cost * self.energy).sqrt()).max(0.000000001);
-        }
-        let spent = linear_cost * effort_scale + quadratic_cost * effort_scale * effort_scale;
-        self.energy = (self.energy - spent).max(0.0);
-        ax = effort_x * effort_scale - self.vx * LINEAR_DRAG;
-        ay = effort_y * effort_scale - self.vy * LINEAR_DRAG;
+        let old_vx = self.vx;
+        let old_vy = self.vy;
+        let old_speed2 = old_vx * old_vx + old_vy * old_vy;
         self.vx = self.vx + ax * DT;
         self.vy = self.vy + ay * DT;
 
@@ -500,6 +487,48 @@ class Fighter {
         strafe_speed = strafe_speed / speed_scale;
         self.vx = c * forward_speed - s * strafe_speed;
         self.vy = s * forward_speed + c * strafe_speed;
+
+        // Charge footwork per metre plus positive changes in kinetic energy.
+        // Drag only controls motion; overcoming it has no separate energy charge.
+        let distance_cost = BODY_MASS * LOCOMOTION_J_PER_KG_METRE * DT;
+        let wanted_speed2 = self.vx * self.vx + self.vy * self.vy;
+        let wanted_cost = distance_cost * wanted_speed2.sqrt() +
+                          0.5 * BODY_MASS * (wanted_speed2 - old_speed2).max(0.0);
+        if (wanted_cost > self.energy) {
+            // Solve for an affordable speed, including the acceleration surcharge.
+            let var affordable = self.energy / distance_cost;
+            if (self.energy > distance_cost * old_speed2.sqrt()) {
+                let budget = self.energy + 0.5 * BODY_MASS * old_speed2;
+                affordable = 2.0 * budget / (distance_cost +
+                    (distance_cost * distance_cost + 2.0 * BODY_MASS * budget).sqrt());
+            }
+            let coast_x = old_vx * (1.0 - LINEAR_DRAG * DT);
+            let coast_y = old_vy * (1.0 - LINEAR_DRAG * DT);
+            let coast_speed2 = coast_x * coast_x + coast_y * coast_y;
+            if (coast_speed2 > affordable * affordable) {
+                // Exhaustion cannot erase momentum. Coast or brake until affordable.
+                if (coast_speed2 < wanted_speed2) {
+                    self.vx = coast_x;
+                    self.vy = coast_y;
+                }
+            } else {
+                // Intersect the requested velocity change with the affordable speed.
+                let dvx = self.vx - coast_x;
+                let dvy = self.vy - coast_y;
+                let a = dvx * dvx + dvy * dvy;
+                let b = coast_x * dvx + coast_y * dvy;
+                let c0 = coast_speed2 - affordable * affordable;
+                let u = ((-b + (b * b - a * c0).max(0.0).sqrt()) /
+                         a.max(0.000000000001)).clip(0.0, 1.0);
+                self.vx = coast_x + u * dvx;
+                self.vy = coast_y + u * dvy;
+            }
+        }
+        let speed2 = self.vx * self.vx + self.vy * self.vy;
+        let spent = distance_cost * speed2.sqrt() +
+                    0.5 * BODY_MASS * (speed2 - old_speed2).max(0.0);
+        // Braking never refills energy; exhausted coasting cannot overdraw the reserve.
+        self.energy = (self.energy - spent).max(0.0);
 
         // A tenth of a second is shorter than one tile at running speed.
         // Resolve each axis separately so fighters can slide along notches.
@@ -774,6 +803,36 @@ fun check_room_connected(arena) {
             assert(arena.solid(x, y) || visited[y * arena.width + x]);
 }
 
+fun energy_scenario(individual, movement, attack_interval) {
+    let arena = Arena(20, 20, nil);
+    let fighter = Fighter(individual);
+    let enemy = Fighter(individual);
+    let rng = Xoshiro128(123);
+    fighter.reset(10.0, 10.0, 0.0);
+    enemy.reset(15.0, 10.0, 0.0);
+    let var attacks = 0;
+    let var first_denied_attack = -1;
+    let var distance = 0.0;
+    for (let var tick = 0; tick < EPISODE_TICKS; ++tick) {
+        fighter.recover();
+        fighter.move(arena, [movement, 0.0, 0.0, 0.0]);
+        distance = distance + fighter.x - 10.0;
+        if (attack_interval > 0 && tick % attack_interval == 0 && fighter.cooldown == 0) {
+            fighter.strikes(arena, enemy, 1.0, rng);
+            if (fighter.cooldown > 0)
+                attacks = attacks + 1;
+            else if (first_denied_attack < 0)
+                first_denied_attack = tick;
+        }
+        assert(fighter.energy >= 0.0 && fighter.energy <= MAX_ENERGY);
+        // Simulate open ground; misses still spend energy, without ending the episode.
+        fighter.x = 10.0;
+        fighter.y = 10.0;
+    }
+    return {energy: fighter.energy, attacks: attacks,
+            first_denied_attack: first_denied_attack, distance: distance};
+}
+
 fun check_energy() {
     let individual = Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "ENERGY", [80, 201, 255]);
     let fighter = Fighter(individual);
@@ -799,13 +858,16 @@ fun check_energy() {
         assert(fighter.inputs.get_f32(NUM_SENSORS - 1) == 1.0);
     }
 
-    // Starting from rest costs kinetic energy; partial reserves limit acceleration.
+    // Starting from rest costs both kinetic energy and locomotion over the step.
     fighter.reset(10.0, 10.0, 0.0);
     fighter.move(arena, forward);
-    let launch_cost = 0.5 * BODY_MASS * FORWARD_ACCEL * FORWARD_ACCEL * DT * DT;
+    let launch_cost = 0.5 * BODY_MASS * FORWARD_ACCEL * FORWARD_ACCEL * DT * DT +
+                      BODY_MASS * LOCOMOTION_J_PER_KG_METRE * FORWARD_ACCEL * DT * DT;
     assert((MAX_ENERGY - fighter.energy - launch_cost).abs() < 0.000001);
     fighter.reset(10.0, 10.0, 0.0);
-    fighter.energy = launch_cost * 0.25;
+    let half_speed = FORWARD_ACCEL * DT * 0.5;
+    fighter.energy = 0.5 * BODY_MASS * half_speed * half_speed +
+                     BODY_MASS * LOCOMOTION_J_PER_KG_METRE * half_speed * DT;
     fighter.move(arena, forward);
     assert((fighter.vx - FORWARD_ACCEL * DT * 0.5).abs() < 0.000001);
     assert(fighter.energy >= 0.0 && fighter.energy < 0.000001);
@@ -816,7 +878,7 @@ fun check_energy() {
     fighter.move(arena, [0.0, 1.0, 0.0, 0.0]);
     assert(fighter.turn_velocity > 0.0 && fighter.energy == 0.0);
 
-    // Coasting still slows down when exhausted; it neither costs nor returns energy.
+    // Exhausted agents coast to a stop instead of erasing their momentum instantly.
     fighter.reset(10.0, 10.0, 0.0);
     fighter.energy = 0.0;
     fighter.vx = MAX_FORWARD;
@@ -826,7 +888,10 @@ fun check_energy() {
     fighter.reset(10.0, 10.0, 0.0);
     fighter.vx = MAX_FORWARD;
     fighter.move(arena, forward);
-    assert(fighter.energy < MAX_ENERGY && fighter.vx == MAX_FORWARD);
+    assert(fighter.vx == MAX_FORWARD);
+    // Constant speed charges only locomotion, not artificial drag or clipped acceleration.
+    assert((MAX_ENERGY - fighter.energy -
+            BODY_MASS * LOCOMOTION_J_PER_KG_METRE * MAX_FORWARD * DT).abs() < 0.000001);
     fighter.move(arena, [-1.0, 0.0, 0.0, 0.0]);
     assert(fighter.energy < MAX_ENERGY && fighter.energy >= 0.0);
 
@@ -887,6 +952,22 @@ fun check_energy() {
     }
     duel.reset_episode();
     assert(duel.fighters[0].energy == MAX_ENERGY && duel.fighters[1].energy == MAX_ENERGY);
+
+    let rushing = energy_scenario(individual, 1.0, 1);
+    let running = energy_scenario(individual, 1.0, 0);
+    let selective = energy_scenario(individual, 0.3, 20);
+    let stationary = energy_scenario(individual, 0.0, 1);
+    assert(rushing.first_denied_attack >= 0 && rushing.first_denied_attack < 100);
+    assert(rushing.attacks < EPISODE_TICKS.idiv(ATTACK_COOLDOWN));
+    assert(running.distance > rushing.distance);
+    assert(selective.first_denied_attack == -1 && selective.attacks == EPISODE_TICKS.idiv(20));
+    assert(selective.energy > MAX_ENERGY * 0.8);
+    assert(stationary.first_denied_attack >= 0 && stationary.energy < STAB_ENERGY);
+    $println("Run + stab: first denied attack at " +
+             (rushing.first_denied_attack.to_f() * DT).to_s() + "s, " +
+             rushing.attacks.to_s() + " attacks in 30s");
+    $println("Slow + selective: " + selective.attacks.to_s() + " attacks, " +
+             selective.energy.floor().to_s() + " J remaining");
     $println("energy checks passed");
 }
 
