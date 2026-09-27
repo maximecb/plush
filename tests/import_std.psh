@@ -35,3 +35,19 @@ rng.seed(99);
 let fresh = Xoshiro128(99);
 for (let var i = 0; i < 100; ++i)
     assert(rng.next_u32() == fresh.next_u32());
+
+// Normal samples are reproducible and have the requested mean and variance
+let normal_rng = Xoshiro128(42);
+let normal_fresh = Xoshiro128(42);
+let var sum = 0.0;
+let var sum_sq = 0.0;
+for (let var i = 0; i < 10000; ++i)
+{
+    let v = normal_rng.normal(2.0, 3.0);
+    assert(v == normal_fresh.normal(2.0, 3.0));
+    sum = sum + v;
+    sum_sq = sum_sq + (v - 2.0) * (v - 2.0);
+}
+assert((sum / 10000.0 - 2.0).abs() < 0.2);
+assert((sum_sq / 10000.0 - 9.0).abs() < 0.8);
+assert(normal_rng.normal(7.0, 0.0) == 7.0);

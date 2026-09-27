@@ -2926,13 +2926,6 @@ fun band_slots(band) { if (band == 1) return 7; if (band == 2) return 7;
                        if (band == 3) return 7; return 6; }
 fun band_empty(band) { return 0.08 + (band - 1).to_f() * 0.015; }
 
-// Box-Muller. Plush has ln and cos, which is all it needs.
-fun rand_normal(mean, sd) {
-    let u1 = rng.float(0.0001, 1.0);
-    let u2 = rng.float(0.0, 1.0);
-    return mean + sd * (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
-}
-
 // Pareto. A real skyline is mostly low building with a thin tail of towers,
 // which is what a heavy-tailed draw gives and a uniform range does not: a
 // uniform one makes everything mid-rise and nothing stands out.
@@ -3007,9 +3000,9 @@ fun generate_slot(list, side, band, zs, slot_len) {
     // one, and never closer than the block line
     let var near = 0.0;
     if (rng.float(0.0, 1.0) < NEAR_PROB) {
-        near = rand_normal(NEAR_MU, NEAR_SIGMA).max(BLOCK_MIN);
+        near = rng.normal(NEAR_MU, NEAR_SIGMA).max(BLOCK_MIN);
     } else {
-        near = rand_normal(band_mu(band), band_sigma(band)).max(BLOCK_MIN);
+        near = rng.normal(band_mu(band), band_sigma(band)).max(BLOCK_MIN);
     }
 
     let var x0 = 0.0;

@@ -65,6 +65,17 @@ class RNG
         return min + t * (max - min);
     }
 
+    // Returns a normally distributed float with mean mu and standard deviation sigma
+    normal(self, mu, sigma)
+    {
+        assert(sigma >= 0.0);
+
+        // Box-Muller needs its first uniform value to be strictly positive
+        let u1 = (self.next_u32().to_f() + 1.0) / 4294967296.0;
+        let u2 = self.next_u32().to_f() / 4294967296.0;
+        return mu + sigma * (-2.0 * u1.ln()).sqrt() * (6.283185307179586 * u2).cos();
+    }
+
     // Returns true or false with equal probability
     bool(self)
     {

@@ -479,34 +479,6 @@ fun hsv_to_rgb(h, s, v) {
 // variance instead of pinning it to the clamp on the very first tick
 let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
 
-class Gauss
-{
-    init(self, rng)
-    {
-        self.rng = rng;
-        self.spare = 0.0;
-        self.has_spare = false;
-    }
-
-    // Box-Muller, which produces two values at a time
-    next(self)
-    {
-        if (self.has_spare) {
-            self.has_spare = false;
-            return self.spare;
-        }
-
-        let u1 = self.rng.float(1.0e-9, 1.0);
-        let u2 = self.rng.float(0.0, 1.0);
-        let mag = (-2.0 * u1.ln()).sqrt();
-        let theta = 6.28318530717959 * u2;
-
-        self.spare = mag * theta.sin();
-        self.has_spare = true;
-        return mag * theta.cos();
-    }
-}
-
 fun new_genome(rng) {
     let g = ByteArray.with_size(NUM_WEIGHTS * 4);
 
@@ -519,7 +491,7 @@ fun new_genome(rng) {
 // Gaussian perturbation of a handful of weights, which is what lets a nearly
 // right behaviour be nudged into a right one. Drawing the count up front
 // instead of rolling against every weight saves a few thousand rng calls
-fun mutate_genome(rng, gauss, src) {
+fun mutate_genome(rng, src) {
     let g = ByteArray.with_size(NUM_WEIGHTS * 4);
     g.memcpy(0, src, 0, NUM_WEIGHTS * 4);
 
@@ -533,7 +505,7 @@ fun mutate_genome(rng, gauss, src) {
         if (rng.float(0.0, 1.0) < MUT_RESET_PROB)
             g.set_f32(idx, rng.float(-W_SCALE, W_SCALE));
         else
-            g.set_f32(idx, g.get_f32(idx) + gauss.next() * MUT_SIGMA);
+            g.set_f32(idx, rng.normal(g.get_f32(idx), MUT_SIGMA));
     }
 
     return g;
@@ -903,7 +875,6 @@ class Island
     init(self, seed)
     {
         self.rng = Xoshiro128(seed);
-        self.gauss = Gauss(self.rng);
         self.seed_val = seed;
 
         self.grid = ByteArray.with_size(GRID_W * GRID_H * 4);
@@ -1193,7 +1164,7 @@ class Island
 
     norm_int(self, mean, sd)
     {
-        return (mean.to_f() + self.gauss.next() * sd.to_f() + 0.5).floor().max(0);
+        return (self.rng.normal(mean.to_f(), sd.to_f()) + 0.5).floor().max(0);
     }
 
     // Straight runs of rock, laid down row-wise and column-wise. Neither is
@@ -1649,7 +1620,7 @@ class Island
 
         parent.energy = parent.energy - REPRO_COST;
 
-        let genome = mutate_genome(self.rng, self.gauss, parent.genome);
+        let genome = mutate_genome(self.rng, parent.genome);
         let child = self.place_agent(genome, idx);
         if (child == nil) {
             parent.energy = parent.energy + REPRO_COST;
