@@ -13,7 +13,7 @@
 // Islands always train at full speed. Headless: --headless --matches 1000.
 // --migrate-period N overrides the default of 4,000 for short experiments.
 // --max-room N overrides the initial 5 to 8 metre room range.
-// --check-movement runs movement assertions without starting the islands.
+// --check-movement runs movement and arena assertions without starting islands.
 
 from random import Xoshiro128;
 
@@ -48,7 +48,7 @@ let EPISODE_TICKS = 300;
 let EPISODES = 10;
 let MIN_ROOM = 5;
 let MAX_ROOM = flag_int("--max-room", 8).max(MIN_ROOM);
-let BODY_RADIUS = 0.25;
+let BODY_RADIUS = 0.325;
 let MAX_FORWARD = 3.0;
 let MAX_STRAFE = 1.6;
 let MAX_TURN = 3.5;
@@ -62,6 +62,8 @@ let KNIFE_RANGE = 1.0;
 let KNIFE_DAMAGE = 34.0;
 let KNIFE_DOT = 0.70710678;
 let ATTACK_COOLDOWN = 5;
+let ATTACK_ANIM_TICKS = 2;
+let NOTCH_CHANCE = 0.4;
 let MIGRATE_PERIOD = flag_int("--migrate-period", 4_000).max(1);
 
 let VIEW_BINS = 30;
@@ -113,10 +115,9 @@ class Individual {
     }
 }
 
-// The grid has one metre cells. All MVP rooms have an empty rectangular
-// interior and a one cell wall border; the tile array is ready for cover.
+// The grid has one metre cells, a one cell wall border, and optional notches.
 class Arena {
-    init(self, inner_w, inner_h) {
+    init(self, inner_w, inner_h, rng) {
         self.inner_w = inner_w;
         self.inner_h = inner_h;
         self.width = inner_w + 2;
@@ -128,21 +129,101 @@ class Arena {
                     self.tiles.set_u32(y * self.width + x, 1);
             }
         }
+        if (rng != nil) {
+            let walls = [];
+            for (let var i = 0; i < 4; ++i)
+                walls.push(rng.float(0.0, 1.0) < NOTCH_CHANCE);
+            if ((walls[0] || walls[1]) && (walls[2] || walls[3])) {
+                if (rng.index(2) == 0) {
+                    walls[0] = false;
+                    walls[1] = false;
+                } else {
+                    walls[2] = false;
+                    walls[3] = false;
+                }
+            }
+            if (walls[0])
+                self.add_notch(rng.index(inner_w - 2) + 2, 1);
+            if (walls[1])
+                self.add_notch(rng.index(inner_w - 2) + 2, inner_h);
+            if (walls[2])
+                self.add_notch(1, rng.index(inner_h - 2) + 2);
+            if (walls[3])
+                self.add_notch(inner_w, rng.index(inner_h - 2) + 2);
+        }
     }
 
-    // Empty rooms allow direct wall distance, without stepping through tiles.
+    add_notch(self, x, y) {
+        self.tiles.set_u32(y * self.width + x, 1);
+    }
+
+    solid(self, x, y) {
+        if (x < 0 || y < 0 || x >= self.width || y >= self.height)
+            return true;
+        return self.tiles.get_u32(y * self.width + x) != 0;
+    }
+
+    blocked(self, x, y) {
+        if (x < 1.0 + BODY_RADIUS || x > self.inner_w.to_f() + 1.0 - BODY_RADIUS ||
+            y < 1.0 + BODY_RADIUS || y > self.inner_h.to_f() + 1.0 - BODY_RADIUS)
+            return true;
+        for (let var ty = (y - BODY_RADIUS).floor(); ty <= (y + BODY_RADIUS).floor(); ++ty) {
+            for (let var tx = (x - BODY_RADIUS).floor(); tx <= (x + BODY_RADIUS).floor(); ++tx) {
+                if (!self.solid(tx, ty))
+                    continue;
+                let nx = x.clip(tx.to_f(), tx.to_f() + 1.0);
+                let ny = y.clip(ty.to_f(), ty.to_f() + 1.0);
+                let dx = x - nx;
+                let dy = y - ny;
+                if (dx * dx + dy * dy < BODY_RADIUS * BODY_RADIUS)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    // Walk grid cells until the ray enters a solid tile.
     wall_distance(self, x, y, dx, dy) {
+        let var cell_x = x.floor();
+        let var cell_y = y.floor();
+        let var step_x = 0;
+        let var step_y = 0;
         let var tx = 1.0e20;
         let var ty = 1.0e20;
-        if (dx > 0.0)
-            tx = (self.inner_w.to_f() + 1.0 - x) / dx;
-        else if (dx < 0.0)
-            tx = (1.0 - x) / dx;
-        if (dy > 0.0)
-            ty = (self.inner_h.to_f() + 1.0 - y) / dy;
-        else if (dy < 0.0)
-            ty = (1.0 - y) / dy;
-        return tx.min(ty);
+        let var delta_x = 1.0e20;
+        let var delta_y = 1.0e20;
+        if (dx > 0.0) {
+            step_x = 1;
+            delta_x = 1.0 / dx;
+            tx = (cell_x.to_f() + 1.0 - x) * delta_x;
+        } else if (dx < 0.0) {
+            step_x = -1;
+            delta_x = -1.0 / dx;
+            tx = (x - cell_x.to_f()) * delta_x;
+        }
+        if (dy > 0.0) {
+            step_y = 1;
+            delta_y = 1.0 / dy;
+            ty = (cell_y.to_f() + 1.0 - y) * delta_y;
+        } else if (dy < 0.0) {
+            step_y = -1;
+            delta_y = -1.0 / dy;
+            ty = (y - cell_y.to_f()) * delta_y;
+        }
+        loop {
+            let var distance = 0.0;
+            if (tx < ty) {
+                cell_x = cell_x + step_x;
+                distance = tx;
+                tx = tx + delta_x;
+            } else {
+                cell_y = cell_y + step_y;
+                distance = ty;
+                ty = ty + delta_y;
+            }
+            if (self.solid(cell_x, cell_y))
+                return distance;
+        }
     }
 }
 
@@ -164,6 +245,7 @@ class Fighter {
         self.turn_velocity = 0.0;
         self.health = HEALTH;
         self.cooldown = 0;
+        self.attack_ticks = 0;
         self.inputs.fill_u32(0, NUM_INPUTS, 0);
         self.inputs.set_f32(NUM_SENSORS - 1, 1.0);
     }
@@ -263,33 +345,80 @@ class Fighter {
         self.vx = c * forward_speed - s * strafe_speed;
         self.vy = s * forward_speed + c * strafe_speed;
 
-        // A tenth of a second is shorter than one tile at human running
-        // speed. Clamping to the free rectangle gives swept wall collision.
+        // A tenth of a second is shorter than one tile at running speed.
+        // Resolve each axis separately so fighters can slide along notches.
         let next_x = self.x + self.vx * DT;
         let next_y = self.y + self.vy * DT;
-        self.x = next_x.clip(1.0 + BODY_RADIUS,
-                             arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
-        self.y = next_y.clip(1.0 + BODY_RADIUS,
-                             arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        let candidate_x = next_x.clip(1.0 + BODY_RADIUS,
+                                       arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+        if (arena.blocked(candidate_x, self.y)) {
+            let start_x = self.x;
+            let var safe = 0.0;
+            let var blocked = 1.0;
+            for (let var i = 0; i < 6; ++i) {
+                let middle = (safe + blocked) * 0.5;
+                if (arena.blocked(start_x + (candidate_x - start_x) * middle, self.y))
+                    blocked = middle;
+                else
+                    safe = middle;
+            }
+            self.x = start_x + (candidate_x - start_x) * safe;
+        } else {
+            self.x = candidate_x;
+        }
         if (self.x != next_x)
             self.vx = 0.0;
+        let candidate_y = next_y.clip(1.0 + BODY_RADIUS,
+                                       arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        if (arena.blocked(self.x, candidate_y)) {
+            let start_y = self.y;
+            let var safe = 0.0;
+            let var blocked = 1.0;
+            for (let var i = 0; i < 6; ++i) {
+                let middle = (safe + blocked) * 0.5;
+                if (arena.blocked(self.x, start_y + (candidate_y - start_y) * middle))
+                    blocked = middle;
+                else
+                    safe = middle;
+            }
+            self.y = start_y + (candidate_y - start_y) * safe;
+        } else {
+            self.y = candidate_y;
+        }
         if (self.y != next_y)
             self.vy = 0.0;
         if (self.cooldown > 0)
             self.cooldown = self.cooldown - 1;
+        if (self.attack_ticks > 0)
+            self.attack_ticks = self.attack_ticks - 1;
     }
 
-    strikes(self, other, attack_probability, rng) {
+    push(self, arena, dx, dy) {
+        let next_x = (self.x + dx).clip(1.0 + BODY_RADIUS,
+                                       arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+        if (!arena.blocked(next_x, self.y))
+            self.x = next_x;
+        let next_y = (self.y + dy).clip(1.0 + BODY_RADIUS,
+                                       arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        if (!arena.blocked(self.x, next_y))
+            self.y = next_y;
+    }
+
+    strikes(self, arena, other, attack_probability, rng) {
         if (self.cooldown > 0 || rng.float(0.0, 1.0) >= attack_probability)
             return false;
         self.cooldown = ATTACK_COOLDOWN;
+        self.attack_ticks = ATTACK_ANIM_TICKS;
         let dx = other.x - self.x;
         let dy = other.y - self.y;
         let dist2 = dx * dx + dy * dy;
         let reach = KNIFE_RANGE + BODY_RADIUS;
         if (dist2 > reach * reach || dist2 < 0.000001)
             return false;
-        return (dx * self.angle.cos() + dy * self.angle.sin()) >= KNIFE_DOT * dist2.sqrt();
+        let dist = dist2.sqrt();
+        if (arena.wall_distance(self.x, self.y, dx / dist, dy / dist) < dist - BODY_RADIUS)
+            return false;
+        return (dx * self.angle.cos() + dy * self.angle.sin()) >= KNIFE_DOT * dist;
     }
 }
 
@@ -299,20 +428,27 @@ class Match {
         self.rng = Xoshiro128(seed);
         let rng = self.rng;
         let size = rng.index(MAX_ROOM - MIN_ROOM + 1) + MIN_ROOM;
-        self.arena = Arena(size, size);
+        self.arena = Arena(size, size, rng);
         self.fighters = [Fighter(first), Fighter(second)];
         self.kills = [0, 0];
         self.episode = 0;
         self.tick = 0;
         self.done = false;
+        self.needs_reset = false;
         self.reset_episode();
     }
 
     reset_episode(self) {
         let rng = self.rng;
         let arena = self.arena;
-        let ax = rng.float(1.0 + BODY_RADIUS, arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
-        let ay = rng.float(1.0 + BODY_RADIUS, arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        let var ax = 0.0;
+        let var ay = 0.0;
+        loop {
+            ax = rng.float(1.0 + BODY_RADIUS, arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+            ay = rng.float(1.0 + BODY_RADIUS, arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+            if (!arena.blocked(ax, ay))
+                break;
+        }
         let var bx = 0.0;
         let var by = 0.0;
         loop {
@@ -320,15 +456,20 @@ class Match {
             by = rng.float(1.0 + BODY_RADIUS, arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
             let dx = bx - ax;
             let dy = by - ay;
-            if (dx * dx + dy * dy >= 4.0)
+            if (dx * dx + dy * dy >= 4.0 && !arena.blocked(bx, by))
                 break;
         }
         self.fighters[0].reset(ax, ay, rng.float(-PI, PI));
         self.fighters[1].reset(bx, by, rng.float(-PI, PI));
         self.tick = 0;
+        self.needs_reset = false;
     }
 
     step(self) {
+        if (self.needs_reset) {
+            self.episode = self.episode + 1;
+            self.reset_episode();
+        }
         let rng = self.rng;
         let a = self.fighters[0];
         let b = self.fighters[1];
@@ -346,14 +487,8 @@ class Match {
         let distance = (dx * dx + dy * dy).sqrt();
         if (distance < 2.0 * BODY_RADIUS && distance > 0.000001) {
             let push = (2.0 * BODY_RADIUS - distance) * 0.5 / distance;
-            a.x = (a.x - dx * push).clip(1.0 + BODY_RADIUS,
-                                        self.arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
-            a.y = (a.y - dy * push).clip(1.0 + BODY_RADIUS,
-                                        self.arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
-            b.x = (b.x + dx * push).clip(1.0 + BODY_RADIUS,
-                                        self.arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
-            b.y = (b.y + dy * push).clip(1.0 + BODY_RADIUS,
-                                        self.arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+            a.push(self.arena, -dx * push, -dy * push);
+            b.push(self.arena, dx * push, dy * push);
             let nx = dx / distance;
             let ny = dy / distance;
             let closing_speed = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
@@ -365,8 +500,8 @@ class Match {
             }
         }
 
-        let hit_a = a.strikes(b, aa[3], rng);
-        let hit_b = b.strikes(a, ba[3], rng);
+        let hit_a = a.strikes(self.arena, b, aa[3], rng);
+        let hit_b = b.strikes(self.arena, a, ba[3], rng);
         if (hit_a)
             b.health = b.health - KNIFE_DAMAGE;
         if (hit_b)
@@ -378,18 +513,44 @@ class Match {
                 self.kills[0] = self.kills[0] + 1;
             if (a.health <= 0.0)
                 self.kills[1] = self.kills[1] + 1;
-            self.episode = self.episode + 1;
-            if (self.episode == EPISODES)
+            if (self.episode + 1 == EPISODES)
                 self.done = true;
             else
-                self.reset_episode();
+                self.needs_reset = true;
         }
     }
 }
 
+fun check_room_connected(arena) {
+    let visited = Array.with_size(arena.width * arena.height, false);
+    let start = 2 * arena.width + 2;
+    let queue = [start];
+    visited[start] = true;
+    for (let var head = 0; head < queue.len; ++head) {
+        let cell = queue[head];
+        let x = cell % arena.width;
+        let y = cell.idiv(arena.width);
+        let neighbours = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]];
+        for (let var i = 0; i < neighbours.len; ++i) {
+            let nx = neighbours[i][0];
+            let ny = neighbours[i][1];
+            if (arena.solid(nx, ny))
+                continue;
+            let next = ny * arena.width + nx;
+            if (!visited[next]) {
+                visited[next] = true;
+                queue.push(next);
+            }
+        }
+    }
+    for (let var y = 1; y <= arena.inner_h; ++y)
+        for (let var x = 1; x <= arena.inner_w; ++x)
+            assert(arena.solid(x, y) || visited[y * arena.width + x]);
+}
+
 fun check_movement() {
     let fighter = Fighter(Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0));
-    let arena = Arena(20, 20);
+    let arena = Arena(20, 20, nil);
     let forward = [1.0, 0.0, 0.0, 0.0];
     let idle = [0.0, 0.0, 0.0, 0.0];
 
@@ -427,11 +588,51 @@ fun check_movement() {
     fighter.move(arena, idle);
     assert(fighter.turn_velocity < MAX_TURN);
 
-    fighter.reset(20.7, 10.0, 0.0);
+    fighter.reset(20.0 + 1.0 - BODY_RADIUS - 0.05, 10.0, 0.0);
     fighter.vx = MAX_FORWARD;
     fighter.move(arena, idle);
-    assert(fighter.x <= 20.75 && fighter.vx == 0.0);
-    $println("movement checks passed");
+    assert(fighter.x <= 21.0 - BODY_RADIUS && fighter.vx == 0.0);
+
+    let notched = Arena(5, 5, nil);
+    notched.add_notch(3, 1);
+    assert(notched.solid(3, 1) && !notched.solid(3, 2));
+    assert(notched.blocked(3.5, 2.1) && !notched.blocked(4.5, 2.5));
+    assert((notched.wall_distance(3.5, 3.0, 0.0, -1.0) - 1.0).abs() < 0.0001);
+    fighter.reset(3.5, 2.5, -PI * 0.5);
+    fighter.vy = -MAX_FORWARD;
+    fighter.move(notched, idle);
+    assert(fighter.y >= 2.0 + BODY_RADIUS && fighter.y < 2.5 && fighter.vy == 0.0);
+    assert(!notched.blocked(fighter.x, fighter.y));
+
+    for (let var seed = 0; seed < 20; ++seed) {
+        let duel = Match(fighter.individual, fighter.individual, seed);
+        let replay = Match(fighter.individual, fighter.individual, seed);
+        for (let var tile = 0; tile < duel.arena.width * duel.arena.height; ++tile)
+            assert(duel.arena.tiles.get_u32(tile) == replay.arena.tiles.get_u32(tile));
+        assert(duel.fighters[0].x == replay.fighters[0].x);
+        assert(duel.fighters[0].y == replay.fighters[0].y);
+        let var horizontal = false;
+        let var vertical = false;
+        for (let var x = 2; x < duel.arena.inner_w; ++x)
+            if (duel.arena.solid(x, 1) || duel.arena.solid(x, duel.arena.inner_h))
+                horizontal = true;
+        for (let var y = 2; y < duel.arena.inner_h; ++y)
+            if (duel.arena.solid(1, y) || duel.arena.solid(duel.arena.inner_w, y))
+                vertical = true;
+        assert(!(horizontal && vertical));
+        check_room_connected(duel.arena);
+        for (let var episode = 0; episode < EPISODES; ++episode) {
+            let a = duel.fighters[0];
+            let b = duel.fighters[1];
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            assert(!duel.arena.blocked(a.x, a.y));
+            assert(!duel.arena.blocked(b.x, b.y));
+            assert(dx * dx + dy * dy >= 4.0);
+            duel.reset_episode();
+        }
+    }
+    $println("movement and arena checks passed");
 }
 
 if (has_flag("--check-movement")) {
@@ -665,6 +866,7 @@ fun run_headless(ids) {
 let FRAME_W = 900;
 let FRAME_H = 640;
 let VIEW_W = 620;
+let PIXELS_PER_METRE = 44;
 let COL_BG = 0xFF_17_1C_22;
 let COL_FLOOR = 0xFF_29_32_3A;
 let COL_WALL = 0xFF_61_6B_72;
@@ -672,6 +874,8 @@ let COL_A = 0xFF_52_C9_FF;
 let COL_B = 0xFF_FF_9B_57;
 let COL_TEXT = 0xFF_E1_E8_EB;
 let COL_DIM = 0xFF_9B_A9_B0;
+let COL_SKIN = 0xFF_F3_D1_AC;
+let COL_BLADE = 0xFF_D8_E4_EA;
 
 fun fill_rect(buf, x, y, w, h, color) {
     let x0 = x.max(0);
@@ -687,6 +891,32 @@ fun draw_disc(buf, cx, cy, radius, color) {
     for (let var dy = -radius; dy <= radius; ++dy) {
         let half = (radius * radius - dy * dy).to_f().sqrt().floor();
         fill_rect(buf, cx - half, cy + dy, 2 * half + 1, 1, color);
+    }
+}
+
+fun draw_segment(buf, x0, y0, x1, y1, radius, color) {
+    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    for (let var i = 0; i <= steps; ++i) {
+        let t = i.to_f() / steps.to_f();
+        let x = (x0.to_f() + (x1 - x0).to_f() * t).floor();
+        let y = (y0.to_f() + (y1 - y0).to_f() * t).floor();
+        draw_disc(buf, x, y, radius, color);
+    }
+}
+
+fun draw_body(buf, x, y, angle, half_length, half_width, radius, color) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let bound = radius.floor() + 1;
+    for (let var dy = -bound; dy <= bound; ++dy) {
+        for (let var dx = -bound; dx <= bound; ++dx) {
+            if (dx * dx + dy * dy > radius * radius)
+                continue;
+            let forward = dx.to_f() * c + dy.to_f() * s;
+            let side = -dx.to_f() * s + dy.to_f() * c;
+            if (forward.abs() <= half_length.to_f() && side.abs() <= half_width.to_f())
+                fill_rect(buf, x + dx, y + dy, 1, 1, color);
+        }
     }
 }
 
@@ -719,11 +949,33 @@ fun draw_text(buf, x, y, label, color) {
     }
 }
 
-fun draw_fighter(buf, x, y, angle, hp, color) {
-    draw_disc(buf, x, y, 9, color);
-    let tip_x = x + (angle.cos() * 15.0).floor();
-    let tip_y = y + (angle.sin() * 15.0).floor();
-    draw_disc(buf, tip_x, tip_y, 3, COL_TEXT);
+fun draw_fighter(buf, x, y, angle, hp, attack_ticks, color, scale) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let right_x = -s;
+    let right_y = c;
+    let metres = scale.to_f();
+    let body_radius = metres * BODY_RADIUS;
+    let half_length = (metres * BODY_RADIUS * 0.62).floor().max(1);
+    let half_width = (metres * BODY_RADIUS * 0.78 * 1.20).floor().max(1);
+    draw_body(buf, x, y, angle, half_length, half_width, body_radius, COL_BG);
+    draw_body(buf, x, y, angle, (half_length - 1).max(1),
+              (half_width - 1).max(1), body_radius, color);
+    let head_radius = (metres * BODY_RADIUS * 0.32 * 1.50).floor().max(2);
+    draw_disc(buf, x, y, head_radius + 1, COL_BG);
+    draw_disc(buf, x, y, head_radius, COL_SKIN);
+
+    let thrust = attack_ticks == 2 ? 0.20 : attack_ticks == 1 ? 0.10 : 0.0;
+    let hand_x = x + (c * metres * (0.09 + thrust) + right_x * metres * 0.22).floor();
+    let hand_y = y + (s * metres * (0.09 + thrust) + right_y * metres * 0.22).floor();
+    let blade_x = hand_x + (c * metres * 0.08).floor();
+    let blade_y = hand_y + (s * metres * 0.08).floor();
+    let tip_x = hand_x + (c * metres * 0.36).floor();
+    let tip_y = hand_y + (s * metres * 0.36).floor();
+    draw_segment(buf, hand_x, hand_y, blade_x, blade_y, 2, COL_BG);
+    draw_segment(buf, blade_x, blade_y, tip_x, tip_y, 1, COL_BLADE);
+    draw_disc(buf, hand_x, hand_y, (metres * 0.07).floor().max(2), COL_SKIN);
+
     fill_rect(buf, x - 15, y - 21, 30, 4, COL_BG);
     fill_rect(buf, x - 15, y - 21, (hp.max(0.0) * 0.3).floor(), 4, color);
 }
@@ -736,10 +988,11 @@ fun replay_snapshot(config, duel) {
         first_age: config.first_age, second_age: config.second_age,
         oldest_side: config.oldest_side,
         room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
+        tiles: duel.arena.tiles,
         episode: duel.episode.min(EPISODES - 1), tick: duel.tick,
         kills_a: duel.kills[0], kills_b: duel.kills[1],
-        ax: a.x, ay: a.y, adir: a.angle, ahp: a.health,
-        bx: b.x, by: b.y, bdir: b.angle, bhp: b.health
+        ax: a.x, ay: a.y, adir: a.angle, ahp: a.health, astab: a.attack_ticks,
+        bx: b.x, by: b.y, bdir: b.angle, bhp: b.health, bstab: b.attack_ticks
     };
 }
 
@@ -771,20 +1024,22 @@ fun render(buf, snap, agg, view_speed, paused) {
     if (snap == nil) {
         draw_text(buf, 42, 300, "WAITING FOR OLDEST MATCH", COL_TEXT);
     } else {
-        let scale = 36.min(VIEW_W.idiv(snap.room_w + 2)).min(FRAME_H.idiv(snap.room_h + 2)).max(4);
+        let scale = PIXELS_PER_METRE.min(VIEW_W.idiv(snap.room_w + 2))
+                                     .min(FRAME_H.idiv(snap.room_h + 2)).max(4);
         let ox = (VIEW_W - (snap.room_w + 2) * scale).idiv(2);
         let oy = (FRAME_H - (snap.room_h + 2) * scale).idiv(2);
+        let grid_w = snap.room_w + 2;
         for (let var y = 0; y < snap.room_h + 2; ++y) {
             for (let var x = 0; x < snap.room_w + 2; ++x) {
-                let wall = x == 0 || y == 0 || x == snap.room_w + 1 || y == snap.room_h + 1;
+                let wall = snap.tiles.get_u32(y * grid_w + x) != 0;
                 fill_rect(buf, ox + x * scale, oy + y * scale, scale - 1, scale - 1,
                           wall ? COL_WALL : COL_FLOOR);
             }
         }
         draw_fighter(buf, ox + (snap.ax * scale).floor(), oy + (snap.ay * scale).floor(),
-                     snap.adir, snap.ahp, COL_A);
+                     snap.adir, snap.ahp, snap.astab, COL_A, scale);
         draw_fighter(buf, ox + (snap.bx * scale).floor(), oy + (snap.by * scale).floor(),
-                     snap.bdir, snap.bhp, COL_B);
+                     snap.bdir, snap.bhp, snap.bstab, COL_B, scale);
     }
 
     let px = VIEW_W + 20;
@@ -825,7 +1080,7 @@ if (HEADLESS) {
     $exit(0);
 }
 
-let window = $window_create(FRAME_W, FRAME_H, "Arena GA", 0);
+let window = $window_create(FRAME_W, FRAME_H, "Genetic Algorithm Arena", 0);
 let frame = ByteArray.with_size(FRAME_W * FRAME_H * 4);
 let var next_offer = nil;
 let var view_config = nil;
