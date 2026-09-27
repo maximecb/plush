@@ -978,12 +978,15 @@ let EVAL_EPISODES = 4;
 let MUTATION_PROB = 0.02;
 let MUTATION_SIGMA = 0.18;
 let MUTATION_RESET_PROB = 0.1;
-let MIGRATION_PERIOD = 100;
-let NUM_MIGRANTS = 1;  // Sent to each neighbour, so an island receives two
+let MIGRATION_PERIOD = 20;
+let NUM_MIGRANTS = 2;  // Sent to each neighbour, so an island receives four
 
-// Individuals run in the real simulator per generation, and how quickly the
-// estimate of the model's optimism follows their results
-let REALITY_CHECKS = 2;
+// Individuals run in the real simulator per generation: the best ones, plus
+// one picked at random. The random pick shows how well the model ranks the
+// whole population, not just its favourites, and adds more varied data.
+// OPTIMISM_RATE sets how quickly the estimate of the model's optimism
+// follows the checks
+let REALITY_CHECKS = 4;
 let OPTIMISM_RATE = 0.1;
 
 // Dynamics model: the current and previous observations and the action in;
@@ -996,7 +999,7 @@ let OUT_PROGRESS = OBS_SIZE;
 let OUT_FALL = OBS_SIZE + 1;
 let MODEL_OUTPUTS = OBS_SIZE + 2;
 let DROPOUT = 0.2;
-let ENSEMBLE_SIZE = 4;
+let ENSEMBLE_SIZE = 5;
 
 // A model rollout stops once the chance of still being upright is this low
 let SURVIVAL_CUTOFF = 0.01;
@@ -1052,7 +1055,8 @@ let MSG_DATA = 4;      // One episode's transitions: count, inputs, targets
 let MSG_REPORT = 5;
 
 // Island index, generation, real fitness, model fitness from the same
-// starting pose, controller snapshot, the island's model estimate
+// starting pose, controller snapshot, the island's model estimate, whether
+// the individual was picked at random
 let MSG_REAL = 6;
 
 // Model version, buffer count, transitions collected, train error,
@@ -1905,6 +1909,18 @@ class Island
         return nil;
     }
 
+    // A random individual that has not been run for real, if any
+    random_unchecked(self)
+    {
+        let start = self.rng.index(POP_SIZE);
+        for (let var n = 0; n < POP_SIZE; ++n) {
+            let i = (start + n) % POP_SIZE;
+            if (self.real[i] == nil)
+                return i;
+        }
+        return nil;
+    }
+
     // Runs individual i for real from a random starting pose, recording its
     // transitions, and caps its fitness at the real score. Returns the result
     // and what the model predicted for the same pose
@@ -2040,10 +2056,12 @@ fun island_actor()
 
         island.rank();
 
-        // Run the best unchecked individuals for real. Their transitions
-        // train the model, and their real scores cap their fitness
+        // Run the best unchecked individuals for real, and one picked at
+        // random. Their transitions train the model, and their real scores
+        // cap their fitness
         for (let var c = 0; c < REALITY_CHECKS; ++c) {
-            let i = island.next_unchecked();
+            let random_pick = c == REALITY_CHECKS - 1;
+            let i = random_pick ? island.random_unchecked() : island.next_unchecked();
             if (i == nil)
                 break;
             let model_score = island.model_fitness[i];
@@ -2056,7 +2074,8 @@ fun island_actor()
                 checked[0].fitness,
                 checked[1],
                 island.pop[i].network.snapshot(),
-                model_score
+                model_score,
+                random_pick
             ]);
             island.rank();
         }
@@ -2141,6 +2160,38 @@ fun correlation(xs, ys)
     return sxy / (sxx * syy).sqrt();
 }
 
+// The last CHECK_WINDOW reality checks: real scores, and model scores from
+// the same starting poses
+class CheckWindow
+{
+    init(self)
+    {
+        self.real = [];
+        self.model = [];
+        self.count = 0;
+    }
+
+    add(self, real, model)
+    {
+        if (self.real.len < CHECK_WINDOW) {
+            self.real.push(real);
+            self.model.push(model);
+        } else {
+            let slot = self.count % CHECK_WINDOW;
+            self.real[slot] = real;
+            self.model[slot] = model;
+        }
+        self.count += 1;
+    }
+
+    // The correlation, and how many checks it covers
+    describe(self)
+    {
+        let r = correlation(self.real, self.model);
+        return (r == nil ? "n/a" : r.format_decimals(2)) + " (" + self.real.len.to_s() + ")";
+    }
+}
+
 // Runs in the main actor: tracks the islands' reports and reality checks,
 // and prints progress. The latest reality check of each island provides a
 // controller for the viewer
@@ -2155,10 +2206,9 @@ class Coordinator
         self.best_fitness = Array.with_size(n, nil);
         self.optimism = Array.with_size(n, 0.0);
 
-        // Recent reality checks: real scores, and model scores on the same pose
-        self.check_real = [];
-        self.check_model = [];
-        self.checks = 0;
+        // Recent reality checks, all of them and just the random picks
+        self.all_checks = CheckWindow();
+        self.random_checks = CheckWindow();
         self.period_real = [];
         self.last_print_ms = $time_current_ms();
     }
@@ -2183,16 +2233,9 @@ class Coordinator
             self.latest[i] = msg;
             self.scores[i] = self.scores[i] == nil ? real : self.scores[i] + 0.2 * (real - self.scores[i]);
             self.period_real.push(real);
-
-            let slot = self.checks % CHECK_WINDOW;
-            if (self.check_real.len < CHECK_WINDOW) {
-                self.check_real.push(real);
-                self.check_model.push(msg[4]);
-            } else {
-                self.check_real[slot] = real;
-                self.check_model[slot] = msg[4];
-            }
-            self.checks += 1;
+            self.all_checks.add(real, msg[4]);
+            if (msg[7])
+                self.random_checks.add(real, msg[4]);
             return true;
         }
 
@@ -2255,16 +2298,12 @@ class Coordinator
                 sum += self.period_real[i];
                 top = top.max(self.period_real[i]);
             }
-            let var model_sum = 0.0;
-            for (let var i = 0; i < self.check_model.len; ++i)
-                model_sum += self.check_model[i];
-            let r = correlation(self.check_real, self.check_model);
             $println(
                 "Reality checks: " + self.period_real.len.to_s() + " in the last " + (STATS_PERIOD_MS / 1000).to_s() + " s" +
                 ", real mean " + (sum / self.period_real.len).format_decimals(3) +
                 ", best " + top.format_decimals(3) +
-                " | last " + self.check_real.len.to_s() + ": model mean " + (model_sum / self.check_model.len).format_decimals(3) +
-                ", correlation with real " + (r == nil ? "n/a" : r.format_decimals(2))
+                " | correlation of model with real: all " + self.all_checks.describe() +
+                ", random picks " + self.random_checks.describe()
             );
             self.period_real.resize(0, nil);
         }
