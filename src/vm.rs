@@ -1547,8 +1547,8 @@ impl Actor
     }
 
     /// Report a runtime error, printing the message along with a stack
-    /// trace, then terminate the execution. The instruction name is empty
-    /// for errors that don't come from executing an instruction.
+    /// trace, then terminate the program. The instruction name is empty for
+    /// errors that don't come from executing an instruction.
     ///
     /// Marked cold so that the error paths in the interpreter loop, which
     /// call this at many sites, stay out of the way of the hot code
@@ -1629,8 +1629,17 @@ impl Actor
             }
         }
 
-        // End program execution
-        panic!();
+        // Unit tests rely on main actor panics to check their diagnostics
+        #[cfg(test)]
+        if self.actor_id == 0 {
+            panic!();
+        }
+
+        // An actor failing with an error should end the process,
+        // because otherwise the error report can go unnoticed in the
+        // console output, and other actors can hang waiting for messages
+        // that will never arrive.
+        std::process::exit(-1);
     }
 
     /// Call and execute a function in this actor
