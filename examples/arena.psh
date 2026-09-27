@@ -591,8 +591,8 @@ class Fighter {
             self.y = next_y;
     }
 
-    strikes(self, arena, other, attack_probability, rng) {
-        if (self.cooldown > 0 || rng.float(0.0, 1.0) >= attack_probability)
+    strikes(self, arena, other, attack_signal) {
+        if (self.cooldown > 0 || attack_signal <= 0.5)
             return 0.0;
         let cost = self.gun_ammo > 0 ? SHOT_ENERGY : STAB_ENERGY;
         if (self.energy < cost)
@@ -757,8 +757,8 @@ class Match {
         }
 
         self.pickup_gun();
-        let hit_a = a.strikes(self.arena, b, aa[3], rng);
-        let hit_b = b.strikes(self.arena, a, ba[3], rng);
+        let hit_a = a.strikes(self.arena, b, aa[3]);
+        let hit_b = b.strikes(self.arena, a, ba[3]);
         b.health = b.health - hit_a;
         a.health = a.health - hit_b;
         self.tick = self.tick + 1;
@@ -807,7 +807,6 @@ fun energy_scenario(individual, movement, attack_interval) {
     let arena = Arena(20, 20, nil);
     let fighter = Fighter(individual);
     let enemy = Fighter(individual);
-    let rng = Xoshiro128(123);
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(15.0, 10.0, 0.0);
     let var attacks = 0;
@@ -818,7 +817,7 @@ fun energy_scenario(individual, movement, attack_interval) {
         fighter.move(arena, [movement, 0.0, 0.0, 0.0]);
         distance = distance + fighter.x - 10.0;
         if (attack_interval > 0 && tick % attack_interval == 0 && fighter.cooldown == 0) {
-            fighter.strikes(arena, enemy, 1.0, rng);
+            fighter.strikes(arena, enemy, 1.0);
             if (fighter.cooldown > 0)
                 attacks = attacks + 1;
             else if (first_denied_attack < 0)
@@ -918,23 +917,26 @@ fun check_energy() {
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(11.0, 10.0, 0.0);
     fighter.energy = STAB_ENERGY - 1.0;
-    assert(fighter.strikes(arena, enemy, 1.0, rng) == 0.0);
+    assert(fighter.strikes(arena, enemy, 1.0) == 0.0);
     assert(fighter.cooldown == 0 && fighter.attack_ticks == 0);
     assert(fighter.energy == STAB_ENERGY - 1.0);
     fighter.energy = STAB_ENERGY;
-    assert(fighter.strikes(arena, enemy, 1.0, rng) == KNIFE_DAMAGE);
+    assert(fighter.strikes(arena, enemy, 0.49) == 0.0);
+    assert(fighter.strikes(arena, enemy, 0.5) == 0.0);
+    assert(fighter.energy == STAB_ENERGY && fighter.cooldown == 0);
+    assert(fighter.strikes(arena, enemy, 0.51) == KNIFE_DAMAGE);
     assert(fighter.energy == 0.0 && fighter.cooldown == ATTACK_COOLDOWN);
     fighter.cooldown = 0;
     fighter.energy = STAB_ENERGY;
     enemy.reset(15.0, 10.0, 0.0);
-    assert(fighter.strikes(arena, enemy, 1.0, rng) == 0.0);
+    assert(fighter.strikes(arena, enemy, 1.0) == 0.0);
     assert(fighter.energy == 0.0 && fighter.attack_ticks == ATTACK_ANIM_TICKS);
     fighter.cooldown = 0;
     fighter.gun_ammo = GUN_AMMO;
-    assert(fighter.strikes(arena, enemy, 1.0, rng) == 0.0);
+    assert(fighter.strikes(arena, enemy, 1.0) == 0.0);
     assert(fighter.gun_ammo == GUN_AMMO && fighter.cooldown == 0);
     fighter.energy = SHOT_ENERGY;
-    assert(fighter.strikes(arena, enemy, 1.0, rng) == GUN_DAMAGE);
+    assert(fighter.strikes(arena, enemy, 1.0) == GUN_DAMAGE);
     assert(fighter.energy == 0.0 && fighter.gun_ammo == GUN_AMMO - 1);
 
     // A network driven only by the energy sensor sees this tick's recovery.
@@ -1030,21 +1032,21 @@ fun check_movement() {
     fighter.gun_ammo = GUN_AMMO;
     fighter.sense(arena, enemy, false, 0.0, 0.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(VIEW_INPUTS + 6) == 1.0);
-    assert(fighter.strikes(arena, enemy, 1.0, Xoshiro128(1)) == GUN_DAMAGE);
+    assert(fighter.strikes(arena, enemy, 1.0) == GUN_DAMAGE);
     assert(fighter.gun_ammo == GUN_AMMO - 1 && fighter.shot_ticks == SHOT_TRACE_TICKS);
     assert((fighter.shot_end_x - (enemy.x - BODY_RADIUS)).abs() < 0.0001);
     for (let var shot = 1; shot < GUN_AMMO; ++shot) {
         fighter.cooldown = 0;
-        assert(fighter.strikes(arena, enemy, 1.0, Xoshiro128(1)) == GUN_DAMAGE);
+        assert(fighter.strikes(arena, enemy, 1.0) == GUN_DAMAGE);
     }
     assert(fighter.gun_ammo == 0);
     fighter.cooldown = 0;
     fighter.gun_ammo = 1;
-    assert(fighter.strikes(vision_arena, enemy, 1.0, Xoshiro128(1)) == 0.0);
+    assert(fighter.strikes(vision_arena, enemy, 1.0) == 0.0);
     assert(fighter.gun_ammo == 0 && fighter.shot_end_x <= 12.0);
     fighter.cooldown = 0;
     enemy.reset(11.0, 10.0, 0.0);
-    assert(fighter.strikes(arena, enemy, 1.0, Xoshiro128(1)) == KNIFE_DAMAGE);
+    assert(fighter.strikes(arena, enemy, 1.0) == KNIFE_DAMAGE);
 
     let pickup = Match(fighter.individual, fighter.individual, 7);
     pickup.gun_x = pickup.fighters[0].x;
