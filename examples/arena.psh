@@ -12,7 +12,7 @@
 // Movement and turning outputs command bounded acceleration.
 // Islands always train at full speed. Headless: --headless --matches 1000.
 // --migrate-period N overrides the default of 4,000 for short experiments.
-// --max-room N overrides the initial 5 to 8 metre room range.
+// --max-room N overrides the initial 5 to 9 metre room range.
 // --check-movement runs movement and arena assertions without starting islands.
 
 from random import Xoshiro128;
@@ -47,7 +47,7 @@ let DT = 0.1;
 let EPISODE_TICKS = 300;
 let EPISODES = 10;
 let MIN_ROOM = 5;
-let MAX_ROOM = flag_int("--max-room", 8).max(MIN_ROOM);
+let MAX_ROOM = flag_int("--max-room", 9).max(MIN_ROOM);
 let BODY_RADIUS = 0.325;
 let MAX_FORWARD = 3.0;
 let MAX_STRAFE = 1.6;
@@ -66,9 +66,11 @@ let ATTACK_ANIM_TICKS = 2;
 let NOTCH_CHANCE = 0.4;
 let MIGRATE_PERIOD = flag_int("--migrate-period", 4_000).max(1);
 
-let VIEW_BINS = 30;
+let VIEW_BINS = 17;
 let VIEW_CHANNELS = 4;
 let VIEW_INPUTS = VIEW_BINS * VIEW_CHANNELS;
+let VIEW_MIDDLE = VIEW_BINS.idiv(2);
+let VIEW_HALF_ANGLE = PI / 3.0;
 let BODY_INPUTS = 7;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
 let HIDDEN = 10;
@@ -78,13 +80,24 @@ let NUM_WEIGHTS = HIDDEN * NUM_INPUTS + OUTPUTS * HIDDEN;
 let OUTPUT_BASE = HIDDEN * NUM_INPUTS;
 let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
 
-// Rays cover 120 degrees and are fixed relative to the agent's facing.
+// Rays cover 120 degrees with finer spacing near the centre of view.
+let RAY_ANGLE = [];
 let RAY_X = [];
 let RAY_Y = [];
 for (let var i = 0; i < VIEW_BINS; ++i) {
-    let angle = ((i.to_f() + 0.5) / VIEW_BINS.to_f() - 0.5) * (2.0 * PI / 3.0);
+    let offset = i - VIEW_MIDDLE;
+    let u = offset.abs().to_f() / VIEW_MIDDLE.to_f();
+    let angle = (offset < 0 ? -1.0 : 1.0) * VIEW_HALF_ANGLE * u * u.sqrt();
+    RAY_ANGLE.push(angle);
     RAY_X.push(angle.cos());
     RAY_Y.push(angle.sin());
+}
+let BIN_LEFT = [];
+let BIN_RIGHT = [];
+for (let var i = 0; i < VIEW_BINS; ++i) {
+    BIN_LEFT.push(i == 0 ? -VIEW_HALF_ANGLE : (RAY_ANGLE[i - 1] + RAY_ANGLE[i]) * 0.5);
+    BIN_RIGHT.push(i == VIEW_BINS - 1 ? VIEW_HALF_ANGLE :
+                   (RAY_ANGLE[i] + RAY_ANGLE[i + 1]) * 0.5);
 }
 
 fun new_genome(rng) {
@@ -259,6 +272,33 @@ class Fighter {
         let dist2 = ex * ex + ey * ey;
         let evx = other.vx - self.vx;
         let evy = other.vy - self.vy;
+        let var opponent_visible = false;
+        let var opponent_left = 0.0;
+        let var opponent_right = 0.0;
+        let var opponent_near = 0.0;
+        let var opponent_velocity = 0.0;
+
+        // Project the opponent's angular width onto bins, then check one
+        // line of sight to its centre against the tile grid.
+        let forward = ex * c + ey * s;
+        if (forward > 0.0 && dist2 > BODY_RADIUS * BODY_RADIUS) {
+            let side = -ex * s + ey * c;
+            let bearing = (side / forward).atan();
+            let half_angle = (BODY_RADIUS /
+                              (dist2 - BODY_RADIUS * BODY_RADIUS).sqrt()).atan();
+            opponent_left = bearing - half_angle;
+            opponent_right = bearing + half_angle;
+            if (opponent_right >= -VIEW_HALF_ANGLE && opponent_left <= VIEW_HALF_ANGLE) {
+                let dist = dist2.sqrt();
+                if (arena.wall_distance(self.x, self.y, ex / dist, ey / dist) >=
+                    dist - BODY_RADIUS) {
+                    opponent_visible = true;
+                    opponent_near = (dist - BODY_RADIUS).max(0.0);
+                    opponent_velocity = ((evx * ex + evy * ey) / dist / MAX_FORWARD)
+                                        .clip(-1.0, 1.0);
+                }
+            }
+        }
 
         for (let var i = 0; i < VIEW_BINS; ++i) {
             let dx = c * RAY_X[i] - s * RAY_Y[i];
@@ -266,22 +306,11 @@ class Fighter {
             let wall = arena.wall_distance(self.x, self.y, dx, dy);
             let base = i * VIEW_CHANNELS;
             inputs.set_f32(base, 1.0 / (1.0 + wall));
-            inputs.set_f32(base + 1, 0.0);
-            inputs.set_f32(base + 2, 0.0);
-            inputs.set_f32(base + 3, 0.0);
-
-            // Ray against the opponent's body. The wall test also handles
-            // occlusion when interior cover is added to wall_distance.
-            let along = ex * dx + ey * dy;
-            let side2 = dist2 - along * along;
-            if (along > 0.0 && side2 <= BODY_RADIUS * BODY_RADIUS) {
-                let near = (along - (BODY_RADIUS * BODY_RADIUS - side2).max(0.0).sqrt()).max(0.0);
-                if (near < wall) {
-                    inputs.set_f32(base + 1, 1.0);
-                    inputs.set_f32(base + 2, 1.0 / (1.0 + near));
-                    inputs.set_f32(base + 3, ((evx * dx + evy * dy) / MAX_FORWARD).clip(-1.0, 1.0));
-                }
-            }
+            let in_bin = opponent_visible && opponent_left <= BIN_RIGHT[i] &&
+                         opponent_right >= BIN_LEFT[i];
+            inputs.set_f32(base + 1, in_bin ? 1.0 : 0.0);
+            inputs.set_f32(base + 2, in_bin ? 1.0 / (1.0 + opponent_near) : 0.0);
+            inputs.set_f32(base + 3, in_bin ? opponent_velocity : 0.0);
         }
 
         inputs.set_f32(VIEW_INPUTS, self.health / HEALTH);
@@ -427,8 +456,9 @@ class Match {
         self.seed = seed;
         self.rng = Xoshiro128(seed);
         let rng = self.rng;
-        let size = rng.index(MAX_ROOM - MIN_ROOM + 1) + MIN_ROOM;
-        self.arena = Arena(size, size, rng);
+        let width = rng.index(MAX_ROOM - MIN_ROOM + 1) + MIN_ROOM;
+        let height = rng.index(MAX_ROOM - MIN_ROOM + 1) + MIN_ROOM;
+        self.arena = Arena(width, height, rng);
         self.fighters = [Fighter(first), Fighter(second)];
         self.kills = [0, 0];
         self.episode = 0;
@@ -551,8 +581,26 @@ fun check_room_connected(arena) {
 fun check_movement() {
     let fighter = Fighter(Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0));
     let arena = Arena(20, 20, nil);
+    let vision_arena = Arena(20, 20, nil);
+    let enemy = Fighter(fighter.individual);
     let forward = [1.0, 0.0, 0.0, 0.0];
     let idle = [0.0, 0.0, 0.0, 0.0];
+
+    assert(RAY_ANGLE[VIEW_MIDDLE] == 0.0);
+    assert((RAY_ANGLE[0] + VIEW_HALF_ANGLE).abs() < 0.0001);
+    assert((RAY_ANGLE[VIEW_BINS - 1] - VIEW_HALF_ANGLE).abs() < 0.0001);
+    fighter.reset(10.0, 10.0, 0.0);
+    enemy.reset(13.0, 10.0, 0.0);
+    fighter.sense(vision_arena, enemy, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 1.0);
+    let peripheral = 55.0 * PI / 180.0;
+    enemy.reset(10.0 + 5.0 * peripheral.cos(), 10.0 + 5.0 * peripheral.sin(), 0.0);
+    fighter.sense(vision_arena, enemy, Xoshiro128(1));
+    assert(fighter.inputs.get_f32((VIEW_BINS - 1) * VIEW_CHANNELS + 1) == 1.0);
+    enemy.reset(13.0, 10.0, 0.0);
+    vision_arena.add_notch(12, 10);
+    fighter.sense(vision_arena, enemy, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 0.0);
 
     fighter.reset(10.0, 10.0, 0.0);
     fighter.move(arena, forward);
@@ -604,9 +652,14 @@ fun check_movement() {
     assert(fighter.y >= 2.0 + BODY_RADIUS && fighter.y < 2.5 && fighter.vy == 0.0);
     assert(!notched.blocked(fighter.x, fighter.y));
 
+    let var saw_rectangle = false;
     for (let var seed = 0; seed < 20; ++seed) {
         let duel = Match(fighter.individual, fighter.individual, seed);
         let replay = Match(fighter.individual, fighter.individual, seed);
+        assert(duel.arena.inner_w >= MIN_ROOM && duel.arena.inner_w <= MAX_ROOM);
+        assert(duel.arena.inner_h >= MIN_ROOM && duel.arena.inner_h <= MAX_ROOM);
+        if (duel.arena.inner_w != duel.arena.inner_h)
+            saw_rectangle = true;
         for (let var tile = 0; tile < duel.arena.width * duel.arena.height; ++tile)
             assert(duel.arena.tiles.get_u32(tile) == replay.arena.tiles.get_u32(tile));
         assert(duel.fighters[0].x == replay.fighters[0].x);
@@ -621,6 +674,14 @@ fun check_movement() {
                 vertical = true;
         assert(!(horizontal && vertical));
         check_room_connected(duel.arena);
+        for (let var tick = 0; tick < 3; ++tick) {
+            duel.step();
+            replay.step();
+            assert(duel.fighters[0].x == replay.fighters[0].x);
+            assert(duel.fighters[0].y == replay.fighters[0].y);
+            assert(duel.fighters[1].x == replay.fighters[1].x);
+            assert(duel.fighters[1].y == replay.fighters[1].y);
+        }
         for (let var episode = 0; episode < EPISODES; ++episode) {
             let a = duel.fighters[0];
             let b = duel.fighters[1];
@@ -632,6 +693,8 @@ fun check_movement() {
             duel.reset_episode();
         }
     }
+    if (MAX_ROOM > MIN_ROOM)
+        assert(saw_rectangle);
     $println("movement and arena checks passed");
 }
 
