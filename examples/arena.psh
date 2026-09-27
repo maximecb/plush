@@ -2190,6 +2190,17 @@ fun draw_pistol(buf, grip_x, grip_y, angle, metres) {
                  muzzle_y + (right_y * slide_thickness).floor(), 0, COL_GUN_SHADOW);
 }
 
+fun draw_floor_pistol(buf, center_x, center_y, scale) {
+    let metres = scale.to_f() * 1.25;
+    let rear = -(metres * 0.11).floor();
+    let muzzle = (metres * 0.238).floor();
+    let slide_mid = (rear + muzzle).idiv(2);
+    let handle_bottom = (metres * 0.12).floor() + (metres * 0.12).floor().max(1);
+    let slide_top = -((3.0 * 0.8).floor() + 1);
+    let vertical_mid = (slide_top + handle_bottom).idiv(2);
+    draw_pistol(buf, center_x - slide_mid, center_y - vertical_mid, 0.0, metres);
+}
+
 fun draw_body(buf, x, y, angle, half_length, half_width, radius, color) {
     let c = angle.cos();
     let s = angle.sin();
@@ -2345,7 +2356,7 @@ fun render(buf, snap, agg, view_speed, paused) {
         if (snap.gun_available) {
             let gun_px = ox + (snap.gun_x * scale).floor();
             let gun_py = oy + (snap.gun_y * scale).floor();
-            draw_pistol(buf, gun_px, gun_py, 0.0, scale.to_f() * 1.25);
+            draw_floor_pistol(buf, gun_px, gun_py, scale);
         }
         if (snap.ashot > 0)
             draw_segment(buf, ox + (snap.asx * scale).floor(), oy + (snap.asy * scale).floor(),
@@ -2417,8 +2428,30 @@ if (has_flag("--check-render")) {
     let test_oy = (FRAME_H - test_duel.arena.height * test_scale).idiv(2);
     let test_x = test_ox + (test_duel.gun_x * test_scale).floor();
     let test_y = test_oy + (test_duel.gun_y * test_scale).floor();
+    let icon_scales = [8, 16, 24, 44];
+    for (let var scale_idx = 0; scale_idx < icon_scales.len; ++scale_idx) {
+        let scale = icon_scales[scale_idx];
+        test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+        draw_floor_pistol(test_frame, test_x, test_y, scale);
+        let var left = test_x + 40;
+        let var right = test_x - 40;
+        let var top = test_y + 40;
+        let var bottom = test_y - 40;
+        for (let var dy = -40; dy <= 40; ++dy) {
+            for (let var dx = -40; dx <= 40; ++dx) {
+                if (test_frame.get_u32((test_y + dy) * FRAME_W + test_x + dx) == COL_BG)
+                    continue;
+                left = left.min(test_x + dx);
+                right = right.max(test_x + dx);
+                top = top.min(test_y + dy);
+                bottom = bottom.max(test_y + dy);
+            }
+        }
+        assert(left <= right && top <= bottom);
+        assert((left + right - 2 * test_x).abs() <= 2);
+        assert((top + bottom - 2 * test_y).abs() <= 2);
+    }
     render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
-    assert(test_frame.get_u32(test_y * FRAME_W + test_x + 4) == COL_GUN);
     let test_shooter = test_duel.fighters[0];
     test_duel.gun_available = false;
     test_shooter.gun_ammo = GUN_AMMO;
