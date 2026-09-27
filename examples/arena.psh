@@ -3,13 +3,14 @@
 // Each island repeatedly samples two genomes from its population. They fight
 // ten episodes in one randomly sized room. The winner stays unchanged and a
 // mutated child replaces the loser. Age counts matches lived through.
-// Every 10,000 matches an island copies one random genome to a ring neighbour,
+// Every 4,000 matches an island copies one random genome to a ring neighbour,
 // where it replaces the youngest resident at the next match boundary.
 //
 // Run with: plush examples/arena.psh
-// F cycles viewer playback through 1x, 2x, 3x, and 4x. SPACE pauses it.
+// F cycles viewer playback through 1x, 2x, 4x, 8x, and 10x.
+// SPACE pauses the viewer; N skips to the next offered match.
 // Islands always train at full speed. Headless: --headless --matches 1000.
-// --migrate-period N overrides the default of 10,000 for short experiments.
+// --migrate-period N overrides the default of 4,000 for short experiments.
 // --max-room N overrides the initial 5 to 8 metre room range.
 
 from random import Xoshiro128;
@@ -54,7 +55,7 @@ let KNIFE_RANGE = 1.0;
 let KNIFE_DAMAGE = 34.0;
 let KNIFE_DOT = 0.70710678;
 let ATTACK_COOLDOWN = 5;
-let MIGRATE_PERIOD = flag_int("--migrate-period", 10_000).max(1);
+let MIGRATE_PERIOD = flag_int("--migrate-period", 4_000).max(1);
 
 let VIEW_BINS = 30;
 let VIEW_CHANNELS = 4;
@@ -392,9 +393,7 @@ class Island {
             now < self.last_offer_ms + 3000)
             return nil;
         let var oldest = 0;
-        let var age_sum = self.population[0].age;
         for (let var i = 1; i < POP_SIZE; ++i) {
-            age_sum = age_sum + self.population[i].age;
             if (self.population[i].age > self.population[oldest].age)
                 oldest = i;
         }
@@ -406,16 +405,11 @@ class Island {
             seed: self.duel.seed, room_w: self.duel.arena.inner_w,
             room_h: self.duel.arena.inner_h,
             oldest_age: self.population[oldest].age,
-            mean_age: age_sum.idiv(POP_SIZE),
             oldest_side: oldest == self.first_idx ? 0 : 1,
             first_weights: self.population[self.first_idx].weights,
             second_weights: self.population[self.second_idx].weights,
             first_age: self.population[self.first_idx].age,
-            second_age: self.population[self.second_idx].age,
-            matches: self.matches, kills: self.kills,
-            zero_matches: self.zero_matches,
-            migrants_sent: self.migrants_sent,
-            migrants_received: self.migrants_received
+            second_age: self.population[self.second_idx].age
         };
     }
 
@@ -478,19 +472,12 @@ class Island {
             oldest = oldest.max(self.population[i].age);
             age_sum = age_sum + self.population[i].age;
         }
-        let duel = self.duel;
-        let a = duel.fighters[0];
-        let b = duel.fighters[1];
         return {
-            index: self.index, matches: self.matches, episodes: self.episodes,
+            kind: "STATS", index: self.index,
+            matches: self.matches, episodes: self.episodes,
             kills: self.kills, zero_matches: self.zero_matches,
             migrants_sent: self.migrants_sent, migrants_received: self.migrants_received,
-            oldest: oldest, mean_age: age_sum.idiv(POP_SIZE),
-            room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
-            episode: duel.episode, tick: duel.tick,
-            kills_a: duel.kills[0], kills_b: duel.kills[1],
-            ax: a.x, ay: a.y, adir: a.angle, ahp: a.health,
-            bx: b.x, by: b.y, bdir: b.angle, bhp: b.health
+            oldest: oldest, mean_age: age_sum.idiv(POP_SIZE)
         };
     }
 }
@@ -626,7 +613,8 @@ let FONT = {
     "M": [5,7,7,5,5], "N": [6,5,5,5,5], "O": [7,5,5,5,7], "P": [7,5,7,4,4],
     "R": [7,5,6,5,5], "S": [7,4,7,1,7], "T": [7,2,2,2,2], "U": [5,5,5,5,7],
     "V": [5,5,5,5,2], "W": [5,5,7,7,5], "X": [5,5,2,5,5], "Y": [5,5,2,2,2], "Z": [7,1,2,4,7],
-    " ": [0,0,0,0,0], ":": [0,2,0,2,0], "/": [1,1,2,4,4], "-": [0,0,7,0,0]
+    " ": [0,0,0,0,0], ",": [0,0,0,6,2], ":": [0,2,0,2,0],
+    "/": [1,1,2,4,4], "-": [0,0,7,0,0]
 };
 
 fun draw_text(buf, x, y, label, color) {
@@ -657,11 +645,8 @@ fun replay_snapshot(config, duel) {
     let a = duel.fighters[0];
     let b = duel.fighters[1];
     return {
-        index: config.index, matches: config.match_no,
-        kills: config.kills, zero_matches: config.zero_matches,
-        migrants_sent: config.migrants_sent,
-        migrants_received: config.migrants_received,
-        oldest: config.oldest_age, mean_age: config.mean_age,
+        index: config.index, match_no: config.match_no,
+        first_age: config.first_age, second_age: config.second_age,
         oldest_side: config.oldest_side,
         room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
         episode: duel.episode.min(EPISODES - 1), tick: duel.tick,
@@ -671,50 +656,80 @@ fun replay_snapshot(config, duel) {
     };
 }
 
-fun render(buf, snap, view_speed, paused) {
+fun aggregate_stats(snaps, matches_per_sec) {
+    let var matches = 0;
+    let var kills = 0;
+    let var zero_matches = 0;
+    let var migrations = 0;
+    let var oldest = 0;
+    for (let var i = 0; i < snaps.len; ++i) {
+        let s = snaps[i];
+        if (s == nil)
+            continue;
+        matches = matches + s.matches;
+        kills = kills + s.kills;
+        zero_matches = zero_matches + s.zero_matches;
+        migrations = migrations + s.migrants_sent;
+        oldest = oldest.max(s.oldest);
+    }
+    return {
+        matches: matches, matches_per_sec: matches_per_sec,
+        kills: kills, zero_matches: zero_matches,
+        migrations: migrations, oldest: oldest
+    };
+}
+
+fun render(buf, snap, agg, view_speed, paused) {
     buf.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
     if (snap == nil) {
         draw_text(buf, 42, 300, "WAITING FOR OLDEST MATCH", COL_TEXT);
-        return;
-    }
-    let scale = 36.min(VIEW_W.idiv(snap.room_w + 2)).min(FRAME_H.idiv(snap.room_h + 2)).max(4);
-    let ox = (VIEW_W - (snap.room_w + 2) * scale).idiv(2);
-    let oy = (FRAME_H - (snap.room_h + 2) * scale).idiv(2);
-    for (let var y = 0; y < snap.room_h + 2; ++y) {
-        for (let var x = 0; x < snap.room_w + 2; ++x) {
-            let wall = x == 0 || y == 0 || x == snap.room_w + 1 || y == snap.room_h + 1;
-            fill_rect(buf, ox + x * scale, oy + y * scale, scale - 1, scale - 1,
-                      wall ? COL_WALL : COL_FLOOR);
+    } else {
+        let scale = 36.min(VIEW_W.idiv(snap.room_w + 2)).min(FRAME_H.idiv(snap.room_h + 2)).max(4);
+        let ox = (VIEW_W - (snap.room_w + 2) * scale).idiv(2);
+        let oy = (FRAME_H - (snap.room_h + 2) * scale).idiv(2);
+        for (let var y = 0; y < snap.room_h + 2; ++y) {
+            for (let var x = 0; x < snap.room_w + 2; ++x) {
+                let wall = x == 0 || y == 0 || x == snap.room_w + 1 || y == snap.room_h + 1;
+                fill_rect(buf, ox + x * scale, oy + y * scale, scale - 1, scale - 1,
+                          wall ? COL_WALL : COL_FLOOR);
+            }
         }
+        draw_fighter(buf, ox + (snap.ax * scale).floor(), oy + (snap.ay * scale).floor(),
+                     snap.adir, snap.ahp, COL_A);
+        draw_fighter(buf, ox + (snap.bx * scale).floor(), oy + (snap.by * scale).floor(),
+                     snap.bdir, snap.bhp, COL_B);
     }
-    draw_fighter(buf, ox + (snap.ax * scale).floor(), oy + (snap.ay * scale).floor(),
-                 snap.adir, snap.ahp, COL_A);
-    draw_fighter(buf, ox + (snap.bx * scale).floor(), oy + (snap.by * scale).floor(),
-                 snap.bdir, snap.bhp, COL_B);
 
     let px = VIEW_W + 20;
-    draw_text(buf, px, 30, "ARENA GA", COL_TEXT);
-    draw_text(buf, px, 65, "ISLAND " + snap.index.to_s(), COL_DIM);
-    draw_text(buf, px, 90, "MATCH " + snap.matches.to_s(), COL_TEXT);
-    draw_text(buf, px, 115, "EPISODE " + (snap.episode + 1).to_s() + "/10", COL_TEXT);
-    draw_text(buf, px, 140, "TIME " + (snap.tick.idiv(10)).to_s() + "/30", COL_TEXT);
-    draw_text(buf, px, 175, "BLUE KILLS " + snap.kills_a.to_s(), COL_A);
-    draw_text(buf, px, 200, "ORANGE KILLS " + snap.kills_b.to_s(), COL_B);
-    draw_text(buf, px, 245, "ROOM " + snap.room_w.to_s() + " X " + snap.room_h.to_s(), COL_TEXT);
-    draw_text(buf, px, 280, "TOTAL KILLS " + snap.kills.to_s(), COL_TEXT);
-    draw_text(buf, px, 305, "ZERO MATCHES " + snap.zero_matches.to_s(), COL_TEXT);
-    draw_text(buf, px, 340, "OLDEST " + snap.oldest.to_s(), COL_TEXT);
-    draw_text(buf, px, 365, "MEAN AGE " + snap.mean_age.to_s(), COL_TEXT);
-    draw_text(buf, px, 400, "MIGRANTS IN " + snap.migrants_received.to_s(), COL_TEXT);
-    draw_text(buf, px, 425, "MIGRANTS OUT " + snap.migrants_sent.to_s(), COL_TEXT);
-    draw_text(buf, px, 460,
-              snap.oldest_side == 0 ? "WATCH BLUE AGE " + snap.oldest.to_s() :
-                                      "WATCH ORANGE AGE " + snap.oldest.to_s(), COL_TEXT);
-    draw_text(buf, px, 500, "REPLAY " + view_speed.to_s() + "X", COL_TEXT);
+    draw_text(buf, px, 20, "ALL " + NUM_ISLANDS.comma_sep() + " ISLANDS", COL_DIM);
+    draw_text(buf, px, 50, "MATCHES " + agg.matches.comma_sep(), COL_TEXT);
+    draw_text(buf, px, 74, "MATCHES/S " + agg.matches_per_sec.comma_sep(), COL_TEXT);
+    draw_text(buf, px, 98, "KILLS " + agg.kills.comma_sep(), COL_TEXT);
+    draw_text(buf, px, 122, "ZERO MATCHES " + agg.zero_matches.comma_sep(), COL_TEXT);
+    draw_text(buf, px, 146, "MIGRATIONS " + agg.migrations.comma_sep(), COL_TEXT);
+    draw_text(buf, px, 170, "OLDEST AGE " + agg.oldest.comma_sep(), COL_TEXT);
+    fill_rect(buf, px, 197, 238, 1, COL_DIM);
+
+    draw_text(buf, px, 215, "VIEWED MATCH", COL_DIM);
+    if (snap != nil) {
+        draw_text(buf, px, 245, "ISLAND " + snap.index.comma_sep(), COL_TEXT);
+        draw_text(buf, px, 268, "MATCH " + snap.match_no.comma_sep(), COL_TEXT);
+        draw_text(buf, px, 291, "EPISODE " + (snap.episode + 1).comma_sep() + "/10", COL_TEXT);
+        draw_text(buf, px, 314, "TIME " + snap.tick.idiv(10).comma_sep() + "/30", COL_TEXT);
+        draw_text(buf, px, 343, "BLUE AGE " + snap.first_age.comma_sep(), COL_A);
+        draw_text(buf, px, 366, "BLUE KILLS " + snap.kills_a.comma_sep(), COL_A);
+        draw_text(buf, px, 394, "ORANGE AGE " + snap.second_age.comma_sep(), COL_B);
+        draw_text(buf, px, 417, "ORANGE KILLS " + snap.kills_b.comma_sep(), COL_B);
+        draw_text(buf, px, 445, "ROOM " + snap.room_w.comma_sep() + " X " + snap.room_h.comma_sep(), COL_TEXT);
+    } else {
+        draw_text(buf, px, 245, "WAITING FOR MATCH", COL_TEXT);
+    }
+    draw_text(buf, px, 485, "REPLAY " + view_speed.to_s() + "X", COL_TEXT);
     if (paused)
-        draw_text(buf, px, 525, "VIEW PAUSED", COL_TEXT);
-    draw_text(buf, px, 575, "F VIEW SPEED", COL_DIM);
-    draw_text(buf, px, 595, "SPACE PAUSE VIEW", COL_DIM);
+        draw_text(buf, px, 508, "VIEW PAUSED", COL_TEXT);
+    draw_text(buf, px, 550, "F VIEW SPEED", COL_DIM);
+    draw_text(buf, px, 574, "SPACE PAUSE VIEW", COL_DIM);
+    draw_text(buf, px, 598, "N NEXT MATCH", COL_DIM);
 }
 
 let island_ids = spawn_islands();
@@ -731,8 +746,16 @@ let var view_duel = nil;
 let var last_draw = 0;
 let var last_play_ms = $time_current_ms();
 let var play_credit = 0.0;
-let var view_speed = 1;
+let VIEW_SPEEDS = [1, 2, 4, 8, 10];
+let var view_speed_idx = 0;
 let var paused = false;
+let island_stats = Array.with_size(NUM_ISLANDS, nil);
+let var stats_pending = false;
+let var stats_received = 0;
+let var last_stats_request = 0;
+let var last_rate_ms = 0;
+let var last_total_matches = 0;
+let var matches_per_sec = 0;
 
 loop {
     loop {
@@ -744,18 +767,48 @@ loop {
                 (next_offer == nil || msg.oldest_age > next_offer.oldest_age ||
                  (msg.oldest_age == next_offer.oldest_age && msg.match_no > next_offer.match_no)))
                 next_offer = msg;
+            else if (msg.kind == "STATS") {
+                island_stats[msg.index] = msg;
+                if (stats_pending) {
+                    stats_received = stats_received + 1;
+                    if (stats_received == NUM_ISLANDS) {
+                        stats_pending = false;
+                        let sample_time = $time_current_ms();
+                        let totals = aggregate_stats(island_stats, 0);
+                        if (last_rate_ms > 0 && sample_time > last_rate_ms)
+                            matches_per_sec = ((totals.matches - last_total_matches).to_f() *
+                                               1000.0 / (sample_time - last_rate_ms).to_f()).floor().max(0);
+                        last_total_matches = totals.matches;
+                        last_rate_ms = sample_time;
+                    }
+                }
+            }
         }
         else if (msg.kind == "CLOSE_WINDOW")
             $exit(0);
         else if (msg.kind == "KEY_DOWN") {
             if (msg.key == "F")
-                view_speed = view_speed % 4 + 1;
+                view_speed_idx = (view_speed_idx + 1) % VIEW_SPEEDS.len;
             else if (msg.key == "SPACE")
                 paused = !paused;
+            else if (msg.key == "N") {
+                view_duel = nil;
+                view_config = nil;
+                play_credit = 0.0;
+                paused = false;
+            }
         }
     }
 
     let now = $time_current_ms();
+    if (!stats_pending && now >= last_stats_request + 1000) {
+        for (let var i = 0; i < island_ids.len; ++i)
+            $actor_send(island_ids[i], [MSG_SNAPSHOT]);
+        stats_pending = true;
+        stats_received = 0;
+        last_stats_request = now;
+    }
+
     if ((view_duel == nil || view_duel.done) && next_offer != nil) {
         view_config = next_offer;
         next_offer = nil;
@@ -771,6 +824,7 @@ loop {
         last_play_ms = now;
     }
 
+    let view_speed = VIEW_SPEEDS[view_speed_idx];
     if (view_duel != nil && !view_duel.done && !paused) {
         play_credit = play_credit + (now - last_play_ms).to_f() * view_speed.to_f() / 100.0;
         let steps = play_credit.floor();
@@ -785,7 +839,8 @@ loop {
 
     if (now >= last_draw + 33) {
         let snap = view_duel == nil ? nil : replay_snapshot(view_config, view_duel);
-        render(frame, snap, view_speed, paused);
+        let agg = aggregate_stats(island_stats, matches_per_sec);
+        render(frame, snap, agg, view_speed, paused);
         $window_draw_frame(window, frame);
         last_draw = now;
     }
