@@ -997,7 +997,8 @@ fun evaluate_controller(controller, episode_seed, max_seconds, recorder) {
 // generation. At every step the ensemble's predicted observation changes are
 // averaged, but the least predicted progress and the highest predicted
 // chance of falling are used, so a controller only scores well where every
-// member agrees. The top half of the population reproduces by mutation.
+// member agrees. The best few carry over unchanged, and the rest of the
+// population is replaced by mutated children of the top ones.
 //
 // Each generation, islands also run their best individuals in the real
 // simulator. Those runs train the model exactly where the islands are
@@ -1006,7 +1007,8 @@ fun evaluate_controller(controller, episode_seed, max_seconds, recorder) {
 
 let NUM_ISLANDS = 14;
 let POP_SIZE = 64;
-let NUM_PARENTS = 32;
+let NUM_ELITES = 8;
+let NUM_PARENTS = 28;
 let EVAL_EPISODES = 4;
 let MUTATION_PROB = 0.02;
 let MUTATION_SIGMA = 0.18;
@@ -2003,21 +2005,24 @@ class Island
         self.mean_fitness = total / POP_SIZE;
     }
 
-    // A snapshot of a random individual from the top half, to send to a
-    // neighbouring island
+    // A snapshot of a random parent, to send to a neighbouring island
     emigrant(self)
     {
         return self.pop[self.order[self.rng.index(NUM_PARENTS)]].network.snapshot();
     }
 
-    // Replaces the population with mutated children of the top half, two
-    // each. Must be called after rank()
+    // Keeps the elites unchanged and fills the rest of the population with
+    // mutated children of the parents. Must be called after rank()
     reproduce(self)
     {
         for (let var i = 0; i < POP_SIZE; ++i) {
             let child = self.next_pop[i].network;
-            child.copy_from(self.pop[self.order[i % NUM_PARENTS]].network);
-            mutate_network(child, self.rng, MUTATION_SIGMA);
+            if (i < NUM_ELITES) {
+                child.copy_from(self.pop[self.order[i]].network);
+            } else {
+                child.copy_from(self.pop[self.order[(i - NUM_ELITES) % NUM_PARENTS]].network);
+                mutate_network(child, self.rng, MUTATION_SIGMA);
+            }
             self.real[i] = nil;
         }
 
