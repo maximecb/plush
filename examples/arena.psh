@@ -116,6 +116,14 @@ let NUM_WEIGHTS = HIDDEN * NUM_INPUTS + (OUTPUTS + RECURRENT) * HIDDEN;
 let OUTPUT_BASE = HIDDEN * NUM_INPUTS;
 let RECURRENT_BASE = OUTPUT_BASE + OUTPUTS * HIDDEN;
 let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
+let INITIAL_MUTATION_RATE = 0.05;
+let INITIAL_MUTATION_STRENGTH = 0.10;
+let MIN_MUTATION_RATE = 0.005;
+let MAX_MUTATION_RATE = 0.10;
+let MIN_MUTATION_STRENGTH = 0.01;
+let MAX_MUTATION_STRENGTH = 0.30;
+let STRATEGY_MUTATION_CHANCE = 0.10;
+let STRATEGY_MUTATION_STEP = 0.05;
 
 // View rays cover 120 degrees with finer spacing near the centre of view.
 let RAY_ANGLE = [];
@@ -212,7 +220,9 @@ fun encode_individual(individual) {
         output.push(row);
     }
     return {age: individual.age, name: individual.name, colors: individual.colors,
-            hidden: hidden, output: output};
+            hidden: hidden, output: output,
+            mutation_rates: individual.mutation_rates,
+            mutation_strengths: individual.mutation_strengths};
 }
 
 fun decode_individual(rng, saved, old_inputs, old_outputs) {
@@ -228,7 +238,21 @@ fun decode_individual(rng, saved, old_inputs, old_outputs) {
     let weights = restore_genome(rng, saved, old_inputs, old_outputs);
     if (weights == nil)
         return nil;
-    return Individual(weights, saved.age, saved.name, saved.colors);
+    let rates = [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE];
+    let strengths = [INITIAL_MUTATION_STRENGTH, INITIAL_MUTATION_STRENGTH];
+    if (saved.has("mutation_rates") && saved.has("mutation_strengths") &&
+        saved.mutation_rates instanceof Array && saved.mutation_strengths instanceof Array &&
+        saved.mutation_rates.len == 2 && saved.mutation_strengths.len == 2) {
+        for (let var layer = 0; layer < 2; ++layer) {
+            if (!valid_weight(saved.mutation_rates[layer]) ||
+                !valid_weight(saved.mutation_strengths[layer]))
+                return nil;
+            rates[layer] = saved.mutation_rates[layer].clip(MIN_MUTATION_RATE, MAX_MUTATION_RATE);
+            strengths[layer] = saved.mutation_strengths[layer].clip(
+                MIN_MUTATION_STRENGTH, MAX_MUTATION_STRENGTH);
+        }
+    }
+    return Individual(weights, saved.age, saved.name, saved.colors, rates, strengths);
 }
 
 fun read_checkpoint() {
@@ -267,18 +291,33 @@ fun new_genome(rng) {
     return weights;
 }
 
-fun mutate(rng, parent) {
+fun mutate(rng, parent, rates, strengths) {
     let weights = ByteArray.with_size(NUM_WEIGHTS * 4);
     weights.memcpy(0, parent, 0, NUM_WEIGHTS * 4);
-    let count = (NUM_WEIGHTS.to_f() * 0.02).floor().max(1);
-    for (let var i = 0; i < count; ++i) {
-        let idx = rng.index(NUM_WEIGHTS);
-        if (rng.float(0.0, 1.0) < 0.05)
-            weights.set_f32(idx, rng.float(-W_SCALE, W_SCALE));
-        else
-            weights.set_f32(idx, rng.normal(weights.get_f32(idx), 0.08));
+    let starts = [0, OUTPUT_BASE];
+    let lengths = [OUTPUT_BASE, NUM_WEIGHTS - OUTPUT_BASE];
+    for (let var layer = 0; layer < 2; ++layer) {
+        let expected = lengths[layer].to_f() * rates[layer];
+        let var count = expected.floor();
+        if (rng.float(0.0, 1.0) < expected - count.to_f())
+            count = count + 1;
+        count = count.max(1);
+        for (let var i = 0; i < count; ++i) {
+            let idx = starts[layer] + rng.index(lengths[layer]);
+            if (rng.float(0.0, 1.0) < 0.05)
+                weights.set_f32(idx, rng.float(-W_SCALE, W_SCALE));
+            else
+                weights.set_f32(idx, rng.normal(weights.get_f32(idx), strengths[layer]));
+        }
     }
     return weights;
+}
+
+fun mutate_strategy(rng, value, min_value, max_value) {
+    if (rng.float(0.0, 1.0) >= STRATEGY_MUTATION_CHANCE)
+        return value;
+    return (value * rng.normal(0.0, STRATEGY_MUTATION_STEP).clip(-0.15, 0.15).exp())
+           .clip(min_value, max_value);
 }
 
 fun random_name(rng) {
@@ -296,20 +335,33 @@ fun random_name(rng) {
 // Cosmetic genes never enter the neural network's perception or weights.
 fun birth(rng, parent) {
     let colors = [];
+    let rates = [];
+    let strengths = [];
     for (let var i = 0; i < 3; ++i) {
         colors.push(parent == nil ? 80 + rng.index(176) :
                     (parent.colors[i] + rng.index(33) - 16).max(80).min(255));
     }
-    return Individual(parent == nil ? new_genome(rng) : mutate(rng, parent.weights),
-                      0, random_name(rng), colors);
+    for (let var layer = 0; layer < 2; ++layer) {
+        rates.push(parent == nil ? INITIAL_MUTATION_RATE :
+                   mutate_strategy(rng, parent.mutation_rates[layer],
+                                   MIN_MUTATION_RATE, MAX_MUTATION_RATE));
+        strengths.push(parent == nil ? INITIAL_MUTATION_STRENGTH :
+                       mutate_strategy(rng, parent.mutation_strengths[layer],
+                                       MIN_MUTATION_STRENGTH, MAX_MUTATION_STRENGTH));
+    }
+    return Individual(parent == nil ? new_genome(rng) :
+                      mutate(rng, parent.weights, rates, strengths),
+                      0, random_name(rng), colors, rates, strengths);
 }
 
 class Individual {
-    init(self, weights, age, name, colors) {
+    init(self, weights, age, name, colors, mutation_rates, mutation_strengths) {
         self.weights = weights;
         self.age = age;
         self.name = name;
         self.colors = colors;
+        self.mutation_rates = mutation_rates;
+        self.mutation_strengths = mutation_strengths;
     }
 
     color(self) {
@@ -1078,7 +1130,9 @@ fun check_maps() {
     assert(pillar.try_cover(2, 2, 1, 1));
     check_room_connected(pillar);
 
-    let individual = Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "MAP", [80, 201, 255]);
+    let individual = Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "MAP", [80, 201, 255],
+                                [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE],
+                                [INITIAL_MUTATION_STRENGTH, INITIAL_MUTATION_STRENGTH]);
     let duel = Match(individual, individual, 123);
     let var saw_open = false;
     let var saw_pillar = false;
@@ -1185,7 +1239,9 @@ fun energy_scenario(individual, movement, attack_interval) {
 }
 
 fun check_energy() {
-    let individual = Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "ENERGY", [80, 201, 255]);
+    let individual = Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "ENERGY", [80, 201, 255],
+                                [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE],
+                                [INITIAL_MUTATION_STRENGTH, INITIAL_MUTATION_STRENGTH]);
     let fighter = Fighter(individual);
     let enemy = Fighter(individual);
     let arena = Arena(20, 20, nil);
@@ -1331,7 +1387,9 @@ if (has_flag("--check-energy")) {
 }
 
 fun check_movement() {
-    let fighter = Fighter(Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "TEST", [80, 201, 255]));
+    let fighter = Fighter(Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "TEST", [80, 201, 255],
+                                     [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE],
+                                     [INITIAL_MUTATION_STRENGTH, INITIAL_MUTATION_STRENGTH]));
     let arena = Arena(20, 20, nil);
     let vision_arena = Arena(20, 20, nil);
     let enemy = Fighter(fighter.individual);
@@ -1348,7 +1406,9 @@ fun check_movement() {
     memory_weights.set_f32(OUTPUT_BASE, 1.0);
     memory_weights.set_f32(OUTPUT_BASE + HIDDEN + 1, 1.0);
     memory_weights.set_f32(RECURRENT_BASE, 1.0);
-    let remembering = Fighter(Individual(memory_weights, 0, "MEMORY", [255, 155, 87]));
+    let remembering = Fighter(Individual(memory_weights, 0, "MEMORY", [255, 155, 87],
+                                        [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE],
+                                        [INITIAL_MUTATION_STRENGTH, INITIAL_MUTATION_STRENGTH]));
     let var actions = remembering.think();
     assert(actions[0] == 0.5 && actions[1] == 0.0);
     assert(remembering.inputs.get_f32(NUM_SENSORS) == 0.5);
@@ -1614,7 +1674,11 @@ class Island {
             first_name: self.population[self.first_idx].name,
             second_name: self.population[self.second_idx].name,
             first_colors: self.population[self.first_idx].colors,
-            second_colors: self.population[self.second_idx].colors
+            second_colors: self.population[self.second_idx].colors,
+            first_rates: self.population[self.first_idx].mutation_rates,
+            second_rates: self.population[self.second_idx].mutation_rates,
+            first_strengths: self.population[self.first_idx].mutation_strengths,
+            second_strengths: self.population[self.second_idx].mutation_strengths
         };
     }
 
@@ -1634,7 +1698,8 @@ class Island {
                     youngest = idx;
             }
             let migrant = self.pending_migrants[m];
-            self.population[youngest] = Individual(migrant[0], migrant[1], migrant[2], migrant[3]);
+            self.population[youngest] = Individual(migrant[0], migrant[1], migrant[2], migrant[3],
+                                                   migrant[4], migrant[5]);
             replaced[youngest] = true;
             self.migrants_received = self.migrants_received + 1;
         }
@@ -1707,7 +1772,8 @@ class Island {
             selected[best] = true;
             let agent = self.population[best];
             individuals.push({age: agent.age, name: agent.name, colors: agent.colors,
-                              weights: agent.weights});
+                              weights: agent.weights, mutation_rates: agent.mutation_rates,
+                              mutation_strengths: agent.mutation_strengths});
         }
         return {kind: "CHECKPOINT", index: self.index, matches: self.matches,
                 individuals: individuals};
@@ -1716,6 +1782,34 @@ class Island {
 
 if (has_flag("--check-evolution")) {
     let island = Island(0, 123, nil);
+    let strategy_parent = island.population[0];
+    assert(strategy_parent.mutation_rates[0] == 0.05 &&
+           strategy_parent.mutation_rates[1] == 0.05);
+    assert(strategy_parent.mutation_strengths[0] == 0.10 &&
+           strategy_parent.mutation_strengths[1] == 0.10);
+    let strategy_rng = Xoshiro128(456);
+    let var rate_changes = 0;
+    let var strength_changes = 0;
+    for (let var child_no = 0; child_no < 300; ++child_no) {
+        let child = birth(strategy_rng, strategy_parent);
+        for (let var layer = 0; layer < 2; ++layer) {
+            let rate = child.mutation_rates[layer];
+            let strength = child.mutation_strengths[layer];
+            assert(rate >= MIN_MUTATION_RATE && rate <= MAX_MUTATION_RATE);
+            assert(strength >= MIN_MUTATION_STRENGTH && strength <= MAX_MUTATION_STRENGTH);
+            assert(rate / strategy_parent.mutation_rates[layer] <= 0.15.exp() + 0.000001);
+            assert(rate / strategy_parent.mutation_rates[layer] >= (-0.15).exp() - 0.000001);
+            assert(strength / strategy_parent.mutation_strengths[layer] <= 0.15.exp() + 0.000001);
+            assert(strength / strategy_parent.mutation_strengths[layer] >= (-0.15).exp() - 0.000001);
+            if (rate != strategy_parent.mutation_rates[layer])
+                rate_changes = rate_changes + 1;
+            if (strength != strategy_parent.mutation_strengths[layer])
+                strength_changes = strength_changes + 1;
+        }
+    }
+    assert(rate_changes > 0 && strength_changes > 0);
+    assert(strategy_parent.mutation_rates[0] == INITIAL_MUTATION_RATE &&
+           strategy_parent.mutation_strengths[0] == INITIAL_MUTATION_STRENGTH);
     island.first_idx = 0;
     island.second_idx = 1;
     let var first = island.population[0];
@@ -1743,6 +1837,24 @@ if (has_flag("--check-evolution")) {
             saw_younger = true;
     }
     assert(saw_oldest && saw_younger);
+    first.name = "MIGRANT";
+    first.mutation_rates = [0.074, 0.093];
+    first.mutation_strengths = [0.12, 0.18];
+    island.receive([first.weights, first.age, first.name, first.colors,
+                    first.mutation_rates, first.mutation_strengths]);
+    island.apply_migrants();
+    let var found = false;
+    for (let var i = 0; i < POP_SIZE; ++i) {
+        let candidate = island.population[i];
+        if (candidate != first && candidate.name == "MIGRANT") {
+            found = true;
+            assert(candidate.mutation_rates[0] == 0.074 &&
+                   candidate.mutation_rates[1] == 0.093);
+            assert(candidate.mutation_strengths[0] == 0.12 &&
+                   candidate.mutation_strengths[1] == 0.18);
+        }
+    }
+    assert(found);
     $println("evolution checks passed");
     $exit(0);
 }
@@ -1757,6 +1869,8 @@ if (has_flag("--check-checkpoint")) {
     island.population[3].age = 99;
     island.population[4].age = 98;
     island.population[5].age = 97;
+    island.population[1].mutation_rates = [0.071, 0.089];
+    island.population[1].mutation_strengths = [0.11, 0.19];
     let elites = island.elite_snapshot();
     assert(elites.individuals.len == 4);
     assert(elites.individuals[0].age == 100 && elites.individuals[1].age == 99 &&
@@ -1768,6 +1882,9 @@ if (has_flag("--check-checkpoint")) {
     assert(restored.age == encoded.age && restored.name == encoded.name);
     for (let var c = 0; c < 3; ++c)
         assert(restored.colors[c] == encoded.colors[c]);
+    assert(restored.mutation_rates[0] == 0.071 && restored.mutation_rates[1] == 0.089);
+    assert(restored.mutation_strengths[0] == 0.11 &&
+           restored.mutation_strengths[1] == 0.19);
     for (let var i = 0; i < NUM_WEIGHTS; ++i)
         assert(restored.weights.get_f32(i) == elites.individuals[0].weights.get_f32(i));
 
@@ -1815,6 +1932,13 @@ if (has_flag("--check-checkpoint")) {
             assert(remapped.weights.get_f32(idx) == expected);
         }
     }
+    let legacy = {age: decoded.age, name: decoded.name, colors: decoded.colors,
+                  hidden: decoded.hidden, output: decoded.output};
+    let legacy_agent = decode_individual(Xoshiro128(7), legacy, INPUT_NAMES, OUTPUT_NAMES);
+    assert(legacy_agent.mutation_rates[0] == INITIAL_MUTATION_RATE &&
+           legacy_agent.mutation_rates[1] == INITIAL_MUTATION_RATE);
+    assert(legacy_agent.mutation_strengths[0] == INITIAL_MUTATION_STRENGTH &&
+           legacy_agent.mutation_strengths[1] == INITIAL_MUTATION_STRENGTH);
     $println("checkpoint checks passed");
     $exit(0);
 }
@@ -1856,7 +1980,8 @@ fun island_actor() {
                     let neighbour = (island.index + ids.len + side) % ids.len;
                     let donor = island.migration_donor();
                     $actor_send(ids[neighbour], [MSG_MIGRANT,
-                                [donor.weights, donor.age, donor.name, donor.colors]]);
+                                [donor.weights, donor.age, donor.name, donor.colors,
+                                 donor.mutation_rates, donor.mutation_strengths]]);
                     island.migrants_sent = island.migrants_sent + 1;
                     $println("Migration: island " + island.index.to_s() + " -> " +
                              neighbour.to_s() + " at match " + island.matches.to_s() +
@@ -2277,7 +2402,9 @@ fun render(buf, snap, agg, view_speed, paused) {
 
 if (has_flag("--check-render")) {
     let test_weights = ByteArray.with_size(NUM_WEIGHTS * 4);
-    let test_agent = Individual(test_weights, 0, "TEST", [80, 201, 255]);
+    let test_agent = Individual(test_weights, 0, "TEST", [80, 201, 255],
+                                [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE],
+                                [INITIAL_MUTATION_STRENGTH, INITIAL_MUTATION_STRENGTH]);
     let test_duel = Match(test_agent, test_agent, 7);
     let test_config = {index: 0, match_no: 0, first_age: 0, second_age: 0,
                        oldest_side: 0};
@@ -2437,9 +2564,11 @@ loop {
         next_offer = nil;
         view_duel = Match(
             Individual(view_config.first_weights, view_config.first_age,
-                       view_config.first_name, view_config.first_colors),
+                       view_config.first_name, view_config.first_colors,
+                       view_config.first_rates, view_config.first_strengths),
             Individual(view_config.second_weights, view_config.second_age,
-                       view_config.second_name, view_config.second_colors),
+                       view_config.second_name, view_config.second_colors,
+                       view_config.second_rates, view_config.second_strengths),
             view_config.seed
         );
         $println("Viewing island " + view_config.index.to_s() + " match " +
