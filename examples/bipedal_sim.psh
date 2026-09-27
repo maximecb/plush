@@ -39,7 +39,7 @@ let STEP = 1.0 / 240.0;
 let EPISODE_SECONDS = 10.0;
 // Fitness bonus per second before falling. It outweighs diving forward, so
 // that controllers learn to balance before they learn to walk
-let UPRIGHT_WEIGHT = 1.5;
+let UPRIGHT_WEIGHT = 2.0;
 // Coefficient of friction between the soles and the ground, as for rubber
 // on a track surface
 let FRICTION = 1.0;
@@ -50,7 +50,7 @@ let FALL_TILT_COS = (55.0 * DEG).cos();
 // Scales the width of every starting pose range around its midpoint
 let POSE_RANDOMNESS = 0.5;
 let CONTROL_SUBSTEPS = 4;
-let ITERATIONS = 12;
+let ITERATIONS = 10;
 let WIDTH = 800;
 let HEIGHT = 600;
 let BRIGHTNESS = 1.25;
@@ -59,13 +59,14 @@ let SKY_STEPS = 256;
 // either end. At 5 m/s the marked section provides twelve seconds of travel.
 let TRACK_WIDTH = 3.0;
 let TRACK_LENGTH = 60.0;
-// Active joint axes in Simulator.joints order. The knee/elbow only bend on X;
+// Active joint axes in Simulator.joints order. The knee only bends on X;
 // the ankle and shoulder use X and Z. Each pair is [joint index, local Euler
-// axis]. The neck and elbows are locked, as are the waist's twist and side
-// bend, and the hips' and shoulders' twist, so each has zero range.
+// axis]. The neck is locked, as are the waist's twist and side bend, and the
+// hips' and shoulders' twist, so each has zero range. Arms are rigid, with
+// no elbow joint.
 let CONTROL_AXES = [[0,0],
                     [2,0],[2,2], [3,0], [4,0],[4,2], [5,0],[5,2],
-                    [7,0],[7,2], [8,0], [9,0],[9,2], [10,0],[10,2]];
+                    [6,0],[6,2], [7,0], [8,0],[8,2], [9,0],[9,2]];
 let CONTROL_JOINT_AXES = CONTROL_AXES.len;
 let CONTROL_FOOT_POINTS = 8;
 let CONTROL_OUTPUTS = CONTROL_JOINT_AXES;
@@ -73,8 +74,8 @@ let CONTROL_DT = CONTROL_SUBSTEPS * STEP;
 let EPISODE_CONTROL_STEPS = (EPISODE_SECONDS / CONTROL_DT + 0.5).floor();
 let FOOT_SENSOR_CORNERS = [0,1,4,5];
 
-// Encoded observation layout, shared by the controller and the dynamics
-// model. Values are scaled into [-1, 1], contacts and height into [0, 1].
+// Encoded observation layout for the controller. Values are scaled into
+// [-1, 1], contacts and height into [0, 1].
 // The up direction is estimated from the head's sensors by filter_up(). The
 // compass gives the track's forward direction, and the height the head's
 // height above the ground, as a rangefinder or eyes would
@@ -191,6 +192,8 @@ class Body {
                                    (i & 2) == 0 ? -size.y*0.5 : size.y*0.5,
                                    (i & 4) == 0 ? -size.z*0.5 : size.z*0.5));
         }
+        // Optional boxes drawn instead of the body's own, as [offset, size, color]
+        self.parts = nil;
         self.support = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         // Tangential positional impulse from static friction this step
         self.traction = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
@@ -343,10 +346,6 @@ class Network
         // Initialization range of each layer, also used by mutation resets
         self.bounds = [];
 
-        // Optional dropout: one mask per hidden layer, whose values scale
-        // each unit's output, zero for dropped units
-        self.masks = nil;
-
         for (let var l = 0; l < self.num_layers; ++l) {
             let rows = sizes[l + 1];
             let cols = sizes[l];
@@ -373,14 +372,11 @@ class Network
             let b = self.biases[l];
             let out = self.acts[l];
             let relu = l + 1 < self.num_layers;
-            let mask = relu && self.masks != nil ? self.masks[l] : nil;
 
             for (let var r = 0; r < rows; ++r) {
                 let var v = w.dot_f32(r * cols, 1, x, 0, 1, cols) + b.get_f32(r);
                 if (relu && v < 0.0)
                     v = 0.0;
-                if (mask != nil)
-                    v *= mask.get_f32(r);
                 out.set_f32(r, v);
             }
 
@@ -598,11 +594,13 @@ class Simulator {
             self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,0.0,-30.0), Vec3(18.0,0.0,30.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
             self.joint(name+"knee", thigh, shin, Vec3(s*0.105,0.55,0.0), zero(), Vec3(120.0,0.0,0.0), Vec3(160.0,0.0,0.0), Vec3(10.0,1.0,1.0));
             self.joint(name+"ankle", shin, foot, Vec3(s*0.105,0.12,0.0), Vec3(-15.0,0.0,-20.0), Vec3(44.0,0.0,20.0), Vec3(120.0,0.0,35.0), Vec3(6.0,1.0,3.0));
-            let upper = self.body(name+"upper arm", 2.0, Vec3(0.085,0.29,0.10), Vec3(s*0.245,1.345,0.0), 0xB52E34);
-            let lower = self.body(name+"forearm", 1.5, Vec3(0.075,0.30,0.085), Vec3(s*0.245,1.05,0.0), 0xE04A42);
+            // The upper arm and forearm are welded into one rigid body, but
+            // are still drawn as two boxes
+            let arm = self.body(name+"arm", 3.5, Vec3(0.085,0.59,0.10), Vec3(s*0.245,1.195,0.0), 0xB52E34);
+            arm.parts = [[Vec3(0.0,0.15,0.0), Vec3(0.085,0.29,0.10), 0xB52E34],
+                         [Vec3(0.0,-0.145,0.0), Vec3(0.075,0.30,0.085), 0xE04A42]];
             // Arms can raise outwards, which is -Z on the right and +Z on the left
-            self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-70.0,0.0,(s*30.0).min(0.0)), Vec3(60.0,0.0,(s*30.0).max(0.0)),Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
-            self.joint(name+"elbow", upper, lower, Vec3(s*0.245,1.20,0.0), zero(), zero(), Vec3(55.0,0.0,0.0), Vec3(8.0,1.0,1.0));
+            self.joint(name+"shoulder", torso, arm, Vec3(s*0.245,1.49,0.0), Vec3(-70.0,0.0,(s*30.0).min(0.0)), Vec3(60.0,0.0,(s*30.0).max(0.0)),Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
         }
         // Sample a shared stride and leg spread, then add small independent
         // offsets. Either foot can lead; outward hip rotation widens the stance.
@@ -886,10 +884,9 @@ class EpisodeResult {
 }
 
 // The evaluator, trainer and viewer use the same observation, torque and
-// stop logic. With a recorder, every control step is also recorded as a
-// transition for training
+// stop logic
 class PolicyEpisode {
-    init(self, controller, episode_seed, max_seconds, recorder) {
+    init(self, controller, episode_seed, max_seconds) {
         assert(max_seconds > 0.0 && max_seconds <= EPISODE_SECONDS);
         self.sim = Simulator(episode_seed);
         self.controller = controller;
@@ -905,50 +902,19 @@ class PolicyEpisode {
         self.done = false;
         self.steps = 0;
         self.max_steps = (max_seconds/STEP).floor();
-
-        // When recording, the observations from the last two control steps,
-        // and the action and pelvis position from the last one
-        self.recorder = recorder;
-        if (recorder != nil) {
-            recorder.clear();
-            self.last_obs = ByteArray.with_size(OBS_SIZE * 4);
-            self.before_last_obs = ByteArray.with_size(OBS_SIZE * 4);
-            self.last_action = ByteArray.with_size(CONTROL_OUTPUTS * 4);
-            self.last_pelvis = self.sim.pelvis.p;
-        }
     }
-    // Encodes the current observation, and when recording, completes the
-    // transition from the previous control step
     observe(self) {
         self.previous_head_velocity = observe_biped(
             self.sim, self.observation, self.previous_head_velocity, CONTROL_DT);
         encode_observation(self.observation, self.obs);
         self.up = filter_up(self.up, self.obs, 0);
-
-        if (self.recorder != nil && self.steps > 0) {
-            let progress = self.sim.pelvis.p.sub(self.last_pelvis).dot(TRACK_FORWARD);
-            self.recorder.add(
-                self.last_obs, self.before_last_obs, self.last_action,
-                self.obs, progress, self.fell ? 1.0 : 0.0
-            );
-        }
     }
     step(self) {
         if (self.done) return;
         if (self.steps % CONTROL_SUBSTEPS == 0) {
             self.observe();
-            let action = self.controller.act(self.obs);
+            self.controller.act(self.obs);
             self.sim.set_policy_torques(self.controller.torques());
-
-            // The first step has no earlier observation, so it stands in
-            // for its own previous one
-            if (self.recorder != nil) {
-                let older = self.steps > 0 ? self.last_obs : self.obs;
-                self.before_last_obs.memcpy(0, older, 0, OBS_SIZE * 4);
-                self.last_obs.memcpy(0, self.obs, 0, OBS_SIZE * 4);
-                self.last_action.memcpy(0, action, 0, CONTROL_OUTPUTS * 4);
-                self.last_pelvis = self.sim.pelvis.p;
-            }
         }
         self.sim.step();
         self.steps += 1;
@@ -957,10 +923,6 @@ class PolicyEpisode {
         let torso = self.sim.torso;
         self.fell = torso.p.y < self.fall_height || torso.q.rotate(UP).y < FALL_TILT_COS;
         self.done = self.fell || self.steps >= self.max_steps;
-
-        // The last control step may be cut short by a fall
-        if (self.done && self.recorder != nil)
-            self.observe();
     }
     result(self) {
         // Fitness is displacement projected on the forward vector, so sideways
@@ -972,38 +934,21 @@ class PolicyEpisode {
     }
 }
 
-// Runs one episode to completion and returns its result. With a recorder,
-// its transitions are recorded as well
-fun evaluate_controller(controller, episode_seed, max_seconds, recorder) {
-    let episode = PolicyEpisode(controller,episode_seed,max_seconds,recorder);
+// Runs one episode to completion and returns its result
+fun evaluate_controller(controller, episode_seed, max_seconds) {
+    let episode = PolicyEpisode(controller,episode_seed,max_seconds);
     while (!episode.done) episode.step();
     return episode.result();
 }
 
-// --- Model-based evolution ---
+// --- Evolution ---
 //
-// Controllers are evolved inside a learned dynamics model, which is much
-// faster than the simulator. The model sees only what the robot perceives:
-// it maps the current and previous observations and an action to the next
-// observation, the forward progress made during the step and the chance of
-// falling during it. Progress and falls come from the simulator as training
-// labels, but are never model inputs.
-//
-// A trainer actor learns the model from a big replay buffer of real
-// transitions, with dropout, and sends it to the island actors often. Each
-// island evolves a population of controllers. Every individual is scored on
-// the same EVAL_EPISODES starting poses, redrawn each generation, with an
-// ensemble of the model under ENSEMBLE_SIZE dropout masks, also redrawn each
-// generation. At every step the ensemble's predicted observation changes are
-// averaged, but the least predicted progress and the highest predicted
-// chance of falling are used, so a controller only scores well where every
-// member agrees. The best few carry over unchanged, and the rest of the
-// population is replaced by mutated children of the top ones.
-//
-// Each generation, islands also run their best individuals in the real
-// simulator. Those runs train the model exactly where the islands are
-// looking, show how far the model's scores can be trusted, and cap the
-// fitness of individuals that only do well in the model
+// Each island actor evolves a population of controllers in the simulator.
+// Every individual is scored on the same EVAL_EPISODES starting poses,
+// redrawn each generation, and its fitness is the mean over those rollouts.
+// The best few carry over unchanged, and the rest of the population is
+// replaced by mutated children of the top ones. Islands form a ring, and
+// periodically send a few parents to their neighbours.
 
 let NUM_ISLANDS = 14;
 let POP_SIZE = 64;
@@ -1016,87 +961,17 @@ let MUTATION_RESET_PROB = 0.1;
 let MIGRATION_PERIOD = 20;
 let NUM_MIGRANTS = 2;  // Sent to each neighbour, so an island receives four
 
-// Individuals run in the real simulator per generation: the best ones, plus
-// one picked at random. The random pick shows how well the model ranks the
-// whole population, not just its favourites, and adds more varied data.
-// OPTIMISM_RATE sets how quickly the estimate of the model's optimism
-// follows the checks
-let REALITY_CHECKS = 4;
-let OPTIMISM_RATE = 0.1;
-
-// Dynamics model: the current and previous observations and the action in;
-// observation change, forward progress and fall probability out
-let IN_PREV_OBS = OBS_SIZE;
-let IN_ACTION = 2 * OBS_SIZE;
-let MODEL_INPUTS = IN_ACTION + CONTROL_OUTPUTS;
-let MODEL_HIDDEN = 256;
-let OUT_PROGRESS = OBS_SIZE;
-let OUT_FALL = OBS_SIZE + 1;
-let MODEL_OUTPUTS = OBS_SIZE + 2;
-let DROPOUT = 0.2;
-let ENSEMBLE_SIZE = 5;
-
-// A model rollout stops once the chance of still being upright is this low
-let SURVIVAL_CUTOFF = 0.01;
-
-// Rollouts keep every predicted value inside the range the simulator has
-// produced, widened by this fraction of that range on each side
-let BOUND_MARGIN = 0.05;
-
-// The trainer's buffer holds as many transitions as fit in this budget
-let BUFFER_BYTES = 3 << 29;  // 1.5 GiB
-let BUFFER_SIZE = BUFFER_BYTES.idiv((MODEL_INPUTS + MODEL_OUTPUTS) * 4);
-
-// The buffer is saved this often, and when training stops, and loaded when
-// training starts. The header records the layout, which must match
-let SAVE_PERIOD_MS = 300_000;
-let BUFFER_INPUTS_PATH = "bipedal_model_inputs.bin";
-let BUFFER_TARGETS_PATH = "bipedal_model_targets.bin";
-let BUFFER_HEADER_PATH = "bipedal_model_buffer.hdr";
-let BUFFER_MAGIC = 0x424D4231;
-
-let MIN_TRANSITIONS = 10_000;    // Collected before training starts
-let RECENT_TRANSITIONS = 50_000; // Newest rows, sampled for half of each batch
-let FIRST_MODEL_BATCHES = 2_000; // Trained before the first model goes out
-let BATCH_SIZE = 64;
-let TRAIN_CHUNK = 16;            // Batches between mailbox polls
-let MASK_POOL = 64;              // Dropout masks drawn per chunk, to pick from
-let LEARNING_RATE = 0.001;
-let MODEL_PERIOD_MS = 10_000;    // How often islands get an updated model
-let STATS_PERIOD_MS = 10_000;
-
-// Extra loss weight on fall and progress outputs, which fitness depends on
-// directly, and on actual falls within the fall loss, so they are not missed
-let FALL_LOSS_WEIGHT = 10.0;
-let PROGRESS_LOSS_WEIGHT = 10.0;
-let FALL_POSITIVE_WEIGHT = 3.0;
-
-// How often the viewer switches to the best controller run for real
+// How often the viewer switches to the best controller
 let VIEWER_PERIOD_MS = 10_000;
 
-// Reality checks kept to measure how well model scores predict real ones
-let CHECK_WINDOW = 200;
-
-// Setup for an island: index, seed, island ids, trainer. For the trainer:
-// seed, island ids
+// Setup for an island: index, seed, island ids
 let MSG_SETUP = 0;
 let MSG_MIGRANT = 1;   // A controller snapshot arriving from a neighbour
 let MSG_STOP = 2;
-let MSG_MODEL = 3;     // Version, network snapshot, output mean, output std, bounds
-let MSG_DATA = 4;      // One episode's transitions: count, inputs, targets
 
-// Island index, generation, best fitness, mean fitness, ms taken, model
-// version, optimism estimate
-let MSG_REPORT = 5;
-
-// Island index, generation, real fitness, model fitness from the same
-// starting pose, controller snapshot, the island's model estimate, whether
-// the individual was picked at random
-let MSG_REAL = 6;
-
-// Model version, buffer count, transitions collected, train error,
-// validation error, validation fall error, samples/s
-let MSG_TRAINER = 7;
+// Island index, generation, best fitness, mean fitness, ms taken, snapshot
+// of the best controller
+let MSG_REPORT = 3;
 
 // Standard normal sample using Box-Muller
 fun gauss(rng)
@@ -1104,18 +979,6 @@ fun gauss(rng)
     let u1 = rng.float(1.0e-9, 1.0);
     let u2 = rng.float(0.0, 1.0);
     return (-2.0 * u1.ln()).sqrt() * (6.28318530717959 * u2).cos();
-}
-
-fun sigmoid(x)
-{
-    return 1.0 / (1.0 + (-x).exp());
-}
-
-fun copy_bytes(src)
-{
-    let copy = ByteArray.with_size(src.len);
-    copy.memcpy(0, src, 0, src.len);
-    return copy;
 }
 
 // Fills order with the indices of values, sorted from highest to lowest
@@ -1166,710 +1029,11 @@ fun mutate_network(network, rng, sigma)
     }
 }
 
-// Dropout masks for the model's hidden layers. Kept units are scaled up so
-// that the expected output of each layer does not change
-fun dropout_masks(rng)
-{
-    let keep = 1.0 / (1.0 - DROPOUT);
-    let masks = [];
-    for (let var l = 0; l < 2; ++l) {
-        let mask = ByteArray.with_size(MODEL_HIDDEN * 4);
-        for (let var i = 0; i < MODEL_HIDDEN; ++i)
-            mask.set_f32(i, rng.float(0.0, 1.0) < DROPOUT ? 0.0 : keep);
-        masks.push(mask);
-    }
-    return masks;
-}
-
-// The encoded first observation of the episode with this seed, identical to
-// what PolicyEpisode sees at its first control step
-fun start_observation(seed, out)
-{
-    let sim = Simulator(seed);
-    let observation = BipedObservation();
-    observe_biped(sim, observation, sim.head.v, CONTROL_DT);
-    encode_observation(observation, out);
-    filter_up(nil, out, 0);
-}
-
-// Minibatch gradient descent with momentum, where each neuron's step is
-// scaled by a running RMS of its gradient, as in Adam. Plush has no
-// elementwise square root over arrays, so the second moment is tracked per
-// row rather than per weight, which keeps every update inside dot_f32 and
-// axpy_f32. Scaling an array in place is an axpy of the array onto itself
-class Optimizer
-{
-    init(self, net)
-    {
-        self.net = net;
-        self.grad_w = [];
-        self.grad_b = [];
-        self.mom_w = [];
-        self.mom_b = [];
-        self.rms_w = [];
-        self.rms_b = [];
-        self.deltas = [];
-
-        for (let var l = 0; l < net.num_layers; ++l) {
-            let rows = net.sizes[l + 1];
-            let cols = net.sizes[l];
-            self.grad_w.push(ByteArray.with_size(rows * cols * 4));
-            self.grad_b.push(ByteArray.with_size(rows * 4));
-            self.mom_w.push(ByteArray.with_size(rows * cols * 4));
-            self.mom_b.push(ByteArray.with_size(rows * 4));
-            self.rms_w.push(Array.with_size(rows, 0.0));
-            self.rms_b.push(0.0);
-            self.deltas.push(ByteArray.with_size(rows * 4));
-        }
-
-        self.samples = 0;
-        self.steps = 0;
-    }
-
-    // Accumulates the gradient of half the squared error, for the input the
-    // network was just run on. dout is the output minus the target
-    backward(self, input, dout)
-    {
-        let net = self.net;
-        let last = net.num_layers - 1;
-        self.deltas[last].memcpy(0, dout, 0, dout.len);
-
-        for (let var l = last; l >= 0; --l) {
-            let rows = net.sizes[l + 1];
-            let cols = net.sizes[l];
-            let x = l == 0 ? input : net.acts[l - 1];
-            let d = self.deltas[l];
-            let gw = self.grad_w[l];
-
-            for (let var r = 0; r < rows; ++r) {
-                let g = d.get_f32(r);
-                if (g != 0.0)
-                    gw.axpy_f32(r * cols, 1, x, 0, 1, cols, g);
-            }
-            self.grad_b[l].axpy_f32(0, 1, d, 0, 1, rows, 1.0);
-
-            if (l > 0) {
-                // Back through the weights, then through the ReLU
-                let w = net.weights[l];
-                let prev = self.deltas[l - 1];
-                prev.zero_fill();
-                for (let var r = 0; r < rows; ++r) {
-                    let g = d.get_f32(r);
-                    if (g != 0.0)
-                        prev.axpy_f32(0, 1, w, r * cols, 1, cols, g);
-                }
-                // Dropped units have zero output, so the same test covers
-                // them, and kept units scale their gradient like their output
-                let act = net.acts[l - 1];
-                let mask = net.masks != nil ? net.masks[l - 1] : nil;
-                for (let var c = 0; c < cols; ++c) {
-                    if (act.get_f32(c) <= 0.0)
-                        prev.set_f32(c, 0.0);
-                    else if (mask != nil)
-                        prev.set_f32(c, prev.get_f32(c) * mask.get_f32(c));
-                }
-            }
-        }
-
-        self.samples += 1;
-    }
-
-    // Applies the gradient averaged over the accumulated samples
-    step(self, lr)
-    {
-        let beta1 = 0.9;
-        let beta2 = 0.999;
-        self.steps += 1;
-        let scale = 1.0 / self.samples;
-        let t = self.steps.to_f();
-        let step_size = lr * (1.0 - beta2.pow(t)).sqrt() / (1.0 - beta1.pow(t));
-
-        let net = self.net;
-        for (let var l = 0; l < net.num_layers; ++l) {
-            let rows = net.sizes[l + 1];
-            let cols = net.sizes[l];
-            let w = net.weights[l];
-            let gw = self.grad_w[l];
-            let mw = self.mom_w[l];
-            let rms = self.rms_w[l];
-
-            for (let var r = 0; r < rows; ++r) {
-                let base = r * cols;
-                let mean_sq = gw.dot_f32(base, 1, gw, base, 1, cols) * scale * scale / cols;
-                rms[r] = beta2 * rms[r] + (1.0 - beta2) * mean_sq;
-                mw.axpy_f32(base, 1, mw, base, 1, cols, -(1.0 - beta1));
-                mw.axpy_f32(base, 1, gw, base, 1, cols, (1.0 - beta1) * scale);
-                w.axpy_f32(base, 1, mw, base, 1, cols, -step_size / (rms[r].sqrt() + 1.0e-8));
-            }
-
-            // Each layer's biases share one second moment
-            let b = net.biases[l];
-            let gb = self.grad_b[l];
-            let mb = self.mom_b[l];
-            let mean_sq = gb.dot_f32(0, 1, gb, 0, 1, rows) * scale * scale / rows;
-            self.rms_b[l] = beta2 * self.rms_b[l] + (1.0 - beta2) * mean_sq;
-            mb.axpy_f32(0, 1, mb, 0, 1, rows, -(1.0 - beta1));
-            mb.axpy_f32(0, 1, gb, 0, 1, rows, (1.0 - beta1) * scale);
-            b.axpy_f32(0, 1, mb, 0, 1, rows, -step_size / (self.rms_b[l].sqrt() + 1.0e-8));
-
-            gw.zero_fill();
-            gb.zero_fill();
-        }
-
-        self.samples = 0;
-    }
-}
-
-// Records an episode for PolicyEpisode, one row per control step
-class EpisodeLog
-{
-    init(self, capacity)
-    {
-        self.count = 0;
-        self.inputs = ByteArray.with_size(capacity * MODEL_INPUTS * 4);
-        self.targets = ByteArray.with_size(capacity * MODEL_OUTPUTS * 4);
-    }
-
-    clear(self)
-    {
-        self.count = 0;
-    }
-
-    add(self, obs, prev_obs, action, next_obs, progress, fell)
-    {
-        let i = self.count;
-        let in_base = i * MODEL_INPUTS;
-        self.inputs.memcpy(in_base * 4, obs, 0, OBS_SIZE * 4);
-        self.inputs.memcpy((in_base + IN_PREV_OBS) * 4, prev_obs, 0, OBS_SIZE * 4);
-        self.inputs.memcpy((in_base + IN_ACTION) * 4, action, 0, CONTROL_OUTPUTS * 4);
-
-        let base = i * MODEL_OUTPUTS;
-        for (let var j = 0; j < OBS_SIZE; ++j)
-            self.targets.set_f32(base + j, next_obs.get_f32(j) - obs.get_f32(j));
-        self.targets.set_f32(base + OUT_PROGRESS, progress);
-        self.targets.set_f32(base + OUT_FALL, fell);
-        self.count += 1;
-    }
-
-    // The episode's transitions for the trainer
-    data_message(self)
-    {
-        let inputs = ByteArray.with_size(self.count * MODEL_INPUTS * 4);
-        let targets = ByteArray.with_size(self.count * MODEL_OUTPUTS * 4);
-        inputs.memcpy(0, self.inputs, 0, inputs.len);
-        targets.memcpy(0, self.targets, 0, targets.len);
-        return [MSG_DATA, self.count, inputs, targets];
-    }
-}
-
-// A ring of transitions. Each input row is the current and previous
-// observations and the action, each target row the observation change,
-// forward progress and fall flag. Running sums of the targets give the
-// statistics used to normalize them
-class ReplayBuffer
-{
-    init(self)
-    {
-        self.count = 0;
-        self.next = 0;
-        self.transitions = 0;
-        self.sum = Array.with_size(MODEL_OUTPUTS, 0.0);
-        self.sum_sq = Array.with_size(MODEL_OUTPUTS, 0.0);
-        if (!self.load()) {
-            self.inputs = ByteArray.with_size(BUFFER_SIZE * MODEL_INPUTS * 4);
-            self.targets = ByteArray.with_size(BUFFER_SIZE * MODEL_OUTPUTS * 4);
-        }
-    }
-
-    // Adds or removes row i from the running sums
-    track(self, i, sign)
-    {
-        let base = i * MODEL_OUTPUTS;
-        for (let var j = 0; j < MODEL_OUTPUTS; ++j) {
-            let v = self.targets.get_f32(base + j);
-            self.sum[j] += sign * v;
-            self.sum_sq[j] += sign * v * v;
-        }
-    }
-
-    append(self, inputs, targets, count)
-    {
-        for (let var k = 0; k < count; ++k) {
-            let i = self.next;
-            if (self.count == BUFFER_SIZE)
-                self.track(i, -1.0);
-            else
-                self.count += 1;
-            self.next = (i + 1) % BUFFER_SIZE;
-
-            self.inputs.memcpy(i * MODEL_INPUTS * 4, inputs, k * MODEL_INPUTS * 4, MODEL_INPUTS * 4);
-            self.targets.memcpy(i * MODEL_OUTPUTS * 4, targets, k * MODEL_OUTPUTS * 4, MODEL_OUTPUTS * 4);
-            self.track(i, 1.0);
-        }
-        self.transitions += count;
-    }
-
-    // Writes both arrays as they are, which needs no copy, then a header
-    // saying how much of them is filled and where the ring continues
-    save(self)
-    {
-        let start = $time_current_ms();
-        if (!$write_file(BUFFER_INPUTS_PATH, self.inputs) || !$write_file(BUFFER_TARGETS_PATH, self.targets)) {
-            $println("Trainer: failed to save the replay buffer");
-            return;
-        }
-
-        let header = ByteArray.with_size(7 * 4);
-        header.set_u32(0, BUFFER_MAGIC);
-        header.set_u32(1, MODEL_INPUTS);
-        header.set_u32(2, MODEL_OUTPUTS);
-        header.set_u32(3, BUFFER_SIZE);
-        header.set_u32(4, self.count);
-        header.set_u32(5, self.next);
-        header.set_u32(6, self.transitions);
-        assert($write_file(BUFFER_HEADER_PATH, header));
-
-        $println("Trainer: saved " + self.count.comma_sep() + " transitions in " + ($time_current_ms() - start).to_s() + " ms");
-    }
-
-    // Takes the saved buffer if there is one with the same layout, and
-    // rebuilds the running sums. Returns whether it did
-    load(self)
-    {
-        let header = $read_file(BUFFER_HEADER_PATH);
-        if (header == nil)
-            return false;
-
-        let matches = header.len == 7 * 4 && header.get_u32(0) == BUFFER_MAGIC &&
-            header.get_u32(1) == MODEL_INPUTS && header.get_u32(2) == MODEL_OUTPUTS &&
-            header.get_u32(3) == BUFFER_SIZE;
-        if (!matches) {
-            $println("Trainer: ignoring the saved replay buffer, which has a different layout");
-            return false;
-        }
-
-        let inputs = $read_file(BUFFER_INPUTS_PATH);
-        let targets = $read_file(BUFFER_TARGETS_PATH);
-        if (inputs == nil || targets == nil ||
-            inputs.len != BUFFER_SIZE * MODEL_INPUTS * 4 || targets.len != BUFFER_SIZE * MODEL_OUTPUTS * 4) {
-            $println("Trainer: ignoring the saved replay buffer, which is missing or incomplete");
-            return false;
-        }
-
-        self.inputs = inputs;
-        self.targets = targets;
-        self.count = header.get_u32(4);
-        self.next = header.get_u32(5);
-        self.transitions = header.get_u32(6);
-        for (let var i = 0; i < self.count; ++i)
-            self.track(i, 1.0);
-        $println("Trainer: loaded " + self.count.comma_sep() + " transitions");
-        return true;
-    }
-}
-
-// The learned dynamics model, with the statistics that map its normalized
-// outputs back to real units. The fall output is a logit
-class DynamicsModel
-{
-    init(self)
-    {
-        self.version = 0;
-        self.net = Network([MODEL_INPUTS, MODEL_HIDDEN, MODEL_HIDDEN, MODEL_OUTPUTS], 0);
-        self.mean = ByteArray.with_size(MODEL_OUTPUTS * 4);
-        self.std = ByteArray.with_size(MODEL_OUTPUTS * 4);
-        self.std.fill_u32(0, MODEL_OUTPUTS, 0x3F800000);  // 1.0f
-        self.input = ByteArray.with_size(MODEL_INPUTS * 4);
-        self.delta = ByteArray.with_size(OBS_SIZE * 4);
-
-        // Bounds on observations, and on per-step changes and progress, in
-        // real units. The trainer sets them from the data
-        self.obs_lo = ByteArray.with_size(OBS_SIZE * 4);
-        self.obs_hi = ByteArray.with_size(OBS_SIZE * 4);
-        self.out_lo = ByteArray.with_size(MODEL_OUTPUTS * 4);
-        self.out_hi = ByteArray.with_size(MODEL_OUTPUTS * 4);
-    }
-
-    // A message carrying a copy of this model
-    message(self)
-    {
-        return [
-            MSG_MODEL,
-            self.version,
-            self.net.snapshot(),
-            copy_bytes(self.mean),
-            copy_bytes(self.std),
-            [copy_bytes(self.obs_lo), copy_bytes(self.obs_hi), copy_bytes(self.out_lo), copy_bytes(self.out_hi)]
-        ];
-    }
-
-    load(self, msg)
-    {
-        self.version = msg[1];
-        self.net.load(msg[2]);
-        self.mean.memcpy(0, msg[3], 0, self.mean.len);
-        self.std.memcpy(0, msg[4], 0, self.std.len);
-        let bounds = msg[5];
-        self.obs_lo.memcpy(0, bounds[0], 0, self.obs_lo.len);
-        self.obs_hi.memcpy(0, bounds[1], 0, self.obs_hi.len);
-        self.out_lo.memcpy(0, bounds[2], 0, self.out_lo.len);
-        self.out_hi.memcpy(0, bounds[3], 0, self.out_hi.len);
-    }
-
-    // Plays a controller from a starting observation and returns its expected
-    // fitness. Every step runs the model under each set of dropout masks.
-    // Their observation changes are averaged, but the least progress and the
-    // highest chance of falling are used. Falling is a hazard per step: the
-    // chance of still being upright weights every later step's reward
-    rollout(self, controller, start_obs, ensemble)
-    {
-        let input = self.input;
-        let delta = self.delta;
-        let net = self.net;
-        let mean = self.mean;
-        let std = self.std;
-        let obs_lo = self.obs_lo;
-        let obs_hi = self.obs_hi;
-        let out_lo = self.out_lo;
-        let out_hi = self.out_hi;
-        let members = ensemble.len;
-        controller.reset();
-
-        // The input row holds the current observation, then the previous
-        // one, then the action. The start stands in for its own previous
-        input.memcpy(0, start_obs, 0, OBS_SIZE * 4);
-        input.memcpy(IN_PREV_OBS * 4, start_obs, 0, OBS_SIZE * 4);
-
-        let var survival = 1.0;
-        let var fitness = 0.0;
-        for (let var t = 0; t < EPISODE_CONTROL_STEPS; ++t) {
-            let action = controller.act(input);
-            input.memcpy(IN_ACTION * 4, action, 0, CONTROL_OUTPUTS * 4);
-
-            delta.zero_fill();
-            let var progress = 1.0e30;
-            let var hazard = 0.0;
-            for (let var m = 0; m < members; ++m) {
-                net.masks = ensemble[m];
-                let out = net.forward(input);
-                delta.axpy_f32(0, 1, out, 0, 1, OBS_SIZE, 1.0 / members);
-                progress = progress.min(out.get_f32(OUT_PROGRESS));
-                hazard = hazard.max(sigmoid(out.get_f32(OUT_FALL)));
-            }
-            net.masks = nil;
-
-            // Step the observations. Both the changes and the values they
-            // lead to stay inside what the simulator has produced, so the
-            // model cannot be exploited by predicting impossible motion
-            input.memcpy(IN_PREV_OBS * 4, input, 0, OBS_SIZE * 4);
-            for (let var j = 0; j < OBS_SIZE; ++j) {
-                let d = (delta.get_f32(j) * std.get_f32(j) + mean.get_f32(j)).clip(out_lo.get_f32(j), out_hi.get_f32(j));
-                let v = input.get_f32(IN_PREV_OBS + j) + d;
-                input.set_f32(j, v.clip(obs_lo.get_f32(j), obs_hi.get_f32(j)));
-            }
-
-            // The up estimate is the same filter the robot runs, fed the
-            // predicted sensor readings, rather than a prediction itself.
-            // The compass turns with the predicted gyro reading, which is
-            // exact for a direction fixed in the world
-            let up = Vec3(
-                input.get_f32(IN_PREV_OBS + OBS_UP),
-                input.get_f32(IN_PREV_OBS + OBS_UP + 1),
-                input.get_f32(IN_PREV_OBS + OBS_UP + 2)
-            );
-            filter_up(up, input, 0);
-            let compass = turn_with_gyro(Vec3(
-                input.get_f32(IN_PREV_OBS + OBS_COMPASS),
-                input.get_f32(IN_PREV_OBS + OBS_COMPASS + 1),
-                input.get_f32(IN_PREV_OBS + OBS_COMPASS + 2)
-            ), input, 0).unit();
-            input.set_f32(OBS_COMPASS, compass.x);
-            input.set_f32(OBS_COMPASS + 1, compass.y);
-            input.set_f32(OBS_COMPASS + 2, compass.z);
-
-            let real_progress = progress * std.get_f32(OUT_PROGRESS) + mean.get_f32(OUT_PROGRESS);
-            let clipped = real_progress.clip(out_lo.get_f32(OUT_PROGRESS), out_hi.get_f32(OUT_PROGRESS));
-            fitness += survival * (clipped + UPRIGHT_WEIGHT * CONTROL_DT);
-            survival *= 1.0 - hazard;
-            if (survival < SURVIVAL_CUTOFF)
-                break;
-        }
-
-        return fitness;
-    }
-}
-
-// Trains the dynamics model on the replay buffer, as fast as it can, while
-// the islands keep adding to it
-class ModelTrainer
-{
-    init(self, seed)
-    {
-        self.rng = Xoshiro128(seed);
-        self.model = DynamicsModel();
-        self.optimizer = Optimizer(self.model.net);
-        self.buffer = ReplayBuffer();
-        self.dout = ByteArray.with_size(MODEL_OUTPUTS * 4);
-        self.pool = [];
-
-        // Every value the simulator has produced falls within these, which
-        // only ever widen. They include data that has left the buffer
-        self.obs_min = Array.with_size(OBS_SIZE, 1.0e30);
-        self.obs_max = Array.with_size(OBS_SIZE, -1.0e30);
-        self.out_min = Array.with_size(MODEL_OUTPUTS, 1.0e30);
-        self.out_max = Array.with_size(MODEL_OUTPUTS, -1.0e30);
-        self.track_ranges(self.buffer.inputs, self.buffer.targets, self.buffer.count);
-
-        self.batches = 0;
-        self.train_loss = 0.0;
-        self.train_samples = 0;
-        self.val_loss = 0.0;
-        self.val_fall = 0.0;
-        self.val_samples = 0;
-
-        // Squared error of the fall probability in the last sample_loss()
-        self.fall_sq = 0.0;
-    }
-
-    // Runs the model on row i of an input and target array pair, and leaves
-    // the weighted gradient in dout. Returns the unweighted mean squared error
-    // over the normalized observation changes and progress. The fall output
-    // is a logit trained with cross-entropy, whose gradient is the predicted
-    // probability minus the label
-    sample_loss(self, inputs, targets, i)
-    {
-        let mean = self.model.mean;
-        let std = self.model.std;
-        self.model.input.memcpy(0, inputs, i * MODEL_INPUTS * 4, MODEL_INPUTS * 4);
-        let out = self.model.net.forward(self.model.input);
-
-        let base = i * MODEL_OUTPUTS;
-        let var loss = 0.0;
-        for (let var j = 0; j < OUT_FALL; ++j) {
-            let target = (targets.get_f32(base + j) - mean.get_f32(j)) / std.get_f32(j);
-            let e = out.get_f32(j) - target;
-            self.dout.set_f32(j, j == OUT_PROGRESS ? e * PROGRESS_LOSS_WEIGHT : e);
-            loss += e * e;
-        }
-
-        let fell = targets.get_f32(base + OUT_FALL);
-        let e = sigmoid(out.get_f32(OUT_FALL)) - fell;
-        let weight = FALL_LOSS_WEIGHT * (fell > 0.5 ? FALL_POSITIVE_WEIGHT : 1.0);
-        self.dout.set_f32(OUT_FALL, e * weight);
-        self.fall_sq = e * e;
-
-        return loss / OUT_FALL;
-    }
-
-    // Adds an episode from an island. Once there is a model, it is scored
-    // on the episode first, without dropout, since it has never trained on it
-    ingest(self, msg)
-    {
-        let count = msg[1];
-        if (self.model.version > 0) {
-            for (let var i = 0; i < count; ++i) {
-                self.val_loss += self.sample_loss(msg[2], msg[3], i);
-                self.val_fall += self.fall_sq;
-            }
-            self.val_samples += count;
-        }
-
-        self.buffer.append(msg[2], msg[3], count);
-        self.track_ranges(msg[2], msg[3], count);
-    }
-
-    // Widens the ranges to cover these rows: observations before and after
-    // each step, their changes, and progress
-    track_ranges(self, inputs, targets, count)
-    {
-        for (let var i = 0; i < count; ++i) {
-            let in_base = i * MODEL_INPUTS;
-            let base = i * MODEL_OUTPUTS;
-
-            for (let var j = 0; j < OBS_SIZE; ++j) {
-                let obs = inputs.get_f32(in_base + j);
-                let delta = targets.get_f32(base + j);
-                let next = obs + delta;
-                self.obs_min[j] = self.obs_min[j].min(obs).min(next);
-                self.obs_max[j] = self.obs_max[j].max(obs).max(next);
-                self.out_min[j] = self.out_min[j].min(delta);
-                self.out_max[j] = self.out_max[j].max(delta);
-            }
-
-            let progress = targets.get_f32(base + OUT_PROGRESS);
-            self.out_min[OUT_PROGRESS] = self.out_min[OUT_PROGRESS].min(progress);
-            self.out_max[OUT_PROGRESS] = self.out_max[OUT_PROGRESS].max(progress);
-        }
-    }
-
-    // Copies the ranges into the model, widened by BOUND_MARGIN. Observation
-    // bounds also stay inside what the encoder can produce
-    update_bounds(self)
-    {
-        let model = self.model;
-        for (let var j = 0; j < OBS_SIZE; ++j) {
-            let margin = BOUND_MARGIN * (self.obs_max[j] - self.obs_min[j]);
-            let lo = j < OBS_CONTACTS ? -1.0 : 0.0;
-            model.obs_lo.set_f32(j, (self.obs_min[j] - margin).max(lo));
-            model.obs_hi.set_f32(j, (self.obs_max[j] + margin).min(1.0));
-        }
-
-        for (let var j = 0; j <= OUT_PROGRESS; ++j) {
-            let margin = BOUND_MARGIN * (self.out_max[j] - self.out_min[j]);
-            model.out_lo.set_f32(j, self.out_min[j] - margin);
-            model.out_hi.set_f32(j, self.out_max[j] + margin);
-        }
-    }
-
-    // Moves the normalization statistics to the buffer's current ones, and
-    // rescales the output layer so that the model's predictions are unchanged
-    update_stats(self)
-    {
-        let net = self.model.net;
-        let last = net.num_layers - 1;
-        let w = net.weights[last];
-        let b = net.biases[last];
-        let cols = net.sizes[last];
-        let n = self.buffer.count;
-
-        // Falls stay unnormalized, so the output reads as a probability
-        for (let var j = 0; j < MODEL_OUTPUTS; ++j) {
-            if (j == OUT_FALL)
-                continue;
-
-            let mean = self.buffer.sum[j] / n;
-            let variance = self.buffer.sum_sq[j] / n - mean * mean;
-            let std = variance.max(1.0e-6).sqrt();
-            let old_mean = self.model.mean.get_f32(j);
-            let old_std = self.model.std.get_f32(j);
-
-            // An untrained model has no predictions worth preserving
-            if (self.optimizer.steps > 0) {
-                w.axpy_f32(j * cols, 1, w, j * cols, 1, cols, old_std / std - 1.0);
-                b.set_f32(j, (old_std * b.get_f32(j) + old_mean - mean) / std);
-            }
-            self.model.mean.set_f32(j, mean);
-            self.model.std.set_f32(j, std);
-        }
-    }
-
-    // Trains on TRAIN_CHUNK batches, each sample with a dropout mask from a
-    // pool drawn for the chunk. Half of each batch comes from the whole
-    // buffer, for coverage, and half from the RECENT_TRANSITIONS newest rows,
-    // so the model stays accurate where the current controllers go
-    train(self)
-    {
-        let buffer = self.buffer;
-        let net = self.model.net;
-        let recent = buffer.count.min(RECENT_TRANSITIONS);
-        self.update_stats();
-
-        self.pool.resize(0, nil);
-        for (let var k = 0; k < MASK_POOL; ++k)
-            self.pool.push(dropout_masks(self.rng));
-
-        for (let var n = 0; n < TRAIN_CHUNK; ++n) {
-            for (let var s = 0; s < BATCH_SIZE; ++s) {
-                let var i = 0;
-                if ((s & 1) == 0)
-                    i = self.rng.index(buffer.count);
-                else
-                    i = (buffer.next - 1 - self.rng.index(recent) + BUFFER_SIZE) % BUFFER_SIZE;
-                net.masks = self.pool[self.rng.index(MASK_POOL)];
-                self.train_loss += self.sample_loss(buffer.inputs, buffer.targets, i);
-                self.optimizer.backward(self.model.input, self.dout);
-            }
-            self.optimizer.step(LEARNING_RATE);
-        }
-        net.masks = nil;
-
-        self.batches += TRAIN_CHUNK;
-        self.train_samples += TRAIN_CHUNK * BATCH_SIZE;
-    }
-
-    // Progress since the last report, which resets the running errors.
-    // Errors are the typical error as a percentage of the typical variation
-    // of each value, so 0% is perfect and 100% is no better than always
-    // guessing the average. Falls are the RMS error of the probability
-    stats_message(self, seconds)
-    {
-        let msg = [
-            MSG_TRAINER,
-            self.model.version,
-            self.buffer.count,
-            self.buffer.transitions,
-            self.train_samples > 0 ? (self.train_loss / self.train_samples).sqrt() * 100.0 : nil,
-            self.val_samples > 0 ? (self.val_loss / self.val_samples).sqrt() * 100.0 : nil,
-            self.val_samples > 0 ? (self.val_fall / self.val_samples).sqrt() : nil,
-            self.train_samples.to_f() / seconds
-        ];
-        self.train_loss = 0.0;
-        self.train_samples = 0;
-        self.val_loss = 0.0;
-        self.val_fall = 0.0;
-        self.val_samples = 0;
-        return msg;
-    }
-}
-
-fun trainer_actor()
-{
-    let setup = $actor_recv();
-    let islands = setup[2];
-    let parent = $actor_parent();
-    let trainer = ModelTrainer(setup[1] * 31 + 5);
-
-    let var last_model_ms = $time_current_ms();
-    let var last_stats_ms = last_model_ms;
-    let var last_save_ms = last_model_ms;
-
-    loop {
-        // Until there is enough data, just wait for more
-        let var msg = trainer.buffer.count < MIN_TRANSITIONS ? $actor_recv() : $actor_poll();
-        while (msg != nil) {
-            if (msg[0] == MSG_STOP) {
-                trainer.buffer.save();
-                return trainer.buffer.transitions;
-            }
-            if (msg[0] == MSG_DATA)
-                trainer.ingest(msg);
-            msg = $actor_poll();
-        }
-
-        let var now = $time_current_ms();
-        if (now - last_stats_ms >= STATS_PERIOD_MS) {
-            $actor_send(parent, trainer.stats_message((now - last_stats_ms).to_f() / 1000.0));
-            last_stats_ms = now;
-        }
-        if (now - last_save_ms >= SAVE_PERIOD_MS) {
-            trainer.buffer.save();
-            last_save_ms = $time_current_ms();
-        }
-
-        if (trainer.buffer.count < MIN_TRANSITIONS)
-            continue;
-
-        trainer.train();
-
-        now = $time_current_ms();
-        let first = trainer.model.version == 0 && trainer.batches >= FIRST_MODEL_BATCHES;
-        if (first || (trainer.model.version > 0 && now - last_model_ms >= MODEL_PERIOD_MS)) {
-            trainer.model.version += 1;
-            trainer.update_bounds();
-            let model = trainer.model.message();
-            for (let var i = 0; i < islands.len; ++i)
-                $actor_send(islands[i], model);
-            last_model_ms = now;
-        }
-    }
-}
-
 class Island
 {
     init(self, seed)
     {
         self.rng = Xoshiro128(seed);
-        self.model = DynamicsModel();
 
         // The next generation is written into next_pop, then the two are
         // swapped, so networks are allocated once rather than every generation
@@ -1881,26 +1045,9 @@ class Island
             self.next_pop.push(Controller(0, limits));
         }
 
-        self.starts = [];
-        for (let var k = 0; k < EVAL_EPISODES; ++k)
-            self.starts.push(ByteArray.with_size(OBS_SIZE * 4));
-        self.ensemble = [];
-
-        // The model's score, and the real score, or nil when an individual
-        // has not been run for real. The model tends to be optimistic about
-        // everyone, so the typical gap between the two, measured by reality
-        // checks, is taken off every model score. Then the lower of the
-        // corrected model score and the real score is the fitness, so an
-        // individual the model overrates more than usual does not pay
-        self.model_fitness = Array.with_size(POP_SIZE, 0.0);
-        self.real = Array.with_size(POP_SIZE, nil);
-        self.optimism = 0.0;
+        self.seeds = Array.with_size(EVAL_EPISODES, 0);
         self.fitness = Array.with_size(POP_SIZE, 0.0);
         self.order = Array.with_size(POP_SIZE, 0);
-
-        // Transitions from real runs, which are sent to the trainer
-        self.recorder = EpisodeLog((EPISODE_SECONDS / CONTROL_DT).ceil() + 2);
-        self.check_start = ByteArray.with_size(OBS_SIZE * 4);
 
         self.immigrants = [];
         self.generation = 0;
@@ -1908,96 +1055,28 @@ class Island
         self.mean_fitness = 0.0;
     }
 
-    // Picks this generation's starting poses and dropout masks. Every
-    // individual is scored with the same ones, so rankings reflect the
-    // controllers rather than the poses or the masks
-    draw_conditions(self)
+    // Picks this generation's starting poses. Every individual is scored
+    // with the same ones, so rankings reflect the controllers, not the poses
+    draw_seeds(self)
     {
         for (let var k = 0; k < EVAL_EPISODES; ++k)
-            start_observation(self.rng.int(0, 0x40000000), self.starts[k]);
-
-        self.ensemble = [];
-        for (let var m = 0; m < ENSEMBLE_SIZE; ++m)
-            self.ensemble.push(dropout_masks(self.rng));
+            self.seeds[k] = self.rng.int(0, 0x40000000);
     }
 
     evaluate(self, i)
     {
         let var total = 0.0;
         for (let var k = 0; k < EVAL_EPISODES; ++k)
-            total += self.model.rollout(self.pop[i], self.starts[k], self.ensemble);
-        self.model_fitness[i] = total / EVAL_EPISODES;
-        self.score(i);
+            total += evaluate_controller(self.pop[i], self.seeds[k], EPISODE_SECONDS).fitness;
+        self.fitness[i] = total / EVAL_EPISODES;
     }
 
-    score(self, i)
-    {
-        self.fitness[i] = self.model_fitness[i] - self.optimism;
-        if (self.real[i] != nil)
-            self.fitness[i] = self.fitness[i].min(self.real[i]);
-    }
-
-    // Sorts the population by fitness, best first
+    // Sorts the population by fitness, best first, and records this
+    // generation's statistics
     rank(self)
     {
         sort_indices(self.order, self.fitness);
-    }
 
-    // The highest ranked individual that has not been run for real, if any
-    next_unchecked(self)
-    {
-        for (let var n = 0; n < POP_SIZE; ++n) {
-            let i = self.order[n];
-            if (self.real[i] == nil)
-                return i;
-        }
-        return nil;
-    }
-
-    // A random individual that has not been run for real, if any
-    random_unchecked(self)
-    {
-        let start = self.rng.index(POP_SIZE);
-        for (let var n = 0; n < POP_SIZE; ++n) {
-            let i = (start + n) % POP_SIZE;
-            if (self.real[i] == nil)
-                return i;
-        }
-        return nil;
-    }
-
-    // Runs individual i for real from a random starting pose, recording its
-    // transitions, and caps its fitness at the real score. Returns the result
-    // and what the model predicted for the same pose
-    reality_check(self, i)
-    {
-        let seed = self.rng.int(0, 0x40000000);
-        let result = evaluate_controller(self.pop[i], seed, EPISODE_SECONDS, self.recorder);
-        start_observation(seed, self.check_start);
-        let predicted = self.model.rollout(self.pop[i], self.check_start, self.ensemble);
-
-        // The optimism estimate follows recent checks, since it changes as
-        // the model and the population improve
-        let gap = self.model_fitness[i] - result.fitness;
-        self.optimism += OPTIMISM_RATE * (gap - self.optimism);
-
-        self.real[i] = result.fitness;
-        for (let var j = 0; j < POP_SIZE; ++j)
-            self.score(j);
-        return [result, predicted];
-    }
-
-    // Runs a random individual for real, to collect data before any model
-    // exists
-    bootstrap_episode(self)
-    {
-        let i = self.rng.index(POP_SIZE);
-        evaluate_controller(self.pop[i], self.rng.int(0, 0x40000000), EPISODE_SECONDS, self.recorder);
-    }
-
-    // Records this generation's statistics. Must be called after rank()
-    summarize(self)
-    {
         let var total = 0.0;
         for (let var i = 0; i < POP_SIZE; ++i)
             total += self.fitness[i];
@@ -2023,7 +1102,6 @@ class Island
                 child.copy_from(self.pop[self.order[(i - NUM_ELITES) % NUM_PARENTS]].network);
                 mutate_network(child, self.rng, MUTATION_SIGMA);
             }
-            self.real[i] = nil;
         }
 
         // Immigrants replace the last children, and arrive unmutated so the
@@ -2045,7 +1123,6 @@ fun island_actor()
     let setup = $actor_recv();
     let index = setup[1];
     let ids = setup[3];
-    let trainer = setup[4];
     let parent = $actor_parent();
 
     // Each island gets its own stream, so they do not evolve in lockstep
@@ -2056,35 +1133,9 @@ fun island_actor()
         ids[(index + ids.len - 1) % ids.len]
     ];
 
-    // Nothing to evolve against until the trainer has a first model, so
-    // collect data for it from the initial population meanwhile
-    let var waiting = true;
-    while (waiting) {
-        island.bootstrap_episode();
-        $actor_send(trainer, island.recorder.data_message());
-
-        loop {
-            let msg = $actor_poll();
-            if (msg == nil)
-                break;
-            if (msg[0] == MSG_STOP)
-                return 0;
-            if (msg[0] == MSG_MIGRANT)
-                island.immigrants.push(msg[1]);
-            if (msg[0] == MSG_MODEL) {
-                island.model.load(msg);
-                waiting = false;
-            }
-        }
-    }
-
     loop {
         let start_ms = $time_current_ms();
-        island.draw_conditions();
-
-        // A model that arrives mid-generation is held until the end, so
-        // the whole population is scored by the same one
-        let var new_model = nil;
+        island.draw_seeds();
 
         for (let var i = 0; i < POP_SIZE; ++i) {
             island.evaluate(i);
@@ -2097,38 +1148,10 @@ fun island_actor()
                     return island.generation;
                 if (msg[0] == MSG_MIGRANT)
                     island.immigrants.push(msg[1]);
-                if (msg[0] == MSG_MODEL)
-                    new_model = msg;
             }
         }
 
         island.rank();
-
-        // Run the best unchecked individuals for real, and one picked at
-        // random. Their transitions train the model, and their real scores
-        // cap their fitness
-        for (let var c = 0; c < REALITY_CHECKS; ++c) {
-            let random_pick = c == REALITY_CHECKS - 1;
-            let i = random_pick ? island.random_unchecked() : island.next_unchecked();
-            if (i == nil)
-                break;
-            let model_score = island.model_fitness[i];
-            let checked = island.reality_check(i);
-            $actor_send(trainer, island.recorder.data_message());
-            $actor_send(parent, [
-                MSG_REAL,
-                index,
-                island.generation,
-                checked[0].fitness,
-                checked[1],
-                island.pop[i].network.snapshot(),
-                model_score,
-                random_pick
-            ]);
-            island.rank();
-        }
-
-        island.summarize();
         $actor_send(parent, [
             MSG_REPORT,
             index,
@@ -2136,8 +1159,7 @@ fun island_actor()
             island.best_fitness,
             island.mean_fitness,
             $time_current_ms() - start_ms,
-            island.model.version,
-            island.optimism
+            island.pop[island.order[0]].network.snapshot()
         ]);
 
         if (ids.len > 1 && (island.generation + 1) % MIGRATION_PERIOD == 0) {
@@ -2148,213 +1170,72 @@ fun island_actor()
         }
 
         island.reproduce();
-
-        if (new_model != nil)
-            island.model.load(new_model);
     }
 }
 
-// Spawns the trainer and the ring of islands, and tells each who the others
-// are. Actor ids only exist once everything has been spawned, which is why
-// setup is a message rather than an argument
+// Spawns the ring of islands, and tells each who the others are. Actor ids
+// only exist once everything has been spawned, which is why setup is a
+// message rather than an argument. Returns the island ids
 fun spawn_training(num_islands, seed)
 {
-    let trainer = $actor_spawn(trainer_actor);
-
     let ids = [];
     for (let var i = 0; i < num_islands; ++i)
         ids.push($actor_spawn(island_actor));
 
     for (let var i = 0; i < num_islands; ++i)
-        $actor_send(ids[i], [MSG_SETUP, i, seed, ids, trainer]);
-    $actor_send(trainer, [MSG_SETUP, seed, ids]);
+        $actor_send(ids[i], [MSG_SETUP, i, seed, ids]);
 
-    return [trainer, ids];
+    return ids;
 }
 
-// Stops every actor, and returns the total number of island generations
-fun stop_training(training)
+// Stops every island, and returns the total number of island generations
+fun stop_training(ids)
 {
-    let ids = training[1];
-    $actor_send(training[0], [MSG_STOP]);
     for (let var i = 0; i < ids.len; ++i)
         $actor_send(ids[i], [MSG_STOP]);
 
-    $actor_join(training[0]);
     let var generations = 0;
     for (let var i = 0; i < ids.len; ++i)
         generations += $actor_join(ids[i]);
     return generations;
 }
 
-// Pearson correlation of two equally long arrays, or nil when undefined
-fun correlation(xs, ys)
-{
-    let n = xs.len;
-    if (n < 2)
-        return nil;
-
-    let var sx = 0.0; let var sy = 0.0;
-    for (let var i = 0; i < n; ++i) { sx += xs[i]; sy += ys[i]; }
-    let mx = sx / n; let my = sy / n;
-
-    let var sxy = 0.0; let var sxx = 0.0; let var syy = 0.0;
-    for (let var i = 0; i < n; ++i) {
-        let dx = xs[i] - mx; let dy = ys[i] - my;
-        sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
-    }
-    if (sxx <= 0.0 || syy <= 0.0)
-        return nil;
-    return sxy / (sxx * syy).sqrt();
-}
-
-// The last CHECK_WINDOW reality checks: real scores, and model scores from
-// the same starting poses
-class CheckWindow
-{
-    init(self)
-    {
-        self.real = [];
-        self.model = [];
-        self.count = 0;
-    }
-
-    add(self, real, model)
-    {
-        if (self.real.len < CHECK_WINDOW) {
-            self.real.push(real);
-            self.model.push(model);
-        } else {
-            let slot = self.count % CHECK_WINDOW;
-            self.real[slot] = real;
-            self.model[slot] = model;
-        }
-        self.count += 1;
-    }
-
-    // The correlation, and how many checks it covers
-    describe(self)
-    {
-        let r = correlation(self.real, self.model);
-        return (r == nil ? "n/a" : r.format_decimals(2)) + " (" + self.real.len.to_s() + ")";
-    }
-}
-
-// Runs in the main actor: tracks the islands' reports and reality checks,
-// and prints progress. The latest reality check of each island provides a
-// controller for the viewer
+// Runs in the main actor: prints each island's report, and keeps the latest
+// one, whose best controller the viewer can show
 class Coordinator
 {
-    init(self, training)
+    init(self, ids)
     {
-        let n = training[1].len;
-        self.latest = Array.with_size(n, nil);
-        self.scores = Array.with_size(n, nil);
-        self.generations = Array.with_size(n, 0);
-        self.best_fitness = Array.with_size(n, nil);
-        self.optimism = Array.with_size(n, 0.0);
-
-        // Recent reality checks, all of them and just the random picks
-        self.all_checks = CheckWindow();
-        self.random_checks = CheckWindow();
-        self.period_real = [];
-        self.last_print_ms = $time_current_ms();
+        self.latest = Array.with_size(ids.len, nil);
     }
 
-    // Handles a message from the training actors, if it is one
+    // Handles a message from the islands, if it is one
     handle(self, msg)
     {
-        if (!(msg instanceof Array))
+        if (!(msg instanceof Array) || msg[0] != MSG_REPORT)
             return false;
 
-        if (msg[0] == MSG_REPORT) {
-            let i = msg[1];
-            self.generations[i] = msg[2];
-            self.best_fitness[i] = msg[3];
-            self.optimism[i] = msg[7];
-            return true;
-        }
-
-        if (msg[0] == MSG_REAL) {
-            let i = msg[1];
-            let real = msg[3];
-            self.latest[i] = msg;
-            self.scores[i] = self.scores[i] == nil ? real : self.scores[i] + 0.2 * (real - self.scores[i]);
-            self.period_real.push(real);
-            self.all_checks.add(real, msg[4]);
-            if (msg[7])
-                self.random_checks.add(real, msg[4]);
-            return true;
-        }
-
-        if (msg[0] == MSG_TRAINER) {
-            let fill = 100.0 * msg[2].to_f() / BUFFER_SIZE;
-            $println(
-                "Trainer, model v" + msg[1].to_s() +
-                ": buffer " + msg[2].comma_sep() + " (" + fill.format_decimals(1) + "%)" +
-                ", train error " + (msg[4] == nil ? "n/a" : msg[4].format_decimals(1) + "%") +
-                ", validation error " + (msg[5] == nil ? "n/a" : msg[5].format_decimals(1) + "%") +
-                ", fall error " + (msg[6] == nil ? "n/a" : msg[6].format_decimals(3)) +
-                ", " + msg[7].format_decimals(0) + " samples/s"
-            );
-            return true;
-        }
-
-        return false;
+        self.latest[msg[1]] = msg;
+        $println(
+            "Island " + msg[1].to_s() +
+            ", generation " + msg[2].to_s() +
+            ": best fitness " + msg[3].format_decimals(3) +
+            ", mean " + msg[4].format_decimals(3) +
+            ", " + (msg[5].to_f() / 1000.0).format_decimals(1) + " s"
+        );
+        return true;
     }
 
-    // The island whose reality checks score best, or nil before any
+    // The island whose latest best fitness is highest, or nil before any
+    // report
     best(self)
     {
         let var best = nil;
-        for (let var i = 0; i < self.scores.len; ++i) {
-            if (self.scores[i] != nil && (best == nil || self.scores[i] > self.scores[best]))
+        for (let var i = 0; i < self.latest.len; ++i) {
+            if (self.latest[i] != nil && (best == nil || self.latest[i][3] > self.latest[best][3]))
                 best = i;
         }
         return best;
-    }
-
-    tick(self, now)
-    {
-        if (now - self.last_print_ms < STATS_PERIOD_MS)
-            return;
-        self.last_print_ms = now;
-
-        let var lo = 1_000_000_000; let var hi = 0;
-        let var best_island = nil; let var optimism = 0.0; let var n = 0;
-        for (let var i = 0; i < self.generations.len; ++i) {
-            lo = lo.min(self.generations[i]); hi = hi.max(self.generations[i]);
-            if (self.best_fitness[i] != nil) {
-                if (best_island == nil || self.best_fitness[i] > self.best_fitness[best_island])
-                    best_island = i;
-                optimism += self.optimism[i];
-                n += 1;
-            }
-        }
-        if (best_island != nil) {
-            $println(
-                "Islands: generations " + lo.to_s() + "-" + hi.to_s() +
-                ", best corrected model fitness " + self.best_fitness[best_island].format_decimals(3) +
-                " (island " + best_island.to_s() + ")" +
-                ", mean optimism " + (optimism / n).format_decimals(3)
-            );
-        }
-
-        if (self.period_real.len > 0) {
-            let var sum = 0.0; let var top = -1.0e30;
-            for (let var i = 0; i < self.period_real.len; ++i) {
-                sum += self.period_real[i];
-                top = top.max(self.period_real[i]);
-            }
-            $println(
-                "Reality checks: " + self.period_real.len.to_s() + " in the last " + (STATS_PERIOD_MS / 1000).to_s() + " s" +
-                ", real mean " + (sum / self.period_real.len).format_decimals(3) +
-                ", best " + top.format_decimals(3) +
-                " | correlation of model with real: all " + self.all_checks.describe() +
-                ", random picks " + self.random_checks.describe()
-            );
-            self.period_real.resize(0, nil);
-        }
     }
 }
 
@@ -2493,12 +1374,24 @@ class Renderer {
         return BRIGHTNESS * (0.28 + 0.50*n.dot(SUN_DIRECTION).max(0.0)
                                  + 0.20*n.dot(FILL_DIRECTION).max(0.0));
     }
-    body(self, b) {
+    box(self, b, offset, size, color) {
         let vertices = [];
-        for (let var i = 0; i < 8; ++i) vertices.push(b.world(b.corners[i]));
+        for (let var i = 0; i < 8; ++i) {
+            vertices.push(b.world(Vec3(offset.x + ((i & 1) == 0 ? -size.x*0.5 : size.x*0.5),
+                                       offset.y + ((i & 2) == 0 ? -size.y*0.5 : size.y*0.5),
+                                       offset.z + ((i & 4) == 0 ? -size.z*0.5 : size.z*0.5))));
+        }
         for (let var i = 0; i < 6; ++i) {
             let f = self.faces[i];
-            self.quad(vertices[f[0]],vertices[f[1]],vertices[f[2]],vertices[f[3]],b.color);
+            self.quad(vertices[f[0]],vertices[f[1]],vertices[f[2]],vertices[f[3]],color);
+        }
+    }
+    body(self, b) {
+        if (b.parts == nil) {
+            self.box(b, zero(), b.size, b.color);
+        } else {
+            for (let var i = 0; i < b.parts.len; ++i)
+                self.box(b, b.parts[i][0], b.parts[i][1], b.parts[i][2]);
         }
         // Chunky trapezoidal sunglasses: separate tinted lenses, a bridge,
         // side arms and small reflections distinguish them from a robot visor.
@@ -2636,7 +1529,7 @@ if ($cmd_get_arg_or(1,"") == "--evaluate") {
         $println("Expected integer episode and model seeds"); $exit(1);
     }
     let controller = Controller(model_seed,biped_torque_limits());
-    let result = evaluate_controller(controller,episode_seed,EPISODE_SECONDS,nil);
+    let result = evaluate_controller(controller,episode_seed,EPISODE_SECONDS);
     $println("Fitness: " + result.fitness.format_decimals(3)
         + " | forward: " + result.progress.format_decimals(3) + " m"
         + " | max lateral: " + result.max_lateral.format_decimals(3) + " m"
@@ -2665,7 +1558,6 @@ if ($cmd_get_arg_or(1,"") == "--train-headless") {
             $actor_sleep(20);
         else
             coordinator.handle(msg);
-        coordinator.tick($time_current_ms());
     }
 
     $println("Training stopped after " + stop_training(training).comma_sep() + " generations across all islands");
@@ -2727,10 +1619,10 @@ let training = train_mode ? spawn_training(num_islands, model_seed) : nil;
 let coordinator = train_mode ? Coordinator(training) : nil;
 let var last_viewer_ms = $time_current_ms();
 let controller = viewer_mode ? Controller(model_seed,biped_torque_limits()) : nil;
-let var episode = viewer_mode ? PolicyEpisode(controller,seed,EPISODE_SECONDS,nil) : nil;
+let var episode = viewer_mode ? PolicyEpisode(controller,seed,EPISODE_SECONDS) : nil;
 let var sim = viewer_mode ? episode.sim : Simulator(seed);
 let renderer = Renderer();
-$println("Biped: 1.78 m, 80 kg, 13 bodies. Seed: " + seed.to_s());
+$println("Biped: 1.78 m, 80 kg, 11 bodies. Seed: " + seed.to_s());
 if (headless) {
     if ($cmd_get_arg_or(5,"") == "hold") sim.toggle_hold();
     let count = (duration/STEP).ceil();
@@ -2753,7 +1645,7 @@ if (headless) {
 }
 
 if (train_mode) {
-    $println("Evolving " + num_islands.to_s() + " islands in a learned model; watching the island with the best real runs. Episodes replay after a short pause.");
+    $println("Evolving " + num_islands.to_s() + " islands in the simulator; watching the island with the best latest generation. Episodes replay after a short pause.");
     $println("R next pose | SPACE pause | N step | Arrows orbit | W/S zoom | Close window to exit");
 } else if (policy_mode) {
     $println("Watching untrained policy (model seed " + model_seed.to_s() + "). Episodes replay after a short pause.");
@@ -2793,7 +1685,7 @@ loop {
         if (msg.key == 'R') {
             if (viewer_mode) {
                 seed += 1;
-                episode = PolicyEpisode(controller,seed,EPISODE_SECONDS,nil);
+                episode = PolicyEpisode(controller,seed,EPISODE_SECONDS);
                 sim = episode.sim;
                 renderer.target.z = 0.0;
                 replay_ms = 0;
@@ -2813,22 +1705,21 @@ loop {
     }
     if (quit) break;
 
-    // Periodically switch to the latest real run of the island whose real
-    // runs score best
+    // Periodically switch to the best controller of the island whose latest
+    // generation scores best
     if (train_mode) {
-        coordinator.tick(start);
         let best = coordinator.best();
         if (best != nil && start - last_viewer_ms >= VIEWER_PERIOD_MS) {
             let latest = coordinator.latest[best];
-            controller.network.load(latest[5]);
-            episode = PolicyEpisode(controller, seed, EPISODE_SECONDS, nil);
+            controller.network.load(latest[6]);
+            episode = PolicyEpisode(controller,seed,EPISODE_SECONDS);
             sim = episode.sim;
             renderer.target.z = 0.0;
             accumulator = 0.0;
             replay_ms = 0;
             viewer_revision += 1;
             last_viewer_ms = start;
-            $println("Viewer: island " + best.to_s() + ", real fitness " + latest[3].format_decimals(3));
+            $println("Viewer: island " + best.to_s() + ", fitness " + latest[3].format_decimals(3));
         }
     }
 
@@ -2852,7 +1743,7 @@ loop {
             replay_ms = $time_current_ms()+1200;
         }
         if (!paused && episode.done && $time_current_ms() >= replay_ms) {
-            episode = PolicyEpisode(controller,seed,EPISODE_SECONDS,nil);
+            episode = PolicyEpisode(controller,seed,EPISODE_SECONDS);
             sim = episode.sim;
             renderer.target.z = 0.0;
             accumulator = 0.0;
