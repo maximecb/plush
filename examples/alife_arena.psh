@@ -1,0 +1,793 @@
+// Arena Life, a small evolutionary 1v1 combat experiment.
+//
+// Each island repeatedly samples two genomes from its population. They fight
+// ten episodes in one randomly sized room. The winner stays unchanged and a
+// mutated child replaces the loser. Age counts matches lived through.
+// Every 10,000 matches an island copies one random genome to a ring neighbour,
+// where it replaces the youngest resident at the next match boundary.
+//
+// Run with: plush examples/alife_arena.psh
+// F cycles viewer playback through 1x, 2x, 3x, and 4x. SPACE pauses it.
+// Islands always train at full speed. Headless: --headless --matches 1000.
+// --migrate-period N overrides the default of 10,000 for short experiments.
+// --max-room N overrides the initial 5 to 8 metre room range.
+
+from random import Xoshiro128;
+
+fun has_flag(name) {
+    for (let var i = 0; i < $cmd_num_args(); ++i)
+        if ($cmd_get_arg(i) == name)
+            return true;
+    return false;
+}
+
+fun flag_int(name, fallback) {
+    for (let var i = 0; i < $cmd_num_args() - 1; ++i) {
+        if ($cmd_get_arg(i) == name) {
+            let n = $cmd_get_arg(i + 1).parse_int(10);
+            if (n != nil)
+                return n;
+        }
+    }
+    return fallback;
+}
+
+let HEADLESS = has_flag("--headless");
+let MAX_MATCHES = flag_int("--matches", 0);
+let NUM_ISLANDS = flag_int("--islands", 6).max(1);
+let POP_SIZE = flag_int("--population", 64).max(2);
+let SEED = flag_int("--seed", $time_current_ms());
+
+let PI = 3.141592653589793;
+let TAU = 2.0 * PI;
+let DT = 0.1;
+let EPISODE_TICKS = 300;
+let EPISODES = 10;
+let MIN_ROOM = 5;
+let MAX_ROOM = flag_int("--max-room", 8).max(MIN_ROOM);
+let BODY_RADIUS = 0.25;
+let MAX_FORWARD = 3.0;
+let MAX_STRAFE = 2.5;
+let MAX_TURN = 3.5;
+let HEALTH = 100.0;
+let KNIFE_RANGE = 1.0;
+let KNIFE_DAMAGE = 34.0;
+let KNIFE_DOT = 0.70710678;
+let ATTACK_COOLDOWN = 5;
+let MIGRATE_PERIOD = flag_int("--migrate-period", 10_000).max(1);
+
+let VIEW_BINS = 30;
+let VIEW_CHANNELS = 4;
+let VIEW_INPUTS = VIEW_BINS * VIEW_CHANNELS;
+let BODY_INPUTS = 6;
+let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
+let HIDDEN = 8;
+let OUTPUTS = 4;
+let NUM_INPUTS = NUM_SENSORS + HIDDEN;
+let NUM_WEIGHTS = HIDDEN * NUM_INPUTS + OUTPUTS * HIDDEN;
+let OUTPUT_BASE = HIDDEN * NUM_INPUTS;
+let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
+
+// Rays cover 120 degrees and are fixed relative to the agent's facing.
+let RAY_X = [];
+let RAY_Y = [];
+for (let var i = 0; i < VIEW_BINS; ++i) {
+    let angle = ((i.to_f() + 0.5) / VIEW_BINS.to_f() - 0.5) * (2.0 * PI / 3.0);
+    RAY_X.push(angle.cos());
+    RAY_Y.push(angle.sin());
+}
+
+fun new_genome(rng) {
+    let weights = ByteArray.with_size(NUM_WEIGHTS * 4);
+    for (let var i = 0; i < NUM_WEIGHTS; ++i)
+        weights.set_f32(i, rng.float(-W_SCALE, W_SCALE));
+    return weights;
+}
+
+fun mutate(rng, parent) {
+    let weights = ByteArray.with_size(NUM_WEIGHTS * 4);
+    weights.memcpy(0, parent, 0, NUM_WEIGHTS * 4);
+    let count = (NUM_WEIGHTS.to_f() * 0.02).floor().max(1);
+    for (let var i = 0; i < count; ++i) {
+        let idx = rng.index(NUM_WEIGHTS);
+        if (rng.float(0.0, 1.0) < 0.05)
+            weights.set_f32(idx, rng.float(-W_SCALE, W_SCALE));
+        else
+            weights.set_f32(idx, rng.normal(weights.get_f32(idx), 0.08));
+    }
+    return weights;
+}
+
+class Individual {
+    init(self, weights, age) {
+        self.weights = weights;
+        self.age = age;
+    }
+}
+
+// The grid has one metre cells. All MVP rooms have an empty rectangular
+// interior and a one cell wall border; the tile array is ready for cover.
+class Arena {
+    init(self, inner_w, inner_h) {
+        self.inner_w = inner_w;
+        self.inner_h = inner_h;
+        self.width = inner_w + 2;
+        self.height = inner_h + 2;
+        self.tiles = ByteArray.with_size(self.width * self.height * 4);
+        for (let var y = 0; y < self.height; ++y) {
+            for (let var x = 0; x < self.width; ++x) {
+                if (x == 0 || y == 0 || x == self.width - 1 || y == self.height - 1)
+                    self.tiles.set_u32(y * self.width + x, 1);
+            }
+        }
+    }
+
+    // Empty rooms allow direct wall distance, without stepping through tiles.
+    wall_distance(self, x, y, dx, dy) {
+        let var tx = 1.0e20;
+        let var ty = 1.0e20;
+        if (dx > 0.0)
+            tx = (self.inner_w.to_f() + 1.0 - x) / dx;
+        else if (dx < 0.0)
+            tx = (1.0 - x) / dx;
+        if (dy > 0.0)
+            ty = (self.inner_h.to_f() + 1.0 - y) / dy;
+        else if (dy < 0.0)
+            ty = (1.0 - y) / dy;
+        return tx.min(ty);
+    }
+}
+
+class Fighter {
+    init(self, individual) {
+        self.individual = individual;
+        self.inputs = ByteArray.with_size(NUM_INPUTS * 4);
+        self.next_hidden = ByteArray.with_size(HIDDEN * 4);
+        self.action = Array.with_size(OUTPUTS, 0.0);
+        self.reset(2.0, 2.0, 0.0);
+    }
+
+    reset(self, x, y, angle) {
+        self.x = x;
+        self.y = y;
+        self.angle = angle;
+        self.vx = 0.0;
+        self.vy = 0.0;
+        self.health = HEALTH;
+        self.cooldown = 0;
+        self.inputs.fill_u32(0, NUM_INPUTS, 0);
+        self.inputs.set_f32(NUM_SENSORS - 1, 1.0);
+    }
+
+    sense(self, arena, other, rng) {
+        let inputs = self.inputs;
+        let c = self.angle.cos();
+        let s = self.angle.sin();
+        let ex = other.x - self.x;
+        let ey = other.y - self.y;
+        let dist2 = ex * ex + ey * ey;
+        let evx = other.vx - self.vx;
+        let evy = other.vy - self.vy;
+
+        for (let var i = 0; i < VIEW_BINS; ++i) {
+            let dx = c * RAY_X[i] - s * RAY_Y[i];
+            let dy = s * RAY_X[i] + c * RAY_Y[i];
+            let wall = arena.wall_distance(self.x, self.y, dx, dy);
+            let base = i * VIEW_CHANNELS;
+            inputs.set_f32(base, 1.0 / (1.0 + wall));
+            inputs.set_f32(base + 1, 0.0);
+            inputs.set_f32(base + 2, 0.0);
+            inputs.set_f32(base + 3, 0.0);
+
+            // Ray against the opponent's body. The wall test also handles
+            // occlusion when interior cover is added to wall_distance.
+            let along = ex * dx + ey * dy;
+            let side2 = dist2 - along * along;
+            if (along > 0.0 && side2 <= BODY_RADIUS * BODY_RADIUS) {
+                let near = (along - (BODY_RADIUS * BODY_RADIUS - side2).max(0.0).sqrt()).max(0.0);
+                if (near < wall) {
+                    inputs.set_f32(base + 1, 1.0);
+                    inputs.set_f32(base + 2, 1.0 / (1.0 + near));
+                    inputs.set_f32(base + 3, ((evx * dx + evy * dy) / MAX_FORWARD).clip(-1.0, 1.0));
+                }
+            }
+        }
+
+        inputs.set_f32(VIEW_INPUTS, self.health / HEALTH);
+        inputs.set_f32(VIEW_INPUTS + 1, (self.vx * c + self.vy * s) / MAX_FORWARD);
+        inputs.set_f32(VIEW_INPUTS + 2, (-self.vx * s + self.vy * c) / MAX_STRAFE);
+        inputs.set_f32(VIEW_INPUTS + 3, self.cooldown.to_f() / ATTACK_COOLDOWN.to_f());
+        inputs.set_f32(VIEW_INPUTS + 4, rng.float(-1.0, 1.0));
+    }
+
+    think(self) {
+        let weights = self.individual.weights;
+        for (let var i = 0; i < HIDDEN; ++i) {
+            let value = weights.dot_f32(i * NUM_INPUTS, 1, self.inputs, 0, 1, NUM_INPUTS);
+            self.next_hidden.set_f32(i, value.clip(0.0, 8.0));
+        }
+        self.inputs.memcpy(NUM_SENSORS * 4, self.next_hidden, 0, HIDDEN * 4);
+
+        let out = self.action;
+        for (let var i = 0; i < OUTPUTS; ++i) {
+            let v = weights.dot_f32(OUTPUT_BASE + i * HIDDEN, 1, self.next_hidden, 0, 1, HIDDEN);
+            out[i] = v / (1.0 + v.abs());
+        }
+        out[3] = (out[3] + 1.0) * 0.5;
+        return out;
+    }
+
+    move(self, arena, action) {
+        self.angle = self.angle + action[1] * MAX_TURN * DT;
+        if (self.angle > PI)
+            self.angle = self.angle - TAU;
+        else if (self.angle < -PI)
+            self.angle = self.angle + TAU;
+
+        let var f = action[0];
+        let var side = action[2];
+        let scale = (f * f + side * side).sqrt().max(1.0);
+        f = f / scale;
+        side = side / scale;
+        let c = self.angle.cos();
+        let s = self.angle.sin();
+        self.vx = c * f * MAX_FORWARD - s * side * MAX_STRAFE;
+        self.vy = s * f * MAX_FORWARD + c * side * MAX_STRAFE;
+
+        // A tenth of a second is shorter than one tile at human running
+        // speed. Clamping to the free rectangle gives swept wall collision.
+        self.x = (self.x + self.vx * DT).clip(1.0 + BODY_RADIUS,
+                                             arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+        self.y = (self.y + self.vy * DT).clip(1.0 + BODY_RADIUS,
+                                             arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        if (self.cooldown > 0)
+            self.cooldown = self.cooldown - 1;
+    }
+
+    strikes(self, other, attack_probability, rng) {
+        if (self.cooldown > 0 || rng.float(0.0, 1.0) >= attack_probability)
+            return false;
+        self.cooldown = ATTACK_COOLDOWN;
+        let dx = other.x - self.x;
+        let dy = other.y - self.y;
+        let dist2 = dx * dx + dy * dy;
+        let reach = KNIFE_RANGE + BODY_RADIUS;
+        if (dist2 > reach * reach || dist2 < 0.000001)
+            return false;
+        return (dx * self.angle.cos() + dy * self.angle.sin()) >= KNIFE_DOT * dist2.sqrt();
+    }
+}
+
+class Match {
+    init(self, first, second, seed) {
+        self.seed = seed;
+        self.rng = Xoshiro128(seed);
+        let rng = self.rng;
+        let size = rng.index(MAX_ROOM - MIN_ROOM + 1) + MIN_ROOM;
+        self.arena = Arena(size, size);
+        self.fighters = [Fighter(first), Fighter(second)];
+        self.kills = [0, 0];
+        self.episode = 0;
+        self.tick = 0;
+        self.done = false;
+        self.reset_episode();
+    }
+
+    reset_episode(self) {
+        let rng = self.rng;
+        let arena = self.arena;
+        let ax = rng.float(1.0 + BODY_RADIUS, arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+        let ay = rng.float(1.0 + BODY_RADIUS, arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        let var bx = 0.0;
+        let var by = 0.0;
+        loop {
+            bx = rng.float(1.0 + BODY_RADIUS, arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+            by = rng.float(1.0 + BODY_RADIUS, arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+            let dx = bx - ax;
+            let dy = by - ay;
+            if (dx * dx + dy * dy >= 4.0)
+                break;
+        }
+        self.fighters[0].reset(ax, ay, rng.float(-PI, PI));
+        self.fighters[1].reset(bx, by, rng.float(-PI, PI));
+        self.tick = 0;
+    }
+
+    step(self) {
+        let rng = self.rng;
+        let a = self.fighters[0];
+        let b = self.fighters[1];
+        let old_ax = a.x;
+        let old_ay = a.y;
+        let old_bx = b.x;
+        let old_by = b.y;
+        a.sense(self.arena, b, rng);
+        b.sense(self.arena, a, rng);
+        let aa = a.think();
+        let ba = b.think();
+        a.move(self.arena, aa);
+        b.move(self.arena, ba);
+
+        // Resolve body overlap symmetrically so neither side can walk
+        // through its opponent or gain priority from acting first.
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if (distance < 2.0 * BODY_RADIUS && distance > 0.000001) {
+            let push = (2.0 * BODY_RADIUS - distance) * 0.5 / distance;
+            a.x = (a.x - dx * push).clip(1.0 + BODY_RADIUS,
+                                        self.arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+            a.y = (a.y - dy * push).clip(1.0 + BODY_RADIUS,
+                                        self.arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+            b.x = (b.x + dx * push).clip(1.0 + BODY_RADIUS,
+                                        self.arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+            b.y = (b.y + dy * push).clip(1.0 + BODY_RADIUS,
+                                        self.arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        }
+        a.vx = (a.x - old_ax) / DT;
+        a.vy = (a.y - old_ay) / DT;
+        b.vx = (b.x - old_bx) / DT;
+        b.vy = (b.y - old_by) / DT;
+
+        let hit_a = a.strikes(b, aa[3], rng);
+        let hit_b = b.strikes(a, ba[3], rng);
+        if (hit_a)
+            b.health = b.health - KNIFE_DAMAGE;
+        if (hit_b)
+            a.health = a.health - KNIFE_DAMAGE;
+        self.tick = self.tick + 1;
+
+        if (a.health <= 0.0 || b.health <= 0.0 || self.tick >= EPISODE_TICKS) {
+            if (b.health <= 0.0)
+                self.kills[0] = self.kills[0] + 1;
+            if (a.health <= 0.0)
+                self.kills[1] = self.kills[1] + 1;
+            self.episode = self.episode + 1;
+            if (self.episode == EPISODES)
+                self.done = true;
+            else
+                self.reset_episode();
+        }
+    }
+}
+
+class Island {
+    init(self, index, seed) {
+        self.index = index;
+        self.rng = Xoshiro128(seed + index * 7919);
+        self.population = [];
+        for (let var i = 0; i < POP_SIZE; ++i)
+            self.population.push(Individual(new_genome(self.rng), 0));
+        self.pending_migrants = [];
+        self.matches = 0;
+        self.episodes = 0;
+        self.kills = 0;
+        self.zero_matches = 0;
+        self.migrants_sent = 0;
+        self.migrants_received = 0;
+        self.last_offer_ms = -3000;
+        self.duel = nil;
+        self.pick_match();
+    }
+
+    pick_match(self) {
+        let a = self.rng.index(POP_SIZE);
+        let var b = self.rng.index(POP_SIZE - 1);
+        if (b >= a)
+            b = b + 1;
+        self.first_idx = a;
+        self.second_idx = b;
+        self.duel = Match(self.population[a], self.population[b],
+                          self.rng.index(2_147_483_647));
+    }
+
+    receive(self, migrant) {
+        self.pending_migrants.push(migrant);
+    }
+
+    // Offer a complete match only when the oldest resident is selected.
+    // The viewer gets genomes and a seed, then simulates its own copy.
+    match_offer(self, now) {
+        if (self.duel.episode != 0 || self.duel.tick != 0 ||
+            now < self.last_offer_ms + 3000)
+            return nil;
+        let var oldest = 0;
+        let var age_sum = self.population[0].age;
+        for (let var i = 1; i < POP_SIZE; ++i) {
+            age_sum = age_sum + self.population[i].age;
+            if (self.population[i].age > self.population[oldest].age)
+                oldest = i;
+        }
+        if (oldest != self.first_idx && oldest != self.second_idx)
+            return nil;
+        self.last_offer_ms = now;
+        return {
+            kind: "MATCH", index: self.index, match_no: self.matches + 1,
+            seed: self.duel.seed, room_w: self.duel.arena.inner_w,
+            room_h: self.duel.arena.inner_h,
+            oldest_age: self.population[oldest].age,
+            mean_age: age_sum.idiv(POP_SIZE),
+            oldest_side: oldest == self.first_idx ? 0 : 1,
+            first_weights: self.population[self.first_idx].weights,
+            second_weights: self.population[self.second_idx].weights,
+            first_age: self.population[self.first_idx].age,
+            second_age: self.population[self.second_idx].age,
+            matches: self.matches, kills: self.kills,
+            zero_matches: self.zero_matches,
+            migrants_sent: self.migrants_sent,
+            migrants_received: self.migrants_received
+        };
+    }
+
+    apply_migrants(self) {
+        if (self.pending_migrants.len == 0)
+            return;
+        let var replaced = Array.with_size(POP_SIZE, false);
+        for (let var m = 0; m < self.pending_migrants.len; ++m) {
+            if (m > 0 && m % POP_SIZE == 0)
+                replaced = Array.with_size(POP_SIZE, false);
+            let start = self.rng.index(POP_SIZE);
+            let var youngest = -1;
+            for (let var i = 0; i < POP_SIZE; ++i) {
+                let idx = (start + i) % POP_SIZE;
+                if (!replaced[idx] &&
+                    (youngest < 0 || self.population[idx].age < self.population[youngest].age))
+                    youngest = idx;
+            }
+            let migrant = self.pending_migrants[m];
+            self.population[youngest] = Individual(migrant[0], migrant[1]);
+            replaced[youngest] = true;
+            self.migrants_received = self.migrants_received + 1;
+        }
+        self.pending_migrants.resize(0, nil);
+    }
+
+    step(self) {
+        if (MAX_MATCHES > 0 && self.matches >= MAX_MATCHES)
+            return false;
+        self.duel.step();
+        if (!self.duel.done)
+            return false;
+
+        let ka = self.duel.kills[0];
+        let kb = self.duel.kills[1];
+        for (let var i = 0; i < POP_SIZE; ++i)
+            self.population[i].age = self.population[i].age + 1;
+        if (ka != kb) {
+            let win_first = ka > kb;
+            let winner_idx = win_first ? self.first_idx : self.second_idx;
+            let loser_idx = win_first ? self.second_idx : self.first_idx;
+            let winner = self.population[winner_idx];
+            self.population[loser_idx] = Individual(mutate(self.rng, winner.weights), 0);
+        }
+        self.matches = self.matches + 1;
+        self.episodes = self.episodes + EPISODES;
+        self.kills = self.kills + ka + kb;
+        if (ka == 0 && kb == 0)
+            self.zero_matches = self.zero_matches + 1;
+        self.apply_migrants();
+        if (MAX_MATCHES == 0 || self.matches < MAX_MATCHES)
+            self.pick_match();
+        return self.matches % MIGRATE_PERIOD == 0;
+    }
+
+    snapshot(self) {
+        let var oldest = 0;
+        let var age_sum = 0;
+        for (let var i = 0; i < POP_SIZE; ++i) {
+            oldest = oldest.max(self.population[i].age);
+            age_sum = age_sum + self.population[i].age;
+        }
+        let duel = self.duel;
+        let a = duel.fighters[0];
+        let b = duel.fighters[1];
+        return {
+            index: self.index, matches: self.matches, episodes: self.episodes,
+            kills: self.kills, zero_matches: self.zero_matches,
+            migrants_sent: self.migrants_sent, migrants_received: self.migrants_received,
+            oldest: oldest, mean_age: age_sum.idiv(POP_SIZE),
+            room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
+            episode: duel.episode, tick: duel.tick,
+            kills_a: duel.kills[0], kills_b: duel.kills[1],
+            ax: a.x, ay: a.y, adir: a.angle, ahp: a.health,
+            bx: b.x, by: b.y, bdir: b.angle, bhp: b.health
+        };
+    }
+}
+
+let MSG_SETUP = 0;
+let MSG_SNAPSHOT = 1;
+let MSG_MIGRANT = 3;
+let BATCH = 32;
+
+fun island_actor() {
+    let setup = $actor_recv();
+    let ids = setup[3];
+    let island = Island(setup[1], setup[2]);
+    let parent = $actor_parent();
+
+    loop {
+        loop {
+            let msg = $actor_poll();
+            if (msg == nil)
+                break;
+            if (msg[0] == MSG_SNAPSHOT)
+                $actor_send(parent, island.snapshot());
+            else if (msg[0] == MSG_MIGRANT)
+                island.receive(msg[1]);
+        }
+
+        for (let var i = 0; i < BATCH; ++i) {
+            if (!HEADLESS && island.duel.episode == 0 && island.duel.tick == 0) {
+                let offer = island.match_offer($time_current_ms());
+                if (offer != nil)
+                    $actor_send(parent, offer);
+            }
+            if (island.step()) {
+                if (ids.len > 1) {
+                    let side = island.rng.index(2) == 0 ? -1 : 1;
+                    let neighbour = (island.index + ids.len + side) % ids.len;
+                    let donor = island.population[island.rng.index(POP_SIZE)];
+                    $actor_send(ids[neighbour], [MSG_MIGRANT, [donor.weights, donor.age]]);
+                    island.migrants_sent = island.migrants_sent + 1;
+                    $println("Migration: island " + island.index.to_s() + " -> " +
+                             neighbour.to_s() + " at match " + island.matches.to_s() +
+                             ", migrant age " + donor.age.to_s());
+                }
+            }
+        }
+
+        if (MAX_MATCHES > 0 && island.matches >= MAX_MATCHES)
+            $actor_sleep(10);
+    }
+}
+
+fun spawn_islands() {
+    let ids = [];
+    for (let var i = 0; i < NUM_ISLANDS; ++i)
+        ids.push($actor_spawn(island_actor));
+    for (let var i = 0; i < NUM_ISLANDS; ++i)
+        $actor_send(ids[i], [MSG_SETUP, i, SEED, ids]);
+    return ids;
+}
+
+fun gather(ids) {
+    let snaps = Array.with_size(ids.len, nil);
+    for (let var i = 0; i < ids.len; ++i)
+        $actor_send(ids[i], [MSG_SNAPSHOT]);
+    for (let var i = 0; i < ids.len; ++i) {
+        let snap = $actor_recv();
+        snaps[snap.index] = snap;
+    }
+    return snaps;
+}
+
+fun run_headless(ids) {
+    let limit = MAX_MATCHES > 0 ? MAX_MATCHES : 1000;
+    let start = $time_current_ms();
+    $println("seed " + SEED.to_s() + "  islands " + NUM_ISLANDS.to_s() +
+             "  population " + POP_SIZE.to_s() + "  matches/island " + limit.to_s());
+    $println("island  matches  kills  zero  oldest  mean_age  sent  received");
+    loop {
+        let snaps = gather(ids);
+        let var finished = true;
+        for (let var i = 0; i < snaps.len; ++i) {
+            let s = snaps[i];
+            if (s.matches < limit)
+                finished = false;
+            $println(i.to_s().rpad(8, ' ') + s.matches.to_s().rpad(9, ' ') +
+                     s.kills.to_s().rpad(7, ' ') + s.zero_matches.to_s().rpad(6, ' ') +
+                     s.oldest.to_s().rpad(8, ' ') + s.mean_age.to_s().rpad(10, ' ') +
+                     s.migrants_sent.to_s().rpad(6, ' ') + s.migrants_received.to_s());
+        }
+        if (finished) {
+            $println("elapsed_ms " + ($time_current_ms() - start).to_s());
+            return;
+        }
+        $actor_sleep(1000);
+    }
+}
+
+let FRAME_W = 900;
+let FRAME_H = 640;
+let VIEW_W = 620;
+let COL_BG = 0xFF_17_1C_22;
+let COL_FLOOR = 0xFF_29_32_3A;
+let COL_WALL = 0xFF_61_6B_72;
+let COL_A = 0xFF_52_C9_FF;
+let COL_B = 0xFF_FF_9B_57;
+let COL_TEXT = 0xFF_E1_E8_EB;
+let COL_DIM = 0xFF_9B_A9_B0;
+
+fun fill_rect(buf, x, y, w, h, color) {
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(FRAME_W);
+    let y1 = (y + h).min(FRAME_H);
+    for (let var row = y0; row < y1; ++row)
+        if (x1 > x0)
+            buf.fill_u32(row * FRAME_W + x0, x1 - x0, color);
+}
+
+fun draw_disc(buf, cx, cy, radius, color) {
+    for (let var dy = -radius; dy <= radius; ++dy) {
+        let half = (radius * radius - dy * dy).to_f().sqrt().floor();
+        fill_rect(buf, cx - half, cy + dy, 2 * half + 1, 1, color);
+    }
+}
+
+let FONT = {
+    "0": [7,5,5,5,7], "1": [2,6,2,2,7], "2": [7,1,7,4,7], "3": [7,1,7,1,7],
+    "4": [5,5,7,1,1], "5": [7,4,7,1,7], "6": [7,4,7,5,7], "7": [7,1,1,1,1],
+    "8": [7,5,7,5,7], "9": [7,5,7,1,7],
+    "A": [7,5,7,5,5], "B": [6,5,6,5,6], "C": [7,4,4,4,7], "D": [6,5,5,5,6],
+    "E": [7,4,7,4,7], "F": [7,4,7,4,4], "G": [7,4,5,5,7], "H": [5,5,7,5,5],
+    "I": [7,2,2,2,7], "J": [1,1,1,5,7], "K": [5,5,6,5,5], "L": [4,4,4,4,7],
+    "M": [5,7,7,5,5], "N": [6,5,5,5,5], "O": [7,5,5,5,7], "P": [7,5,7,4,4],
+    "R": [7,5,6,5,5], "S": [7,4,7,1,7], "T": [7,2,2,2,2], "U": [5,5,5,5,7],
+    "V": [5,5,5,5,2], "W": [5,5,7,7,5], "X": [5,5,2,5,5], "Y": [5,5,2,2,2], "Z": [7,1,2,4,7],
+    " ": [0,0,0,0,0], ":": [0,2,0,2,0], "/": [1,1,2,4,4], "-": [0,0,7,0,0]
+};
+
+fun draw_text(buf, x, y, label, color) {
+    for (let var i = 0; i < label.len; ++i) {
+        let ch = label.char_at(i);
+        if (!FONT.has(ch))
+            continue;
+        let rows = FONT[ch];
+        for (let var row = 0; row < 5; ++row) {
+            for (let var col = 0; col < 3; ++col) {
+                if (((rows[row] >> (2 - col)) & 1) != 0)
+                    fill_rect(buf, x + i * 8 + col * 2, y + row * 2, 2, 2, color);
+            }
+        }
+    }
+}
+
+fun draw_fighter(buf, x, y, angle, hp, color) {
+    draw_disc(buf, x, y, 9, color);
+    let tip_x = x + (angle.cos() * 15.0).floor();
+    let tip_y = y + (angle.sin() * 15.0).floor();
+    draw_disc(buf, tip_x, tip_y, 3, COL_TEXT);
+    fill_rect(buf, x - 15, y - 21, 30, 4, COL_BG);
+    fill_rect(buf, x - 15, y - 21, (hp.max(0.0) * 0.3).floor(), 4, color);
+}
+
+fun replay_snapshot(config, duel) {
+    let a = duel.fighters[0];
+    let b = duel.fighters[1];
+    return {
+        index: config.index, matches: config.match_no,
+        kills: config.kills, zero_matches: config.zero_matches,
+        migrants_sent: config.migrants_sent,
+        migrants_received: config.migrants_received,
+        oldest: config.oldest_age, mean_age: config.mean_age,
+        oldest_side: config.oldest_side,
+        room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
+        episode: duel.episode.min(EPISODES - 1), tick: duel.tick,
+        kills_a: duel.kills[0], kills_b: duel.kills[1],
+        ax: a.x, ay: a.y, adir: a.angle, ahp: a.health,
+        bx: b.x, by: b.y, bdir: b.angle, bhp: b.health
+    };
+}
+
+fun render(buf, snap, view_speed, paused) {
+    buf.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+    if (snap == nil) {
+        draw_text(buf, 42, 300, "WAITING FOR OLDEST MATCH", COL_TEXT);
+        return;
+    }
+    let scale = 36.min(VIEW_W.idiv(snap.room_w + 2)).min(FRAME_H.idiv(snap.room_h + 2)).max(4);
+    let ox = (VIEW_W - (snap.room_w + 2) * scale).idiv(2);
+    let oy = (FRAME_H - (snap.room_h + 2) * scale).idiv(2);
+    for (let var y = 0; y < snap.room_h + 2; ++y) {
+        for (let var x = 0; x < snap.room_w + 2; ++x) {
+            let wall = x == 0 || y == 0 || x == snap.room_w + 1 || y == snap.room_h + 1;
+            fill_rect(buf, ox + x * scale, oy + y * scale, scale - 1, scale - 1,
+                      wall ? COL_WALL : COL_FLOOR);
+        }
+    }
+    draw_fighter(buf, ox + (snap.ax * scale).floor(), oy + (snap.ay * scale).floor(),
+                 snap.adir, snap.ahp, COL_A);
+    draw_fighter(buf, ox + (snap.bx * scale).floor(), oy + (snap.by * scale).floor(),
+                 snap.bdir, snap.bhp, COL_B);
+
+    let px = VIEW_W + 20;
+    draw_text(buf, px, 30, "ARENA LIFE", COL_TEXT);
+    draw_text(buf, px, 65, "ISLAND " + snap.index.to_s(), COL_DIM);
+    draw_text(buf, px, 90, "MATCH " + snap.matches.to_s(), COL_TEXT);
+    draw_text(buf, px, 115, "EPISODE " + (snap.episode + 1).to_s() + "/10", COL_TEXT);
+    draw_text(buf, px, 140, "TIME " + (snap.tick.idiv(10)).to_s() + "/30", COL_TEXT);
+    draw_text(buf, px, 175, "BLUE KILLS " + snap.kills_a.to_s(), COL_A);
+    draw_text(buf, px, 200, "ORANGE KILLS " + snap.kills_b.to_s(), COL_B);
+    draw_text(buf, px, 245, "ROOM " + snap.room_w.to_s() + " X " + snap.room_h.to_s(), COL_TEXT);
+    draw_text(buf, px, 280, "TOTAL KILLS " + snap.kills.to_s(), COL_TEXT);
+    draw_text(buf, px, 305, "ZERO MATCHES " + snap.zero_matches.to_s(), COL_TEXT);
+    draw_text(buf, px, 340, "OLDEST " + snap.oldest.to_s(), COL_TEXT);
+    draw_text(buf, px, 365, "MEAN AGE " + snap.mean_age.to_s(), COL_TEXT);
+    draw_text(buf, px, 400, "MIGRANTS IN " + snap.migrants_received.to_s(), COL_TEXT);
+    draw_text(buf, px, 425, "MIGRANTS OUT " + snap.migrants_sent.to_s(), COL_TEXT);
+    draw_text(buf, px, 460,
+              snap.oldest_side == 0 ? "WATCH BLUE AGE " + snap.oldest.to_s() :
+                                      "WATCH ORANGE AGE " + snap.oldest.to_s(), COL_TEXT);
+    draw_text(buf, px, 500, "VIEW " + view_speed.to_s() + "X", COL_TEXT);
+    if (paused)
+        draw_text(buf, px, 525, "VIEW PAUSED", COL_TEXT);
+    draw_text(buf, px, 575, "F SPEED", COL_DIM);
+    draw_text(buf, px, 595, "SPACE PAUSE", COL_DIM);
+}
+
+let island_ids = spawn_islands();
+if (HEADLESS) {
+    run_headless(island_ids);
+    $exit(0);
+}
+
+let window = $window_create(FRAME_W, FRAME_H, "Arena Life", 0);
+let frame = ByteArray.with_size(FRAME_W * FRAME_H * 4);
+let var next_offer = nil;
+let var view_config = nil;
+let var view_duel = nil;
+let var last_draw = 0;
+let var last_play_ms = $time_current_ms();
+let var play_credit = 0.0;
+let var view_speed = 1;
+let var paused = false;
+
+loop {
+    loop {
+        let msg = $actor_poll();
+        if (msg == nil)
+            break;
+        if (msg instanceof Dict) {
+            if (msg.kind == "MATCH" &&
+                (next_offer == nil || msg.oldest_age > next_offer.oldest_age ||
+                 (msg.oldest_age == next_offer.oldest_age && msg.match_no > next_offer.match_no)))
+                next_offer = msg;
+        }
+        else if (msg.kind == "CLOSE_WINDOW")
+            $exit(0);
+        else if (msg.kind == "KEY_DOWN") {
+            if (msg.key == "F")
+                view_speed = view_speed % 4 + 1;
+            else if (msg.key == "SPACE")
+                paused = !paused;
+        }
+    }
+
+    let now = $time_current_ms();
+    if ((view_duel == nil || view_duel.done) && next_offer != nil) {
+        view_config = next_offer;
+        next_offer = nil;
+        view_duel = Match(
+            Individual(view_config.first_weights, view_config.first_age),
+            Individual(view_config.second_weights, view_config.second_age),
+            view_config.seed
+        );
+        $println("Viewing island " + view_config.index.to_s() + " match " +
+                 view_config.match_no.to_s() + ", oldest age " +
+                 view_config.oldest_age.to_s());
+        play_credit = 0.0;
+        last_play_ms = now;
+    }
+
+    if (view_duel != nil && !view_duel.done && !paused) {
+        play_credit = play_credit + (now - last_play_ms).to_f() * view_speed.to_f() / 100.0;
+        let steps = play_credit.floor();
+        play_credit = play_credit - steps.to_f();
+        for (let var i = 0; i < steps; ++i) {
+            if (view_duel.done)
+                break;
+            view_duel.step();
+        }
+    }
+    last_play_ms = now;
+
+    if (now >= last_draw + 33) {
+        let snap = view_duel == nil ? nil : replay_snapshot(view_config, view_duel);
+        render(frame, snap, view_speed, paused);
+        $window_draw_frame(window, frame);
+        last_draw = now;
+    }
+    $actor_sleep(2);
+}
