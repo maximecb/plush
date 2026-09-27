@@ -350,7 +350,8 @@ class Fighter {
             inputs.set_f32(base, 1.0 / (1.0 + wall));
             let in_bin = opponent_visible && opponent_left <= BIN_RIGHT[i] &&
                          opponent_right >= BIN_LEFT[i];
-            inputs.set_f32(base + 1, in_bin ? 1.0 : 0.0);
+            // Presence also identifies the visible opponent's weapon.
+            inputs.set_f32(base + 1, in_bin ? (other.gun_ammo > 0 ? 1.0 : 0.5) : 0.0);
             inputs.set_f32(base + 2, in_bin ? 1.0 / (1.0 + opponent_near) : 0.0);
             inputs.set_f32(base + 3, in_bin ? opponent_velocity : 0.0);
             let gun_in_bin = gun_visible && gun_left <= BIN_RIGHT[i] &&
@@ -726,13 +727,18 @@ fun check_movement() {
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     fighter.sense(vision_arena, enemy, true, 12.0, 10.0, Xoshiro128(1));
-    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 1.0);
+    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 0.5);
     assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 4) > 0.0);
+    enemy.gun_ammo = GUN_AMMO;
+    fighter.sense(vision_arena, enemy, true, 12.0, 10.0, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 1.0);
+    enemy.gun_ammo = 0;
     let peripheral = 55.0 * PI / 180.0;
     enemy.reset(10.0 + 5.0 * peripheral.cos(), 10.0 + 5.0 * peripheral.sin(), 0.0);
     fighter.sense(vision_arena, enemy, false, 0.0, 0.0, Xoshiro128(1));
-    assert(fighter.inputs.get_f32((VIEW_BINS - 1) * VIEW_CHANNELS + 1) == 1.0);
+    assert(fighter.inputs.get_f32((VIEW_BINS - 1) * VIEW_CHANNELS + 1) == 0.5);
     enemy.reset(13.0, 10.0, 0.0);
+    enemy.gun_ammo = GUN_AMMO;
     vision_arena.add_notch(12, 10);
     fighter.sense(vision_arena, enemy, true, 13.0, 10.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 0.0);
