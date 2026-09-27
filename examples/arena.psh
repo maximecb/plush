@@ -12,10 +12,11 @@
 // Movement and turning outputs command bounded acceleration.
 // Islands always train at full speed. Headless: --headless --matches 1000.
 // --migrate-period N overrides the default of 2,000 for short experiments.
-// --max-room N overrides the initial 5 to 9 metre room range.
+// --max-room N overrides the initial 5 to 10 metre room range.
 // --check-movement runs movement and arena assertions without starting islands.
 // Render check: --check-render verifies pickup and shot colors without a window.
 // Energy check: --check-energy verifies replenishment, action costs, and exhaustion.
+// Map check: --check-maps validates varied layouts, clearance, and spawning.
 
 from random import Xoshiro128;
 
@@ -49,7 +50,7 @@ let DT = 0.1;
 let EPISODE_TICKS = 300;
 let EPISODES = 8;
 let MIN_ROOM = 5;
-let MAX_ROOM = flag_int("--max-room", 9).max(MIN_ROOM);
+let MAX_ROOM = flag_int("--max-room", 10).max(MIN_ROOM);
 let BODY_RADIUS = 0.325;
 let MAX_FORWARD = 3.0;
 let MAX_STRAFE = 1.6;
@@ -88,6 +89,8 @@ let SHOT_TRACE_TICKS = 4;
 let ATTACK_COOLDOWN = 5;
 let ATTACK_ANIM_TICKS = 2;
 let NOTCH_CHANCE = 0.4;
+let MAX_OBSTACLE_FRACTION = 0.28;
+let ROOM_LAYOUT_CHANCE = 0.7;
 let MIGRATE_PERIOD = flag_int("--migrate-period", 2_000).max(1);
 let MATCH_OFFER_INTERVAL_MS = 1500;
 
@@ -186,7 +189,7 @@ class Individual {
     }
 }
 
-// The grid has one metre cells, a one cell wall border, and optional notches.
+// The grid has one metre cells, a wall border, and sparse connected cover layouts.
 class Arena {
     init(self, inner_w, inner_h, rng) {
         self.inner_w = inner_w;
@@ -200,28 +203,165 @@ class Arena {
                     self.tiles.set_u32(y * self.width + x, 1);
             }
         }
-        if (rng != nil) {
-            let walls = [];
-            for (let var i = 0; i < 4; ++i)
-                walls.push(rng.float(0.0, 1.0) < NOTCH_CHANCE);
-            if ((walls[0] || walls[1]) && (walls[2] || walls[3])) {
-                if (rng.index(2) == 0) {
-                    walls[0] = false;
-                    walls[1] = false;
-                } else {
-                    walls[2] = false;
-                    walls[3] = false;
+        if (rng != nil)
+            self.generate_cover(rng);
+    }
+
+    generate_cover(self, rng) {
+        let room_layout = rng.float(0.0, 1.0) < ROOM_LAYOUT_CHANCE;
+        // Occasionally retain an open room; otherwise vary the amount of cover.
+        if (!room_layout && rng.index(8) == 0)
+            return;
+        let fraction = room_layout ? MAX_OBSTACLE_FRACTION : 0.16;
+        let limit = (self.inner_w * self.inner_h * fraction).floor().max(1);
+        let var occupied = room_layout ? self.generate_rooms(rng, limit) : 0;
+        let budget = room_layout ? (occupied + rng.index(3)).min(limit) : 1 + rng.index(limit);
+        for (let var attempt = 0; attempt < 24 && occupied < budget; ++attempt) {
+            let attached = rng.float(0.0, 1.0) < NOTCH_CHANCE;
+            let var w = 1;
+            let var h = 1;
+            if (attached) {
+                w = 1 + rng.index(2);
+                h = 1 + rng.index(2);
+            } else {
+                let shape = rng.index(4);
+                if (shape == 1)
+                    w = 2 + rng.index(2);
+                else if (shape == 2)
+                    h = 2 + rng.index(2);
+                else if (shape == 3) {
+                    w = 2;
+                    h = 2;
                 }
             }
-            if (walls[0])
-                self.add_notch(rng.index(inner_w - 2) + 2, 1);
-            if (walls[1])
-                self.add_notch(rng.index(inner_w - 2) + 2, inner_h);
-            if (walls[2])
-                self.add_notch(1, rng.index(inner_h - 2) + 2);
-            if (walls[3])
-                self.add_notch(inner_w, rng.index(inner_h - 2) + 2);
+            if (occupied + w * h > budget)
+                continue;
+            // Interior cover has a floor path on all four sides.
+            let var x = 2 + rng.index(self.inner_w - w - 1);
+            let var y = 2 + rng.index(self.inner_h - h - 1);
+            if (attached) {
+                let wall = rng.index(4);
+                if (wall == 0)
+                    x = 1;
+                else if (wall == 1)
+                    x = self.inner_w - w + 1;
+                else if (wall == 2)
+                    y = 1;
+                else
+                    y = self.inner_h - h + 1;
+            }
+            // Leave a full tile between separate obstacles, including at corners.
+            let var separated = true;
+            for (let var cy = (y - 1).max(1); cy <= (y + h).min(self.inner_h); ++cy)
+                for (let var cx = (x - 1).max(1); cx <= (x + w).min(self.inner_w); ++cx)
+                    if (self.solid(cx, cy))
+                        separated = false;
+            if (separated && self.try_cover(x, y, w, h))
+                occupied = occupied + w * h;
         }
+    }
+
+    generate_rooms(self, rng, limit) {
+        let rooms = [[1, 1, self.inner_w, self.inner_h]];
+        let var occupied = 0;
+        let target_rooms = 2 + rng.index(3);
+        for (let var attempt = 0; attempt < 16 && rooms.len < target_rooms; ++attempt) {
+            let index = rng.index(rooms.len);
+            let room = rooms[index];
+            let x = room[0];
+            let y = room[1];
+            let w = room[2];
+            let h = room[3];
+            if (w < 5 && h < 5)
+                continue;
+            let vertical = w >= 5 && (h < 5 || rng.index(2) == 0);
+            let span = vertical ? h : w;
+            if (occupied + span - 1 > limit)
+                continue;
+            // Each side retains at least two floor tiles of depth.
+            let split = 2 + rng.index((vertical ? w : h) - 4);
+            let wall_x = vertical ? x + split : x;
+            let wall_y = vertical ? y : y + split;
+            // A one-metre opening admits the 0.65-metre body. Prefer non-corner doors.
+            let door = span > 2 ? 1 + rng.index(span - 2) : rng.index(span);
+            if (!self.try_partition(wall_x, wall_y, span, vertical, door))
+                continue;
+            occupied = occupied + span - 1;
+            rooms[index] = vertical ? [x, y, split, h] : [x, y, w, split];
+            rooms.push(vertical ? [wall_x + 1, y, w - split - 1, h] :
+                                  [x, wall_y + 1, w, h - split - 1]);
+        }
+        return occupied;
+    }
+
+    try_partition(self, x, y, span, vertical, door) {
+        let cells = [];
+        for (let var i = 0; i < span; ++i) {
+            let cx = x + (vertical ? 0 : i);
+            let cy = y + (vertical ? i : 0);
+            if (self.solid(cx, cy))
+                return false;
+            if (i != door)
+                cells.push(cy * self.width + cx);
+        }
+        for (let var i = 0; i < cells.len; ++i)
+            self.tiles.set_u32(cells[i], 1);
+        // Check the complete wall and doorway together, including earlier rooms.
+        if (self.connected())
+            return true;
+        for (let var i = 0; i < cells.len; ++i)
+            self.tiles.set_u32(cells[i], 0);
+        return false;
+    }
+
+    try_cover(self, x, y, w, h) {
+        if (w <= 0 || h <= 0 || x < 1 || y < 1 ||
+            x + w > self.inner_w + 1 || y + h > self.inner_h + 1)
+            return false;
+        for (let var cy = y; cy < y + h; ++cy)
+            for (let var cx = x; cx < x + w; ++cx)
+                if (self.solid(cx, cy))
+                    return false;
+        for (let var cy = y; cy < y + h; ++cy)
+            for (let var cx = x; cx < x + w; ++cx)
+                self.tiles.set_u32(cy * self.width + cx, 1);
+        if (self.connected())
+            return true;
+        // Undo the entire proposal when any floor area would become unreachable.
+        for (let var cy = y; cy < y + h; ++cy)
+            for (let var cx = x; cx < x + w; ++cx)
+                self.tiles.set_u32(cy * self.width + cx, 0);
+        return false;
+    }
+
+    connected(self) {
+        let var start = -1;
+        let var floor_count = 0;
+        for (let var y = 1; y <= self.inner_h; ++y) {
+            for (let var x = 1; x <= self.inner_w; ++x) {
+                if (!self.solid(x, y)) {
+                    floor_count = floor_count + 1;
+                    start = y * self.width + x;
+                }
+            }
+        }
+        if (start < 0)
+            return false;
+        let visited = Array.with_size(self.width * self.height, false);
+        let queue = [start];
+        let offsets = [-1, 1, -self.width, self.width];
+        visited[start] = true;
+        for (let var head = 0; head < queue.len; ++head) {
+            for (let var i = 0; i < offsets.len; ++i) {
+                let next = queue[head] + offsets[i];
+                // The solid border keeps this four-neighbour traversal in bounds.
+                if (!visited[next] && self.tiles.get_u32(next) == 0) {
+                    visited[next] = true;
+                    queue.push(next);
+                }
+            }
+        }
+        return queue.len == floor_count;
     }
 
     add_notch(self, x, y) {
@@ -778,7 +918,12 @@ class Match {
 
 fun check_room_connected(arena) {
     let visited = Array.with_size(arena.width * arena.height, false);
-    let start = 2 * arena.width + 2;
+    let var start = -1;
+    for (let var y = 1; y <= arena.inner_h; ++y)
+        for (let var x = 1; x <= arena.inner_w; ++x)
+            if (!arena.solid(x, y))
+                start = y * arena.width + x;
+    assert(start >= 0);
     let queue = [start];
     visited[start] = true;
     for (let var head = 0; head < queue.len; ++head) {
@@ -801,6 +946,100 @@ fun check_room_connected(arena) {
     for (let var y = 1; y <= arena.inner_h; ++y)
         for (let var x = 1; x <= arena.inner_w; ++x)
             assert(arena.solid(x, y) || visited[y * arena.width + x]);
+}
+
+fun check_maps() {
+    let barrier = Arena(5, 5, nil);
+    assert(!barrier.try_cover(3, 1, 1, 5));
+    for (let var y = 1; y <= 5; ++y)
+        assert(!barrier.solid(3, y));
+    assert(!barrier.try_cover(1, 1, 5, 5));
+    assert(barrier.connected());
+    assert(barrier.try_cover(2, 1, 1, 1));
+    // A diagonal-only exit cannot rescue the corner at (1, 1).
+    assert(!barrier.try_cover(1, 2, 1, 1));
+    assert(!barrier.solid(1, 2) && barrier.solid(2, 1));
+    assert(!barrier.try_cover(2, 1, 1, 2));
+    assert(!barrier.solid(2, 2) && barrier.solid(2, 1));
+    let pillar = Arena(5, 5, nil);
+    assert(pillar.try_cover(2, 2, 1, 1));
+    check_room_connected(pillar);
+
+    let individual = Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "MAP", [80, 201, 255]);
+    let duel = Match(individual, individual, 123);
+    let var saw_open = false;
+    let var saw_pillar = false;
+    let var saw_wall = false;
+    let var saw_square = false;
+    let var saw_deep_recess = false;
+    let var maps = 0;
+    for (let var w = 5; w <= 10; ++w) {
+        for (let var h = 5; h <= 10; ++h) {
+            for (let var seed = 0; seed < 64; ++seed) {
+                let map_seed = seed * 7919 + 12345;
+                let arena = Arena(w, h, Xoshiro128(map_seed));
+                let replay = Arena(w, h, Xoshiro128(map_seed));
+                for (let var cell = 0; cell < arena.width * arena.height; ++cell)
+                    assert(arena.tiles.get_u32(cell) == replay.tiles.get_u32(cell));
+                assert(arena.connected());
+                check_room_connected(arena);
+                let var occupied = 0;
+                for (let var y = 1; y <= h; ++y) {
+                    for (let var x = 1; x <= w; ++x) {
+                        if (arena.solid(x, y)) {
+                            occupied = occupied + 1;
+                            if (x > 1 && x < w && y > 1 && y < h) {
+                                if (!arena.solid(x - 1, y) && !arena.solid(x + 1, y) &&
+                                    !arena.solid(x, y - 1) && !arena.solid(x, y + 1))
+                                    saw_pillar = true;
+                                if ((x + 1 < w && arena.solid(x + 1, y)) ||
+                                    (y + 1 < h && arena.solid(x, y + 1)))
+                                    saw_wall = true;
+                                if (x + 1 < w && y + 1 < h && arena.solid(x + 1, y) &&
+                                    arena.solid(x, y + 1) && arena.solid(x + 1, y + 1))
+                                    saw_square = true;
+                            }
+                            if ((x == 1 && arena.solid(2, y)) ||
+                                (x == w && arena.solid(w - 1, y)) ||
+                                (y == 1 && arena.solid(x, 2)) ||
+                                (y == h && arena.solid(x, h - 1)))
+                                saw_deep_recess = true;
+                            continue;
+                        }
+                        // Verify physical body clearance along each flood-fill edge.
+                        assert(!arena.blocked(x.to_f() + 0.5, y.to_f() + 0.5));
+                        for (let var step = 1; step <= 4; ++step) {
+                            let offset = step.to_f() * 0.25;
+                            if (!arena.solid(x + 1, y))
+                                assert(!arena.blocked(x.to_f() + 0.5 + offset, y.to_f() + 0.5));
+                            if (!arena.solid(x, y + 1))
+                                assert(!arena.blocked(x.to_f() + 0.5, y.to_f() + 0.5 + offset));
+                        }
+                    }
+                }
+                assert(occupied <= (w * h * MAX_OBSTACLE_FRACTION).floor());
+                if (occupied == 0)
+                    saw_open = true;
+                duel.arena = arena;
+                for (let var episode = 0; episode < 3; ++episode) {
+                    duel.reset_episode();
+                    let a = duel.fighters[0];
+                    let b = duel.fighters[1];
+                    assert(!arena.blocked(a.x, a.y) && !arena.blocked(b.x, b.y));
+                    assert(!arena.blocked(duel.gun_x, duel.gun_y));
+                    assert((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) >= 4.0);
+                }
+                maps = maps + 1;
+            }
+        }
+    }
+    assert(saw_open && saw_pillar && saw_wall && saw_square && saw_deep_recess);
+    $println("map checks passed: " + maps.to_s() + " layouts, 3 spawn rounds each");
+}
+
+if (has_flag("--check-maps")) {
+    check_maps();
+    $exit(0);
 }
 
 fun energy_scenario(individual, movement, attack_interval) {
@@ -1120,15 +1359,6 @@ fun check_movement() {
         assert(duel.fighters[0].y == replay.fighters[0].y);
         assert(duel.gun_x == replay.gun_x && duel.gun_y == replay.gun_y);
         assert(!duel.arena.blocked(duel.gun_x, duel.gun_y));
-        let var horizontal = false;
-        let var vertical = false;
-        for (let var x = 2; x < duel.arena.inner_w; ++x)
-            if (duel.arena.solid(x, 1) || duel.arena.solid(x, duel.arena.inner_h))
-                horizontal = true;
-        for (let var y = 2; y < duel.arena.inner_h; ++y)
-            if (duel.arena.solid(1, y) || duel.arena.solid(duel.arena.inner_w, y))
-                vertical = true;
-        assert(!(horizontal && vertical));
         check_room_connected(duel.arena);
         for (let var tick = 0; tick < 3; ++tick) {
             duel.step();
