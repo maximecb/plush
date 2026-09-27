@@ -44,9 +44,11 @@ let UPRIGHT_WEIGHT = 1.5;
 // on a track surface
 let FRICTION = 1.0;
 // An episode ends in a fall once the torso is below this fraction of its
-// starting height, or tilted more than 45 degrees from vertical
-let FALL_HEIGHT_FRACTION = 0.65;
-let FALL_TILT_COS = 0.7071067811865476;
+// starting height, or tilted more than 55 degrees from vertical
+let FALL_HEIGHT_FRACTION = 0.55;
+let FALL_TILT_COS = (55.0 * DEG).cos();
+// Scales the width of every starting pose range around its midpoint
+let POSE_RANDOMNESS = 0.5;
 let CONTROL_SUBSTEPS = 4;
 let ITERATIONS = 12;
 let WIDTH = 800;
@@ -58,12 +60,12 @@ let SKY_STEPS = 256;
 let TRACK_WIDTH = 3.0;
 let TRACK_LENGTH = 60.0;
 // Active joint axes in Simulator.joints order. The knee/elbow only bend on X;
-// the ankle uses X and Z. Each pair is [joint index, local Euler axis].
-// The neck and elbows are locked, as are the waist's twist and side bend,
-// the hips' twist and the shoulders' side swing, so each has zero range.
+// the ankle and shoulder use X and Z. Each pair is [joint index, local Euler
+// axis]. The neck and elbows are locked, as are the waist's twist and side
+// bend, and the hips' and shoulders' twist, so each has zero range.
 let CONTROL_AXES = [[0,0],
-                    [2,0],[2,2], [3,0], [4,0],[4,2], [5,0],
-                    [7,0],[7,2], [8,0], [9,0],[9,2], [10,0]];
+                    [2,0],[2,2], [3,0], [4,0],[4,2], [5,0],[5,2],
+                    [7,0],[7,2], [8,0], [9,0],[9,2], [10,0],[10,2]];
 let CONTROL_JOINT_AXES = CONTROL_AXES.len;
 let CONTROL_FOOT_POINTS = 8;
 let CONTROL_OUTPUTS = CONTROL_JOINT_AXES;
@@ -293,7 +295,7 @@ class Joint {
 
 // Sensors for a controller policy. Angles and angular speeds follow
 // CONTROL_AXES: waist X, then each side's hip XZ, knee X, ankle XZ and
-// shoulder X. Locked axes are omitted.
+// shoulder XZ. Locked axes are omitted.
 // Contact order for each foot is heel -X, heel +X, toe -X, toe +X, where X
 // is local to that foot. Distances/loads can be converted with foot_contact().
 class BipedObservation {
@@ -481,8 +483,8 @@ class Controller
 // Default torque limits mirror the active axes in Simulator.reset().
 fun biped_torque_limits() {
     return [140.0,
-            200.0,110.0, 160.0, 120.0,35.0, 70.0,
-            200.0,110.0, 160.0, 120.0,35.0, 70.0];
+            200.0,110.0, 160.0, 120.0,35.0, 70.0,60.0,
+            200.0,110.0, 160.0, 120.0,35.0, 70.0,60.0];
 }
 
 // A signed-distance contact interface leaves room for ramps/triangle meshes.
@@ -570,6 +572,12 @@ class Simulator {
     joint(self, name, a, b, p, lo, hi, torque, speed) {
         let j = Joint(name, a, b, p, lo, hi, torque, speed); self.joints.push(j); return j;
     }
+    // A random starting pose value, from a range narrowed by POSE_RANDOMNESS
+    pose_float(self, lo, hi) {
+        let mid = 0.5 * (lo + hi);
+        let half = 0.5 * POSE_RANDOMNESS * (hi - lo);
+        return self.rng.float(mid - half, mid + half);
+    }
     reset(self) {
         self.bodies = []; self.joints = []; self.time = 0.0; self.hold = false;
         // Eighties sportswear: red jacket, navy trousers, cream trainers
@@ -587,36 +595,37 @@ class Simulator {
             let shin = self.body(name+"shin", 3.5, Vec3(0.105,0.43,0.115), Vec3(s*0.105,0.335,0.0), 0x435E80);
             let foot = self.body(name+"foot", 1.5, Vec3(0.12,0.12,0.26), Vec3(s*0.105,0.06,0.065), 0xF2D09A);
             self.feet.push(foot);
-            self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,0.0,-15.0), Vec3(18.0,0.0,15.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
+            self.joint(name+"hip", pelvis, thigh, Vec3(s*0.105,0.98,0.0), Vec3(-130.0,0.0,-30.0), Vec3(18.0,0.0,30.0), Vec3(200.0,80.0,110.0), Vec3(6.0,4.0,4.0));
             self.joint(name+"knee", thigh, shin, Vec3(s*0.105,0.55,0.0), zero(), Vec3(120.0,0.0,0.0), Vec3(160.0,0.0,0.0), Vec3(10.0,1.0,1.0));
             self.joint(name+"ankle", shin, foot, Vec3(s*0.105,0.12,0.0), Vec3(-15.0,0.0,-20.0), Vec3(44.0,0.0,20.0), Vec3(120.0,0.0,35.0), Vec3(6.0,1.0,3.0));
             let upper = self.body(name+"upper arm", 2.0, Vec3(0.085,0.29,0.10), Vec3(s*0.245,1.345,0.0), 0xB52E34);
             let lower = self.body(name+"forearm", 1.5, Vec3(0.075,0.30,0.085), Vec3(s*0.245,1.05,0.0), 0xE04A42);
-            self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-70.0,0.0,0.0), Vec3(45.0,0.0,0.0), Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
+            // Arms can raise outwards, which is -Z on the right and +Z on the left
+            self.joint(name+"shoulder", torso, upper, Vec3(s*0.245,1.49,0.0), Vec3(-70.0,0.0,(s*30.0).min(0.0)), Vec3(60.0,0.0,(s*30.0).max(0.0)),Vec3(70.0,35.0,60.0), Vec3(6.0,4.0,5.0));
             self.joint(name+"elbow", upper, lower, Vec3(s*0.245,1.20,0.0), zero(), zero(), Vec3(55.0,0.0,0.0), Vec3(8.0,1.0,1.0));
         }
         // Sample a shared stride and leg spread, then add small independent
         // offsets. Either foot can lead; outward hip rotation widens the stance.
         // Rebuild down the tree so every randomized pose has connected joints.
-        let stagger = self.rng.float(-0.32,0.32);
-        let spread = self.rng.float(-0.015,0.25);
-        let hip_bias = self.rng.float(-0.12,-0.04);
+        let stagger = self.pose_float(-0.32,0.32);
+        let spread = self.pose_float(-0.015,0.25);
+        let hip_bias = self.pose_float(-0.12,-0.04);
         // Tilt the whole body forward or back, with an independent waist bend.
-        // Their combined pitch can reach roughly 30 degrees in either direction.
-        pelvis.q = euler(Vec3(self.rng.float(-0.18,0.22), self.rng.float(-0.15,0.15), self.rng.float(-0.10,0.10)));
+        // Their combined pitch can reach roughly 15 degrees in either direction.
+        pelvis.q = euler(Vec3(self.pose_float(-0.18,0.22), self.pose_float(-0.15,0.15), self.pose_float(-0.10,0.10)));
         let level_feet = euler(Vec3(0.0,pelvis.q.angles().y,0.0));
         for (let var i = 0; i < self.joints.len; ++i) {
             let j = self.joints[i];
-            let var pose = Vec3(self.rng.float(-0.12,0.12),
-                                self.rng.float(-0.04,0.04), self.rng.float(-0.06,0.06));
-            if (j.name == "Waist") pose = Vec3(self.rng.float(-0.38,0.38),pose.y,pose.z);
+            let var pose = Vec3(self.pose_float(-0.12,0.12),
+                                self.pose_float(-0.04,0.04), self.pose_float(-0.06,0.06));
+            if (j.name == "Waist") pose = Vec3(self.pose_float(-0.38,0.38),pose.y,pose.z);
             if (j.name == "Right hip" || j.name == "Left hip") {
                 let side = j.name == "Right hip" ? -1.0 : 1.0;
-                pose = Vec3(hip_bias + side*stagger + self.rng.float(-0.04,0.04),
-                            pose.y, side*spread + self.rng.float(-0.01,0.01));
+                pose = Vec3(hip_bias + side*stagger + self.pose_float(-0.04,0.04),
+                            pose.y, side*spread + self.pose_float(-0.01,0.01));
             }
             if (j.name == "Right knee" || j.name == "Left knee") {
-                pose = Vec3(self.rng.float(0.06,0.32),0.0,0.0);
+                pose = Vec3(self.pose_float(0.06,0.32),0.0,0.0);
             }
             if (j.name == "Right ankle" || j.name == "Left ankle") {
                 // Aim the soles toward level, subject to the ankle stops.
