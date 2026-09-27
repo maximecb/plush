@@ -3,7 +3,7 @@
 // Each island samples two genomes to fight eight episodes in a randomly sized room.
 // The winner stays unchanged, and a mutated child replaces the loser.
 // Age counts matches lived through.
-// Every 4,000 matches, an island copies one random genome to a ring neighbour.
+// Every 2,000 matches, an island copies one oldest individual to a ring neighbour.
 // The migrant replaces the youngest resident at the next match boundary.
 //
 // Run with: plush examples/arena.psh
@@ -11,7 +11,7 @@
 // SPACE pauses the viewer; N skips to the next offered match.
 // Movement and turning outputs command bounded acceleration.
 // Islands always train at full speed. Headless: --headless --matches 1000.
-// --migrate-period N overrides the default of 4,000 for short experiments.
+// --migrate-period N overrides the default of 2,000 for short experiments.
 // --max-room N overrides the initial 5 to 9 metre room range.
 // --check-movement runs movement and arena assertions without starting islands.
 // Render check: --check-render verifies pickup and shot colors without a window.
@@ -1212,6 +1212,24 @@ class Island {
         self.pending_migrants.push(migrant);
     }
 
+    migration_donor(self) {
+        let var oldest = self.population[0];
+        let var ties = 1;
+        for (let var i = 1; i < self.population.len; ++i) {
+            let candidate = self.population[i];
+            if (candidate.age > oldest.age) {
+                oldest = candidate;
+                ties = 1;
+            } else if (candidate.age == oldest.age) {
+                // Choose uniformly among equally old residents.
+                ties = ties + 1;
+                if (self.rng.index(ties) == 0)
+                    oldest = candidate;
+            }
+        }
+        return oldest;
+    }
+
     // Offer a complete match only when the oldest resident is selected.
     // The viewer gets genomes and a seed, then simulates its own copy.
     match_offer(self, now) {
@@ -1344,7 +1362,7 @@ fun island_actor() {
                 if (ids.len > 1) {
                     let side = island.rng.index(2) == 0 ? -1 : 1;
                     let neighbour = (island.index + ids.len + side) % ids.len;
-                    let donor = island.population[island.rng.index(POP_SIZE)];
+                    let donor = island.migration_donor();
                     $actor_send(ids[neighbour], [MSG_MIGRANT,
                                 [donor.weights, donor.age, donor.name, donor.colors]]);
                     island.migrants_sent = island.migrants_sent + 1;
