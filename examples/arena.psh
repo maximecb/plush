@@ -15,6 +15,7 @@
 // --max-room N overrides the initial 5 to 9 metre room range.
 // --check-movement runs movement and arena assertions without starting islands.
 // Render check: --check-render verifies pickup and shot colors without a window.
+// Energy check: --check-energy verifies replenishment, action costs, and exhaustion.
 
 from random import Xoshiro128;
 
@@ -58,6 +59,18 @@ let STRAFE_ACCEL = 5.0;
 let TURN_ACCEL = 10.0;
 let LINEAR_DRAG = 1.5;
 let TURN_DRAG = 2.0;
+// Mechanical-work equivalents, not dietary energy or a detailed fatigue model.
+// Human cycling measurements: ~151 W critical power and ~19 kJ work reserve.
+// https://doi.org/10.1113/EP091429
+// These defaults approximate a 75 kg adult; recovery is deliberately linear.
+let BODY_MASS = 75.0;
+let MAX_ENERGY = 15_000.0;
+let RECOVERY_POWER = 150.0;
+// Stab impact energies are tens of joules; allow extra work for arm recovery.
+// https://pubmed.ncbi.nlm.nih.gov/10464927/
+let STAB_ENERGY = 75.0;
+// Approximate trigger work: 20 N through 5 mm. Propellant supplies bullet energy.
+let SHOT_ENERGY = 0.1;
 let HEALTH = 100.0;
 let KNIFE_RANGE = 1.0;
 let KNIFE_DAMAGE = 34.0;
@@ -78,7 +91,8 @@ let VIEW_CHANNELS = 5;
 let VIEW_INPUTS = VIEW_BINS * VIEW_CHANNELS;
 let VIEW_MIDDLE = VIEW_BINS.idiv(2);
 let VIEW_HALF_ANGLE = PI / 3.0;
-let BODY_INPUTS = 8;
+let BODY_INPUTS = 9;
+let ENERGY_INPUT = VIEW_INPUTS + 7;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
 let HIDDEN = 10;
 let OUTPUTS = 4;
@@ -296,6 +310,7 @@ class Fighter {
         self.vy = 0.0;
         self.turn_velocity = 0.0;
         self.health = HEALTH;
+        self.energy = MAX_ENERGY;
         self.cooldown = 0;
         self.attack_ticks = 0;
         self.gun_ammo = 0;
@@ -305,7 +320,12 @@ class Fighter {
         self.shot_end_x = x;
         self.shot_end_y = y;
         self.inputs.fill_u32(0, NUM_INPUTS, 0);
+        self.inputs.set_f32(ENERGY_INPUT, 1.0);
         self.inputs.set_f32(NUM_SENSORS - 1, 1.0);
+    }
+
+    recover(self) {
+        self.energy = (self.energy + RECOVERY_POWER * DT).min(MAX_ENERGY);
     }
 
     sense(self, arena, other, gun_available, gun_x, gun_y, rng) {
@@ -396,6 +416,7 @@ class Fighter {
         inputs.set_f32(VIEW_INPUTS + 4, self.cooldown.to_f() / ATTACK_COOLDOWN.to_f());
         inputs.set_f32(VIEW_INPUTS + 5, rng.float(-1.0, 1.0));
         inputs.set_f32(VIEW_INPUTS + 6, self.gun_ammo.to_f() / GUN_AMMO.to_f());
+        inputs.set_f32(ENERGY_INPUT, (self.energy / MAX_ENERGY).clip(0.0, 1.0));
     }
 
     think(self) {
@@ -446,6 +467,27 @@ class Fighter {
         let accel_scale = (ax * ax + ay * ay).sqrt().max(FORWARD_ACCEL) / FORWARD_ACCEL;
         ax = ax / accel_scale;
         ay = ay / accel_scale;
+        // Separate active effort from passive drag, which costs no reserve.
+        // Charge F * distance, including effort spent maintaining speed or braking.
+        // Speed * DT + 0.5 * |a| * DT^2 estimates the distance under that effort.
+        // This conservative effort model also charges sideways acceleration.
+        let effort_x = ax + self.vx * LINEAR_DRAG;
+        let effort_y = ay + self.vy * LINEAR_DRAG;
+        let effort = (effort_x * effort_x + effort_y * effort_y).sqrt();
+        let speed = (self.vx * self.vx + self.vy * self.vy).sqrt();
+        let linear_cost = BODY_MASS * effort * speed * DT;
+        let quadratic_cost = 0.5 * BODY_MASS * effort * effort * DT * DT;
+        let var effort_scale = 1.0;
+        if (linear_cost + quadratic_cost > self.energy) {
+            // Solve linear_cost * u + quadratic_cost * u^2 = available joules.
+            effort_scale = 2.0 * self.energy /
+                (linear_cost + (linear_cost * linear_cost +
+                               4.0 * quadratic_cost * self.energy).sqrt()).max(0.000000001);
+        }
+        let spent = linear_cost * effort_scale + quadratic_cost * effort_scale * effort_scale;
+        self.energy = (self.energy - spent).max(0.0);
+        ax = effort_x * effort_scale - self.vx * LINEAR_DRAG;
+        ay = effort_y * effort_scale - self.vy * LINEAR_DRAG;
         self.vx = self.vx + ax * DT;
         self.vy = self.vy + ay * DT;
 
@@ -523,6 +565,11 @@ class Fighter {
     strikes(self, arena, other, attack_probability, rng) {
         if (self.cooldown > 0 || rng.float(0.0, 1.0) >= attack_probability)
             return 0.0;
+        let cost = self.gun_ammo > 0 ? SHOT_ENERGY : STAB_ENERGY;
+        if (self.energy < cost)
+            return 0.0;
+        // An attempted attack costs energy even when it misses.
+        self.energy = (self.energy - cost).max(0.0);
         self.cooldown = ATTACK_COOLDOWN;
         if (self.gun_ammo > 0) {
             self.gun_ammo = self.gun_ammo - 1;
@@ -651,6 +698,8 @@ class Match {
         let rng = self.rng;
         let a = self.fighters[0];
         let b = self.fighters[1];
+        a.recover();
+        b.recover();
         a.sense(self.arena, b, self.gun_available, self.gun_x, self.gun_y, rng);
         b.sense(self.arena, a, self.gun_available, self.gun_x, self.gun_y, rng);
         let aa = a.think();
@@ -723,6 +772,127 @@ fun check_room_connected(arena) {
     for (let var y = 1; y <= arena.inner_h; ++y)
         for (let var x = 1; x <= arena.inner_w; ++x)
             assert(arena.solid(x, y) || visited[y * arena.width + x]);
+}
+
+fun check_energy() {
+    let individual = Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "ENERGY", [80, 201, 255]);
+    let fighter = Fighter(individual);
+    let enemy = Fighter(individual);
+    let arena = Arena(20, 20, nil);
+    let rng = Xoshiro128(123);
+    let forward = [1.0, 0.0, 0.0, 0.0];
+    let idle = [0.0, 0.0, 0.0, 0.0];
+
+    assert(fighter.energy == MAX_ENERGY);
+    fighter.recover();
+    assert(fighter.energy == MAX_ENERGY);
+    fighter.energy = 0.0;
+    fighter.recover();
+    assert((fighter.energy - RECOVERY_POWER * DT).abs() < 0.000001);
+    fighter.energy = MAX_ENERGY - 1.0;
+    fighter.recover();
+    assert(fighter.energy == MAX_ENERGY);
+    for (let var i = 0; i <= 2; ++i) {
+        fighter.energy = MAX_ENERGY * i.to_f() * 0.5;
+        fighter.sense(arena, enemy, false, 0.0, 0.0, rng);
+        assert(fighter.inputs.get_f32(ENERGY_INPUT) == i.to_f() * 0.5);
+        assert(fighter.inputs.get_f32(NUM_SENSORS - 1) == 1.0);
+    }
+
+    // Starting from rest costs kinetic energy; partial reserves limit acceleration.
+    fighter.reset(10.0, 10.0, 0.0);
+    fighter.move(arena, forward);
+    let launch_cost = 0.5 * BODY_MASS * FORWARD_ACCEL * FORWARD_ACCEL * DT * DT;
+    assert((MAX_ENERGY - fighter.energy - launch_cost).abs() < 0.000001);
+    fighter.reset(10.0, 10.0, 0.0);
+    fighter.energy = launch_cost * 0.25;
+    fighter.move(arena, forward);
+    assert((fighter.vx - FORWARD_ACCEL * DT * 0.5).abs() < 0.000001);
+    assert(fighter.energy >= 0.0 && fighter.energy < 0.000001);
+    fighter.reset(10.0, 10.0, 0.0);
+    fighter.energy = 0.0;
+    fighter.move(arena, forward);
+    assert(fighter.vx == 0.0 && fighter.x == 10.0 && fighter.energy == 0.0);
+    fighter.move(arena, [0.0, 1.0, 0.0, 0.0]);
+    assert(fighter.turn_velocity > 0.0 && fighter.energy == 0.0);
+
+    // Coasting still slows down when exhausted; it neither costs nor returns energy.
+    fighter.reset(10.0, 10.0, 0.0);
+    fighter.energy = 0.0;
+    fighter.vx = MAX_FORWARD;
+    fighter.move(arena, idle);
+    assert((fighter.vx - MAX_FORWARD * (1.0 - LINEAR_DRAG * DT)).abs() < 0.000001);
+    assert(fighter.energy == 0.0);
+    fighter.reset(10.0, 10.0, 0.0);
+    fighter.vx = MAX_FORWARD;
+    fighter.move(arena, forward);
+    assert(fighter.energy < MAX_ENERGY && fighter.vx == MAX_FORWARD);
+    fighter.move(arena, [-1.0, 0.0, 0.0, 0.0]);
+    assert(fighter.energy < MAX_ENERGY && fighter.energy >= 0.0);
+
+    // Sustained running drains the burst reserve, then settles at a lower speed.
+    fighter.reset(10.0, 10.0, 0.0);
+    for (let var tick = 0; tick < 600; ++tick) {
+        fighter.recover();
+        fighter.move(arena, forward);
+        assert(fighter.energy >= 0.0 && fighter.energy <= MAX_ENERGY);
+        assert(fighter.vx >= 0.0 && fighter.vx <= MAX_FORWARD);
+        // Keep this effort test away from walls without changing velocity.
+        fighter.x = 10.0;
+        fighter.y = 10.0;
+    }
+    assert(fighter.energy < RECOVERY_POWER * DT);
+    assert(fighter.vx > 0.0 && fighter.vx < MAX_FORWARD * 0.75);
+    for (let var tick = 0; tick < 1100; ++tick) {
+        fighter.recover();
+        fighter.move(arena, idle);
+    }
+    assert(fighter.energy == MAX_ENERGY);
+
+    // Insufficient energy must not consume ammunition or start an attack cooldown.
+    fighter.reset(10.0, 10.0, 0.0);
+    enemy.reset(11.0, 10.0, 0.0);
+    fighter.energy = STAB_ENERGY - 1.0;
+    assert(fighter.strikes(arena, enemy, 1.0, rng) == 0.0);
+    assert(fighter.cooldown == 0 && fighter.attack_ticks == 0);
+    assert(fighter.energy == STAB_ENERGY - 1.0);
+    fighter.energy = STAB_ENERGY;
+    assert(fighter.strikes(arena, enemy, 1.0, rng) == KNIFE_DAMAGE);
+    assert(fighter.energy == 0.0 && fighter.cooldown == ATTACK_COOLDOWN);
+    fighter.cooldown = 0;
+    fighter.energy = STAB_ENERGY;
+    enemy.reset(15.0, 10.0, 0.0);
+    assert(fighter.strikes(arena, enemy, 1.0, rng) == 0.0);
+    assert(fighter.energy == 0.0 && fighter.attack_ticks == ATTACK_ANIM_TICKS);
+    fighter.cooldown = 0;
+    fighter.gun_ammo = GUN_AMMO;
+    assert(fighter.strikes(arena, enemy, 1.0, rng) == 0.0);
+    assert(fighter.gun_ammo == GUN_AMMO && fighter.cooldown == 0);
+    fighter.energy = SHOT_ENERGY;
+    assert(fighter.strikes(arena, enemy, 1.0, rng) == GUN_DAMAGE);
+    assert(fighter.energy == 0.0 && fighter.gun_ammo == GUN_AMMO - 1);
+
+    // A network driven only by the energy sensor sees this tick's recovery.
+    individual.weights.set_f32(ENERGY_INPUT, 1.0);
+    individual.weights.set_f32(OUTPUT_BASE, 1.0);
+    let duel = Match(individual, individual, 7);
+    for (let var i = 0; i < 2; ++i)
+        duel.fighters[i].energy = 0.0;
+    duel.step();
+    for (let var i = 0; i < 2; ++i) {
+        let agent = duel.fighters[i];
+        assert((agent.inputs.get_f32(ENERGY_INPUT) - RECOVERY_POWER * DT / MAX_ENERGY).abs() < 0.000001);
+        assert(agent.action[0] > 0.0);
+        assert(agent.energy > 0.0 && agent.energy < RECOVERY_POWER * DT);
+    }
+    duel.reset_episode();
+    assert(duel.fighters[0].energy == MAX_ENERGY && duel.fighters[1].energy == MAX_ENERGY);
+    $println("energy checks passed");
+}
+
+if (has_flag("--check-energy")) {
+    check_energy();
+    $exit(0);
 }
 
 fun check_movement() {
@@ -886,6 +1056,8 @@ fun check_movement() {
             assert(duel.fighters[1].y == replay.fighters[1].y);
             assert(duel.gun_available == replay.gun_available);
             assert(duel.fighters[0].gun_ammo == replay.fighters[0].gun_ammo);
+            assert(duel.fighters[0].energy == replay.fighters[0].energy);
+            assert(duel.fighters[1].energy == replay.fighters[1].energy);
         }
         for (let var episode = 0; episode < EPISODES; ++episode) {
             let a = duel.fighters[0];
@@ -1364,10 +1536,10 @@ fun replay_snapshot(config, duel) {
         episode: duel.episode.min(EPISODES - 1), tick: duel.tick,
         kills_a: duel.kills[0], kills_b: duel.kills[1],
         ax: a.x, ay: a.y, adir: a.angle, ahp: a.health, astab: a.attack_ticks,
-        aammo: a.gun_ammo, ashot: a.shot_ticks,
+        aammo: a.gun_ammo, ashot: a.shot_ticks, aenergy: a.energy,
         asx: a.shot_start_x, asy: a.shot_start_y, aex: a.shot_end_x, aey: a.shot_end_y,
         bx: b.x, by: b.y, bdir: b.angle, bhp: b.health, bstab: b.attack_ticks,
-        bammo: b.gun_ammo, bshot: b.shot_ticks,
+        bammo: b.gun_ammo, bshot: b.shot_ticks, benergy: b.energy,
         bsx: b.shot_start_x, bsy: b.shot_start_y, bex: b.shot_end_x, bey: b.shot_end_y
     };
 }
@@ -1452,10 +1624,12 @@ fun render(buf, snap, agg, view_speed, paused) {
         draw_text(buf, px, 366, "KILLS " + snap.kills_a.comma_sep(), snap.first_color);
         draw_text(buf, px + 160, 366,
                   snap.aammo > 0 ? "GUN " + snap.aammo.comma_sep() : "KNIFE", snap.first_color);
+        draw_text(buf, px, 380, "ENERGY " + snap.aenergy.floor().comma_sep() + " J", COL_DIM);
         draw_text(buf, px, 394, snap.second_name + " AGE " + snap.second_age.comma_sep(), snap.second_color);
         draw_text(buf, px, 417, "KILLS " + snap.kills_b.comma_sep(), snap.second_color);
         draw_text(buf, px + 160, 417,
                   snap.bammo > 0 ? "GUN " + snap.bammo.comma_sep() : "KNIFE", snap.second_color);
+        draw_text(buf, px, 431, "ENERGY " + snap.benergy.floor().comma_sep() + " J", COL_DIM);
         draw_text(buf, px, 445, "ROOM " + snap.room_w.comma_sep() + " X " + snap.room_h.comma_sep(), COL_TEXT);
     } else {
         draw_text(buf, px, 245, "WAITING FOR MATCH", COL_TEXT);
