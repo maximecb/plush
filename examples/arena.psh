@@ -94,21 +94,22 @@ let ROOM_LAYOUT_CHANCE = 0.7;
 let MIGRATE_PERIOD = flag_int("--migrate-period", 2_000).max(1);
 let MATCH_OFFER_INTERVAL_MS = 1500;
 
-let VIEW_BINS = 17;
-let VIEW_CHANNELS = 5;
-let VIEW_INPUTS = VIEW_BINS * VIEW_CHANNELS;
+let VIEW_BINS = 7;
 let VIEW_MIDDLE = VIEW_BINS.idiv(2);
 let VIEW_HALF_ANGLE = PI / 3.0;
+let OPPONENT_INPUT = VIEW_BINS;
+let PICKUP_INPUT = OPPONENT_INPUT + 4;
+let VIEW_INPUTS = PICKUP_INPUT + 3;
 let BODY_INPUTS = 9;
 let ENERGY_INPUT = VIEW_INPUTS + 7;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
-let HIDDEN = 10;
+let HIDDEN = 16;
 let OUTPUTS = 4;
-let FORGET_UNITS = HIDDEN.idiv(2);
-let NUM_INPUTS = NUM_SENSORS + HIDDEN;
-let NUM_WEIGHTS = HIDDEN * NUM_INPUTS + (OUTPUTS + 1) * HIDDEN;
+let RECURRENT = 10;
+let NUM_INPUTS = NUM_SENSORS + RECURRENT;
+let NUM_WEIGHTS = HIDDEN * NUM_INPUTS + (OUTPUTS + RECURRENT) * HIDDEN;
 let OUTPUT_BASE = HIDDEN * NUM_INPUTS;
-let FORGET_BASE = OUTPUT_BASE + OUTPUTS * HIDDEN;
+let RECURRENT_BASE = OUTPUT_BASE + OUTPUTS * HIDDEN;
 let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
 
 // View rays cover 120 degrees with finer spacing near the centre of view.
@@ -123,14 +124,6 @@ for (let var i = 0; i < VIEW_BINS; ++i) {
     RAY_X.push(angle.cos());
     RAY_Y.push(angle.sin());
 }
-let BIN_LEFT = [];
-let BIN_RIGHT = [];
-for (let var i = 0; i < VIEW_BINS; ++i) {
-    BIN_LEFT.push(i == 0 ? -VIEW_HALF_ANGLE : (RAY_ANGLE[i - 1] + RAY_ANGLE[i]) * 0.5);
-    BIN_RIGHT.push(i == VIEW_BINS - 1 ? VIEW_HALF_ANGLE :
-                   (RAY_ANGLE[i] + RAY_ANGLE[i + 1]) * 0.5);
-}
-
 fun new_genome(rng) {
     let weights = ByteArray.with_size(NUM_WEIGHTS * 4);
     for (let var i = 0; i < NUM_WEIGHTS; ++i)
@@ -480,36 +473,24 @@ class Fighter {
         let ex = other.x - self.x;
         let ey = other.y - self.y;
         let dist2 = ex * ex + ey * ey;
-        let evx = other.vx - self.vx;
-        let evy = other.vy - self.vy;
         let var opponent_visible = false;
-        let var opponent_left = 0.0;
-        let var opponent_right = 0.0;
+        let var opponent_angle = 0.0;
         let var opponent_near = 0.0;
-        let var opponent_velocity = 0.0;
-        let var gun_left = 0.0;
-        let var gun_right = 0.0;
+        let var gun_angle = 0.0;
         let var gun_near = 0.0;
         let var gun_visible = false;
 
-        // Project the opponent's angular width onto bins, then check one
-        // line of sight to its centre against the tile grid.
+        // One center ray per object prevents seeing pickups or opponents through walls.
         let forward = ex * c + ey * s;
-        if (forward > 0.0 && dist2 > BODY_RADIUS * BODY_RADIUS) {
+        if (forward > 0.0 && dist2 > 0.000001) {
             let side = -ex * s + ey * c;
             let bearing = (side / forward).atan();
-            let half_angle = (BODY_RADIUS /
-                              (dist2 - BODY_RADIUS * BODY_RADIUS).sqrt()).atan();
-            opponent_left = bearing - half_angle;
-            opponent_right = bearing + half_angle;
-            if (opponent_right >= -VIEW_HALF_ANGLE && opponent_left <= VIEW_HALF_ANGLE) {
+            if (bearing >= -VIEW_HALF_ANGLE && bearing <= VIEW_HALF_ANGLE) {
                 let dist = dist2.sqrt();
-                if (arena.wall_distance(self.x, self.y, ex / dist, ey / dist) >=
-                    dist - BODY_RADIUS) {
+                if (arena.wall_distance(self.x, self.y, ex / dist, ey / dist) >= dist) {
                     opponent_visible = true;
-                    opponent_near = (dist - BODY_RADIUS).max(0.0);
-                    opponent_velocity = ((evx * ex + evy * ey) / dist / MAX_FORWARD)
-                                        .clip(-1.0, 1.0);
+                    opponent_angle = bearing / VIEW_HALF_ANGLE;
+                    opponent_near = 1.0 / (1.0 + (dist - BODY_RADIUS).max(0.0));
                 }
             }
         }
@@ -519,21 +500,21 @@ class Fighter {
             let gy = gun_y - self.y;
             let gun_dist2 = gx * gx + gy * gy;
             let gun_forward = gx * c + gy * s;
-            if (gun_forward > 0.0 && gun_dist2 > GUN_RADIUS * GUN_RADIUS) {
+            if (gun_forward > 0.0 && gun_dist2 > 0.000001) {
                 let gun_side = -gx * s + gy * c;
                 let gun_bearing = (gun_side / gun_forward).atan();
-                let gun_half_angle = (GUN_RADIUS /
-                                      (gun_dist2 - GUN_RADIUS * GUN_RADIUS).sqrt()).atan();
-                gun_left = gun_bearing - gun_half_angle;
-                gun_right = gun_bearing + gun_half_angle;
-                if (gun_right >= -VIEW_HALF_ANGLE && gun_left <= VIEW_HALF_ANGLE) {
+                if (gun_bearing >= -VIEW_HALF_ANGLE && gun_bearing <= VIEW_HALF_ANGLE) {
                     let dist = gun_dist2.sqrt();
-                    if (arena.wall_distance(self.x, self.y, gx / dist, gy / dist) >=
-                        dist - GUN_RADIUS) {
+                    if (arena.wall_distance(self.x, self.y, gx / dist, gy / dist) >= dist) {
                         gun_visible = true;
-                        gun_near = (dist - GUN_RADIUS).max(0.0);
+                        gun_angle = gun_bearing / VIEW_HALF_ANGLE;
+                        gun_near = 1.0 / (1.0 + (dist - GUN_RADIUS).max(0.0));
                     }
                 }
+            }
+            if (gun_dist2 <= 0.000001) {
+                gun_visible = true;
+                gun_near = 1.0;
             }
         }
 
@@ -541,18 +522,16 @@ class Fighter {
             let dx = c * RAY_X[i] - s * RAY_Y[i];
             let dy = s * RAY_X[i] + c * RAY_Y[i];
             let wall = arena.wall_distance(self.x, self.y, dx, dy);
-            let base = i * VIEW_CHANNELS;
-            inputs.set_f32(base, 1.0 / (1.0 + wall));
-            let in_bin = opponent_visible && opponent_left <= BIN_RIGHT[i] &&
-                         opponent_right >= BIN_LEFT[i];
-            // Presence also identifies the visible opponent's weapon.
-            inputs.set_f32(base + 1, in_bin ? (other.gun_ammo > 0 ? 1.0 : 0.5) : 0.0);
-            inputs.set_f32(base + 2, in_bin ? 1.0 / (1.0 + opponent_near) : 0.0);
-            inputs.set_f32(base + 3, in_bin ? opponent_velocity : 0.0);
-            let gun_in_bin = gun_visible && gun_left <= BIN_RIGHT[i] &&
-                             gun_right >= BIN_LEFT[i];
-            inputs.set_f32(base + 4, gun_in_bin ? 1.0 / (1.0 + gun_near) : 0.0);
+            inputs.set_f32(i, 1.0 / (1.0 + wall));
         }
+        inputs.set_f32(OPPONENT_INPUT, opponent_visible ? 1.0 : 0.0);
+        inputs.set_f32(OPPONENT_INPUT + 1, opponent_angle);
+        inputs.set_f32(OPPONENT_INPUT + 2, opponent_near);
+        inputs.set_f32(OPPONENT_INPUT + 3,
+                       opponent_visible && other.gun_ammo > 0 ? 1.0 : 0.0);
+        inputs.set_f32(PICKUP_INPUT, gun_visible ? 1.0 : 0.0);
+        inputs.set_f32(PICKUP_INPUT + 1, gun_angle);
+        inputs.set_f32(PICKUP_INPUT + 2, gun_near);
 
         inputs.set_f32(VIEW_INPUTS, self.health / HEALTH);
         inputs.set_f32(VIEW_INPUTS + 1, (self.vx * c + self.vy * s) / MAX_FORWARD);
@@ -578,13 +557,11 @@ class Fighter {
         }
         out[3] = (out[3] + 1.0) * 0.5;
 
-        // The gate changes only the state carried into the next tick.
-        let forget = weights.dot_f32(FORGET_BASE, 1, self.next_hidden, 0, 1, HIDDEN);
-        let keep = 1.0 - forget.clip(0.0, 1.0);
-        self.inputs.memcpy(NUM_SENSORS * 4, self.next_hidden, 0, HIDDEN * 4);
-        for (let var i = 0; i < FORGET_UNITS; ++i) {
-            let index = NUM_SENSORS + i;
-            self.inputs.set_f32(index, self.inputs.get_f32(index) * keep);
+        // Recurrent outputs become the next tick's memory inputs.
+        for (let var i = 0; i < RECURRENT; ++i) {
+            let v = weights.dot_f32(RECURRENT_BASE + i * HIDDEN, 1,
+                                    self.next_hidden, 0, 1, HIDDEN);
+            self.inputs.set_f32(NUM_SENSORS + i, v / (1.0 + v.abs()));
         }
         return out;
     }
@@ -1229,42 +1206,60 @@ fun check_movement() {
     assert((RAY_ANGLE[0] + VIEW_HALF_ANGLE).abs() < 0.0001);
     assert((RAY_ANGLE[VIEW_BINS - 1] - VIEW_HALF_ANGLE).abs() < 0.0001);
 
-    let gate_weights = ByteArray.with_size(NUM_WEIGHTS * 4);
-    gate_weights.set_f32(NUM_SENSORS - 1, 1.0);
-    gate_weights.set_f32(FORGET_UNITS * NUM_INPUTS + NUM_SENSORS - 1, 1.0);
-    gate_weights.set_f32(OUTPUT_BASE, 1.0);
-    gate_weights.set_f32(FORGET_BASE, 1.0);
-    let gated = Fighter(Individual(gate_weights, 0, "GATE", [255, 155, 87]));
-    let var gated_actions = gated.think();
-    assert(gated_actions[0] == 0.5);
-    assert(gated.inputs.get_f32(NUM_SENSORS) == 0.0);
-    assert(gated.inputs.get_f32(NUM_SENSORS + FORGET_UNITS) == 1.0);
-    gate_weights.set_f32(FORGET_BASE, 0.5);
-    gated.reset(2.0, 2.0, 0.0);
-    gated_actions = gated.think();
-    assert(gated_actions[0] == 0.5);
-    assert(gated.inputs.get_f32(NUM_SENSORS) == 0.5);
-    assert(gated.inputs.get_f32(NUM_SENSORS + FORGET_UNITS) == 1.0);
+    let memory_weights = ByteArray.with_size(NUM_WEIGHTS * 4);
+    memory_weights.set_f32(NUM_SENSORS - 1, 1.0);
+    memory_weights.set_f32(NUM_INPUTS + NUM_SENSORS, 1.0);
+    memory_weights.set_f32(OUTPUT_BASE, 1.0);
+    memory_weights.set_f32(OUTPUT_BASE + HIDDEN + 1, 1.0);
+    memory_weights.set_f32(RECURRENT_BASE, 1.0);
+    let remembering = Fighter(Individual(memory_weights, 0, "MEMORY", [255, 155, 87]));
+    let var actions = remembering.think();
+    assert(actions[0] == 0.5 && actions[1] == 0.0);
+    assert(remembering.inputs.get_f32(NUM_SENSORS) == 0.5);
+    actions = remembering.think();
+    assert(actions[0] == 0.5 && (actions[1] - 1.0 / 3.0).abs() < 0.000001);
+    remembering.reset(2.0, 2.0, 0.0);
+    assert(remembering.inputs.get_f32(NUM_SENSORS) == 0.0);
+    actions = remembering.think();
+    assert(actions[1] == 0.0 && remembering.inputs.get_f32(NUM_SENSORS) == 0.5);
+    memory_weights.set_f32(RECURRENT_BASE, -1.0);
+    remembering.reset(2.0, 2.0, 0.0);
+    remembering.think();
+    assert(remembering.inputs.get_f32(NUM_SENSORS) == -0.5);
 
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     fighter.sense(vision_arena, enemy, true, 12.0, 10.0, Xoshiro128(1));
-    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 0.5);
-    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 4) > 0.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 1.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT + 2) > 0.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT + 3) == 0.0);
+    assert(fighter.inputs.get_f32(PICKUP_INPUT) == 1.0);
+    assert(fighter.inputs.get_f32(PICKUP_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(PICKUP_INPUT + 2) > 0.0);
     enemy.gun_ammo = GUN_AMMO;
     fighter.sense(vision_arena, enemy, true, 12.0, 10.0, Xoshiro128(1));
-    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 1.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT + 3) == 1.0);
     enemy.gun_ammo = 0;
     let peripheral = 55.0 * PI / 180.0;
     enemy.reset(10.0 + 5.0 * peripheral.cos(), 10.0 + 5.0 * peripheral.sin(), 0.0);
     fighter.sense(vision_arena, enemy, false, 0.0, 0.0, Xoshiro128(1));
-    assert(fighter.inputs.get_f32((VIEW_BINS - 1) * VIEW_CHANNELS + 1) == 0.5);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 1.0);
+    assert((fighter.inputs.get_f32(OPPONENT_INPUT + 1) - 55.0 / 60.0).abs() < 0.0001);
+    assert(fighter.inputs.get_f32(PICKUP_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(PICKUP_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(PICKUP_INPUT + 2) == 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     enemy.gun_ammo = GUN_AMMO;
     vision_arena.add_notch(12, 10);
     fighter.sense(vision_arena, enemy, true, 13.0, 10.0, Xoshiro128(1));
-    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 0.0);
-    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 4) == 0.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT + 2) == 0.0);
+    assert(fighter.inputs.get_f32(OPPONENT_INPUT + 3) == 0.0);
+    assert(fighter.inputs.get_f32(PICKUP_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(PICKUP_INPUT + 2) == 0.0);
+    assert(fighter.inputs.get_f32(VIEW_MIDDLE) > 0.0);
 
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
