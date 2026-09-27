@@ -72,15 +72,20 @@ let EPISODE_CONTROL_STEPS = (EPISODE_SECONDS / CONTROL_DT + 0.5).floor();
 let FOOT_SENSOR_CORNERS = [0,1,4,5];
 
 // Encoded observation layout, shared by the controller and the dynamics
-// model. Values are scaled into [-1, 1], contacts into [0, 1]. The up
-// direction is estimated from the head's sensors by filter_up()
+// model. Values are scaled into [-1, 1], contacts and height into [0, 1].
+// The up direction is estimated from the head's sensors by filter_up(). The
+// compass gives the track's forward direction, and the height the head's
+// height above the ground, as a rangefinder or eyes would
 let OBS_ANGLES = 0;
 let OBS_SPEEDS = OBS_ANGLES + CONTROL_JOINT_AXES;
 let OBS_ACCEL = OBS_SPEEDS + CONTROL_JOINT_AXES;
 let OBS_GYRO = OBS_ACCEL + 3;
 let OBS_UP = OBS_GYRO + 3;
-let OBS_CONTACTS = OBS_UP + 3;
+let OBS_COMPASS = OBS_UP + 3;
+let OBS_HEIGHT = OBS_COMPASS + 3;
+let OBS_CONTACTS = OBS_HEIGHT + 1;
 let OBS_SIZE = OBS_CONTACTS + CONTROL_FOOT_POINTS;
+let HEIGHT_SCALE = 2.0;  // Head heights are encoded in units of this many metres
 
 // Fraction of the way the up estimate moves toward the accelerometer's
 // reading at each control step, which sets how quickly gyro drift is undone
@@ -300,6 +305,10 @@ class BipedObservation {
         // measured in head-local coordinates: rest reads roughly +1 on Y.
         self.head_accel_g = Vec3(0.0,1.0,0.0);
         self.head_gyro = zero();
+        // The track's forward direction in head-local coordinates, as a
+        // compass reads it, and the head's height above the ground.
+        self.compass = TRACK_FORWARD;
+        self.head_height = 0.0;
     }
     set_contact(self, index, distance_m, normal_force_n) {
         assert(index >= 0 && index < CONTROL_FOOT_POINTS);
@@ -769,6 +778,8 @@ fun observe_biped(sim, observation, previous_head_velocity, interval) {
     observation.head_accel_g = head.q.conj().rotate(
         acceleration.add(Vec3(0.0,9.81,0.0)).mul(1.0/9.81));
     observation.head_gyro = head.q.conj().rotate(head.w);
+    observation.compass = head.q.conj().rotate(TRACK_FORWARD);
+    observation.head_height = sim.ground.sample(head.p);
     for (let var side = 0; side < 2; ++side) {
         let foot = sim.feet[side];
         for (let var k = 0; k < 4; ++k) {
@@ -800,8 +811,27 @@ fun encode_observation(observation, out)
     out.set_f32(OBS_GYRO + 1, (g.y / 10.0).clip(-1.0, 1.0));
     out.set_f32(OBS_GYRO + 2, (g.z / 10.0).clip(-1.0, 1.0));
 
+    let c = observation.compass;
+    out.set_f32(OBS_COMPASS, c.x);
+    out.set_f32(OBS_COMPASS + 1, c.y);
+    out.set_f32(OBS_COMPASS + 2, c.z);
+    out.set_f32(OBS_HEIGHT, (observation.head_height / HEIGHT_SCALE).clip(0.0, 1.0));
+
     for (let var i = 0; i < CONTROL_FOOT_POINTS; ++i)
         out.set_f32(OBS_CONTACTS + i, observation.contacts.get_f32(i).clip(0.0, 1.0));
+}
+
+// A direction fixed in the world, in head-local coordinates, turned against
+// the head's rotation over one control step, from the encoded gyro reading
+// at base in obs
+fun turn_with_gyro(v, obs, base)
+{
+    let w = Vec3(
+        obs.get_f32(base + OBS_GYRO) * 10.0,
+        obs.get_f32(base + OBS_GYRO + 1) * 10.0,
+        obs.get_f32(base + OBS_GYRO + 2) * 10.0
+    );
+    return v.add(v.cross(w).mul(CONTROL_DT));
 }
 
 // Complementary filter estimating the up direction in the head frame, from
@@ -822,13 +852,7 @@ fun filter_up(prev, obs, base)
         if (accel_len > 0.1)
             up = Vec3(ax, ay, az);
     } else {
-        // A direction fixed in the world turns against the head's rotation
-        let w = Vec3(
-            obs.get_f32(base + OBS_GYRO) * 10.0,
-            obs.get_f32(base + OBS_GYRO + 1) * 10.0,
-            obs.get_f32(base + OBS_GYRO + 2) * 10.0
-        );
-        up = prev.add(prev.cross(w).mul(CONTROL_DT));
+        up = turn_with_gyro(prev, obs, base);
 
         // Only trust the accelerometer near 1 g, when it mostly reads gravity
         if (accel_len > 0.5 && accel_len < 1.5)
@@ -1534,13 +1558,23 @@ class DynamicsModel
             }
 
             // The up estimate is the same filter the robot runs, fed the
-            // predicted sensor readings, rather than a prediction itself
+            // predicted sensor readings, rather than a prediction itself.
+            // The compass turns with the predicted gyro reading, which is
+            // exact for a direction fixed in the world
             let up = Vec3(
                 input.get_f32(IN_PREV_OBS + OBS_UP),
                 input.get_f32(IN_PREV_OBS + OBS_UP + 1),
                 input.get_f32(IN_PREV_OBS + OBS_UP + 2)
             );
             filter_up(up, input, 0);
+            let compass = turn_with_gyro(Vec3(
+                input.get_f32(IN_PREV_OBS + OBS_COMPASS),
+                input.get_f32(IN_PREV_OBS + OBS_COMPASS + 1),
+                input.get_f32(IN_PREV_OBS + OBS_COMPASS + 2)
+            ), input, 0).unit();
+            input.set_f32(OBS_COMPASS, compass.x);
+            input.set_f32(OBS_COMPASS + 1, compass.y);
+            input.set_f32(OBS_COMPASS + 2, compass.z);
 
             let real_progress = progress * std.get_f32(OUT_PROGRESS) + mean.get_f32(OUT_PROGRESS);
             let clipped = real_progress.clip(out_lo.get_f32(OUT_PROGRESS), out_hi.get_f32(OUT_PROGRESS));
