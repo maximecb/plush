@@ -9,9 +9,11 @@
 // Run with: plush examples/arena.psh
 // F cycles viewer playback through 1x, 2x, 4x, 8x, and 10x.
 // SPACE pauses the viewer; N skips to the next offered match.
+// Movement and turning outputs command bounded acceleration.
 // Islands always train at full speed. Headless: --headless --matches 1000.
 // --migrate-period N overrides the default of 4,000 for short experiments.
 // --max-room N overrides the initial 5 to 8 metre room range.
+// --check-movement runs movement assertions without starting the islands.
 
 from random import Xoshiro128;
 
@@ -48,8 +50,13 @@ let MIN_ROOM = 5;
 let MAX_ROOM = flag_int("--max-room", 8).max(MIN_ROOM);
 let BODY_RADIUS = 0.25;
 let MAX_FORWARD = 3.0;
-let MAX_STRAFE = 2.5;
+let MAX_STRAFE = 1.6;
 let MAX_TURN = 3.5;
+let FORWARD_ACCEL = 5.0;
+let STRAFE_ACCEL = 5.0;
+let TURN_ACCEL = 10.0;
+let LINEAR_DRAG = 1.5;
+let TURN_DRAG = 2.0;
 let HEALTH = 100.0;
 let KNIFE_RANGE = 1.0;
 let KNIFE_DAMAGE = 34.0;
@@ -60,7 +67,7 @@ let MIGRATE_PERIOD = flag_int("--migrate-period", 4_000).max(1);
 let VIEW_BINS = 30;
 let VIEW_CHANNELS = 4;
 let VIEW_INPUTS = VIEW_BINS * VIEW_CHANNELS;
-let BODY_INPUTS = 6;
+let BODY_INPUTS = 7;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
 let HIDDEN = 8;
 let OUTPUTS = 4;
@@ -154,6 +161,7 @@ class Fighter {
         self.angle = angle;
         self.vx = 0.0;
         self.vy = 0.0;
+        self.turn_velocity = 0.0;
         self.health = HEALTH;
         self.cooldown = 0;
         self.inputs.fill_u32(0, NUM_INPUTS, 0);
@@ -197,8 +205,9 @@ class Fighter {
         inputs.set_f32(VIEW_INPUTS, self.health / HEALTH);
         inputs.set_f32(VIEW_INPUTS + 1, (self.vx * c + self.vy * s) / MAX_FORWARD);
         inputs.set_f32(VIEW_INPUTS + 2, (-self.vx * s + self.vy * c) / MAX_STRAFE);
-        inputs.set_f32(VIEW_INPUTS + 3, self.cooldown.to_f() / ATTACK_COOLDOWN.to_f());
-        inputs.set_f32(VIEW_INPUTS + 4, rng.float(-1.0, 1.0));
+        inputs.set_f32(VIEW_INPUTS + 3, self.turn_velocity / MAX_TURN);
+        inputs.set_f32(VIEW_INPUTS + 4, self.cooldown.to_f() / ATTACK_COOLDOWN.to_f());
+        inputs.set_f32(VIEW_INPUTS + 5, rng.float(-1.0, 1.0));
     }
 
     think(self) {
@@ -219,7 +228,11 @@ class Fighter {
     }
 
     move(self, arena, action) {
-        self.angle = self.angle + action[1] * MAX_TURN * DT;
+        let turn_accel = (action[1] * TURN_ACCEL - self.turn_velocity * TURN_DRAG)
+                         .clip(-TURN_ACCEL, TURN_ACCEL);
+        self.turn_velocity = (self.turn_velocity + turn_accel * DT)
+                             .clip(-MAX_TURN, MAX_TURN);
+        self.angle = self.angle + self.turn_velocity * DT;
         if (self.angle > PI)
             self.angle = self.angle - TAU;
         else if (self.angle < -PI)
@@ -232,15 +245,36 @@ class Fighter {
         side = side / scale;
         let c = self.angle.cos();
         let s = self.angle.sin();
-        self.vx = c * f * MAX_FORWARD - s * side * MAX_STRAFE;
-        self.vy = s * f * MAX_FORWARD + c * side * MAX_STRAFE;
+        let var ax = c * f * FORWARD_ACCEL - s * side * STRAFE_ACCEL - self.vx * LINEAR_DRAG;
+        let var ay = s * f * FORWARD_ACCEL + c * side * STRAFE_ACCEL - self.vy * LINEAR_DRAG;
+        let accel_scale = (ax * ax + ay * ay).sqrt().max(FORWARD_ACCEL) / FORWARD_ACCEL;
+        ax = ax / accel_scale;
+        ay = ay / accel_scale;
+        self.vx = self.vx + ax * DT;
+        self.vy = self.vy + ay * DT;
+
+        // Cap each body-relative component, then cap diagonal running speed.
+        let var forward_speed = (self.vx * c + self.vy * s).clip(-MAX_FORWARD, MAX_FORWARD);
+        let var strafe_speed = (-self.vx * s + self.vy * c).clip(-MAX_STRAFE, MAX_STRAFE);
+        let speed_scale = (forward_speed * forward_speed + strafe_speed * strafe_speed)
+                          .sqrt().max(MAX_FORWARD) / MAX_FORWARD;
+        forward_speed = forward_speed / speed_scale;
+        strafe_speed = strafe_speed / speed_scale;
+        self.vx = c * forward_speed - s * strafe_speed;
+        self.vy = s * forward_speed + c * strafe_speed;
 
         // A tenth of a second is shorter than one tile at human running
         // speed. Clamping to the free rectangle gives swept wall collision.
-        self.x = (self.x + self.vx * DT).clip(1.0 + BODY_RADIUS,
-                                             arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
-        self.y = (self.y + self.vy * DT).clip(1.0 + BODY_RADIUS,
-                                             arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        let next_x = self.x + self.vx * DT;
+        let next_y = self.y + self.vy * DT;
+        self.x = next_x.clip(1.0 + BODY_RADIUS,
+                             arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+        self.y = next_y.clip(1.0 + BODY_RADIUS,
+                             arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+        if (self.x != next_x)
+            self.vx = 0.0;
+        if (self.y != next_y)
+            self.vy = 0.0;
         if (self.cooldown > 0)
             self.cooldown = self.cooldown - 1;
     }
@@ -298,10 +332,6 @@ class Match {
         let rng = self.rng;
         let a = self.fighters[0];
         let b = self.fighters[1];
-        let old_ax = a.x;
-        let old_ay = a.y;
-        let old_bx = b.x;
-        let old_by = b.y;
         a.sense(self.arena, b, rng);
         b.sense(self.arena, a, rng);
         let aa = a.think();
@@ -324,11 +354,16 @@ class Match {
                                         self.arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
             b.y = (b.y + dy * push).clip(1.0 + BODY_RADIUS,
                                         self.arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+            let nx = dx / distance;
+            let ny = dy / distance;
+            let closing_speed = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
+            if (closing_speed > 0.0) {
+                a.vx = a.vx - nx * closing_speed * 0.5;
+                a.vy = a.vy - ny * closing_speed * 0.5;
+                b.vx = b.vx + nx * closing_speed * 0.5;
+                b.vy = b.vy + ny * closing_speed * 0.5;
+            }
         }
-        a.vx = (a.x - old_ax) / DT;
-        a.vy = (a.y - old_ay) / DT;
-        b.vx = (b.x - old_bx) / DT;
-        b.vy = (b.y - old_by) / DT;
 
         let hit_a = a.strikes(b, aa[3], rng);
         let hit_b = b.strikes(a, ba[3], rng);
@@ -350,6 +385,58 @@ class Match {
                 self.reset_episode();
         }
     }
+}
+
+fun check_movement() {
+    let fighter = Fighter(Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0));
+    let arena = Arena(20, 20);
+    let forward = [1.0, 0.0, 0.0, 0.0];
+    let idle = [0.0, 0.0, 0.0, 0.0];
+
+    fighter.reset(10.0, 10.0, 0.0);
+    fighter.move(arena, forward);
+    assert((fighter.vx - FORWARD_ACCEL * DT).abs() < 0.0001);
+    for (let var i = 0; i < 30; ++i)
+        fighter.move(arena, forward);
+    assert((fighter.vx - MAX_FORWARD).abs() < 0.0001);
+    fighter.move(arena, idle);
+    assert(fighter.vx < MAX_FORWARD && fighter.vx > 0.0);
+    let before_brake = fighter.vx;
+    fighter.move(arena, [-1.0, 0.0, 0.0, 0.0]);
+    assert(before_brake - fighter.vx <= FORWARD_ACCEL * DT + 0.0001);
+
+    fighter.reset(10.0, 10.0, 0.0);
+    let strafe = [0.0, 0.0, 1.0, 0.0];
+    for (let var i = 0; i < 30; ++i)
+        fighter.move(arena, strafe);
+    assert((fighter.vy - MAX_STRAFE).abs() < 0.0001);
+
+    fighter.reset(10.0, 10.0, 0.0);
+    let diagonal = [1.0, 0.0, 1.0, 0.0];
+    for (let var i = 0; i < 30; ++i)
+        fighter.move(arena, diagonal);
+    assert((fighter.vx * fighter.vx + fighter.vy * fighter.vy).sqrt() <= MAX_FORWARD + 0.0001);
+
+    fighter.reset(10.0, 10.0, 0.0);
+    let turn = [0.0, 1.0, 0.0, 0.0];
+    fighter.move(arena, turn);
+    assert((fighter.turn_velocity - TURN_ACCEL * DT).abs() < 0.0001);
+    for (let var i = 0; i < 20; ++i)
+        fighter.move(arena, turn);
+    assert((fighter.turn_velocity - MAX_TURN).abs() < 0.0001);
+    fighter.move(arena, idle);
+    assert(fighter.turn_velocity < MAX_TURN);
+
+    fighter.reset(20.7, 10.0, 0.0);
+    fighter.vx = MAX_FORWARD;
+    fighter.move(arena, idle);
+    assert(fighter.x <= 20.75 && fighter.vx == 0.0);
+    $println("movement checks passed");
+}
+
+if (has_flag("--check-movement")) {
+    check_movement();
+    $exit(0);
 }
 
 class Island {
@@ -724,9 +811,9 @@ fun render(buf, snap, agg, view_speed, paused) {
     } else {
         draw_text(buf, px, 245, "WAITING FOR MATCH", COL_TEXT);
     }
-    draw_text(buf, px, 485, "REPLAY " + view_speed.to_s() + "X", COL_TEXT);
     if (paused)
-        draw_text(buf, px, 508, "VIEW PAUSED", COL_TEXT);
+        draw_text(buf, px, 485, "VIEW PAUSED", COL_TEXT);
+    draw_text(buf, px, 526, "REPLAY " + view_speed.to_s() + "X", COL_TEXT);
     draw_text(buf, px, 550, "F VIEW SPEED", COL_DIM);
     draw_text(buf, px, 574, "SPACE PAUSE VIEW", COL_DIM);
     draw_text(buf, px, 598, "N NEXT MATCH", COL_DIM);
