@@ -1,8 +1,8 @@
 // Arena GA, a small evolutionary 1v1 combat experiment.
 //
-// Each island repeatedly samples two genomes from its population. They fight
-// ten episodes in one randomly sized room. The winner stays unchanged and a
-// mutated child replaces the loser. Age counts matches lived through.
+// Each island samples two genomes to fight eight episodes in a randomly sized room.
+// The winner stays unchanged, and a mutated child replaces the loser.
+// Age counts matches lived through.
 // Every 4,000 matches an island copies one random genome to a ring neighbour,
 // where it replaces the youngest resident at the next match boundary.
 //
@@ -45,7 +45,7 @@ let PI = 3.141592653589793;
 let TAU = 2.0 * PI;
 let DT = 0.1;
 let EPISODE_TICKS = 300;
-let EPISODES = 10;
+let EPISODES = 8;
 let MIN_ROOM = 5;
 let MAX_ROOM = flag_int("--max-room", 9).max(MIN_ROOM);
 let BODY_RADIUS = 0.325;
@@ -75,9 +75,11 @@ let BODY_INPUTS = 7;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
 let HIDDEN = 10;
 let OUTPUTS = 4;
+let FORGET_UNITS = HIDDEN.idiv(2);
 let NUM_INPUTS = NUM_SENSORS + HIDDEN;
-let NUM_WEIGHTS = HIDDEN * NUM_INPUTS + OUTPUTS * HIDDEN;
+let NUM_WEIGHTS = HIDDEN * NUM_INPUTS + (OUTPUTS + 1) * HIDDEN;
 let OUTPUT_BASE = HIDDEN * NUM_INPUTS;
+let FORGET_BASE = OUTPUT_BASE + OUTPUTS * HIDDEN;
 let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
 
 // Rays cover 120 degrees with finer spacing near the centre of view.
@@ -327,7 +329,6 @@ class Fighter {
             let value = weights.dot_f32(i * NUM_INPUTS, 1, self.inputs, 0, 1, NUM_INPUTS);
             self.next_hidden.set_f32(i, value.clip(0.0, 8.0));
         }
-        self.inputs.memcpy(NUM_SENSORS * 4, self.next_hidden, 0, HIDDEN * 4);
 
         let out = self.action;
         for (let var i = 0; i < OUTPUTS; ++i) {
@@ -335,6 +336,15 @@ class Fighter {
             out[i] = v / (1.0 + v.abs());
         }
         out[3] = (out[3] + 1.0) * 0.5;
+
+        // The gate changes only the state carried into the next tick.
+        let forget = weights.dot_f32(FORGET_BASE, 1, self.next_hidden, 0, 1, HIDDEN);
+        let keep = 1.0 - forget.clip(0.0, 1.0);
+        self.inputs.memcpy(NUM_SENSORS * 4, self.next_hidden, 0, HIDDEN * 4);
+        for (let var i = 0; i < FORGET_UNITS; ++i) {
+            let index = NUM_SENSORS + i;
+            self.inputs.set_f32(index, self.inputs.get_f32(index) * keep);
+        }
         return out;
     }
 
@@ -589,6 +599,24 @@ fun check_movement() {
     assert(RAY_ANGLE[VIEW_MIDDLE] == 0.0);
     assert((RAY_ANGLE[0] + VIEW_HALF_ANGLE).abs() < 0.0001);
     assert((RAY_ANGLE[VIEW_BINS - 1] - VIEW_HALF_ANGLE).abs() < 0.0001);
+
+    let gate_weights = ByteArray.with_size(NUM_WEIGHTS * 4);
+    gate_weights.set_f32(NUM_SENSORS - 1, 1.0);
+    gate_weights.set_f32(FORGET_UNITS * NUM_INPUTS + NUM_SENSORS - 1, 1.0);
+    gate_weights.set_f32(OUTPUT_BASE, 1.0);
+    gate_weights.set_f32(FORGET_BASE, 1.0);
+    let gated = Fighter(Individual(gate_weights, 0));
+    let var gated_actions = gated.think();
+    assert(gated_actions[0] == 0.5);
+    assert(gated.inputs.get_f32(NUM_SENSORS) == 0.0);
+    assert(gated.inputs.get_f32(NUM_SENSORS + FORGET_UNITS) == 1.0);
+    gate_weights.set_f32(FORGET_BASE, 0.5);
+    gated.reset(2.0, 2.0, 0.0);
+    gated_actions = gated.think();
+    assert(gated_actions[0] == 0.5);
+    assert(gated.inputs.get_f32(NUM_SENSORS) == 0.5);
+    assert(gated.inputs.get_f32(NUM_SENSORS + FORGET_UNITS) == 1.0);
+
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     fighter.sense(vision_arena, enemy, Xoshiro128(1));
