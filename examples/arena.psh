@@ -3,8 +3,8 @@
 // Each island samples two genomes to fight eight episodes in a randomly sized room.
 // The winner stays unchanged, and a mutated child replaces the loser.
 // Age counts matches lived through.
-// Every 4,000 matches an island copies one random genome to a ring neighbour,
-// where it replaces the youngest resident at the next match boundary.
+// Every 4,000 matches, an island copies one random genome to a ring neighbour.
+// The migrant replaces the youngest resident at the next match boundary.
 //
 // Run with: plush examples/arena.psh
 // F cycles viewer playback through 1x, 2x, 4x, 8x, and 10x.
@@ -14,6 +14,7 @@
 // --migrate-period N overrides the default of 4,000 for short experiments.
 // --max-room N overrides the initial 5 to 9 metre room range.
 // --check-movement runs movement and arena assertions without starting islands.
+// Render check: --check-render verifies pickup and shot colors without a window.
 
 from random import Xoshiro128;
 
@@ -61,17 +62,23 @@ let HEALTH = 100.0;
 let KNIFE_RANGE = 1.0;
 let KNIFE_DAMAGE = 34.0;
 let KNIFE_DOT = 0.70710678;
+let GUN_DAMAGE = 40.0;
+let GUN_AMMO = 17;
+let GUN_RADIUS = 0.18;
+let GUN_PICKUP_RANGE = BODY_RADIUS + GUN_RADIUS;
+let SHOT_TRACE_TICKS = 4;
 let ATTACK_COOLDOWN = 5;
 let ATTACK_ANIM_TICKS = 2;
 let NOTCH_CHANCE = 0.4;
 let MIGRATE_PERIOD = flag_int("--migrate-period", 4_000).max(1);
+let MATCH_OFFER_INTERVAL_MS = 1500;
 
 let VIEW_BINS = 17;
-let VIEW_CHANNELS = 4;
+let VIEW_CHANNELS = 5;
 let VIEW_INPUTS = VIEW_BINS * VIEW_CHANNELS;
 let VIEW_MIDDLE = VIEW_BINS.idiv(2);
 let VIEW_HALF_ANGLE = PI / 3.0;
-let BODY_INPUTS = 7;
+let BODY_INPUTS = 8;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
 let HIDDEN = 10;
 let OUTPUTS = 4;
@@ -261,11 +268,17 @@ class Fighter {
         self.health = HEALTH;
         self.cooldown = 0;
         self.attack_ticks = 0;
+        self.gun_ammo = 0;
+        self.shot_ticks = 0;
+        self.shot_start_x = x;
+        self.shot_start_y = y;
+        self.shot_end_x = x;
+        self.shot_end_y = y;
         self.inputs.fill_u32(0, NUM_INPUTS, 0);
         self.inputs.set_f32(NUM_SENSORS - 1, 1.0);
     }
 
-    sense(self, arena, other, rng) {
+    sense(self, arena, other, gun_available, gun_x, gun_y, rng) {
         let inputs = self.inputs;
         let c = self.angle.cos();
         let s = self.angle.sin();
@@ -279,6 +292,10 @@ class Fighter {
         let var opponent_right = 0.0;
         let var opponent_near = 0.0;
         let var opponent_velocity = 0.0;
+        let var gun_left = 0.0;
+        let var gun_right = 0.0;
+        let var gun_near = 0.0;
+        let var gun_visible = false;
 
         // Project the opponent's angular width onto bins, then check one
         // line of sight to its centre against the tile grid.
@@ -302,6 +319,29 @@ class Fighter {
             }
         }
 
+        if (gun_available) {
+            let gx = gun_x - self.x;
+            let gy = gun_y - self.y;
+            let gun_dist2 = gx * gx + gy * gy;
+            let gun_forward = gx * c + gy * s;
+            if (gun_forward > 0.0 && gun_dist2 > GUN_RADIUS * GUN_RADIUS) {
+                let gun_side = -gx * s + gy * c;
+                let gun_bearing = (gun_side / gun_forward).atan();
+                let gun_half_angle = (GUN_RADIUS /
+                                      (gun_dist2 - GUN_RADIUS * GUN_RADIUS).sqrt()).atan();
+                gun_left = gun_bearing - gun_half_angle;
+                gun_right = gun_bearing + gun_half_angle;
+                if (gun_right >= -VIEW_HALF_ANGLE && gun_left <= VIEW_HALF_ANGLE) {
+                    let dist = gun_dist2.sqrt();
+                    if (arena.wall_distance(self.x, self.y, gx / dist, gy / dist) >=
+                        dist - GUN_RADIUS) {
+                        gun_visible = true;
+                        gun_near = (dist - GUN_RADIUS).max(0.0);
+                    }
+                }
+            }
+        }
+
         for (let var i = 0; i < VIEW_BINS; ++i) {
             let dx = c * RAY_X[i] - s * RAY_Y[i];
             let dy = s * RAY_X[i] + c * RAY_Y[i];
@@ -313,6 +353,9 @@ class Fighter {
             inputs.set_f32(base + 1, in_bin ? 1.0 : 0.0);
             inputs.set_f32(base + 2, in_bin ? 1.0 / (1.0 + opponent_near) : 0.0);
             inputs.set_f32(base + 3, in_bin ? opponent_velocity : 0.0);
+            let gun_in_bin = gun_visible && gun_left <= BIN_RIGHT[i] &&
+                             gun_right >= BIN_LEFT[i];
+            inputs.set_f32(base + 4, gun_in_bin ? 1.0 / (1.0 + gun_near) : 0.0);
         }
 
         inputs.set_f32(VIEW_INPUTS, self.health / HEALTH);
@@ -321,6 +364,7 @@ class Fighter {
         inputs.set_f32(VIEW_INPUTS + 3, self.turn_velocity / MAX_TURN);
         inputs.set_f32(VIEW_INPUTS + 4, self.cooldown.to_f() / ATTACK_COOLDOWN.to_f());
         inputs.set_f32(VIEW_INPUTS + 5, rng.float(-1.0, 1.0));
+        inputs.set_f32(VIEW_INPUTS + 6, self.gun_ammo.to_f() / GUN_AMMO.to_f());
     }
 
     think(self) {
@@ -430,6 +474,8 @@ class Fighter {
             self.cooldown = self.cooldown - 1;
         if (self.attack_ticks > 0)
             self.attack_ticks = self.attack_ticks - 1;
+        if (self.shot_ticks > 0)
+            self.shot_ticks = self.shot_ticks - 1;
     }
 
     push(self, arena, dx, dy) {
@@ -445,19 +491,46 @@ class Fighter {
 
     strikes(self, arena, other, attack_probability, rng) {
         if (self.cooldown > 0 || rng.float(0.0, 1.0) >= attack_probability)
-            return false;
+            return 0.0;
         self.cooldown = ATTACK_COOLDOWN;
+        if (self.gun_ammo > 0) {
+            self.gun_ammo = self.gun_ammo - 1;
+            let c = self.angle.cos();
+            let s = self.angle.sin();
+            let wall = arena.wall_distance(self.x, self.y, c, s);
+            let dx = other.x - self.x;
+            let dy = other.y - self.y;
+            let along = dx * c + dy * s;
+            let side2 = dx * dx + dy * dy - along * along;
+            let var hit = false;
+            let var distance = wall;
+            if (along >= 0.0 && side2 <= BODY_RADIUS * BODY_RADIUS) {
+                let entry = (along - (BODY_RADIUS * BODY_RADIUS - side2).max(0.0).sqrt())
+                            .max(0.0);
+                if (entry <= wall) {
+                    hit = true;
+                    distance = entry;
+                }
+            }
+            self.shot_start_x = self.x;
+            self.shot_start_y = self.y;
+            self.shot_end_x = self.x + c * distance;
+            self.shot_end_y = self.y + s * distance;
+            self.shot_ticks = SHOT_TRACE_TICKS;
+            return hit ? GUN_DAMAGE : 0.0;
+        }
         self.attack_ticks = ATTACK_ANIM_TICKS;
         let dx = other.x - self.x;
         let dy = other.y - self.y;
         let dist2 = dx * dx + dy * dy;
         let reach = KNIFE_RANGE + BODY_RADIUS;
         if (dist2 > reach * reach || dist2 < 0.000001)
-            return false;
+            return 0.0;
         let dist = dist2.sqrt();
         if (arena.wall_distance(self.x, self.y, dx / dist, dy / dist) < dist - BODY_RADIUS)
-            return false;
-        return (dx * self.angle.cos() + dy * self.angle.sin()) >= KNIFE_DOT * dist;
+            return 0.0;
+        return (dx * self.angle.cos() + dy * self.angle.sin()) >= KNIFE_DOT * dist ?
+               KNIFE_DAMAGE : 0.0;
     }
 }
 
@@ -501,8 +574,42 @@ class Match {
         }
         self.fighters[0].reset(ax, ay, rng.float(-PI, PI));
         self.fighters[1].reset(bx, by, rng.float(-PI, PI));
+        loop {
+            self.gun_x = rng.float(1.0 + BODY_RADIUS,
+                                   arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+            self.gun_y = rng.float(1.0 + BODY_RADIUS,
+                                   arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+            let da_x = self.gun_x - ax;
+            let da_y = self.gun_y - ay;
+            let db_x = self.gun_x - bx;
+            let db_y = self.gun_y - by;
+            if (!arena.blocked(self.gun_x, self.gun_y) &&
+                da_x * da_x + da_y * da_y >= 1.0 &&
+                db_x * db_x + db_y * db_y >= 1.0)
+                break;
+        }
+        self.gun_available = true;
         self.tick = 0;
         self.needs_reset = false;
+    }
+
+    pickup_gun(self) {
+        if (!self.gun_available)
+            return;
+        let a = self.fighters[0];
+        let b = self.fighters[1];
+        let ax = a.x - self.gun_x;
+        let ay = a.y - self.gun_y;
+        let bx = b.x - self.gun_x;
+        let by = b.y - self.gun_y;
+        let da = ax * ax + ay * ay;
+        let db = bx * bx + by * by;
+        let reach2 = GUN_PICKUP_RANGE * GUN_PICKUP_RANGE;
+        if (da > reach2 && db > reach2)
+            return;
+        let owner = da <= db ? a : b;
+        owner.gun_ammo = GUN_AMMO;
+        self.gun_available = false;
     }
 
     step(self) {
@@ -513,8 +620,8 @@ class Match {
         let rng = self.rng;
         let a = self.fighters[0];
         let b = self.fighters[1];
-        a.sense(self.arena, b, rng);
-        b.sense(self.arena, a, rng);
+        a.sense(self.arena, b, self.gun_available, self.gun_x, self.gun_y, rng);
+        b.sense(self.arena, a, self.gun_available, self.gun_x, self.gun_y, rng);
         let aa = a.think();
         let ba = b.think();
         a.move(self.arena, aa);
@@ -540,12 +647,11 @@ class Match {
             }
         }
 
+        self.pickup_gun();
         let hit_a = a.strikes(self.arena, b, aa[3], rng);
         let hit_b = b.strikes(self.arena, a, ba[3], rng);
-        if (hit_a)
-            b.health = b.health - KNIFE_DAMAGE;
-        if (hit_b)
-            a.health = a.health - KNIFE_DAMAGE;
+        b.health = b.health - hit_a;
+        a.health = a.health - hit_b;
         self.tick = self.tick + 1;
 
         if (a.health <= 0.0 || b.health <= 0.0 || self.tick >= EPISODE_TICKS) {
@@ -619,16 +725,47 @@ fun check_movement() {
 
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
-    fighter.sense(vision_arena, enemy, Xoshiro128(1));
+    fighter.sense(vision_arena, enemy, true, 12.0, 10.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 1.0);
+    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 4) > 0.0);
     let peripheral = 55.0 * PI / 180.0;
     enemy.reset(10.0 + 5.0 * peripheral.cos(), 10.0 + 5.0 * peripheral.sin(), 0.0);
-    fighter.sense(vision_arena, enemy, Xoshiro128(1));
+    fighter.sense(vision_arena, enemy, false, 0.0, 0.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32((VIEW_BINS - 1) * VIEW_CHANNELS + 1) == 1.0);
     enemy.reset(13.0, 10.0, 0.0);
     vision_arena.add_notch(12, 10);
-    fighter.sense(vision_arena, enemy, Xoshiro128(1));
+    fighter.sense(vision_arena, enemy, true, 13.0, 10.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 1) == 0.0);
+    assert(fighter.inputs.get_f32(VIEW_MIDDLE * VIEW_CHANNELS + 4) == 0.0);
+
+    fighter.reset(10.0, 10.0, 0.0);
+    enemy.reset(13.0, 10.0, 0.0);
+    fighter.gun_ammo = GUN_AMMO;
+    fighter.sense(arena, enemy, false, 0.0, 0.0, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(VIEW_INPUTS + 6) == 1.0);
+    assert(fighter.strikes(arena, enemy, 1.0, Xoshiro128(1)) == GUN_DAMAGE);
+    assert(fighter.gun_ammo == GUN_AMMO - 1 && fighter.shot_ticks == SHOT_TRACE_TICKS);
+    assert((fighter.shot_end_x - (enemy.x - BODY_RADIUS)).abs() < 0.0001);
+    for (let var shot = 1; shot < GUN_AMMO; ++shot) {
+        fighter.cooldown = 0;
+        assert(fighter.strikes(arena, enemy, 1.0, Xoshiro128(1)) == GUN_DAMAGE);
+    }
+    assert(fighter.gun_ammo == 0);
+    fighter.cooldown = 0;
+    fighter.gun_ammo = 1;
+    assert(fighter.strikes(vision_arena, enemy, 1.0, Xoshiro128(1)) == 0.0);
+    assert(fighter.gun_ammo == 0 && fighter.shot_end_x <= 12.0);
+    fighter.cooldown = 0;
+    enemy.reset(11.0, 10.0, 0.0);
+    assert(fighter.strikes(arena, enemy, 1.0, Xoshiro128(1)) == KNIFE_DAMAGE);
+
+    let pickup = Match(fighter.individual, fighter.individual, 7);
+    pickup.gun_x = pickup.fighters[0].x;
+    pickup.gun_y = pickup.fighters[0].y;
+    pickup.pickup_gun();
+    assert(!pickup.gun_available && pickup.fighters[0].gun_ammo == GUN_AMMO);
+    pickup.reset_episode();
+    assert(pickup.gun_available && pickup.fighters[0].gun_ammo == 0);
 
     fighter.reset(10.0, 10.0, 0.0);
     fighter.move(arena, forward);
@@ -692,6 +829,8 @@ fun check_movement() {
             assert(duel.arena.tiles.get_u32(tile) == replay.arena.tiles.get_u32(tile));
         assert(duel.fighters[0].x == replay.fighters[0].x);
         assert(duel.fighters[0].y == replay.fighters[0].y);
+        assert(duel.gun_x == replay.gun_x && duel.gun_y == replay.gun_y);
+        assert(!duel.arena.blocked(duel.gun_x, duel.gun_y));
         let var horizontal = false;
         let var vertical = false;
         for (let var x = 2; x < duel.arena.inner_w; ++x)
@@ -709,6 +848,8 @@ fun check_movement() {
             assert(duel.fighters[0].y == replay.fighters[0].y);
             assert(duel.fighters[1].x == replay.fighters[1].x);
             assert(duel.fighters[1].y == replay.fighters[1].y);
+            assert(duel.gun_available == replay.gun_available);
+            assert(duel.fighters[0].gun_ammo == replay.fighters[0].gun_ammo);
         }
         for (let var episode = 0; episode < EPISODES; ++episode) {
             let a = duel.fighters[0];
@@ -718,6 +859,7 @@ fun check_movement() {
             assert(!duel.arena.blocked(a.x, a.y));
             assert(!duel.arena.blocked(b.x, b.y));
             assert(dx * dx + dy * dy >= 4.0);
+            assert(!duel.arena.blocked(duel.gun_x, duel.gun_y));
             duel.reset_episode();
         }
     }
@@ -745,7 +887,7 @@ class Island {
         self.zero_matches = 0;
         self.migrants_sent = 0;
         self.migrants_received = 0;
-        self.last_offer_ms = -3000;
+        self.last_offer_ms = -MATCH_OFFER_INTERVAL_MS;
         self.duel = nil;
         self.pick_match();
     }
@@ -769,7 +911,7 @@ class Island {
     // The viewer gets genomes and a seed, then simulates its own copy.
     match_offer(self, now) {
         if (self.duel.episode != 0 || self.duel.tick != 0 ||
-            now < self.last_offer_ms + 3000)
+            now < self.last_offer_ms + MATCH_OFFER_INTERVAL_MS)
             return nil;
         let var oldest = 0;
         for (let var i = 1; i < POP_SIZE; ++i) {
@@ -967,6 +1109,10 @@ let COL_TEXT = 0xFF_E1_E8_EB;
 let COL_DIM = 0xFF_9B_A9_B0;
 let COL_SKIN = 0xFF_F3_D1_AC;
 let COL_BLADE = 0xFF_D8_E4_EA;
+let COL_GUN = 0xFF_C4_C9_CD;
+let COL_GUN_HIGHLIGHT = 0xFF_E3_E8_EA;
+let COL_GUN_SHADOW = 0xFF_6D_78_80;
+let COL_SHOT = 0xFF_FF_E4_63;
 
 fun fill_rect(buf, x, y, w, h, color) {
     let x0 = x.max(0);
@@ -993,6 +1139,34 @@ fun draw_segment(buf, x0, y0, x1, y1, radius, color) {
         let y = (y0.to_f() + (y1 - y0).to_f() * t).floor();
         draw_disc(buf, x, y, radius, color);
     }
+}
+
+fun draw_pistol(buf, grip_x, grip_y, angle, metres) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let right_x = -s;
+    let right_y = c;
+    let rear_x = grip_x - (c * metres * 0.11).floor();
+    let rear_y = grip_y - (s * metres * 0.11).floor();
+    let muzzle_x = grip_x + (c * metres * 0.18).floor();
+    let muzzle_y = grip_y + (s * metres * 0.18).floor();
+    let handle_x = grip_x - (c * metres * 0.09).floor() +
+                   (right_x * metres * 0.19).floor();
+    let handle_y = grip_y - (s * metres * 0.09).floor() +
+                   (right_y * metres * 0.19).floor();
+    let guard_x = grip_x + (c * metres * 0.08).floor() +
+                  (right_x * metres * 0.08).floor();
+    let guard_y = grip_y + (s * metres * 0.08).floor() +
+                  (right_y * metres * 0.08).floor();
+    draw_segment(buf, grip_x, grip_y, handle_x, handle_y, 3, COL_BG);
+    draw_segment(buf, grip_x, grip_y, handle_x, handle_y, 2, COL_GUN_SHADOW);
+    draw_segment(buf, handle_x, handle_y, guard_x, guard_y, 0, COL_GUN_HIGHLIGHT);
+    draw_segment(buf, rear_x, rear_y, muzzle_x, muzzle_y, 3, COL_BG);
+    draw_segment(buf, rear_x, rear_y, muzzle_x, muzzle_y, 2, COL_GUN);
+    draw_segment(buf, rear_x - right_x.floor(), rear_y - right_y.floor(),
+                 muzzle_x - right_x.floor(), muzzle_y - right_y.floor(),
+                 0, COL_GUN_HIGHLIGHT);
+    draw_disc(buf, muzzle_x, muzzle_y, 2, COL_GUN_SHADOW);
 }
 
 fun draw_body(buf, x, y, angle, half_length, half_width, radius, color) {
@@ -1040,7 +1214,7 @@ fun draw_text(buf, x, y, label, color) {
     }
 }
 
-fun draw_fighter(buf, x, y, angle, hp, attack_ticks, color, scale) {
+fun draw_fighter(buf, x, y, angle, hp, attack_ticks, gun_ammo, color, scale) {
     let c = angle.cos();
     let s = angle.sin();
     let right_x = -s;
@@ -1056,15 +1230,21 @@ fun draw_fighter(buf, x, y, angle, hp, attack_ticks, color, scale) {
     draw_disc(buf, x, y, head_radius + 1, COL_BG);
     draw_disc(buf, x, y, head_radius, COL_SKIN);
 
-    let thrust = attack_ticks == 2 ? 0.20 : attack_ticks == 1 ? 0.10 : 0.0;
-    let hand_x = x + (c * metres * (0.09 + thrust) + right_x * metres * 0.22).floor();
-    let hand_y = y + (s * metres * (0.09 + thrust) + right_y * metres * 0.22).floor();
-    let blade_x = hand_x + (c * metres * 0.08).floor();
-    let blade_y = hand_y + (s * metres * 0.08).floor();
-    let tip_x = hand_x + (c * metres * 0.36).floor();
-    let tip_y = hand_y + (s * metres * 0.36).floor();
-    draw_segment(buf, hand_x, hand_y, blade_x, blade_y, 2, COL_BG);
-    draw_segment(buf, blade_x, blade_y, tip_x, tip_y, 1, COL_BLADE);
+    let thrust = gun_ammo > 0 ? 0.0 :
+                 attack_ticks == 2 ? 0.20 : attack_ticks == 1 ? 0.10 : 0.0;
+    let side_offset = gun_ammo > 0 ? 0.0 : 0.22;
+    let hand_x = x + (c * metres * (0.09 + thrust) + right_x * metres * side_offset).floor();
+    let hand_y = y + (s * metres * (0.09 + thrust) + right_y * metres * side_offset).floor();
+    if (gun_ammo > 0) {
+        draw_pistol(buf, hand_x, hand_y, angle, metres);
+    } else {
+        let blade_x = hand_x + (c * metres * 0.08).floor();
+        let blade_y = hand_y + (s * metres * 0.08).floor();
+        let tip_x = hand_x + (c * metres * 0.36).floor();
+        let tip_y = hand_y + (s * metres * 0.36).floor();
+        draw_segment(buf, hand_x, hand_y, blade_x, blade_y, 2, COL_BG);
+        draw_segment(buf, blade_x, blade_y, tip_x, tip_y, 1, COL_BLADE);
+    }
     draw_disc(buf, hand_x, hand_y, (metres * 0.07).floor().max(2), COL_SKIN);
 
     fill_rect(buf, x - 15, y - 21, 30, 4, COL_BG);
@@ -1080,10 +1260,15 @@ fun replay_snapshot(config, duel) {
         oldest_side: config.oldest_side,
         room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
         tiles: duel.arena.tiles,
+        gun_available: duel.gun_available, gun_x: duel.gun_x, gun_y: duel.gun_y,
         episode: duel.episode.min(EPISODES - 1), tick: duel.tick,
         kills_a: duel.kills[0], kills_b: duel.kills[1],
         ax: a.x, ay: a.y, adir: a.angle, ahp: a.health, astab: a.attack_ticks,
-        bx: b.x, by: b.y, bdir: b.angle, bhp: b.health, bstab: b.attack_ticks
+        aammo: a.gun_ammo, ashot: a.shot_ticks,
+        asx: a.shot_start_x, asy: a.shot_start_y, aex: a.shot_end_x, aey: a.shot_end_y,
+        bx: b.x, by: b.y, bdir: b.angle, bhp: b.health, bstab: b.attack_ticks,
+        bammo: b.gun_ammo, bshot: b.shot_ticks,
+        bsx: b.shot_start_x, bsy: b.shot_start_y, bex: b.shot_end_x, bey: b.shot_end_y
     };
 }
 
@@ -1127,10 +1312,23 @@ fun render(buf, snap, agg, view_speed, paused) {
                           wall ? COL_WALL : COL_FLOOR);
             }
         }
+        if (snap.gun_available) {
+            let gun_px = ox + (snap.gun_x * scale).floor();
+            let gun_py = oy + (snap.gun_y * scale).floor();
+            draw_pistol(buf, gun_px, gun_py, 0.0, scale.to_f() * 1.25);
+        }
+        if (snap.ashot > 0)
+            draw_segment(buf, ox + (snap.asx * scale).floor(), oy + (snap.asy * scale).floor(),
+                         ox + (snap.aex * scale).floor(), oy + (snap.aey * scale).floor(),
+                         0, COL_SHOT);
+        if (snap.bshot > 0)
+            draw_segment(buf, ox + (snap.bsx * scale).floor(), oy + (snap.bsy * scale).floor(),
+                         ox + (snap.bex * scale).floor(), oy + (snap.bey * scale).floor(),
+                         0, COL_SHOT);
         draw_fighter(buf, ox + (snap.ax * scale).floor(), oy + (snap.ay * scale).floor(),
-                     snap.adir, snap.ahp, snap.astab, COL_A, scale);
+                     snap.adir, snap.ahp, snap.astab, snap.aammo, COL_A, scale);
         draw_fighter(buf, ox + (snap.bx * scale).floor(), oy + (snap.by * scale).floor(),
-                     snap.bdir, snap.bhp, snap.bstab, COL_B, scale);
+                     snap.bdir, snap.bhp, snap.bstab, snap.bammo, COL_B, scale);
     }
 
     let px = VIEW_W + 20;
@@ -1147,12 +1345,17 @@ fun render(buf, snap, agg, view_speed, paused) {
     if (snap != nil) {
         draw_text(buf, px, 245, "ISLAND " + snap.index.comma_sep(), COL_TEXT);
         draw_text(buf, px, 268, "MATCH " + snap.match_no.comma_sep(), COL_TEXT);
-        draw_text(buf, px, 291, "EPISODE " + (snap.episode + 1).comma_sep() + "/10", COL_TEXT);
+        draw_text(buf, px, 291, "EPISODE " + (snap.episode + 1).comma_sep() +
+                  "/" + EPISODES.comma_sep(), COL_TEXT);
         draw_text(buf, px, 314, "TIME " + snap.tick.idiv(10).comma_sep() + "/30", COL_TEXT);
         draw_text(buf, px, 343, "BLUE AGE " + snap.first_age.comma_sep(), COL_A);
         draw_text(buf, px, 366, "BLUE KILLS " + snap.kills_a.comma_sep(), COL_A);
+        draw_text(buf, px + 160, 366,
+                  snap.aammo > 0 ? "GUN " + snap.aammo.comma_sep() : "KNIFE", COL_A);
         draw_text(buf, px, 394, "ORANGE AGE " + snap.second_age.comma_sep(), COL_B);
         draw_text(buf, px, 417, "ORANGE KILLS " + snap.kills_b.comma_sep(), COL_B);
+        draw_text(buf, px + 160, 417,
+                  snap.bammo > 0 ? "GUN " + snap.bammo.comma_sep() : "KNIFE", COL_B);
         draw_text(buf, px, 445, "ROOM " + snap.room_w.comma_sep() + " X " + snap.room_h.comma_sep(), COL_TEXT);
     } else {
         draw_text(buf, px, 245, "WAITING FOR MATCH", COL_TEXT);
@@ -1163,6 +1366,46 @@ fun render(buf, snap, agg, view_speed, paused) {
     draw_text(buf, px, 550, "F VIEW SPEED", COL_DIM);
     draw_text(buf, px, 574, "SPACE PAUSE VIEW", COL_DIM);
     draw_text(buf, px, 598, "N NEXT MATCH", COL_DIM);
+}
+
+if (has_flag("--check-render")) {
+    let test_weights = ByteArray.with_size(NUM_WEIGHTS * 4);
+    let test_agent = Individual(test_weights, 0);
+    let test_duel = Match(test_agent, test_agent, 7);
+    let test_config = {index: 0, match_no: 0, first_age: 0, second_age: 0,
+                       oldest_side: 0};
+    let test_stats = {matches: 0, matches_per_sec: 0, kills: 0,
+                      zero_matches: 0, migrations: 0, oldest: 0};
+    let test_frame = ByteArray.with_size(FRAME_W * FRAME_H * 4);
+    let test_scale = PIXELS_PER_METRE.min(VIEW_W.idiv(test_duel.arena.inner_w + 2))
+                                      .min(FRAME_H.idiv(test_duel.arena.inner_h + 2)).max(4);
+    let test_ox = (VIEW_W - test_duel.arena.width * test_scale).idiv(2);
+    let test_oy = (FRAME_H - test_duel.arena.height * test_scale).idiv(2);
+    let test_x = test_ox + (test_duel.gun_x * test_scale).floor();
+    let test_y = test_oy + (test_duel.gun_y * test_scale).floor();
+    render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
+    assert(test_frame.get_u32(test_y * FRAME_W + test_x + 4) == COL_GUN);
+    let test_shooter = test_duel.fighters[0];
+    test_duel.gun_available = false;
+    test_shooter.gun_ammo = GUN_AMMO;
+    render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
+    let test_player_x = test_ox + (test_shooter.x * test_scale).floor();
+    let test_player_y = test_oy + (test_shooter.y * test_scale).floor();
+    let var held_gun_visible = false;
+    for (let var dy = -30; dy <= 30; ++dy)
+        for (let var dx = -30; dx <= 30; ++dx)
+            if (test_frame.get_u32((test_player_y + dy) * FRAME_W + test_player_x + dx) == COL_GUN)
+                held_gun_visible = true;
+    assert(held_gun_visible);
+    test_shooter.shot_ticks = SHOT_TRACE_TICKS;
+    test_shooter.shot_start_x = test_duel.gun_x - 0.3;
+    test_shooter.shot_start_y = test_duel.gun_y;
+    test_shooter.shot_end_x = test_duel.gun_x + 0.3;
+    test_shooter.shot_end_y = test_duel.gun_y;
+    render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
+    assert(test_frame.get_u32(test_y * FRAME_W + test_x) == COL_SHOT);
+    $println("render checks passed");
+    $exit(0);
 }
 
 let island_ids = spawn_islands();
