@@ -55,6 +55,7 @@ let ERROR = rgb(255, 120, 120);
 let SUCCESS = rgb(130, 220, 140);
 let REGISTER_HEADING = rgb(80, 255, 100);
 let BUTTON = rgb(110, 90, 200);
+let LOGIN_BUTTON = rgb(150, 70, 235);
 let PRIMARY_BUTTON = REGISTER_HEADING;
 let BUTTON_TEXT = rgb(255, 255, 255);
 let DANGER = rgb(140, 50, 70);
@@ -503,10 +504,8 @@ class App
         self.messages_today = nil;
         self.num_accounts = nil;
 
-        // Login screen, in "login" or "register" mode. The fields are the
-        // username, password and password confirmation, as arrays of
-        // characters. The confirmation only shows when registering.
-        self.mode = "register";
+        // Login screen fields: username, password and password confirmation,
+        // as arrays of characters. Confirmation is only used to register.
         self.fields = [[], [], []];
         self.focus = 0;
         self.status = "";
@@ -902,11 +901,9 @@ class App
         self.dirty = true;
     }
 
-    // Validates the form and sends a login or register request, depending
-    // on the mode of the login screen
-    submit_login(self)
+    // Validates the form and sends the requested login or register request
+    submit_login(self, type)
     {
-        let type = self.mode;
         let username = join(self.fields[0]);
         let password = join(self.fields[1]);
 
@@ -967,22 +964,12 @@ class App
         self.is_admin = false;
         self.admin_info = nil;
         self.admin_error = "";
-        self.mode = "login";
         self.fields = [[], [], []];
         self.focus = 0;
         self.screen = "login";
         self.set_status("", DIM);
         self.disconnect();
         self.connect();
-    }
-
-    // Switches the login screen between logging in and registering
-    set_mode(self, mode)
-    {
-        self.mode = mode;
-        self.fields[2] = [];
-        self.focus = self.fields[0].len == 0 ? 0 : 1;
-        self.set_status("", DIM);
     }
 
     // Moves from the intro to the login screen, sliding the logo up unless
@@ -1096,9 +1083,7 @@ class App
         if (action == "focus") {
             self.focus = arg;
         } else if (action == "submit") {
-            self.submit_login();
-        } else if (action == "mode") {
-            self.set_mode(arg);
+            self.submit_login(arg);
         } else if (action == "send") {
             self.submit_post();
         } else if (action == "logout") {
@@ -1146,12 +1131,10 @@ class App
         }
 
         if (self.screen == "login") {
-            let num_fields = self.mode == "register" ? 3 : 2;
-
             if (key == "TAB")
-                self.focus = (self.focus + 1) % num_fields;
+                self.focus = (self.focus + 1) % 3;
             else if (key == "RETURN")
-                self.submit_login();
+                self.submit_login(self.focus == 2 ? "register" : "login");
             else if (key == "BACKSPACE" && self.fields[self.focus].len > 0)
                 self.fields[self.focus].pop();
             return;
@@ -1279,7 +1262,7 @@ class App
         let shown = join(value.slice(start, value.len));
         let text_y = box_y + (h - CHAR_H).idiv(2);
 
-        let placeholder = self.mode == "register" && index == 0 && value.len == 0;
+        let placeholder = index == 0 && value.len == 0;
         if (placeholder)
             self.text(self.frame, x + TEXT_PAD, text_y, "choose a username", PLACEHOLDER, FIELD);
         else
@@ -1331,24 +1314,14 @@ class App
             return out;
         }
 
-        if (self.mode == "register") {
-            self.centered(260, "Create your new account", REGISTER_HEADING);
-            self.field(x, 296, w, "Username", self.fields[0], 0);
-            self.field(x, 370, w, "Password", stars(self.fields[1]), 1);
-            self.field(x, 444, w, "Confirm password", stars(self.fields[2]), 2);
-            self.button(x, 528, bw, 40, "Register", PRIMARY_BUTTON, "submit", nil);
-            self.button(x + w - bw, 528, bw, 40, "Log in", BUTTON, "mode", "login");
-            self.centered(582, self.status, self.status_color);
-            self.centered(HEIGHT - 76, "Tab switches fields, Enter registers", DIM);
-        } else {
-            self.centered(260, "Sign the Plush guestbook!", TEXT);
-            self.field(x, 296, w, "Username", self.fields[0], 0);
-            self.field(x, 370, w, "Password", stars(self.fields[1]), 1);
-            self.button(x, 456, bw, 40, "Register", BUTTON, "mode", "register");
-            self.button(x + w - bw, 456, bw, 40, "Log in", PRIMARY_BUTTON, "submit", nil);
-            self.centered(514, self.status, self.status_color);
-            self.centered(HEIGHT - 76, "Tab switches fields, Enter logs in", DIM);
-        }
+        self.centered(245, "Create your new user account or sign in", REGISTER_HEADING);
+        self.field(x, 296, w, "Username", self.fields[0], 0);
+        self.field(x, 370, w, "Password", stars(self.fields[1]), 1);
+        self.field(x, 444, w, "Confirm (register only)", stars(self.fields[2]), 2);
+        self.button(x, 528, bw, 40, "Register", PRIMARY_BUTTON, "submit", "register");
+        self.button(x + w - bw, 528, bw, 40, "Log in", LOGIN_BUTTON, "submit", "login");
+        self.centered(582, self.status, self.status_color);
+        self.centered(HEIGHT - 76, "Enter logs in; in Confirm, Enter registers", DIM);
 
         let conn_text =
             self.conn == "connected" ? "Connected to " + self.addr :
