@@ -14,7 +14,7 @@
 // --migrate-period N overrides the default of 2,000 for short experiments.
 // --max-room N overrides the initial 5 to 10 metre room range.
 // --check-movement runs movement and arena assertions without starting islands.
-// Render check: --check-render verifies pickup and shot colors without a window.
+// Render check: --check-render verifies pickup, shot, and blast colors without a window.
 // Energy check: --check-energy verifies replenishment, action costs, and exhaustion.
 // Map check: --check-maps validates varied layouts, clearance, and spawning.
 // Evolution check: --check-evolution verifies tie replacement and migration.
@@ -91,6 +91,15 @@ let GUN_PICKUP_RANGE = BODY_RADIUS + GUN_RADIUS;
 let HEALTH_KIT_HEAL = 50.0;
 let HEALTH_KIT_RADIUS = 0.3;
 let HEALTH_KIT_PICKUP_RANGE = BODY_RADIUS + HEALTH_KIT_RADIUS;
+let GRENADE_RADIUS = 0.2;
+let GRENADE_PICKUP_RANGE = BODY_RADIUS + GRENADE_RADIUS;
+let GRENADE_THROW_SPEED = 8.0;
+let GRENADE_MAX_TRAVEL = 5.0;
+let GRENADE_THROW_ENERGY = 30.0;
+let GRENADE_FUSE_TICKS = 15;
+let GRENADE_BLAST_RADIUS = 3.0;
+let GRENADE_DAMAGE = 200.0;
+let GRENADE_BLAST_TICKS = 4;
 let SHOT_TRACE_TICKS = 4;
 let ATTACK_COOLDOWN = 5;
 let ATTACK_ANIM_TICKS = 2;
@@ -108,12 +117,14 @@ let VIEW_HALF_ANGLE = PI / 3.0;
 let OPPONENT_INPUT = VIEW_BINS;
 let PICKUP_INPUT = OPPONENT_INPUT + 4;
 let HEALTH_KIT_INPUT = PICKUP_INPUT + 3;
-let VIEW_INPUTS = HEALTH_KIT_INPUT + 3;
-let BODY_INPUTS = 9;
-let ENERGY_INPUT = VIEW_INPUTS + 7;
+let GRENADE_INPUT = HEALTH_KIT_INPUT + 3;
+let THROWN_GRENADE_INPUT = GRENADE_INPUT + 3;
+let VIEW_INPUTS = THROWN_GRENADE_INPUT + 3;
+let BODY_INPUTS = 10;
+let ENERGY_INPUT = VIEW_INPUTS + 8;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
 let HIDDEN = 16;
-let OUTPUTS = 4;
+let OUTPUTS = 5;
 let RECURRENT = 10;
 let NUM_INPUTS = NUM_SENSORS + RECURRENT;
 let NUM_WEIGHTS = HIDDEN * NUM_INPUTS + (OUTPUTS + RECURRENT) * HIDDEN;
@@ -122,9 +133,9 @@ let RECURRENT_BASE = OUTPUT_BASE + OUTPUTS * HIDDEN;
 let W_SCALE = 1.0 / NUM_INPUTS.to_f().sqrt();
 let INITIAL_MUTATION_RATE = 0.05;
 let INITIAL_MUTATION_STRENGTH = 0.10;
-let MIN_MUTATION_RATE = 0.005;
+let MIN_MUTATION_RATE = 0.008;
 let MAX_MUTATION_RATE = 0.10;
-let MIN_MUTATION_STRENGTH = 0.01;
+let MIN_MUTATION_STRENGTH = 0.05;
 let MAX_MUTATION_STRENGTH = 0.30;
 let STRATEGY_MUTATION_CHANCE = 0.10;
 let STRATEGY_MUTATION_STEP = 0.05;
@@ -146,16 +157,19 @@ let INPUT_NAMES = [];
 for (let var i = 0; i < VIEW_BINS; ++i)
     INPUT_NAMES.push("wall_ray_" + (i - VIEW_MIDDLE).to_s());
 let BODY_NAMES = ["health", "forward_speed", "strafe_speed", "turn_speed",
-                  "attack_cooldown", "random", "gun_ammo", "energy", "bias"];
+                  "attack_cooldown", "random", "gun_ammo", "grenade_held", "energy", "bias"];
 let VISION_NAMES = ["opponent_visible", "opponent_angle", "opponent_proximity",
                     "opponent_has_gun", "pickup_gun_visible", "pickup_gun_angle",
                     "pickup_gun_proximity", "pickup_health_kit_visible",
-                    "pickup_health_kit_angle", "pickup_health_kit_proximity"];
+                    "pickup_health_kit_angle", "pickup_health_kit_proximity",
+                    "pickup_grenade_visible", "pickup_grenade_angle",
+                    "pickup_grenade_proximity", "thrown_grenade_visible",
+                    "thrown_grenade_angle", "thrown_grenade_proximity"];
 for (let var i = 0; i < VISION_NAMES.len; ++i)
     INPUT_NAMES.push(VISION_NAMES[i]);
 for (let var i = 0; i < BODY_NAMES.len; ++i)
     INPUT_NAMES.push(BODY_NAMES[i]);
-let OUTPUT_NAMES = ["forward", "turn", "strafe", "attack"];
+let OUTPUT_NAMES = ["forward", "turn", "strafe", "attack", "throw_grenade"];
 for (let var i = 0; i < RECURRENT; ++i) {
     let name = "memory_" + i.to_s();
     INPUT_NAMES.push(name);
@@ -319,9 +333,10 @@ fun mutate(rng, parent, rates, strengths) {
 }
 
 fun mutate_strategy(rng, value, min_value, max_value) {
+    let bounded = value.clip(min_value, max_value);
     if (rng.float(0.0, 1.0) >= STRATEGY_MUTATION_CHANCE)
-        return value;
-    return (value * rng.normal(0.0, STRATEGY_MUTATION_STEP).clip(-0.15, 0.15).exp())
+        return bounded;
+    return (bounded * rng.normal(0.0, STRATEGY_MUTATION_STEP).clip(-0.15, 0.15).exp())
            .clip(min_value, max_value);
 }
 
@@ -645,6 +660,7 @@ class Fighter {
         self.cooldown = 0;
         self.attack_ticks = 0;
         self.gun_ammo = 0;
+        self.grenade_held = false;
         self.shot_ticks = 0;
         self.shot_start_x = x;
         self.shot_start_y = y;
@@ -661,7 +677,9 @@ class Fighter {
     }
 
     sense(self, arena, other, gun_available, gun_x, gun_y,
-          kit_available, kit_x, kit_y, rng) {
+          kit_available, kit_x, kit_y,
+          grenade_available, grenade_x, grenade_y,
+          thrown_active, thrown_x, thrown_y, rng) {
         let inputs = self.inputs;
         let c = self.angle.cos();
         let s = self.angle.sin();
@@ -677,6 +695,12 @@ class Fighter {
         let var kit_angle = 0.0;
         let var kit_near = 0.0;
         let var kit_visible = false;
+        let var grenade_angle = 0.0;
+        let var grenade_near = 0.0;
+        let var grenade_visible = false;
+        let var thrown_angle = 0.0;
+        let var thrown_near = 0.0;
+        let var thrown_visible = false;
 
         // One center ray per object prevents seeing pickups or opponents through walls.
         let forward = ex * c + ey * s;
@@ -739,6 +763,54 @@ class Fighter {
             }
         }
 
+        if (grenade_available) {
+            let gx = grenade_x - self.x;
+            let gy = grenade_y - self.y;
+            let grenade_dist2 = gx * gx + gy * gy;
+            let grenade_forward = gx * c + gy * s;
+            if (grenade_forward > 0.0 && grenade_dist2 > 0.000001) {
+                let grenade_side = -gx * s + gy * c;
+                let grenade_bearing = (grenade_side / grenade_forward).atan();
+                if (grenade_bearing >= -VIEW_HALF_ANGLE &&
+                    grenade_bearing <= VIEW_HALF_ANGLE) {
+                    let dist = grenade_dist2.sqrt();
+                    if (arena.wall_distance(self.x, self.y, gx / dist, gy / dist) >= dist) {
+                        grenade_visible = true;
+                        grenade_angle = grenade_bearing / VIEW_HALF_ANGLE;
+                        grenade_near = 1.0 / (1.0 + (dist - GRENADE_RADIUS).max(0.0));
+                    }
+                }
+            }
+            if (grenade_dist2 <= 0.000001) {
+                grenade_visible = true;
+                grenade_near = 1.0;
+            }
+        }
+
+        if (thrown_active) {
+            let gx = thrown_x - self.x;
+            let gy = thrown_y - self.y;
+            let thrown_dist2 = gx * gx + gy * gy;
+            let thrown_forward = gx * c + gy * s;
+            if (thrown_forward > 0.0 && thrown_dist2 > 0.000001) {
+                let thrown_side = -gx * s + gy * c;
+                let thrown_bearing = (thrown_side / thrown_forward).atan();
+                if (thrown_bearing >= -VIEW_HALF_ANGLE &&
+                    thrown_bearing <= VIEW_HALF_ANGLE) {
+                    let dist = thrown_dist2.sqrt();
+                    if (arena.wall_distance(self.x, self.y, gx / dist, gy / dist) >= dist) {
+                        thrown_visible = true;
+                        thrown_angle = thrown_bearing / VIEW_HALF_ANGLE;
+                        thrown_near = 1.0 / (1.0 + (dist - GRENADE_RADIUS).max(0.0));
+                    }
+                }
+            }
+            if (thrown_dist2 <= 0.000001) {
+                thrown_visible = true;
+                thrown_near = 1.0;
+            }
+        }
+
         for (let var i = 0; i < VIEW_BINS; ++i) {
             let dx = c * RAY_X[i] - s * RAY_Y[i];
             let dy = s * RAY_X[i] + c * RAY_Y[i];
@@ -756,6 +828,12 @@ class Fighter {
         inputs.set_f32(HEALTH_KIT_INPUT, kit_visible ? 1.0 : 0.0);
         inputs.set_f32(HEALTH_KIT_INPUT + 1, kit_angle);
         inputs.set_f32(HEALTH_KIT_INPUT + 2, kit_near);
+        inputs.set_f32(GRENADE_INPUT, grenade_visible ? 1.0 : 0.0);
+        inputs.set_f32(GRENADE_INPUT + 1, grenade_angle);
+        inputs.set_f32(GRENADE_INPUT + 2, grenade_near);
+        inputs.set_f32(THROWN_GRENADE_INPUT, thrown_visible ? 1.0 : 0.0);
+        inputs.set_f32(THROWN_GRENADE_INPUT + 1, thrown_angle);
+        inputs.set_f32(THROWN_GRENADE_INPUT + 2, thrown_near);
 
         inputs.set_f32(VIEW_INPUTS, self.health / HEALTH);
         inputs.set_f32(VIEW_INPUTS + 1, (self.vx * c + self.vy * s) / MAX_FORWARD);
@@ -764,6 +842,7 @@ class Fighter {
         inputs.set_f32(VIEW_INPUTS + 4, self.cooldown.to_f() / ATTACK_COOLDOWN.to_f());
         inputs.set_f32(VIEW_INPUTS + 5, rng.float(-1.0, 1.0));
         inputs.set_f32(VIEW_INPUTS + 6, self.gun_ammo.to_f() / GUN_AMMO.to_f());
+        inputs.set_f32(VIEW_INPUTS + 7, self.grenade_held ? 1.0 : 0.0);
         inputs.set_f32(ENERGY_INPUT, (self.energy / MAX_ENERGY).clip(0.0, 1.0));
     }
 
@@ -780,6 +859,7 @@ class Fighter {
             out[i] = v / (1.0 + v.abs());
         }
         out[3] = (out[3] + 1.0) * 0.5;
+        out[4] = (out[4] + 1.0) * 0.5;
 
         // Recurrent outputs become the next tick's memory inputs.
         for (let var i = 0; i < RECURRENT; ++i) {
@@ -1055,6 +1135,34 @@ class Match {
                 break;
         }
         self.kit_available = true;
+        loop {
+            self.grenade_x = rng.float(1.0 + BODY_RADIUS,
+                                       arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+            self.grenade_y = rng.float(1.0 + BODY_RADIUS,
+                                       arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+            let da_x = self.grenade_x - ax;
+            let da_y = self.grenade_y - ay;
+            let db_x = self.grenade_x - bx;
+            let db_y = self.grenade_y - by;
+            let gun_x = self.grenade_x - self.gun_x;
+            let gun_y = self.grenade_y - self.gun_y;
+            let kit_x = self.grenade_x - self.kit_x;
+            let kit_y = self.grenade_y - self.kit_y;
+            if (!arena.blocked(self.grenade_x, self.grenade_y) &&
+                da_x * da_x + da_y * da_y >= 1.0 &&
+                db_x * db_x + db_y * db_y >= 1.0 &&
+                gun_x * gun_x + gun_y * gun_y >= 0.49 &&
+                kit_x * kit_x + kit_y * kit_y >= 0.49)
+                break;
+        }
+        self.grenade_available = true;
+        self.grenade_active = false;
+        self.grenade_vx = 0.0;
+        self.grenade_vy = 0.0;
+        self.grenade_travel = 0.0;
+        self.grenade_thrower = 0;
+        self.grenade_fuse = 0;
+        self.blast_ticks = 0;
         self.tick = 0;
         self.needs_reset = false;
     }
@@ -1099,20 +1207,120 @@ class Match {
         self.kit_available = false;
     }
 
+    pickup_grenade(self) {
+        if (!self.grenade_available)
+            return;
+        let a = self.fighters[0];
+        let b = self.fighters[1];
+        let ax = a.x - self.grenade_x;
+        let ay = a.y - self.grenade_y;
+        let bx = b.x - self.grenade_x;
+        let by = b.y - self.grenade_y;
+        let da = ax * ax + ay * ay;
+        let db = bx * bx + by * by;
+        let reach2 = GRENADE_PICKUP_RANGE * GRENADE_PICKUP_RANGE;
+        if (da > reach2 && db > reach2)
+            return;
+        let owner = da <= db ? a : b;
+        owner.grenade_held = true;
+        self.grenade_available = false;
+    }
+
+    throw_grenade(self, fighter, signal, side) {
+        if (!fighter.grenade_held || signal <= 0.5 || fighter.cooldown > 0 ||
+            fighter.energy < GRENADE_THROW_ENERGY || self.grenade_active)
+            return false;
+        fighter.energy = fighter.energy - GRENADE_THROW_ENERGY;
+        fighter.cooldown = ATTACK_COOLDOWN;
+        fighter.grenade_held = false;
+        self.grenade_x = fighter.x;
+        self.grenade_y = fighter.y;
+        self.grenade_vx = fighter.angle.cos() * GRENADE_THROW_SPEED;
+        self.grenade_vy = fighter.angle.sin() * GRENADE_THROW_SPEED;
+        self.grenade_travel = 0.0;
+        self.grenade_thrower = side;
+        self.grenade_fuse = GRENADE_FUSE_TICKS;
+        self.grenade_active = true;
+        return true;
+    }
+
+    advance_grenade(self) {
+        let speed = (self.grenade_vx * self.grenade_vx +
+                     self.grenade_vy * self.grenade_vy).sqrt();
+        if (speed > 0.0) {
+            let dx = self.grenade_vx / speed;
+            let dy = self.grenade_vy / speed;
+            let remaining = (GRENADE_MAX_TRAVEL - self.grenade_travel).max(0.0);
+            let var travel = (speed * DT).min(remaining);
+            let reached_range = travel >= remaining;
+            let enemy = self.fighters[1 - self.grenade_thrower];
+            let ex = enemy.x - self.grenade_x;
+            let ey = enemy.y - self.grenade_y;
+            let along = ex * dx + ey * dy;
+            let side2 = (ex * ex + ey * ey - along * along).max(0.0);
+            let reach = BODY_RADIUS + GRENADE_RADIUS;
+            if (along >= 0.0 && side2 <= reach * reach) {
+                let entry = (along - (reach * reach - side2).sqrt()).max(0.0);
+                if (entry <= travel) {
+                    travel = entry;
+                    self.grenade_vx = 0.0;
+                    self.grenade_vy = 0.0;
+                }
+            }
+            let wall = self.arena.wall_distance(self.grenade_x, self.grenade_y, dx, dy);
+            if (wall <= travel + GRENADE_RADIUS) {
+                travel = (wall - GRENADE_RADIUS).max(0.0);
+                self.grenade_vx = 0.0;
+                self.grenade_vy = 0.0;
+            }
+            if (reached_range) {
+                self.grenade_vx = 0.0;
+                self.grenade_vy = 0.0;
+            }
+            self.grenade_x = self.grenade_x + dx * travel;
+            self.grenade_y = self.grenade_y + dy * travel;
+            self.grenade_travel = self.grenade_travel + travel;
+        }
+        self.grenade_fuse = self.grenade_fuse - 1;
+        if (self.grenade_fuse > 0)
+            return;
+        self.grenade_active = false;
+        self.blast_ticks = GRENADE_BLAST_TICKS;
+        for (let var side = 0; side < 2; ++side) {
+            let target = self.fighters[side];
+            let dx = target.x - self.grenade_x;
+            let dy = target.y - self.grenade_y;
+            let distance = (dx * dx + dy * dy).sqrt();
+            if (distance < GRENADE_BLAST_RADIUS &&
+                (distance <= 0.000001 ||
+                 self.arena.wall_distance(self.grenade_x, self.grenade_y,
+                                          dx / distance, dy / distance) >= distance))
+                target.health = target.health -
+                    GRENADE_DAMAGE * (1.0 - distance / GRENADE_BLAST_RADIUS);
+        }
+    }
+
     step(self) {
         if (self.needs_reset) {
             self.episode = self.episode + 1;
             self.reset_episode();
         }
+        let grenade_was_active = self.grenade_active;
+        if (self.blast_ticks > 0)
+            self.blast_ticks = self.blast_ticks - 1;
         let rng = self.rng;
         let a = self.fighters[0];
         let b = self.fighters[1];
         a.recover();
         b.recover();
         a.sense(self.arena, b, self.gun_available, self.gun_x, self.gun_y,
-                self.kit_available, self.kit_x, self.kit_y, rng);
+                self.kit_available, self.kit_x, self.kit_y,
+                self.grenade_available, self.grenade_x, self.grenade_y,
+                self.grenade_active, self.grenade_x, self.grenade_y, rng);
         b.sense(self.arena, a, self.gun_available, self.gun_x, self.gun_y,
-                self.kit_available, self.kit_x, self.kit_y, rng);
+                self.kit_available, self.kit_x, self.kit_y,
+                self.grenade_available, self.grenade_x, self.grenade_y,
+                self.grenade_active, self.grenade_x, self.grenade_y, rng);
         let aa = a.think();
         let ba = b.think();
         a.move(self.arena, aa);
@@ -1140,10 +1348,15 @@ class Match {
 
         self.pickup_gun();
         self.pickup_health_kit();
-        let hit_a = a.strikes(self.arena, b, aa[3]);
-        let hit_b = b.strikes(self.arena, a, ba[3]);
+        self.pickup_grenade();
+        let threw_a = self.throw_grenade(a, aa[4], 0);
+        let threw_b = self.throw_grenade(b, ba[4], 1);
+        let hit_a = a.strikes(self.arena, b, threw_a ? 0.0 : aa[3]);
+        let hit_b = b.strikes(self.arena, a, threw_b ? 0.0 : ba[3]);
         b.health = b.health - hit_a;
         a.health = a.health - hit_b;
+        if (grenade_was_active)
+            self.advance_grenade();
         self.tick = self.tick + 1;
 
         if (a.health <= 0.0 || b.health <= 0.0 || self.tick >= EPISODE_TICKS) {
@@ -1273,6 +1486,7 @@ fun check_maps() {
                     assert(!arena.blocked(a.x, a.y) && !arena.blocked(b.x, b.y));
                     assert(!arena.blocked(duel.gun_x, duel.gun_y));
                     assert(!arena.blocked(duel.kit_x, duel.kit_y));
+                    assert(!arena.blocked(duel.grenade_x, duel.grenade_y));
                     assert((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) >= 4.0);
                 }
                 maps = maps + 1;
@@ -1339,7 +1553,8 @@ fun check_energy() {
     assert(fighter.energy == MAX_ENERGY);
     for (let var i = 0; i <= 2; ++i) {
         fighter.energy = MAX_ENERGY * i.to_f() * 0.5;
-        fighter.sense(arena, enemy, false, 0.0, 0.0, false, 0.0, 0.0, rng);
+        fighter.sense(arena, enemy, false, 0.0, 0.0, false, 0.0, 0.0,
+                      false, 0.0, 0.0, false, 0.0, 0.0, rng);
         assert(fighter.inputs.get_f32(ENERGY_INPUT) == i.to_f() * 0.5);
         assert(fighter.inputs.get_f32(NUM_SENSORS - 1) == 1.0);
     }
@@ -1515,7 +1730,8 @@ fun check_movement() {
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     fighter.sense(vision_arena, enemy, true, 12.0, 10.0,
-                  true, 12.0, 12.0, Xoshiro128(1));
+                  true, 12.0, 12.0, true, 12.0, 10.0,
+                  true, 12.0, 10.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 1.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 2) > 0.0);
@@ -1526,15 +1742,23 @@ fun check_movement() {
     assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT) == 1.0);
     assert((fighter.inputs.get_f32(HEALTH_KIT_INPUT + 1) - 0.75).abs() < 0.0001);
     assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 2) > 0.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT) == 1.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT + 2) > 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 1.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 2) > 0.0);
     enemy.gun_ammo = GUN_AMMO;
     fighter.sense(vision_arena, enemy, true, 12.0, 10.0,
-                  true, 12.0, 12.0, Xoshiro128(1));
+                  true, 12.0, 12.0, true, 12.0, 10.0,
+                  true, 12.0, 10.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 3) == 1.0);
     enemy.gun_ammo = 0;
     let peripheral = 55.0 * PI / 180.0;
     enemy.reset(10.0 + 5.0 * peripheral.cos(), 10.0 + 5.0 * peripheral.sin(), 0.0);
     fighter.sense(vision_arena, enemy, false, 0.0, 0.0,
-                  false, 0.0, 0.0, Xoshiro128(1));
+                  false, 0.0, 0.0, false, 0.0, 0.0,
+                  true, 12.0, 10.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 1.0);
     assert((fighter.inputs.get_f32(OPPONENT_INPUT + 1) - 55.0 / 60.0).abs() < 0.0001);
     assert(fighter.inputs.get_f32(PICKUP_INPUT) == 0.0);
@@ -1543,10 +1767,15 @@ fun check_movement() {
     assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT) == 0.0);
     assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 2) == 0.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT + 2) == 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 1.0);
     enemy.reset(13.0, 10.0, 0.0);
     enemy.gun_ammo = GUN_AMMO;
     vision_arena.add_notch(12, 10);
     fighter.sense(vision_arena, enemy, true, 13.0, 10.0,
+                  true, 13.0, 10.0, true, 13.0, 10.0,
                   true, 13.0, 10.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 1) == 0.0);
@@ -1557,14 +1786,39 @@ fun check_movement() {
     assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT) == 0.0);
     assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 2) == 0.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(GRENADE_INPUT + 2) == 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 2) == 0.0);
     assert(fighter.inputs.get_f32(VIEW_MIDDLE) > 0.0);
+    fighter.sense(arena, enemy, false, 0.0, 0.0,
+                  false, 0.0, 0.0, false, 0.0, 0.0,
+                  false, 13.0, 10.0, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 2) == 0.0);
+    fighter.sense(arena, enemy, false, 0.0, 0.0,
+                  false, 0.0, 0.0, false, 0.0, 0.0,
+                  true, 10.0, 10.0, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 1.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 2) == 1.0);
 
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     fighter.gun_ammo = GUN_AMMO;
     fighter.sense(arena, enemy, false, 0.0, 0.0,
+                  false, 0.0, 0.0, false, 0.0, 0.0,
                   false, 0.0, 0.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(VIEW_INPUTS + 6) == 1.0);
+    fighter.grenade_held = true;
+    fighter.sense(arena, enemy, false, 0.0, 0.0,
+                  false, 0.0, 0.0, false, 0.0, 0.0,
+                  false, 0.0, 0.0, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(VIEW_INPUTS + 7) == 1.0);
+    fighter.grenade_held = false;
     assert(fighter.strikes(arena, enemy, 1.0) == GUN_DAMAGE);
     assert(fighter.gun_ammo == GUN_AMMO - 1 && fighter.shot_ticks == SHOT_TRACE_TICKS);
     assert((fighter.shot_end_x - (enemy.x - BODY_RADIUS)).abs() < 0.0001);
@@ -1602,6 +1856,108 @@ fun check_movement() {
     pickup.fighters[0].health = 80.0;
     pickup.pickup_health_kit();
     assert(!pickup.kit_available && pickup.fighters[0].health == HEALTH);
+    pickup.arena = Arena(30, 30, nil);
+    pickup.fighters[0].reset(10.0, 10.0, 0.0);
+    pickup.fighters[1].reset(15.0, 10.0, 0.0);
+    pickup.grenade_x = 10.0;
+    pickup.grenade_y = 10.0;
+    pickup.pickup_grenade();
+    assert(!pickup.grenade_available && pickup.fighters[0].grenade_held);
+    assert(!pickup.throw_grenade(pickup.fighters[0], 0.5, 0));
+    assert(pickup.throw_grenade(pickup.fighters[0], 1.0, 0));
+    assert(!pickup.fighters[0].grenade_held && pickup.grenade_active);
+    assert(pickup.grenade_fuse == GRENADE_FUSE_TICKS);
+    assert(pickup.fighters[0].energy == MAX_ENERGY - GRENADE_THROW_ENERGY);
+    for (let var i = 0; i < GRENADE_FUSE_TICKS - 1; ++i)
+        pickup.advance_grenade();
+    assert(pickup.grenade_active && pickup.grenade_fuse == 1);
+    pickup.advance_grenade();
+    assert(!pickup.grenade_active && pickup.blast_ticks == GRENADE_BLAST_TICKS);
+    assert((pickup.grenade_x - (15.0 - BODY_RADIUS - GRENADE_RADIUS)).abs() < 0.0001);
+    assert(pickup.grenade_vx == 0.0 && pickup.grenade_travel < GRENADE_MAX_TRAVEL);
+    assert(pickup.fighters[0].health == HEALTH && pickup.fighters[1].health < 0.0);
+
+    let range_throw = Match(fighter.individual, fighter.individual, 11);
+    range_throw.arena = Arena(30, 30, nil);
+    range_throw.fighters[0].reset(10.0, 10.0, 0.0);
+    range_throw.fighters[1].reset(22.0, 10.0, 0.0);
+    range_throw.fighters[0].grenade_held = true;
+    assert(range_throw.throw_grenade(range_throw.fighters[0], 1.0, 0));
+    for (let var i = 0; i < GRENADE_FUSE_TICKS; ++i)
+        range_throw.advance_grenade();
+    assert((range_throw.grenade_x - 15.0).abs() < 0.0001);
+    assert((range_throw.grenade_travel - GRENADE_MAX_TRAVEL).abs() < 0.0001);
+    assert(range_throw.grenade_vx == 0.0 && range_throw.fighters[1].health == HEALTH);
+    range_throw.fighters[0].reset(15.0, 10.0, 0.0);
+    range_throw.fighters[1].reset(10.0, 10.0, 0.0);
+    range_throw.fighters[1].angle = 0.0;
+    range_throw.fighters[1].grenade_held = true;
+    assert(range_throw.throw_grenade(range_throw.fighters[1], 1.0, 1));
+    for (let var i = 0; i < GRENADE_FUSE_TICKS; ++i)
+        range_throw.advance_grenade();
+    assert((range_throw.grenade_x - (15.0 - BODY_RADIUS - GRENADE_RADIUS)).abs() < 0.0001);
+    assert(range_throw.fighters[0].health < 0.0);
+
+    let blast = Match(fighter.individual, fighter.individual, 8);
+    blast.arena = Arena(30, 30, nil);
+    blast.fighters[0].reset(10.0, 10.0, 0.0);
+    blast.fighters[1].reset(11.5, 10.0, 0.0);
+    blast.grenade_x = 10.0;
+    blast.grenade_y = 10.0;
+    blast.grenade_vx = 0.0;
+    blast.grenade_vy = 0.0;
+    blast.grenade_fuse = 1;
+    blast.grenade_active = true;
+    blast.advance_grenade();
+    assert(blast.fighters[0].health == -100.0 && blast.fighters[1].health == 0.0);
+    blast.fighters[1].reset(13.0, 10.0, 0.0);
+    blast.grenade_fuse = 1;
+    blast.grenade_active = true;
+    blast.advance_grenade();
+    assert(blast.fighters[1].health == HEALTH);
+    let shielded_blast = Match(fighter.individual, fighter.individual, 12);
+    shielded_blast.arena = Arena(5, 5, nil);
+    shielded_blast.arena.add_notch(3, 3);
+    shielded_blast.fighters[0].reset(2.5, 4.5, 0.0);
+    shielded_blast.fighters[1].reset(4.5, 3.5, 0.0);
+    shielded_blast.grenade_x = 2.5;
+    shielded_blast.grenade_y = 3.5;
+    shielded_blast.grenade_vx = 0.0;
+    shielded_blast.grenade_vy = 0.0;
+    shielded_blast.grenade_fuse = 1;
+    shielded_blast.grenade_active = true;
+    shielded_blast.advance_grenade();
+    assert(shielded_blast.fighters[0].health < HEALTH);
+    assert(shielded_blast.fighters[1].health == HEALTH);
+    let throw_weights = ByteArray.with_size(NUM_WEIGHTS * 4);
+    throw_weights.set_f32(NUM_SENSORS - 1, 1.0);
+    throw_weights.set_f32(OUTPUT_BASE + 4 * HIDDEN, 1.0);
+    let throw_agent = Individual(throw_weights, 0, "THROW", [80, 201, 255],
+                                 [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE],
+                                 [INITIAL_MUTATION_STRENGTH, INITIAL_MUTATION_STRENGTH]);
+    let throw_match = Match(throw_agent, throw_agent, 9);
+    throw_match.grenade_x = throw_match.fighters[0].x;
+    throw_match.grenade_y = throw_match.fighters[0].y;
+    throw_match.step();
+    assert(!throw_match.grenade_available && throw_match.grenade_active);
+    assert(!throw_match.fighters[0].grenade_held &&
+           throw_match.grenade_fuse == GRENADE_FUSE_TICKS);
+    throw_match.reset_episode();
+    assert(throw_match.grenade_available && !throw_match.grenade_active &&
+           !throw_match.fighters[0].grenade_held);
+    let wall_throw = Match(fighter.individual, fighter.individual, 10);
+    wall_throw.arena = Arena(5, 5, nil);
+    wall_throw.grenade_x = 5.5;
+    wall_throw.grenade_y = 3.5;
+    wall_throw.grenade_vx = GRENADE_THROW_SPEED;
+    wall_throw.grenade_vy = 0.0;
+    wall_throw.grenade_fuse = 2;
+    wall_throw.grenade_active = true;
+    wall_throw.advance_grenade();
+    assert(wall_throw.grenade_x <= 6.0 - GRENADE_RADIUS &&
+           wall_throw.grenade_vx == 0.0);
+    wall_throw.advance_grenade();
+    assert(!wall_throw.grenade_active && wall_throw.blast_ticks == GRENADE_BLAST_TICKS);
 
     fighter.reset(10.0, 10.0, 0.0);
     fighter.move(arena, forward);
@@ -1667,8 +2023,10 @@ fun check_movement() {
         assert(duel.fighters[0].y == replay.fighters[0].y);
         assert(duel.gun_x == replay.gun_x && duel.gun_y == replay.gun_y);
         assert(duel.kit_x == replay.kit_x && duel.kit_y == replay.kit_y);
+        assert(duel.grenade_x == replay.grenade_x && duel.grenade_y == replay.grenade_y);
         assert(!duel.arena.blocked(duel.gun_x, duel.gun_y));
         assert(!duel.arena.blocked(duel.kit_x, duel.kit_y));
+        assert(!duel.arena.blocked(duel.grenade_x, duel.grenade_y));
         check_room_connected(duel.arena);
         for (let var tick = 0; tick < 3; ++tick) {
             duel.step();
@@ -1679,7 +2037,13 @@ fun check_movement() {
             assert(duel.fighters[1].y == replay.fighters[1].y);
             assert(duel.gun_available == replay.gun_available);
             assert(duel.kit_available == replay.kit_available);
+            assert(duel.grenade_available == replay.grenade_available);
+            assert(duel.grenade_active == replay.grenade_active);
+            assert(duel.grenade_x == replay.grenade_x &&
+                   duel.grenade_y == replay.grenade_y);
             assert(duel.fighters[0].gun_ammo == replay.fighters[0].gun_ammo);
+            assert(duel.fighters[0].grenade_held == replay.fighters[0].grenade_held);
+            assert(duel.fighters[1].grenade_held == replay.fighters[1].grenade_held);
             assert(duel.fighters[0].health == replay.fighters[0].health);
             assert(duel.fighters[1].health == replay.fighters[1].health);
             assert(duel.fighters[0].energy == replay.fighters[0].energy);
@@ -1695,6 +2059,7 @@ fun check_movement() {
             assert(dx * dx + dy * dy >= 4.0);
             assert(!duel.arena.blocked(duel.gun_x, duel.gun_y));
             assert(!duel.arena.blocked(duel.kit_x, duel.kit_y));
+            assert(!duel.arena.blocked(duel.grenade_x, duel.grenade_y));
             duel.reset_episode();
         }
     }
@@ -1954,6 +2319,15 @@ if (has_flag("--check-evolution")) {
     assert(rate_changes > 0 && strength_changes > 0);
     assert(strategy_parent.mutation_rates[0] == INITIAL_MUTATION_RATE &&
            strategy_parent.mutation_strengths[0] == INITIAL_MUTATION_STRENGTH);
+    let low_parent = Individual(strategy_parent.weights, 0, "LOW", [80, 80, 80],
+                                [0.001, 0.007], [0.02, 0.04]);
+    for (let var i = 0; i < 20; ++i) {
+        let child = birth(strategy_rng, low_parent);
+        for (let var layer = 0; layer < 2; ++layer) {
+            assert(child.mutation_rates[layer] >= MIN_MUTATION_RATE);
+            assert(child.mutation_strengths[layer] >= MIN_MUTATION_STRENGTH);
+        }
+    }
     island.first_idx = 0;
     island.second_idx = 1;
     let var first = island.population[0];
@@ -2045,6 +2419,14 @@ if (has_flag("--check-checkpoint")) {
     assert(restored.mutation_rates[0] == 0.071 && restored.mutation_rates[1] == 0.089);
     assert(restored.mutation_strengths[0] == 0.11 &&
            restored.mutation_strengths[1] == 0.19);
+    let stale = parse_json(format_json(encoded));
+    stale.mutation_rates = [0.001, 0.007];
+    stale.mutation_strengths = [0.02, 0.04];
+    let lifted = decode_individual(Xoshiro128(7), stale, INPUT_NAMES, OUTPUT_NAMES);
+    for (let var layer = 0; layer < 2; ++layer) {
+        assert(lifted.mutation_rates[layer] == MIN_MUTATION_RATE);
+        assert(lifted.mutation_strengths[layer] == MIN_MUTATION_STRENGTH);
+    }
     for (let var i = 0; i < NUM_WEIGHTS; ++i)
         assert(restored.weights.get_f32(i) == elites.individuals[0].weights.get_f32(i));
     let loaded = Island(0, 123, {inputs: INPUT_NAMES, outputs: OUTPUT_NAMES,
@@ -2087,27 +2469,36 @@ if (has_flag("--check-checkpoint")) {
                    elites.individuals[i].weights.get_f32(w));
     }
 
-    // An unknown old input is ignored, while a newly added current input
-    // retains its small random initializer instead of shifting other columns.
+    // Unknown old inputs are ignored; new inputs retain their small random
+    // initializers instead of shifting saved columns.
     let old_inputs = ["retired_sensor"];
     for (let var i = 0; i < INPUT_NAMES.len; ++i)
-        if (INPUT_NAMES[i] != "energy")
+        if (INPUT_NAMES[i] != "energy" &&
+            INPUT_NAMES[i] != "thrown_grenade_visible" &&
+            INPUT_NAMES[i] != "thrown_grenade_angle" &&
+            INPUT_NAMES[i] != "thrown_grenade_proximity")
             old_inputs.push(INPUT_NAMES[i]);
     let shifted = encode_individual(elites.individuals[0]);
     for (let var h = 0; h < HIDDEN; ++h) {
         let row = [0.75];
         for (let var i = 0; i < INPUT_NAMES.len; ++i)
-            if (INPUT_NAMES[i] != "energy")
+            if (INPUT_NAMES[i] != "energy" &&
+                INPUT_NAMES[i] != "thrown_grenade_visible" &&
+                INPUT_NAMES[i] != "thrown_grenade_angle" &&
+                INPUT_NAMES[i] != "thrown_grenade_proximity")
                 row.push(shifted.hidden[h][i]);
         shifted.hidden[h] = row;
     }
     let baseline = new_genome(Xoshiro128(7));
     let var remapped = decode_individual(Xoshiro128(7), shifted, old_inputs, OUTPUT_NAMES);
     let energy_index = name_index(INPUT_NAMES, "energy");
+    let thrown_index = name_index(INPUT_NAMES, "thrown_grenade_visible");
     for (let var h = 0; h < HIDDEN; ++h) {
         for (let var i = 0; i < NUM_INPUTS; ++i) {
             let idx = h * NUM_INPUTS + i;
-            let expected = i == energy_index ? baseline.get_f32(idx) :
+            let expected = i == energy_index ||
+                           (i >= thrown_index && i < thrown_index + 3) ?
+                           baseline.get_f32(idx) :
                            elites.individuals[0].weights.get_f32(idx);
             assert(remapped.weights.get_f32(idx) == expected);
         }
@@ -2300,6 +2691,9 @@ let COL_GUN_HIGHLIGHT = 0xFF_E3_E8_EA;
 let COL_GUN_SHADOW = 0xFF_6D_78_80;
 let COL_HEALTH_KIT = 0xFF_D8_3F_4B;
 let COL_HEALTH_CROSS = 0xFF_FF_FF_FF;
+let COL_GRENADE = 0xFF_72_86_62;
+let COL_GRENADE_HIGHLIGHT = 0xFF_D7_E2_BE;
+let COL_BLAST = 0xFF_FF_4B_4B;
 let COL_SHOT = 0xFF_FF_E4_63;
 
 fun fill_rect(buf, x, y, w, h, color) {
@@ -2417,6 +2811,50 @@ fun draw_health_kit(buf, center_x, center_y, scale) {
               2 * cross_half + 1, 3, COL_HEALTH_CROSS);
 }
 
+fun draw_grenade(buf, center_x, center_y, scale) {
+    let half_w = (scale.to_f() * 0.11).floor().max(3);
+    let half_h = (scale.to_f() * 0.18).floor().max(5);
+    let body_x = center_x - 1;
+    let body_y = center_y + 1;
+    for (let var dy = -half_h - 1; dy <= half_h + 1; ++dy) {
+        let t = dy.to_f() / (half_h + 1).to_f();
+        let half = ((half_w + 1).to_f() * (1.0 - t * t).sqrt()).floor();
+        fill_rect(buf, body_x - half, body_y + dy, 2 * half + 1, 1, COL_BG);
+    }
+    for (let var dy = -half_h; dy <= half_h; ++dy) {
+        let t = dy.to_f() / half_h.to_f();
+        let half = (half_w.to_f() * (1.0 - t * t).sqrt()).floor();
+        fill_rect(buf, body_x - half, body_y + dy, 2 * half + 1, 1, COL_GRENADE);
+    }
+    draw_disc(buf, center_x, center_y, 1, COL_GRENADE_HIGHLIGHT);
+    let hook_x = body_x + half_w + 3;
+    let hook_top = body_y - half_h - 1;
+    let hook_bottom = body_y + 1;
+    let hook_start = body_x - 1;
+    fill_rect(buf, hook_start - 1, hook_top - 1,
+              hook_x - hook_start + 4, 4, COL_BG);
+    fill_rect(buf, hook_x - 1, hook_top - 1,
+              4, hook_bottom - hook_top + 2, COL_BG);
+    fill_rect(buf, hook_start, hook_top,
+              hook_x - hook_start + 2, 2, COL_GRENADE_HIGHLIGHT);
+    fill_rect(buf, hook_x, hook_top,
+              2, hook_bottom - hook_top + 1, COL_GRENADE_HIGHLIGHT);
+}
+
+fun draw_blast(buf, center_x, center_y, scale, ticks) {
+    let progress = (GRENADE_BLAST_TICKS - ticks + 1).to_f() /
+                   GRENADE_BLAST_TICKS.to_f();
+    let radius = GRENADE_BLAST_RADIUS * scale.to_f() * progress;
+    for (let var i = 0; i < 180; ++i) {
+        let angle = TAU * i.to_f() / 180.0;
+        let x = center_x + (radius * angle.cos()).floor();
+        let y = center_y + (radius * angle.sin()).floor();
+        if (x >= 2 && x < VIEW_W - 2 && y >= 2 && y < FRAME_H - 2)
+            draw_disc(buf, x, y, 2, COL_BLAST);
+    }
+    draw_disc(buf, center_x, center_y, (scale.to_f() * 0.18).floor().max(3), COL_BLAST);
+}
+
 fun draw_body(buf, x, y, angle, half_length, half_width, radius, color) {
     let c = angle.cos();
     let s = angle.sin();
@@ -2467,7 +2905,8 @@ fun draw_text(buf, x, y, label, color) {
     }
 }
 
-fun draw_fighter(buf, x, y, angle, hp, attack_ticks, gun_ammo, color, scale) {
+fun draw_fighter(buf, x, y, angle, hp, attack_ticks, gun_ammo,
+                 grenade_held, color, scale) {
     let c = angle.cos();
     let s = angle.sin();
     let right_x = -s;
@@ -2485,7 +2924,7 @@ fun draw_fighter(buf, x, y, angle, hp, attack_ticks, gun_ammo, color, scale) {
 
     let thrust = gun_ammo > 0 ? 0.0 :
                  attack_ticks == 2 ? 0.20 : attack_ticks == 1 ? 0.10 : 0.0;
-    let side_offset = gun_ammo > 0 ? 0.0 : 0.22;
+    let side_offset = gun_ammo > 0 && !grenade_held ? 0.0 : 0.22;
     let forward_offset = gun_ammo > 0 ? 0.32 : 0.09 + thrust;
     let hand_x = x + (c * metres * forward_offset + right_x * metres * side_offset).floor();
     let hand_y = y + (s * metres * forward_offset + right_y * metres * side_offset).floor();
@@ -2506,6 +2945,16 @@ fun draw_fighter(buf, x, y, angle, hp, attack_ticks, gun_ammo, color, scale) {
         draw_segment(buf, blade_x, blade_y, tip_x, tip_y, 1, COL_BLADE);
     }
     draw_disc(buf, hand_x, hand_y, (metres * 0.07).floor().max(2), COL_SKIN);
+    if (grenade_held) {
+        let grenade_hand_x = x + (c * metres * 0.09 - right_x * metres * 0.22).floor();
+        let grenade_hand_y = y + (s * metres * 0.09 - right_y * metres * 0.22).floor();
+        let grenade_x = grenade_hand_x + (c * metres * 0.20).floor();
+        let grenade_y = grenade_hand_y + (s * metres * 0.20).floor();
+        draw_disc(buf, grenade_x, grenade_y,
+                  (metres * GRENADE_RADIUS * 0.6).floor().max(3), COL_GRENADE);
+        draw_disc(buf, grenade_hand_x, grenade_hand_y,
+                  (metres * 0.07).floor().max(2), COL_SKIN);
+    }
 
     fill_rect(buf, x - 15, y - 21, 30, 4, COL_BG);
     fill_rect(buf, x - 15, y - 21, (hp.max(0.0) * 0.3).floor(), 4, color);
@@ -2528,13 +2977,18 @@ fun replay_snapshot(config, duel) {
         tiles: duel.arena.tiles,
         gun_available: duel.gun_available, gun_x: duel.gun_x, gun_y: duel.gun_y,
         kit_available: duel.kit_available, kit_x: duel.kit_x, kit_y: duel.kit_y,
+        grenade_available: duel.grenade_available, grenade_active: duel.grenade_active,
+        grenade_x: duel.grenade_x, grenade_y: duel.grenade_y,
+        blast_ticks: duel.blast_ticks,
         episode: duel.episode.min(EPISODES - 1), tick: duel.tick,
         kills_a: duel.kills[0], kills_b: duel.kills[1],
         ax: a.x, ay: a.y, adir: a.angle, ahp: a.health, astab: a.attack_ticks,
-        aammo: a.gun_ammo, ashot: a.shot_ticks, aenergy: a.energy,
+        aammo: a.gun_ammo, agrenade: a.grenade_held,
+        ashot: a.shot_ticks, aenergy: a.energy,
         asx: a.shot_start_x, asy: a.shot_start_y, aex: a.shot_end_x, aey: a.shot_end_y,
         bx: b.x, by: b.y, bdir: b.angle, bhp: b.health, bstab: b.attack_ticks,
-        bammo: b.gun_ammo, bshot: b.shot_ticks, benergy: b.energy,
+        bammo: b.gun_ammo, bgrenade: b.grenade_held,
+        bshot: b.shot_ticks, benergy: b.energy,
         bsx: b.shot_start_x, bsy: b.shot_start_y, bex: b.shot_end_x, bey: b.shot_end_y
     };
 }
@@ -2601,6 +3055,16 @@ fun render(buf, snap, agg, view_speed, paused) {
             let kit_py = oy + (snap.kit_y * scale).floor();
             draw_health_kit(buf, kit_px, kit_py, scale);
         }
+        if (snap.grenade_available || snap.grenade_active) {
+            let grenade_px = ox + (snap.grenade_x * scale).floor();
+            let grenade_py = oy + (snap.grenade_y * scale).floor();
+            draw_grenade(buf, grenade_px, grenade_py, scale);
+        }
+        if (snap.blast_ticks > 0) {
+            let blast_px = ox + (snap.grenade_x * scale).floor();
+            let blast_py = oy + (snap.grenade_y * scale).floor();
+            draw_blast(buf, blast_px, blast_py, scale, snap.blast_ticks);
+        }
         if (snap.ashot > 0)
             draw_segment(buf, ox + (snap.asx * scale).floor(), oy + (snap.asy * scale).floor(),
                          ox + (snap.aex * scale).floor(), oy + (snap.aey * scale).floor(),
@@ -2610,9 +3074,11 @@ fun render(buf, snap, agg, view_speed, paused) {
                          ox + (snap.bex * scale).floor(), oy + (snap.bey * scale).floor(),
                          0, COL_SHOT);
         draw_fighter(buf, ox + (snap.ax * scale).floor(), oy + (snap.ay * scale).floor(),
-                     snap.adir, snap.ahp, snap.astab, snap.aammo, snap.first_color, scale);
+                     snap.adir, snap.ahp, snap.astab, snap.aammo, snap.agrenade,
+                     snap.first_color, scale);
         draw_fighter(buf, ox + (snap.bx * scale).floor(), oy + (snap.by * scale).floor(),
-                     snap.bdir, snap.bhp, snap.bstab, snap.bammo, snap.second_color, scale);
+                     snap.bdir, snap.bhp, snap.bstab, snap.bammo, snap.bgrenade,
+                     snap.second_color, scale);
     }
 
     let px = VIEW_W + 20;
@@ -2636,12 +3102,14 @@ fun render(buf, snap, agg, view_speed, paused) {
         draw_text(buf, px, 366, snap.first_name + " AGE " + snap.first_age.comma_sep(), snap.first_color);
         draw_text(buf, px, 380, "KILLS " + snap.kills_a.comma_sep(), snap.first_color);
         draw_text(buf, px + 160, 380,
+                  snap.agrenade ? (snap.aammo > 0 ? "G" + snap.aammo.to_s() + " GR" : "GRENADE") :
                   snap.aammo > 0 ? "GUN " + snap.aammo.comma_sep() : "KNIFE", snap.first_color);
         draw_text(buf, px, 394, "ENERGY " + snap.aenergy.floor().comma_sep() + " J", COL_DIM);
         draw_text(buf, px, 408, mutation_text(snap.first_rates, snap.first_strengths), COL_DIM);
         draw_text(buf, px, 437, snap.second_name + " AGE " + snap.second_age.comma_sep(), snap.second_color);
         draw_text(buf, px, 451, "KILLS " + snap.kills_b.comma_sep(), snap.second_color);
         draw_text(buf, px + 160, 451,
+                  snap.bgrenade ? (snap.bammo > 0 ? "G" + snap.bammo.to_s() + " GR" : "GRENADE") :
                   snap.bammo > 0 ? "GUN " + snap.bammo.comma_sep() : "KNIFE", snap.second_color);
         draw_text(buf, px, 465, "ENERGY " + snap.benergy.floor().comma_sep() + " J", COL_DIM);
         draw_text(buf, px, 479, mutation_text(snap.second_rates, snap.second_strengths), COL_DIM);
@@ -2719,11 +3187,45 @@ if (has_flag("--check-render")) {
             assert(test_frame.get_u32(205 * FRAME_W + 200) == COL_HEALTH_CROSS);
             assert(test_frame.get_u32(206 * FRAME_W + 200) == COL_HEALTH_KIT);
         }
+        test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+        draw_grenade(test_frame, 200, 200, scale);
+        assert(test_frame.get_u32(200 * FRAME_W + 200) == COL_GRENADE_HIGHLIGHT);
+        let grenade_half_w = (scale.to_f() * 0.11).floor().max(3);
+        let grenade_half_h = (scale.to_f() * 0.18).floor().max(5);
+        let hook_x = 199 + grenade_half_w + 3;
+        let hook_top = 201 - grenade_half_h - 1;
+        assert(test_frame.get_u32(201 * FRAME_W + 199 - grenade_half_w) == COL_GRENADE);
+        assert(test_frame.get_u32(201 * FRAME_W + 199 + grenade_half_w) == COL_GRENADE);
+        assert(test_frame.get_u32(hook_top * FRAME_W + 198) == COL_GRENADE_HIGHLIGHT);
+        assert(test_frame.get_u32((hook_top + 1) * FRAME_W + 198) ==
+               COL_GRENADE_HIGHLIGHT);
+        assert(test_frame.get_u32(hook_top * FRAME_W + hook_x + 1) ==
+               COL_GRENADE_HIGHLIGHT);
+        assert(test_frame.get_u32(202 * FRAME_W + hook_x) == COL_GRENADE_HIGHLIGHT);
+        assert(test_frame.get_u32(202 * FRAME_W + hook_x + 1) == COL_GRENADE_HIGHLIGHT);
     }
+    test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+    let blast_outer = (GRENADE_BLAST_RADIUS * 44.0).floor();
+    let blast_first = (GRENADE_BLAST_RADIUS * 44.0 /
+                       GRENADE_BLAST_TICKS.to_f()).floor();
+    draw_blast(test_frame, 200, 200, 44, GRENADE_BLAST_TICKS);
+    assert(test_frame.get_u32(200 * FRAME_W + 200 + blast_first) == COL_BLAST);
+    assert(test_frame.get_u32(200 * FRAME_W + 200 + blast_outer) == COL_BG);
+    draw_blast(test_frame, 200, 200, 44, 1);
+    assert(test_frame.get_u32(200 * FRAME_W + 200 + blast_outer) == COL_BLAST);
     render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
     let test_kit_x = test_ox + (test_duel.kit_x * test_scale).floor();
     let test_kit_y = test_oy + (test_duel.kit_y * test_scale).floor();
     assert(test_frame.get_u32(test_kit_y * FRAME_W + test_kit_x) == COL_HEALTH_CROSS);
+    let test_grenade_x = test_ox + (test_duel.grenade_x * test_scale).floor();
+    let test_grenade_y = test_oy + (test_duel.grenade_y * test_scale).floor();
+    assert(test_frame.get_u32(test_grenade_y * FRAME_W + test_grenade_x) ==
+           COL_GRENADE_HIGHLIGHT);
+    test_duel.grenade_available = false;
+    test_duel.blast_ticks = GRENADE_BLAST_TICKS;
+    render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
+    assert(test_frame.get_u32(test_grenade_y * FRAME_W + test_grenade_x) == COL_BLAST);
+    test_duel.blast_ticks = 0;
     test_duel.kit_available = false;
     render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
     assert(test_frame.get_u32(test_kit_y * FRAME_W + test_kit_x) != COL_HEALTH_CROSS);
@@ -2743,7 +3245,7 @@ if (has_flag("--check-render")) {
     for (let var direction = 0; direction < 8; ++direction) {
         let angle = direction.to_f() * TAU / 8.0;
         test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
-        draw_fighter(test_frame, 100, 100, angle, HEALTH, 0, GUN_AMMO,
+        draw_fighter(test_frame, 100, 100, angle, HEALTH, 0, GUN_AMMO, false,
                      test_agent.color(), PIXELS_PER_METRE);
         assert(test_frame.get_u32(100 * FRAME_W + 100) == COL_SKIN);
         let var visible = false;
@@ -2758,6 +3260,53 @@ if (has_flag("--check-render")) {
             }
         }
         assert(visible);
+        test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+        draw_fighter(test_frame, 100, 100, angle, HEALTH, 0, 0, true,
+                     test_agent.color(), PIXELS_PER_METRE);
+        let var held_grenade_visible = false;
+        let var held_knife_visible = false;
+        for (let var y = 65; y <= 135; ++y) {
+            for (let var x = 65; x <= 135; ++x) {
+                let pixel = test_frame.get_u32(y * FRAME_W + x);
+                let side = -(x - 100).to_f() * angle.sin() +
+                            (y - 100).to_f() * angle.cos();
+                if (pixel == COL_GRENADE) {
+                    held_grenade_visible = true;
+                    let forward = (x - 100).to_f() * angle.cos() +
+                                  (y - 100).to_f() * angle.sin();
+                    assert(forward > 0.0);
+                    assert(side < 0.0);
+                }
+                if (pixel == COL_BLADE) {
+                    held_knife_visible = true;
+                    assert(side > 0.0);
+                }
+                assert(pixel != COL_GRENADE_HIGHLIGHT);
+            }
+        }
+        assert(held_grenade_visible && held_knife_visible);
+        test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+        draw_fighter(test_frame, 100, 100, angle, HEALTH, 0, GUN_AMMO, true,
+                     test_agent.color(), PIXELS_PER_METRE);
+        let var grenade_with_gun_visible = false;
+        let var right_hand_gun_visible = false;
+        for (let var y = 65; y <= 135; ++y) {
+            for (let var x = 65; x <= 135; ++x) {
+                let pixel = test_frame.get_u32(y * FRAME_W + x);
+                let side = -(x - 100).to_f() * angle.sin() +
+                            (y - 100).to_f() * angle.cos();
+                if (pixel == COL_GRENADE) {
+                    grenade_with_gun_visible = true;
+                    assert(side < 0.0);
+                }
+                if (pixel == COL_GUN) {
+                    right_hand_gun_visible = true;
+                    assert(side > 0.0);
+                }
+                assert(pixel != COL_GRENADE_HIGHLIGHT);
+            }
+        }
+        assert(grenade_with_gun_visible && right_hand_gun_visible);
     }
     test_shooter.shot_ticks = SHOT_TRACE_TICKS;
     test_shooter.shot_start_x = test_duel.gun_x - 0.3;
