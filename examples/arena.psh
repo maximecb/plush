@@ -1,7 +1,7 @@
 // Arena GA, a small evolutionary 1v1 combat experiment.
 //
 // Each island samples two genomes to fight eight episodes in a randomly sized room.
-// Total kills decide matches; damage, sighting, then exploration break episode ties.
+// A decisive winner stays; bounding-box coverage breaks kill ties.
 // Age counts matches lived through.
 // Every 2,000 matches, an island copies one random individual to a ring neighbour.
 // The migrant replaces the youngest resident at the next match boundary.
@@ -1162,7 +1162,7 @@ class Match {
         self.arena = Arena(width, height, rng);
         self.fighters = [Fighter(first), Fighter(second)];
         self.kills = [0, 0];
-        self.tiebreak_wins = [0, 0];
+        self.coverage_sum = [0.0, 0.0];
         self.episode = 0;
         self.tick = 0;
         self.done = false;
@@ -1197,8 +1197,6 @@ class Match {
         self.max_x = [ax, bx];
         self.min_y = [ay, by];
         self.max_y = [ay, by];
-        self.saw_opponent = [false, false];
-        self.damage_dealt = [0.0, 0.0];
         loop {
             self.gun_x = rng.float(1.0 + BODY_RADIUS,
                                    arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
@@ -1266,8 +1264,6 @@ class Match {
 
     track_coverage(self) {
         for (let var side = 0; side < 2; ++side) {
-            if (self.saw_opponent[side])
-                continue;
             let fighter = self.fighters[side];
             self.min_x[side] = self.min_x[side].min(fighter.x);
             self.max_x[side] = self.max_x[side].max(fighter.x);
@@ -1280,26 +1276,6 @@ class Match {
         let width = self.max_x[side] - self.min_x[side];
         let height = self.max_y[side] - self.min_y[side];
         return width * height / (self.arena.inner_w * self.arena.inner_h).to_f();
-    }
-
-    episode_tiebreak_winner(self) {
-        if (self.damage_dealt[0] != self.damage_dealt[1])
-            return self.damage_dealt[0] > self.damage_dealt[1] ? 0 : 1;
-        if (self.saw_opponent[0] != self.saw_opponent[1])
-            return self.saw_opponent[0] ? 0 : 1;
-        let coverage_a = self.coverage(0);
-        let coverage_b = self.coverage(1);
-        if (coverage_a != coverage_b)
-            return coverage_a > coverage_b ? 0 : 1;
-        return -1;
-    }
-
-    deal_damage(self, attacker_side, target_side, damage) {
-        let target = self.fighters[target_side];
-        if (attacker_side != target_side)
-            self.damage_dealt[attacker_side] = self.damage_dealt[attacker_side] +
-                                               damage.min(target.health.max(0.0));
-        target.health = target.health - damage;
     }
 
     pickup_gun(self) {
@@ -1430,8 +1406,8 @@ class Match {
                 (distance <= 0.000001 ||
                  self.arena.wall_distance(self.grenade_x, self.grenade_y,
                                           dx / distance, dy / distance) >= distance))
-                self.deal_damage(self.grenade_thrower, side,
-                                 GRENADE_DAMAGE * (1.0 - distance / GRENADE_BLAST_RADIUS));
+                target.health = target.health -
+                    GRENADE_DAMAGE * (1.0 - distance / GRENADE_BLAST_RADIUS);
         }
     }
 
@@ -1456,10 +1432,6 @@ class Match {
                 self.kit_available, self.kit_x, self.kit_y,
                 self.grenade_available, self.grenade_x, self.grenade_y,
                 self.grenade_active, self.grenade_x, self.grenade_y, self.tick, rng);
-        if (a.inputs.get_f32(OPPONENT_INPUT) > 0.5)
-            self.saw_opponent[0] = true;
-        if (b.inputs.get_f32(OPPONENT_INPUT) > 0.5)
-            self.saw_opponent[1] = true;
         let aa = a.think();
         let ba = b.think();
         a.move(self.arena, aa);
@@ -1493,22 +1465,19 @@ class Match {
         let threw_b = self.throw_grenade(b, ba[4], 1);
         let hit_a = a.strikes(self.arena, b, threw_a ? 0.0 : aa[3]);
         let hit_b = b.strikes(self.arena, a, threw_b ? 0.0 : ba[3]);
-        self.deal_damage(0, 1, hit_a);
-        self.deal_damage(1, 0, hit_b);
+        b.health = b.health - hit_a;
+        a.health = a.health - hit_b;
         if (grenade_was_active)
             self.advance_grenade();
         self.tick = self.tick + 1;
 
         if (a.health <= 0.0 || b.health <= 0.0 || self.tick >= EPISODE_TICKS) {
+            for (let var side = 0; side < 2; ++side)
+                self.coverage_sum[side] = self.coverage_sum[side] + self.coverage(side);
             if (b.health <= 0.0)
                 self.kills[0] = self.kills[0] + 1;
             if (a.health <= 0.0)
                 self.kills[1] = self.kills[1] + 1;
-            if ((a.health <= 0.0) == (b.health <= 0.0)) {
-                let winner = self.episode_tiebreak_winner();
-                if (winner >= 0)
-                    self.tiebreak_wins[winner] = self.tiebreak_wins[winner] + 1;
-            }
             if (self.episode + 1 == EPISODES)
                 self.done = true;
             else
@@ -2411,11 +2380,11 @@ class Island {
         self.pending_migrants.resize(0, nil);
     }
 
-    reproduce(self, ka, kb, wa, wb) {
+    reproduce(self, ka, kb, ca, cb) {
         for (let var i = 0; i < POP_SIZE; ++i)
             self.population[i].age = self.population[i].age + 1;
-        if (ka != kb || wa != wb) {
-            let win_first = ka > kb || (ka == kb && wa > wb);
+        if (ka != kb || ca != cb) {
+            let win_first = ka > kb || (ka == kb && ca > cb);
             let winner_idx = win_first ? self.first_idx : self.second_idx;
             let loser_idx = win_first ? self.second_idx : self.first_idx;
             let winner = self.population[winner_idx];
@@ -2449,7 +2418,7 @@ class Island {
 
         let ka = self.duel.kills[0];
         let kb = self.duel.kills[1];
-        self.reproduce(ka, kb, self.duel.tiebreak_wins[0], self.duel.tiebreak_wins[1]);
+        self.reproduce(ka, kb, self.duel.coverage_sum[0], self.duel.coverage_sum[1]);
         self.matches = self.matches + 1;
         self.episodes = self.episodes + EPISODES;
         self.kills = self.kills + ka + kb;
@@ -2546,7 +2515,7 @@ if (has_flag("--check-evolution")) {
         island.population[i].mutation_rates = [0.087, 0.091];
         island.population[i].mutation_strengths = [0.21, 0.24];
     }
-    island.reproduce(0, 0, 0, 0);
+    island.reproduce(0, 0, 0.0, 0.0);
     assert(island.population[0] != first && island.population[1] != second);
     assert(island.population[0].age == 0 && island.population[1].age == 0);
     assert(island.population[0].weights != first.weights);
@@ -2561,12 +2530,12 @@ if (has_flag("--check-evolution")) {
     scoring_draw.second_idx = 1;
     scoring_draw.population[0].mutation_rates = [0.02, 0.02];
     scoring_draw.population[1].mutation_rates = [0.02, 0.02];
-    scoring_draw.reproduce(1, 1, 0, 0);
+    scoring_draw.reproduce(1, 1, 0.0, 0.0);
     assert(scoring_draw.population[0].mutation_rates[0] < 0.03 &&
            scoring_draw.population[1].mutation_rates[0] < 0.03);
     first = island.population[0];
     second = island.population[1];
-    island.reproduce(2, 1, 0, 8);
+    island.reproduce(2, 1, 0.0, 1.0);
     assert(island.population[0] == first && first.age == 1);
     assert(island.population[1] != second && island.population[1].age == 0);
     let coverage_match = Match(strategy_parent, strategy_parent, 19);
@@ -2583,53 +2552,19 @@ if (has_flag("--check-evolution")) {
             6.0 / (coverage_match.arena.inner_w * coverage_match.arena.inner_h).to_f()).abs()
            < 0.000001);
     assert(coverage_match.coverage(1) == 0.0);
-    coverage_match.damage_dealt = [10.0, 5.0];
-    coverage_match.saw_opponent = [false, true];
-    assert(coverage_match.episode_tiebreak_winner() == 0);
-    coverage_match.damage_dealt = [0.0, 0.0];
-    assert(coverage_match.episode_tiebreak_winner() == 1);
-    coverage_match.saw_opponent = [false, false];
-    assert(coverage_match.episode_tiebreak_winner() == 0);
-    coverage_match.saw_opponent[0] = true;
-    coverage_match.fighters[0].x = 5.0;
-    coverage_match.fighters[0].y = 6.0;
-    coverage_match.track_coverage();
-    assert((coverage_match.coverage(0) -
-            6.0 / (coverage_match.arena.inner_w * coverage_match.arena.inner_h).to_f()).abs()
-           < 0.000001);
     coverage_match.reset_episode();
     assert(coverage_match.coverage(0) == 0.0 && coverage_match.coverage(1) == 0.0);
-    assert(!coverage_match.saw_opponent[0] && !coverage_match.saw_opponent[1]);
-    coverage_match.fighters[1].health = 10.0;
-    coverage_match.deal_damage(0, 1, 34.0);
-    coverage_match.deal_damage(0, 1, 34.0);
-    coverage_match.deal_damage(0, 0, 12.0);
-    assert(coverage_match.damage_dealt[0] == 10.0 && coverage_match.damage_dealt[1] == 0.0);
-    coverage_match.reset_episode();
-    assert(coverage_match.damage_dealt[0] == 0.0 && coverage_match.damage_dealt[1] == 0.0);
-    let quiet = Individual(ByteArray.with_size(NUM_WEIGHTS * 4), 0, "QUIET", [80, 80, 80],
-                           [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE],
-                           [INITIAL_MUTATION_STRENGTH, INITIAL_MUTATION_STRENGTH]);
-    let tied_episode = Match(quiet, quiet, 21);
-    tied_episode.damage_dealt[0] = 1.0;
-    tied_episode.tick = EPISODE_TICKS - 1;
-    tied_episode.step();
-    assert(tied_episode.kills[0] == 0 && tied_episode.kills[1] == 0);
-    assert(tied_episode.tiebreak_wins[0] == 1 && tied_episode.tiebreak_wins[1] == 0);
-    tied_episode.step();
-    assert(tied_episode.episode == 1 && tied_episode.damage_dealt[0] == 0.0);
-    assert(tied_episode.tiebreak_wins[0] == 1);
     let exploring_draw = Island(0, 790, nil);
     exploring_draw.first_idx = 0;
     exploring_draw.second_idx = 1;
     let exploring_first = exploring_draw.population[0];
     let var exploring_second = exploring_draw.population[1];
-    exploring_draw.reproduce(0, 0, 2, 1);
+    exploring_draw.reproduce(0, 0, 0.2, 0.1);
     assert(exploring_draw.population[0] == exploring_first && exploring_first.age == 1);
     assert(exploring_draw.population[1] != exploring_second &&
            exploring_draw.population[1].age == 0);
     exploring_second = exploring_draw.population[1];
-    exploring_draw.reproduce(1, 1, 1, 2);
+    exploring_draw.reproduce(1, 1, 0.1, 0.2);
     assert(exploring_draw.population[0] != exploring_first &&
            exploring_draw.population[0].age == 0);
     assert(exploring_draw.population[1] == exploring_second && exploring_second.age == 1);
