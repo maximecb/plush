@@ -1606,15 +1606,23 @@ class Island {
         self.index = index;
         self.rng = Xoshiro128(seed + index * 7919);
         self.population = [];
-        for (let var i = 0; i < POP_SIZE; ++i)
-            self.population.push(birth(self.rng, nil));
         if (checkpoint != nil) {
+            let var ages = "";
             for (let var i = 0; i < POP_SIZE.min(checkpoint.individuals.len); ++i) {
                 let restored = decode_individual(self.rng, checkpoint.individuals[i],
                                                  checkpoint.inputs, checkpoint.outputs);
-                if (restored != nil)
-                    self.population[i] = restored;
+                if (restored != nil) {
+                    self.population.push(restored);
+                    ages = ages + (ages.len == 0 ? "" : ", ") + restored.age.to_s();
+                }
             }
+            $println("Loaded island " + index.to_s() + " individual ages: " + ages);
+        }
+        let loaded_count = self.population.len;
+        while (self.population.len < POP_SIZE) {
+            let parent = loaded_count == 0 ? nil :
+                         self.population[self.rng.index(loaded_count)];
+            self.population.push(birth(self.rng, parent));
         }
         self.pending_migrants = [];
         self.matches = 0;
@@ -1887,6 +1895,45 @@ if (has_flag("--check-checkpoint")) {
            restored.mutation_strengths[1] == 0.19);
     for (let var i = 0; i < NUM_WEIGHTS; ++i)
         assert(restored.weights.get_f32(i) == elites.individuals[0].weights.get_f32(i));
+    let loaded = Island(0, 123, {inputs: INPUT_NAMES, outputs: OUTPUT_NAMES,
+                                  individuals: [encoded]});
+    assert(loaded.population.len == POP_SIZE);
+    assert(loaded.population[0].age == restored.age &&
+           loaded.population[0].name == restored.name);
+    for (let var c = 0; c < 3; ++c)
+        assert(loaded.population[0].colors[c] == restored.colors[c]);
+    for (let var layer = 0; layer < 2; ++layer) {
+        assert(loaded.population[0].mutation_rates[layer] == restored.mutation_rates[layer]);
+        assert(loaded.population[0].mutation_strengths[layer] ==
+               restored.mutation_strengths[layer]);
+    }
+    for (let var i = 0; i < NUM_WEIGHTS; ++i)
+        assert(loaded.population[0].weights.get_f32(i) == restored.weights.get_f32(i));
+    for (let var i = 1; i < POP_SIZE; ++i) {
+        let child = loaded.population[i];
+        assert(child.age == 0);
+        for (let var layer = 0; layer < 2; ++layer) {
+            assert(child.mutation_rates[layer] > 0.06);
+            assert(child.mutation_strengths[layer] > 0.09);
+        }
+        let var changed = false;
+        for (let var w = 0; w < NUM_WEIGHTS; ++w)
+            if (child.weights.get_f32(w) != restored.weights.get_f32(w))
+                changed = true;
+        assert(changed);
+    }
+    let saved_four = [];
+    for (let var i = 0; i < elites.individuals.len; ++i)
+        saved_four.push(encode_individual(elites.individuals[i]));
+    let loaded_four = Island(0, 123, {inputs: INPUT_NAMES, outputs: OUTPUT_NAMES,
+                                       individuals: saved_four});
+    for (let var i = 0; i < saved_four.len; ++i) {
+        assert(loaded_four.population[i].age == saved_four[i].age);
+        assert(loaded_four.population[i].name == saved_four[i].name);
+        for (let var w = 0; w < NUM_WEIGHTS; ++w)
+            assert(loaded_four.population[i].weights.get_f32(w) ==
+                   elites.individuals[i].weights.get_f32(w));
+    }
 
     // An unknown old input is ignored, while a newly added current input
     // retains its small random initializer instead of shifting other columns.
