@@ -2275,21 +2275,26 @@ let FONT = {
     "R": [7,5,6,5,5], "S": [7,4,7,1,7], "T": [7,2,2,2,2], "U": [5,5,5,5,7],
     "V": [5,5,5,5,2], "W": [5,5,7,7,5], "X": [5,5,2,5,5], "Y": [5,5,2,2,2], "Z": [7,1,2,4,7],
     " ": [0,0,0,0,0], ",": [0,0,0,6,2], ":": [0,2,0,2,0],
+    ".": [0,0,0,0,2], "%": [5,1,2,4,5], "σ": [0,7,5,5,7],
     "/": [1,1,2,4,4], "-": [0,0,7,0,0]
 };
 
 fun draw_text(buf, x, y, label, color) {
+    let var column = 0;
     for (let var i = 0; i < label.len; ++i) {
         let ch = label.char_at(i);
+        if (ch == nil)
+            continue;
         if (!FONT.has(ch))
             continue;
         let rows = FONT[ch];
         for (let var row = 0; row < 5; ++row) {
             for (let var col = 0; col < 3; ++col) {
                 if (((rows[row] >> (2 - col)) & 1) != 0)
-                    fill_rect(buf, x + i * 8 + col * 2, y + row * 2, 2, 2, color);
+                    fill_rect(buf, x + column * 8 + col * 2, y + row * 2, 2, 2, color);
             }
         }
+        column = column + 1;
     }
 }
 
@@ -2345,6 +2350,10 @@ fun replay_snapshot(config, duel) {
         first_age: config.first_age, second_age: config.second_age,
         first_name: a.individual.name, second_name: b.individual.name,
         first_color: a.individual.color(), second_color: b.individual.color(),
+        first_rates: a.individual.mutation_rates,
+        first_strengths: a.individual.mutation_strengths,
+        second_rates: b.individual.mutation_rates,
+        second_strengths: b.individual.mutation_strengths,
         oldest_side: config.oldest_side,
         room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
         tiles: duel.arena.tiles,
@@ -2381,6 +2390,18 @@ fun aggregate_stats(snaps, matches_per_sec) {
         kills: kills, zero_matches: zero_matches,
         migrations: migrations, oldest: oldest
     };
+}
+
+fun mutation_text(rates, strengths) {
+    let var label = "";
+    for (let var layer = 0; layer < 2; ++layer) {
+        let rate_tenths = (rates[layer] * 1000.0 + 0.5).floor();
+        let strength_hundredths = (strengths[layer] * 100.0 + 0.5).floor();
+        label = label + (layer == 0 ? "H R" : " O R") +
+                rate_tenths.idiv(10).to_s() + "." + (rate_tenths % 10).to_s() + "% σ0." +
+                (strength_hundredths < 10 ? "0" : "") + strength_hundredths.to_s();
+    }
+    return label;
 }
 
 fun render(buf, snap, agg, view_speed, paused) {
@@ -2437,21 +2458,24 @@ fun render(buf, snap, agg, view_speed, paused) {
                   "/" + EPISODES.comma_sep(), COL_TEXT);
         draw_text(buf, px, 314, "TIME " + snap.tick.idiv(10).comma_sep() + "/30", COL_TEXT);
         draw_text(buf, px, 337, "ROOM " + snap.room_w.comma_sep() + " X " + snap.room_h.comma_sep(), COL_TEXT);
+        draw_text(buf, px, 351, "H/O LAYER  R RATE  σ STRENGTH", COL_DIM);
         draw_text(buf, px, 366, snap.first_name + " AGE " + snap.first_age.comma_sep(), snap.first_color);
         draw_text(buf, px, 380, "KILLS " + snap.kills_a.comma_sep(), snap.first_color);
         draw_text(buf, px + 160, 380,
                   snap.aammo > 0 ? "GUN " + snap.aammo.comma_sep() : "KNIFE", snap.first_color);
         draw_text(buf, px, 394, "ENERGY " + snap.aenergy.floor().comma_sep() + " J", COL_DIM);
-        draw_text(buf, px, 417, snap.second_name + " AGE " + snap.second_age.comma_sep(), snap.second_color);
-        draw_text(buf, px, 431, "KILLS " + snap.kills_b.comma_sep(), snap.second_color);
-        draw_text(buf, px + 160, 431,
+        draw_text(buf, px, 408, mutation_text(snap.first_rates, snap.first_strengths), COL_DIM);
+        draw_text(buf, px, 425, snap.second_name + " AGE " + snap.second_age.comma_sep(), snap.second_color);
+        draw_text(buf, px, 439, "KILLS " + snap.kills_b.comma_sep(), snap.second_color);
+        draw_text(buf, px + 160, 439,
                   snap.bammo > 0 ? "GUN " + snap.bammo.comma_sep() : "KNIFE", snap.second_color);
-        draw_text(buf, px, 445, "ENERGY " + snap.benergy.floor().comma_sep() + " J", COL_DIM);
+        draw_text(buf, px, 453, "ENERGY " + snap.benergy.floor().comma_sep() + " J", COL_DIM);
+        draw_text(buf, px, 467, mutation_text(snap.second_rates, snap.second_strengths), COL_DIM);
     } else {
         draw_text(buf, px, 245, "WAITING FOR MATCH", COL_TEXT);
     }
     if (paused)
-        draw_text(buf, px, 485, "VIEW PAUSED", COL_TEXT);
+        draw_text(buf, px, 491, "VIEW PAUSED", COL_TEXT);
     draw_text(buf, px, 526, "REPLAY " + view_speed.to_s() + "X", COL_TEXT);
     draw_text(buf, px, 550, "F VIEW SPEED", COL_DIM);
     draw_text(buf, px, 574, "SPACE PAUSE VIEW", COL_DIM);
@@ -2459,6 +2483,9 @@ fun render(buf, snap, agg, view_speed, paused) {
 }
 
 if (has_flag("--check-render")) {
+    assert(FONT.has(".") && FONT.has("%") && FONT.has("σ"));
+    assert(mutation_text([0.006, 0.007], [0.02, 0.05]) ==
+           "H R0.6% σ0.02 O R0.7% σ0.05");
     let test_weights = ByteArray.with_size(NUM_WEIGHTS * 4);
     let test_agent = Individual(test_weights, 0, "TEST", [80, 201, 255],
                                 [INITIAL_MUTATION_RATE, INITIAL_MUTATION_RATE],
@@ -2469,6 +2496,12 @@ if (has_flag("--check-render")) {
     let test_stats = {matches: 0, matches_per_sec: 0, kills: 0,
                       zero_matches: 0, migrations: 0, oldest: 0};
     let test_frame = ByteArray.with_size(FRAME_W * FRAME_H * 4);
+    test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+    draw_text(test_frame, 20, 20, ".%σ0", COL_TEXT);
+    assert(test_frame.get_u32(28 * FRAME_W + 22) == COL_TEXT);
+    assert(test_frame.get_u32(20 * FRAME_W + 28) == COL_TEXT);
+    assert(test_frame.get_u32(22 * FRAME_W + 36) == COL_TEXT);
+    assert(test_frame.get_u32(20 * FRAME_W + 44) == COL_TEXT);
     let test_scale = PIXELS_PER_METRE.min(VIEW_W.idiv(test_duel.arena.inner_w + 2))
                                       .min(FRAME_H.idiv(test_duel.arena.inner_h + 2)).max(4);
     let test_ox = (VIEW_W - test_duel.arena.width * test_scale).idiv(2);
