@@ -1,6 +1,7 @@
 // A small 3D rigid box simulation.
 // World units are metres, kilograms, seconds, and radians.
 // Screen coordinates and the focal length are pixels.
+//
 // Usage: plush examples/boxsim_3d.psh [box_count]
 // Headless: plush examples/boxsim_3d.psh --headless [steps [image.tga|- [box_count]]]
 // Controls: Left click to poke, ENTER drops a box, arrows orbit, W/S zoom,
@@ -8,8 +9,15 @@
 //
 // Box pairs use SAT. Face contacts clip one face against the other.
 // Contact patches provide several support points for stacking.
-// The pair scan can later become a sorted broad phase.
 // No joints or continuous collision detection are used.
+//
+// Optimizations implemented:
+// - Sweep sorted, cached AABBs to reject distant pairs before SAT.
+// - Cache box orientation axes for collision and rendering calculations.
+// - Compute inverse inertia and contact effective mass from those axes.
+// - Stop position and velocity solver passes when corrections are small.
+// - Sleep settled contact islands and skip physics when every box sleeps.
+// - Use a conservative S-buffer and reuse frames when nothing moves.
 
 from image import Image, save_tga;
 from random import Xoshiro128;
@@ -99,16 +107,33 @@ class Box {
         self.p=p; self.q=identity(); self.v=zero(); self.w=zero();
         self.h=half; self.color=color;
         self.id=0; self.sleeping=false; self.sleep_time=0.0; self.sleep_group=0;
+        self.bounds = nil;
+        self.axes_dirty = true;
+        self.axis_x = nil;
+        self.axis_y = nil;
+        self.axis_z = nil;
         self.im = mass > 0.0 ? 1.0/mass : 0.0;
         self.ii = mass > 0.0 ? Vec3(3.0*self.im/(half.y*half.y+half.z*half.z),
                                      3.0*self.im/(half.x*half.x+half.z*half.z),
                                      3.0*self.im/(half.x*half.x+half.y*half.y)) : zero();
     }
 
+    // Rebuild orientation axes only after the box rotates.
+    refresh_axes(self) {
+        if (!self.axes_dirty) return;
+
+        self.axis_x = self.q.rotate(Vec3(1.0, 0.0, 0.0));
+        self.axis_y = self.q.rotate(Vec3(0.0, 1.0, 0.0));
+        self.axis_z = self.q.rotate(Vec3(0.0, 0.0, 1.0));
+        self.axes_dirty = false;
+    }
+
+    // Return a cached world-space axis for collision and rendering.
     axis(self, i) {
-        if (i == 0) return self.q.rotate(Vec3(1.0,0.0,0.0));
-        if (i == 1) return self.q.rotate(Vec3(0.0,1.0,0.0));
-        return self.q.rotate(Vec3(0.0,0.0,1.0));
+        self.refresh_axes();
+        if (i == 0) return self.axis_x;
+        if (i == 1) return self.axis_y;
+        return self.axis_z;
     }
 
     world(self, local) { return self.p.add(self.q.rotate(local)); }
@@ -116,19 +141,31 @@ class Box {
     local(self, world) { return self.q.conj().rotate(world.sub(self.p)); }
 
     inertia(self, v) {
-        let u = self.q.conj().rotate(v);
-        return self.q.rotate(Vec3(u.x*self.ii.x,u.y*self.ii.y,u.z*self.ii.z));
+        self.refresh_axes();
+        let x = v.dot(self.axis_x) * self.ii.x;
+        let y = v.dot(self.axis_y) * self.ii.y;
+        let z = v.dot(self.axis_z) * self.ii.z;
+        return Vec3(self.axis_x.x * x + self.axis_y.x * y + self.axis_z.x * z,
+                    self.axis_x.y * x + self.axis_y.y * y + self.axis_z.y * z,
+                    self.axis_x.z * x + self.axis_y.z * y + self.axis_z.z * z);
     }
 
     weight(self, r, n) {
+        if (self.im == 0.0) return 0.0;
+
+        self.refresh_axes();
         let c = r.cross(n);
-        return self.im+c.dot(self.inertia(c));
+        let x = c.dot(self.axis_x);
+        let y = c.dot(self.axis_y);
+        let z = c.dot(self.axis_z);
+        return self.im + self.ii.x * x * x + self.ii.y * y * y + self.ii.z * z * z;
     }
 
     move(self, impulse, r) {
         if (self.im == 0.0) return;
         self.p = self.p.add(impulse.mul(self.im));
         self.q = rotation(self.inertia(r.cross(impulse))).mul(self.q).unit();
+        self.axes_dirty = true;
     }
 
     impulse(self, j, r) {
@@ -146,9 +183,10 @@ class Box {
     }
 
     radius(self, n) {
-        return self.h.x*self.axis(0).dot(n).abs()
-             + self.h.y*self.axis(1).dot(n).abs()
-             + self.h.z*self.axis(2).dot(n).abs();
+        self.refresh_axes();
+        return self.h.x * self.axis_x.dot(n).abs()
+             + self.h.y * self.axis_y.dot(n).abs()
+             + self.h.z * self.axis_z.dot(n).abs();
     }
 
     extent(self, i) {
@@ -334,6 +372,39 @@ fun broad_overlap(a, b) {
     return true;
 }
 
+class BoxBounds {
+    // Cache the world-aligned bounds used by the collision sweep.
+    init(self, box) {
+        self.box = box;
+        box.bounds = self;
+        self.update();
+    }
+
+    // Expand each axis by half the broad-phase contact margin.
+    update(self) {
+        let box = self.box;
+        let axis_x = box.axis(0);
+        let axis_y = box.axis(1);
+        let axis_z = box.axis(2);
+        let radius_x = box.h.x * axis_x.x.abs() + box.h.y * axis_y.x.abs() + box.h.z * axis_z.x.abs() + 0.01;
+        let radius_y = box.h.x * axis_x.y.abs() + box.h.y * axis_y.y.abs() + box.h.z * axis_z.y.abs() + 0.01;
+        let radius_z = box.h.x * axis_x.z.abs() + box.h.y * axis_y.z.abs() + box.h.z * axis_z.z.abs() + 0.01;
+
+        self.min_x = box.p.x - radius_x;
+        self.max_x = box.p.x + radius_x;
+        self.min_y = box.p.y - radius_y;
+        self.max_y = box.p.y + radius_y;
+        self.min_z = box.p.z - radius_z;
+        self.max_z = box.p.z + radius_z;
+    }
+
+    // Test the remaining axes after the x-axis sweep finds a candidate.
+    overlaps_yz(self, other) {
+        return self.min_y <= other.max_y && other.min_y <= self.max_y
+            && self.min_z <= other.max_z && other.min_z <= self.max_z;
+    }
+}
+
 class World {
     // Keep a random stream for boxes added during this run.
     init(self, count) {
@@ -344,6 +415,8 @@ class World {
 
     reset(self) {
         self.boxes=[]; self.contacts=[]; self.time=0.0;
+        self.bounds = [];
+        self.render_dirty = true;
         self.next_sleep_group=1; self.wake_events=0;
         self.boxes.push(Box(Vec3(0.0,-0.3,0.0),Vec3(9.0,0.3,9.0),0.0,0x617783));
 
@@ -366,6 +439,11 @@ class World {
         falling.w=Vec3(0.4,0.2,-0.3);
         falling.id=self.boxes.len;
         self.boxes.push(falling);
+
+        for (let var i = 0; i < self.boxes.len; ++i)
+            self.bounds.push(BoxBounds(self.boxes[i]));
+
+        self.awake_count = self.boxes.len - 1;
     }
 
     // Spawn a varied box above the current pile near the scene center.
@@ -391,6 +469,29 @@ class World {
                               self.rng.float(-0.35, 0.35)));
         box.id = self.boxes.len;
         self.boxes.push(box);
+        self.bounds.push(BoxBounds(box));
+        self.awake_count += 1;
+        self.render_dirty = true;
+    }
+
+    // Update moving bounds and restore x order with nearby swaps.
+    sort_bounds(self) {
+        for (let var i = 0; i < self.bounds.len; ++i) {
+            let bounds = self.bounds[i];
+            if (!bounds.box.sleeping && bounds.box.im > 0.0) bounds.update();
+        }
+
+        for (let var i = 1; i < self.bounds.len; ++i) {
+            let bounds = self.bounds[i];
+            let var j = i;
+
+            while (j > 0 && self.bounds[j - 1].min_x > bounds.min_x) {
+                self.bounds[j] = self.bounds[j - 1];
+                j -= 1;
+            }
+
+            self.bounds[j] = bounds;
+        }
     }
 
     wake_group(self, group) {
@@ -400,6 +501,7 @@ class World {
         for (let var i=1; i<self.boxes.len; ++i) {
             let b=self.boxes[i];
             if (b.sleep_group != group) continue;
+            if (b.sleeping) self.awake_count += 1;
             b.sleeping=false; b.sleep_group=0; b.sleep_time=0.0;
         }
     }
@@ -423,6 +525,7 @@ class World {
         let point = origin.add(direction.mul(nearest));
         hit.impulse(direction.mul(POKE_IMPULSE), point.sub(hit.p));
         hit.sleep_time = 0.0;
+        self.render_dirty = true;
         return hit.id;
     }
 
@@ -474,11 +577,22 @@ class World {
                 let body=self.boxes[island[j]];
                 body.sleeping=true; body.sleep_group=group;
                 body.v=zero(); body.w=zero();
+                body.bounds.update();
+                self.awake_count -= 1;
             }
         }
     }
 
     step(self) {
+        // A fully sleeping world has no motion until a spawn or poke wakes it.
+        if (self.awake_count == 0) {
+            self.contacts = [];
+            self.time += STEP;
+            return;
+        }
+
+        self.render_dirty = true;
+
         // Predict the moving boxes' poses before finding contacts.
         for (let var i=1; i<self.boxes.len; ++i) {
             let b=self.boxes[i];
@@ -486,17 +600,35 @@ class World {
             b.v=b.v.add(Vec3(0.0,GRAVITY*STEP,0.0));
             b.p=b.p.add(b.v.mul(STEP));
             b.q=rotation(b.w.mul(STEP)).mul(b.q).unit();
+            b.axes_dirty = true;
         }
+
+        self.sort_bounds();
 
         // A new impact wakes every box in the sleeping contact island.
         let var woke=true;
         while (woke) {
             woke=false;
-            for (let var i=1; i<self.boxes.len; ++i) {
-                for (let var j=i+1; j<self.boxes.len; ++j) {
-                    let a=self.boxes[i]; let b=self.boxes[j];
-                    if (a.sleeping == b.sleeping || !broad_overlap(a,b)) continue;
-                    if (collide(a,b) == nil) continue;
+            for (let var i = 0; i < self.bounds.len; ++i) {
+                let a_bounds = self.bounds[i];
+
+                for (let var j = i + 1; j < self.bounds.len; ++j) {
+                    let b_bounds = self.bounds[j];
+                    if (b_bounds.min_x > a_bounds.max_x) break;
+
+                    let var a = a_bounds.box;
+                    let var b = b_bounds.box;
+                    if (a.im == 0.0 || b.im == 0.0) continue;
+                    if (a.sleeping == b.sleeping || !a_bounds.overlaps_yz(b_bounds)) continue;
+
+                    if (a.id > b.id) {
+                        let swap = a;
+                        a = b;
+                        b = swap;
+                    }
+
+                    if (collide(a, b) == nil) continue;
+
                     self.wake_group(a.sleeping ? a.sleep_group : b.sleep_group);
                     woke=true;
                 }
@@ -505,14 +637,44 @@ class World {
 
         // Reject distant pairs with world-aligned bounds before SAT.
         self.contacts=[];
-        for (let var i=0; i<self.boxes.len; ++i) {
-            for (let var j=i+1; j<self.boxes.len; ++j) {
-                let a=self.boxes[i]; let b=self.boxes[j];
+        for (let var i = 0; i < self.bounds.len; ++i) {
+            let a_bounds = self.bounds[i];
+
+            for (let var j = i + 1; j < self.bounds.len; ++j) {
+                let b_bounds = self.bounds[j];
+                if (b_bounds.min_x > a_bounds.max_x) break;
+
+                let var a = a_bounds.box;
+                let var b = b_bounds.box;
                 if (a.sleeping || b.sleeping) continue;
-                if (!broad_overlap(a,b)) continue;
+                if (!a_bounds.overlaps_yz(b_bounds)) continue;
+
+                if (a.id > b.id) {
+                    let swap = a;
+                    a = b;
+                    b = swap;
+                }
+
                 let c=collide(a,b);
                 if (c != nil) self.contacts.push(c);
             }
+        }
+
+        // Keep the solver's original pair order for stable stacked contacts.
+        for (let var i = 1; i < self.contacts.len; ++i) {
+            let contact = self.contacts[i];
+            let var j = i;
+
+            while (j > 0) {
+                let prev = self.contacts[j - 1];
+                if (prev.a.id < contact.a.id) break;
+                if (prev.a.id == contact.a.id && prev.b.id < contact.b.id) break;
+
+                self.contacts[j] = prev;
+                j -= 1;
+            }
+
+            self.contacts[j] = contact;
         }
 
         // Project overlapping contact points apart.
@@ -762,7 +924,7 @@ class Renderer {
         let base=0.27+0.65*normal.dot(self.sun).max(0.0);
         for (let var i=0; i<4; ++i) {
             let p=box.corner(indices[i]);
-            let light=((base+0.035*p.y)*1.3).clip(0.18,1.0);
+            let light=((base+0.035*p.y)*1.20).clip(0.18,1.0);
             poly.push(self.view(p,light));
         }
 
@@ -964,17 +1126,29 @@ loop {
 
     let yaw=((orbit_right ? 1.0 : 0.0)-(orbit_left ? 1.0 : 0.0))*ORBIT_SPEED*elapsed;
     let pitch=((orbit_up ? 1.0 : 0.0)-(orbit_down ? 1.0 : 0.0))*ORBIT_SPEED*elapsed;
-    if (yaw != 0.0 || pitch != 0.0) renderer.orbit(yaw,pitch);
+    let var camera_changed = false;
+    if (yaw != 0.0 || pitch != 0.0) {
+        renderer.orbit(yaw,pitch);
+        camera_changed = true;
+    }
+
     let zoom=((zoom_out ? 1.0 : 0.0)-(zoom_in ? 1.0 : 0.0))*ZOOM_SPEED*elapsed;
-    if (zoom != 0.0) renderer.zoom(zoom);
+    if (zoom != 0.0) {
+        renderer.zoom(zoom);
+        camera_changed = true;
+    }
 
     let physics_start=$time_current_ms();
     let var steps=0;
     if (advance) { world.step(); advance=false; steps+=1; }
     while (accumulator >= STEP) { world.step(); accumulator-=STEP; steps+=1; }
 
+    // Reuse the framebuffer when neither the scene nor the camera moved.
     let render_start=$time_current_ms();
-    renderer.render(world);
+    if (camera_changed || world.render_dirty) {
+        renderer.render(world);
+        world.render_dirty = false;
+    }
     let render_end=$time_current_ms();
     $window_draw_frame(window,renderer.fb);
 
