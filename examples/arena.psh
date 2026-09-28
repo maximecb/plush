@@ -54,7 +54,10 @@ let EPISODE_TICKS = 300;
 let EPISODES = 8;
 let MIN_ROOM = 5;
 let MAX_ROOM = flag_int("--max-room", 10).max(MIN_ROOM);
-let BODY_RADIUS = 0.325;
+let BODY_RADIUS = 0.25;
+let DRAW_BODY_RADIUS = 0.325;
+let DOOR_SLIDE_RANGE = 0.6;
+let DOOR_SLIDE_SPEED = 1.5;
 let MAX_FORWARD = 3.0;
 let MAX_STRAFE = 1.6;
 let MAX_TURN = 3.5;
@@ -483,7 +486,7 @@ class Arena {
             let split = 2 + rng.index((vertical ? w : h) - 4);
             let wall_x = vertical ? x + split : x;
             let wall_y = vertical ? y : y + split;
-            // A one-metre opening admits the 0.65-metre body. Prefer non-corner doors.
+            // A one-metre opening admits the 0.5-metre body. Prefer non-corner doors.
             let door = span > 2 ? 1 + rng.index(span - 2) : rng.index(span);
             if (!self.try_partition(wall_x, wall_y, span, vertical, door))
                 continue;
@@ -592,6 +595,27 @@ class Arena {
             }
         }
         return false;
+    }
+
+    doorway_center(self, leading, lateral, along_x, positive) {
+        let wall = (leading + (positive ? BODY_RADIUS : -BODY_RADIUS)).floor();
+        let var nearest = nil;
+        let var nearest_distance = DOOR_SLIDE_RANGE;
+        for (let var cell = (lateral - DOOR_SLIDE_RANGE).floor();
+             cell <= (lateral + DOOR_SLIDE_RANGE).floor(); ++cell) {
+            let opening = along_x ? !self.solid(wall, cell) &&
+                                    self.solid(wall, cell - 1) &&
+                                    self.solid(wall, cell + 1) :
+                                    !self.solid(cell, wall) &&
+                                    self.solid(cell - 1, wall) &&
+                                    self.solid(cell + 1, wall);
+            let distance = (cell.to_f() + 0.5 - lateral).abs();
+            if (opening && distance <= nearest_distance) {
+                nearest = cell.to_f() + 0.5;
+                nearest_distance = distance;
+            }
+        }
+        return nearest;
     }
 
     // Walk grid cells until the ray enters a solid tile.
@@ -954,10 +978,17 @@ class Fighter {
         // A tenth of a second is shorter than one tile at running speed.
         // Resolve each axis separately so fighters can slide along notches.
         let next_x = self.x + self.vx * DT;
-        let next_y = self.y + self.vy * DT;
         let candidate_x = next_x.clip(1.0 + BODY_RADIUS,
                                        arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
         if (arena.blocked(candidate_x, self.y)) {
+            let door_y = arena.doorway_center(candidate_x, self.y, true, self.vx > 0.0);
+            if (door_y != nil) {
+                let var slide = (door_y - self.y).clip(-DOOR_SLIDE_SPEED * DT,
+                                                        DOOR_SLIDE_SPEED * DT);
+                slide = slide.clip(-self.vx.abs() * DT, self.vx.abs() * DT);
+                if (!arena.blocked(self.x, self.y + slide))
+                    self.y = self.y + slide;
+            }
             let start_x = self.x;
             let var safe = 0.0;
             let var blocked = 1.0;
@@ -974,9 +1005,18 @@ class Fighter {
         }
         if (self.x != next_x)
             self.vx = 0.0;
+        let next_y = self.y + self.vy * DT;
         let candidate_y = next_y.clip(1.0 + BODY_RADIUS,
                                        arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
         if (arena.blocked(self.x, candidate_y)) {
+            let door_x = arena.doorway_center(candidate_y, self.x, false, self.vy > 0.0);
+            if (door_x != nil) {
+                let var slide = (door_x - self.x).clip(-DOOR_SLIDE_SPEED * DT,
+                                                        DOOR_SLIDE_SPEED * DT);
+                slide = slide.clip(-self.vy.abs() * DT, self.vy.abs() * DT);
+                if (!arena.blocked(self.x + slide, self.y))
+                    self.x = self.x + slide;
+            }
             let start_y = self.y;
             let var safe = 0.0;
             let var blocked = 1.0;
@@ -2008,6 +2048,45 @@ fun check_movement() {
     fighter.move(notched, idle);
     assert(fighter.y >= 2.0 + BODY_RADIUS && fighter.y < 2.5 && fighter.vy == 0.0);
     assert(!notched.blocked(fighter.x, fighter.y));
+    let doorway = Arena(5, 5, nil);
+    for (let var y = 1; y <= 5; ++y)
+        if (y != 3)
+            doorway.add_notch(3, y);
+    assert(!doorway.blocked(3.5, 3.26));
+    assert(doorway.blocked(3.5, 3.24));
+    fighter.reset(2.5, 3.05, 0.0);
+    for (let var i = 0; i < 30; ++i) {
+        fighter.move(doorway, forward);
+        assert(!doorway.blocked(fighter.x, fighter.y));
+    }
+    assert(fighter.x > 3.5 && fighter.y > 3.25 && fighter.y < 3.75);
+    fighter.reset(4.5, 3.95, PI);
+    for (let var i = 0; i < 30; ++i) {
+        fighter.move(doorway, forward);
+        assert(!doorway.blocked(fighter.x, fighter.y));
+    }
+    assert(fighter.x < 2.5 && fighter.y > 3.25 && fighter.y < 3.75);
+    fighter.reset(2.5, 2.8, 0.0);
+    for (let var i = 0; i < 30; ++i)
+        fighter.move(doorway, forward);
+    assert(fighter.x <= 3.0 - BODY_RADIUS && fighter.y == 2.8);
+    let horizontal_doorway = Arena(5, 5, nil);
+    for (let var x = 1; x <= 5; ++x)
+        if (x != 3)
+            horizontal_doorway.add_notch(x, 3);
+    fighter.reset(3.05, 2.5, PI * 0.5);
+    for (let var i = 0; i < 30; ++i) {
+        fighter.move(horizontal_doorway, forward);
+        assert(!horizontal_doorway.blocked(fighter.x, fighter.y));
+    }
+    assert(fighter.y > 3.5 && fighter.x > 3.25 && fighter.x < 3.75);
+    let closed_wall = Arena(5, 5, nil);
+    for (let var y = 1; y <= 5; ++y)
+        closed_wall.add_notch(3, y);
+    fighter.reset(2.5, 3.05, 0.0);
+    for (let var i = 0; i < 30; ++i)
+        fighter.move(closed_wall, forward);
+    assert(fighter.x <= 3.0 - BODY_RADIUS && fighter.y == 3.05);
 
     let var saw_rectangle = false;
     for (let var seed = 0; seed < 20; ++seed) {
@@ -2912,13 +2991,13 @@ fun draw_fighter(buf, x, y, angle, hp, attack_ticks, gun_ammo,
     let right_x = -s;
     let right_y = c;
     let metres = scale.to_f();
-    let body_radius = metres * BODY_RADIUS;
-    let half_length = (metres * BODY_RADIUS * 0.62).floor().max(1);
-    let half_width = (metres * BODY_RADIUS * 0.78 * 1.20).floor().max(1);
+    let body_radius = metres * DRAW_BODY_RADIUS;
+    let half_length = (metres * DRAW_BODY_RADIUS * 0.62).floor().max(1);
+    let half_width = (metres * DRAW_BODY_RADIUS * 0.78 * 1.20).floor().max(1);
     draw_body(buf, x, y, angle, half_length, half_width, body_radius, COL_BG);
     draw_body(buf, x, y, angle, (half_length - 1).max(1),
               (half_width - 1).max(1), body_radius, color);
-    let head_radius = (metres * BODY_RADIUS * 0.32 * 1.50).floor().max(2);
+    let head_radius = (metres * DRAW_BODY_RADIUS * 0.32 * 1.50).floor().max(2);
     draw_disc(buf, x, y, head_radius + 1, COL_BG);
     draw_disc(buf, x, y, head_radius, COL_SKIN);
 
@@ -3275,7 +3354,7 @@ if (has_flag("--check-render")) {
                     visible = true;
                     let forward = (x - 100).to_f() * angle.cos() +
                                   (y - 100).to_f() * angle.sin();
-                    assert(forward > PIXELS_PER_METRE.to_f() * BODY_RADIUS * 0.48);
+                    assert(forward > PIXELS_PER_METRE.to_f() * DRAW_BODY_RADIUS * 0.48);
                 }
             }
         }
