@@ -9,7 +9,8 @@
 // Connects to a Plush guestbook server, lets you register or log in, then
 // shows the latest messages and lets you sign the guestbook. The message
 // list scrolls with the scrollbar on the right or the up and down arrow keys,
-// and older messages load as you scroll down.
+// and older messages load as you scroll down. Admins can press F12 to see
+// server information, then F1 to return to the guestbook.
 //
 // The server speaks one JSON object per line in each direction. Passwords
 // are never sent: the client sends a SHA-256 hash of the password instead.
@@ -54,7 +55,7 @@ let ERROR = rgb(255, 120, 120);
 let SUCCESS = rgb(130, 220, 140);
 let REGISTER_HEADING = rgb(80, 255, 100);
 let BUTTON = rgb(110, 90, 200);
-let REGISTER_BUTTON = REGISTER_HEADING;
+let PRIMARY_BUTTON = REGISTER_HEADING;
 let BUTTON_TEXT = rgb(255, 255, 255);
 let DANGER = rgb(140, 50, 70);
 let CANCEL = rgb(40, 130, 75);
@@ -475,8 +476,8 @@ fun net_actor(addr, gen)
     $actor_send(parent, {net: "closed", gen: gen});
 }
 
-// State of the client and its three screens: the intro animation, the
-// login screen and the guestbook itself
+// State of the client and its four screens: the intro animation, the
+// login screen, the guestbook and the admin page
 class App
 {
     // Creates the client for a given server address
@@ -515,6 +516,8 @@ class App
         self.username = nil;
         self.is_admin = false;
         self.auth = nil;
+        self.admin_info = nil;
+        self.admin_error = "";
 
         // Messages, newest first, with their wrapped lines
         self.messages = [];
@@ -631,7 +634,7 @@ class App
             self.handle_net(msg);
     }
 
-    // Checks for news every few seconds, and reconnects when disconnected
+    // Refreshes the current page every few seconds and reconnects when needed
     on_tick(self)
     {
         if (self.screen == "intro")
@@ -645,6 +648,8 @@ class App
         if (self.screen == "main" && self.pending.len == 0) {
             self.request_newer();
             self.send({type: "stats"}, nil);
+        } else if (self.screen == "admin" && self.is_admin && self.pending.len == 0) {
+            self.send({type: "admin_info"}, nil);
         }
     }
 
@@ -658,6 +663,9 @@ class App
 
         if (msg.net == "failed") {
             self.conn = "failed";
+            self.is_admin = false;
+            self.admin_info = nil;
+            self.admin_error = "";
             if (self.screen != "main")
                 self.set_status("Could not connect to " + self.addr + ", retrying...", ERROR);
             return;
@@ -676,6 +684,9 @@ class App
             self.sock = nil;
             self.pending = [];
             self.loading_older = false;
+            self.is_admin = false;
+            self.admin_info = nil;
+            self.admin_error = "";
             return;
         }
 
@@ -716,13 +727,19 @@ class App
                 self.is_admin = res.status == "ADMIN";
                 self.auth = {username: req.username, hash: req.hash};
 
-                if (self.screen != "main")
+                if (self.screen == "admin" && self.is_admin) {
+                    self.send({type: "admin_info"}, nil);
+                } else if (self.screen != "main") {
                     self.enter_main();
-                else
+                } else {
                     self.request_newer();
+                }
             } else {
                 if (info != nil && info.silent) {
                     self.auth = nil;
+                    self.username = nil;
+                    self.is_admin = false;
+                    self.admin_info = nil;
                     self.screen = "login";
                 }
                 self.set_status(res.error, ERROR);
@@ -762,6 +779,23 @@ class App
             return;
         }
 
+        if (req.type == "admin_info") {
+            if (res.ok) {
+                self.admin_info = res;
+                self.admin_error = "";
+            } else if (res.error == "not allowed") {
+                self.is_admin = false;
+                self.admin_info = nil;
+                self.admin_error = "";
+                if (self.screen == "admin")
+                    self.leave_admin();
+            } else {
+                self.admin_info = nil;
+                self.admin_error = res.error;
+            }
+            return;
+        }
+
         if (req.type == "stats" && res.ok) {
             self.total_views = res.total_views;
             self.messages_today = res.has("messages_today") ? res.messages_today : nil;
@@ -780,6 +814,25 @@ class App
         self.loading_older = false;
         self.set_status("", DIM);
         self.send({type: "get_messages", limit: PAGE_SIZE}, {mode: "latest"});
+    }
+
+    // Opens the admin page and requests a fresh snapshot
+    enter_admin(self)
+    {
+        self.screen = "admin";
+        self.drag_offset = nil;
+        self.admin_info = nil;
+        self.admin_error = "";
+        self.dirty = true;
+        self.send({type: "admin_info"}, nil);
+    }
+
+    // Returns to the guestbook without losing the message list or draft
+    leave_admin(self)
+    {
+        self.screen = "main";
+        self.dirty = true;
+        self.request_newer();
     }
 
     // Asks for messages newer than the newest one we have
@@ -912,6 +965,8 @@ class App
         self.auth = nil;
         self.username = nil;
         self.is_admin = false;
+        self.admin_info = nil;
+        self.admin_error = "";
         self.mode = "login";
         self.fields = [[], [], []];
         self.focus = 0;
@@ -972,7 +1027,7 @@ class App
         self.dirty = true;
 
         if (self.screen == "intro") {
-            if (ev.kind == "KEY_DOWN" || ev.kind == "MOUSE_DOWN")
+            if ((ev.kind == "KEY_DOWN" && ev.key != "F12") || ev.kind == "MOUSE_DOWN")
                 self.start_login(false);
             return;
         }
@@ -1008,6 +1063,9 @@ class App
     // Handles a left click: on the scrollbar, or on a button
     mouse_down(self, x, y)
     {
+        if (self.screen == "admin")
+            return;
+
         if (self.screen == "main") {
             let bar = self.scrollbar();
 
@@ -1081,6 +1139,12 @@ class App
     // Handles special keys
     key_down(self, key)
     {
+        if (self.screen == "admin") {
+            if (key == "F1")
+                self.leave_admin();
+            return;
+        }
+
         if (self.screen == "login") {
             let num_fields = self.mode == "register" ? 3 : 2;
 
@@ -1094,7 +1158,9 @@ class App
         }
 
         if (self.screen == "main") {
-            if (key == "ESCAPE")
+            if (key == "F12" && self.is_admin)
+                self.enter_admin();
+            else if (key == "ESCAPE")
                 self.deleting = nil;
             else if (key == "RETURN")
                 self.submit_post();
@@ -1161,6 +1227,8 @@ class App
             self.render_intro();
         else if (self.screen == "login")
             self.render_login();
+        else if (self.screen == "admin")
+            self.render_admin();
         else
             self.render_main();
 
@@ -1233,7 +1301,7 @@ class App
     {
         self.frame.fill_rect(x, y, w, h, color);
         let tx = x + (w - num_chars(label) * CHAR_W).idiv(2);
-        let text_color = color == REGISTER_BUTTON ? BG : BUTTON_TEXT;
+        let text_color = color == PRIMARY_BUTTON ? BG : BUTTON_TEXT;
         self.text(self.frame, tx, y + (h - CHAR_H).idiv(2), label, text_color, color);
         self.buttons.push({x: x, y: y, w: w, h: h, action: action, arg: arg});
     }
@@ -1268,7 +1336,7 @@ class App
             self.field(x, 296, w, "Username", self.fields[0], 0);
             self.field(x, 370, w, "Password", stars(self.fields[1]), 1);
             self.field(x, 444, w, "Confirm password", stars(self.fields[2]), 2);
-            self.button(x, 528, bw, 40, "Register", REGISTER_BUTTON, "submit", nil);
+            self.button(x, 528, bw, 40, "Register", PRIMARY_BUTTON, "submit", nil);
             self.button(x + w - bw, 528, bw, 40, "Log in", BUTTON, "mode", "login");
             self.centered(582, self.status, self.status_color);
             self.centered(HEIGHT - 76, "Tab switches fields, Enter registers", DIM);
@@ -1276,8 +1344,8 @@ class App
             self.centered(260, "Sign the Plush guestbook!", TEXT);
             self.field(x, 296, w, "Username", self.fields[0], 0);
             self.field(x, 370, w, "Password", stars(self.fields[1]), 1);
-            self.button(x, 456, bw, 40, "Log in", BUTTON, "submit", nil);
-            self.button(x + w - bw, 456, bw, 40, "Register", REGISTER_BUTTON, "mode", "register");
+            self.button(x, 456, bw, 40, "Register", BUTTON, "mode", "register");
+            self.button(x + w - bw, 456, bw, 40, "Log in", PRIMARY_BUTTON, "submit", nil);
             self.centered(514, self.status, self.status_color);
             self.centered(HEIGHT - 76, "Tab switches fields, Enter logs in", DIM);
         }
@@ -1287,6 +1355,52 @@ class App
             self.conn == "connecting" ? "Connecting to " + self.addr + "..." :
             "Not connected";
         self.centered(HEIGHT - 44, conn_text, self.conn == "connected" ? SUCCESS : DIM);
+    }
+
+    // Draws the admin page with the latest server snapshot
+    render_admin(self)
+    {
+        let frame = self.frame;
+        let panel_y = 72;
+        let panel_w = WIDTH - 2 * MARGIN;
+        let panel_h = HEIGHT - panel_y - MARGIN;
+        let x = MARGIN + 24;
+        let value_x = MARGIN + 310;
+
+        draw_full_logo(frame, MARGIN, 14, SMALL_LOGO);
+        self.text(frame, MARGIN + logo_width(SMALL_LOGO) + 12, 17, "admin", DIM, BG);
+        self.text(frame, WIDTH - MARGIN - 12 * CHAR_W, 30, "F1 guestbook", DIM, BG);
+
+        frame.fill_rect(MARGIN, panel_y, panel_w, panel_h, PANEL);
+        draw_rect(frame, MARGIN, panel_y, panel_w, panel_h, BORDER);
+
+        if (self.conn != "connected") {
+            self.text(frame, x, 100, "Connection lost, reconnecting...", ERROR, PANEL);
+            return;
+        }
+
+        if (self.admin_info == nil) {
+            let msg = self.admin_error == "" ? "Loading admin info..." : self.admin_error;
+            self.text(frame, x, 100, msg, self.admin_error == "" ? DIM : ERROR, PANEL);
+            return;
+        }
+
+        let info = self.admin_info;
+        self.text(frame, x, 100, "Process uptime:", DIM, PANEL);
+        self.text(frame, value_x, 100, info.uptime, TEXT, PANEL);
+        self.text(frame, x, 144, "Unique IPs:", DIM, PANEL);
+        self.text(frame, value_x, 144, info.unique_ips.comma_sep(), TEXT, PANEL);
+        self.text(frame, x, 188, "Total user accounts:", DIM, PANEL);
+        self.text(frame, value_x, 188, info.num_accounts.comma_sep(), TEXT, PANEL);
+
+        frame.fill_rect(x, 246, panel_w - 48, 1, FIELD);
+        self.text(frame, x, 268, "Last 10 user accounts", TEXT, PANEL);
+
+        for (let var i = 0; i < info.users.len; ++i) {
+            let y = 310 + i * 34;
+            self.text(frame, x, y, (i + 1).to_s() + ".", DIM, PANEL);
+            self.text(frame, x + 4 * CHAR_W, y, info.users[i], name_color(info.users[i]), PANEL);
+        }
     }
 
     // Draws the guestbook screen: a header, the box to write a message,
