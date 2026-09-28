@@ -123,8 +123,9 @@ let HEALTH_KIT_INPUT = PICKUP_INPUT + 3;
 let GRENADE_INPUT = HEALTH_KIT_INPUT + 3;
 let THROWN_GRENADE_INPUT = GRENADE_INPUT + 3;
 let VIEW_INPUTS = THROWN_GRENADE_INPUT + 3;
-let BODY_INPUTS = 10;
+let BODY_INPUTS = 11;
 let ENERGY_INPUT = VIEW_INPUTS + 8;
+let TIME_INPUT = VIEW_INPUTS + 9;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
 let HIDDEN = 16;
 let OUTPUTS = 5;
@@ -160,7 +161,8 @@ let INPUT_NAMES = [];
 for (let var i = 0; i < VIEW_BINS; ++i)
     INPUT_NAMES.push("wall_ray_" + (i - VIEW_MIDDLE).to_s());
 let BODY_NAMES = ["health", "forward_speed", "strafe_speed", "turn_speed",
-                  "attack_cooldown", "random", "gun_ammo", "grenade_held", "energy", "bias"];
+                  "attack_cooldown", "random", "gun_ammo", "grenade_held",
+                  "energy", "episode_time", "bias"];
 let VISION_NAMES = ["opponent_visible", "opponent_angle", "opponent_proximity",
                     "opponent_has_gun", "pickup_gun_visible", "pickup_gun_angle",
                     "pickup_gun_proximity", "pickup_health_kit_visible",
@@ -703,7 +705,7 @@ class Fighter {
     sense(self, arena, other, gun_available, gun_x, gun_y,
           kit_available, kit_x, kit_y,
           grenade_available, grenade_x, grenade_y,
-          thrown_active, thrown_x, thrown_y, rng) {
+          thrown_active, thrown_x, thrown_y, episode_tick, rng) {
         let inputs = self.inputs;
         let c = self.angle.cos();
         let s = self.angle.sin();
@@ -868,6 +870,8 @@ class Fighter {
         inputs.set_f32(VIEW_INPUTS + 6, self.gun_ammo.to_f() / GUN_AMMO.to_f());
         inputs.set_f32(VIEW_INPUTS + 7, self.grenade_held ? 1.0 : 0.0);
         inputs.set_f32(ENERGY_INPUT, (self.energy / MAX_ENERGY).clip(0.0, 1.0));
+        inputs.set_f32(TIME_INPUT, (episode_tick.to_f() /
+                       (EPISODE_TICKS - 1).to_f()).clip(0.0, 1.0));
     }
 
     think(self) {
@@ -1356,11 +1360,11 @@ class Match {
         a.sense(self.arena, b, self.gun_available, self.gun_x, self.gun_y,
                 self.kit_available, self.kit_x, self.kit_y,
                 self.grenade_available, self.grenade_x, self.grenade_y,
-                self.grenade_active, self.grenade_x, self.grenade_y, rng);
+                self.grenade_active, self.grenade_x, self.grenade_y, self.tick, rng);
         b.sense(self.arena, a, self.gun_available, self.gun_x, self.gun_y,
                 self.kit_available, self.kit_x, self.kit_y,
                 self.grenade_available, self.grenade_x, self.grenade_y,
-                self.grenade_active, self.grenade_x, self.grenade_y, rng);
+                self.grenade_active, self.grenade_x, self.grenade_y, self.tick, rng);
         let aa = a.think();
         let ba = b.think();
         a.move(self.arena, aa);
@@ -1594,7 +1598,7 @@ fun check_energy() {
     for (let var i = 0; i <= 2; ++i) {
         fighter.energy = MAX_ENERGY * i.to_f() * 0.5;
         fighter.sense(arena, enemy, false, 0.0, 0.0, false, 0.0, 0.0,
-                      false, 0.0, 0.0, false, 0.0, 0.0, rng);
+                      false, 0.0, 0.0, false, 0.0, 0.0, 0, rng);
         assert(fighter.inputs.get_f32(ENERGY_INPUT) == i.to_f() * 0.5);
         assert(fighter.inputs.get_f32(NUM_SENSORS - 1) == 1.0);
     }
@@ -1763,15 +1767,19 @@ fun check_movement() {
     memory_duel.needs_reset = true;
     memory_duel.step();
     assert(memory_duel.episode == 1);
+    assert(memory_duel.fighters[0].inputs.get_f32(TIME_INPUT) == 0.0);
     for (let var side = 0; side < 2; ++side)
         for (let var unit = 0; unit < RECURRENT; ++unit)
             assert(memory_duel.fighters[side].inputs.get_f32(NUM_SENSORS + unit) == 0.0);
+    memory_duel.step();
+    assert((memory_duel.fighters[0].inputs.get_f32(TIME_INPUT) -
+            1.0 / (EPISODE_TICKS - 1).to_f()).abs() < 0.000001);
 
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     fighter.sense(vision_arena, enemy, true, 12.0, 10.0,
                   true, 12.0, 12.0, true, 12.0, 10.0,
-                  true, 12.0, 10.0, Xoshiro128(1));
+                  true, 12.0, 10.0, 0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 1.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 2) > 0.0);
@@ -1788,17 +1796,20 @@ fun check_movement() {
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 1.0);
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 2) > 0.0);
+    assert(fighter.inputs.get_f32(TIME_INPUT) == 0.0);
     enemy.gun_ammo = GUN_AMMO;
     fighter.sense(vision_arena, enemy, true, 12.0, 10.0,
                   true, 12.0, 12.0, true, 12.0, 10.0,
-                  true, 12.0, 10.0, Xoshiro128(1));
+                  true, 12.0, 10.0, EPISODE_TICKS.idiv(2), Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 3) == 1.0);
+    assert((fighter.inputs.get_f32(TIME_INPUT) -
+            EPISODE_TICKS.idiv(2).to_f() / (EPISODE_TICKS - 1).to_f()).abs() < 0.000001);
     enemy.gun_ammo = 0;
     let peripheral = 55.0 * PI / 180.0;
     enemy.reset(10.0 + 5.0 * peripheral.cos(), 10.0 + 5.0 * peripheral.sin(), 0.0);
     fighter.sense(vision_arena, enemy, false, 0.0, 0.0,
                   false, 0.0, 0.0, false, 0.0, 0.0,
-                  true, 12.0, 10.0, Xoshiro128(1));
+                  true, 12.0, 10.0, EPISODE_TICKS - 1, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 1.0);
     assert((fighter.inputs.get_f32(OPPONENT_INPUT + 1) - 55.0 / 60.0).abs() < 0.0001);
     assert(fighter.inputs.get_f32(PICKUP_INPUT) == 0.0);
@@ -1811,12 +1822,13 @@ fun check_movement() {
     assert(fighter.inputs.get_f32(GRENADE_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(GRENADE_INPUT + 2) == 0.0);
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 1.0);
+    assert(fighter.inputs.get_f32(TIME_INPUT) == 1.0);
     enemy.reset(13.0, 10.0, 0.0);
     enemy.gun_ammo = GUN_AMMO;
     vision_arena.add_notch(12, 10);
     fighter.sense(vision_arena, enemy, true, 13.0, 10.0,
                   true, 13.0, 10.0, true, 13.0, 10.0,
-                  true, 13.0, 10.0, Xoshiro128(1));
+                  true, 13.0, 10.0, 0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 2) == 0.0);
@@ -1835,13 +1847,13 @@ fun check_movement() {
     assert(fighter.inputs.get_f32(VIEW_MIDDLE) > 0.0);
     fighter.sense(arena, enemy, false, 0.0, 0.0,
                   false, 0.0, 0.0, false, 0.0, 0.0,
-                  false, 13.0, 10.0, Xoshiro128(1));
+                  false, 13.0, 10.0, 0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 0.0);
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 2) == 0.0);
     fighter.sense(arena, enemy, false, 0.0, 0.0,
                   false, 0.0, 0.0, false, 0.0, 0.0,
-                  true, 10.0, 10.0, Xoshiro128(1));
+                  true, 10.0, 10.0, 0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT) == 1.0);
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(THROWN_GRENADE_INPUT + 2) == 1.0);
@@ -1851,12 +1863,12 @@ fun check_movement() {
     fighter.gun_ammo = GUN_AMMO;
     fighter.sense(arena, enemy, false, 0.0, 0.0,
                   false, 0.0, 0.0, false, 0.0, 0.0,
-                  false, 0.0, 0.0, Xoshiro128(1));
+                  false, 0.0, 0.0, 0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(VIEW_INPUTS + 6) == 1.0);
     fighter.grenade_held = true;
     fighter.sense(arena, enemy, false, 0.0, 0.0,
                   false, 0.0, 0.0, false, 0.0, 0.0,
-                  false, 0.0, 0.0, Xoshiro128(1));
+                  false, 0.0, 0.0, 0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(VIEW_INPUTS + 7) == 1.0);
     fighter.grenade_held = false;
     assert(fighter.strikes(arena, enemy, 1.0) == GUN_DAMAGE);
@@ -2552,7 +2564,7 @@ if (has_flag("--check-checkpoint")) {
     // initializers instead of shifting saved columns.
     let old_inputs = ["retired_sensor"];
     for (let var i = 0; i < INPUT_NAMES.len; ++i)
-        if (INPUT_NAMES[i] != "energy" &&
+        if (INPUT_NAMES[i] != "energy" && INPUT_NAMES[i] != "episode_time" &&
             INPUT_NAMES[i] != "thrown_grenade_visible" &&
             INPUT_NAMES[i] != "thrown_grenade_angle" &&
             INPUT_NAMES[i] != "thrown_grenade_proximity")
@@ -2561,7 +2573,7 @@ if (has_flag("--check-checkpoint")) {
     for (let var h = 0; h < HIDDEN; ++h) {
         let row = [0.75];
         for (let var i = 0; i < INPUT_NAMES.len; ++i)
-            if (INPUT_NAMES[i] != "energy" &&
+            if (INPUT_NAMES[i] != "energy" && INPUT_NAMES[i] != "episode_time" &&
                 INPUT_NAMES[i] != "thrown_grenade_visible" &&
                 INPUT_NAMES[i] != "thrown_grenade_angle" &&
                 INPUT_NAMES[i] != "thrown_grenade_proximity")
@@ -2571,11 +2583,12 @@ if (has_flag("--check-checkpoint")) {
     let baseline = new_genome(Xoshiro128(7));
     let var remapped = decode_individual(Xoshiro128(7), shifted, old_inputs, OUTPUT_NAMES);
     let energy_index = name_index(INPUT_NAMES, "energy");
+    let time_index = name_index(INPUT_NAMES, "episode_time");
     let thrown_index = name_index(INPUT_NAMES, "thrown_grenade_visible");
     for (let var h = 0; h < HIDDEN; ++h) {
         for (let var i = 0; i < NUM_INPUTS; ++i) {
             let idx = h * NUM_INPUTS + i;
-            let expected = i == energy_index ||
+            let expected = i == energy_index || i == time_index ||
                            (i >= thrown_index && i < thrown_index + 3) ?
                            baseline.get_f32(idx) :
                            elites.individuals[0].weights.get_f32(idx);
