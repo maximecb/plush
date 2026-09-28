@@ -49,10 +49,12 @@ let BORDER = rgb(92, 82, 140);
 let FOCUS = rgb(160, 140, 240);
 let TEXT = rgb(236, 232, 248);
 let DIM = rgb(150, 140, 185);
+let PLACEHOLDER = rgb(115, 115, 120);
 let ERROR = rgb(255, 120, 120);
 let SUCCESS = rgb(130, 220, 140);
+let REGISTER_HEADING = rgb(80, 255, 100);
 let BUTTON = rgb(110, 90, 200);
-let REGISTER_BUTTON = rgb(30, 145, 120);
+let REGISTER_BUTTON = REGISTER_HEADING;
 let BUTTON_TEXT = rgb(255, 255, 255);
 let DANGER = rgb(140, 50, 70);
 let CANCEL = rgb(40, 130, 75);
@@ -503,7 +505,7 @@ class App
         // Login screen, in "login" or "register" mode. The fields are the
         // username, password and password confirmation, as arrays of
         // characters. The confirmation only shows when registering.
-        self.mode = "login";
+        self.mode = "register";
         self.fields = [[], [], []];
         self.focus = 0;
         self.status = "";
@@ -1208,10 +1210,20 @@ class App
         let start = (value.len - max_chars).max(0);
         let shown = join(value.slice(start, value.len));
         let text_y = box_y + (h - CHAR_H).idiv(2);
-        self.text(self.frame, x + TEXT_PAD, text_y, shown, TEXT, FIELD);
 
-        if (focused && self.cursor_on)
-            self.text(self.frame, x + TEXT_PAD + num_chars(shown) * CHAR_W, text_y, "＿", FOCUS, FIELD);
+        let placeholder = self.mode == "register" && index == 0 && value.len == 0;
+        if (placeholder)
+            self.text(self.frame, x + TEXT_PAD, text_y, "choose a username", PLACEHOLDER, FIELD);
+        else
+            self.text(self.frame, x + TEXT_PAD, text_y, shown, TEXT, FIELD);
+
+        if (focused && self.cursor_on) {
+            let cursor_x = x + TEXT_PAD + num_chars(shown) * CHAR_W;
+            if (placeholder)
+                self.frame.fill_rect(cursor_x, text_y + CHAR_H - 4, CHAR_W, 2, FOCUS);
+            else
+                self.text(self.frame, cursor_x, text_y, "＿", FOCUS, FIELD);
+        }
 
         self.buttons.push({x: x, y: box_y, w: w, h: h, action: "focus", arg: index});
     }
@@ -1221,7 +1233,8 @@ class App
     {
         self.frame.fill_rect(x, y, w, h, color);
         let tx = x + (w - num_chars(label) * CHAR_W).idiv(2);
-        self.text(self.frame, tx, y + (h - CHAR_H).idiv(2), label, BUTTON_TEXT, color);
+        let text_color = color == REGISTER_BUTTON ? BG : BUTTON_TEXT;
+        self.text(self.frame, tx, y + (h - CHAR_H).idiv(2), label, text_color, color);
         self.buttons.push({x: x, y: y, w: w, h: h, action: action, arg: arg});
     }
 
@@ -1251,21 +1264,21 @@ class App
         }
 
         if (self.mode == "register") {
-            self.centered(216, "Create your account", TEXT);
-            self.field(x, 252, w, "Username", self.fields[0], 0);
-            self.field(x, 326, w, "Password", stars(self.fields[1]), 1);
-            self.field(x, 400, w, "Confirm password", stars(self.fields[2]), 2);
-            self.button(x, 484, bw, 40, "Back", BUTTON, "mode", "login");
-            self.button(x + w - bw, 484, bw, 40, "Register", REGISTER_BUTTON, "submit", nil);
-            self.centered(538, self.status, self.status_color);
+            self.centered(260, "Create your new account", REGISTER_HEADING);
+            self.field(x, 296, w, "Username", self.fields[0], 0);
+            self.field(x, 370, w, "Password", stars(self.fields[1]), 1);
+            self.field(x, 444, w, "Confirm password", stars(self.fields[2]), 2);
+            self.button(x, 528, bw, 40, "Register", REGISTER_BUTTON, "submit", nil);
+            self.button(x + w - bw, 528, bw, 40, "Log in", BUTTON, "mode", "login");
+            self.centered(582, self.status, self.status_color);
             self.centered(HEIGHT - 76, "Tab switches fields, Enter registers", DIM);
         } else {
-            self.centered(220, "Sign the Plush guestbook!", TEXT);
-            self.field(x, 270, w, "Username", self.fields[0], 0);
-            self.field(x, 348, w, "Password", stars(self.fields[1]), 1);
-            self.button(x, 434, bw, 40, "Log in", BUTTON, "submit", nil);
-            self.button(x + w - bw, 434, bw, 40, "Register", REGISTER_BUTTON, "mode", "register");
-            self.centered(492, self.status, self.status_color);
+            self.centered(260, "Sign the Plush guestbook!", TEXT);
+            self.field(x, 296, w, "Username", self.fields[0], 0);
+            self.field(x, 370, w, "Password", stars(self.fields[1]), 1);
+            self.button(x, 456, bw, 40, "Log in", BUTTON, "submit", nil);
+            self.button(x + w - bw, 456, bw, 40, "Register", REGISTER_BUTTON, "mode", "register");
+            self.centered(514, self.status, self.status_color);
             self.centered(HEIGHT - 76, "Tab switches fields, Enter logs in", DIM);
         }
 
