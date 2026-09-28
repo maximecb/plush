@@ -15,6 +15,9 @@
 // - Sweep sorted, cached AABBs to reject distant pairs before SAT.
 // - Cache box orientation axes for collision and rendering calculations.
 // - Compute inverse inertia and contact effective mass from those axes.
+// - Reuse contact anchors and normal effective mass across velocity passes.
+// - Compute relative contact velocity without temporary cross-product vectors.
+// - Skip zero impulses and static-body updates in the velocity solver.
 // - Stop position and velocity solver passes when corrections are small.
 // - Sleep settled contact islands and skip physics when every box sleeps.
 // - Use a conservative S-buffer and reuse frames when nothing moves.
@@ -41,7 +44,7 @@ let FOCAL = 610.0;
 let ORBIT_SPEED = 1.6;
 let ZOOM_SPEED = 8.0;
 // The poke is an instantaneous impulse in newton-seconds.
-let POKE_IMPULSE = 1.5;
+let POKE_IMPULSE = 2.5;
 let BOX_COLORS = [0xF34E44, 0xF6BE2D, 0x25B8D0, 0xA65BE8, 0x50C56C];
 
 class Vec3 {
@@ -150,14 +153,17 @@ class Box {
                     self.axis_x.z * x + self.axis_y.z * y + self.axis_z.z * z);
     }
 
+    // Compute inverse effective mass along a contact direction.
     weight(self, r, n) {
         if (self.im == 0.0) return 0.0;
 
         self.refresh_axes();
-        let c = r.cross(n);
-        let x = c.dot(self.axis_x);
-        let y = c.dot(self.axis_y);
-        let z = c.dot(self.axis_z);
+        let cx = r.y * n.z - r.z * n.y;
+        let cy = r.z * n.x - r.x * n.z;
+        let cz = r.x * n.y - r.y * n.x;
+        let x = cx * self.axis_x.x + cy * self.axis_x.y + cz * self.axis_x.z;
+        let y = cx * self.axis_y.x + cy * self.axis_y.y + cz * self.axis_y.z;
+        let z = cx * self.axis_z.x + cy * self.axis_z.y + cz * self.axis_z.z;
         return self.im + self.ii.x * x * x + self.ii.y * y * y + self.ii.z * z * z;
     }
 
@@ -168,9 +174,14 @@ class Box {
         self.axes_dirty = true;
     }
 
+    // Apply a velocity impulse at an offset from the center of mass.
     impulse(self, j, r) {
         if (self.im == 0.0) return;
-        self.v = self.v.add(j.mul(self.im));
+
+        let v = self.v;
+        self.v = Vec3(v.x + j.x * self.im,
+                      v.y + j.y * self.im,
+                      v.z + j.z * self.im);
         self.w = self.w.add(self.inertia(r.cross(j)));
     }
 
@@ -230,9 +241,13 @@ class Box {
 }
 
 class ContactPoint {
+    // Store local anchors and the quantities reused by velocity passes.
     init(self, a, b, pa, pb) {
         self.la=a.local(pa); self.lb=b.local(pb);
         self.normal_impulse=0.0; self.friction_impulse=zero();
+        self.ra = nil;
+        self.rb = nil;
+        self.normal_weight = 0.0;
     }
 }
 
@@ -240,6 +255,21 @@ class Contact {
     init(self, a, b, n) { self.a=a; self.b=b; self.n=n; self.points=[]; }
 
     add(self, pa, pb) { self.points.push(ContactPoint(self.a,self.b,pa,pb)); }
+
+    // Compute relative contact velocity without temporary cross-product vectors.
+    relative_velocity(self, ra, rb) {
+        let av = self.a.v;
+        let aw = self.a.w;
+        let bv = self.b.v;
+        let bw = self.b.w;
+        let ax = av.x + aw.y * ra.z - aw.z * ra.y;
+        let ay = av.y + aw.z * ra.x - aw.x * ra.z;
+        let az = av.z + aw.x * ra.y - aw.y * ra.x;
+        let bx = bv.x + bw.y * rb.z - bw.z * rb.y;
+        let by = bv.y + bw.z * rb.x - bw.x * rb.z;
+        let bz = bv.z + bw.x * rb.y - bw.y * rb.x;
+        return Vec3(bx - ax, by - ay, bz - az);
+    }
 }
 
 // Keep the points on the negative side of n dot p = d.
@@ -703,42 +733,67 @@ class World {
             if (worst < 0.001) break;
         }
 
+        // Position passes change orientation; velocity passes do not.
+        for (let var i = 0; i < self.contacts.len; ++i) {
+            let contact = self.contacts[i];
+
+            for (let var j = 0; j < contact.points.len; ++j) {
+                let point = contact.points[j];
+                point.ra = contact.a.q.rotate(point.la);
+                point.rb = contact.b.q.rotate(point.lb);
+                point.normal_weight = contact.a.weight(point.ra, contact.n)
+                                    + contact.b.weight(point.rb, contact.n);
+            }
+        }
+
         // Cancel inward contact velocity and oppose tangential sliding.
-        for (let var pass=0; pass<MAX_VELOCITY_PASSES; ++pass) {
-            let var worst=0.0;
+        for (let var pass = 0; pass < MAX_VELOCITY_PASSES; ++pass) {
+            let var worst = 0.0;
 
-            for (let var i=0; i<self.contacts.len; ++i) {
-                let c=self.contacts[i]; let n=c.n;
+            for (let var i = 0; i < self.contacts.len; ++i) {
+                let c = self.contacts[i];
+                let n = c.n;
 
-                for (let var j=0; j<c.points.len; ++j) {
-                    let p=c.points[j];
-                    let ra=c.a.q.rotate(p.la); let rb=c.b.q.rotate(p.lb);
-                    let var relative=c.b.velocity(rb).sub(c.a.velocity(ra));
-                    let vn=relative.dot(n);
-                    let w=c.a.weight(ra,n)+c.b.weight(rb,n);
+                for (let var j = 0; j < c.points.len; ++j) {
+                    let p = c.points[j];
+                    let ra = p.ra;
+                    let rb = p.rb;
+                    let var relative = c.relative_velocity(ra, rb);
+                    let vn = relative.dot(n);
+                    let w = p.normal_weight;
 
-                    let new_j=(p.normal_impulse-vn/w).max(0.0);
-                    let dj=new_j-p.normal_impulse;
-                    p.normal_impulse=new_j;
-                    c.a.impulse(n.mul(-dj),ra); c.b.impulse(n.mul(dj),rb);
-                    worst=worst.max(dj.abs());
+                    let new_j = (p.normal_impulse - vn / w).max(0.0);
+                    let dj = new_j - p.normal_impulse;
+                    p.normal_impulse = new_j;
+                    worst = worst.max(dj.abs());
 
-                    relative=c.b.velocity(rb).sub(c.a.velocity(ra));
-                    let tangent=relative.sub(n.mul(relative.dot(n)));
-                    let speed=tangent.length();
+                    if (dj != 0.0) {
+                        if (c.a.im != 0.0) c.a.impulse(n.mul(-dj), ra);
+                        if (c.b.im != 0.0) c.b.impulse(n.mul(dj), rb);
+                        relative = c.relative_velocity(ra, rb);
+                    }
+
+                    let tangent = relative.sub(n.mul(relative.dot(n)));
+                    let speed = tangent.length();
                     if (speed < 1.0e-8) continue;
 
-                    let t=tangent.mul(1.0/speed);
-                    let wt=c.a.weight(ra,t)+c.b.weight(rb,t);
-                    let old=p.friction_impulse;
-                    let var trial=old.sub(t.mul(speed/wt));
-                    let cap=FRICTION*p.normal_impulse;
-                    let length=trial.length();
-                    if (length > cap) trial=trial.mul(cap/length);
-                    let change=trial.sub(old);
-                    p.friction_impulse=trial;
-                    c.a.impulse(change.mul(-1.0),ra); c.b.impulse(change,rb);
-                    worst=worst.max(change.length());
+                    let t = tangent.mul(1.0 / speed);
+                    let wt = c.a.weight(ra, t) + c.b.weight(rb, t);
+                    let old = p.friction_impulse;
+                    let var trial = old.sub(t.mul(speed / wt));
+                    let cap = FRICTION * p.normal_impulse;
+                    let length = trial.length();
+                    if (length > cap) trial = trial.mul(cap / length);
+                    let change = trial.sub(old);
+                    let change_length = change.length();
+                    p.friction_impulse = trial;
+
+                    if (change_length != 0.0) {
+                        if (c.a.im != 0.0) c.a.impulse(change.mul(-1.0), ra);
+                        if (c.b.im != 0.0) c.b.impulse(change, rb);
+                    }
+
+                    worst = worst.max(change_length);
                 }
             }
 
