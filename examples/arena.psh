@@ -88,6 +88,9 @@ let GUN_DAMAGE = 40.0;
 let GUN_AMMO = 17;
 let GUN_RADIUS = 0.3;
 let GUN_PICKUP_RANGE = BODY_RADIUS + GUN_RADIUS;
+let HEALTH_KIT_HEAL = 50.0;
+let HEALTH_KIT_RADIUS = 0.3;
+let HEALTH_KIT_PICKUP_RANGE = BODY_RADIUS + HEALTH_KIT_RADIUS;
 let SHOT_TRACE_TICKS = 4;
 let ATTACK_COOLDOWN = 5;
 let ATTACK_ANIM_TICKS = 2;
@@ -104,7 +107,8 @@ let VIEW_MIDDLE = VIEW_BINS.idiv(2);
 let VIEW_HALF_ANGLE = PI / 3.0;
 let OPPONENT_INPUT = VIEW_BINS;
 let PICKUP_INPUT = OPPONENT_INPUT + 4;
-let VIEW_INPUTS = PICKUP_INPUT + 3;
+let HEALTH_KIT_INPUT = PICKUP_INPUT + 3;
+let VIEW_INPUTS = HEALTH_KIT_INPUT + 3;
 let BODY_INPUTS = 9;
 let ENERGY_INPUT = VIEW_INPUTS + 7;
 let NUM_SENSORS = VIEW_INPUTS + BODY_INPUTS;
@@ -145,7 +149,8 @@ let BODY_NAMES = ["health", "forward_speed", "strafe_speed", "turn_speed",
                   "attack_cooldown", "random", "gun_ammo", "energy", "bias"];
 let VISION_NAMES = ["opponent_visible", "opponent_angle", "opponent_proximity",
                     "opponent_has_gun", "pickup_gun_visible", "pickup_gun_angle",
-                    "pickup_gun_proximity"];
+                    "pickup_gun_proximity", "pickup_health_kit_visible",
+                    "pickup_health_kit_angle", "pickup_health_kit_proximity"];
 for (let var i = 0; i < VISION_NAMES.len; ++i)
     INPUT_NAMES.push(VISION_NAMES[i]);
 for (let var i = 0; i < BODY_NAMES.len; ++i)
@@ -655,7 +660,8 @@ class Fighter {
         self.energy = (self.energy + RECOVERY_POWER * DT).min(MAX_ENERGY);
     }
 
-    sense(self, arena, other, gun_available, gun_x, gun_y, rng) {
+    sense(self, arena, other, gun_available, gun_x, gun_y,
+          kit_available, kit_x, kit_y, rng) {
         let inputs = self.inputs;
         let c = self.angle.cos();
         let s = self.angle.sin();
@@ -668,6 +674,9 @@ class Fighter {
         let var gun_angle = 0.0;
         let var gun_near = 0.0;
         let var gun_visible = false;
+        let var kit_angle = 0.0;
+        let var kit_near = 0.0;
+        let var kit_visible = false;
 
         // One center ray per object prevents seeing pickups or opponents through walls.
         let forward = ex * c + ey * s;
@@ -707,6 +716,29 @@ class Fighter {
             }
         }
 
+        if (kit_available) {
+            let kx = kit_x - self.x;
+            let ky = kit_y - self.y;
+            let kit_dist2 = kx * kx + ky * ky;
+            let kit_forward = kx * c + ky * s;
+            if (kit_forward > 0.0 && kit_dist2 > 0.000001) {
+                let kit_side = -kx * s + ky * c;
+                let kit_bearing = (kit_side / kit_forward).atan();
+                if (kit_bearing >= -VIEW_HALF_ANGLE && kit_bearing <= VIEW_HALF_ANGLE) {
+                    let dist = kit_dist2.sqrt();
+                    if (arena.wall_distance(self.x, self.y, kx / dist, ky / dist) >= dist) {
+                        kit_visible = true;
+                        kit_angle = kit_bearing / VIEW_HALF_ANGLE;
+                        kit_near = 1.0 / (1.0 + (dist - HEALTH_KIT_RADIUS).max(0.0));
+                    }
+                }
+            }
+            if (kit_dist2 <= 0.000001) {
+                kit_visible = true;
+                kit_near = 1.0;
+            }
+        }
+
         for (let var i = 0; i < VIEW_BINS; ++i) {
             let dx = c * RAY_X[i] - s * RAY_Y[i];
             let dy = s * RAY_X[i] + c * RAY_Y[i];
@@ -721,6 +753,9 @@ class Fighter {
         inputs.set_f32(PICKUP_INPUT, gun_visible ? 1.0 : 0.0);
         inputs.set_f32(PICKUP_INPUT + 1, gun_angle);
         inputs.set_f32(PICKUP_INPUT + 2, gun_near);
+        inputs.set_f32(HEALTH_KIT_INPUT, kit_visible ? 1.0 : 0.0);
+        inputs.set_f32(HEALTH_KIT_INPUT + 1, kit_angle);
+        inputs.set_f32(HEALTH_KIT_INPUT + 2, kit_near);
 
         inputs.set_f32(VIEW_INPUTS, self.health / HEALTH);
         inputs.set_f32(VIEW_INPUTS + 1, (self.vx * c + self.vy * s) / MAX_FORWARD);
@@ -1002,6 +1037,24 @@ class Match {
                 break;
         }
         self.gun_available = true;
+        loop {
+            self.kit_x = rng.float(1.0 + BODY_RADIUS,
+                                   arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
+            self.kit_y = rng.float(1.0 + BODY_RADIUS,
+                                   arena.inner_h.to_f() + 1.0 - BODY_RADIUS);
+            let da_x = self.kit_x - ax;
+            let da_y = self.kit_y - ay;
+            let db_x = self.kit_x - bx;
+            let db_y = self.kit_y - by;
+            let gun_x = self.kit_x - self.gun_x;
+            let gun_y = self.kit_y - self.gun_y;
+            if (!arena.blocked(self.kit_x, self.kit_y) &&
+                da_x * da_x + da_y * da_y >= 1.0 &&
+                db_x * db_x + db_y * db_y >= 1.0 &&
+                gun_x * gun_x + gun_y * gun_y >= 1.0)
+                break;
+        }
+        self.kit_available = true;
         self.tick = 0;
         self.needs_reset = false;
     }
@@ -1025,6 +1078,27 @@ class Match {
         self.gun_available = false;
     }
 
+    pickup_health_kit(self) {
+        if (!self.kit_available)
+            return;
+        let a = self.fighters[0];
+        let b = self.fighters[1];
+        let ax = a.x - self.kit_x;
+        let ay = a.y - self.kit_y;
+        let bx = b.x - self.kit_x;
+        let by = b.y - self.kit_y;
+        let da = ax * ax + ay * ay;
+        let db = bx * bx + by * by;
+        let reach2 = HEALTH_KIT_PICKUP_RANGE * HEALTH_KIT_PICKUP_RANGE;
+        let can_a = a.health < HEALTH && da <= reach2;
+        let can_b = b.health < HEALTH && db <= reach2;
+        if (!can_a && !can_b)
+            return;
+        let owner = can_a && (!can_b || da <= db) ? a : b;
+        owner.health = (owner.health + HEALTH_KIT_HEAL).min(HEALTH);
+        self.kit_available = false;
+    }
+
     step(self) {
         if (self.needs_reset) {
             self.episode = self.episode + 1;
@@ -1035,8 +1109,10 @@ class Match {
         let b = self.fighters[1];
         a.recover();
         b.recover();
-        a.sense(self.arena, b, self.gun_available, self.gun_x, self.gun_y, rng);
-        b.sense(self.arena, a, self.gun_available, self.gun_x, self.gun_y, rng);
+        a.sense(self.arena, b, self.gun_available, self.gun_x, self.gun_y,
+                self.kit_available, self.kit_x, self.kit_y, rng);
+        b.sense(self.arena, a, self.gun_available, self.gun_x, self.gun_y,
+                self.kit_available, self.kit_x, self.kit_y, rng);
         let aa = a.think();
         let ba = b.think();
         a.move(self.arena, aa);
@@ -1063,6 +1139,7 @@ class Match {
         }
 
         self.pickup_gun();
+        self.pickup_health_kit();
         let hit_a = a.strikes(self.arena, b, aa[3]);
         let hit_b = b.strikes(self.arena, a, ba[3]);
         b.health = b.health - hit_a;
@@ -1195,6 +1272,7 @@ fun check_maps() {
                     let b = duel.fighters[1];
                     assert(!arena.blocked(a.x, a.y) && !arena.blocked(b.x, b.y));
                     assert(!arena.blocked(duel.gun_x, duel.gun_y));
+                    assert(!arena.blocked(duel.kit_x, duel.kit_y));
                     assert((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) >= 4.0);
                 }
                 maps = maps + 1;
@@ -1261,7 +1339,7 @@ fun check_energy() {
     assert(fighter.energy == MAX_ENERGY);
     for (let var i = 0; i <= 2; ++i) {
         fighter.energy = MAX_ENERGY * i.to_f() * 0.5;
-        fighter.sense(arena, enemy, false, 0.0, 0.0, rng);
+        fighter.sense(arena, enemy, false, 0.0, 0.0, false, 0.0, 0.0, rng);
         assert(fighter.inputs.get_f32(ENERGY_INPUT) == i.to_f() * 0.5);
         assert(fighter.inputs.get_f32(NUM_SENSORS - 1) == 1.0);
     }
@@ -1436,7 +1514,8 @@ fun check_movement() {
 
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
-    fighter.sense(vision_arena, enemy, true, 12.0, 10.0, Xoshiro128(1));
+    fighter.sense(vision_arena, enemy, true, 12.0, 10.0,
+                  true, 12.0, 12.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 1.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 2) > 0.0);
@@ -1444,34 +1523,47 @@ fun check_movement() {
     assert(fighter.inputs.get_f32(PICKUP_INPUT) == 1.0);
     assert(fighter.inputs.get_f32(PICKUP_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(PICKUP_INPUT + 2) > 0.0);
+    assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT) == 1.0);
+    assert((fighter.inputs.get_f32(HEALTH_KIT_INPUT + 1) - 0.75).abs() < 0.0001);
+    assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 2) > 0.0);
     enemy.gun_ammo = GUN_AMMO;
-    fighter.sense(vision_arena, enemy, true, 12.0, 10.0, Xoshiro128(1));
+    fighter.sense(vision_arena, enemy, true, 12.0, 10.0,
+                  true, 12.0, 12.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 3) == 1.0);
     enemy.gun_ammo = 0;
     let peripheral = 55.0 * PI / 180.0;
     enemy.reset(10.0 + 5.0 * peripheral.cos(), 10.0 + 5.0 * peripheral.sin(), 0.0);
-    fighter.sense(vision_arena, enemy, false, 0.0, 0.0, Xoshiro128(1));
+    fighter.sense(vision_arena, enemy, false, 0.0, 0.0,
+                  false, 0.0, 0.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 1.0);
     assert((fighter.inputs.get_f32(OPPONENT_INPUT + 1) - 55.0 / 60.0).abs() < 0.0001);
     assert(fighter.inputs.get_f32(PICKUP_INPUT) == 0.0);
     assert(fighter.inputs.get_f32(PICKUP_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(PICKUP_INPUT + 2) == 0.0);
+    assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 2) == 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     enemy.gun_ammo = GUN_AMMO;
     vision_arena.add_notch(12, 10);
-    fighter.sense(vision_arena, enemy, true, 13.0, 10.0, Xoshiro128(1));
+    fighter.sense(vision_arena, enemy, true, 13.0, 10.0,
+                  true, 13.0, 10.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(OPPONENT_INPUT) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 1) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 2) == 0.0);
     assert(fighter.inputs.get_f32(OPPONENT_INPUT + 3) == 0.0);
     assert(fighter.inputs.get_f32(PICKUP_INPUT) == 0.0);
     assert(fighter.inputs.get_f32(PICKUP_INPUT + 2) == 0.0);
+    assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT) == 0.0);
+    assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 1) == 0.0);
+    assert(fighter.inputs.get_f32(HEALTH_KIT_INPUT + 2) == 0.0);
     assert(fighter.inputs.get_f32(VIEW_MIDDLE) > 0.0);
 
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
     fighter.gun_ammo = GUN_AMMO;
-    fighter.sense(arena, enemy, false, 0.0, 0.0, Xoshiro128(1));
+    fighter.sense(arena, enemy, false, 0.0, 0.0,
+                  false, 0.0, 0.0, Xoshiro128(1));
     assert(fighter.inputs.get_f32(VIEW_INPUTS + 6) == 1.0);
     assert(fighter.strikes(arena, enemy, 1.0) == GUN_DAMAGE);
     assert(fighter.gun_ammo == GUN_AMMO - 1 && fighter.shot_ticks == SHOT_TRACE_TICKS);
@@ -1496,6 +1588,20 @@ fun check_movement() {
     assert(!pickup.gun_available && pickup.fighters[0].gun_ammo == GUN_AMMO);
     pickup.reset_episode();
     assert(pickup.gun_available && pickup.fighters[0].gun_ammo == 0);
+    pickup.kit_x = pickup.fighters[0].x;
+    pickup.kit_y = pickup.fighters[0].y;
+    pickup.pickup_health_kit();
+    assert(pickup.kit_available && pickup.fighters[0].health == HEALTH);
+    pickup.fighters[0].health = 40.0;
+    pickup.pickup_health_kit();
+    assert(!pickup.kit_available && pickup.fighters[0].health == 90.0);
+    pickup.reset_episode();
+    assert(pickup.kit_available && pickup.fighters[0].health == HEALTH);
+    pickup.kit_x = pickup.fighters[0].x;
+    pickup.kit_y = pickup.fighters[0].y;
+    pickup.fighters[0].health = 80.0;
+    pickup.pickup_health_kit();
+    assert(!pickup.kit_available && pickup.fighters[0].health == HEALTH);
 
     fighter.reset(10.0, 10.0, 0.0);
     fighter.move(arena, forward);
@@ -1560,7 +1666,9 @@ fun check_movement() {
         assert(duel.fighters[0].x == replay.fighters[0].x);
         assert(duel.fighters[0].y == replay.fighters[0].y);
         assert(duel.gun_x == replay.gun_x && duel.gun_y == replay.gun_y);
+        assert(duel.kit_x == replay.kit_x && duel.kit_y == replay.kit_y);
         assert(!duel.arena.blocked(duel.gun_x, duel.gun_y));
+        assert(!duel.arena.blocked(duel.kit_x, duel.kit_y));
         check_room_connected(duel.arena);
         for (let var tick = 0; tick < 3; ++tick) {
             duel.step();
@@ -1570,7 +1678,10 @@ fun check_movement() {
             assert(duel.fighters[1].x == replay.fighters[1].x);
             assert(duel.fighters[1].y == replay.fighters[1].y);
             assert(duel.gun_available == replay.gun_available);
+            assert(duel.kit_available == replay.kit_available);
             assert(duel.fighters[0].gun_ammo == replay.fighters[0].gun_ammo);
+            assert(duel.fighters[0].health == replay.fighters[0].health);
+            assert(duel.fighters[1].health == replay.fighters[1].health);
             assert(duel.fighters[0].energy == replay.fighters[0].energy);
             assert(duel.fighters[1].energy == replay.fighters[1].energy);
         }
@@ -1583,6 +1694,7 @@ fun check_movement() {
             assert(!duel.arena.blocked(b.x, b.y));
             assert(dx * dx + dy * dy >= 4.0);
             assert(!duel.arena.blocked(duel.gun_x, duel.gun_y));
+            assert(!duel.arena.blocked(duel.kit_x, duel.kit_y));
             duel.reset_episode();
         }
     }
@@ -2186,6 +2298,8 @@ let COL_BLADE = 0xFF_D8_E4_EA;
 let COL_GUN = 0xFF_C4_C9_CD;
 let COL_GUN_HIGHLIGHT = 0xFF_E3_E8_EA;
 let COL_GUN_SHADOW = 0xFF_6D_78_80;
+let COL_HEALTH_KIT = 0xFF_D8_3F_4B;
+let COL_HEALTH_CROSS = 0xFF_FF_FF_FF;
 let COL_SHOT = 0xFF_FF_E4_63;
 
 fun fill_rect(buf, x, y, w, h, color) {
@@ -2286,6 +2400,21 @@ fun draw_floor_pistol(buf, center_x, center_y, scale) {
     let slide_top = -((3.0 * 0.8).floor() + 1);
     let vertical_mid = (slide_top + handle_bottom).idiv(2);
     draw_pistol(buf, center_x - slide_mid, center_y - vertical_mid, 0.0, metres);
+}
+
+fun draw_health_kit(buf, center_x, center_y, scale) {
+    let half_w = (scale.to_f() * 0.192).floor().max(3);
+    let original_half_h = (scale.to_f() * 0.18).floor().max(3);
+    let half_h = original_half_h + 1;
+    let cross_half = ((original_half_h - 1).to_f() * 0.8 + 0.5).floor().max(2);
+    fill_rect(buf, center_x - half_w - 1, center_y - half_h - 1,
+              2 * half_w + 3, 2 * half_h + 3, COL_BG);
+    fill_rect(buf, center_x - half_w, center_y - half_h,
+              2 * half_w + 1, 2 * half_h + 1, COL_HEALTH_KIT);
+    fill_rect(buf, center_x - 1, center_y - cross_half,
+              3, 2 * cross_half + 1, COL_HEALTH_CROSS);
+    fill_rect(buf, center_x - cross_half, center_y - 1,
+              2 * cross_half + 1, 3, COL_HEALTH_CROSS);
 }
 
 fun draw_body(buf, x, y, angle, half_length, half_width, radius, color) {
@@ -2398,6 +2527,7 @@ fun replay_snapshot(config, duel) {
         room_w: duel.arena.inner_w, room_h: duel.arena.inner_h,
         tiles: duel.arena.tiles,
         gun_available: duel.gun_available, gun_x: duel.gun_x, gun_y: duel.gun_y,
+        kit_available: duel.kit_available, kit_x: duel.kit_x, kit_y: duel.kit_y,
         episode: duel.episode.min(EPISODES - 1), tick: duel.tick,
         kills_a: duel.kills[0], kills_b: duel.kills[1],
         ax: a.x, ay: a.y, adir: a.angle, ahp: a.health, astab: a.attack_ticks,
@@ -2466,6 +2596,11 @@ fun render(buf, snap, agg, view_speed, paused) {
             let gun_py = oy + (snap.gun_y * scale).floor();
             draw_floor_pistol(buf, gun_px, gun_py, scale);
         }
+        if (snap.kit_available) {
+            let kit_px = ox + (snap.kit_x * scale).floor();
+            let kit_py = oy + (snap.kit_y * scale).floor();
+            draw_health_kit(buf, kit_px, kit_py, scale);
+        }
         if (snap.ashot > 0)
             draw_segment(buf, ox + (snap.asx * scale).floor(), oy + (snap.asy * scale).floor(),
                          ox + (snap.aex * scale).floor(), oy + (snap.aey * scale).floor(),
@@ -2498,24 +2633,23 @@ fun render(buf, snap, agg, view_speed, paused) {
                   "/" + EPISODES.comma_sep(), COL_TEXT);
         draw_text(buf, px, 314, "TIME " + snap.tick.idiv(10).comma_sep() + "/30", COL_TEXT);
         draw_text(buf, px, 337, "ROOM " + snap.room_w.comma_sep() + " X " + snap.room_h.comma_sep(), COL_TEXT);
-        draw_text(buf, px, 351, "H/O LAYER  R RATE  σ STRENGTH", COL_DIM);
         draw_text(buf, px, 366, snap.first_name + " AGE " + snap.first_age.comma_sep(), snap.first_color);
         draw_text(buf, px, 380, "KILLS " + snap.kills_a.comma_sep(), snap.first_color);
         draw_text(buf, px + 160, 380,
                   snap.aammo > 0 ? "GUN " + snap.aammo.comma_sep() : "KNIFE", snap.first_color);
         draw_text(buf, px, 394, "ENERGY " + snap.aenergy.floor().comma_sep() + " J", COL_DIM);
         draw_text(buf, px, 408, mutation_text(snap.first_rates, snap.first_strengths), COL_DIM);
-        draw_text(buf, px, 425, snap.second_name + " AGE " + snap.second_age.comma_sep(), snap.second_color);
-        draw_text(buf, px, 439, "KILLS " + snap.kills_b.comma_sep(), snap.second_color);
-        draw_text(buf, px + 160, 439,
+        draw_text(buf, px, 437, snap.second_name + " AGE " + snap.second_age.comma_sep(), snap.second_color);
+        draw_text(buf, px, 451, "KILLS " + snap.kills_b.comma_sep(), snap.second_color);
+        draw_text(buf, px + 160, 451,
                   snap.bammo > 0 ? "GUN " + snap.bammo.comma_sep() : "KNIFE", snap.second_color);
-        draw_text(buf, px, 453, "ENERGY " + snap.benergy.floor().comma_sep() + " J", COL_DIM);
-        draw_text(buf, px, 467, mutation_text(snap.second_rates, snap.second_strengths), COL_DIM);
+        draw_text(buf, px, 465, "ENERGY " + snap.benergy.floor().comma_sep() + " J", COL_DIM);
+        draw_text(buf, px, 479, mutation_text(snap.second_rates, snap.second_strengths), COL_DIM);
     } else {
         draw_text(buf, px, 245, "WAITING FOR MATCH", COL_TEXT);
     }
     if (paused)
-        draw_text(buf, px, 491, "VIEW PAUSED", COL_TEXT);
+        draw_text(buf, px, 502, "VIEW PAUSED", COL_TEXT);
     draw_text(buf, px, 526, "REPLAY " + view_speed.to_s() + "X", COL_TEXT);
     draw_text(buf, px, 550, "F VIEW SPEED", COL_DIM);
     draw_text(buf, px, 574, "SPACE PAUSE VIEW", COL_DIM);
@@ -2570,8 +2704,29 @@ if (has_flag("--check-render")) {
         assert(left <= right && top <= bottom);
         assert((left + right - 2 * test_x).abs() <= 2);
         assert((top + bottom - 2 * test_y).abs() <= 2);
+        test_frame.fill_u32(0, FRAME_W * FRAME_H, COL_BG);
+        draw_health_kit(test_frame, 200, 200, scale);
+        assert(test_frame.get_u32(200 * FRAME_W + 200) == COL_HEALTH_CROSS);
+        let half_w = (scale.to_f() * 0.192).floor().max(3);
+        let half_h = (scale.to_f() * 0.18).floor().max(3) + 1;
+        assert(test_frame.get_u32(200 * FRAME_W + 200 - half_w) == COL_HEALTH_KIT);
+        assert(test_frame.get_u32(200 * FRAME_W + 200 + half_w) == COL_HEALTH_KIT);
+        assert(test_frame.get_u32((200 - half_h) * FRAME_W + 200) == COL_HEALTH_KIT);
+        assert(test_frame.get_u32((200 + half_h) * FRAME_W + 200) == COL_HEALTH_KIT);
+        if (scale == 44) {
+            assert(test_frame.get_u32(200 * FRAME_W + 205) == COL_HEALTH_CROSS);
+            assert(test_frame.get_u32(200 * FRAME_W + 206) == COL_HEALTH_KIT);
+            assert(test_frame.get_u32(205 * FRAME_W + 200) == COL_HEALTH_CROSS);
+            assert(test_frame.get_u32(206 * FRAME_W + 200) == COL_HEALTH_KIT);
+        }
     }
     render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
+    let test_kit_x = test_ox + (test_duel.kit_x * test_scale).floor();
+    let test_kit_y = test_oy + (test_duel.kit_y * test_scale).floor();
+    assert(test_frame.get_u32(test_kit_y * FRAME_W + test_kit_x) == COL_HEALTH_CROSS);
+    test_duel.kit_available = false;
+    render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
+    assert(test_frame.get_u32(test_kit_y * FRAME_W + test_kit_x) != COL_HEALTH_CROSS);
     let test_shooter = test_duel.fighters[0];
     test_duel.gun_available = false;
     test_shooter.gun_ammo = GUN_AMMO;
