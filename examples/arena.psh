@@ -645,6 +645,7 @@ class Fighter {
         self.shot_start_y = y;
         self.shot_end_x = x;
         self.shot_end_y = y;
+        // Clear recurrent inputs along with perception for each new episode.
         self.inputs.fill_u32(0, NUM_INPUTS, 0);
         self.inputs.set_f32(ENERGY_INPUT, 1.0);
         self.inputs.set_f32(NUM_SENSORS - 1, 1.0);
@@ -1422,6 +1423,16 @@ fun check_movement() {
     remembering.reset(2.0, 2.0, 0.0);
     remembering.think();
     assert(remembering.inputs.get_f32(NUM_SENSORS) == -0.5);
+    let memory_duel = Match(fighter.individual, fighter.individual, 7);
+    for (let var side = 0; side < 2; ++side)
+        for (let var unit = 0; unit < RECURRENT; ++unit)
+            memory_duel.fighters[side].inputs.set_f32(NUM_SENSORS + unit, 0.75);
+    memory_duel.needs_reset = true;
+    memory_duel.step();
+    assert(memory_duel.episode == 1);
+    for (let var side = 0; side < 2; ++side)
+        for (let var unit = 0; unit < RECURRENT; ++unit)
+            assert(memory_duel.fighters[side].inputs.get_f32(NUM_SENSORS + unit) == 0.0);
 
     fighter.reset(10.0, 10.0, 0.0);
     enemy.reset(13.0, 10.0, 0.0);
@@ -1717,8 +1728,21 @@ class Island {
     reproduce(self, ka, kb) {
         for (let var i = 0; i < POP_SIZE; ++i)
             self.population[i].age = self.population[i].age + 1;
-        if (ka == kb) {
-            // Both parents leave mutated children, so draws continue evolution.
+        if (ka == 0 && kb == 0 && POP_SIZE > 2) {
+            let eligible = [];
+            for (let var i = 0; i < POP_SIZE; ++i)
+                if (i != self.first_idx && i != self.second_idx)
+                    eligible.push(i);
+            let donor_a = self.rng.index(eligible.len);
+            let var donor_b = eligible.len > 1 ? self.rng.index(eligible.len - 1) : donor_a;
+            if (eligible.len > 1 && donor_b >= donor_a)
+                donor_b = donor_b + 1;
+            let first_parent = self.population[eligible[donor_a]];
+            let second_parent = self.population[eligible[donor_b]];
+            self.population[self.first_idx] = birth(self.rng, first_parent);
+            self.population[self.second_idx] = birth(self.rng, second_parent);
+        } else if (ka == kb) {
+            // Scoring draws leave mutated children of both fighters.
             self.population[self.first_idx] = birth(self.rng, self.population[self.first_idx]);
             self.population[self.second_idx] = birth(self.rng, self.population[self.second_idx]);
         } else {
@@ -1823,12 +1847,28 @@ if (has_flag("--check-evolution")) {
     let var first = island.population[0];
     let var second = island.population[1];
     let bystander = island.population[2];
+    for (let var i = 2; i < POP_SIZE; ++i) {
+        island.population[i].mutation_rates = [0.087, 0.091];
+        island.population[i].mutation_strengths = [0.21, 0.24];
+    }
     island.reproduce(0, 0);
     assert(island.population[0] != first && island.population[1] != second);
     assert(island.population[0].age == 0 && island.population[1].age == 0);
     assert(island.population[0].weights != first.weights);
     assert(island.population[1].weights != second.weights);
+    assert(island.population[0].mutation_rates[0] > 0.07 &&
+           island.population[1].mutation_rates[0] > 0.07);
+    assert(island.population[0].mutation_strengths[0] > 0.17 &&
+           island.population[1].mutation_strengths[0] > 0.17);
     assert(island.population[2] == bystander && bystander.age == 1);
+    let scoring_draw = Island(0, 789, nil);
+    scoring_draw.first_idx = 0;
+    scoring_draw.second_idx = 1;
+    scoring_draw.population[0].mutation_rates = [0.02, 0.02];
+    scoring_draw.population[1].mutation_rates = [0.02, 0.02];
+    scoring_draw.reproduce(1, 1);
+    assert(scoring_draw.population[0].mutation_rates[0] < 0.03 &&
+           scoring_draw.population[1].mutation_rates[0] < 0.03);
     first = island.population[0];
     second = island.population[1];
     island.reproduce(2, 1);
