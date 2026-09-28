@@ -1,7 +1,7 @@
 // Arena GA, a small evolutionary 1v1 combat experiment.
 //
 // Each island samples two genomes to fight eight episodes in a randomly sized room.
-// A decisive winner stays; in a tie, both fighters leave mutated offspring.
+// A decisive winner stays; bounding-box coverage breaks kill ties.
 // Age counts matches lived through.
 // Every 2,000 matches, an island copies one random individual to a ring neighbour.
 // The migrant replaces the youngest resident at the next match boundary.
@@ -17,7 +17,7 @@
 // Render check: --check-render verifies pickup, shot, and blast colors without a window.
 // Energy check: --check-energy verifies replenishment, action costs, and exhaustion.
 // Map check: --check-maps validates varied layouts, clearance, and spawning.
-// Evolution check: --check-evolution verifies tie replacement and migration.
+// Evolution check: --check-evolution verifies coverage selection and migration.
 // Checkpoint check: --check-checkpoint verifies selection and named weight mapping.
 
 from random import Xoshiro128;
@@ -1162,6 +1162,7 @@ class Match {
         self.arena = Arena(width, height, rng);
         self.fighters = [Fighter(first), Fighter(second)];
         self.kills = [0, 0];
+        self.coverage_sum = [0.0, 0.0];
         self.episode = 0;
         self.tick = 0;
         self.done = false;
@@ -1192,6 +1193,10 @@ class Match {
         }
         self.fighters[0].reset(ax, ay, rng.float(-PI, PI));
         self.fighters[1].reset(bx, by, rng.float(-PI, PI));
+        self.min_x = [ax, bx];
+        self.max_x = [ax, bx];
+        self.min_y = [ay, by];
+        self.max_y = [ay, by];
         loop {
             self.gun_x = rng.float(1.0 + BODY_RADIUS,
                                    arena.inner_w.to_f() + 1.0 - BODY_RADIUS);
@@ -1255,6 +1260,22 @@ class Match {
         self.blast_ticks = 0;
         self.tick = 0;
         self.needs_reset = false;
+    }
+
+    track_coverage(self) {
+        for (let var side = 0; side < 2; ++side) {
+            let fighter = self.fighters[side];
+            self.min_x[side] = self.min_x[side].min(fighter.x);
+            self.max_x[side] = self.max_x[side].max(fighter.x);
+            self.min_y[side] = self.min_y[side].min(fighter.y);
+            self.max_y[side] = self.max_y[side].max(fighter.y);
+        }
+    }
+
+    coverage(self, side) {
+        let width = self.max_x[side] - self.min_x[side];
+        let height = self.max_y[side] - self.min_y[side];
+        return width * height / (self.arena.inner_w * self.arena.inner_h).to_f();
     }
 
     pickup_gun(self) {
@@ -1435,6 +1456,7 @@ class Match {
                 b.vy = b.vy + ny * closing_speed * 0.5;
             }
         }
+        self.track_coverage();
 
         self.pickup_gun();
         self.pickup_health_kit();
@@ -1450,6 +1472,8 @@ class Match {
         self.tick = self.tick + 1;
 
         if (a.health <= 0.0 || b.health <= 0.0 || self.tick >= EPISODE_TICKS) {
+            for (let var side = 0; side < 2; ++side)
+                self.coverage_sum[side] = self.coverage_sum[side] + self.coverage(side);
             if (b.health <= 0.0)
                 self.kills[0] = self.kills[0] + 1;
             if (a.health <= 0.0)
@@ -2356,10 +2380,16 @@ class Island {
         self.pending_migrants.resize(0, nil);
     }
 
-    reproduce(self, ka, kb) {
+    reproduce(self, ka, kb, ca, cb) {
         for (let var i = 0; i < POP_SIZE; ++i)
             self.population[i].age = self.population[i].age + 1;
-        if (ka == 0 && kb == 0 && POP_SIZE > 2) {
+        if (ka != kb || ca != cb) {
+            let win_first = ka > kb || (ka == kb && ca > cb);
+            let winner_idx = win_first ? self.first_idx : self.second_idx;
+            let loser_idx = win_first ? self.second_idx : self.first_idx;
+            let winner = self.population[winner_idx];
+            self.population[loser_idx] = birth(self.rng, winner);
+        } else if (ka == 0 && POP_SIZE > 2) {
             let eligible = [];
             for (let var i = 0; i < POP_SIZE; ++i)
                 if (i != self.first_idx && i != self.second_idx)
@@ -2372,16 +2402,10 @@ class Island {
             let second_parent = self.population[eligible[donor_b]];
             self.population[self.first_idx] = birth(self.rng, first_parent);
             self.population[self.second_idx] = birth(self.rng, second_parent);
-        } else if (ka == kb) {
+        } else {
             // Scoring draws leave mutated children of both fighters.
             self.population[self.first_idx] = birth(self.rng, self.population[self.first_idx]);
             self.population[self.second_idx] = birth(self.rng, self.population[self.second_idx]);
-        } else {
-            let win_first = ka > kb;
-            let winner_idx = win_first ? self.first_idx : self.second_idx;
-            let loser_idx = win_first ? self.second_idx : self.first_idx;
-            let winner = self.population[winner_idx];
-            self.population[loser_idx] = birth(self.rng, winner);
         }
     }
 
@@ -2394,7 +2418,7 @@ class Island {
 
         let ka = self.duel.kills[0];
         let kb = self.duel.kills[1];
-        self.reproduce(ka, kb);
+        self.reproduce(ka, kb, self.duel.coverage_sum[0], self.duel.coverage_sum[1]);
         self.matches = self.matches + 1;
         self.episodes = self.episodes + EPISODES;
         self.kills = self.kills + ka + kb;
@@ -2491,7 +2515,7 @@ if (has_flag("--check-evolution")) {
         island.population[i].mutation_rates = [0.087, 0.091];
         island.population[i].mutation_strengths = [0.21, 0.24];
     }
-    island.reproduce(0, 0);
+    island.reproduce(0, 0, 0.0, 0.0);
     assert(island.population[0] != first && island.population[1] != second);
     assert(island.population[0].age == 0 && island.population[1].age == 0);
     assert(island.population[0].weights != first.weights);
@@ -2506,14 +2530,44 @@ if (has_flag("--check-evolution")) {
     scoring_draw.second_idx = 1;
     scoring_draw.population[0].mutation_rates = [0.02, 0.02];
     scoring_draw.population[1].mutation_rates = [0.02, 0.02];
-    scoring_draw.reproduce(1, 1);
+    scoring_draw.reproduce(1, 1, 0.0, 0.0);
     assert(scoring_draw.population[0].mutation_rates[0] < 0.03 &&
            scoring_draw.population[1].mutation_rates[0] < 0.03);
     first = island.population[0];
     second = island.population[1];
-    island.reproduce(2, 1);
+    island.reproduce(2, 1, 0.0, 1.0);
     assert(island.population[0] == first && first.age == 1);
     assert(island.population[1] != second && island.population[1].age == 0);
+    let coverage_match = Match(strategy_parent, strategy_parent, 19);
+    coverage_match.min_x = [2.0, 2.0];
+    coverage_match.max_x = [2.0, 2.0];
+    coverage_match.min_y = [2.0, 2.0];
+    coverage_match.max_y = [2.0, 2.0];
+    coverage_match.fighters[1].x = 2.0;
+    coverage_match.fighters[1].y = 2.0;
+    coverage_match.fighters[0].x = 4.0;
+    coverage_match.fighters[0].y = 5.0;
+    coverage_match.track_coverage();
+    assert((coverage_match.coverage(0) -
+            6.0 / (coverage_match.arena.inner_w * coverage_match.arena.inner_h).to_f()).abs()
+           < 0.000001);
+    assert(coverage_match.coverage(1) == 0.0);
+    coverage_match.reset_episode();
+    assert(coverage_match.coverage(0) == 0.0 && coverage_match.coverage(1) == 0.0);
+    let exploring_draw = Island(0, 790, nil);
+    exploring_draw.first_idx = 0;
+    exploring_draw.second_idx = 1;
+    let exploring_first = exploring_draw.population[0];
+    let var exploring_second = exploring_draw.population[1];
+    exploring_draw.reproduce(0, 0, 0.2, 0.1);
+    assert(exploring_draw.population[0] == exploring_first && exploring_first.age == 1);
+    assert(exploring_draw.population[1] != exploring_second &&
+           exploring_draw.population[1].age == 0);
+    exploring_second = exploring_draw.population[1];
+    exploring_draw.reproduce(1, 1, 0.1, 0.2);
+    assert(exploring_draw.population[0] != exploring_first &&
+           exploring_draw.population[0].age == 0);
+    assert(exploring_draw.population[1] == exploring_second && exploring_second.age == 1);
     let var saw_oldest = false;
     let var saw_younger = false;
     first.age = 1000;
