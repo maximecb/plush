@@ -122,7 +122,8 @@ let PICKUP_INPUT = OPPONENT_INPUT + 4;
 let HEALTH_KIT_INPUT = PICKUP_INPUT + 3;
 let GRENADE_INPUT = HEALTH_KIT_INPUT + 3;
 let THROWN_GRENADE_INPUT = GRENADE_INPUT + 3;
-let VIEW_INPUTS = THROWN_GRENADE_INPUT + 3;
+let DOOR_INPUT = THROWN_GRENADE_INPUT + 3;
+let VIEW_INPUTS = DOOR_INPUT + 1;
 let BODY_INPUTS = 11;
 let ENERGY_INPUT = VIEW_INPUTS + 8;
 let TIME_INPUT = VIEW_INPUTS + 9;
@@ -169,7 +170,8 @@ let VISION_NAMES = ["opponent_visible", "opponent_angle", "opponent_proximity",
                     "pickup_health_kit_angle", "pickup_health_kit_proximity",
                     "pickup_grenade_visible", "pickup_grenade_angle",
                     "pickup_grenade_proximity", "thrown_grenade_visible",
-                    "thrown_grenade_angle", "thrown_grenade_proximity"];
+                    "thrown_grenade_angle", "thrown_grenade_proximity",
+                    "door_visible"];
 for (let var i = 0; i < VISION_NAMES.len; ++i)
     INPUT_NAMES.push(VISION_NAMES[i]);
 for (let var i = 0; i < BODY_NAMES.len; ++i)
@@ -620,6 +622,49 @@ class Arena {
         return nearest;
     }
 
+    door_on_ray(self, x, y, dx, dy) {
+        let var cell_x = x.floor();
+        let var cell_y = y.floor();
+        let var step_x = 0;
+        let var step_y = 0;
+        let var tx = 1.0e20;
+        let var ty = 1.0e20;
+        let var delta_x = 1.0e20;
+        let var delta_y = 1.0e20;
+        if (dx > 0.0) {
+            step_x = 1;
+            delta_x = 1.0 / dx;
+            tx = (cell_x.to_f() + 1.0 - x) * delta_x;
+        } else if (dx < 0.0) {
+            step_x = -1;
+            delta_x = -1.0 / dx;
+            tx = (x - cell_x.to_f()) * delta_x;
+        }
+        if (dy > 0.0) {
+            step_y = 1;
+            delta_y = 1.0 / dy;
+            ty = (cell_y.to_f() + 1.0 - y) * delta_y;
+        } else if (dy < 0.0) {
+            step_y = -1;
+            delta_y = -1.0 / dy;
+            ty = (y - cell_y.to_f()) * delta_y;
+        }
+        loop {
+            if (self.solid(cell_x, cell_y))
+                return false;
+            if ((self.solid(cell_x - 1, cell_y) && self.solid(cell_x + 1, cell_y)) ||
+                (self.solid(cell_x, cell_y - 1) && self.solid(cell_x, cell_y + 1)))
+                return true;
+            if (tx < ty) {
+                cell_x = cell_x + step_x;
+                tx = tx + delta_x;
+            } else {
+                cell_y = cell_y + step_y;
+                ty = ty + delta_y;
+            }
+        }
+    }
+
     // Walk grid cells until the ray enters a solid tile.
     wall_distance(self, x, y, dx, dy) {
         let var cell_x = x.floor();
@@ -860,6 +905,7 @@ class Fighter {
         inputs.set_f32(THROWN_GRENADE_INPUT, thrown_visible ? 1.0 : 0.0);
         inputs.set_f32(THROWN_GRENADE_INPUT + 1, thrown_angle);
         inputs.set_f32(THROWN_GRENADE_INPUT + 2, thrown_near);
+        inputs.set_f32(DOOR_INPUT, arena.door_on_ray(self.x, self.y, c, s) ? 1.0 : 0.0);
 
         inputs.set_f32(VIEW_INPUTS, self.health / HEALTH);
         inputs.set_f32(VIEW_INPUTS + 1, (self.vx * c + self.vy * s) / MAX_FORWARD);
@@ -2066,6 +2112,19 @@ fun check_movement() {
             doorway.add_notch(3, y);
     assert(!doorway.blocked(3.5, 3.26));
     assert(doorway.blocked(3.5, 3.24));
+    assert(doorway.door_on_ray(2.5, 3.5, 1.0, 0.0));
+    assert(doorway.door_on_ray(4.5, 3.5, -1.0, 0.0));
+    assert(!doorway.door_on_ray(2.5, 2.5, 1.0, 0.0));
+    fighter.reset(2.5, 3.5, 0.0);
+    fighter.sense(doorway, enemy, false, 0.0, 0.0,
+                  false, 0.0, 0.0, false, 0.0, 0.0,
+                  false, 0.0, 0.0, 0, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(DOOR_INPUT) == 1.0);
+    fighter.angle = PI * 0.5;
+    fighter.sense(doorway, enemy, false, 0.0, 0.0,
+                  false, 0.0, 0.0, false, 0.0, 0.0,
+                  false, 0.0, 0.0, 0, Xoshiro128(1));
+    assert(fighter.inputs.get_f32(DOOR_INPUT) == 0.0);
     fighter.reset(2.5, 3.05, 0.0);
     for (let var i = 0; i < 30; ++i) {
         fighter.move(doorway, forward);
@@ -2086,6 +2145,7 @@ fun check_movement() {
     for (let var x = 1; x <= 5; ++x)
         if (x != 3)
             horizontal_doorway.add_notch(x, 3);
+    assert(horizontal_doorway.door_on_ray(3.5, 2.5, 0.0, 1.0));
     fighter.reset(3.05, 2.5, PI * 0.5);
     for (let var i = 0; i < 30; ++i) {
         fighter.move(horizontal_doorway, forward);
@@ -2095,6 +2155,9 @@ fun check_movement() {
     let closed_wall = Arena(5, 5, nil);
     for (let var y = 1; y <= 5; ++y)
         closed_wall.add_notch(3, y);
+    closed_wall.add_notch(5, 2);
+    closed_wall.add_notch(5, 4);
+    assert(!closed_wall.door_on_ray(2.5, 3.5, 1.0, 0.0));
     fighter.reset(2.5, 3.05, 0.0);
     for (let var i = 0; i < 30; ++i)
         fighter.move(closed_wall, forward);
@@ -2565,6 +2628,7 @@ if (has_flag("--check-checkpoint")) {
     let old_inputs = ["retired_sensor"];
     for (let var i = 0; i < INPUT_NAMES.len; ++i)
         if (INPUT_NAMES[i] != "energy" && INPUT_NAMES[i] != "episode_time" &&
+            INPUT_NAMES[i] != "door_visible" &&
             INPUT_NAMES[i] != "thrown_grenade_visible" &&
             INPUT_NAMES[i] != "thrown_grenade_angle" &&
             INPUT_NAMES[i] != "thrown_grenade_proximity")
@@ -2574,6 +2638,7 @@ if (has_flag("--check-checkpoint")) {
         let row = [0.75];
         for (let var i = 0; i < INPUT_NAMES.len; ++i)
             if (INPUT_NAMES[i] != "energy" && INPUT_NAMES[i] != "episode_time" &&
+                INPUT_NAMES[i] != "door_visible" &&
                 INPUT_NAMES[i] != "thrown_grenade_visible" &&
                 INPUT_NAMES[i] != "thrown_grenade_angle" &&
                 INPUT_NAMES[i] != "thrown_grenade_proximity")
@@ -2584,11 +2649,12 @@ if (has_flag("--check-checkpoint")) {
     let var remapped = decode_individual(Xoshiro128(7), shifted, old_inputs, OUTPUT_NAMES);
     let energy_index = name_index(INPUT_NAMES, "energy");
     let time_index = name_index(INPUT_NAMES, "episode_time");
+    let door_index = name_index(INPUT_NAMES, "door_visible");
     let thrown_index = name_index(INPUT_NAMES, "thrown_grenade_visible");
     for (let var h = 0; h < HIDDEN; ++h) {
         for (let var i = 0; i < NUM_INPUTS; ++i) {
             let idx = h * NUM_INPUTS + i;
-            let expected = i == energy_index || i == time_index ||
+            let expected = i == energy_index || i == time_index || i == door_index ||
                            (i >= thrown_index && i < thrown_index + 3) ?
                            baseline.get_f32(idx) :
                            elites.individuals[0].weights.get_f32(idx);
