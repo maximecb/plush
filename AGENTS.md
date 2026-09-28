@@ -6,6 +6,7 @@ Commenting:
   methods such as accessors
 
 Code style:
+- Try to read code in a style that will be pleasant for humans to read
 - Separate function and method declarations with one line of whitespace
 - Separate parts of a function that are logically distinct using one line
   of whitespace
@@ -13,6 +14,7 @@ Code style:
 - Separate operators using one space, e.g.
   let a = 1;
   a = b + c;
+- Add comments to explain things that would not be immediately clear to humans
 
 Benchmarking:
 - Performed interleaved runs and use the median for each configuration
