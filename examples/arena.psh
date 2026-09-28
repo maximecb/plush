@@ -94,7 +94,7 @@ let HEALTH_KIT_PICKUP_RANGE = BODY_RADIUS + HEALTH_KIT_RADIUS;
 let GRENADE_RADIUS = 0.2;
 let GRENADE_PICKUP_RANGE = BODY_RADIUS + GRENADE_RADIUS;
 let GRENADE_THROW_SPEED = 8.0;
-let GRENADE_MAX_TRAVEL = 5.0;
+let GRENADE_MAX_TRAVEL = 6.0;
 let GRENADE_THROW_ENERGY = 30.0;
 let GRENADE_FUSE_TICKS = 15;
 let GRENADE_BLAST_RADIUS = 3.0;
@@ -1885,7 +1885,7 @@ fun check_movement() {
     assert(range_throw.throw_grenade(range_throw.fighters[0], 1.0, 0));
     for (let var i = 0; i < GRENADE_FUSE_TICKS; ++i)
         range_throw.advance_grenade();
-    assert((range_throw.grenade_x - 15.0).abs() < 0.0001);
+    assert((range_throw.grenade_x - 16.0).abs() < 0.0001);
     assert((range_throw.grenade_travel - GRENADE_MAX_TRAVEL).abs() < 0.0001);
     assert(range_throw.grenade_vx == 0.0 && range_throw.fighters[1].health == HEALTH);
     range_throw.fighters[0].reset(15.0, 10.0, 0.0);
@@ -2845,8 +2845,8 @@ fun draw_blast(buf, center_x, center_y, scale, ticks) {
     let progress = (GRENADE_BLAST_TICKS - ticks + 1).to_f() /
                    GRENADE_BLAST_TICKS.to_f();
     let radius = GRENADE_BLAST_RADIUS * scale.to_f() * progress;
-    for (let var i = 0; i < 180; ++i) {
-        let angle = TAU * i.to_f() / 180.0;
+    for (let var i = 0; i < 360; ++i) {
+        let angle = TAU * i.to_f() / 360.0;
         let x = center_x + (radius * angle.cos()).floor();
         let y = center_y + (radius * angle.sin()).floor();
         if (x >= 2 && x < VIEW_W - 2 && y >= 2 && y < FRAME_H - 2)
@@ -3214,6 +3214,25 @@ if (has_flag("--check-render")) {
     assert(test_frame.get_u32(200 * FRAME_W + 200 + blast_outer) == COL_BG);
     draw_blast(test_frame, 200, 200, 44, 1);
     assert(test_frame.get_u32(200 * FRAME_W + 200 + blast_outer) == COL_BLAST);
+    let wall_blast = Match(test_agent, test_agent, 13);
+    wall_blast.arena = Arena(5, 5, nil);
+    wall_blast.arena.add_notch(3, 3);
+    wall_blast.fighters[0].reset(1.5, 1.5, 0.0);
+    wall_blast.fighters[1].reset(5.5, 5.5, 0.0);
+    wall_blast.grenade_available = false;
+    wall_blast.grenade_x = 2.5;
+    wall_blast.grenade_y = 3.5;
+    wall_blast.blast_ticks = GRENADE_BLAST_TICKS;
+    render(test_frame, replay_snapshot(test_config, wall_blast), test_stats, 1, false);
+    let wall_ox = (VIEW_W - 7 * PIXELS_PER_METRE).idiv(2);
+    let wall_oy = (FRAME_H - 7 * PIXELS_PER_METRE).idiv(2);
+    let wall_ring_x = wall_ox + (2.5 * PIXELS_PER_METRE).floor() +
+                      (GRENADE_BLAST_RADIUS * PIXELS_PER_METRE.to_f() /
+                       GRENADE_BLAST_TICKS.to_f()).floor();
+    let wall_ring_y = wall_oy + (3.5 * PIXELS_PER_METRE).floor();
+    assert(wall_ring_x >= wall_ox + 3 * PIXELS_PER_METRE &&
+           wall_ring_x < wall_ox + 4 * PIXELS_PER_METRE);
+    assert(test_frame.get_u32(wall_ring_y * FRAME_W + wall_ring_x) == COL_BLAST);
     render(test_frame, replay_snapshot(test_config, test_duel), test_stats, 1, false);
     let test_kit_x = test_ox + (test_duel.kit_x * test_scale).floor();
     let test_kit_y = test_oy + (test_duel.kit_y * test_scale).floor();
