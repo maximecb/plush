@@ -15,6 +15,8 @@ Code style:
   let a = 1;
   a = b + c;
 - Add comments to explain things that would not be immediately clear to humans
+- Place a short comment above every nontrivial loop or block of logic to explain
+  what it does
 
 Benchmarking:
 - Performed interleaved runs and use the median for each configuration

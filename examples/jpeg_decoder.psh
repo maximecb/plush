@@ -1,0 +1,640 @@
+// Decode baseline JPEG files and show the pixels in a window.
+// Run: plush examples/jpeg_decoder.psh [path/to/image.jpg]
+// The default image is an 800-pixel-high copy of Hokusai's Great Wave.
+// Source: https://commons.wikimedia.org/wiki/File:Katsushika_Hokusai_-_Thirty-Six_Views_of_Mount_Fuji-_The_Great_Wave_Off_the_Coast_of_Kanagawa_-_Google_Art_Project.jpg
+
+let ZIGZAG = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+    12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21,
+    28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30,
+    37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54,
+    47, 55, 62, 63
+];
+
+// Clamp a reconstructed sample to the eight-bit range.
+fun byte_clamp(value) {
+    return value.max(0).min(255);
+}
+
+// Convert a JPEG sign-magnitude value to a signed coefficient.
+fun receive_extend(bits, size) {
+    if (size == 0) {
+        return 0;
+    }
+
+    let threshold = 1 << (size - 1);
+    return bits < threshold ? bits - ((1 << size) - 1) : bits;
+}
+
+// Hold one canonical Huffman table, indexed by code length.
+class HuffmanTable {
+    // Build the first code and symbol offset for each code length.
+    init(self, counts, symbols) {
+        self.counts = counts;
+        self.symbols = symbols;
+        self.first_code = Array.with_size(17, 0);
+        self.first_symbol = Array.with_size(17, 0);
+        self.fast = Array.with_size(256, 0);
+
+        let var code = 0;
+        let var symbol = 0;
+        for (let var size = 1; size <= 16; ++size) {
+            self.first_code[size] = code;
+            self.first_symbol[size] = symbol;
+
+            if (size <= 8) {
+                let copies = 1 << (8 - size);
+                for (let var i = 0; i < counts[size]; ++i) {
+                    let start = (code + i) * copies;
+                    let entry = (size << 8) | symbols[symbol + i];
+                    for (let var j = 0; j < copies; ++j) {
+                        self.fast[start + j] = entry;
+                    }
+                }
+            }
+
+            symbol += counts[size];
+            code = (code + counts[size]) << 1;
+        }
+    }
+}
+
+// Read stuffed entropy bytes without advancing into a following marker.
+class BitReader {
+    // Start reading entropy bits at the scan's first byte.
+    init(self, data, pos) {
+        self.data = data;
+        self.pos = pos;
+        self.bits_left = 0;
+        self.buffer = 0;
+    }
+
+    // Append entropy bytes until enough bits are present or a marker begins.
+    fill(self, count) {
+        while (self.bits_left < count && self.pos < self.data.len) {
+            let byte = self.data[self.pos];
+            if (byte == 255) {
+                assert(self.pos + 1 < self.data.len);
+                if (self.data[self.pos + 1] != 0) {
+                    return;
+                }
+                self.pos += 1;
+            }
+
+            self.pos += 1;
+            let mask = (1 << self.bits_left) - 1;
+            self.buffer = ((self.buffer & mask) << 8) | byte;
+            self.bits_left += 8;
+        }
+    }
+
+    // Read one most-significant-bit-first entropy bit.
+    bit(self) {
+        self.fill(1);
+        assert(self.bits_left > 0);
+        self.bits_left -= 1;
+        return (self.buffer >> self.bits_left) & 1;
+    }
+
+    // Read a small unsigned value from the entropy stream.
+    bits(self, count) {
+        self.fill(count);
+        assert(self.bits_left >= count);
+        self.bits_left -= count;
+        return (self.buffer >> self.bits_left) & ((1 << count) - 1);
+    }
+
+    // Decode a symbol from a canonical JPEG Huffman table.
+    symbol(self, table) {
+        self.fill(8);
+        if (self.bits_left >= 8) {
+            let prefix = (self.buffer >> (self.bits_left - 8)) & 255;
+            let entry = table.fast[prefix];
+            if (entry != 0) {
+                self.bits_left -= entry >> 8;
+                return entry & 255;
+            }
+        }
+
+        let var code = 0;
+        for (let var size = 1; size <= 16; ++size) {
+            code = (code << 1) | self.bit();
+            let offset = code - table.first_code[size];
+            if (offset >= 0 && offset < table.counts[size]) {
+                return table.symbols[table.first_symbol[size] + offset];
+            }
+        }
+
+        assert(false);
+    }
+
+    // Consume the next restart marker after discarding byte padding.
+    restart(self, number) {
+        self.bits_left = 0;
+        assert(self.pos + 1 < self.data.len);
+        assert(self.data[self.pos] == 255);
+
+        while (self.pos < self.data.len && self.data[self.pos] == 255) {
+            self.pos += 1;
+        }
+
+        assert(self.pos < self.data.len);
+        assert(self.data[self.pos] == 0xD0 + number);
+        self.pos += 1;
+    }
+}
+
+// Keep one component's sampling factors, tables, DC predictor, and samples.
+class JpegComponent {
+    // Store the component header and initialize its decoding state.
+    init(self, id, h, v, quant_id) {
+        self.id = id;
+        self.h = h;
+        self.v = v;
+        self.quant_id = quant_id;
+        self.dc_id = 0;
+        self.ac_id = 0;
+        self.dc = 0;
+        self.stride = 0;
+        self.samples = nil;
+    }
+}
+
+// Decode the baseline, eight-bit, Huffman-coded subset of JPEG.
+class JpegDecoder {
+    // Set up marker tables and precompute inverse-DCT cosine weights.
+    init(self, data) {
+        self.data = data;
+        self.pos = 2;
+        self.width = 0;
+        self.height = 0;
+        self.max_h = 0;
+        self.max_v = 0;
+        self.mcu_cols = 0;
+        self.mcu_rows = 0;
+        self.restart_interval = 0;
+        self.adobe_transform = -1;
+        self.components = [];
+        self.quant = Array.with_size(4, nil);
+        self.dc_tables = Array.with_size(4, nil);
+        self.ac_tables = Array.with_size(4, nil);
+        self.basis = Array.with_size(64, 0.0);
+
+        for (let var x = 0; x < 8; ++x) {
+            for (let var u = 0; u < 8; ++u) {
+                let scale = u == 0 ? 0.3535533905932738 : 0.5;
+                self.basis[x * 8 + u] = scale * ((2 * x + 1) * u * 0.19634954084936207).cos();
+            }
+        }
+    }
+
+    // Read a big-endian 16-bit value from the marker stream.
+    u16(self, pos) {
+        assert(pos + 1 < self.data.len);
+        return (self.data[pos] << 8) | self.data[pos + 1];
+    }
+
+    // Find the next marker outside the entropy-coded data.
+    marker(self) {
+        assert(self.pos < self.data.len && self.data[self.pos] == 255);
+        while (self.pos < self.data.len && self.data[self.pos] == 255) {
+            self.pos += 1;
+        }
+
+        assert(self.pos < self.data.len);
+        let marker = self.data[self.pos];
+        self.pos += 1;
+        return marker;
+    }
+
+    // Read one or more eight-bit quantization tables.
+    read_quant(self, end) {
+        while (self.pos < end) {
+            let spec = self.data[self.pos];
+            self.pos += 1;
+            assert((spec >> 4) == 0 && (spec & 15) < 4);
+
+            let table = Array.with_size(64, 0);
+            for (let var i = 0; i < 64; ++i) {
+                table[ZIGZAG[i]] = self.data[self.pos];
+                self.pos += 1;
+            }
+
+            self.quant[spec & 15] = table;
+        }
+        assert(self.pos == end);
+    }
+
+    // Read one or more DC or AC Huffman tables.
+    read_huffman(self, end) {
+        while (self.pos < end) {
+            let spec = self.data[self.pos];
+            self.pos += 1;
+            assert((spec >> 4) <= 1 && (spec & 15) < 4);
+
+            let counts = Array.with_size(17, 0);
+            let var total = 0;
+            for (let var size = 1; size <= 16; ++size) {
+                counts[size] = self.data[self.pos];
+                total += counts[size];
+                self.pos += 1;
+            }
+
+            let symbols = Array.with_size(total, 0);
+            for (let var i = 0; i < total; ++i) {
+                symbols[i] = self.data[self.pos];
+                self.pos += 1;
+            }
+
+            let table = HuffmanTable(counts, symbols);
+            if ((spec >> 4) == 0) {
+                self.dc_tables[spec & 15] = table;
+            } else {
+                self.ac_tables[spec & 15] = table;
+            }
+        }
+        assert(self.pos == end);
+    }
+
+    // Read dimensions and component sampling from an SOF0 marker.
+    read_frame(self, end) {
+        assert(self.data[self.pos] == 8);
+        self.height = self.u16(self.pos + 1);
+        self.width = self.u16(self.pos + 3);
+        let count = self.data[self.pos + 5];
+        assert(self.width > 0 && self.height > 0);
+        assert(count == 1 || count == 3);
+        assert(end == self.pos + 6 + 3 * count);
+        self.pos += 6;
+
+        for (let var i = 0; i < count; ++i) {
+            let id = self.data[self.pos];
+            let sampling = self.data[self.pos + 1];
+            let h = sampling >> 4;
+            let v = sampling & 15;
+            let quant_id = self.data[self.pos + 2];
+            assert(h > 0 && h <= 4 && v > 0 && v <= 4 && quant_id < 4);
+
+            self.components.push(JpegComponent(id, h, v, quant_id));
+            self.max_h = self.max_h.max(h);
+            self.max_v = self.max_v.max(v);
+            self.pos += 3;
+        }
+
+        self.mcu_cols = (self.width + 8 * self.max_h - 1).idiv(8 * self.max_h);
+        self.mcu_rows = (self.height + 8 * self.max_v - 1).idiv(8 * self.max_v);
+
+        for (let var i = 0; i < count; ++i) {
+            let component = self.components[i];
+            assert(self.max_h % component.h == 0 && self.max_v % component.v == 0);
+            component.stride = self.mcu_cols * component.h * 8;
+            let plane_height = self.mcu_rows * component.v * 8;
+            component.samples = ByteArray.with_size(component.stride * plane_height);
+        }
+    }
+
+    // Decode one 8x8 block into the component's padded sample plane.
+    block(self, reader, component, bx, by) {
+        let dc_table = self.dc_tables[component.dc_id];
+        let ac_table = self.ac_tables[component.ac_id];
+        let quant = self.quant[component.quant_id];
+        assert(dc_table != nil && ac_table != nil && quant != nil);
+
+        let coeff = Array.with_size(64, 0);
+        let size = reader.symbol(dc_table);
+        assert(size <= 11);
+        component.dc += receive_extend(reader.bits(size), size);
+        coeff[0] = component.dc * quant[0];
+
+        let var k = 1;
+        let var row_mask = 1;
+        let var has_ac = false;
+        while (k < 64) {
+            let symbol = reader.symbol(ac_table);
+            if (symbol == 0) {
+                break;
+            }
+
+            let run = symbol >> 4;
+            let ac_size = symbol & 15;
+            if (ac_size == 0) {
+                assert(run == 15);
+                k += 16;
+                continue;
+            }
+
+            k += run;
+            assert(k < 64 && ac_size <= 10);
+            let value = receive_extend(reader.bits(ac_size), ac_size);
+            let index = ZIGZAG[k];
+            coeff[index] = value * quant[index];
+            row_mask |= 1 << index.idiv(8);
+            has_ac = true;
+            k += 1;
+        }
+
+        // A DC-only block has the same reconstructed value at every pixel.
+        if (!has_ac) {
+            let dc_basis = self.basis[0];
+            let sample = byte_clamp((coeff[0] * dc_basis * dc_basis + 128.5).floor());
+            let origin = by * 8 * component.stride + bx * 8;
+            for (let var y = 0; y < 8; ++y) {
+                for (let var x = 0; x < 8; ++x) {
+                    component.samples[origin + y * component.stride + x] = sample;
+                }
+            }
+            return;
+        }
+
+        self.idct(coeff, component, bx, by, row_mask);
+    }
+
+    // Apply a separable inverse DCT and write eight-bit samples.
+    idct(self, coeff, component, bx, by, row_mask) {
+        let temp = Array.with_size(64, 0.0);
+        for (let var v = 0; v < 8; ++v) {
+            if ((row_mask & (1 << v)) == 0) {
+                continue;
+            }
+
+            let row = v * 8;
+            for (let var x = 0; x < 8; ++x) {
+                let var sum = 0.0;
+                for (let var u = 0; u < 8; ++u) {
+                    if (coeff[row + u] != 0) {
+                        sum += coeff[row + u] * self.basis[x * 8 + u];
+                    }
+                }
+                temp[row + x] = sum;
+            }
+        }
+
+        let origin = by * 8 * component.stride + bx * 8;
+        for (let var y = 0; y < 8; ++y) {
+            for (let var x = 0; x < 8; ++x) {
+                let var sum = 0.0;
+                for (let var v = 0; v < 8; ++v) {
+                    if ((row_mask & (1 << v)) != 0) {
+                        sum += temp[v * 8 + x] * self.basis[y * 8 + v];
+                    }
+                }
+                component.samples[origin + y * component.stride + x] = byte_clamp((sum + 128.5).floor());
+            }
+        }
+    }
+
+    // Decode either an interleaved scan or a single-component scan.
+    read_scan(self, end) {
+        let count = self.data[self.pos];
+        assert(count > 0 && count <= self.components.len);
+        assert(end == self.pos + 1 + 2 * count + 3);
+        self.pos += 1;
+
+        let scan = [];
+        for (let var i = 0; i < count; ++i) {
+            let id = self.data[self.pos];
+            let tables = self.data[self.pos + 1];
+            let var component = nil;
+            for (let var j = 0; j < self.components.len; ++j) {
+                if (self.components[j].id == id) {
+                    component = self.components[j];
+                }
+            }
+            assert(component != nil);
+            component.dc_id = tables >> 4;
+            component.ac_id = tables & 15;
+            assert(component.dc_id < 4 && component.ac_id < 4);
+            scan.push(component);
+            self.pos += 2;
+        }
+
+        // Baseline scans have no spectral selection or successive approximation.
+        assert(self.data[self.pos] == 0);
+        assert(self.data[self.pos + 1] == 63);
+        assert(self.data[self.pos + 2] == 0);
+        self.pos = end;
+
+        let var cols = self.mcu_cols;
+        let var rows = self.mcu_rows;
+        if (count == 1) {
+            let component = scan[0];
+            cols = (self.width * component.h + 8 * self.max_h - 1).idiv(8 * self.max_h);
+            rows = (self.height * component.v + 8 * self.max_v - 1).idiv(8 * self.max_v);
+        }
+
+        let reader = BitReader(self.data, self.pos);
+        let var restart_number = 0;
+        for (let var mcu = 0; mcu < cols * rows; ++mcu) {
+            if (self.restart_interval > 0 && mcu > 0 && mcu % self.restart_interval == 0) {
+                reader.restart(restart_number);
+                restart_number = (restart_number + 1) & 7;
+                for (let var i = 0; i < self.components.len; ++i) {
+                    self.components[i].dc = 0;
+                }
+            }
+
+            let mx = mcu % cols;
+            let my = mcu.idiv(cols);
+            for (let var i = 0; i < count; ++i) {
+                let component = scan[i];
+                if (count == 1) {
+                    self.block(reader, component, mx, my);
+                } else {
+                    for (let var v = 0; v < component.v; ++v) {
+                        for (let var h = 0; h < component.h; ++h) {
+                            self.block(reader, component, mx * component.h + h, my * component.v + v);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.pos = reader.pos;
+    }
+
+    // Convert component planes to ARGB pixels for the window.
+    pixels(self) {
+        let output = ByteArray.with_size(self.width * self.height * 4);
+        let y_plane = self.components[0];
+        let color = self.components.len == 3;
+        let var cb_plane = nil;
+        let var cr_plane = nil;
+        if (color) {
+            cb_plane = self.components[1];
+            cr_plane = self.components[2];
+        }
+
+        let rgb = color && (self.adobe_transform == 0 ||
+                           (self.adobe_transform < 0 && y_plane.id == 82 &&
+                            cb_plane.id == 71 && cr_plane.id == 66));
+
+        // Reuse each chroma sample for its four luma pixels in 4:2:0 images.
+        if (color && !rgb && self.max_h == 2 && self.max_v == 2 &&
+            y_plane.h == 2 && y_plane.v == 2 &&
+            cb_plane.h == 1 && cb_plane.v == 1 &&
+            cr_plane.h == 1 && cr_plane.v == 1 &&
+            self.width % 2 == 0 && self.height % 2 == 0) {
+            for (let var y = 0; y < self.height; y += 2) {
+                let y_row0 = y * y_plane.stride;
+                let y_row1 = (y + 1) * y_plane.stride;
+                let cb_row = y.idiv(2) * cb_plane.stride;
+                let cr_row = y.idiv(2) * cr_plane.stride;
+                let out_row0 = y * self.width;
+                let out_row1 = (y + 1) * self.width;
+
+                for (let var x = 0; x < self.width; x += 2) {
+                    let cb = cb_plane.samples[cb_row + x.idiv(2)] - 128;
+                    let cr = cr_plane.samples[cr_row + x.idiv(2)] - 128;
+                    let red = 1.402 * cr;
+                    let green = -0.344136 * cb - 0.714136 * cr;
+                    let blue = 1.772 * cb;
+
+                    let y00 = y_plane.samples[y_row0 + x];
+                    let r00 = byte_clamp((y00 + red + 0.5).floor());
+                    let g00 = byte_clamp((y00 + green + 0.5).floor());
+                    let b00 = byte_clamp((y00 + blue + 0.5).floor());
+                    output.set_u32(out_row0 + x, 0xFF000000 | (r00 << 16) | (g00 << 8) | b00);
+
+                    let y01 = y_plane.samples[y_row0 + x + 1];
+                    let r01 = byte_clamp((y01 + red + 0.5).floor());
+                    let g01 = byte_clamp((y01 + green + 0.5).floor());
+                    let b01 = byte_clamp((y01 + blue + 0.5).floor());
+                    output.set_u32(out_row0 + x + 1, 0xFF000000 | (r01 << 16) | (g01 << 8) | b01);
+
+                    let y10 = y_plane.samples[y_row1 + x];
+                    let r10 = byte_clamp((y10 + red + 0.5).floor());
+                    let g10 = byte_clamp((y10 + green + 0.5).floor());
+                    let b10 = byte_clamp((y10 + blue + 0.5).floor());
+                    output.set_u32(out_row1 + x, 0xFF000000 | (r10 << 16) | (g10 << 8) | b10);
+
+                    let y11 = y_plane.samples[y_row1 + x + 1];
+                    let r11 = byte_clamp((y11 + red + 0.5).floor());
+                    let g11 = byte_clamp((y11 + green + 0.5).floor());
+                    let b11 = byte_clamp((y11 + blue + 0.5).floor());
+                    output.set_u32(out_row1 + x + 1, 0xFF000000 | (r11 << 16) | (g11 << 8) | b11);
+                }
+            }
+
+            return output;
+        }
+
+        for (let var y = 0; y < self.height; ++y) {
+            let yy = (y * y_plane.v).idiv(self.max_v);
+            for (let var x = 0; x < self.width; ++x) {
+                let xx = (x * y_plane.h).idiv(self.max_h);
+                let luma = y_plane.samples[yy * y_plane.stride + xx];
+                let var r = luma;
+                let var g = luma;
+                let var b = luma;
+
+                if (color) {
+                    let cx = (x * cb_plane.h).idiv(self.max_h);
+                    let cy = (y * cb_plane.v).idiv(self.max_v);
+                    let rx = (x * cr_plane.h).idiv(self.max_h);
+                    let ry = (y * cr_plane.v).idiv(self.max_v);
+                    let cb = cb_plane.samples[cy * cb_plane.stride + cx];
+                    let cr = cr_plane.samples[ry * cr_plane.stride + rx];
+
+                    if (rgb) {
+                        g = cb;
+                        b = cr;
+                    } else {
+                        let blue = cb - 128;
+                        let red = cr - 128;
+                        r = byte_clamp((luma + 1.402 * red + 0.5).floor());
+                        g = byte_clamp((luma - 0.344136 * blue - 0.714136 * red + 0.5).floor());
+                        b = byte_clamp((luma + 1.772 * blue + 0.5).floor());
+                    }
+                }
+
+                output.set_u32(y * self.width + x, 0xFF000000 | (r << 16) | (g << 8) | b);
+            }
+        }
+
+        return output;
+    }
+
+    // Walk JPEG markers, decoding every baseline scan before conversion.
+    decode(self) {
+        assert(self.data.len >= 4 && self.data[0] == 255 && self.data[1] == 0xD8);
+        let var saw_scan = false;
+
+        loop {
+            let marker = self.marker();
+            if (marker == 0xD9) {
+                break;
+            }
+
+            assert(marker != 0xD8 && marker != 0 && marker != 0x01 &&
+                   (marker < 0xD0 || marker > 0xD7));
+            let length = self.u16(self.pos);
+            assert(length >= 2 && self.pos + length <= self.data.len);
+            let end = self.pos + length;
+            self.pos += 2;
+
+            if (marker == 0xDB) {
+                self.read_quant(end);
+            } else if (marker == 0xC4) {
+                self.read_huffman(end);
+            } else if (marker == 0xC0) {
+                self.read_frame(end);
+            } else if (marker == 0xDD) {
+                assert(length == 4);
+                self.restart_interval = self.u16(self.pos);
+            } else if (marker == 0xDA) {
+                assert(self.components.len > 0);
+                self.read_scan(end);
+                saw_scan = true;
+                continue;
+            } else if (marker == 0xEE && length >= 14 &&
+                       self.data[self.pos] == 65 && self.data[self.pos + 1] == 100 &&
+                       self.data[self.pos + 2] == 111 && self.data[self.pos + 3] == 98 &&
+                       self.data[self.pos + 4] == 101) {
+                self.adobe_transform = self.data[self.pos + 11];
+            } else if (marker >= 0xC0 && marker <= 0xCF && marker != 0xC4) {
+                $println("Unsupported JPEG frame type: " + marker.to_s());
+                return nil;
+            }
+
+            self.pos = end;
+        }
+
+        assert(saw_scan);
+        return self.pixels();
+    }
+}
+
+// Load, time, and display one JPEG, keeping the window alive until closed.
+fun main() {
+    let path = $cmd_get_arg_or(1, "examples/data/great_wave_800.jpg");
+    let data = $read_file(path);
+    if (data == nil) {
+        $println("Could not read JPEG: " + path);
+        return;
+    }
+
+    let start = $time_current_ms();
+    let decoder = JpegDecoder(data);
+    let pixels = decoder.decode();
+    if (pixels == nil) {
+        return;
+    }
+
+    let elapsed = $time_current_ms() - start;
+    $println("Decoded " + decoder.width.to_s() + " x " + decoder.height.to_s() +
+             " JPEG in " + elapsed.to_s() + " ms");
+
+    let window = $window_create(decoder.width, decoder.height, "JPEG decoder: " + path, 0);
+    $window_draw_frame(window, pixels);
+
+    loop {
+        let event = $actor_recv();
+        if (event instanceof UIEvent &&
+            (event.kind == "CLOSE_WINDOW" ||
+             (event.kind == "KEY_DOWN" && event.key == "ESCAPE"))) {
+            break;
+        }
+    }
+}
+
+main();
