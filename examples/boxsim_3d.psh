@@ -4,7 +4,7 @@
 //
 // Usage: plush examples/boxsim_3d.psh [box_count]
 // Headless: plush examples/boxsim_3d.psh --headless [steps [image.tga|- [box_count]]]
-// Controls: Left click to poke, ENTER drops a box, arrows orbit, W/S zoom,
+// Controls: Left click to poke (hold to keep pushing), ENTER drops a box, arrows orbit, W/S zoom,
 // SPACE pause, N step, R reset, ESC or Q quit.
 //
 // Box pairs use SAT. Face contacts clip one face against the other.
@@ -44,7 +44,9 @@ let FOCAL = 610.0;
 let ORBIT_SPEED = 1.6;
 let ZOOM_SPEED = 8.0;
 // The poke is an instantaneous impulse in newton-seconds.
-let POKE_IMPULSE = 2.5;
+let POKE_IMPULSE = 2.0;
+// Holding the button keeps pushing with this force in newtons.
+let PUSH_FORCE = 10.0;
 let BOX_COLORS = [0xF34E44, 0xF6BE2D, 0x25B8D0, 0xA65BE8, 0x50C56C];
 
 class Vec3 {
@@ -537,7 +539,7 @@ class World {
     }
 
     // Push the nearest ray hit at its surface point and wake its stack.
-    poke(self, origin, direction) {
+    poke(self, origin, direction, impulse) {
         let var nearest = 100.0;
         let var hit = nil;
 
@@ -553,7 +555,7 @@ class World {
         self.wake_group(hit.sleep_group);
 
         let point = origin.add(direction.mul(nearest));
-        hit.impulse(direction.mul(POKE_IMPULSE), point.sub(hit.p));
+        hit.impulse(direction.mul(impulse), point.sub(hit.p));
         hit.sleep_time = 0.0;
         self.render_dirty = true;
         return hit.id;
@@ -1130,6 +1132,7 @@ let var orbit_left=false; let var orbit_right=false;
 let var orbit_up=false; let var orbit_down=false;
 let var zoom_in=false; let var zoom_out=false;
 let var enter_down = false;
+let var push_down = false; let var mouse_x = 0; let var mouse_y = 0;
 let var last_ms=$time_current_ms(); let var accumulator=0.0;
 let var frame=0;
 
@@ -1167,8 +1170,11 @@ loop {
             else if (event.key == 'S') zoom_out=false;
         }
         else if (event.kind == 'MOUSE_DOWN' && event.button == 'LEFT') {
-            world.poke(renderer.eye, renderer.ray_direction(event.x, event.y));
+            push_down = true; mouse_x = event.x; mouse_y = event.y;
+            world.poke(renderer.eye, renderer.ray_direction(event.x, event.y), POKE_IMPULSE);
         }
+        else if (event.kind == 'MOUSE_UP' && event.button == 'LEFT') push_down = false;
+        else if (event.kind == 'MOUSE_MOVE') { mouse_x = event.x; mouse_y = event.y; }
     }
 
     if (quit) break;
@@ -1195,8 +1201,16 @@ loop {
 
     let physics_start=$time_current_ms();
     let var steps=0;
-    if (advance) { world.step(); advance=false; steps+=1; }
-    while (accumulator >= STEP) { world.step(); accumulator-=STEP; steps+=1; }
+    let push_ray = renderer.ray_direction(mouse_x, mouse_y);
+
+    // Apply the held push per physics step so its strength ignores framerate.
+    let var run_step = advance || accumulator >= STEP;
+    while (run_step) {
+        if (push_down) world.poke(renderer.eye, push_ray, PUSH_FORCE * STEP);
+        world.step(); steps+=1;
+        if (advance) advance=false; else accumulator-=STEP;
+        run_step = accumulator >= STEP;
+    }
 
     // Reuse the framebuffer when neither the scene nor the camera moved.
     let render_start=$time_current_ms();
