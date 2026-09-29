@@ -5,7 +5,7 @@
 // Usage: plush examples/boxsim_3d.psh [box_count]
 // Headless: plush examples/boxsim_3d.psh --headless [steps [image.tga|- [box_count]]]
 // Controls: Left click to poke (hold to keep pushing), ENTER drops a box, arrows orbit, W/S zoom,
-// SPACE pause, N step, R reset, ESC or Q quit.
+// T throws a box, SPACE pause, N step, R reset, ESC or Q quit.
 //
 // Box pairs use SAT. Face contacts clip one face against the other.
 // Contact patches provide several support points for stacking.
@@ -16,6 +16,7 @@
 // - Cache box orientation axes for collision and rendering calculations.
 // - Compute inverse inertia and contact effective mass from those axes.
 // - Reuse contact anchors and normal effective mass across velocity passes.
+// - Warm start contact impulses from matching points of the previous step.
 // - Compute relative contact velocity without temporary cross-product vectors.
 // - Skip zero impulses and static-body updates in the velocity solver.
 // - Stop position and velocity solver passes when corrections are small.
@@ -30,6 +31,9 @@ let STEP = 1.0 / 240.0;
 let MAX_POSITION_PASSES = 16;
 let MAX_VELOCITY_PASSES = 10;
 let PENETRATION_SLOP = 0.0005;
+// Contact points within this distance in metres reuse last step's impulses.
+let WARM_DISTANCE = 0.05;
+let WARM_NORMAL_DOT = 0.95;
 let FRICTION = 0.7;
 let GRAVITY = -9.81;
 // Sleep thresholds use metres per second, radians per second, and seconds.
@@ -46,7 +50,11 @@ let ZOOM_SPEED = 8.0;
 // The poke is an instantaneous impulse in newton-seconds.
 let POKE_IMPULSE = 2.0;
 // Holding the button keeps pushing with this force in newtons.
-let PUSH_FORCE = 10.0;
+let PUSH_FORCE = 15.0;
+// Thrown boxes leave the camera at this speed in metres per second.
+let THROW_SPEED = 30.0;
+// Upward tilt of the throw above the view direction, in radians (12 degrees).
+let THROW_ANGLE = 10.0 * 3.141592653589793 / 180.0;
 let BOX_COLORS = [0xF34E44, 0xF6BE2D, 0x25B8D0, 0xA65BE8, 0x50C56C];
 
 class Vec3 {
@@ -127,10 +135,24 @@ class Box {
     refresh_axes(self) {
         if (!self.axes_dirty) return;
 
-        self.axis_x = self.q.rotate(Vec3(1.0, 0.0, 0.0));
-        self.axis_y = self.q.rotate(Vec3(0.0, 1.0, 0.0));
-        self.axis_z = self.q.rotate(Vec3(0.0, 0.0, 1.0));
+        // Read the rotation matrix columns directly from the quaternion.
+        let q = self.q;
+        let xx = q.x * q.x; let yy = q.y * q.y; let zz = q.z * q.z;
+        let xy = q.x * q.y; let xz = q.x * q.z; let yz = q.y * q.z;
+        let wx = q.w * q.x; let wy = q.w * q.y; let wz = q.w * q.z;
+        self.axis_x = Vec3(1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy));
+        self.axis_y = Vec3(2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx));
+        self.axis_z = Vec3(2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy));
         self.axes_dirty = false;
+    }
+
+    // Rotate a local vector into world space using the cached axes.
+    rotate_local(self, v) {
+        self.refresh_axes();
+        let ax = self.axis_x; let ay = self.axis_y; let az = self.axis_z;
+        return Vec3(ax.x * v.x + ay.x * v.y + az.x * v.z,
+                    ax.y * v.x + ay.y * v.y + az.y * v.z,
+                    ax.z * v.x + ay.z * v.y + az.z * v.z);
     }
 
     // Return a cached world-space axis for collision and rendering.
@@ -169,10 +191,32 @@ class Box {
         return self.im + self.ii.x * x * x + self.ii.y * y * y + self.ii.z * z * z;
     }
 
-    move(self, impulse, r) {
+    // Apply a position impulse of size s along n at offset r.
+    // Corrections are small, so a first-order quaternion update suffices.
+    move(self, n, s, r) {
         if (self.im == 0.0) return;
-        self.p = self.p.add(impulse.mul(self.im));
-        self.q = rotation(self.inertia(r.cross(impulse))).mul(self.q).unit();
+
+        let p = self.p;
+        let m = s * self.im;
+        self.p = Vec3(p.x + n.x * m, p.y + n.y * m, p.z + n.z * m);
+
+        self.refresh_axes();
+        let ax = self.axis_x; let ay = self.axis_y; let az = self.axis_z;
+        let cx = (r.y * n.z - r.z * n.y) * s;
+        let cy = (r.z * n.x - r.x * n.z) * s;
+        let cz = (r.x * n.y - r.y * n.x) * s;
+        let x = (cx * ax.x + cy * ax.y + cz * ax.z) * self.ii.x;
+        let y = (cx * ay.x + cy * ay.y + cz * ay.z) * self.ii.y;
+        let z = (cx * az.x + cy * az.y + cz * az.z) * self.ii.z;
+        let tx = (ax.x * x + ay.x * y + az.x * z) * 0.5;
+        let ty = (ax.y * x + ay.y * y + az.y * z) * 0.5;
+        let tz = (ax.z * x + ay.z * y + az.z * z) * 0.5;
+
+        let q = self.q;
+        self.q = Quat(q.w - tx * q.x - ty * q.y - tz * q.z,
+                      q.x + tx * q.w + ty * q.z - tz * q.y,
+                      q.y - tx * q.z + ty * q.w + tz * q.x,
+                      q.z + tx * q.y - ty * q.x + tz * q.w).unit();
         self.axes_dirty = true;
     }
 
@@ -478,23 +522,14 @@ class World {
         self.awake_count = self.boxes.len - 1;
     }
 
-    // Spawn a varied box above the current pile near the scene center.
-    spawn_random_box(self) {
+    // Make a varied box at a position and add it to the world.
+    add_random_box(self, position) {
         let half = Vec3(self.rng.float(0.32, 0.55),
                         self.rng.float(0.32, 0.55),
                         self.rng.float(0.32, 0.55));
-        let var highest = 4.0;
-
-        for (let var i = 1; i < self.boxes.len; ++i) {
-            let box = self.boxes[i];
-            highest = highest.max(box.p.y + box.extent(1));
-        }
 
         // Scale mass from the one-kilogram reference box without extreme ratios.
         let mass = (half.x * half.y * half.z / (0.47 * 0.47 * 0.47)).clip(0.7, 1.6);
-        let position = Vec3(self.rng.float(-0.25, 0.25),
-                            highest + half.y + 1.2,
-                            self.rng.float(-0.25, 0.25));
         let box = Box(position, half, mass, self.rng.choice(BOX_COLORS));
         box.q = rotation(Vec3(self.rng.float(-0.35, 0.35),
                               self.rng.float(-0.35, 0.35),
@@ -504,6 +539,31 @@ class World {
         self.bounds.push(BoxBounds(box));
         self.awake_count += 1;
         self.render_dirty = true;
+        return box;
+    }
+
+    // Spawn a varied box above the current pile near the scene center.
+    spawn_random_box(self) {
+        let var highest = 4.0;
+
+        for (let var i = 1; i < self.boxes.len; ++i) {
+            let box = self.boxes[i];
+            highest = highest.max(box.p.y + box.extent(1));
+        }
+
+        let box = self.add_random_box(Vec3(self.rng.float(-0.25, 0.25), 0.0,
+                                           self.rng.float(-0.25, 0.25)));
+        box.p = Vec3(box.p.x, highest + box.h.y + 1.2, box.p.z);
+        box.bounds.update();
+    }
+
+    // Launch a spinning box from a point with the given velocity.
+    throw_box(self, position, velocity) {
+        let box = self.add_random_box(position);
+        box.v = velocity;
+        box.w = Vec3(self.rng.float(-4.0, 4.0),
+                     self.rng.float(-4.0, 4.0),
+                     self.rng.float(-4.0, 4.0));
     }
 
     // Update moving bounds and restore x order with nearby swaps.
@@ -615,6 +675,41 @@ class World {
         }
     }
 
+    // Seed impulses from matching points of last step's contacts.
+    // Both lists are sorted by body ids, so one merge walk pairs them.
+    warm_start(self, old) {
+        let var k = 0;
+
+        for (let var i = 0; i < self.contacts.len; ++i) {
+            let c = self.contacts[i];
+            while (k < old.len && (old[k].a.id < c.a.id
+                   || (old[k].a.id == c.a.id && old[k].b.id < c.b.id))) k += 1;
+            if (k == old.len) return;
+
+            let prev = old[k];
+            if (prev.a != c.a || prev.b != c.b) continue;
+            if (prev.n.dot(c.n) < WARM_NORMAL_DOT) continue;
+
+            for (let var j = 0; j < c.points.len; ++j) {
+                let p = c.points[j];
+                let var best = nil;
+                let var best_d = WARM_DISTANCE * WARM_DISTANCE;
+
+                for (let var m = 0; m < prev.points.len; ++m) {
+                    let q = prev.points[m];
+                    let dx = p.la.x - q.la.x; let dy = p.la.y - q.la.y; let dz = p.la.z - q.la.z;
+                    let d = dx * dx + dy * dy + dz * dz;
+                    if (d < best_d) { best_d = d; best = q; }
+                }
+
+                if (best == nil) continue;
+                let f = best.friction_impulse;
+                p.normal_impulse = best.normal_impulse;
+                p.friction_impulse = f.sub(c.n.mul(f.dot(c.n)));
+            }
+        }
+    }
+
     step(self) {
         // A fully sleeping world has no motion until a spawn or poke wakes it.
         if (self.awake_count == 0) {
@@ -668,6 +763,7 @@ class World {
         }
 
         // Reject distant pairs with world-aligned bounds before SAT.
+        let old_contacts=self.contacts;
         self.contacts=[];
         for (let var i = 0; i < self.bounds.len; ++i) {
             let a_bounds = self.bounds[i];
@@ -709,6 +805,8 @@ class World {
             self.contacts[j] = contact;
         }
 
+        self.warm_start(old_contacts);
+
         // Project overlapping contact points apart.
         // Stop once the remaining error is small enough.
         for (let var pass=0; pass<MAX_POSITION_PASSES; ++pass) {
@@ -719,16 +817,18 @@ class World {
 
                 for (let var j=0; j<c.points.len; ++j) {
                     let p=c.points[j];
-                    let ra=c.a.q.rotate(p.la); let rb=c.b.q.rotate(p.lb);
-                    let sep=c.b.p.add(rb).sub(c.a.p.add(ra)).dot(n);
+                    let ra=c.a.rotate_local(p.la); let rb=c.b.rotate_local(p.lb);
+                    let pa=c.a.p; let pb=c.b.p;
+                    let sep=(pb.x+rb.x-pa.x-ra.x)*n.x+(pb.y+rb.y-pa.y-ra.y)*n.y
+                           +(pb.z+rb.z-pa.z-ra.z)*n.z;
                     let error=(-sep-PENETRATION_SLOP).max(0.0);
                     worst=worst.max(error);
                     if (error == 0.0) continue;
 
                     let weight=c.a.weight(ra,n)+c.b.weight(rb,n);
-                    let impulse=n.mul((error*0.65).min(0.05)/weight);
-                    c.a.move(impulse.mul(-1.0),ra);
-                    c.b.move(impulse,rb);
+                    let s=(error*0.65).min(0.05)/weight;
+                    c.a.move(n,-s,ra);
+                    c.b.move(n,s,rb);
                 }
             }
 
@@ -741,10 +841,19 @@ class World {
 
             for (let var j = 0; j < contact.points.len; ++j) {
                 let point = contact.points[j];
-                point.ra = contact.a.q.rotate(point.la);
-                point.rb = contact.b.q.rotate(point.lb);
+                point.ra = contact.a.rotate_local(point.la);
+                point.rb = contact.b.rotate_local(point.lb);
                 point.normal_weight = contact.a.weight(point.ra, contact.n)
                                     + contact.b.weight(point.rb, contact.n);
+
+                // Reapply the impulse carried over from the previous step.
+                let n = contact.n;
+                let s = point.normal_impulse;
+                let f = point.friction_impulse;
+                if (s == 0.0 && f.x == 0.0 && f.y == 0.0 && f.z == 0.0) continue;
+                let j = Vec3(n.x * s + f.x, n.y * s + f.y, n.z * s + f.z);
+                contact.a.impulse(j.mul(-1.0), point.ra);
+                contact.b.impulse(j, point.rb);
             }
         }
 
@@ -868,7 +977,7 @@ class SBuffer {
     // Return visible subspans and optionally claim them.
     // A triangle claims them only when ahead of every pending triangle.
     visible(self, y, x0, x1, claim) {
-        self.vis0=[]; self.vis1=[];
+        self.vis0.resize(0,nil); self.vis1.resize(0,nil);
 
         // Walk the sorted intervals and collect the uncovered gaps.
         let var prev=-1; let var cur=self.head[y];
@@ -1131,7 +1240,7 @@ let var paused=false; let var advance=false;
 let var orbit_left=false; let var orbit_right=false;
 let var orbit_up=false; let var orbit_down=false;
 let var zoom_in=false; let var zoom_out=false;
-let var enter_down = false;
+let var enter_down = false; let var throw_down = false;
 let var push_down = false; let var mouse_x = 0; let var mouse_y = 0;
 let var last_ms=$time_current_ms(); let var accumulator=0.0;
 let var frame=0;
@@ -1153,6 +1262,15 @@ loop {
                 if (!enter_down) world.spawn_random_box();
                 enter_down = true;
             }
+            else if (event.key == 'T') {
+                if (!throw_down) {
+                    let origin = renderer.eye.add(renderer.forward.mul(0.8));
+                    let aim = renderer.forward.mul(THROW_ANGLE.cos())
+                                      .add(renderer.up.mul(THROW_ANGLE.sin()));
+                    world.throw_box(origin, aim.mul(THROW_SPEED));
+                }
+                throw_down = true;
+            }
             else if (event.key == 'LEFT') orbit_left=true;
             else if (event.key == 'RIGHT') orbit_right=true;
             else if (event.key == 'UP') orbit_up=true;
@@ -1162,6 +1280,7 @@ loop {
         }
         else if (event.kind == 'KEY_UP') {
             if (event.key == 'RETURN') enter_down = false;
+            else if (event.key == 'T') throw_down = false;
             else if (event.key == 'LEFT') orbit_left=false;
             else if (event.key == 'RIGHT') orbit_right=false;
             else if (event.key == 'UP') orbit_up=false;
