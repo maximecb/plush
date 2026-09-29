@@ -948,6 +948,10 @@ impl Actor
             Tag::Dict => {
                 let key = self.name_str(name);
 
+                if key == "len" {
+                    return Value::fixnum(obj.as_dict().len() as i64).into();
+                }
+
                 match obj.as_dict().get(key) {
                     Some(v) => v.into(),
                     None => HostResult::err(format!("key '{}' not found in dict", key))
@@ -3671,6 +3675,13 @@ mod tests
     fn dict_missing_key()
     {
         eval("let v = {}.x;");
+    }
+
+    #[test]
+    #[should_panic]
+    fn dict_len_index_is_not_entry_count()
+    {
+        eval("let v = {}['len'];");
     }
 
     #[test]
