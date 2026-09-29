@@ -34,6 +34,7 @@ a new terminal (or run `source ~/.plush/env` on macOS and Linux) and try one of
 the bundled examples:
 
 ```sh
+plush --run-example guestbook
 plush --run-example tremor
 plush --run-example night_ride
 plush --list-examples
