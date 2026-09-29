@@ -55,14 +55,22 @@ impl Object
     }
 
     // Get the value associated with a given field
+    #[inline(always)]
     pub fn get(&self, idx: usize) -> Value
     {
-        self.slots()[idx]
+        debug_assert!(idx < self.num_slots());
+
+        // Field indices come from the object's class layout.
+        unsafe { *self.slots().get_unchecked(idx) }
     }
 
     // Set the value of a given field
+    #[inline(always)]
     pub fn set(&mut self, idx: usize, val: Value)
     {
-        self.slots_mut()[idx] = val
+        debug_assert!(idx < self.num_slots());
+
+        // Field indices come from the object's class layout.
+        unsafe { *self.slots_mut().get_unchecked_mut(idx) = val }
     }
 }
