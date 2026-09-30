@@ -346,6 +346,7 @@ def_host_fns! {
         char_at: string_char_at(2),
         parse_int: string_parse_int(2),
         parse_float: string_parse_float(1),
+        find: string_find(2),
         trim: string_trim(1),
         upper: string_upper(1),
         lower: string_lower(1),

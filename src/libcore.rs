@@ -365,6 +365,19 @@ pub(crate) fn string_parse_float(actor: &mut Actor, s: Value) -> HostResult
     }
 }
 
+/// Get the byte index of the first occurrence of a substring
+/// Returns nil if the substring is not found
+pub(crate) fn string_find(actor: &mut Actor, s: Value, sub: Value) -> HostResult
+{
+    let s = unwrap_str!(s);
+    let sub = unwrap_str!(sub);
+
+    match s.find(sub) {
+        Some(idx) => actor.int64(idx as i64).into(),
+        None => Value::NIL.into(),
+    }
+}
+
 /// Trim whitespace
 pub(crate) fn string_trim(actor: &mut Actor, s: Value) -> HostResult
 {
@@ -604,6 +617,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::String, "char_at") => string_char_at,
         (Type::String, "parse_int") => string_parse_int,
         (Type::String, "parse_float") => string_parse_float,
+        (Type::String, "find") => string_find,
         (Type::String, "trim") => string_trim,
         (Type::String, "upper") => string_upper,
         (Type::String, "lower") => string_lower,
