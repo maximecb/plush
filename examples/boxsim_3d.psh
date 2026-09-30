@@ -23,8 +23,9 @@
 // - Sleep settled contact islands and skip physics when every box sleeps.
 // - Use a conservative S-buffer and reuse frames when nothing moves.
 
-from image import Image, save_tga;
+from image import Image, save_tga, COLOR_BLACK, COLOR_WHITE;
 from random import Xoshiro128;
+from ./monogram_font import Font;
 
 // Physics runs at 240 steps per second. Penetration tolerances are metres.
 let STEP = 1.0 / 240.0;
@@ -34,6 +35,8 @@ let PENETRATION_SLOP = 0.0005;
 // Contact points within this distance in metres reuse last step's impulses.
 let WARM_DISTANCE = 0.05;
 let WARM_NORMAL_DOT = 0.95;
+// Carried-over impulses are scaled down so unconverged solver error in tall stacks decays.
+let WARM_SCALE = 0.9;
 let FRICTION = 0.7;
 let GRAVITY = -9.81;
 // Sleep thresholds use metres per second, radians per second, and seconds.
@@ -802,8 +805,8 @@ class World {
 
                 if (best == nil) continue;
                 let f = best.friction_impulse;
-                p.normal_impulse = best.normal_impulse;
-                p.friction_impulse = f.sub(c.n.mul(f.dot(c.n)));
+                p.normal_impulse = best.normal_impulse * WARM_SCALE;
+                p.friction_impulse = f.sub(c.n.mul(f.dot(c.n))).mul(WARM_SCALE);
             }
         }
     }
@@ -1176,10 +1179,30 @@ fun shade(color, light) {
     return 0xFF000000 | ((packed >> 8) & mask_rb) | ((packed >> 32) & 0xFF00);
 }
 
+// Draw lines of help text in white on black and return them as an image.
+fun make_hud(lines) {
+    let font = Font(2, COLOR_WHITE, COLOR_BLACK);
+    let pad = 6;
+    let var text_w = 0;
+    for (let var i = 0; i < lines.len; ++i) text_w = text_w.max(lines[i].len * font.char_w);
+
+    let img = Image(text_w + 2 * pad, lines.len * (font.char_h + pad) + pad);
+    img.clear(COLOR_BLACK);
+    for (let var i = 0; i < lines.len; ++i) {
+        let y = pad + i * (font.char_h + pad);
+        for (let var j = 0; j < lines[i].len; ++j)
+            font.draw_char(img, pad + j * font.char_w, y, lines[i].char_at(j));
+    }
+
+    return img;
+}
+
 class Renderer {
     init(self) {
         self.image = Image(WIDTH, HEIGHT);
         self.fb = self.image.bytes;
+        self.hud = make_hud(["Click: push  ENTER: drop  T: throw",
+                             "Arrows: orbit  W/S: zoom  R: reset"]);
         self.depth = ByteArray.with_size(WIDTH * HEIGHT * 4);
         self.sbuf = SBuffer();
         self.tris = [];
@@ -1437,6 +1460,8 @@ class Renderer {
             let safe = i + 1 == self.tris.len || self.tris[i].max_z <= self.tris[i + 1].min_z;
             self.triangle(self.tris[i], safe);
         }
+
+        self.image.blit(self.hud, 0, HEIGHT - self.hud.height);
     }
 }
 
