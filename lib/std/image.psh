@@ -96,6 +96,67 @@ class Image
         }
     }
 
+    // Return a new image with other placed to the right of this one
+    hcat(self, other)
+    {
+        assert(self.height == other.height);
+
+        let out = Image(self.width + other.width, self.height);
+        out.blit(self, 0, 0);
+        out.blit(other, self.width, 0);
+        return out;
+    }
+
+    // Return a new image with other placed below this one
+    vcat(self, other)
+    {
+        assert(self.width == other.width);
+
+        let out = Image(self.width, self.height + other.height);
+        out.blit(self, 0, 0);
+        out.blit(other, 0, self.height);
+        return out;
+    }
+
+    // Return a new image holding a rectangular region of this one. Areas
+    // outside of this image are left as transparent black.
+    crop(self, x, y, w, h)
+    {
+        let out = Image(w, h);
+        out.blit(self, -x, -y);
+        return out;
+    }
+
+    // Return a new image mirrored left to right
+    hflip(self)
+    {
+        let out = Image(self.width, self.height);
+        let last = self.width - 1;
+
+        for (let var y = 0; y < self.height; ++y) {
+            let row = y * self.width;
+            for (let var x = 0; x < self.width; ++x) {
+                out.bytes.set_u32(row + x, self.bytes.get_u32(row + last - x));
+            }
+        }
+
+        return out;
+    }
+
+    // Return a new image mirrored top to bottom
+    vflip(self)
+    {
+        let out = Image(self.width, self.height);
+        let pitch = self.width * 4;
+        let last = self.height - 1;
+
+        for (let var y = 0; y < self.height; ++y) {
+            out.bytes.memcpy(y * pitch, self.bytes, (last - y) * pitch, pitch);
+        }
+
+        return out;
+    }
+
     // Bresenham's algorithm
     draw_line(self, x0, y0, x1, y1, color) {
         let sx = (x0 < x1 ? 1 : -1);

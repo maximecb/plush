@@ -32,6 +32,56 @@ img.blit(sprite, 7, 3);
 assert(img.get_pixel(7, 3) == COLOR_BLUE);
 assert(img.get_pixel(6, 3) == COLOR_BLACK);
 
+// Concatenation along each axis
+let red = Image(4, 2);
+red.clear(COLOR_RED);
+let blue = Image(3, 2);
+blue.clear(COLOR_BLUE);
+let hc = red.hcat(blue);
+assert(hc.width == 7);
+assert(hc.height == 2);
+assert(hc.get_pixel(3, 0) == COLOR_RED);
+assert(hc.get_pixel(4, 0) == COLOR_BLUE);
+assert(hc.get_pixel(3, 1) == COLOR_RED);
+assert(hc.get_pixel(6, 1) == COLOR_BLUE);
+
+let green = Image(4, 3);
+green.clear(COLOR_GREEN);
+let vc = red.vcat(green);
+assert(vc.width == 4);
+assert(vc.height == 5);
+assert(vc.get_pixel(3, 1) == COLOR_RED);
+assert(vc.get_pixel(0, 2) == COLOR_GREEN);
+assert(vc.get_pixel(3, 4) == COLOR_GREEN);
+
+// Cropping, including a region that extends past the edges
+let grid = Image(4, 3);
+grid.clear(COLOR_BLACK);
+grid.set_pixel(1, 1, COLOR_RED);
+grid.set_pixel(2, 2, COLOR_BLUE);
+let cr = grid.crop(1, 1, 2, 2);
+assert(cr.width == 2);
+assert(cr.height == 2);
+assert(cr.get_pixel(0, 0) == COLOR_RED);
+assert(cr.get_pixel(1, 1) == COLOR_BLUE);
+assert(cr.get_pixel(1, 0) == COLOR_BLACK);
+let cr2 = grid.crop(3, 2, 3, 3);
+assert(cr2.get_pixel(0, 0) == COLOR_BLACK);
+assert(cr2.get_pixel(1, 0) == 0);
+assert(cr2.get_pixel(0, 1) == 0);
+
+// Flipping
+let hf = grid.hflip();
+assert(hf.width == 4 && hf.height == 3);
+assert(hf.get_pixel(2, 1) == COLOR_RED);
+assert(hf.get_pixel(1, 2) == COLOR_BLUE);
+assert(hf.get_pixel(1, 1) == COLOR_BLACK);
+let vf = grid.vflip();
+assert(vf.width == 4 && vf.height == 3);
+assert(vf.get_pixel(1, 1) == COLOR_RED);
+assert(vf.get_pixel(2, 0) == COLOR_BLUE);
+assert(vf.get_pixel(2, 2) == COLOR_BLACK);
+
 // Loading a TGA, whose rows are stored bottom-up
 let tex = load_tga("examples/data/textures/crate_wood.tga");
 assert(tex.width == 256);
