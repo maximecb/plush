@@ -55,80 +55,104 @@ let PUSH_FORCE = 15.0;
 let THROW_SPEED = 30.0;
 // Upward tilt of the throw above the view direction, in radians (12 degrees).
 let THROW_ANGLE = 10.0 * 3.141592653589793 / 180.0;
-let BOX_COLORS = [0xF34E44, 0xF6BE2D, 0x25B8D0, 0xA65BE8, 0x50C56C];
+let BOX_COLORS = [0xFF5A5F, 0xFFB627, 0x2EC4B6, 0x3A86FF, 0x8338EC, 0xFF4FA3];
+let TOWER_HEIGHT = 6;
+let TOWERS_PER_ROW = 5;
 
 class Vec3 {
-    init(self, x, y, z) { self.x = x; self.y = y; self.z = z; }
+    init(self, x, y, z) {
+        self.x = x;
+        self.y = y;
+        self.z = z;
+    }
 
-    add(self, b) { return Vec3(self.x+b.x, self.y+b.y, self.z+b.z); }
+    add(self, b) { return Vec3(self.x + b.x, self.y + b.y, self.z + b.z); }
 
-    sub(self, b) { return Vec3(self.x-b.x, self.y-b.y, self.z-b.z); }
+    sub(self, b) { return Vec3(self.x - b.x, self.y - b.y, self.z - b.z); }
 
-    mul(self, s) { return Vec3(self.x*s, self.y*s, self.z*s); }
+    mul(self, s) { return Vec3(self.x * s, self.y * s, self.z * s); }
 
-    dot(self, b) { return self.x*b.x + self.y*b.y + self.z*b.z; }
+    dot(self, b) { return self.x * b.x + self.y * b.y + self.z * b.z; }
 
-    cross(self, b) { return Vec3(self.y*b.z-self.z*b.y, self.z*b.x-self.x*b.z,
-                                 self.x*b.y-self.y*b.x); }
+    cross(self, b) { return Vec3(self.y * b.z - self.z * b.y, self.z * b.x - self.x * b.z,
+                                 self.x * b.y - self.y * b.x); }
 
     length(self) { return self.dot(self).sqrt(); }
 
-    unit(self) { return self.mul(1.0/self.length().max(1.0e-12)); }
+    unit(self) { return self.mul(1.0 / self.length().max(1.0e-12)); }
 
-    at(self, i) { if (i == 0) return self.x; if (i == 1) return self.y; return self.z; }
+    at(self, i) {
+        if (i == 0) return self.x;
+        if (i == 1) return self.y;
+        return self.z;
+    }
 }
 
 fun zero() { return Vec3(0.0, 0.0, 0.0); }
 let UP = Vec3(0.0, 1.0, 0.0);
 
 class Quat {
-    init(self, w, x, y, z) { self.w=w; self.x=x; self.y=y; self.z=z; }
+    init(self, w, x, y, z) {
+        self.w = w;
+        self.x = x;
+        self.y = y;
+        self.z = z;
+    }
 
-    conj(self) { return Quat(self.w,-self.x,-self.y,-self.z); }
+    conj(self) { return Quat(self.w, -self.x, -self.y, -self.z); }
 
     mul(self, b) {
-        return Quat(self.w*b.w-self.x*b.x-self.y*b.y-self.z*b.z,
-                    self.w*b.x+self.x*b.w+self.y*b.z-self.z*b.y,
-                    self.w*b.y-self.x*b.z+self.y*b.w+self.z*b.x,
-                    self.w*b.z+self.x*b.y-self.y*b.x+self.z*b.w);
+        return Quat(self.w * b.w - self.x * b.x - self.y * b.y - self.z * b.z,
+                    self.w * b.x + self.x * b.w + self.y * b.z - self.z * b.y,
+                    self.w * b.y - self.x * b.z + self.y * b.w + self.z * b.x,
+                    self.w * b.z + self.x * b.y - self.y * b.x + self.z * b.w);
     }
 
     unit(self) {
-        let s = 1.0/(self.w*self.w+self.x*self.x+self.y*self.y+self.z*self.z).sqrt();
-        return Quat(self.w*s,self.x*s,self.y*s,self.z*s);
+        let s = 1.0 / (self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z).sqrt();
+        return Quat(self.w * s, self.x * s, self.y * s, self.z * s);
     }
 
     rotate(self, v) {
-        let t = Vec3(self.y*v.z-self.z*v.y, self.z*v.x-self.x*v.z,
-                     self.x*v.y-self.y*v.x).mul(2.0);
-        return v.add(t.mul(self.w)).add(Vec3(self.y*t.z-self.z*t.y,
-                                              self.z*t.x-self.x*t.z,
-                                              self.x*t.y-self.y*t.x));
+        let t = Vec3(self.y * v.z - self.z * v.y, self.z * v.x - self.x * v.z,
+                     self.x * v.y - self.y * v.x).mul(2.0);
+        return v.add(t.mul(self.w)).add(Vec3(self.y * t.z - self.z * t.y,
+                                              self.z * t.x - self.x * t.z,
+                                              self.x * t.y - self.y * t.x));
     }
 }
 
-fun identity() { return Quat(1.0,0.0,0.0,0.0); }
+fun identity() { return Quat(1.0, 0.0, 0.0, 0.0); }
 fun rotation(v) {
     let a = v.length();
-    if (a < 1.0e-8) return Quat(1.0,v.x*0.5,v.y*0.5,v.z*0.5).unit();
-    let s = (a*0.5).sin()/a;
-    return Quat((a*0.5).cos(),v.x*s,v.y*s,v.z*s);
+    if (a < 1.0e-8) return Quat(1.0, v.x * 0.5, v.y * 0.5, v.z * 0.5).unit();
+    let s = (a * 0.5).sin() / a;
+    return Quat((a * 0.5).cos(), v.x * s, v.y * s, v.z * s);
 }
 
 class Box {
     init(self, p, half, mass, color) {
-        self.p=p; self.q=identity(); self.v=zero(); self.w=zero();
-        self.h=half; self.color=color;
-        self.id=0; self.sleeping=false; self.sleep_time=0.0; self.sleep_group=0;
+        self.p = p;
+        self.q = identity();
+        self.v = zero();
+        self.w = zero();
+        self.h = half;
+        self.color = color;
+        // Boxes with a second color get a checkerboard on their top face.
+        self.alt_color = nil;
+        self.id = 0;
+        self.sleeping = false;
+        self.sleep_time = 0.0;
+        self.sleep_group = 0;
         self.bounds = nil;
         self.axes_dirty = true;
         self.axis_x = nil;
         self.axis_y = nil;
         self.axis_z = nil;
-        self.im = mass > 0.0 ? 1.0/mass : 0.0;
-        self.ii = mass > 0.0 ? Vec3(3.0*self.im/(half.y*half.y+half.z*half.z),
-                                     3.0*self.im/(half.x*half.x+half.z*half.z),
-                                     3.0*self.im/(half.x*half.x+half.y*half.y)) : zero();
+        self.im = mass > 0.0 ? 1.0 / mass : 0.0;
+        self.ii = mass > 0.0 ? Vec3(3.0 * self.im / (half.y * half.y + half.z * half.z),
+                                     3.0 * self.im / (half.x * half.x + half.z * half.z),
+                                     3.0 * self.im / (half.x * half.x + half.y * half.y)) : zero();
     }
 
     // Rebuild orientation axes only after the box rotates.
@@ -137,9 +161,15 @@ class Box {
 
         // Read the rotation matrix columns directly from the quaternion.
         let q = self.q;
-        let xx = q.x * q.x; let yy = q.y * q.y; let zz = q.z * q.z;
-        let xy = q.x * q.y; let xz = q.x * q.z; let yz = q.y * q.z;
-        let wx = q.w * q.x; let wy = q.w * q.y; let wz = q.w * q.z;
+        let xx = q.x * q.x;
+        let yy = q.y * q.y;
+        let zz = q.z * q.z;
+        let xy = q.x * q.y;
+        let xz = q.x * q.z;
+        let yz = q.y * q.z;
+        let wx = q.w * q.x;
+        let wy = q.w * q.y;
+        let wz = q.w * q.z;
         self.axis_x = Vec3(1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy));
         self.axis_y = Vec3(2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx));
         self.axis_z = Vec3(2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy));
@@ -149,7 +179,9 @@ class Box {
     // Rotate a local vector into world space using the cached axes.
     rotate_local(self, v) {
         self.refresh_axes();
-        let ax = self.axis_x; let ay = self.axis_y; let az = self.axis_z;
+        let ax = self.axis_x;
+        let ay = self.axis_y;
+        let az = self.axis_z;
         return Vec3(ax.x * v.x + ay.x * v.y + az.x * v.z,
                     ax.y * v.x + ay.y * v.y + az.y * v.z,
                     ax.z * v.x + ay.z * v.y + az.z * v.z);
@@ -201,7 +233,9 @@ class Box {
         self.p = Vec3(p.x + n.x * m, p.y + n.y * m, p.z + n.z * m);
 
         self.refresh_axes();
-        let ax = self.axis_x; let ay = self.axis_y; let az = self.axis_z;
+        let ax = self.axis_x;
+        let ay = self.axis_y;
+        let az = self.axis_z;
         let cx = (r.y * n.z - r.z * n.y) * s;
         let cy = (r.z * n.x - r.x * n.z) * s;
         let cz = (r.x * n.y - r.y * n.x) * s;
@@ -234,9 +268,9 @@ class Box {
     velocity(self, r) { return self.v.add(self.w.cross(r)); }
 
     corner(self, k) {
-        return self.world(Vec3((k&1)==0 ? -self.h.x : self.h.x,
-                               (k&2)==0 ? -self.h.y : self.h.y,
-                               (k&4)==0 ? -self.h.z : self.h.z));
+        return self.world(Vec3((k & 1) == 0 ? -self.h.x : self.h.x,
+                               (k & 2) == 0 ? -self.h.y : self.h.y,
+                               (k & 4) == 0 ? -self.h.z : self.h.z));
     }
 
     radius(self, n) {
@@ -247,8 +281,8 @@ class Box {
     }
 
     extent(self, i) {
-        return self.radius(i == 0 ? Vec3(1.0,0.0,0.0)
-                          : i == 1 ? UP : Vec3(0.0,0.0,1.0));
+        return self.radius(i == 0 ? Vec3(1.0, 0.0, 0.0)
+                          : i == 1 ? UP : Vec3(0.0, 0.0, 1.0));
     }
 
     // Cast a world-space ray against this box in its local frame.
@@ -289,8 +323,10 @@ class Box {
 class ContactPoint {
     // Store local anchors and the quantities reused by velocity passes.
     init(self, a, b, pa, pb) {
-        self.la=a.local(pa); self.lb=b.local(pb);
-        self.normal_impulse=0.0; self.friction_impulse=zero();
+        self.la = a.local(pa);
+        self.lb = b.local(pb);
+        self.normal_impulse = 0.0;
+        self.friction_impulse = zero();
         self.ra = nil;
         self.rb = nil;
         self.normal_weight = 0.0;
@@ -298,9 +334,14 @@ class ContactPoint {
 }
 
 class Contact {
-    init(self, a, b, n) { self.a=a; self.b=b; self.n=n; self.points=[]; }
+    init(self, a, b, n) {
+        self.a = a;
+        self.b = b;
+        self.n = n;
+        self.points = [];
+    }
 
-    add(self, pa, pb) { self.points.push(ContactPoint(self.a,self.b,pa,pb)); }
+    add(self, pa, pb) { self.points.push(ContactPoint(self.a, self.b, pa, pb)); }
 
     // Compute relative contact velocity without temporary cross-product vectors.
     relative_velocity(self, ra, rb) {
@@ -320,15 +361,17 @@ class Contact {
 
 // Keep the points on the negative side of n dot p = d.
 fun clip_face(poly, n, d) {
-    let out=[];
+    let out = [];
 
-    for (let var i=0; i<poly.len; ++i) {
-        let j=(i+1)%poly.len;
-        let a=poly[i]; let b=poly[j];
-        let da=a.dot(n)-d; let db=b.dot(n)-d;
+    for (let var i = 0; i < poly.len; ++i) {
+        let j = (i + 1) % poly.len;
+        let a = poly[i];
+        let b = poly[j];
+        let da = a.dot(n) - d;
+        let db = b.dot(n) - d;
         if (da <= 0.0) out.push(a);
         if ((da < 0.0 && db > 0.0) || (da > 0.0 && db < 0.0))
-            out.push(a.add(b.sub(a).mul(da/(da-db))));
+            out.push(a.add(b.sub(a).mul(da / (da - db))));
     }
 
     return out;
@@ -336,115 +379,145 @@ fun clip_face(poly, n, d) {
 
 fun face_contacts(c, ref, inc, ref_axis, ref_normal) {
     // Choose the incident face most opposed to the reference normal.
-    let var inc_axis=0; let var best=-1.0;
-    for (let var i=0; i<3; ++i) {
-        let a=inc.axis(i).dot(ref_normal).abs();
-        if (a > best) { best=a; inc_axis=i; }
+    let var inc_axis = 0;
+    let var best = -1.0;
+    for (let var i = 0; i < 3; ++i) {
+        let a = inc.axis(i).dot(ref_normal).abs();
+        if (a > best) {
+            best = a;
+            inc_axis = i;
+        }
     }
 
-    let sign=inc.axis(inc_axis).dot(ref_normal) > 0.0 ? -1.0 : 1.0;
-    let center=inc.p.add(inc.axis(inc_axis).mul(sign*inc.h.at(inc_axis)));
-    let iu=(inc_axis+1)%3; let iv=(inc_axis+2)%3;
-    let u=inc.axis(iu).mul(inc.h.at(iu));
-    let v=inc.axis(iv).mul(inc.h.at(iv));
-    let var poly=[center.sub(u).sub(v),center.add(u).sub(v),
-              center.add(u).add(v),center.sub(u).add(v)];
+    let sign = inc.axis(inc_axis).dot(ref_normal) > 0.0 ? -1.0 : 1.0;
+    let center = inc.p.add(inc.axis(inc_axis).mul(sign * inc.h.at(inc_axis)));
+    let iu = (inc_axis + 1) % 3;
+    let iv = (inc_axis + 2) % 3;
+    let u = inc.axis(iu).mul(inc.h.at(iu));
+    let v = inc.axis(iv).mul(inc.h.at(iv));
+    let var poly = [center.sub(u).sub(v), center.add(u).sub(v),
+                    center.add(u).add(v), center.sub(u).add(v)];
 
     // Clip against the four side planes of the reference face.
-    let ru=ref.axis((ref_axis+1)%3); let rv=ref.axis((ref_axis+2)%3);
-    let hu=ref.h.at((ref_axis+1)%3); let hv=ref.h.at((ref_axis+2)%3);
-    poly=clip_face(poly,ru,ru.dot(ref.p)+hu);
+    let ru = ref.axis((ref_axis + 1) % 3);
+    let rv = ref.axis((ref_axis + 2) % 3);
+    let hu = ref.h.at((ref_axis + 1) % 3);
+    let hv = ref.h.at((ref_axis + 2) % 3);
+    poly = clip_face(poly, ru, ru.dot(ref.p) + hu);
     if (poly.len == 0) return;
 
-    poly=clip_face(poly,ru.mul(-1.0),-ru.dot(ref.p)+hu);
+    poly = clip_face(poly, ru.mul(-1.0), -ru.dot(ref.p) + hu);
     if (poly.len == 0) return;
 
-    poly=clip_face(poly,rv,rv.dot(ref.p)+hv);
+    poly = clip_face(poly, rv, rv.dot(ref.p) + hv);
     if (poly.len == 0) return;
 
-    poly=clip_face(poly,rv.mul(-1.0),-rv.dot(ref.p)+hv);
+    poly = clip_face(poly, rv.mul(-1.0), -rv.dot(ref.p) + hv);
 
     // Pair each clipped point with its projection onto the reference face.
-    let ref_center=ref.p.add(ref_normal.mul(ref.h.at(ref_axis)));
-    for (let var i=0; i<poly.len; ++i) {
-        let depth=ref_normal.dot(ref_center.sub(poly[i]));
+    let ref_center = ref.p.add(ref_normal.mul(ref.h.at(ref_axis)));
+    for (let var i = 0; i < poly.len; ++i) {
+        let depth = ref_normal.dot(ref_center.sub(poly[i]));
         if (depth < -0.002) continue;
-        let on_ref=poly[i].add(ref_normal.mul(depth));
-        if (ref == c.a) c.add(on_ref,poly[i]);
-        else c.add(poly[i],on_ref);
+        let on_ref = poly[i].add(ref_normal.mul(depth));
+        if (ref == c.a) c.add(on_ref, poly[i]);
+        else c.add(poly[i], on_ref);
     }
 }
 
 fun support_edge(b, axis_index, direction) {
-    let var base=b.p;
+    let var base = b.p;
 
-    for (let var i=0; i<3; ++i) {
+    for (let var i = 0; i < 3; ++i) {
         if (i == axis_index) continue;
-        let axis=b.axis(i);
-        base=base.add(axis.mul((axis.dot(direction) >= 0.0 ? 1.0 : -1.0)*b.h.at(i)));
+        let axis = b.axis(i);
+        base = base.add(axis.mul((axis.dot(direction) >= 0.0 ? 1.0 : -1.0) * b.h.at(i)));
     }
 
-    let span=b.axis(axis_index).mul(b.h.at(axis_index));
-    return [base.sub(span),base.add(span)];
+    let span = b.axis(axis_index).mul(b.h.at(axis_index));
+    return [base.sub(span), base.add(span)];
 }
 
 fun edge_contacts(c, ia, ib) {
-    let ea=support_edge(c.a,ia,c.n);
-    let eb=support_edge(c.b,ib,c.n.mul(-1.0));
+    let ea = support_edge(c.a, ia, c.n);
+    let eb = support_edge(c.b, ib, c.n.mul(-1.0));
 
     // Find the nearest points on the two support segments.
-    let u=ea[1].sub(ea[0]); let v=eb[1].sub(eb[0]);
-    let w=ea[0].sub(eb[0]);
-    let aa=u.dot(u); let bb=u.dot(v); let cc=v.dot(v);
-    let dd=u.dot(w); let ee=v.dot(w);
-    let denom=aa*cc-bb*bb;
-    let var s=denom > 1.0e-10 ? ((bb*ee-cc*dd)/denom).clip(0.0,1.0) : 0.5;
-    let t=((bb*s+ee)/cc).clip(0.0,1.0);
-    s=((bb*t-dd)/aa).clip(0.0,1.0);
+    let u = ea[1].sub(ea[0]);
+    let v = eb[1].sub(eb[0]);
+    let w = ea[0].sub(eb[0]);
+    let aa = u.dot(u);
+    let bb = u.dot(v);
+    let cc = v.dot(v);
+    let dd = u.dot(w);
+    let ee = v.dot(w);
+    let denom = aa * cc - bb * bb;
+    let var s = denom > 1.0e-10 ? ((bb * ee - cc * dd) / denom).clip(0.0, 1.0) : 0.5;
+    let t = ((bb * s + ee) / cc).clip(0.0, 1.0);
+    s = ((bb * t - dd) / aa).clip(0.0, 1.0);
 
-    c.add(ea[0].add(u.mul(s)),eb[0].add(v.mul(t)));
+    c.add(ea[0].add(u.mul(s)), eb[0].add(v.mul(t)));
 }
 
 // Fifteen axes: three from each box and nine edge cross products.
 fun collide(a, b) {
-    let delta=b.p.sub(a.p);
-    let var depth=1.0e30; let var n=zero();
-    let var kind=0; let var ia=0; let var ib=0;
+    let delta = b.p.sub(a.p);
+    let var depth = 1.0e30;
+    let var n = zero();
+    let var kind = 0;
+    let var ia = 0;
+    let var ib = 0;
 
-    for (let var i=0; i<15; ++i) {
-        let var axis=zero(); let var type=0; let var ai=0; let var bi=0;
-        if (i < 3) { axis=a.axis(i); ai=i; }
-        else if (i < 6) { axis=b.axis(i-3); type=1; bi=i-3; }
+    for (let var i = 0; i < 15; ++i) {
+        let var axis = zero();
+        let var type = 0;
+        let var ai = 0;
+        let var bi = 0;
+        if (i < 3) {
+            axis = a.axis(i);
+            ai = i;
+        }
+        else if (i < 6) {
+            axis = b.axis(i - 3);
+            type = 1;
+            bi = i - 3;
+        }
         else {
-            let k=i-6; ai=k.idiv(3); bi=k%3; type=2;
-            axis=a.axis(ai).cross(b.axis(bi));
+            let k = i - 6;
+            ai = k.idiv(3);
+            bi = k % 3;
+            type = 2;
+            axis = a.axis(ai).cross(b.axis(bi));
             if (axis.dot(axis) < 1.0e-8) continue;
-            axis=axis.unit();
+            axis = axis.unit();
         }
 
-        let overlap=a.radius(axis)+b.radius(axis)-delta.dot(axis).abs();
+        let overlap = a.radius(axis) + b.radius(axis) - delta.dot(axis).abs();
         if (overlap < 0.0) return nil;
 
         // A small edge bias keeps a face patch when penetrations nearly tie.
-        let score=type == 2 ? overlap*1.02+0.001 : overlap;
+        let score = type == 2 ? overlap * 1.02 + 0.001 : overlap;
         if (score < depth) {
-            depth=score; n=delta.dot(axis) < 0.0 ? axis.mul(-1.0) : axis;
-            kind=type; ia=ai; ib=bi;
+            depth = score;
+            n = delta.dot(axis) < 0.0 ? axis.mul(-1.0) : axis;
+            kind = type;
+            ia = ai;
+            ib = bi;
         }
     }
 
     // The least penetrating axis chooses a face patch or an edge contact.
-    let c=Contact(a,b,n);
-    if (kind == 0) face_contacts(c,a,b,ia,n);
-    else if (kind == 1) face_contacts(c,b,a,ib,n.mul(-1.0));
-    else edge_contacts(c,ia,ib);
+    let c = Contact(a, b, n);
+    if (kind == 0) face_contacts(c, a, b, ia, n);
+    else if (kind == 1) face_contacts(c, b, a, ib, n.mul(-1.0));
+    else edge_contacts(c, ia, ib);
 
     return c.points.len > 0 ? c : nil;
 }
 
 fun broad_overlap(a, b) {
-    for (let var i=0; i<3; ++i)
-        if ((a.p.at(i)-b.p.at(i)).abs() > a.extent(i)+b.extent(i)+0.02) return false;
+    for (let var i = 0; i < 3; ++i)
+        if ((a.p.at(i) - b.p.at(i)).abs() > a.extent(i) + b.extent(i) + 0.02) return false;
     return true;
 }
 
@@ -490,30 +563,36 @@ class World {
     }
 
     reset(self) {
-        self.boxes=[]; self.contacts=[]; self.time=0.0;
+        self.boxes = [];
+        self.contacts = [];
+        self.time = 0.0;
         self.bounds = [];
         self.render_dirty = true;
-        self.next_sleep_group=1; self.wake_events=0;
-        self.boxes.push(Box(Vec3(0.0,-0.3,0.0),Vec3(9.0,0.3,9.0),0.0,0x617783));
+        self.next_sleep_group = 1;
+        self.wake_events = 0;
+        let floor = Box(Vec3(0.0, -0.3, 0.0), Vec3(9.0, 0.3, 9.0), 0.0, 0x90A2BC);
+        floor.alt_color = 0x6F819B;
+        self.boxes.push(floor);
 
-        // Build four-box towers, leaving space for the falling box.
-        for (let var i=0; i<self.count-1; ++i) {
-            let tower=i.idiv(4); let level=i%4;
-            let x=((tower%5)-1)*2.0;
-            let z=tower.idiv(5)*1.8-0.2;
-            let b=Box(Vec3(x+((level&1)==0 ? 0.0 : 0.08),
-                           0.47+level*0.94+level*0.06,z),
-                      Vec3(0.47,0.47,0.47),1.0,BOX_COLORS[(tower+level)%BOX_COLORS.len]);
+        // Build rows of centered towers, leaving space for the falling box.
+        for (let var i = 0; i < self.count - 1; ++i) {
+            let tower = i.idiv(TOWER_HEIGHT);
+            let level = i % TOWER_HEIGHT;
+            let x = ((tower % TOWERS_PER_ROW) - 2) * 2.0;
+            let z = tower.idiv(TOWERS_PER_ROW) * 1.8;
+            let b = Box(Vec3(x + ((level & 1) == 0 ? 0.0 : 0.08),
+                             0.47 + level * 0.94 + level * 0.06, z),
+                        Vec3(0.47, 0.47, 0.47), 1.0, BOX_COLORS[(tower + level) % BOX_COLORS.len]);
             if (tower == 2 && level == 3)
-                b.q=rotation(Vec3(0.08,0.20,0.12));
-            b.id=self.boxes.len;
+                b.q = rotation(Vec3(0.08, 0.20, 0.12));
+            b.id = self.boxes.len;
             self.boxes.push(b);
         }
 
-        let falling=Box(Vec3(-0.9,5.3,-2.2),Vec3(0.65,0.28,0.37),1.4,0xF4D86B);
-        falling.q=rotation(Vec3(0.18,0.38,0.23));
-        falling.w=Vec3(0.4,0.2,-0.3);
-        falling.id=self.boxes.len;
+        let falling = Box(Vec3(-0.9, 5.3, -2.2), Vec3(0.65, 0.28, 0.37), 1.4, 0xFFF1C9);
+        falling.q = rotation(Vec3(0.18, 0.38, 0.23));
+        falling.w = Vec3(0.4, 0.2, -0.3);
+        falling.id = self.boxes.len;
         self.boxes.push(falling);
 
         for (let var i = 0; i < self.boxes.len; ++i)
@@ -588,13 +667,15 @@ class World {
 
     wake_group(self, group) {
         if (group == 0) return;
-        self.wake_events+=1;
+        self.wake_events += 1;
 
-        for (let var i=1; i<self.boxes.len; ++i) {
-            let b=self.boxes[i];
+        for (let var i = 1; i < self.boxes.len; ++i) {
+            let b = self.boxes[i];
             if (b.sleep_group != group) continue;
             if (b.sleeping) self.awake_count += 1;
-            b.sleeping=false; b.sleep_group=0; b.sleep_time=0.0;
+            b.sleeping = false;
+            b.sleep_group = 0;
+            b.sleep_time = 0.0;
         }
     }
 
@@ -622,53 +703,65 @@ class World {
     }
 
     sleep_settled_islands(self) {
-        let links=Array.with_size(self.boxes.len,nil);
-        let supported=Array.with_size(self.boxes.len,false);
-        let visited=Array.with_size(self.boxes.len,false);
-        for (let var i=0; i<links.len; ++i) links[i]=[];
+        let links = Array.with_size(self.boxes.len, nil);
+        let supported = Array.with_size(self.boxes.len, false);
+        let visited = Array.with_size(self.boxes.len, false);
+        for (let var i = 0; i < links.len; ++i) links[i] = [];
 
         // The fixed floor supports islands without connecting separate towers.
-        for (let var i=0; i<self.contacts.len; ++i) {
-            let c=self.contacts[i]; let a=c.a.id; let b=c.b.id;
-            if (a == 0) supported[b]=true;
-            else if (b == 0) supported[a]=true;
-            else { links[a].push(b); links[b].push(a); }
+        for (let var i = 0; i < self.contacts.len; ++i) {
+            let c = self.contacts[i];
+            let a = c.a.id;
+            let b = c.b.id;
+            if (a == 0) supported[b] = true;
+            else if (b == 0) supported[a] = true;
+            else {
+                links[a].push(b);
+                links[b].push(a);
+            }
         }
 
-        for (let var i=1; i<self.boxes.len; ++i) {
-            let b=self.boxes[i];
+        for (let var i = 1; i < self.boxes.len; ++i) {
+            let b = self.boxes[i];
             if (b.sleeping) continue;
             if (b.v.length() < SLEEP_LINEAR_SPEED && b.w.length() < SLEEP_ANGULAR_SPEED)
-                b.sleep_time+=STEP;
-            else b.sleep_time=0.0;
+                b.sleep_time += STEP;
+            else b.sleep_time = 0.0;
         }
 
         // Put a whole connected island to sleep only after every body settles.
-        for (let var i=1; i<self.boxes.len; ++i) {
+        for (let var i = 1; i < self.boxes.len; ++i) {
             if (visited[i] || self.boxes[i].sleeping) continue;
-            let island=[i]; visited[i]=true;
-            let var grounded=false; let var ready=true;
-            let var head=0;
+            let island = [i];
+            visited[i] = true;
+            let var grounded = false;
+            let var ready = true;
+            let var head = 0;
 
             while (head < island.len) {
-                let id=island[head]; head+=1;
-                let b=self.boxes[id];
-                if (supported[id]) grounded=true;
-                if (b.sleep_time < SLEEP_DELAY) ready=false;
+                let id = island[head];
+                head += 1;
+                let b = self.boxes[id];
+                if (supported[id]) grounded = true;
+                if (b.sleep_time < SLEEP_DELAY) ready = false;
 
-                for (let var j=0; j<links[id].len; ++j) {
-                    let next=links[id][j];
+                for (let var j = 0; j < links[id].len; ++j) {
+                    let next = links[id][j];
                     if (visited[next]) continue;
-                    visited[next]=true; island.push(next);
+                    visited[next] = true;
+                    island.push(next);
                 }
             }
 
             if (!grounded || !ready) continue;
-            let group=self.next_sleep_group; self.next_sleep_group+=1;
-            for (let var j=0; j<island.len; ++j) {
-                let body=self.boxes[island[j]];
-                body.sleeping=true; body.sleep_group=group;
-                body.v=zero(); body.w=zero();
+            let group = self.next_sleep_group;
+            self.next_sleep_group += 1;
+            for (let var j = 0; j < island.len; ++j) {
+                let body = self.boxes[island[j]];
+                body.sleeping = true;
+                body.sleep_group = group;
+                body.v = zero();
+                body.w = zero();
                 body.bounds.update();
                 self.awake_count -= 1;
             }
@@ -697,9 +790,14 @@ class World {
 
                 for (let var m = 0; m < prev.points.len; ++m) {
                     let q = prev.points[m];
-                    let dx = p.la.x - q.la.x; let dy = p.la.y - q.la.y; let dz = p.la.z - q.la.z;
+                    let dx = p.la.x - q.la.x;
+                    let dy = p.la.y - q.la.y;
+                    let dz = p.la.z - q.la.z;
                     let d = dx * dx + dy * dy + dz * dz;
-                    if (d < best_d) { best_d = d; best = q; }
+                    if (d < best_d) {
+                        best_d = d;
+                        best = q;
+                    }
                 }
 
                 if (best == nil) continue;
@@ -721,21 +819,21 @@ class World {
         self.render_dirty = true;
 
         // Predict the moving boxes' poses before finding contacts.
-        for (let var i=1; i<self.boxes.len; ++i) {
-            let b=self.boxes[i];
+        for (let var i = 1; i < self.boxes.len; ++i) {
+            let b = self.boxes[i];
             if (b.sleeping) continue;
-            b.v=b.v.add(Vec3(0.0,GRAVITY*STEP,0.0));
-            b.p=b.p.add(b.v.mul(STEP));
-            b.q=rotation(b.w.mul(STEP)).mul(b.q).unit();
+            b.v = b.v.add(Vec3(0.0, GRAVITY * STEP, 0.0));
+            b.p = b.p.add(b.v.mul(STEP));
+            b.q = rotation(b.w.mul(STEP)).mul(b.q).unit();
             b.axes_dirty = true;
         }
 
         self.sort_bounds();
 
         // A new impact wakes every box in the sleeping contact island.
-        let var woke=true;
+        let var woke = true;
         while (woke) {
-            woke=false;
+            woke = false;
             for (let var i = 0; i < self.bounds.len; ++i) {
                 let a_bounds = self.bounds[i];
 
@@ -757,14 +855,14 @@ class World {
                     if (collide(a, b) == nil) continue;
 
                     self.wake_group(a.sleeping ? a.sleep_group : b.sleep_group);
-                    woke=true;
+                    woke = true;
                 }
             }
         }
 
         // Reject distant pairs with world-aligned bounds before SAT.
-        let old_contacts=self.contacts;
-        self.contacts=[];
+        let old_contacts = self.contacts;
+        self.contacts = [];
         for (let var i = 0; i < self.bounds.len; ++i) {
             let a_bounds = self.bounds[i];
 
@@ -783,7 +881,7 @@ class World {
                     b = swap;
                 }
 
-                let c=collide(a,b);
+                let c = collide(a, b);
                 if (c != nil) self.contacts.push(c);
             }
         }
@@ -809,26 +907,29 @@ class World {
 
         // Project overlapping contact points apart.
         // Stop once the remaining error is small enough.
-        for (let var pass=0; pass<MAX_POSITION_PASSES; ++pass) {
-            let var worst=0.0;
+        for (let var pass = 0; pass < MAX_POSITION_PASSES; ++pass) {
+            let var worst = 0.0;
 
-            for (let var i=0; i<self.contacts.len; ++i) {
-                let c=self.contacts[i]; let n=c.n;
+            for (let var i = 0; i < self.contacts.len; ++i) {
+                let c = self.contacts[i];
+                let n = c.n;
 
-                for (let var j=0; j<c.points.len; ++j) {
-                    let p=c.points[j];
-                    let ra=c.a.rotate_local(p.la); let rb=c.b.rotate_local(p.lb);
-                    let pa=c.a.p; let pb=c.b.p;
-                    let sep=(pb.x+rb.x-pa.x-ra.x)*n.x+(pb.y+rb.y-pa.y-ra.y)*n.y
-                           +(pb.z+rb.z-pa.z-ra.z)*n.z;
-                    let error=(-sep-PENETRATION_SLOP).max(0.0);
-                    worst=worst.max(error);
+                for (let var j = 0; j < c.points.len; ++j) {
+                    let p = c.points[j];
+                    let ra = c.a.rotate_local(p.la);
+                    let rb = c.b.rotate_local(p.lb);
+                    let pa = c.a.p;
+                    let pb = c.b.p;
+                    let sep = (pb.x + rb.x - pa.x - ra.x) * n.x + (pb.y + rb.y - pa.y - ra.y) * n.y
+                            + (pb.z + rb.z - pa.z - ra.z) * n.z;
+                    let error = (-sep - PENETRATION_SLOP).max(0.0);
+                    worst = worst.max(error);
                     if (error == 0.0) continue;
 
-                    let weight=c.a.weight(ra,n)+c.b.weight(rb,n);
-                    let s=(error*0.65).min(0.05)/weight;
-                    c.a.move(n,-s,ra);
-                    c.b.move(n,s,rb);
+                    let weight = c.a.weight(ra, n) + c.b.weight(rb, n);
+                    let s = (error * 0.65).min(0.05) / weight;
+                    c.a.move(n, -s, ra);
+                    c.b.move(n, s, rb);
                 }
             }
 
@@ -912,29 +1013,30 @@ class World {
         }
 
         self.sleep_settled_islands();
-        self.time+=STEP;
+        self.time += STEP;
     }
 
     sleeping_count(self) {
-        let var count=0;
-        for (let var i=1; i<self.boxes.len; ++i)
-            if (self.boxes[i].sleeping) count+=1;
+        let var count = 0;
+        for (let var i = 1; i < self.boxes.len; ++i)
+            if (self.boxes[i].sleeping) count += 1;
         return count;
     }
 
     max_penetration(self) {
-        let var worst=0.0;
+        let var worst = 0.0;
 
-        for (let var i=0; i<self.boxes.len; ++i)
-            for (let var j=i+1; j<self.boxes.len; ++j) {
-                let a=self.boxes[i]; let b=self.boxes[j];
-                if (!broad_overlap(a,b)) continue;
-                let c=collide(a,b);
+        for (let var i = 0; i < self.boxes.len; ++i)
+            for (let var j = i + 1; j < self.boxes.len; ++j) {
+                let a = self.boxes[i];
+                let b = self.boxes[j];
+                if (!broad_overlap(a, b)) continue;
+                let c = collide(a, b);
                 if (c == nil) continue;
-                for (let var k=0; k<c.points.len; ++k) {
-                    let p=c.points[k];
-                    let sep=b.world(p.lb).sub(a.world(p.la)).dot(c.n);
-                    worst=worst.max(-sep);
+                for (let var k = 0; k < c.points.len; ++k) {
+                    let p = c.points[k];
+                    let sep = b.world(p.lb).sub(a.world(p.la)).dot(c.n);
+                    worst = worst.max(-sep);
                 }
             }
 
@@ -946,131 +1048,184 @@ class World {
 // It splits each face into triangles with interpolated vertex lighting.
 // The scanline approach follows raster_vertlight.psh.
 class ViewVertex {
-    init(self, x, y, z, light) { self.x=x; self.y=y; self.z=z; self.light=light; }
+    init(self, x, y, z, light) {
+        self.x = x;
+        self.y = y;
+        self.z = z;
+        self.light = light;
+    }
 }
 
 class ScreenVertex {
-    init(self, x, y, z, light) { self.x=x; self.y=y; self.z=z; self.light=light; }
+    init(self, x, y, z, light) {
+        self.x = x;
+        self.y = y;
+        self.z = z;
+        self.light = light;
+    }
 }
 
 class Triangle {
-    init(self, a, b, c, color) {
-        self.a=a; self.b=b; self.c=c; self.color=color;
-        self.min_z=a.z.min(b.z).min(c.z);
-        self.max_z=a.z.max(b.z).max(c.z);
+    init(self, a, b, c, color, alt) {
+        self.a = a;
+        self.b = b;
+        self.c = c;
+        self.color = color;
+        self.alt = alt;
+        self.min_z = a.z.min(b.z).min(c.z);
+        self.max_z = a.z.max(b.z).max(c.z);
     }
 }
 
 class SBuffer {
     init(self) {
-        self.head=Array.with_size(HEIGHT,-1);
-        self.x0=[]; self.x1=[]; self.next=[];
-        self.vis0=[]; self.vis1=[];
-        self.used=0;
+        self.head = Array.with_size(HEIGHT, -1);
+        self.x0 = [];
+        self.x1 = [];
+        self.next = [];
+        self.vis0 = [];
+        self.vis1 = [];
+        self.used = 0;
     }
 
     reset(self) {
-        for (let var y=0; y<HEIGHT; ++y) self.head[y]=-1;
-        self.used=0;
+        for (let var y = 0; y < HEIGHT; ++y) self.head[y] = -1;
+        self.used = 0;
     }
 
     // Return visible subspans and optionally claim them.
     // A triangle claims them only when ahead of every pending triangle.
     visible(self, y, x0, x1, claim) {
-        self.vis0.resize(0,nil); self.vis1.resize(0,nil);
+        self.vis0.resize(0, nil);
+        self.vis1.resize(0, nil);
 
         // Walk the sorted intervals and collect the uncovered gaps.
-        let var prev=-1; let var cur=self.head[y];
+        let var prev = -1;
+        let var cur = self.head[y];
         while (cur != -1 && self.x1[cur] < x0) {
-            prev=cur; cur=self.next[cur];
-        }
-        let var scan=cur; let var cursor=x0;
-        let var merged0=x0; let var merged1=x1;
-        while (scan != -1 && self.x0[scan] <= x1) {
-            if (self.x0[scan] > cursor) {
-                self.vis0.push(cursor); self.vis1.push(self.x0[scan].min(x1));
-            }
-            cursor=cursor.max(self.x1[scan]);
-            merged0=merged0.min(self.x0[scan]);
-            merged1=merged1.max(self.x1[scan]);
-            scan=self.next[scan];
+            prev = cur;
+            cur = self.next[cur];
         }
 
-        if (cursor < x1) { self.vis0.push(cursor); self.vis1.push(x1); }
+        let var scan = cur;
+        let var cursor = x0;
+        let var merged0 = x0;
+        let var merged1 = x1;
+        while (scan != -1 && self.x0[scan] <= x1) {
+            if (self.x0[scan] > cursor) {
+                self.vis0.push(cursor);
+                self.vis1.push(self.x0[scan].min(x1));
+            }
+            cursor = cursor.max(self.x1[scan]);
+            merged0 = merged0.min(self.x0[scan]);
+            merged1 = merged1.max(self.x1[scan]);
+            scan = self.next[scan];
+        }
+
+        if (cursor < x1) {
+            self.vis0.push(cursor);
+            self.vis1.push(x1);
+        }
         if (!claim || self.vis0.len == 0) return;
 
         // Merge the claimed span with any intervals it touches.
         if (cur == scan) {
-            let slot=self.used; self.used+=1;
+            let slot = self.used;
+            self.used += 1;
             if (slot == self.x0.len) {
-                self.x0.push(merged0); self.x1.push(merged1); self.next.push(scan);
+                self.x0.push(merged0);
+                self.x1.push(merged1);
+                self.next.push(scan);
             } else {
-                self.x0[slot]=merged0; self.x1[slot]=merged1; self.next[slot]=scan;
+                self.x0[slot] = merged0;
+                self.x1[slot] = merged1;
+                self.next[slot] = scan;
             }
-            if (prev == -1) self.head[y]=slot; else self.next[prev]=slot;
+            if (prev == -1) self.head[y] = slot;
+            else self.next[prev] = slot;
         } else {
-            self.x0[cur]=merged0; self.x1[cur]=merged1; self.next[cur]=scan;
+            self.x0[cur] = merged0;
+            self.x1[cur] = merged1;
+            self.next[cur] = scan;
         }
     }
 }
 
 fun clip_near(poly) {
-    let out=[];
+    let out = [];
 
-    for (let var i=0; i<poly.len; ++i) {
-        let a=poly[i]; let b=poly[(i+1)%poly.len];
+    for (let var i = 0; i < poly.len; ++i) {
+        let a = poly[i];
+        let b = poly[(i + 1) % poly.len];
         if (a.z >= NEAR) out.push(a);
         if ((a.z < NEAR && b.z > NEAR) || (a.z > NEAR && b.z < NEAR)) {
-            let t=(NEAR-a.z)/(b.z-a.z);
-            out.push(ViewVertex(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,NEAR,
-                                a.light+(b.light-a.light)*t));
+            let t = (NEAR - a.z) / (b.z - a.z);
+            out.push(ViewVertex(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, NEAR,
+                                a.light + (b.light - a.light) * t));
         }
     }
 
     return out;
 }
 
+// Scale an RGB color by light in the range 0 to 1 and return an opaque pixel.
+fun shade(color, light) {
+    let mask_rb = 0x00FF00FF;
+    let l = (light.clip(0.0, 1.0) * 255.0).floor();
+    let packed = ((color & mask_rb) | ((color & 0x0000FF00) << 24)) * l;
+    return 0xFF000000 | ((packed >> 8) & mask_rb) | ((packed >> 32) & 0xFF00);
+}
+
 class Renderer {
     init(self) {
-        self.image=Image(WIDTH,HEIGHT); self.fb=self.image.bytes;
-        self.depth=ByteArray.with_size(WIDTH*HEIGHT*4);
-        self.sbuf=SBuffer(); self.tris=[];
-        self.target=Vec3(0.0,2.0,0.0);
-        self.yaw=0.67; self.pitch=0.32; self.distance=16.1;
-        self.sun=Vec3(-0.5,0.9,-0.35).unit();
+        self.image = Image(WIDTH, HEIGHT);
+        self.fb = self.image.bytes;
+        self.depth = ByteArray.with_size(WIDTH * HEIGHT * 4);
+        self.sbuf = SBuffer();
+        self.tris = [];
+        self.target = Vec3(0.0, 2.6, 0.0);
+        self.yaw = 0.67;
+        self.pitch = 0.32;
+        self.distance = 19.0;
+        // The sun is chosen so the top and two visible sides get distinct shades.
+        self.sun = Vec3(0.26, 0.78, -0.52).unit();
+        self.tx = 0.0;
+        self.tz = 0.0;
+        self.dtx = 0.0;
+        self.dtz = 0.0;
         self.update_camera();
     }
 
     update_camera(self) {
-        let horizontal=self.distance*self.pitch.cos();
-        self.eye=self.target.add(Vec3(horizontal*self.yaw.sin(),
-                                      self.distance*self.pitch.sin(),
-                                      -horizontal*self.yaw.cos()));
-        self.forward=self.target.sub(self.eye).unit();
-        self.right=UP.cross(self.forward).unit();
-        self.up=self.forward.cross(self.right);
+        let horizontal = self.distance * self.pitch.cos();
+        self.eye = self.target.add(Vec3(horizontal * self.yaw.sin(),
+                                        self.distance * self.pitch.sin(),
+                                        -horizontal * self.yaw.cos()));
+        self.forward = self.target.sub(self.eye).unit();
+        self.right = UP.cross(self.forward).unit();
+        self.up = self.forward.cross(self.right);
     }
 
     orbit(self, yaw, pitch) {
-        self.yaw+=yaw;
-        self.pitch=(self.pitch+pitch).clip(0.05,1.35);
+        self.yaw += yaw;
+        self.pitch = (self.pitch + pitch).clip(0.05, 1.35);
         self.update_camera();
     }
 
     zoom(self, metres) {
-        self.distance=(self.distance+metres).clip(4.0,35.0);
+        self.distance = (self.distance + metres).clip(4.0, 35.0);
         self.update_camera();
     }
 
     view(self, p, light) {
-        let d=p.sub(self.eye);
-        return ViewVertex(d.dot(self.right),d.dot(self.up),d.dot(self.forward),light);
+        let d = p.sub(self.eye);
+        return ViewVertex(d.dot(self.right), d.dot(self.up), d.dot(self.forward), light);
     }
 
     project(self, p) {
-        let scale=FOCAL/p.z;
-        return ScreenVertex(WIDTH*0.5+p.x*scale,HEIGHT*0.5-p.y*scale,
-                            p.z,p.light);
+        let scale = FOCAL / p.z;
+        return ScreenVertex(WIDTH * 0.5 + p.x * scale, HEIGHT * 0.5 - p.y * scale,
+                            p.z, p.light);
     }
 
     // Reverse the screen projection to aim a ray through one pixel.
@@ -1082,181 +1237,277 @@ class Renderer {
     }
 
     face(self, box, indices, normal) {
-        let face_center=box.p.add(normal.mul(box.radius(normal)));
+        let face_center = box.p.add(normal.mul(box.radius(normal)));
         if (normal.dot(self.eye.sub(face_center)) <= 0.0) return;
 
         // Carry each corner's light through the near-plane clip.
-        let var poly=[];
-        let base=0.27+0.65*normal.dot(self.sun).max(0.0);
-        for (let var i=0; i<4; ++i) {
-            let p=box.corner(indices[i]);
-            let light=((base+0.035*p.y)*1.20).clip(0.18,1.0);
-            poly.push(self.view(p,light));
+        // Light is capped below 1 so no face shows its color at full brightness.
+        let var poly = [];
+        let base = 0.26 + 0.75 * normal.dot(self.sun).max(0.0);
+        for (let var i = 0; i < 4; ++i) {
+            let p = box.corner(indices[i]);
+            let light = (base + 0.01 * p.y).clip(0.18, 0.95);
+            poly.push(self.view(p, light));
         }
 
-        poly=clip_near(poly);
+        poly = clip_near(poly);
         if (poly.len < 3) return;
 
-        let projected=[];
-        for (let var i=0; i<poly.len; ++i) projected.push(self.project(poly[i]));
+        let projected = [];
+        for (let var i = 0; i < poly.len; ++i) projected.push(self.project(poly[i]));
 
-        for (let var i=1; i+1<projected.len; ++i)
-            self.tris.push(Triangle(projected[0],projected[i],projected[i+1],box.color));
+        let alt = normal.dot(UP) > 0.99 ? box.alt_color : nil;
+        for (let var i = 1; i + 1 < projected.len; ++i)
+            self.tris.push(Triangle(projected[0], projected[i], projected[i + 1], box.color, alt));
     }
 
     box(self, b) {
-        self.face(b,[0,4,6,2],b.axis(0).mul(-1.0));
-        self.face(b,[1,3,7,5],b.axis(0));
-        self.face(b,[0,1,5,4],b.axis(1).mul(-1.0));
-        self.face(b,[2,6,7,3],b.axis(1));
-        self.face(b,[0,2,3,1],b.axis(2).mul(-1.0));
-        self.face(b,[4,5,7,6],b.axis(2));
+        self.face(b, [0, 4, 6, 2], b.axis(0).mul(-1.0));
+        self.face(b, [1, 3, 7, 5], b.axis(0));
+        self.face(b, [0, 1, 5, 4], b.axis(1).mul(-1.0));
+        self.face(b, [2, 6, 7, 3], b.axis(1));
+        self.face(b, [0, 2, 3, 1], b.axis(2).mul(-1.0));
+        self.face(b, [4, 5, 7, 6], b.axis(2));
+    }
+
+    // Find the plane point under pixel px and its per-pixel step over the next 16 pixels.
+    // The point lies on the pixel ray at view depth 1/iz; iz is the triangle's 1/z.
+    tile_chunk(self, px, cy, iz, dzdx) {
+        let eye = self.eye;
+        let f = self.forward;
+        let r = self.right;
+        let u = self.up;
+        let sy = (HEIGHT * 0.5 - cy) / FOCAL;
+        let sx0 = (px + 0.5 - WIDTH * 0.5) / FOCAL;
+        let sx1 = sx0 + 16.0 / FOCAL;
+        let d0 = 1.0 / iz;
+        let d1 = 1.0 / (iz + 16.0 * dzdx);
+        let x0 = eye.x + d0 * (f.x + r.x * sx0 + u.x * sy);
+        let z0 = eye.z + d0 * (f.z + r.z * sx0 + u.z * sy);
+        let x1 = eye.x + d1 * (f.x + r.x * sx1 + u.x * sy);
+        let z1 = eye.z + d1 * (f.z + r.z * sx1 + u.z * sy);
+        self.tx = x0;
+        self.tz = z0;
+        self.dtx = (x1 - x0) * 0.0625;
+        self.dtz = (z1 - z0) * 0.0625;
     }
 
     triangle(self, tri, claim) {
-        let a=tri.a; let b=tri.b; let c=tri.c;
-        let det=(b.x-a.x)*(c.y-a.y)-(c.x-a.x)*(b.y-a.y);
+        let a = tri.a;
+        let b = tri.b;
+        let c = tri.c;
+        let det = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
         if (det.abs() < 1.0e-8) return;
 
         // Interpolate reciprocal depth for the depth test.
         // Interpolate vertex light for shading across the triangle.
-        let inv=1.0/det;
-        let za=1.0/a.z; let zb=1.0/b.z; let zc=1.0/c.z;
-        let dzdx=((zb-za)*(c.y-a.y)-(zc-za)*(b.y-a.y))*inv;
-        let dzdy=((zc-za)*(b.x-a.x)-(zb-za)*(c.x-a.x))*inv;
-        let dldx=((b.light-a.light)*(c.y-a.y)-(c.light-a.light)*(b.y-a.y))*inv;
-        let dldy=((c.light-a.light)*(b.x-a.x)-(b.light-a.light)*(c.x-a.x))*inv;
-        let y0=a.y.min(b.y).min(c.y).floor().max(0);
-        let y1=(a.y.max(b.y).max(c.y).floor()+1).min(HEIGHT);
-        let verts=[a,b,c];
-        let mask_rb=0x00FF00FF;
+        let inv = 1.0 / det;
+        let za = 1.0 / a.z;
+        let zb = 1.0 / b.z;
+        let zc = 1.0 / c.z;
+        let dzdx = ((zb - za) * (c.y - a.y) - (zc - za) * (b.y - a.y)) * inv;
+        let dzdy = ((zc - za) * (b.x - a.x) - (zb - za) * (c.x - a.x)) * inv;
+        let dldx = ((b.light - a.light) * (c.y - a.y) - (c.light - a.light) * (b.y - a.y)) * inv;
+        let dldy = ((c.light - a.light) * (b.x - a.x) - (b.light - a.light) * (c.x - a.x)) * inv;
+        let y0 = a.y.min(b.y).min(c.y).floor().max(0);
+        let y1 = (a.y.max(b.y).max(c.y).floor() + 1).min(HEIGHT);
+        let verts = [a, b, c];
+        let mask_rb = 0x00FF00FF;
 
-        for (let var y=y0; y<y1; ++y) {
-            let cy=y+0.5;
-            let var left=1.0e30; let var right=-1.0e30;
+        // The checkered face is level, so one light value shades both tile colors.
+        let checker = tri.alt != nil;
+        let pix0 = checker ? shade(tri.color, a.light) : 0;
+        let pix1 = checker ? shade(tri.alt, a.light) : 0;
 
-            for (let var e=0; e<3; ++e) {
-                let p=verts[e]; let q=verts[(e+1)%3];
+        for (let var y = y0; y < y1; ++y) {
+            let cy = y + 0.5;
+            let var left = 1.0e30;
+            let var right = -1.0e30;
+
+            for (let var e = 0; e < 3; ++e) {
+                let p = verts[e];
+                let q = verts[(e + 1) % 3];
                 if (cy < p.y.min(q.y) || cy >= p.y.max(q.y)) continue;
-                let x=p.x+(cy-p.y)*(q.x-p.x)/(q.y-p.y);
-                left=left.min(x); right=right.max(x);
+                let x = p.x + (cy - p.y) * (q.x - p.x) / (q.y - p.y);
+                left = left.min(x);
+                right = right.max(x);
             }
 
             if (left >= right) continue;
-            let x0=(left+0.5).floor().max(0);
-            let x1=(right+0.5).floor().min(WIDTH);
+            let x0 = (left + 0.5).floor().max(0);
+            let x1 = (right + 0.5).floor().min(WIDTH);
             if (x0 >= x1) continue;
 
-            self.sbuf.visible(y,x0,x1,claim);
-            for (let var s=0; s<self.sbuf.vis0.len; ++s) {
-                let start=self.sbuf.vis0[s]; let end=self.sbuf.vis1[s];
-                let var iz=za+(start+0.5-a.x)*dzdx+(cy-a.y)*dzdy;
-                let var light=a.light+(start+0.5-a.x)*dldx+(cy-a.y)*dldy;
-                let row=y*WIDTH;
+            self.sbuf.visible(y, x0, x1, claim);
+            for (let var s = 0; s < self.sbuf.vis0.len; ++s) {
+                let start = self.sbuf.vis0[s];
+                let end = self.sbuf.vis1[s];
+                let var iz = za + (start + 0.5 - a.x) * dzdx + (cy - a.y) * dzdy;
+                let var light = a.light + (start + 0.5 - a.x) * dldx + (cy - a.y) * dldy;
+                let row = y * WIDTH;
 
-                for (let var x=start; x<end; ++x) {
-                    let idx=row+x;
+                if (checker) {
+                    // Work in chunks of 16 pixels, most of which lie in a single tile.
+                    let var x = start;
+                    while (x < end) {
+                        let n = (end - x).min(16);
+                        self.tile_chunk(x, cy, iz, dzdx);
+                        let var wx = self.tx;
+                        let var wz = self.tz;
+                        let dwx = self.dtx;
+                        let dwz = self.dtz;
+                        let fx = wx.floor();
+                        let fz = wz.floor();
+                        let uniform = fx == (wx + n * dwx).floor() && fz == (wz + n * dwz).floor();
+                        let stop = x + n;
+
+                        if (uniform) {
+                            let pix = ((fx + fz) & 1) == 1 ? pix1 : pix0;
+                            for (let var k = x; k < stop; ++k) {
+                                let idx = row + k;
+                                if (iz > self.depth.get_f32(idx)) {
+                                    self.depth.set_f32(idx, iz);
+                                    self.fb.set_u32(idx, pix);
+                                }
+                                iz += dzdx;
+                            }
+                        } else {
+                            for (let var k = x; k < stop; ++k) {
+                                let idx = row + k;
+                                if (iz > self.depth.get_f32(idx)) {
+                                    self.depth.set_f32(idx, iz);
+                                    self.fb.set_u32(idx, ((wx.floor() + wz.floor()) & 1) == 1 ? pix1 : pix0);
+                                }
+                                iz += dzdx;
+                                wx += dwx;
+                                wz += dwz;
+                            }
+                        }
+
+                        x = stop;
+                    }
+                    continue;
+                }
+
+                for (let var x = start; x < end; ++x) {
+                    let idx = row + x;
                     if (iz > self.depth.get_f32(idx)) {
-                        self.depth.set_f32(idx,iz);
-                        let l=(light.clip(0.0,1.0)*255.0).floor();
-                        let packed=((tri.color&mask_rb)|((tri.color&0x0000FF00)<<24))*l;
-                        self.fb.set_u32(idx,0xFF000000|((packed>>8)&mask_rb)
-                                                 |((packed>>32)&0xFF00));
+                        self.depth.set_f32(idx, iz);
+                        let l = (light.clip(0.0, 1.0) * 255.0).floor();
+                        let packed = ((tri.color & mask_rb) | ((tri.color & 0x0000FF00) << 24)) * l;
+                        self.fb.set_u32(idx, 0xFF000000 | ((packed >> 8) & mask_rb)
+                                           | ((packed >> 32) & 0xFF00));
                     }
 
-                    iz+=dzdx; light+=dldx;
+                    iz += dzdx;
+                    light += dldx;
                 }
             }
         }
     }
 
     render(self, world) {
-        // Fill the sky before drawing opaque triangles.
-        for (let var y=0; y<HEIGHT; ++y) {
-            let sky=(y.to_f()/HEIGHT.to_f()).clip(0.0,1.0);
-            let r=(34.0+40.0*sky).floor();
-            let g=(55.0+44.0*sky).floor();
-            let b=(80.0+43.0*sky).floor();
-            self.fb.fill_u32(y*WIDTH,WIDTH,0xFF000000|(r<<16)|(g<<8)|b);
+        // Fill the sky with a gradient from zenith blue to a pale horizon.
+        for (let var y = 0; y < HEIGHT; ++y) {
+            let sky = (y.to_f() / (HEIGHT.to_f() * 0.6)).clip(0.0, 1.0);
+            let r = (50.0 + 140.0 * sky).floor();
+            let g = (120.0 + 100.0 * sky).floor();
+            let b = (225.0 + 25.0 * sky).floor();
+            self.fb.fill_u32(y * WIDTH, WIDTH, 0xFF000000 | (r << 16) | (g << 8) | b);
         }
 
-        self.depth.zero_fill(); self.sbuf.reset(); self.tris=[];
-        for (let var i=0; i<world.boxes.len; ++i) self.box(world.boxes[i]);
+        self.depth.zero_fill();
+        self.sbuf.reset();
+        self.tris = [];
+        for (let var i = 0; i < world.boxes.len; ++i) self.box(world.boxes[i]);
 
         // Minimum-depth order plus the farthest-depth claim test makes the
         // S-buffer conservative even when projected boxes overlap.
-        for (let var i=1; i<self.tris.len; ++i) {
-            let t=self.tris[i]; let var j=i;
-            while (j>0 && self.tris[j-1].min_z>t.min_z) {
-                self.tris[j]=self.tris[j-1]; --j;
+        for (let var i = 1; i < self.tris.len; ++i) {
+            let t = self.tris[i];
+            let var j = i;
+            while (j > 0 && self.tris[j - 1].min_z > t.min_z) {
+                self.tris[j] = self.tris[j - 1];
+                --j;
             }
-            self.tris[j]=t;
+            self.tris[j] = t;
         }
 
-        for (let var i=0; i<self.tris.len; ++i) {
-            let safe=i+1==self.tris.len || self.tris[i].max_z<=self.tris[i+1].min_z;
-            self.triangle(self.tris[i],safe);
+        for (let var i = 0; i < self.tris.len; ++i) {
+            let safe = i + 1 == self.tris.len || self.tris[i].max_z <= self.tris[i + 1].min_z;
+            self.triangle(self.tris[i], safe);
         }
     }
 }
 
-let mode=$cmd_get_arg_or(1,"");
-let count_text=mode == "--headless" ? $cmd_get_arg_or(4,"13") : $cmd_get_arg_or(1,"13");
-let box_count=count_text.parse_int(10);
+let mode = $cmd_get_arg_or(1, "");
+let count_text = mode == "--headless" ? $cmd_get_arg_or(4, "31") : $cmd_get_arg_or(1, "31");
+let box_count = count_text.parse_int(10);
 
 if (box_count == nil || box_count < 1 || box_count > 101) {
-    $println("box_count must be from 1 to 101"); $exit(1);
+    $println("box_count must be from 1 to 101");
+    $exit(1);
 }
 
-let world=World(box_count);
-let renderer=Renderer();
+let world = World(box_count);
+let renderer = Renderer();
 
 if (mode == "--headless") {
-    let steps=$cmd_get_arg_or(2,"480").parse_int(10);
+    let steps = $cmd_get_arg_or(2, "480").parse_int(10);
     if (steps == nil || steps < 0) {
-        $println("steps must be a nonnegative integer"); $exit(1);
+        $println("steps must be a nonnegative integer");
+        $exit(1);
     }
 
-    for (let var i=0; i<steps; ++i) world.step();
+    for (let var i = 0; i < steps; ++i) world.step();
 
-    let path=$cmd_get_arg_or(3,"");
+    let path = $cmd_get_arg_or(3, "");
     if (path.len > 0 && path != "-") {
         renderer.render(world);
-        if (!save_tga(path,renderer.image)) {
-            $println("could not save " + path); $exit(1);
+        if (!save_tga(path, renderer.image)) {
+            $println("could not save " + path);
+            $exit(1);
         }
     }
 
-    $println("boxes="+(world.boxes.len-1).to_s()+" sleeping="+world.sleeping_count().to_s()
-             +" wakes="+world.wake_events.to_s()
-             +" contacts="+world.contacts.len.to_s()
-             +" max penetration="+world.max_penetration().format_decimals(5)+" m"
-             +" time="+world.time.format_decimals(3)+" s");
+    $println("boxes=" + (world.boxes.len - 1).to_s() + " sleeping=" + world.sleeping_count().to_s()
+             + " wakes=" + world.wake_events.to_s()
+             + " contacts=" + world.contacts.len.to_s()
+             + " max penetration=" + world.max_penetration().format_decimals(5) + " m"
+             + " time=" + world.time.format_decimals(3) + " s");
     $exit(0);
 }
 
-let window=$window_create(WIDTH,HEIGHT,"3D Box Physics Simulation", 0);
-let var paused=false; let var advance=false;
-let var orbit_left=false; let var orbit_right=false;
-let var orbit_up=false; let var orbit_down=false;
-let var zoom_in=false; let var zoom_out=false;
-let var enter_down = false; let var throw_down = false;
-let var push_down = false; let var mouse_x = 0; let var mouse_y = 0;
-let var last_ms=$time_current_ms(); let var accumulator=0.0;
-let var frame=0;
+let window = $window_create(WIDTH, HEIGHT, "3D Box Physics Simulation", 0);
+let var paused = false;
+let var advance = false;
+let var orbit_left = false;
+let var orbit_right = false;
+let var orbit_up = false;
+let var orbit_down = false;
+let var zoom_in = false;
+let var zoom_out = false;
+let var enter_down = false;
+let var throw_down = false;
+let var push_down = false;
+let var mouse_x = 0;
+let var mouse_y = 0;
+let var last_ms = $time_current_ms();
+let var accumulator = 0.0;
+let var frame = 0;
 
 loop {
-    let var quit=false;
+    let var quit = false;
 
     loop {
-        let event=$actor_poll();
+        let event = $actor_poll();
         if (event == nil) break;
         if (!(event instanceof UIEvent)) continue;
-        if (event.kind == 'CLOSE_WINDOW') quit=true;
+        if (event.kind == 'CLOSE_WINDOW') quit = true;
         if (event.kind == 'KEY_DOWN') {
-            if (event.key == 'ESCAPE' || event.key == 'Q') quit=true;
-            else if (event.key == 'SPACE') paused=!paused;
-            else if (event.key == 'N') advance=true;
+            if (event.key == 'ESCAPE' || event.key == 'Q') quit = true;
+            else if (event.key == 'SPACE') paused = !paused;
+            else if (event.key == 'N') advance = true;
             else if (event.key == 'R') world.reset();
             else if (event.key == 'RETURN') {
                 if (!enter_down) world.spawn_random_box();
@@ -1271,81 +1522,88 @@ loop {
                 }
                 throw_down = true;
             }
-            else if (event.key == 'LEFT') orbit_left=true;
-            else if (event.key == 'RIGHT') orbit_right=true;
-            else if (event.key == 'UP') orbit_up=true;
-            else if (event.key == 'DOWN') orbit_down=true;
-            else if (event.key == 'W') zoom_in=true;
-            else if (event.key == 'S') zoom_out=true;
+            else if (event.key == 'LEFT') orbit_left = true;
+            else if (event.key == 'RIGHT') orbit_right = true;
+            else if (event.key == 'UP') orbit_up = true;
+            else if (event.key == 'DOWN') orbit_down = true;
+            else if (event.key == 'W') zoom_in = true;
+            else if (event.key == 'S') zoom_out = true;
         }
         else if (event.kind == 'KEY_UP') {
             if (event.key == 'RETURN') enter_down = false;
             else if (event.key == 'T') throw_down = false;
-            else if (event.key == 'LEFT') orbit_left=false;
-            else if (event.key == 'RIGHT') orbit_right=false;
-            else if (event.key == 'UP') orbit_up=false;
-            else if (event.key == 'DOWN') orbit_down=false;
-            else if (event.key == 'W') zoom_in=false;
-            else if (event.key == 'S') zoom_out=false;
+            else if (event.key == 'LEFT') orbit_left = false;
+            else if (event.key == 'RIGHT') orbit_right = false;
+            else if (event.key == 'UP') orbit_up = false;
+            else if (event.key == 'DOWN') orbit_down = false;
+            else if (event.key == 'W') zoom_in = false;
+            else if (event.key == 'S') zoom_out = false;
         }
         else if (event.kind == 'MOUSE_DOWN' && event.button == 'LEFT') {
-            push_down = true; mouse_x = event.x; mouse_y = event.y;
+            push_down = true;
+            mouse_x = event.x;
+            mouse_y = event.y;
             world.poke(renderer.eye, renderer.ray_direction(event.x, event.y), POKE_IMPULSE);
         }
         else if (event.kind == 'MOUSE_UP' && event.button == 'LEFT') push_down = false;
-        else if (event.kind == 'MOUSE_MOVE') { mouse_x = event.x; mouse_y = event.y; }
+        else if (event.kind == 'MOUSE_MOVE') {
+            mouse_x = event.x;
+            mouse_y = event.y;
+        }
     }
 
     if (quit) break;
 
     // Accumulate real time into fixed physics steps.
-    let now=$time_current_ms();
-    let elapsed=((now-last_ms).to_f()*0.001).min(0.05);
-    last_ms=now;
-    if (!paused) accumulator=(accumulator+elapsed).min(0.05);
+    let now = $time_current_ms();
+    let elapsed = ((now - last_ms).to_f() * 0.001).min(0.05);
+    last_ms = now;
+    if (!paused) accumulator = (accumulator + elapsed).min(0.05);
 
-    let yaw=((orbit_right ? 1.0 : 0.0)-(orbit_left ? 1.0 : 0.0))*ORBIT_SPEED*elapsed;
-    let pitch=((orbit_up ? 1.0 : 0.0)-(orbit_down ? 1.0 : 0.0))*ORBIT_SPEED*elapsed;
+    let yaw = ((orbit_right ? 1.0 : 0.0) - (orbit_left ? 1.0 : 0.0)) * ORBIT_SPEED * elapsed;
+    let pitch = ((orbit_up ? 1.0 : 0.0) - (orbit_down ? 1.0 : 0.0)) * ORBIT_SPEED * elapsed;
     let var camera_changed = false;
     if (yaw != 0.0 || pitch != 0.0) {
-        renderer.orbit(yaw,pitch);
+        renderer.orbit(yaw, pitch);
         camera_changed = true;
     }
 
-    let zoom=((zoom_out ? 1.0 : 0.0)-(zoom_in ? 1.0 : 0.0))*ZOOM_SPEED*elapsed;
+    let zoom = ((zoom_out ? 1.0 : 0.0) - (zoom_in ? 1.0 : 0.0)) * ZOOM_SPEED * elapsed;
     if (zoom != 0.0) {
         renderer.zoom(zoom);
         camera_changed = true;
     }
 
-    let physics_start=$time_current_ms();
-    let var steps=0;
+    let physics_start = $time_current_ms();
+    let var steps = 0;
     let push_ray = renderer.ray_direction(mouse_x, mouse_y);
 
     // Apply the held push per physics step so its strength ignores framerate.
     let var run_step = advance || accumulator >= STEP;
     while (run_step) {
         if (push_down) world.poke(renderer.eye, push_ray, PUSH_FORCE * STEP);
-        world.step(); steps+=1;
-        if (advance) advance=false; else accumulator-=STEP;
+        world.step();
+        steps += 1;
+        if (advance) advance = false;
+        else accumulator -= STEP;
         run_step = accumulator >= STEP;
     }
 
     // Reuse the framebuffer when neither the scene nor the camera moved.
-    let render_start=$time_current_ms();
+    let render_start = $time_current_ms();
     if (camera_changed || world.render_dirty) {
         renderer.render(world);
         world.render_dirty = false;
     }
-    let render_end=$time_current_ms();
-    $window_draw_frame(window,renderer.fb);
+    let render_end = $time_current_ms();
+    $window_draw_frame(window, renderer.fb);
 
-    $println("frame="+frame.to_s()+" steps="+steps.to_s()
-             +" boxes="+(world.boxes.len-1).to_s()
-             +" sleeping="+world.sleeping_count().to_s()
-             +" physics="+(render_start-physics_start).to_s()+" ms"
-             +" render="+(render_end-render_start).to_s()+" ms");
-    frame+=1;
+    $println("frame=" + frame.to_s() + " steps=" + steps.to_s()
+             + " boxes=" + (world.boxes.len - 1).to_s()
+             + " sleeping=" + world.sleeping_count().to_s()
+             + " physics=" + (render_start - physics_start).to_s() + " ms"
+             + " render=" + (render_end - render_start).to_s() + " ms");
+    frame += 1;
 
     $actor_sleep(5);
 }
