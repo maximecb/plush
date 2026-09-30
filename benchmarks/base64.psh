@@ -1,0 +1,48 @@
+// Base64 encoding and decoding throughput
+//
+// Times base64_encode() and base64_decode() over a buffer of random bytes
+// and reports the throughput in MB/s of binary data.
+
+from random import Xoshiro128;
+from base64 import base64_encode, base64_decode;
+
+let NUM_BYTES = 256 * 1024;
+let NUM_ITERS = 120;
+
+fun main()
+{
+    let rng = Xoshiro128(1337);
+    let data = ByteArray.with_size(NUM_BYTES);
+    for (let var i = 0; i < NUM_BYTES; ++i)
+        data[i] = rng.int(0, 255);
+
+    // Check that the data survives a round trip before timing anything
+    let text = base64_encode(data);
+    let decoded = base64_decode(text);
+    assert(decoded != nil);
+    assert(decoded.to_hex() == data.to_hex());
+
+    let enc_start = $time_current_ms();
+    for (let var i = 0; i < NUM_ITERS; ++i) {
+        let out = base64_encode(data);
+        assert(out.len == text.len);
+    }
+    let enc_ms = $time_current_ms() - enc_start;
+
+    let dec_start = $time_current_ms();
+    for (let var i = 0; i < NUM_ITERS; ++i) {
+        let out = base64_decode(text);
+        assert(out.len == NUM_BYTES);
+    }
+    let dec_ms = $time_current_ms() - dec_start;
+
+    let mb = (NUM_BYTES * NUM_ITERS).to_f() / 1000000.0;
+    let enc_rate = mb / (enc_ms.max(1).to_f() / 1000.0);
+    let dec_rate = mb / (dec_ms.max(1).to_f() / 1000.0);
+
+    $println("data size: " + NUM_BYTES.comma_sep() + " bytes, " + NUM_ITERS.to_s() + " iterations");
+    $println("encode: " + enc_ms.to_s() + " ms, " + enc_rate.format_decimals(2) + " MB/s");
+    $println("decode: " + dec_ms.to_s() + " ms, " + dec_rate.format_decimals(2) + " MB/s");
+}
+
+main();

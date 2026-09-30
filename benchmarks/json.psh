@@ -1,0 +1,111 @@
+// JSON parsing and serialization throughput
+//
+// Builds a random tree of objects and arrays, with strings, integers and
+// floats at the leaves, then times parse_json() and format_json() over it
+// and reports the throughput in MB/s of JSON text.
+
+from random import Xoshiro128;
+from json import parse_json, format_json, Error;
+
+let DEPTH = 6;
+let FANOUT = 4;
+let NUM_ITERS = 240;
+
+let rng = Xoshiro128(1337);
+
+fun gen_string()
+{
+    let len = rng.int(3, 16);
+    let buf = ByteArray.with_size(0);
+
+    for (let var i = 0; i < len; ++i) {
+        // A few characters need escaping when serialized, one is multibyte
+        let r = rng.int(0, 40);
+        if (r == 0)
+            buf.push_u8(34);
+        else if (r == 1)
+            buf.push_u8(10);
+        else if (r == 2)
+            buf.push_u8(92);
+        else if (r == 3)
+            buf.push_string("é");
+        else
+            buf.push_u8(rng.int(32, 126));
+    }
+
+    return String.from_utf8(buf, 0, buf.len);
+}
+
+fun gen_leaf()
+{
+    let r = rng.int(0, 3);
+
+    if (r == 0)
+        return gen_string();
+    if (r == 1)
+        return rng.int(-1000000, 1000000);
+    if (r == 2)
+        return rng.float(-1000.0, 1000.0);
+
+    return rng.int(0, 1) == 0;
+}
+
+fun gen_tree(depth)
+{
+    if (depth == 0)
+        return gen_leaf();
+
+    if (rng.int(0, 1) == 0) {
+        let obj = {};
+        for (let var i = 0; i < FANOUT; ++i)
+            obj["key" + i.to_s()] = gen_tree(depth - 1);
+        return obj;
+    }
+
+    let arr = [];
+    for (let var i = 0; i < FANOUT; ++i)
+        arr.push(gen_tree(depth - 1));
+    return arr;
+}
+
+fun main()
+{
+    // The root is always an object, so there are no shortcuts at depth 6
+    let tree = {};
+    for (let var i = 0; i < FANOUT; ++i)
+        tree["key" + i.to_s()] = gen_tree(DEPTH - 1);
+
+    let text = format_json(tree);
+    let num_bytes = text.len;
+
+    // Check that the text survives a round trip before timing anything
+    let parsed = parse_json(text);
+    assert(!(parsed instanceof Error));
+    assert(format_json(parsed) == text);
+
+    let var total_bytes = 0;
+
+    let parse_start = $time_current_ms();
+    for (let var i = 0; i < NUM_ITERS; ++i) {
+        let val = parse_json(text);
+        total_bytes = total_bytes + num_bytes;
+    }
+    let parse_ms = $time_current_ms() - parse_start;
+
+    let fmt_start = $time_current_ms();
+    for (let var i = 0; i < NUM_ITERS; ++i) {
+        let out = format_json(tree);
+        assert(out.len == num_bytes);
+    }
+    let fmt_ms = $time_current_ms() - fmt_start;
+
+    let mb = total_bytes.to_f() / 1000000.0;
+    let parse_rate = mb / (parse_ms.max(1).to_f() / 1000.0);
+    let fmt_rate = mb / (fmt_ms.max(1).to_f() / 1000.0);
+
+    $println("document size: " + num_bytes.comma_sep() + " bytes, " + NUM_ITERS.to_s() + " iterations");
+    $println("parse:  " + parse_ms.to_s() + " ms, " + parse_rate.format_decimals(2) + " MB/s");
+    $println("format: " + fmt_ms.to_s() + " ms, " + fmt_rate.format_decimals(2) + " MB/s");
+}
+
+main();
