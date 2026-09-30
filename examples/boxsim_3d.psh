@@ -1181,17 +1181,20 @@ fun shade(color, light) {
 
 // Draw lines of help text in white on black and return them as an image.
 fun make_hud(lines) {
-    let font = Font(2, COLOR_WHITE, COLOR_BLACK);
+    // Largest scale whose character cell is still 11 pixels wide
+    let font = Font(1.57, COLOR_WHITE, COLOR_BLACK);
     let pad = 6;
     let var text_w = 0;
     for (let var i = 0; i < lines.len; ++i) text_w = text_w.max(lines[i].len * font.char_w);
 
-    let img = Image(text_w + 2 * pad, lines.len * (font.char_h + pad) + pad);
+    // The bar spans the window and the text is centered in it
+    let x0 = (WIDTH - text_w).idiv(2);
+    let img = Image(WIDTH, lines.len * (font.char_h + pad) + pad);
     img.clear(COLOR_BLACK);
     for (let var i = 0; i < lines.len; ++i) {
         let y = pad + i * (font.char_h + pad);
         for (let var j = 0; j < lines[i].len; ++j)
-            font.draw_char(img, pad + j * font.char_w, y, lines[i].char_at(j));
+            font.draw_char(img, x0 + j * font.char_w, y, lines[i].char_at(j));
     }
 
     return img;
@@ -1201,8 +1204,7 @@ class Renderer {
     init(self) {
         self.image = Image(WIDTH, HEIGHT);
         self.fb = self.image.bytes;
-        self.hud = make_hud(["Click: push  ENTER: drop  T: throw",
-                             "Arrows: orbit  W/S: zoom  R: reset"]);
+        self.hud = make_hud(["Click: push  ENTER: drop  T: throw  Arrows: orbit  W/S: zoom  R: reset"]);
         self.depth = ByteArray.with_size(WIDTH * HEIGHT * 4);
         self.sbuf = SBuffer();
         self.tris = [];

@@ -412,24 +412,83 @@ let char_map = {
     "＿": [0,0,0,0,0,0,0,0,0,0,127,0],
 };
 
+// For each of n_out output pixels along an axis, find the first source pixel
+// it overlaps and the fraction of the output pixel covered by each one
+fun axis_weights(n_out, n_src)
+{
+    let starts = [];
+    let weights = [];
+    let ratio = n_src.to_f() / n_out.to_f();
+
+    for (let var i = 0; i < n_out; ++i) {
+        let lo = i.to_f() * ratio;
+        let hi = (i + 1).to_f() * ratio;
+        let first = lo.floor();
+        let last = hi.ceil().min(n_src);
+        let w = [];
+
+        for (let var k = first; k < last; ++k) {
+            let overlap = hi.min((k + 1).to_f()) - lo.max(k.to_f());
+            w.push(overlap / (hi - lo));
+        }
+
+        starts.push(first);
+        weights.push(w);
+    }
+
+    return [starts, weights];
+}
+
 class Font
 {
+    // The scale can be fractional. The character cell is rounded up to whole
+    // pixels and glyphs are resampled to fill it.
     // Characters are blitted opaquely, so bg_color should match the
     // background the text is drawn on
     init(self, scale, color, bg_color)
     {
-        assert(scale instanceof Int64);
+        assert(scale instanceof Int64 || scale instanceof Float64);
         assert(color instanceof Int64);
         assert(bg_color instanceof Int64);
 
         self.scale = scale;
         self.color = color;
         self.bg_color = bg_color;
-        self.char_w = CHAR_W * scale;
-        self.char_h = CHAR_H * scale;
+        self.char_w = (CHAR_W.to_f() * scale.to_f()).ceil();
+        self.char_h = (CHAR_H.to_f() * scale.to_f()).ceil();
+
+        let cols = axis_weights(self.char_w, CHAR_W);
+        let rows = axis_weights(self.char_h, CHAR_H);
+        self.col_start = cols[0];
+        self.col_weights = cols[1];
+        self.row_start = rows[0];
+        self.row_weights = rows[1];
 
         // Cache of rendered characters
         self.cache = {};
+    }
+
+    // Blend the text color over the background by a coverage in [0, 1]
+    mix(self, cov)
+    {
+        // Steepen edges by pushing coverage away from 0.5. Fully covered
+        // and empty pixels are unchanged, so integer scales are unaffected.
+        let cov = (cov - 0.5) * 1.55 + 0.5;
+        if (cov <= 0.0) return self.bg_color;
+        if (cov >= 0.999999) return self.color;
+
+        let fg = self.color;
+        let bg = self.bg_color;
+        let var out = 0xFF000000;
+
+        for (let var shift = 0; shift < 24; shift += 8) {
+            let b = (bg >> shift) & 0xFF;
+            let f = (fg >> shift) & 0xFF;
+            let c = b + ((f - b).to_f() * cov + 0.5).floor();
+            out = out | (c << shift);
+        }
+
+        return out;
     }
 
     // Render a single character into a bitmap image
@@ -445,22 +504,29 @@ class Font
             bitmap = char_map[ch];
         }
 
-        let img = Image(CHAR_W * self.scale, CHAR_H * self.scale);
-        img.clear(self.bg_color);
+        let img = Image(self.char_w, self.char_h);
 
-        for (let var j = 0; j < CHAR_H; ++j) {
-            let row = bitmap[j];
+        // Each output pixel gets the area-weighted share of lit source pixels
+        for (let var oy = 0; oy < self.char_h; ++oy) {
+            let wy = self.row_weights[oy];
+            let sy = self.row_start[oy];
 
-            for (let var i = 0; i < CHAR_W; ++i) {
-                let mask = 1 << i;
-                if ((row & mask) != 0) {
-                    // Fill a rectangle of size scale x scale
-                    for (let var y = 0; y < self.scale; ++y) {
-                        for (let var x = 0; x < self.scale; ++x) {
-                            img.set_pixel(i * self.scale + x, j * self.scale + y, self.color);
+            for (let var ox = 0; ox < self.char_w; ++ox) {
+                let wx = self.col_weights[ox];
+                let sx = self.col_start[ox];
+                let var cov = 0.0;
+
+                for (let var j = 0; j < wy.len; ++j) {
+                    let row = bitmap[sy + j];
+
+                    for (let var i = 0; i < wx.len; ++i) {
+                        if (((row >> (sx + i)) & 1) != 0) {
+                            cov += wy[j] * wx[i];
                         }
                     }
                 }
+
+                img.set_pixel(ox, oy, self.mix(cov));
             }
         }
 
