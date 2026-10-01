@@ -1611,7 +1611,7 @@ impl Actor
             // Get the name of the function and its source position
             let vm = self.vm.lock().unwrap();
             let fun = &vm.prog.funs[&fun_id];
-            let fun_name = fun.name.clone();
+            let fun_name = format!("{}({})", fun.name, fun.params.join(", "));
             let fun_pos = fun.pos;
             let fun_class_id = fun.class_id;
 
