@@ -13,10 +13,17 @@
 // and older messages load as you scroll down. Admins can press F12 to see
 // server information, then F1 to return to the guestbook.
 //
+// F2 shows the pixel canvas, a large image that anyone can draw on without
+// an account: pick a color, then click pixels to paint them. The arrow keys
+// move around the canvas, and + and - zoom in and out. F1 returns to the
+// guestbook.
+//
 // The server speaks one JSON object per line in each direction. Passwords
 // are never sent: the client sends a SHA-256 hash of the password instead.
+// The canvas is fetched as tiles, each a TGA file sent as raw bytes after
+// the response that announces it.
 
-from image import Image, rgb;
+from image import Image, rgb, RAINBOW12, decode_tga;
 from json import parse_json, format_json;
 from sha256 import sha256;
 from ./monogram_font import Font;
@@ -39,6 +46,9 @@ let MIN_PASS_LEN = 4;
 // Messages fetched per request, and how often to check for new ones
 let PAGE_SIZE = 32;
 let POLL_MS = 5000;
+
+// Most raw data accepted after a response, in bytes
+let MAX_BLOB = 16 << 20;
 
 // Prefix hashed with passwords, which the server expects
 let HASH_PREFIX = "plush_guestbook:";
@@ -166,6 +176,56 @@ let PANEL_Y = 208;
 let MARGIN = 16;
 let SCROLLBAR_W = 12;
 let TEXT_PAD = 12;
+
+// Tabs at the bottom of the screen, one per view, in rainbow colors
+let TABS = [
+    {key: "F1", label: "guestbook", screen: "main"},
+    {key: "F2", label: "canvas", screen: "canvas"},
+];
+let FOOTER_H = 28;
+let FOOTER_Y = HEIGHT - FOOTER_H - 8;
+
+// Layout of the canvas screen: the square view of the canvas on the left,
+// and the colors on its right
+let VIEW_SIZE = 640;
+let VIEW_X = MARGIN;
+let VIEW_Y = 52;
+let SIDE_X = VIEW_X + VIEW_SIZE + 16;
+let SIDE_W = WIDTH - MARGIN - SIDE_X;
+let SWATCH = 52;
+let SWATCH_GAP = 8;
+
+// The color picker: a square of saturations and values for the current
+// hue, drawn as blocks of PICK_BLOCK pixels, above a bar of hues
+let PICK_Y = VIEW_Y + 4 * (SWATCH + SWATCH_GAP) + 8;
+let PICK_H = 136;
+let PICK_BLOCK = 4;
+let HUE_Y = PICK_Y + PICK_H + 8;
+let HUE_H = 20;
+
+// Sizes of a canvas pixel on screen, in pixels, from zoomed out to zoomed
+// in. All divide VIEW_SIZE. The view starts at zoom DEFAULT_ZOOM, and
+// drawing needs pixels big enough to click, from zoom MIN_DRAW_ZOOM up.
+let ZOOMS = [1, 2, 5, 10, 20];
+let DEFAULT_ZOOM = 3;
+let MIN_DRAW_ZOOM = 2;
+
+// How often to ask for the pixels others changed, the minimum time between
+// the pixel changes we send, kept under the server's limit, and how many
+// clicks can wait to be sent
+let CANVAS_POLL_MS = 1000;
+let SET_INTERVAL_MS = 220;
+let MAX_QUEUED_SETS = 8;
+
+// Colors to paint with: the 12-band rainbow, then black, grey, white and
+// brown
+let PALETTE = [];
+for (let var i = 0; i < RAINBOW12.len; ++i)
+    PALETTE.push(RAINBOW12[i]);
+PALETTE.push(rgb(0, 0, 0));
+PALETTE.push(rgb(128, 128, 128));
+PALETTE.push(rgb(255, 255, 255));
+PALETTE.push(rgb(139, 69, 19));
 
 // Characters per line in the compose box and the message list
 let COMPOSE_COLS = (WIDTH - 2 * MARGIN - 2 * TEXT_PAD).idiv(CHAR_W);
@@ -315,6 +375,54 @@ fun password_hash(password)
     return sha256(HASH_PREFIX + password).to_hex();
 }
 
+// Converts a hue in [0, 360) and a saturation and value in [0, 1] to a color
+fun hsv_to_rgb(h, s, v)
+{
+    let sector = (h / 60.0).floor();
+    let f = h / 60.0 - sector;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+
+    // Scales a component to [0, 255]
+    fun byte(c) {
+        return (c * 255.0 + 0.5).floor().clip(0, 255);
+    }
+
+    let i = sector % 6;
+    if (i == 0) return rgb(byte(v), byte(t), byte(p));
+    if (i == 1) return rgb(byte(q), byte(v), byte(p));
+    if (i == 2) return rgb(byte(p), byte(v), byte(t));
+    if (i == 3) return rgb(byte(p), byte(q), byte(v));
+    if (i == 4) return rgb(byte(t), byte(p), byte(v));
+    return rgb(byte(v), byte(p), byte(q));
+}
+
+// Converts a color to its hue, saturation and value, see hsv_to_rgb
+fun rgb_to_hsv(color)
+{
+    let r = ((color >> 16) & 0xFF) / 255.0;
+    let g = ((color >> 8) & 0xFF) / 255.0;
+    let b = (color & 0xFF) / 255.0;
+    let hi = r.max(g).max(b);
+    let d = hi - r.min(g).min(b);
+    let var h = 0.0;
+
+    if (d > 0.0) {
+        if (hi == r)
+            h = 60.0 * ((g - b) / d);
+        else if (hi == g)
+            h = 60.0 * ((b - r) / d + 2.0);
+        else
+            h = 60.0 * ((r - g) / d + 4.0);
+
+        if (h < 0.0)
+            h = h + 360.0;
+    }
+
+    return {h: h, s: hi > 0.0 ? d / hi : 0.0, v: hi};
+}
+
 // Draws a filled ellipse
 fun fill_ellipse(img, cx, cy, rx, ry, color)
 {
@@ -450,6 +558,12 @@ fun net_actor(addr, gen)
     let buf = ByteArray.with_size(1 << 20);
     let var len = 0;
 
+    // Raw data being read, which follows a message with a `bytes` field,
+    // and is forwarded with it in its `data` field
+    let var blob = nil;
+    let var blob_len = 0;
+    let var blob_msg = nil;
+
     loop {
         let num_read = $net_read(sock, buf, len, buf.len - len);
 
@@ -458,18 +572,49 @@ fun net_actor(addr, gen)
 
         len = len + num_read;
 
-        // Forward every complete line
+        // Forward every complete line, and the raw data after it, if any
         let var start = 0;
-        for (let var i = 0; i < len; ++i) {
-            if (buf[i] == 10) {
-                let line = String.from_utf8(buf, start, i - start);
-                start = i + 1;
+        let var i = 0;
 
-                if (line != nil) {
-                    let msg = parse_json(line);
-                    if (msg instanceof Dict)
-                        $actor_send(parent, {net: "msg", gen: gen, msg: msg});
+        while (i < len) {
+            if (blob != nil) {
+                let num = (len - i).min(blob.len - blob_len);
+                blob.memcpy(blob_len, buf, i, num);
+                blob_len = blob_len + num;
+                i = i + num;
+                start = i;
+
+                if (blob_len == blob.len) {
+                    blob_msg.data = blob;
+                    $actor_send(parent, {net: "msg", gen: gen, msg: blob_msg});
+                    blob = nil;
                 }
+
+                continue;
+            }
+
+            if (buf[i] != 10) {
+                i = i + 1;
+                continue;
+            }
+
+            let line = String.from_utf8(buf, start, i - start);
+            i = i + 1;
+            start = i;
+
+            if (line == nil)
+                continue;
+
+            let msg = parse_json(line);
+            if (!(msg instanceof Dict))
+                continue;
+
+            if (msg.has("bytes") && msg.bytes instanceof Int64 && msg.bytes > 0 && msg.bytes <= MAX_BLOB) {
+                blob = ByteArray.with_size(msg.bytes);
+                blob_len = 0;
+                blob_msg = msg;
+            } else {
+                $actor_send(parent, {net: "msg", gen: gen, msg: msg});
             }
         }
 
@@ -490,7 +635,7 @@ class App
     {
         self.addr = addr;
         self.frame = Image(WIDTH, HEIGHT);
-        self.panel = Image(WIDTH - 2 * MARGIN, HEIGHT - PANEL_Y - MARGIN);
+        self.panel = Image(WIDTH - 2 * MARGIN, FOOTER_Y - 8 - PANEL_Y);
         self.fonts = {};
 
         self.screen = "intro";
@@ -543,6 +688,52 @@ class App
         // Id of the message the admin is about to delete, which then shows
         // the categories to delete it as
         self.deleting = nil;
+
+        // Our copy of the canvas, created once the server tells its size,
+        // and for each tile, the server's change counter when we fetched it,
+        // or -1 if it has to be fetched, and whether a request is on its way
+        self.canvas = nil;
+        self.canvas_size = 0;
+        self.tile_size = 0;
+        self.tiles = [];
+
+        // Epoch and seq of the last poll response, which the next poll sends
+        self.canvas_epoch = nil;
+        self.canvas_seq = nil;
+        self.canvas_polling = false;
+        self.last_poll_ms = 0;
+        self.canvas_error = "";
+
+        // Pixels we painted that are waiting to be sent
+        self.set_queue = [];
+        self.last_set_ms = 0;
+
+        // Part of the canvas in view: zoom level, top-left canvas pixel, and
+        // the image of it at that zoom, redrawn when view_dirty is set
+        self.zoom = DEFAULT_ZOOM;
+        self.view_x = 0;
+        self.view_y = 0;
+        self.view_img = Image(VIEW_SIZE, VIEW_SIZE);
+        self.view_dirty = true;
+
+        // Canvas pixel under the mouse, or nil
+        self.hover = nil;
+
+        // Color to paint with: one of the palette's, or the custom color
+        // made with the color picker. Then the custom color's place in the
+        // picker, the picker's images, and which part of the picker is
+        // being dragged, if any.
+        self.color = PALETTE[0];
+        self.custom = self.color;
+        self.custom_selected = false;
+        self.hsv = rgb_to_hsv(self.custom);
+        self.sv_img = Image(SIDE_W, PICK_H);
+        self.sv_hue = nil;
+        self.hue_img = Image(SIDE_W, HUE_H);
+        self.pick_drag = nil;
+
+        for (let var x = 0; x < SIDE_W; x = x + PICK_BLOCK)
+            self.hue_img.fill_rect(x, 0, PICK_BLOCK, HUE_H, hsv_to_rgb(360.0 * x / SIDE_W, 1.0, 1.0));
     }
 
     // Returns a font for a text color on a background color
@@ -619,6 +810,7 @@ class App
         self.pending = [];
         self.loading_older = false;
         self.dirty = true;
+        self.reset_canvas_requests();
 
         let addr = self.addr;
         let gen = self.gen;
@@ -722,6 +914,7 @@ class App
             self.is_admin = false;
             self.admin_info = nil;
             self.admin_error = "";
+            self.reset_canvas_requests();
 
             // A login request in flight is lost
             if (self.modal && self.modal_status != "")
@@ -847,6 +1040,26 @@ class App
             return;
         }
 
+        if (req.type == "canvas_poll") {
+            self.on_canvas_poll(res);
+            return;
+        }
+
+        if (req.type == "canvas_tile") {
+            self.on_canvas_tile(req, res);
+            return;
+        }
+
+        if (req.type == "canvas_set") {
+            // A change the server dropped is undone, unless painted over
+            let idx = info.y * self.canvas_size + info.x;
+            if (!res.ok && self.canvas.bytes.get_u32(idx) == info.color) {
+                self.canvas.bytes.set_u32(idx, info.prev);
+                self.view_dirty = true;
+            }
+            return;
+        }
+
         if (req.type == "stats" && res.ok) {
             self.total_views = res.total_views;
             self.messages_today = res.has("messages_today") ? res.messages_today : nil;
@@ -951,6 +1164,309 @@ class App
         }
 
         self.dirty = true;
+    }
+
+    // Shows the canvas, which update() then keeps up to date
+    enter_canvas(self)
+    {
+        self.screen = "canvas";
+        self.drag_offset = nil;
+        self.canvas_error = "";
+        self.last_poll_ms = 0;
+        self.dirty = true;
+    }
+
+    // Returns from the canvas to the guestbook
+    leave_canvas(self)
+    {
+        self.screen = "main";
+        self.pick_drag = nil;
+        self.hover = nil;
+        self.dirty = true;
+        self.request_newer();
+    }
+
+    // Forgets the canvas requests that were lost with the connection, and
+    // undoes the pixels painted that were not sent
+    reset_canvas_requests(self)
+    {
+        self.canvas_polling = false;
+
+        for (let var i = 0; i < self.tiles.len; ++i)
+            self.tiles[i].requested = false;
+
+        for (let var i = self.set_queue.len - 1; i >= 0; i = i - 1) {
+            let set = self.set_queue[i];
+            self.canvas.bytes.set_u32(set.y * self.canvas_size + set.x, set.prev);
+        }
+
+        self.set_queue = [];
+        self.view_dirty = true;
+    }
+
+    // Asks the server for the pixels that changed since the last poll
+    poll_canvas(self)
+    {
+        let req = {type: "canvas_poll"};
+
+        if (self.canvas_epoch != nil) {
+            req.epoch = self.canvas_epoch;
+            req.since = self.canvas_seq;
+        }
+
+        if (self.send(req, nil)) {
+            self.canvas_polling = true;
+            self.last_poll_ms = $time_current_ms();
+        }
+    }
+
+    // Creates our copy of the canvas, with every tile still to fetch, and
+    // the view on its middle
+    create_canvas(self, size, tile_size)
+    {
+        self.canvas = Image(size, size);
+        self.canvas.clear(FIELD);
+        self.canvas_size = size;
+        self.tile_size = tile_size;
+        self.canvas_epoch = nil;
+        self.set_queue = [];
+
+        self.tiles = [];
+        let per_row = size.idiv(tile_size);
+        for (let var i = 0; i < per_row * per_row; ++i)
+            self.tiles.push({have: -1, requested: false});
+
+        self.zoom = DEFAULT_ZOOM;
+        self.view_x = (size - self.visible()).idiv(2);
+        self.view_y = self.view_x;
+        self.clamp_view();
+    }
+
+    // Handles the response to a poll: either the pixels that changed, or,
+    // when the server can't tell which did, the change counter of each tile
+    on_canvas_poll(self, res)
+    {
+        self.canvas_polling = false;
+
+        if (!res.ok) {
+            // Servers older than the canvas don't know the request
+            self.canvas_error = res.error == "unknown request type" ? "no canvas here" : res.error;
+            return;
+        }
+
+        if (self.canvas == nil || self.canvas_size != res.size || self.tile_size != res.tile_size)
+            self.create_canvas(res.size, res.tile_size);
+
+        if (res.has("tiles")) {
+            // After a server restart, any tile may have changed
+            let restarted = self.canvas_epoch != res.epoch;
+
+            for (let var i = 0; i < self.tiles.len && i < res.tiles.len; ++i) {
+                if (restarted || self.tiles[i].have != res.tiles[i])
+                    self.tiles[i].have = -1;
+            }
+        } else {
+            let pixels = res.pixels;
+
+            for (let var i = 0; i + 2 < pixels.len; i = i + 3) {
+                if (pixels[i] < self.canvas_size && pixels[i + 1] < self.canvas_size)
+                    self.canvas.set_pixel(pixels[i], pixels[i + 1], rgb(0, 0, 0) | pixels[i + 2]);
+            }
+
+            if (pixels.len > 0)
+                self.view_dirty = true;
+        }
+
+        self.canvas_epoch = res.epoch;
+        self.canvas_seq = res.seq;
+        self.request_tiles();
+    }
+
+    // Requests the tiles that have to be fetched, nearest to the middle of
+    // the view first
+    request_tiles(self)
+    {
+        let per_row = self.canvas_size.idiv(self.tile_size);
+        let mid_x = self.view_x + self.visible().idiv(2);
+        let mid_y = self.view_y + self.visible().idiv(2);
+
+        // Distance from the middle of a tile to the middle of the view
+        let dists = [];
+        for (let var i = 0; i < self.tiles.len; ++i) {
+            let dx = (i % per_row) * self.tile_size + self.tile_size.idiv(2) - mid_x;
+            let dy = i.idiv(per_row) * self.tile_size + self.tile_size.idiv(2) - mid_y;
+            dists.push(dx * dx + dy * dy);
+        }
+
+        loop {
+            let var best = nil;
+
+            for (let var i = 0; i < self.tiles.len; ++i) {
+                let tile = self.tiles[i];
+                if (tile.have == -1 && !tile.requested && (best == nil || dists[i] < dists[best]))
+                    best = i;
+            }
+
+            if (best == nil || !self.send({type: "canvas_tile", tx: best % per_row, ty: best.idiv(per_row)}, nil))
+                break;
+
+            self.tiles[best].requested = true;
+        }
+    }
+
+    // Handles the response to a tile request, whose data is a TGA file
+    on_canvas_tile(self, req, res)
+    {
+        let per_row = self.canvas_size.idiv(self.tile_size);
+        let tile = self.tiles[req.ty * per_row + req.tx];
+        tile.requested = false;
+
+        if (!res.ok || !res.has("data"))
+            return;
+
+        let img = decode_tga(res.data);
+
+        if (img == nil || img.width != self.tile_size || img.height != self.tile_size)
+            return;
+
+        self.canvas.blit(img, req.tx * self.tile_size, req.ty * self.tile_size);
+        tile.have = res.seq;
+        self.view_dirty = true;
+    }
+
+    // Number of canvas pixels across the view at the current zoom
+    visible(self)
+    {
+        return VIEW_SIZE.idiv(ZOOMS[self.zoom]);
+    }
+
+    // Keeps the view within the canvas
+    clamp_view(self)
+    {
+        let max_pos = (self.canvas_size - self.visible()).max(0);
+        self.view_x = self.view_x.clip(0, max_pos);
+        self.view_y = self.view_y.clip(0, max_pos);
+        self.view_dirty = true;
+        self.dirty = true;
+    }
+
+    // Moves the view by a number of steps, each the same distance on screen
+    // at every zoom: one canvas pixel at the starting zoom
+    pan(self, dx, dy)
+    {
+        let step = self.visible().idiv(64).max(1);
+        self.view_x = self.view_x + dx * step;
+        self.view_y = self.view_y + dy * step;
+        self.clamp_view();
+    }
+
+    // Zooms in or out by a number of levels, around the middle of the view
+    zoom_by(self, levels)
+    {
+        if (self.canvas == nil)
+            return;
+
+        let mid_x = self.view_x + self.visible().idiv(2);
+        let mid_y = self.view_y + self.visible().idiv(2);
+        self.zoom = (self.zoom + levels).clip(0, ZOOMS.len - 1);
+        self.view_x = mid_x - self.visible().idiv(2);
+        self.view_y = mid_y - self.visible().idiv(2);
+        self.hover = nil;
+        self.clamp_view();
+    }
+
+    // Canvas pixel at a position in the frame, or nil outside of the view
+    // or of the canvas
+    pixel_at(self, x, y)
+    {
+        if (self.canvas == nil || x < VIEW_X || y < VIEW_Y || x >= VIEW_X + VIEW_SIZE || y >= VIEW_Y + VIEW_SIZE)
+            return nil;
+
+        let cell = ZOOMS[self.zoom];
+        let px = self.view_x + (x - VIEW_X).idiv(cell);
+        let py = self.view_y + (y - VIEW_Y).idiv(cell);
+
+        if (px >= self.canvas_size || py >= self.canvas_size)
+            return nil;
+
+        return {x: px, y: py};
+    }
+
+    // Paints a canvas pixel with the current color. It shows right away,
+    // and is sent to the server from update(), a few per second at most.
+    paint(self, x, y)
+    {
+        let per_row = self.canvas_size.idiv(self.tile_size);
+        let tile = self.tiles[y.idiv(self.tile_size) * per_row + x.idiv(self.tile_size)];
+        let idx = y * self.canvas_size + x;
+        let prev = self.canvas.bytes.get_u32(idx);
+
+        if (self.zoom < MIN_DRAW_ZOOM || self.conn != "connected" || tile.have == -1)
+            return;
+
+        if (prev == self.color || self.set_queue.len >= MAX_QUEUED_SETS)
+            return;
+
+        self.canvas.bytes.set_u32(idx, self.color);
+        self.set_queue.push({x: x, y: y, color: self.color, prev: prev});
+        self.view_dirty = true;
+    }
+
+    // Picks a color of the palette to paint with
+    set_color(self, color)
+    {
+        self.color = color;
+        self.custom_selected = false;
+        self.dirty = true;
+    }
+
+    // Picks the custom color to paint with
+    select_custom(self)
+    {
+        self.color = self.custom;
+        self.custom_selected = true;
+        self.dirty = true;
+    }
+
+    // Changes the custom color with the mouse in the part of the color
+    // picker being dragged, the square of saturations and values or the bar
+    // of hues, and picks it to paint with
+    pick(self, x, y)
+    {
+        let fx = ((x - SIDE_X).to_f() / (SIDE_W - 1)).max(0.0).min(1.0);
+
+        if (self.pick_drag == "hue") {
+            self.hsv.h = fx * 359.9;
+        } else {
+            self.hsv.s = fx;
+            self.hsv.v = 1.0 - ((y - PICK_Y).to_f() / (PICK_H - 1)).max(0.0).min(1.0);
+        }
+
+        self.custom = hsv_to_rgb(self.hsv.h, self.hsv.s, self.hsv.v);
+        self.select_custom();
+    }
+
+    // Handles a click on the canvas screen that isn't on a button
+    canvas_mouse_down(self, x, y)
+    {
+        let pixel = self.pixel_at(x, y);
+
+        if (pixel != nil) {
+            self.paint(pixel.x, pixel.y);
+            return;
+        }
+
+        if (x < SIDE_X || x >= SIDE_X + SIDE_W)
+            return;
+
+        if (y >= PICK_Y && y < PICK_Y + PICK_H)
+            self.pick_drag = "sv";
+        else if (y >= HUE_Y && y < HUE_Y + HUE_H)
+            self.pick_drag = "hue";
+        else
+            return;
+
+        self.pick(x, y);
     }
 
     // Validates the form and sends the requested login or register request
@@ -1075,11 +1591,16 @@ class App
 
         if (ev.kind == "MOUSE_UP") {
             self.drag_offset = nil;
+            self.pick_drag = nil;
             return;
         }
 
         if (ev.kind == "MOUSE_MOVE") {
-            if (self.drag_offset != nil) {
+            if (self.screen == "canvas") {
+                self.hover = self.pixel_at(ev.x, ev.y);
+                if (self.pick_drag != nil)
+                    self.pick(ev.x, ev.y);
+            } else if (self.drag_offset != nil) {
                 let bar = self.scrollbar();
                 let span = (bar.h - bar.thumb_h).max(1);
                 self.scroll_to(((ev.y - self.drag_offset - bar.y) * bar.max_scroll).idiv(span));
@@ -1099,11 +1620,8 @@ class App
     // Handles a left click: on the scrollbar, or on a button
     mouse_down(self, x, y)
     {
-        if (self.screen == "admin")
-            return;
-
         // With the login box open, only its own buttons are registered
-        if (!self.modal) {
+        if (self.screen == "main" && !self.modal) {
             let bar = self.scrollbar();
 
             if (x >= bar.x && x < bar.x + SCROLLBAR_W && y >= bar.y && y < bar.y + bar.h) {
@@ -1125,6 +1643,23 @@ class App
                 return;
             }
         }
+
+        if (self.screen == "canvas")
+            self.canvas_mouse_down(x, y);
+    }
+
+    // Switches to the view of a tab
+    show_screen(self, screen)
+    {
+        if (screen == self.screen)
+            return;
+
+        if (screen == "canvas")
+            self.enter_canvas();
+        else if (self.screen == "admin")
+            self.leave_admin();
+        else
+            self.leave_canvas();
     }
 
     // Performs the action of a clicked button
@@ -1138,6 +1673,14 @@ class App
             self.submit_post();
         } else if (action == "logout") {
             self.log_out();
+        } else if (action == "screen") {
+            self.show_screen(arg);
+        } else if (action == "color") {
+            self.set_color(arg);
+        } else if (action == "custom") {
+            self.select_custom();
+        } else if (action == "zoom") {
+            self.zoom_by(arg);
         } else if (action == "open_modal") {
             self.open_modal(false);
         } else if (action == "close_modal") {
@@ -1171,6 +1714,11 @@ class App
                 }
             } else if (self.screen == "main" && self.compose.len < MAX_MSG_LEN) {
                 self.compose.push(ch);
+            } else if (self.screen == "canvas") {
+                if (ch == "+" || ch == "=")
+                    self.zoom_by(1);
+                else if (ch == "-" || ch == "_")
+                    self.zoom_by(-1);
             }
         }
     }
@@ -1178,9 +1726,26 @@ class App
     // Handles special keys
     key_down(self, key)
     {
-        if (self.screen == "admin") {
-            if (key == "F1")
-                self.leave_admin();
+        // The tabs' keys work on every screen, unless the login box is open
+        for (let var i = 0; i < TABS.len && !self.modal; ++i) {
+            if (key == TABS[i].key) {
+                self.show_screen(TABS[i].screen);
+                return;
+            }
+        }
+
+        if (self.screen == "admin")
+            return;
+
+        if (self.screen == "canvas") {
+            if (key == "LEFT")
+                self.pan(-1, 0);
+            else if (key == "RIGHT")
+                self.pan(1, 0);
+            else if (key == "UP")
+                self.pan(0, -1);
+            else if (key == "DOWN")
+                self.pan(0, 1);
             return;
         }
 
@@ -1233,6 +1798,18 @@ class App
             self.dirty = true;
         }
 
+        if (self.screen == "canvas" && self.conn == "connected") {
+            if (!self.canvas_polling && self.canvas_error == "" && now - self.last_poll_ms >= CANVAS_POLL_MS)
+                self.poll_canvas();
+
+            // Send the next painted pixel
+            if (self.set_queue.len > 0 && now - self.last_set_ms >= SET_INTERVAL_MS) {
+                let set = self.set_queue.remove(0);
+                self.send({type: "canvas_set", x: set.x, y: set.y, color: set.color & 0xFF_FF_FF}, set);
+                self.last_set_ms = now;
+            }
+        }
+
         if (self.screen == "main" && !self.loading_older && !self.no_more_older && self.messages.len > 0) {
             let remaining = self.content_height() - self.scroll_y - self.panel.height;
 
@@ -1261,8 +1838,13 @@ class App
             self.render_intro();
         else if (self.screen == "admin")
             self.render_admin();
+        else if (self.screen == "canvas")
+            self.render_canvas();
         else
             self.render_main();
+
+        if (self.screen != "intro")
+            self.render_footer();
 
         if (self.modal && self.screen == "main")
             self.render_modal();
@@ -1387,13 +1969,12 @@ class App
         let frame = self.frame;
         let panel_y = 72;
         let panel_w = WIDTH - 2 * MARGIN;
-        let panel_h = HEIGHT - panel_y - MARGIN;
+        let panel_h = FOOTER_Y - 8 - panel_y;
         let x = MARGIN + 24;
         let value_x = MARGIN + 310;
 
         draw_full_logo(frame, MARGIN, 14, SMALL_LOGO);
         self.text(frame, MARGIN + logo_width(SMALL_LOGO) + 12, 17, "admin", DIM, BG);
-        self.text(frame, WIDTH - MARGIN - 12 * CHAR_W, 30, "F1 guestbook", DIM, BG);
 
         frame.fill_rect(MARGIN, panel_y, panel_w, panel_h, PANEL);
         draw_rect(frame, MARGIN, panel_y, panel_w, panel_h, BORDER);
@@ -1428,6 +2009,181 @@ class App
             self.text(frame, x, y, (i + 1).to_s() + ".", DIM, PANEL);
             self.text(frame, x + 4 * CHAR_W, y, info.users[i], name_color(info.users[i]), PANEL);
         }
+    }
+
+    // Draws the tabs at the bottom of the screen, one per view, each in its
+    // own rainbow color: as the background of the tab of the current view,
+    // and as the text color of the others
+    render_footer(self)
+    {
+        let var x = MARGIN;
+
+        for (let var i = 0; i < TABS.len; ++i) {
+            let tab = TABS[i];
+            let label = tab.key + " " + tab.label;
+            let w = (num_chars(label) + 2) * CHAR_W;
+            let active = tab.screen == self.screen;
+            let bg = active ? RAINBOW[i] : FIELD;
+
+            self.frame.fill_rect(x, FOOTER_Y, w, FOOTER_H, bg);
+            self.text(self.frame, x + CHAR_W, FOOTER_Y + (FOOTER_H - CHAR_H).idiv(2), label, active ? BG : RAINBOW[i], bg);
+            self.buttons.push({x: x, y: FOOTER_Y, w: w, h: FOOTER_H, action: "screen", arg: tab.screen});
+            x = x + w + 8;
+        }
+    }
+
+    // Draws the part of the canvas in view into the view image, each canvas
+    // pixel as a square of the zoom's size
+    render_view(self)
+    {
+        let cell = ZOOMS[self.zoom];
+        let size = self.canvas_size;
+        let num = self.visible().min(size - self.view_x).min(size - self.view_y);
+        let src = self.canvas.bytes;
+        let dst = self.view_img.bytes;
+
+        self.view_img.clear(BG);
+
+        for (let var y = 0; y < num; ++y) {
+            let src_row = (self.view_y + y) * size + self.view_x;
+            let dst_row = y * cell * VIEW_SIZE;
+
+            if (cell == 1) {
+                dst.memcpy(dst_row * 4, src, src_row * 4, num * 4);
+                continue;
+            }
+
+            // Draw the top line of the row of squares, then copy it down
+            for (let var x = 0; x < num; ++x)
+                dst.fill_u32(dst_row + x * cell, cell, src.get_u32(src_row + x));
+
+            for (let var k = 1; k < cell; ++k)
+                dst.memcpy((dst_row + k * VIEW_SIZE) * 4, dst, dst_row * 4, num * cell * 4);
+        }
+
+        self.view_dirty = false;
+    }
+
+    // Draws the square of saturations and values for the current hue
+    render_sv(self)
+    {
+        let cols = SIDE_W.idiv(PICK_BLOCK);
+        let rows = PICK_H.idiv(PICK_BLOCK);
+
+        for (let var j = 0; j < rows; ++j) {
+            for (let var i = 0; i < cols; ++i) {
+                let color = hsv_to_rgb(self.hsv.h, i.to_f() / (cols - 1), 1.0 - j.to_f() / (rows - 1));
+                self.sv_img.fill_rect(i * PICK_BLOCK, j * PICK_BLOCK, PICK_BLOCK, PICK_BLOCK, color);
+            }
+        }
+
+        self.sv_hue = self.hsv.h;
+    }
+
+    // Draws a marker around a point, visible on any color
+    marker(self, x, y, w, h)
+    {
+        draw_rect(self.frame, x - 1, y - 1, w + 2, h + 2, rgb(0, 0, 0));
+        draw_rect(self.frame, x - 2, y - 2, w + 4, h + 4, rgb(255, 255, 255));
+    }
+
+    // Draws the canvas screen: the view of the canvas, and on its right
+    // the colors, the color picker and the zoom
+    render_canvas(self)
+    {
+        let frame = self.frame;
+
+        draw_full_logo(frame, MARGIN, 14, SMALL_LOGO);
+        self.text(frame, MARGIN + logo_width(SMALL_LOGO) + 12, 17, "canvas", DIM, BG);
+
+        // What is in the way of drawing, if anything
+        let var status = "";
+        let var loading = self.canvas == nil;
+        for (let var i = 0; i < self.tiles.len; ++i)
+            loading = loading || self.tiles[i].have == -1;
+
+        if (self.conn != "connected")
+            status = self.total_views == nil ? "connecting..." : "reconnecting...";
+        else if (self.canvas_error != "")
+            status = self.canvas_error;
+        else if (loading)
+            status = "loading...";
+        else if (self.zoom < MIN_DRAW_ZOOM)
+            status = "zoom in to draw";
+
+        if (self.canvas == nil) {
+            frame.fill_rect(VIEW_X, VIEW_Y, VIEW_SIZE, VIEW_SIZE, FIELD);
+        } else {
+            if (self.view_dirty)
+                self.render_view();
+            frame.blit(self.view_img, VIEW_X, VIEW_Y);
+        }
+
+        // Sets a dark canvas apart from the background
+        draw_rect(frame, VIEW_X - 1, VIEW_Y - 1, VIEW_SIZE + 2, VIEW_SIZE + 2, BORDER);
+
+        // The pixel under the mouse, in the color it would be painted
+        let cell = ZOOMS[self.zoom];
+        if (self.hover != nil && self.zoom >= MIN_DRAW_ZOOM) {
+            let hx = VIEW_X + (self.hover.x - self.view_x) * cell;
+            let hy = VIEW_Y + (self.hover.y - self.view_y) * cell;
+            frame.fill_rect(hx, hy, cell, cell, self.color);
+            self.marker(hx, hy, cell, cell);
+        }
+
+        // Colors to pick from
+        for (let var i = 0; i < PALETTE.len; ++i) {
+            let x = SIDE_X + (i % 4) * (SWATCH + SWATCH_GAP);
+            let y = VIEW_Y + i.idiv(4) * (SWATCH + SWATCH_GAP);
+            frame.fill_rect(x, y, SWATCH, SWATCH, PALETTE[i]);
+            self.buttons.push({x: x, y: y, w: SWATCH, h: SWATCH, action: "color", arg: PALETTE[i]});
+
+            if (!self.custom_selected && PALETTE[i] == self.color)
+                self.marker(x, y, SWATCH, SWATCH);
+        }
+
+        // Color picker, with markers on the custom color
+        if (self.sv_hue != self.hsv.h)
+            self.render_sv();
+        frame.blit(self.sv_img, SIDE_X, PICK_Y);
+        frame.blit(self.hue_img, SIDE_X, HUE_Y);
+
+        let sx = SIDE_X + (self.hsv.s * (SIDE_W - 1)).floor();
+        let sy = PICK_Y + ((1.0 - self.hsv.v) * (PICK_H - 1)).floor();
+        self.marker(sx - 3, sy - 3, 6, 6);
+        let hue_x = SIDE_X + (self.hsv.h / 360.0 * (SIDE_W - 1)).floor();
+        self.marker(hue_x - 2, HUE_Y, 4, HUE_H);
+
+        // Custom color, which can be clicked like the palette's, and its
+        // hex code
+        let var y = HUE_Y + HUE_H + 16;
+        frame.fill_rect(SIDE_X, y, SWATCH, 40, self.custom);
+        self.buttons.push({x: SIDE_X, y: y, w: SWATCH, h: 40, action: "custom", arg: nil});
+
+        if (self.custom_selected)
+            self.marker(SIDE_X, y, SWATCH, 40);
+        else
+            draw_rect(frame, SIDE_X, y, SWATCH, 40, BORDER);
+
+        let hex = "#" + (self.custom & 0xFF_FF_FF).to_hex(6).upper();
+        self.text(frame, SIDE_X + SWATCH + 12, y + 8, hex, TEXT, BG);
+
+        // Zoom, with buttons for the mouse
+        y = y + 60;
+        self.text(frame, SIDE_X, y, "zoom " + cell.to_s() + "x", TEXT, BG);
+        self.button(SIDE_X + SIDE_W - 76, y - 2, 34, 28, "-", FIELD, "zoom", -1);
+        self.button(SIDE_X + SIDE_W - 34, y - 2, 34, 28, "+", FIELD, "zoom", 1);
+
+        // Position of the pixel under the mouse, or of the middle of the view
+        y = y + 40;
+        if (self.hover != nil)
+            self.text(frame, SIDE_X, y, self.hover.x.to_s() + ", " + self.hover.y.to_s(), TEXT, BG);
+        else if (self.canvas != nil)
+            self.text(frame, SIDE_X, y, (self.view_x + self.visible().idiv(2)).to_s() + ", " + (self.view_y + self.visible().idiv(2)).to_s(), DIM, BG);
+
+        self.text(frame, SIDE_X, y + 32, "arrows  move", DIM, BG);
+        self.text(frame, SIDE_X, y + 58, "+ and -  zoom", DIM, BG);
+        self.text(frame, SIDE_X, y + 90, status,self.conn == "connected" && self.canvas_error == "" ? DIM : ERROR, BG);
     }
 
     // Draws the guestbook screen: a header, the box to write a message,
