@@ -263,12 +263,83 @@ class Image
     }
 }
 
-// Reads an uncompressed 32-bit TGA file into an Image. TGA stores pixels in
-// BGRA byte order, the same format as Image, so they are copied as they are.
-// Returns nil if the file can't be read or is not in this format.
-fun load_tga(path)
+// Appends count pixels of a ByteArray of 32-bit pixels, starting at pixel
+// index idx, to out as TGA run-length packets. Each packet holds up to 128
+// pixels: either one pixel to repeat, or pixels stored as they are.
+fun rle_encode_pixels(out, bytes, idx, count)
 {
-    let data = $read_file(path);
+    let end = idx + count;
+    let var i = idx;
+
+    while (i < end) {
+        let p = bytes.get_u32(i);
+        let var n = 1;
+
+        while (i + n < end && n < 128 && bytes.get_u32(i + n) == p) {
+            n = n + 1;
+        }
+
+        if (n > 1) {
+            out.push_u8(0x80 | (n - 1));
+            out.push_u32(p);
+            i = i + n;
+            continue;
+        }
+
+        // Raw packet, up to where the next run starts
+        let start = i;
+        i = i + 1;
+        while (i < end && i - start < 128) {
+            if (i + 1 < end && bytes.get_u32(i) == bytes.get_u32(i + 1)) {
+                break;
+            }
+            i = i + 1;
+        }
+
+        let num_bytes = (i - start) * 4;
+        let pos = out.len + 1;
+        out.push_u8(i - start - 1);
+        out.resize(pos + num_bytes);
+        out.memcpy(pos, bytes, start * 4, num_bytes);
+    }
+}
+
+// Encodes an Image as the bytes of a 32-bit TGA file, run-length encoded
+// if rle is true and uncompressed otherwise
+fun encode_tga(img, rle)
+{
+    let out = ByteArray.with_size(18);
+    out.zero_fill();
+
+    // True-color, with 8 bits of alpha and rows stored top-down (0x20),
+    // so the pixels can be written out in the order they are in
+    out[2] = rle ? 10 : 2;
+    out.store_u16(12, img.width);
+    out.store_u16(14, img.height);
+    out[16] = 32;
+    out[17] = 0x28;
+
+    if (!rle) {
+        let num_bytes = img.width * img.height * 4;
+        out.resize(18 + num_bytes);
+        out.memcpy(18, img.bytes, 0, num_bytes);
+        return out;
+    }
+
+    // Packets don't cross rows, as the TGA specification asks
+    for (let var y = 0; y < img.height; ++y) {
+        rle_encode_pixels(out, img.bytes, y * img.width, img.width);
+    }
+
+    return out;
+}
+
+// Decodes the bytes of a TGA file into an Image. Handles true-color images
+// with 24 or 32 bits per pixel, uncompressed or run-length encoded. TGA
+// stores pixels in BGRA byte order, the same format as Image. Returns nil
+// if the data is not in one of these formats or is cut short.
+fun decode_tga(data)
+{
     if (data == nil || data.len < 18) {
         return nil;
     }
@@ -278,42 +349,92 @@ fun load_tga(path)
     let height = data.load_u16(14);
     let bpp = data[16];
     let top_down = (data[17] & 0x20) != 0;
-    let start = 18 + data[0];
-    let pitch = width * 4;
+    let px = bpp.idiv(8);
+    let num_pixels = width * height;
 
-    if (img_type != 2 || bpp != 32 || data.len < start + height * pitch) {
+    if (data[1] != 0 || (img_type != 2 && img_type != 10) || (bpp != 24 && bpp != 32)) {
         return nil;
     }
 
-    // Rows are stored bottom-up unless the header says otherwise
     let img = Image(width, height);
-    if (top_down) {
-        img.bytes.memcpy(0, data, start, height * pitch);
-    } else {
-        for (let var y = 0; y < height; ++y) {
-            img.bytes.memcpy(y * pitch, data, start + (height - 1 - y) * pitch, pitch);
+    let dst = img.bytes;
+
+    // Reads the pixel at a byte position. 24-bit pixels are made opaque.
+    fun read_pixel(pos) {
+        if (bpp == 32) {
+            return data.load_u32(pos);
+        }
+        return 0xFF_00_00_00 | (data[pos + 2] << 16) | (data[pos + 1] << 8) | data[pos];
+    }
+
+    // Copies count pixels stored as they are at a byte position
+    fun copy_pixels(idx, pos, count) {
+        if (bpp == 32) {
+            dst.memcpy(idx * 4, data, pos, count * 4);
+            return;
+        }
+        for (let var i = 0; i < count; ++i) {
+            dst.set_u32(idx + i, read_pixel(pos + i * 3));
         }
     }
 
-    return img;
+    let var pos = 18 + data[0];
+
+    if (img_type == 2) {
+        if (data.len < pos + num_pixels * px) {
+            return nil;
+        }
+        copy_pixels(0, pos, num_pixels);
+    } else {
+        let var idx = 0;
+
+        while (idx < num_pixels) {
+            if (pos >= data.len) {
+                return nil;
+            }
+
+            let head = data[pos];
+            let count = (head & 0x7F) + 1;
+            let packed = (head & 0x80) != 0;
+            let num_bytes = packed ? px : count * px;
+            pos = pos + 1;
+
+            if (idx + count > num_pixels || pos + num_bytes > data.len) {
+                return nil;
+            }
+
+            if (packed) {
+                dst.fill_u32(idx, count, read_pixel(pos));
+            } else {
+                copy_pixels(idx, pos, count);
+            }
+
+            pos = pos + num_bytes;
+            idx = idx + count;
+        }
+    }
+
+    // Rows are stored bottom-up unless the header says otherwise
+    return top_down ? img : img.vflip();
+}
+
+// Reads a TGA file into an Image, see decode_tga() for the formats handled.
+// Returns nil if the file can't be read or is not in one of these formats.
+fun load_tga(path)
+{
+    return decode_tga($read_file(path));
 }
 
 // Writes an Image to a file as an uncompressed 32-bit TGA.
 // Returns true on success and false on failure, like $write_file().
 fun save_tga(path, img)
 {
-    let num_bytes = img.width * img.height * 4;
-    let out = ByteArray.with_size(18 + num_bytes);
-    out.zero_fill();
+    return $write_file(path, encode_tga(img, false));
+}
 
-    // Uncompressed true-color, with 8 bits of alpha and rows stored
-    // top-down (0x20), so the pixels can be written out as they are
-    out[2] = 2;
-    out.store_u16(12, img.width);
-    out.store_u16(14, img.height);
-    out[16] = 32;
-    out[17] = 0x28;
-    out.memcpy(18, img.bytes, 0, num_bytes);
-
-    return $write_file(path, out);
+// Writes an Image to a file as a run-length encoded 32-bit TGA.
+// Returns true on success and false on failure, like $write_file().
+fun save_tga_rle(path, img)
+{
+    return $write_file(path, encode_tga(img, true));
 }

@@ -99,3 +99,73 @@ for (let var i = 0; i < img.bytes.len; ++i)
     assert(loaded.bytes[i] == img.bytes[i]);
 
 assert(!save_tga("no/such/dir/out.tga", img));
+
+// Tests if two images have the same size and pixels
+fun same_image(a, b)
+{
+    if (a == nil || b == nil || a.width != b.width || a.height != b.height)
+        return false;
+
+    for (let var i = 0; i < a.bytes.len; ++i) {
+        if (a.bytes[i] != b.bytes[i])
+            return false;
+    }
+
+    return true;
+}
+
+// Run-length encoding: a flat image is one packet per 128 pixels of a row
+let flat = Image(300, 3);
+flat.clear(COLOR_C64_BLUE);
+let flat_rle = encode_tga(flat, true);
+assert(flat_rle[2] == 10);
+assert(flat_rle.len == 18 + 3 * 3 * 5);
+assert(same_image(decode_tga(flat_rle), flat));
+
+// Runs mixed with pixels that don't repeat, at both ends of rows, and
+// raw packets longer than 128 pixels
+let mixed = Image(301, 5);
+mixed.clear(COLOR_WHITE);
+for (let var x = 0; x < 301; ++x) {
+    mixed.set_pixel(x, 1, rgb(x & 0xFF, (x * 7) & 0xFF, x >> 8));
+    if (x % 3 == 0)
+        mixed.set_pixel(x, 2, COLOR_RED);
+}
+mixed.set_pixel(0, 3, COLOR_GREEN);
+mixed.set_pixel(300, 3, COLOR_BLUE);
+mixed.set_pixel(299, 4, COLOR_BLUE);
+mixed.set_pixel(300, 4, COLOR_BLUE);
+let mixed_rle = encode_tga(mixed, true);
+assert(mixed_rle.len < encode_tga(mixed, false).len);
+assert(same_image(decode_tga(mixed_rle), mixed));
+assert(same_image(decode_tga(encode_tga(mixed, false)), mixed));
+assert(same_image(decode_tga(encode_tga(img, true)), img));
+
+// Saving run-length encoded and loading back
+assert(save_tga_rle("target/import_image_test_rle.tga", mixed));
+assert(same_image(load_tga("target/import_image_test_rle.tga"), mixed));
+
+// Data that is cut short or not a TGA is rejected
+let cut = ByteArray.with_size(mixed_rle.len - 3);
+cut.memcpy(0, mixed_rle, 0, cut.len);
+assert(decode_tga(cut) == nil);
+assert(decode_tga(ByteArray.with_size(10)) == nil);
+flat_rle[2] = 3;
+assert(decode_tga(flat_rle) == nil);
+
+// 24-bit pixels, stored bottom-up and run-length encoded: a row of two
+// blue pixels, then, above it, a red pixel and a green pixel
+let tga24 = ByteArray.with_size(18);
+tga24.zero_fill();
+tga24[2] = 10;
+tga24.store_u16(12, 2);
+tga24.store_u16(14, 2);
+tga24[16] = 24;
+let packets = [0x81, 255, 0, 0, 0x01, 0, 0, 255, 0, 255, 0];
+for (let var i = 0; i < packets.len; ++i)
+    tga24.push_u8(packets[i]);
+let img24 = decode_tga(tga24);
+assert(img24.get_pixel(0, 0) == COLOR_RED);
+assert(img24.get_pixel(1, 0) == COLOR_GREEN);
+assert(img24.get_pixel(0, 1) == COLOR_BLUE);
+assert(img24.get_pixel(1, 1) == COLOR_BLUE);
