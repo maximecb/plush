@@ -6,9 +6,10 @@
 // this machine with --local or --localhost, or to the given address, e.g.
 // example.com:1337.
 //
-// Connects to a Plush guestbook server, lets you register or log in, then
-// shows the latest messages and lets you sign the guestbook. The message
-// list scrolls with the scrollbar on the right or the up and down arrow keys,
+// Connects to a Plush guestbook server and shows the latest messages, which
+// anyone can read. Signing the guestbook needs an account: sending a message
+// pops up a box to register or log in, then posts it. The message list
+// scrolls with the scrollbar on the right or the up and down arrow keys,
 // and older messages load as you scroll down. Admins can press F12 to see
 // server information, then F1 to return to the guestbook.
 //
@@ -142,7 +143,6 @@ let SHADES_MS = 2850;
 let SHADES_DROP_MS = 350;
 let TAGLINE_MS = 3350;
 let INTRO_END_MS = 4000;
-let SLIDE_MS = 450;
 
 // Height the sunglasses drop from, in the bear's units
 let SHADES_DROP = 45;
@@ -152,9 +152,12 @@ let SHADES_DROP = 45;
 let BIG_LOGO = {cell: 10, stripe: 10, gap: 5, bear_up: 3};
 let SMALL_LOGO = {cell: 3, stripe: 3, gap: 1, bear_up: 1};
 
-// Vertical position of the big logo during the intro and on the login screen
+// Vertical position of the big logo during the intro
 let INTRO_LOGO_Y = 270;
-let LOGIN_LOGO_Y = 80;
+
+// Size of the box to register or log in, centered over the guestbook
+let MODAL_W = 720;
+let MODAL_H = 436;
 
 // Layout of the guestbook screen
 let COMPOSE_Y = 64;
@@ -477,8 +480,9 @@ fun net_actor(addr, gen)
     $actor_send(parent, {net: "closed", gen: gen});
 }
 
-// State of the client and its four screens: the intro animation, the
-// login screen, the guestbook and the admin page
+// State of the client and its three screens: the intro animation, the
+// guestbook and the admin page. The box to register or log in is drawn
+// over the guestbook.
 class App
 {
     // Creates the client for a given server address
@@ -491,7 +495,6 @@ class App
 
         self.screen = "intro";
         self.start_ms = $time_current_ms();
-        self.login_start_ms = 0;
         self.dirty = true;
         self.cursor_on = true;
 
@@ -504,12 +507,19 @@ class App
         self.messages_today = nil;
         self.num_accounts = nil;
 
-        // Login screen fields: username, password and password confirmation,
+        // Login box fields: username, password and password confirmation,
         // as arrays of characters. Confirmation is only used to register.
         self.fields = [[], [], []];
         self.focus = 0;
         self.status = "";
         self.status_color = DIM;
+
+        // Whether the login box is open, its own status line, and whether
+        // to send the message being written once logged in
+        self.modal = false;
+        self.modal_status = "";
+        self.modal_status_color = DIM;
+        self.post_after_auth = false;
 
         // Logged in user, and credentials to log in again after reconnecting
         self.username = nil;
@@ -562,11 +572,41 @@ class App
         self.text(self.frame, (WIDTH - num_chars(str) * CHAR_W).idiv(2), y, str, color, BG);
     }
 
-    // Shows a status message on the login or guestbook screen
+    // Shows a status message on the guestbook screen
     set_status(self, msg, color)
     {
         self.status = msg;
         self.status_color = color;
+        self.dirty = true;
+    }
+
+    // Shows a status message in the login box
+    set_modal_status(self, msg, color)
+    {
+        self.modal_status = msg;
+        self.modal_status_color = color;
+        self.dirty = true;
+    }
+
+    // Opens the login box. If post is true, the message being written is
+    // sent once logged in.
+    open_modal(self, post)
+    {
+        self.modal = true;
+        self.post_after_auth = post;
+        self.drag_offset = nil;
+        self.deleting = nil;
+        self.set_modal_status("", DIM);
+    }
+
+    // Closes the login box, forgetting the passwords typed
+    close_modal(self)
+    {
+        self.modal = false;
+        self.post_after_auth = false;
+        self.fields[1] = [];
+        self.fields[2] = [];
+        self.focus = 0;
         self.dirty = true;
     }
 
@@ -665,16 +705,12 @@ class App
             self.is_admin = false;
             self.admin_info = nil;
             self.admin_error = "";
-            if (self.screen != "main")
-                self.set_status("Could not connect to " + self.addr + ", retrying...", ERROR);
             return;
         }
 
         if (msg.net == "connected") {
             self.conn = "connected";
             self.sock = msg.sock;
-            if (self.status_color == ERROR)
-                self.set_status("", DIM);
             return;
         }
 
@@ -686,6 +722,10 @@ class App
             self.is_admin = false;
             self.admin_info = nil;
             self.admin_error = "";
+
+            // A login request in flight is lost
+            if (self.modal && self.modal_status != "")
+                self.set_modal_status("Connection lost, please try again", ERROR);
             return;
         }
 
@@ -706,9 +746,11 @@ class App
             self.messages_today = res.has("messages_today") ? res.messages_today : nil;
             self.num_accounts = res.has("num_accounts") ? res.num_accounts : nil;
 
-            // Log back in after a reconnection
+            // Log back in after a reconnection, which then fetches messages
             if (self.auth != nil)
                 self.send({type: "login", username: self.auth.username, hash: self.auth.hash}, {silent: true});
+            else if (self.screen == "main" && self.pending.len == 0)
+                self.request_newer();
 
             return;
         }
@@ -721,27 +763,37 @@ class App
         let info = sent.info;
 
         if (req.type == "login" || req.type == "register") {
+            let silent = info != nil && info.silent;
+
             if (res.ok) {
                 self.username = res.username;
                 self.is_admin = res.status == "ADMIN";
                 self.auth = {username: req.username, hash: req.hash};
 
-                if (self.screen == "admin" && self.is_admin) {
+                if (self.screen == "admin" && self.is_admin)
                     self.send({type: "admin_info"}, nil);
-                } else if (self.screen != "main") {
-                    self.enter_main();
-                } else {
+                else
                     self.request_newer();
+
+                if (!silent) {
+                    let post = self.post_after_auth;
+                    self.close_modal();
+                    self.fields[0] = [];
+                    self.set_status("Welcome, " + res.username + "!", SUCCESS);
+
+                    if (post)
+                        self.submit_post();
                 }
-            } else {
-                if (info != nil && info.silent) {
-                    self.auth = nil;
-                    self.username = nil;
-                    self.is_admin = false;
-                    self.admin_info = nil;
-                    self.screen = "login";
-                }
+            } else if (silent) {
+                // Back to browsing as a guest
+                self.auth = nil;
+                self.username = nil;
+                self.is_admin = false;
+                self.admin_info = nil;
+                self.screen = "main";
                 self.set_status(res.error, ERROR);
+            } else {
+                self.set_modal_status(res.error, ERROR);
             }
             return;
         }
@@ -908,43 +960,48 @@ class App
         let password = join(self.fields[1]);
 
         if (!valid_username(username)) {
-            self.set_status("Usernames are 2 to 16 letters, digits or _", ERROR);
+            self.set_modal_status("Usernames are 2 to 16 letters, digits or _", ERROR);
             return;
         }
 
         if (password.len == 0) {
-            self.set_status("Please enter a password", ERROR);
+            self.set_modal_status("Please enter a password", ERROR);
             return;
         }
 
         if (type == "register") {
             if (num_chars(password) < MIN_PASS_LEN) {
-                self.set_status("Please use at least " + MIN_PASS_LEN.to_s() + " characters for your password", ERROR);
+                self.set_modal_status("Please use at least " + MIN_PASS_LEN.to_s() + " characters for your password", ERROR);
                 return;
             }
 
             if (join(self.fields[2]) != password) {
-                self.set_status("The passwords don't match", ERROR);
+                self.set_modal_status("The passwords don't match", ERROR);
                 return;
             }
         }
 
-        if (self.conn != "connected") {
-            self.set_status("Not connected to the server yet, please try again", ERROR);
+        if (!self.send({type: type, username: username, hash: password_hash(password)}, nil)) {
+            self.set_modal_status("Not connected to the server, please try again", ERROR);
             return;
         }
 
-        self.send({type: type, username: username, hash: password_hash(password)}, nil);
-        self.set_status(type == "login" ? "Logging in..." : "Creating your account...", DIM);
+        self.set_modal_status(type == "login" ? "Logging in..." : "Creating your account...", DIM);
     }
 
-    // Sends the message being written
+    // Sends the message being written. Guests are asked to register or log
+    // in first, and the message is sent once they have.
     submit_post(self)
     {
         let text = join(self.compose).trim();
 
         if (num_chars(text) < 3) {
             self.set_status("Your message is a bit short", ERROR);
+            return;
+        }
+
+        if (self.username == nil) {
+            self.open_modal(true);
             return;
         }
 
@@ -956,7 +1013,8 @@ class App
         self.set_status("Sending...", DIM);
     }
 
-    // Logs out, reconnecting so that the server forgets the session
+    // Logs out, reconnecting so that the server forgets the session. The
+    // guestbook stays open, as a guest.
     log_out(self)
     {
         self.auth = nil;
@@ -964,21 +1022,12 @@ class App
         self.is_admin = false;
         self.admin_info = nil;
         self.admin_error = "";
+        self.deleting = nil;
         self.fields = [[], [], []];
         self.focus = 0;
-        self.screen = "login";
         self.set_status("", DIM);
         self.disconnect();
         self.connect();
-    }
-
-    // Moves from the intro to the login screen, sliding the logo up unless
-    // the intro was skipped
-    start_login(self, slide)
-    {
-        self.screen = "login";
-        self.login_start_ms = slide ? $time_current_ms() : 0;
-        self.dirty = true;
     }
 
     // Scrolls the message list, staying within bounds
@@ -1015,7 +1064,7 @@ class App
 
         if (self.screen == "intro") {
             if ((ev.kind == "KEY_DOWN" && ev.key != "F12") || ev.kind == "MOUSE_DOWN")
-                self.start_login(false);
+                self.enter_main();
             return;
         }
 
@@ -1053,7 +1102,8 @@ class App
         if (self.screen == "admin")
             return;
 
-        if (self.screen == "main") {
+        // With the login box open, only its own buttons are registered
+        if (!self.modal) {
             let bar = self.scrollbar();
 
             if (x >= bar.x && x < bar.x + SCROLLBAR_W && y >= bar.y && y < bar.y + bar.h) {
@@ -1088,6 +1138,10 @@ class App
             self.submit_post();
         } else if (action == "logout") {
             self.log_out();
+        } else if (action == "open_modal") {
+            self.open_modal(false);
+        } else if (action == "close_modal") {
+            self.close_modal();
         } else if (action == "start_delete") {
             self.deleting = arg;
         } else if (action == "cancel_delete") {
@@ -1106,7 +1160,7 @@ class App
         for (let var i = 0; i < cs.len; ++i) {
             let ch = cs[i];
 
-            if (self.screen == "login") {
+            if (self.modal) {
                 let field = self.fields[self.focus];
 
                 if (self.focus == 0) {
@@ -1130,8 +1184,10 @@ class App
             return;
         }
 
-        if (self.screen == "login") {
-            if (key == "TAB")
+        if (self.modal) {
+            if (key == "ESCAPE")
+                self.close_modal();
+            else if (key == "TAB")
                 self.focus = (self.focus + 1) % 3;
             else if (key == "RETURN")
                 self.submit_login(self.focus == 2 ? "register" : "login");
@@ -1159,12 +1215,7 @@ class App
     // Tests if the screen is animating and must be redrawn on every frame
     animating(self)
     {
-        let now = $time_current_ms();
-
-        if (self.screen == "intro")
-            return true;
-
-        return self.screen == "login" && now - self.login_start_ms < SLIDE_MS + 50;
+        return self.screen == "intro";
     }
 
     // Updates state that depends on time: the end of the intro, the cursor
@@ -1174,7 +1225,7 @@ class App
         let now = $time_current_ms();
 
         if (self.screen == "intro" && now - self.start_ms >= INTRO_END_MS)
-            self.start_login(true);
+            self.enter_main();
 
         let cursor_on = (now.idiv(500) % 2) == 0;
         if (cursor_on != self.cursor_on) {
@@ -1208,12 +1259,13 @@ class App
 
         if (self.screen == "intro")
             self.render_intro();
-        else if (self.screen == "login")
-            self.render_login();
         else if (self.screen == "admin")
             self.render_admin();
         else
             self.render_main();
+
+        if (self.modal && self.screen == "main")
+            self.render_modal();
 
         self.dirty = false;
     }
@@ -1289,18 +1341,22 @@ class App
         self.buttons.push({x: x, y: y, w: w, h: h, action: action, arg: arg});
     }
 
-    // Draws the login screen, after the logo has slid up into place
-    render_login(self)
+    // Draws the box to register or log in, outlined, over the guestbook
+    render_modal(self)
     {
-        let t = ($time_current_ms() - self.login_start_ms).min(SLIDE_MS);
-        let p = t.to_f() / SLIDE_MS;
-        let ease = 1.0 - (1.0 - p) * (1.0 - p);
-        let logo_y = INTRO_LOGO_Y + ((LOGIN_LOGO_Y - INTRO_LOGO_Y) * ease).floor();
+        let frame = self.frame;
+        let mx = (WIDTH - MODAL_W).idiv(2);
+        let my = (HEIGHT - MODAL_H).idiv(2);
 
-        draw_full_logo(self.frame, (WIDTH - logo_width(BIG_LOGO)).idiv(2), logo_y, BIG_LOGO);
+        // Only the box's own buttons can be clicked while it is open
+        self.buttons = [];
 
-        if (t < SLIDE_MS)
-            return;
+        // A margin sets the outline apart from the messages behind
+        frame.fill_rect(mx - 8, my - 8, MODAL_W + 16, MODAL_H + 16, BG);
+        draw_rect(frame, mx, my, MODAL_W, MODAL_H, FOCUS);
+        draw_rect(frame, mx + 1, my + 1, MODAL_W - 2, MODAL_H - 2, FOCUS);
+
+        self.button(mx + MODAL_W - 40, my + 12, 28, 28, "x", FIELD, "close_modal", nil);
 
         let w = 360;
         let x = (WIDTH - w).idiv(2);
@@ -1314,20 +1370,15 @@ class App
             return out;
         }
 
-        self.centered(245, "Create your new user account or sign in", REGISTER_HEADING);
-        self.field(x, 296, w, "Username", self.fields[0], 0);
-        self.field(x, 370, w, "Password", stars(self.fields[1]), 1);
-        self.field(x, 444, w, "Confirm (register only)", stars(self.fields[2]), 2);
-        self.button(x, 528, bw, 40, "Register", PRIMARY_BUTTON, "submit", "register");
-        self.button(x + w - bw, 528, bw, 40, "Log in", LOGIN_BUTTON, "submit", "login");
-        self.centered(582, self.status, self.status_color);
-        self.centered(HEIGHT - 76, "Enter logs in; in Confirm, Enter registers", DIM);
-
-        let conn_text =
-            self.conn == "connected" ? "Connected to " + self.addr :
-            self.conn == "connecting" ? "Connecting to " + self.addr + "..." :
-            "Not connected";
-        self.centered(HEIGHT - 44, conn_text, self.conn == "connected" ? SUCCESS : DIM);
+        let heading = self.post_after_auth ? "Register or log in to post your message" : "Create your new user account or sign in";
+        self.centered(my + 24, heading, REGISTER_HEADING);
+        self.field(x, my + 70, w, "Username", self.fields[0], 0);
+        self.field(x, my + 144, w, "Password", stars(self.fields[1]), 1);
+        self.field(x, my + 218, w, "Confirm (register only)", stars(self.fields[2]), 2);
+        self.button(x, my + 302, bw, 40, "Register", PRIMARY_BUTTON, "submit", "register");
+        self.button(x + w - bw, my + 302, bw, 40, "Log in", LOGIN_BUTTON, "submit", "login");
+        self.centered(my + 356, self.modal_status, self.modal_status_color);
+        self.centered(my + 392, "Enter logs in; in Confirm, Enter registers", DIM);
     }
 
     // Draws the admin page with the latest server snapshot
@@ -1397,11 +1448,19 @@ class App
             self.text(frame, WIDTH - MARGIN - num_chars(stats) * CHAR_W, 4, stats, DIM, BG);
         }
 
-        let who = (self.is_admin ? "admin " : "") + self.username;
-        let logout_w = 8 * CHAR_W;
-        let who_x = WIDTH - MARGIN - logout_w - 12 - num_chars(who) * CHAR_W;
-        self.text(frame, who_x, 30, who, name_color(self.username), BG);
-        self.button(WIDTH - MARGIN - logout_w, 30, logout_w, CHAR_H, "log out", FIELD, "logout", nil);
+        // Guests get a button to register or log in instead of their name
+        let var who_x = 0;
+        if (self.username == nil) {
+            let login_w = 18 * CHAR_W;
+            who_x = WIDTH - MARGIN - login_w;
+            self.button(who_x, 30, login_w, CHAR_H, "register / log in", LOGIN_BUTTON, "open_modal", nil);
+        } else {
+            let who = (self.is_admin ? "admin " : "") + self.username;
+            let logout_w = 8 * CHAR_W;
+            who_x = WIDTH - MARGIN - logout_w - 12 - num_chars(who) * CHAR_W;
+            self.text(frame, who_x, 30, who, name_color(self.username), BG);
+            self.button(WIDTH - MARGIN - logout_w, 30, logout_w, CHAR_H, "log out", FIELD, "logout", nil);
+        }
 
         // Left out when a long username leaves no room next to the title
         if (self.num_accounts != nil) {
@@ -1422,10 +1481,13 @@ class App
         let tx = MARGIN + TEXT_PAD;
         let ty = COMPOSE_Y + TEXT_PAD;
 
+        // The cursor moves to the login box while it is open
+        let cursor_on = self.cursor_on && !self.modal;
+
         if (self.compose.len == 0) {
-            self.text(frame, tx + CHAR_W, ty, "Write a message and press Enter...", DIM, FIELD);
-            if (self.cursor_on)
-                self.text(frame, tx, ty, "＿", FOCUS, FIELD);
+            self.text(frame, tx, ty, "Write a message and press Enter...", DIM, FIELD);
+            if (cursor_on)
+                self.frame.fill_rect(tx, ty + CHAR_H - 4, CHAR_W, 2, FOCUS);
         } else {
             let lines = wrap(join(self.compose), COMPOSE_COLS);
             let first = (lines.len - COMPOSE_LINES).max(0);
@@ -1433,7 +1495,7 @@ class App
             for (let var i = first; i < lines.len; ++i)
                 self.text(frame, tx, ty + (i - first) * CHAR_H, lines[i], TEXT, FIELD);
 
-            if (self.cursor_on) {
+            if (cursor_on) {
                 let last = lines[lines.len - 1];
                 let cx = tx + num_chars(last) * CHAR_W;
                 self.text(frame, cx.min(MARGIN + box_w - TEXT_PAD - CHAR_W), ty + (lines.len - 1 - first) * CHAR_H, "＿", FOCUS, FIELD);
@@ -1444,10 +1506,15 @@ class App
         let row_y = COMPOSE_Y + box_h + 10;
         let count = self.compose.len.to_s() + "/" + MAX_MSG_LEN.to_s();
         self.text(frame, MARGIN, row_y + 6, count, self.compose.len >= MAX_MSG_LEN ? ERROR : DIM, BG);
+        let status_x = MARGIN + 10 * CHAR_W;
         if (self.conn == "connected")
-            self.text(frame, MARGIN + 10 * CHAR_W, row_y + 6, self.status, self.status_color, BG);
+            self.text(frame, status_x, row_y + 6, self.status, self.status_color, BG);
+        else if (self.total_views != nil)
+            self.text(frame, status_x, row_y + 6, "Connection lost, reconnecting...", ERROR, BG);
+        else if (self.conn == "connecting")
+            self.text(frame, status_x, row_y + 6, "Connecting to " + self.addr + "...", DIM, BG);
         else
-            self.text(frame, MARGIN + 10 * CHAR_W, row_y + 6, "Connection lost, reconnecting...", ERROR, BG);
+            self.text(frame, status_x, row_y + 6, "Could not connect to " + self.addr + ", retrying...", ERROR, BG);
 
         self.button(WIDTH - MARGIN - 110, row_y, 110, 36, "Send", BUTTON, "send", nil);
 
