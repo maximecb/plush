@@ -18,10 +18,17 @@
 // move around the canvas, and + and - zoom in and out. F1 returns to the
 // guestbook.
 //
+// F3 shows the circuit, a large grid that anyone can build logic circuits
+// on without an account: pick a node, turn it with R, then click cells to
+// place it. Clicking a switch turns it on or off, and the right mouse
+// button empties a cell, as does the eraser, which D picks. The circuit is
+// simulated here, see Sim, so what its flip-flops hold differs from one
+// client to the next.
+//
 // The server speaks one JSON object per line in each direction. Passwords
 // are never sent: the client sends a SHA-256 hash of the password instead.
-// The canvas is fetched as tiles, each a TGA file sent as raw bytes after
-// the response that announces it.
+// The canvas and the circuit are fetched as tiles, each a TGA file sent as
+// raw bytes after the response that announces it.
 
 from image import Image, rgb, RAINBOW12, decode_tga;
 from json import parse_json, format_json;
@@ -181,6 +188,7 @@ let TEXT_PAD = 12;
 let TABS = [
     {key: "F1", label: "guestbook", screen: "main"},
     {key: "F2", label: "canvas", screen: "canvas"},
+    {key: "F3", label: "circuit", screen: "circuit"},
 ];
 let FOOTER_H = 28;
 let FOOTER_Y = HEIGHT - FOOTER_H - 8;
@@ -212,10 +220,694 @@ let MIN_DRAW_ZOOM = 2;
 
 // How often to ask for the pixels others changed, the minimum time between
 // the pixel changes we send, kept under the server's limit, and how many
-// clicks can wait to be sent
+// changes can wait to be sent
 let CANVAS_POLL_MS = 1000;
-let SET_INTERVAL_MS = 220;
-let MAX_QUEUED_SETS = 8;
+let SET_INTERVAL_MS = 100;
+let MAX_QUEUED_SETS = 64;
+
+// Circuit simulation
+//
+// The circuit is a square grid of cells, each empty or holding a node: a
+// piece of wire, a clock, a switch, an LED, a logic gate or a D flip-flop.
+// The value of a cell is type | rot << 8 | param << 16, where rot is the
+// number of quarter turns clockwise, and param depends on the type: the bit
+// of the tick counter a clock follows, whether a switch is on, the color of
+// an LED.
+//
+// Nodes have ports on their sides, which connect to the ports facing them
+// on the cells next to them. Ports joined by wires form a net. A net is on
+// when anything drives it: a clock or switch that is on, or the output of a
+// gate or flip-flop. Gates read the nets on their input sides, ignoring the
+// sides nothing is connected to.
+//
+// Signals propagate instantly through wires and gates. Time advances in
+// ticks, TICKS_PER_SEC of them per second, and clocks only change from one
+// tick to the next. A flip-flop outputs what it holds, and is the only node
+// that remembers anything. It has a data input opposite its output, and a
+// clock input on its right as seen from the data input. When its clock
+// input turns on, it takes in what its data input was just before, and
+// outputs it from then on, within the same tick. Flip-flops whose clock
+// inputs turn on together all take in what the others held before.
+//
+// A loop of gates with no flip-flop in it has no defined value: its gates
+// output nothing, and are reported as broken, while the rest of the
+// circuit keeps working.
+
+let TICKS_PER_SEC = 32;
+
+// Node types
+let EMPTY = 0;
+let WIRE = 1;
+let BEND = 2;
+let TEE = 3;
+let CROSS = 4;
+let BRIDGE = 5;
+let CLOCK = 6;
+let SWITCH = 7;
+let LED = 8;
+let AND = 9;
+let OR = 10;
+let XOR = 11;
+let NOT = 12;
+let DFF = 13;
+let NUM_TYPES = 14;
+
+// Most times flip-flops can change within a tick, one setting off another.
+// Those still to change do so on the next tick.
+let MAX_PASSES = 16;
+
+// Bits of the state of a flip-flop, see Sim
+let FF_ON = 1;
+let FF_CLOCK = 2;
+let FF_KNOWN = 4;
+
+// Sides of a cell, in clockwise order, and the cell each one faces. A set
+// of sides is a mask with bit `side` set for each.
+let NORTH = 0;
+let EAST = 1;
+let SOUTH = 2;
+let WEST = 3;
+let SIDE_DX = [0, 1, 0, -1];
+let SIDE_DY = [-1, 0, 1, 0];
+
+// Sides of each type's ports before it is turned. Wires join the sides of
+// each of their groups: the bridge has two, which cross without touching.
+// Gates output to the east and read the other three sides. Flip-flops
+// output to the east, and read data from the west and their clock from the
+// south.
+let WIRE_GROUPS = [[], [10], [3], [14], [15], [5, 10], [], [], [], [], [], [], [], []];
+let OUT_SIDES = [0, 0, 0, 0, 0, 0, 15, 15, 0, 2, 2, 2, 2, 2];
+let IN_SIDES = [0, 0, 0, 0, 0, 0, 0, 0, 15, 13, 13, 13, 13, 12];
+
+// Number of ways each type can be turned that look different
+let NUM_ROTS = [1, 2, 4, 4, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4];
+
+// Builds the value of a cell
+fun cell_value(type, rot, param)
+{
+    return type | (rot << 8) | (param << 16);
+}
+
+// Type of the node in a cell. Types this version doesn't know are empty.
+fun cell_type(value)
+{
+    let type = value & 0xFF;
+    return type < NUM_TYPES ? type : EMPTY;
+}
+
+// Quarter turns of the node in a cell
+fun cell_rot(value)
+{
+    return (value >> 8) & 3;
+}
+
+// Param of the node in a cell
+fun cell_param(value)
+{
+    return (value >> 16) & 0xFF;
+}
+
+// Turns a set of sides clockwise by a number of quarter turns
+fun turn_sides(sides, rot)
+{
+    return ((sides << rot) | (sides >> (4 - rot))) & 15;
+}
+
+// Port tables, indexed by type * 4 + rot: the sides with an output or an
+// input. GROUPS has four entries for each, one per side: the sides joined
+// to that one inside the cell, itself included, or 0 if the side has no
+// port.
+let OUTS = [];
+let INS = [];
+let GROUPS = [];
+
+for (let var type = 0; type < NUM_TYPES; ++type) {
+    for (let var rot = 0; rot < 4; ++rot) {
+        let outs = turn_sides(OUT_SIDES[type], rot);
+        let ins = turn_sides(IN_SIDES[type], rot);
+        let groups = [];
+
+        for (let var i = 0; i < WIRE_GROUPS[type].len; ++i)
+            groups.push(turn_sides(WIRE_GROUPS[type][i], rot));
+
+        OUTS.push(outs);
+        INS.push(ins);
+
+        for (let var side = 0; side < 4; ++side) {
+            let var group = (((outs | ins) >> side) & 1) == 1 ? (1 << side) : 0;
+
+            for (let var i = 0; i < groups.len; ++i) {
+                if (((groups[i] >> side) & 1) == 1)
+                    group = groups[i];
+            }
+
+            GROUPS.push(group);
+        }
+    }
+}
+
+// Index of a cell's node in the port tables
+fun port_key(value)
+{
+    return cell_type(value) * 4 + cell_rot(value);
+}
+
+// Sides of a cell's wire groups, one set of sides per group
+fun wire_groups(value)
+{
+    let groups = [];
+    let base = WIRE_GROUPS[cell_type(value)];
+
+    for (let var i = 0; i < base.len; ++i)
+        groups.push(turn_sides(base[i], cell_rot(value)));
+
+    return groups;
+}
+
+// Sides of a cell's outputs
+fun out_sides(value)
+{
+    return OUTS[port_key(value)];
+}
+
+// Sides of a cell's inputs
+fun in_sides(value)
+{
+    return INS[port_key(value)];
+}
+
+// Frequency of a clock in Hz, given its param
+fun clock_hz(param)
+{
+    return TICKS_PER_SEC.to_f() / (2 << param);
+}
+
+// Simulation of a circuit of size by size cells
+class Sim
+{
+    // Creates the simulation of an empty grid
+    init(self, size)
+    {
+        self.size = size;
+
+        // Number of ticks so far
+        self.t = 0;
+
+        // Net of each side of each cell, as a u32, or 0 if it has no port.
+        // Nets are numbered from 1.
+        self.slot_net = ByteArray.with_size(size * size * 16);
+        self.num_nets = 0;
+
+        // Whether each net is on, one byte per net
+        self.net_on = ByteArray.with_size(1);
+
+        // For each cell, one byte. For a flip-flop: FF_ON if it holds a
+        // one, FF_CLOCK if its clock input was on when last looked at, and
+        // FF_KNOWN once it has been. Then whether a gate there is part of a
+        // loop.
+        self.ff_state = ByteArray.with_size(size * size);
+        self.broken = ByteArray.with_size(size * size);
+        self.num_broken = 0;
+
+        // Clocks and switches, gates in the order to evaluate them, and
+        // flip-flops, each with the nets it reads and drives
+        self.sources = [];
+        self.gates = [];
+        self.flipflops = [];
+
+        // Bits of the tick counter that some clock follows
+        self.clock_bits = 0;
+
+        // Whether flip-flops were still changing at the end of the tick
+        self.unsettled = false;
+    }
+
+    // Sides of a cell whose nets are on
+    sides_on(self, idx)
+    {
+        let var sides = 0;
+
+        for (let var side = 0; side < 4; ++side) {
+            let net = self.slot_net.get_u32(idx * 4 + side);
+            if (net != 0 && self.net_on[net] != 0)
+                sides = sides | (1 << side);
+        }
+
+        return sides;
+    }
+
+    // Tests if the gate in a cell is part of a loop
+    is_broken(self, idx)
+    {
+        return self.broken[idx] != 0;
+    }
+
+    // Works out the nets and the order to evaluate the gates in, from the
+    // values of the cells, held as u32 values whose top byte is ignored.
+    // To be called when cells change. Flip-flops in cells that did not
+    // change keep what they hold.
+    compile(self, cells)
+    {
+        let size = self.size;
+        let slot_net = self.slot_net;
+
+        // Cells with a node
+        let nodes = [];
+        let num_cells = size * size;
+        for (let var idx = 0; idx < num_cells; ++idx) {
+            let type = cells.get_u32(idx) & 0xFF;
+            if (type != EMPTY && type < NUM_TYPES)
+                nodes.push(idx);
+        }
+
+        // Flood fill the nets from each port, through wires and into the
+        // ports they face. has_src says whether a net has more than gate
+        // inputs to it.
+        slot_net.zero_fill();
+        let has_src = [false];
+        let stack = [];
+        let var num_nets = 0;
+
+        for (let var i = 0; i < nodes.len; ++i) {
+            let key = port_key(cells.get_u32(nodes[i]));
+
+            for (let var side = 0; side < 4; ++side) {
+                if (GROUPS[key * 4 + side] == 0 || slot_net.get_u32(nodes[i] * 4 + side) != 0)
+                    continue;
+
+                num_nets += 1;
+                has_src.push(false);
+                slot_net.set_u32(nodes[i] * 4 + side, num_nets);
+                stack.push(nodes[i] * 4 + side);
+
+                while (stack.len > 0) {
+                    let slot = stack.pop();
+                    let idx = slot >> 2;
+                    let s = slot & 3;
+                    let k = port_key(cells.get_u32(idx));
+                    let group = GROUPS[k * 4 + s];
+
+                    if (((INS[k] >> s) & 1) == 0)
+                        has_src[num_nets] = true;
+
+                    // Other sides of the same piece of wire
+                    for (let var s2 = 0; s2 < 4; ++s2) {
+                        if (((group >> s2) & 1) == 1 && slot_net.get_u32(idx * 4 + s2) == 0) {
+                            slot_net.set_u32(idx * 4 + s2, num_nets);
+                            stack.push(idx * 4 + s2);
+                        }
+                    }
+
+                    // Port facing this one
+                    let x = idx % size + SIDE_DX[s];
+                    let y = idx.idiv(size) + SIDE_DY[s];
+                    if (x < 0 || y < 0 || x >= size || y >= size)
+                        continue;
+
+                    let facing = (y * size + x) * 4 + ((s + 2) & 3);
+                    let fk = port_key(cells.get_u32(y * size + x));
+                    if (GROUPS[fk * 4 + ((s + 2) & 3)] != 0 && slot_net.get_u32(facing) == 0) {
+                        slot_net.set_u32(facing, num_nets);
+                        stack.push(facing);
+                    }
+                }
+            }
+        }
+
+        self.num_nets = num_nets;
+        self.net_on = ByteArray.with_size(num_nets + 1);
+
+        // Nets on a set of sides of a cell. Input sides that nothing is
+        // connected to are left out.
+        fun nets_on(idx, sides, inputs) {
+            let nets = [];
+
+            for (let var side = 0; side < 4; ++side) {
+                let net = slot_net.get_u32(idx * 4 + side);
+                if (((sides >> side) & 1) == 1 && (!inputs || has_src[net]))
+                    nets.push(net);
+            }
+
+            return nets;
+        }
+
+        // Net of an input side of a cell, or 0 if nothing is connected to it
+        fun net_in(idx, side) {
+            let net = slot_net.get_u32(idx * 4 + (side & 3));
+            return has_src[net] ? net : 0;
+        }
+
+        let old_flipflops = self.flipflops;
+        let gates = [];
+        self.sources = [];
+        self.flipflops = [];
+        self.clock_bits = 0;
+
+        for (let var i = 0; i < nodes.len; ++i) {
+            let idx = nodes[i];
+            let value = cells.get_u32(idx) & 0xFF_FF_FF;
+            let type = cell_type(value);
+            let key = port_key(value);
+
+            if (type == CLOCK || type == SWITCH) {
+                self.sources.push({type: type, param: cell_param(value), outs: nets_on(idx, 15, false)});
+                if (type == CLOCK)
+                    self.clock_bits = self.clock_bits | (1 << cell_param(value));
+            } else if (type == DFF) {
+                self.flipflops.push({
+                    idx: idx,
+                    value: value,
+                    data: net_in(idx, WEST + cell_rot(value)),
+                    clock: net_in(idx, SOUTH + cell_rot(value)),
+                    out: nets_on(idx, OUTS[key], false)[0],
+                });
+            } else if (type >= AND) {
+                gates.push({
+                    type: type,
+                    idx: idx,
+                    ins: nets_on(idx, INS[key], true),
+                    out: nets_on(idx, OUTS[key], false)[0],
+                });
+            }
+        }
+
+        // A flip-flop that was replaced starts over
+        for (let var i = 0; i < old_flipflops.len; ++i) {
+            if ((cells.get_u32(old_flipflops[i].idx) & 0xFF_FF_FF) != old_flipflops[i].value)
+                self.ff_state[old_flipflops[i].idx] = 0;
+        }
+
+        self.order_gates(gates);
+        self.settle();
+    }
+
+    // Sorts the gates so that each one comes after those driving its
+    // inputs, and marks as broken those that can't be, being part of a loop
+    order_gates(self, gates)
+    {
+        // Gates that read and drive each net, by index, once per input
+        let readers = Array.with_size(self.num_nets + 1, nil);
+        let drivers = Array.with_size(self.num_nets + 1, nil);
+
+        for (let var g = 0; g < gates.len; ++g) {
+            let gate = gates[g];
+
+            if (drivers[gate.out] == nil)
+                drivers[gate.out] = [];
+            drivers[gate.out].push(g);
+
+            for (let var i = 0; i < gate.ins.len; ++i) {
+                if (readers[gate.ins[i]] == nil)
+                    readers[gate.ins[i]] = [];
+                readers[gate.ins[i]].push(g);
+            }
+        }
+
+        // Number of gates left to place before each gate
+        let waiting = [];
+        for (let var g = 0; g < gates.len; ++g) {
+            let var count = 0;
+            for (let var i = 0; i < gates[g].ins.len; ++i) {
+                let from = drivers[gates[g].ins[i]];
+                count += from == nil ? 0 : from.len;
+            }
+            waiting.push(count);
+        }
+
+        let order = [];
+        let ready = [];
+        for (let var g = 0; g < gates.len; ++g) {
+            if (waiting[g] == 0)
+                ready.push(g);
+        }
+
+        // The gates reading a net no longer wait for one of its drivers
+        fun release(net) {
+            let to = readers[net];
+            if (to == nil)
+                return;
+
+            for (let var i = 0; i < to.len; ++i) {
+                waiting[to[i]] -= 1;
+                if (waiting[to[i]] == 0)
+                    ready.push(to[i]);
+            }
+        }
+
+        // Places the gates that are ready, and those this makes ready
+        fun place_ready() {
+            while (ready.len > 0) {
+                let g = ready.pop();
+                order.push(gates[g]);
+                release(gates[g].out);
+            }
+        }
+
+        place_ready();
+
+        self.broken.zero_fill();
+        self.num_broken = 0;
+
+        if (order.len < gates.len) {
+            // The gates left are in loops, or after one. Those after one
+            // lead to no loop: take away the gates that lead to no gate
+            // left, until none do.
+            let left = [];
+            let leads_to = [];
+            let ends = [];
+
+            for (let var g = 0; g < gates.len; ++g)
+                left.push(waiting[g] > 0);
+
+            for (let var g = 0; g < gates.len; ++g) {
+                let var count = 0;
+                let to = readers[gates[g].out];
+
+                for (let var i = 0; left[g] && to != nil && i < to.len; ++i) {
+                    if (left[to[i]])
+                        count += 1;
+                }
+
+                leads_to.push(count);
+                if (left[g] && count == 0)
+                    ends.push(g);
+            }
+
+            while (ends.len > 0) {
+                let g = ends.pop();
+                left[g] = false;
+
+                for (let var i = 0; i < gates[g].ins.len; ++i) {
+                    let from = drivers[gates[g].ins[i]];
+
+                    for (let var j = 0; from != nil && j < from.len; ++j) {
+                        leads_to[from[j]] -= 1;
+                        if (left[from[j]] && leads_to[from[j]] == 0)
+                            ends.push(from[j]);
+                    }
+                }
+            }
+
+            // What remains is broken and outputs nothing, which lets the
+            // gates after the loops be placed
+            for (let var g = 0; g < gates.len; ++g) {
+                if (left[g]) {
+                    self.broken[gates[g].idx] = 1;
+                    self.num_broken += 1;
+
+                    // Never ready
+                    waiting[g] = gates.len * 4 + 1;
+                }
+            }
+
+            for (let var g = 0; g < gates.len; ++g) {
+                if (left[g])
+                    release(gates[g].out);
+            }
+
+            place_ready();
+        }
+
+        self.gates = order;
+    }
+
+    // Works out which nets are on, given the tick and what flip-flops hold
+    eval(self)
+    {
+        let on = self.net_on;
+        on.zero_fill();
+
+        for (let var i = 0; i < self.sources.len; ++i) {
+            let src = self.sources[i];
+            let lit = src.type == CLOCK ? (self.t >> src.param) & 1 : src.param & 1;
+
+            if (lit == 1) {
+                for (let var j = 0; j < src.outs.len; ++j)
+                    on[src.outs[j]] = 1;
+            }
+        }
+
+        for (let var i = 0; i < self.flipflops.len; ++i) {
+            if ((self.ff_state[self.flipflops[i].idx] & FF_ON) != 0)
+                on[self.flipflops[i].out] = 1;
+        }
+
+        for (let var i = 0; i < self.gates.len; ++i) {
+            let gate = self.gates[i];
+            let ins = gate.ins;
+            let var count = 0;
+
+            for (let var j = 0; j < ins.len; ++j)
+                count += on[ins[j]];
+
+            let var out = false;
+            if (gate.type == AND)
+                out = ins.len > 0 && count == ins.len;
+            else if (gate.type == OR)
+                out = count > 0;
+            else if (gate.type == XOR)
+                out = (count & 1) == 1;
+            else
+                out = count == 0;
+
+            if (out)
+                on[gate.out] = 1;
+        }
+    }
+
+    // Has the flip-flops whose clock input turned on take in their data
+    // input, all from the nets as they are. Returns whether any changed.
+    latch(self)
+    {
+        let on = self.net_on;
+        let var changed = false;
+
+        for (let var i = 0; i < self.flipflops.len; ++i) {
+            let ff = self.flipflops[i];
+            let state = self.ff_state[ff.idx];
+            let clock = on[ff.clock];
+            let var held = state & FF_ON;
+
+            // A flip-flop just placed doesn't take a clock input that is on
+            // for one that turned on
+            if (clock == 1 && (state & FF_KNOWN) != 0 && (state & FF_CLOCK) == 0)
+                held = on[ff.data];
+
+            if (held != (state & FF_ON))
+                changed = true;
+
+            self.ff_state[ff.idx] = FF_KNOWN | (clock == 1 ? FF_CLOCK : 0) | held;
+        }
+
+        return changed;
+    }
+
+    // Works out which nets are on, with the flip-flops this sets off taken
+    // into account, and those that these set off in turn
+    settle(self)
+    {
+        self.unsettled = false;
+
+        for (let var pass = 0; pass < MAX_PASSES; ++pass) {
+            self.eval();
+
+            if (!self.latch())
+                return;
+        }
+
+        self.eval();
+        self.unsettled = true;
+    }
+
+    // Advances the simulation by one tick. Returns false if nothing
+    // changed, as no clock did.
+    tick(self)
+    {
+        self.t += 1;
+
+        if (((self.t ^ (self.t - 1)) & self.clock_bits) == 0 && !self.unsettled)
+            return false;
+
+        self.settle();
+        return true;
+    }
+}
+
+// Sizes of a circuit cell on screen, like ZOOMS. Nodes can be placed from
+// zoom MIN_EDIT_ZOOM up, and grid lines show from cells of GRID_LINES_FROM
+// pixels. Nodes are drawn with their outlines from cells of OUTLINES_FROM
+// pixels, and in full from cells of DETAILS_FROM pixels.
+let CIRCUIT_ZOOMS = [4, 8, 16, 32, 64];
+let CIRCUIT_DEFAULT_ZOOM = 4;
+let MIN_EDIT_ZOOM = 1;
+let GRID_LINES_FROM = 8;
+let OUTLINES_FROM = 16;
+let DETAILS_FROM = 28;
+
+// Size of the picture of the node picked, under the nodes to pick from
+let PREVIEW = 64;
+
+// Most ticks of the circuit simulated per frame. Past that, the circuit
+// falls behind rather than skip ticks.
+let MAX_TICKS_PER_FRAME = 4;
+
+// Nodes to build circuits with, in the order they are shown, four per row.
+// The eraser, which empties cells, comes last.
+let NODES = [
+    {name: "wire", value: cell_value(WIRE, 0, 0)},
+    {name: "bend", value: cell_value(BEND, 0, 0)},
+    {name: "tee", value: cell_value(TEE, 0, 0)},
+    {name: "cross", value: cell_value(CROSS, 0, 0)},
+    {name: "bridge", value: cell_value(BRIDGE, 0, 0)},
+    {name: "red LED", value: cell_value(LED, 0, 0)},
+    {name: "green LED", value: cell_value(LED, 0, 1)},
+    {name: "blue LED", value: cell_value(LED, 0, 2)},
+    {name: "1 Hz clock", value: cell_value(CLOCK, 0, 4)},
+    {name: "2 Hz clock", value: cell_value(CLOCK, 0, 3)},
+    {name: "4 Hz clock", value: cell_value(CLOCK, 0, 2)},
+    {name: "8 Hz clock", value: cell_value(CLOCK, 0, 1)},
+    {name: "AND", value: cell_value(AND, 0, 0)},
+    {name: "OR", value: cell_value(OR, 0, 0)},
+    {name: "XOR", value: cell_value(XOR, 0, 0)},
+    {name: "NOT", value: cell_value(NOT, 0, 0)},
+    {name: "switch", value: cell_value(SWITCH, 0, 0)},
+    {name: "flip-flop", value: cell_value(DFF, 0, 0)},
+    {name: "eraser", value: 0},
+];
+
+// Circuit colors: the grid, wires and the lines of nodes, those that are
+// on, and nodes in a loop
+let CELL_BG = rgb(14, 12, 24);
+let GRID_LINE = rgb(46, 46, 54);
+let WIRE_OFF = rgb(240, 240, 245);
+let WIRE_ON = rgb(255, 45, 45);
+let BROKEN = rgb(255, 70, 180);
+let UNKNOWN = rgb(80, 80, 90);
+
+// Body color of each node type that has one
+let NODE_COLORS = Array.with_size(NUM_TYPES, UNKNOWN);
+NODE_COLORS[CLOCK] = rgb(190, 150, 30);
+NODE_COLORS[SWITCH] = rgb(84, 84, 104);
+NODE_COLORS[AND] = rgb(50, 100, 210);
+NODE_COLORS[OR] = rgb(40, 150, 80);
+NODE_COLORS[XOR] = rgb(140, 70, 200);
+NODE_COLORS[NOT] = rgb(205, 95, 40);
+NODE_COLORS[DFF] = rgb(30, 140, 150);
+
+// Square wave drawn on clocks, as the x and y of each of its corners
+let CLOCK_WAVE = [0.26, 0.41, 0.26, 0.25, 0.42, 0.25, 0.42, 0.41, 0.58, 0.41, 0.58, 0.25, 0.74, 0.25, 0.74, 0.41];
+
+// Colors of LEDs that are on, by param
+let LED_COLORS = [
+    rgb(255, 60, 60),
+    rgb(80, 255, 100),
+    rgb(80, 150, 255),
+    rgb(255, 230, 60),
+    rgb(255, 150, 40),
+    rgb(210, 90, 255),
+    rgb(70, 230, 230),
+    rgb(255, 255, 255),
+];
 
 // Colors to paint with: the 12-band rainbow, then black, grey, white and
 // brown
@@ -625,9 +1317,467 @@ fun net_actor(addr, gen)
     $actor_send(parent, {net: "closed", gen: gen});
 }
 
-// State of the client and its three screens: the intro animation, the
-// guestbook and the admin page. The box to register or log in is drawn
-// over the guestbook.
+// Distance from a point to the segment from a to b
+fun seg_dist(u, v, ax, ay, bx, by)
+{
+    let dx = bx - ax;
+    let dy = by - ay;
+    let t = (((u - ax) * dx + (v - ay) * dy) / (dx * dx + dy * dy)).clip(0.0, 1.0);
+    let ex = u - ax - t * dx;
+    let ey = v - ay - t * dy;
+    return (ex * ex + ey * ey).sqrt();
+}
+
+// Tests if a point is in the body of a circuit node of a given type. Nodes
+// are drawn in a unit square, with their output to the east. Gates have the
+// shapes of their schematic symbols, LEDs are round, and the rest square.
+// Flip-flops are larger, to fit their labels.
+fun in_body(type, u, v)
+{
+    let du = u - 0.5;
+    let dv = v - 0.5;
+    let half = type == DFF ? 0.38 : 0.34;
+
+    if (dv.abs() > half)
+        return false;
+
+    if (type == AND)
+        return u >= 0.16 && (u <= 0.5 || du * du + dv * dv <= 0.1156);
+
+    if (type == OR || type == XOR) {
+        // A hollow back, further in for the XOR, and two arcs that meet
+        // at the output
+        let bu = u - (type == XOR ? 0.01 : -0.09);
+        let fu = u - 0.16;
+
+        if (bu * bu + dv * dv < 0.178)
+            return false;
+
+        return fu * fu + (v - 0.96) * (v - 0.96) <= 0.674 && fu * fu + (v - 0.04) * (v - 0.04) <= 0.674;
+    }
+
+    // A triangle around the middle, which leaves room for its bubble
+    if (type == NOT)
+        return u >= 0.24 && dv.abs() <= 0.34 * (1.0 - (u - 0.24) / 0.46);
+
+    if (type == LED)
+        return du * du + dv * dv <= 0.1156;
+
+    return du.abs() <= half;
+}
+
+// What to draw at a point of the picture of a circuit node, in a cell of c
+// pixels: 0 for nothing, 1 for its body, 2 for its lines, 3 for its details
+fun node_shade(type, on, u, v, c)
+{
+    let du = u - 0.5;
+    let dv = v - 0.5;
+    let outlined = c >= OUTLINES_FROM;
+
+    // Half the thickness of thin lines, at least most of a pixel
+    let thin = (0.6 / c).max(0.022);
+
+    // Second arc at the back of the XOR
+    if (type == XOR && outlined && u > 0.0 && dv.abs() <= 0.34) {
+        let d = ((u + 0.09) * (u + 0.09) + dv * dv).sqrt();
+        if ((d - 0.422).abs() <= thin)
+            return 2;
+    }
+
+    // Bubble at the tip of the NOT
+    if (type == NOT) {
+        let d = ((u - 0.82) * (u - 0.82) + dv * dv).sqrt();
+        if (d <= 0.12)
+            return outlined && d >= 0.07 ? 2 : 1;
+    }
+
+    if (!in_body(type, u, v))
+        return 0;
+
+    if (type == SWITCH) {
+        if (!outlined)
+            return on && du.abs() <= 0.17 && dv.abs() <= 0.17 ? 3 : 1;
+
+        // Two contacts, and a lever that joins them when on
+        if (seg_dist(u, v, 0.3, 0.6, on ? 0.7 : 0.66, on ? 0.6 : 0.36) <= thin)
+            return 3;
+        if ((du.abs() - 0.2) * (du.abs() - 0.2) + (v - 0.6) * (v - 0.6) <= 0.0049)
+            return 2;
+    }
+
+    // Wedge at the clock input of the flip-flop, to the south
+    if (type == DFF && outlined && v >= 0.7 && v <= 0.84 && du.abs() <= 0.12 * (v - 0.7) / 0.14)
+        return 2;
+
+    if (type == CLOCK && c >= DETAILS_FROM) {
+        for (let var i = 0; i + 3 < CLOCK_WAVE.len; i += 2) {
+            if (seg_dist(u, v, CLOCK_WAVE[i], CLOCK_WAVE[i + 1], CLOCK_WAVE[i + 2], CLOCK_WAVE[i + 3]) <= thin)
+                return 3;
+        }
+    }
+
+    // Diode in the LED: a triangle pointing at a bar
+    if (type == LED && c >= DETAILS_FROM) {
+        if (u >= 0.36 && u <= 0.6 && dv.abs() <= 0.16 * (0.6 - u) / 0.24)
+            return 3;
+        if (u > 0.6 && u <= 0.66 && dv.abs() <= 0.16)
+            return 3;
+    }
+
+    // Points near the edge leave the body when moved away from its middle
+    if (outlined) {
+        if (!in_body(type, 0.5 + du * 1.16, 0.5 + dv * 1.16))
+            return 2;
+    }
+
+    return 1;
+}
+
+// The part of a grid shown on screen, in a square of VIEW_SIZE pixels
+class View
+{
+    // zooms are the sizes of a cell on screen, in pixels, from zoomed out
+    // to zoomed in, which all divide VIEW_SIZE
+    init(self, zooms, default_zoom)
+    {
+        self.zooms = zooms;
+        self.default_zoom = default_zoom;
+
+        // Size of the grid, zoom level, and top-left cell in view
+        self.size = 0;
+        self.zoom = default_zoom;
+        self.x = 0;
+        self.y = 0;
+
+        // Image of the view at that zoom, redrawn when dirty is set
+        self.img = Image(VIEW_SIZE, VIEW_SIZE);
+        self.dirty = true;
+    }
+
+    // Size of a cell on screen at the current zoom, in pixels
+    cell(self)
+    {
+        return self.zooms[self.zoom];
+    }
+
+    // Number of cells across the view at the current zoom
+    visible(self)
+    {
+        return VIEW_SIZE.idiv(self.cell());
+    }
+
+    // Shows the middle of a grid of a given size, at the default zoom
+    reset(self, size)
+    {
+        self.size = size;
+        self.zoom = self.default_zoom;
+        self.x = (size - self.visible()).idiv(2);
+        self.y = self.x;
+        self.clamp();
+    }
+
+    // Keeps the view within the grid
+    clamp(self)
+    {
+        let max_pos = (self.size - self.visible()).max(0);
+        self.x = self.x.clip(0, max_pos);
+        self.y = self.y.clip(0, max_pos);
+        self.dirty = true;
+    }
+
+    // Moves the view by a number of steps, each the same distance on screen
+    // at every zoom: one cell of the canvas at its starting zoom
+    pan(self, dx, dy)
+    {
+        let step = self.visible().idiv(64).max(1);
+        self.x = self.x + dx * step;
+        self.y = self.y + dy * step;
+        self.clamp();
+    }
+
+    // Zooms in or out by a number of levels, around the middle of the view
+    zoom_by(self, levels)
+    {
+        let mid_x = self.x + self.visible().idiv(2);
+        let mid_y = self.y + self.visible().idiv(2);
+        self.zoom = (self.zoom + levels).clip(0, self.zooms.len - 1);
+        self.x = mid_x - self.visible().idiv(2);
+        self.y = mid_y - self.visible().idiv(2);
+        self.clamp();
+    }
+
+    // Cell at a position in the frame, or nil outside of the view or of
+    // the grid
+    cell_at(self, x, y)
+    {
+        if (x < VIEW_X || y < VIEW_Y || x >= VIEW_X + VIEW_SIZE || y >= VIEW_Y + VIEW_SIZE)
+            return nil;
+
+        let cx = self.x + (x - VIEW_X).idiv(self.cell());
+        let cy = self.y + (y - VIEW_Y).idiv(self.cell());
+
+        if (cx >= self.size || cy >= self.size)
+            return nil;
+
+        return {x: cx, y: cy};
+    }
+}
+
+// A grid of cells shared with the server, the pixel canvas or the circuit:
+// our copy of it, and what it takes to keep it up to date. Requests are
+// sent through the app, which hands their responses back.
+class Grid
+{
+    // name starts the types of the grid's requests, value_key is the field
+    // of a set request that holds the value of a cell, blank is what cells
+    // hold until they are fetched, and view is the part of the grid shown
+    init(self, name, value_key, blank, view)
+    {
+        self.name = name;
+        self.value_key = value_key;
+        self.blank = blank;
+        self.view = view;
+
+        // Our copy of the grid, created once the server tells its size,
+        // and for each tile, the server's change counter when we fetched it,
+        // or -1 if it has to be fetched, and whether a request is on its way
+        self.img = nil;
+        self.size = 0;
+        self.tile_size = 0;
+        self.tiles = [];
+
+        // Epoch and seq of the last poll response, which the next poll sends
+        self.epoch = nil;
+        self.seq = nil;
+        self.polling = false;
+        self.last_poll_ms = 0;
+        self.error = "";
+
+        // Cells we changed that are waiting to be sent
+        self.set_queue = [];
+        self.last_set_ms = 0;
+
+        // Set when cells change, for the circuit to be worked out again
+        self.changed = false;
+    }
+
+    // Notes that cells changed
+    touch(self)
+    {
+        self.changed = true;
+        self.view.dirty = true;
+    }
+
+    // Tests if the grid, or part of it, is still to be fetched
+    loading(self)
+    {
+        for (let var i = 0; i < self.tiles.len; ++i) {
+            if (self.tiles[i].have == -1)
+                return true;
+        }
+
+        return self.img == nil;
+    }
+
+    // Forgets the requests that were lost with the connection, and undoes
+    // the changes that were not sent
+    reset_requests(self)
+    {
+        self.polling = false;
+
+        for (let var i = 0; i < self.tiles.len; ++i)
+            self.tiles[i].requested = false;
+
+        for (let var i = self.set_queue.len - 1; i >= 0; i = i - 1) {
+            let set = self.set_queue[i];
+            self.img.bytes.set_u32(set.y * self.size + set.x, set.prev);
+        }
+
+        self.set_queue = [];
+        self.touch();
+    }
+
+    // Asks the server for the cells that changed since the last poll
+    poll(self, app)
+    {
+        let req = {type: self.name + "_poll"};
+
+        if (self.epoch != nil) {
+            req.epoch = self.epoch;
+            req.since = self.seq;
+        }
+
+        if (app.send(req, self)) {
+            self.polling = true;
+            self.last_poll_ms = $time_current_ms();
+        }
+    }
+
+    // Creates our copy of the grid, with every tile still to fetch, and
+    // the view on its middle
+    create(self, size, tile_size)
+    {
+        self.img = Image(size, size);
+        self.img.clear(self.blank);
+        self.size = size;
+        self.tile_size = tile_size;
+        self.epoch = nil;
+        self.set_queue = [];
+
+        self.tiles = [];
+        let per_row = size.idiv(tile_size);
+        for (let var i = 0; i < per_row * per_row; ++i)
+            self.tiles.push({have: -1, requested: false});
+
+        self.view.reset(size);
+        self.touch();
+    }
+
+    // Handles the response to a poll: either the cells that changed, or,
+    // when the server can't tell which did, the change counter of each tile
+    on_poll(self, app, res)
+    {
+        self.polling = false;
+
+        if (!res.ok) {
+            // Servers older than the grid don't know the request
+            self.error = res.error == "unknown request type" ? "no " + self.name + " here" : res.error;
+            return;
+        }
+
+        if (self.img == nil || self.size != res.size || self.tile_size != res.tile_size)
+            self.create(res.size, res.tile_size);
+
+        if (res.has("tiles")) {
+            // After a server restart, any tile may have changed
+            let restarted = self.epoch != res.epoch;
+
+            for (let var i = 0; i < self.tiles.len && i < res.tiles.len; ++i) {
+                if (restarted || self.tiles[i].have != res.tiles[i])
+                    self.tiles[i].have = -1;
+            }
+        } else {
+            let pixels = res.pixels;
+
+            for (let var i = 0; i + 2 < pixels.len; i = i + 3) {
+                if (pixels[i] < self.size && pixels[i + 1] < self.size)
+                    self.img.set_pixel(pixels[i], pixels[i + 1], rgb(0, 0, 0) | pixels[i + 2]);
+            }
+
+            if (pixels.len > 0)
+                self.touch();
+        }
+
+        self.epoch = res.epoch;
+        self.seq = res.seq;
+        self.request_tiles(app);
+    }
+
+    // Requests the tiles that have to be fetched, nearest to the middle of
+    // the view first
+    request_tiles(self, app)
+    {
+        let per_row = self.size.idiv(self.tile_size);
+        let mid_x = self.view.x + self.view.visible().idiv(2);
+        let mid_y = self.view.y + self.view.visible().idiv(2);
+
+        // Distance from the middle of a tile to the middle of the view
+        let dists = [];
+        for (let var i = 0; i < self.tiles.len; ++i) {
+            let dx = (i % per_row) * self.tile_size + self.tile_size.idiv(2) - mid_x;
+            let dy = i.idiv(per_row) * self.tile_size + self.tile_size.idiv(2) - mid_y;
+            dists.push(dx * dx + dy * dy);
+        }
+
+        loop {
+            let var best = nil;
+
+            for (let var i = 0; i < self.tiles.len; ++i) {
+                let tile = self.tiles[i];
+                if (tile.have == -1 && !tile.requested && (best == nil || dists[i] < dists[best]))
+                    best = i;
+            }
+
+            if (best == nil || !app.send({type: self.name + "_tile", tx: best % per_row, ty: best.idiv(per_row)}, self))
+                break;
+
+            self.tiles[best].requested = true;
+        }
+    }
+
+    // Handles the response to a tile request, whose data is a TGA file
+    on_tile(self, req, res)
+    {
+        let per_row = self.size.idiv(self.tile_size);
+        let tile = self.tiles[req.ty * per_row + req.tx];
+        tile.requested = false;
+
+        if (!res.ok || !res.has("data"))
+            return;
+
+        let img = decode_tga(res.data);
+
+        if (img == nil || img.width != self.tile_size || img.height != self.tile_size)
+            return;
+
+        self.img.blit(img, req.tx * self.tile_size, req.ty * self.tile_size);
+        tile.have = res.seq;
+        self.touch();
+    }
+
+    // Value of a cell, as stored in our copy of the grid
+    get(self, x, y)
+    {
+        return self.img.bytes.get_u32(y * self.size + x);
+    }
+
+    // Changes the value of a cell. It shows right away, and is sent to the
+    // server from update(), a few per second at most. Returns false if the
+    // cell can't be changed for now, or already has that value.
+    put(self, x, y, value)
+    {
+        let per_row = self.size.idiv(self.tile_size);
+        let tile = self.tiles[y.idiv(self.tile_size) * per_row + x.idiv(self.tile_size)];
+        let prev = self.get(x, y);
+
+        if (tile.have == -1 || prev == value || self.set_queue.len >= MAX_QUEUED_SETS)
+            return false;
+
+        self.img.bytes.set_u32(y * self.size + x, value);
+        self.set_queue.push({x: x, y: y, value: value, prev: prev});
+        self.touch();
+        return true;
+    }
+
+    // Handles the response to a change we sent. A change the server
+    // dropped is undone, unless the cell was changed again since.
+    on_set(self, res, set)
+    {
+        if (!res.ok && self.get(set.x, set.y) == set.value) {
+            self.img.bytes.set_u32(set.y * self.size + set.x, set.prev);
+            self.touch();
+        }
+    }
+
+    // Polls the server when it is time to, and sends the next change
+    update(self, app, now)
+    {
+        if (!self.polling && self.error == "" && now - self.last_poll_ms >= CANVAS_POLL_MS)
+            self.poll(app);
+
+        if (self.set_queue.len > 0 && now - self.last_set_ms >= SET_INTERVAL_MS) {
+            let set = self.set_queue.remove(0);
+            let req = {type: self.name + "_set", x: set.x, y: set.y};
+            req[self.value_key] = set.value & 0xFF_FF_FF;
+            app.send(req, {grid: self, set: set});
+            self.last_set_ms = now;
+        }
+    }
+}
+
+// State of the client and its screens: the intro animation, the guestbook,
+// the canvas, the circuit and the admin page. The box to register or log
+// in is drawn over the guestbook.
 class App
 {
     // Creates the client for a given server address
@@ -637,6 +1787,9 @@ class App
         self.frame = Image(WIDTH, HEIGHT);
         self.panel = Image(WIDTH - 2 * MARGIN, FOOTER_Y - 8 - PANEL_Y);
         self.fonts = {};
+
+        // Pictures of circuit nodes, see node_sprite
+        self.sprites = {};
 
         self.screen = "intro";
         self.start_ms = $time_current_ms();
@@ -689,35 +1842,24 @@ class App
         // the categories to delete it as
         self.deleting = nil;
 
-        // Our copy of the canvas, created once the server tells its size,
-        // and for each tile, the server's change counter when we fetched it,
-        // or -1 if it has to be fetched, and whether a request is on its way
-        self.canvas = nil;
-        self.canvas_size = 0;
-        self.tile_size = 0;
-        self.tiles = [];
+        // The pixel canvas and the circuit, whose cells hold nodes. Cells
+        // of the circuit are empty until they are fetched.
+        self.canvas = Grid("canvas", "color", FIELD, View(ZOOMS, DEFAULT_ZOOM));
+        self.circuit = Grid("circuit", "value", rgb(0, 0, 0), View(CIRCUIT_ZOOMS, CIRCUIT_DEFAULT_ZOOM));
 
-        // Epoch and seq of the last poll response, which the next poll sends
-        self.canvas_epoch = nil;
-        self.canvas_seq = nil;
-        self.canvas_polling = false;
-        self.last_poll_ms = 0;
-        self.canvas_error = "";
-
-        // Pixels we painted that are waiting to be sent
-        self.set_queue = [];
-        self.last_set_ms = 0;
-
-        // Part of the canvas in view: zoom level, top-left canvas pixel, and
-        // the image of it at that zoom, redrawn when view_dirty is set
-        self.zoom = DEFAULT_ZOOM;
-        self.view_x = 0;
-        self.view_y = 0;
-        self.view_img = Image(VIEW_SIZE, VIEW_SIZE);
-        self.view_dirty = true;
-
-        // Canvas pixel under the mouse, or nil
+        // Cell under the mouse on the canvas or circuit screen, or nil, and
+        // the last cell changed while the mouse button is held, with
+        // whether it is emptying cells
         self.hover = nil;
+        self.painting = nil;
+
+        // Simulation of the circuit, created with it, and the time up to
+        // which it was run. Then the node to place, as an index in NODES,
+        // and how far it is turned.
+        self.sim = nil;
+        self.sim_ms = 0.0;
+        self.node = 0;
+        self.rot = 0;
 
         // Color to paint with: one of the palette's, or the custom color
         // made with the color picker. Then the custom color's place in the
@@ -736,13 +1878,13 @@ class App
             self.hue_img.fill_rect(x, 0, PICK_BLOCK, HUE_H, hsv_to_rgb(360.0 * x / SIDE_W, 1.0, 1.0));
     }
 
-    // Returns a font for a text color on a background color
-    font(self, color, bg)
+    // Returns a font of a given scale for a text color on a background color
+    font(self, scale, color, bg)
     {
-        let key = color.to_s() + ":" + bg.to_s();
+        let key = scale.to_s() + ":" + color.to_s() + ":" + bg.to_s();
 
         if (!self.fonts.has(key))
-            self.fonts[key] = Font(2, color, bg);
+            self.fonts[key] = Font(scale, color, bg);
 
         return self.fonts[key];
     }
@@ -750,7 +1892,7 @@ class App
     // Draws a line of text into an image
     text(self, img, x, y, str, color, bg)
     {
-        let font = self.font(color, bg);
+        let font = self.font(2, color, bg);
         let cs = chars(str);
 
         for (let var i = 0; i < cs.len; ++i)
@@ -810,7 +1952,8 @@ class App
         self.pending = [];
         self.loading_older = false;
         self.dirty = true;
-        self.reset_canvas_requests();
+        self.canvas.reset_requests();
+        self.circuit.reset_requests();
 
         let addr = self.addr;
         let gen = self.gen;
@@ -914,7 +2057,8 @@ class App
             self.is_admin = false;
             self.admin_info = nil;
             self.admin_error = "";
-            self.reset_canvas_requests();
+            self.canvas.reset_requests();
+            self.circuit.reset_requests();
 
             // A login request in flight is lost
             if (self.modal && self.modal_status != "")
@@ -1040,23 +2184,19 @@ class App
             return;
         }
 
-        if (req.type == "canvas_poll") {
-            self.on_canvas_poll(res);
+        // Requests of the canvas and the circuit are kept with their grid
+        if (req.type == "canvas_poll" || req.type == "circuit_poll") {
+            info.on_poll(self, res);
             return;
         }
 
-        if (req.type == "canvas_tile") {
-            self.on_canvas_tile(req, res);
+        if (req.type == "canvas_tile" || req.type == "circuit_tile") {
+            info.on_tile(req, res);
             return;
         }
 
-        if (req.type == "canvas_set") {
-            // A change the server dropped is undone, unless painted over
-            let idx = info.y * self.canvas_size + info.x;
-            if (!res.ok && self.canvas.bytes.get_u32(idx) == info.color) {
-                self.canvas.bytes.set_u32(idx, info.prev);
-                self.view_dirty = true;
-            }
+        if (req.type == "canvas_set" || req.type == "circuit_set") {
+            info.grid.on_set(res, info.set);
             return;
         }
 
@@ -1166,250 +2306,175 @@ class App
         self.dirty = true;
     }
 
-    // Shows the canvas, which update() then keeps up to date
-    enter_canvas(self)
+    // The grid of the current screen, the canvas or the circuit, or nil on
+    // the other screens
+    grid(self)
     {
-        self.screen = "canvas";
-        self.drag_offset = nil;
-        self.canvas_error = "";
-        self.last_poll_ms = 0;
-        self.dirty = true;
+        if (self.screen == "canvas")
+            return self.canvas;
+
+        return self.screen == "circuit" ? self.circuit : nil;
     }
 
-    // Returns from the canvas to the guestbook
-    leave_canvas(self)
+    // Shows the canvas or the circuit, which update() then keeps up to date
+    enter_grid(self, screen)
+    {
+        self.screen = screen;
+        self.drag_offset = nil;
+        self.pick_drag = nil;
+        self.hover = nil;
+        self.painting = nil;
+        self.dirty = true;
+
+        let grid = self.grid();
+        grid.error = "";
+        grid.last_poll_ms = 0;
+        grid.view.dirty = true;
+
+        // The circuit stood still while it wasn't shown
+        self.sim_ms = $time_current_ms().to_f();
+    }
+
+    // Returns from the canvas or the circuit to the guestbook
+    leave_grid(self)
     {
         self.screen = "main";
         self.pick_drag = nil;
         self.hover = nil;
+        self.painting = nil;
         self.dirty = true;
         self.request_newer();
     }
 
-    // Forgets the canvas requests that were lost with the connection, and
-    // undoes the pixels painted that were not sent
-    reset_canvas_requests(self)
-    {
-        self.canvas_polling = false;
-
-        for (let var i = 0; i < self.tiles.len; ++i)
-            self.tiles[i].requested = false;
-
-        for (let var i = self.set_queue.len - 1; i >= 0; i = i - 1) {
-            let set = self.set_queue[i];
-            self.canvas.bytes.set_u32(set.y * self.canvas_size + set.x, set.prev);
-        }
-
-        self.set_queue = [];
-        self.view_dirty = true;
-    }
-
-    // Asks the server for the pixels that changed since the last poll
-    poll_canvas(self)
-    {
-        let req = {type: "canvas_poll"};
-
-        if (self.canvas_epoch != nil) {
-            req.epoch = self.canvas_epoch;
-            req.since = self.canvas_seq;
-        }
-
-        if (self.send(req, nil)) {
-            self.canvas_polling = true;
-            self.last_poll_ms = $time_current_ms();
-        }
-    }
-
-    // Creates our copy of the canvas, with every tile still to fetch, and
-    // the view on its middle
-    create_canvas(self, size, tile_size)
-    {
-        self.canvas = Image(size, size);
-        self.canvas.clear(FIELD);
-        self.canvas_size = size;
-        self.tile_size = tile_size;
-        self.canvas_epoch = nil;
-        self.set_queue = [];
-
-        self.tiles = [];
-        let per_row = size.idiv(tile_size);
-        for (let var i = 0; i < per_row * per_row; ++i)
-            self.tiles.push({have: -1, requested: false});
-
-        self.zoom = DEFAULT_ZOOM;
-        self.view_x = (size - self.visible()).idiv(2);
-        self.view_y = self.view_x;
-        self.clamp_view();
-    }
-
-    // Handles the response to a poll: either the pixels that changed, or,
-    // when the server can't tell which did, the change counter of each tile
-    on_canvas_poll(self, res)
-    {
-        self.canvas_polling = false;
-
-        if (!res.ok) {
-            // Servers older than the canvas don't know the request
-            self.canvas_error = res.error == "unknown request type" ? "no canvas here" : res.error;
-            return;
-        }
-
-        if (self.canvas == nil || self.canvas_size != res.size || self.tile_size != res.tile_size)
-            self.create_canvas(res.size, res.tile_size);
-
-        if (res.has("tiles")) {
-            // After a server restart, any tile may have changed
-            let restarted = self.canvas_epoch != res.epoch;
-
-            for (let var i = 0; i < self.tiles.len && i < res.tiles.len; ++i) {
-                if (restarted || self.tiles[i].have != res.tiles[i])
-                    self.tiles[i].have = -1;
-            }
-        } else {
-            let pixels = res.pixels;
-
-            for (let var i = 0; i + 2 < pixels.len; i = i + 3) {
-                if (pixels[i] < self.canvas_size && pixels[i + 1] < self.canvas_size)
-                    self.canvas.set_pixel(pixels[i], pixels[i + 1], rgb(0, 0, 0) | pixels[i + 2]);
-            }
-
-            if (pixels.len > 0)
-                self.view_dirty = true;
-        }
-
-        self.canvas_epoch = res.epoch;
-        self.canvas_seq = res.seq;
-        self.request_tiles();
-    }
-
-    // Requests the tiles that have to be fetched, nearest to the middle of
-    // the view first
-    request_tiles(self)
-    {
-        let per_row = self.canvas_size.idiv(self.tile_size);
-        let mid_x = self.view_x + self.visible().idiv(2);
-        let mid_y = self.view_y + self.visible().idiv(2);
-
-        // Distance from the middle of a tile to the middle of the view
-        let dists = [];
-        for (let var i = 0; i < self.tiles.len; ++i) {
-            let dx = (i % per_row) * self.tile_size + self.tile_size.idiv(2) - mid_x;
-            let dy = i.idiv(per_row) * self.tile_size + self.tile_size.idiv(2) - mid_y;
-            dists.push(dx * dx + dy * dy);
-        }
-
-        loop {
-            let var best = nil;
-
-            for (let var i = 0; i < self.tiles.len; ++i) {
-                let tile = self.tiles[i];
-                if (tile.have == -1 && !tile.requested && (best == nil || dists[i] < dists[best]))
-                    best = i;
-            }
-
-            if (best == nil || !self.send({type: "canvas_tile", tx: best % per_row, ty: best.idiv(per_row)}, nil))
-                break;
-
-            self.tiles[best].requested = true;
-        }
-    }
-
-    // Handles the response to a tile request, whose data is a TGA file
-    on_canvas_tile(self, req, res)
-    {
-        let per_row = self.canvas_size.idiv(self.tile_size);
-        let tile = self.tiles[req.ty * per_row + req.tx];
-        tile.requested = false;
-
-        if (!res.ok || !res.has("data"))
-            return;
-
-        let img = decode_tga(res.data);
-
-        if (img == nil || img.width != self.tile_size || img.height != self.tile_size)
-            return;
-
-        self.canvas.blit(img, req.tx * self.tile_size, req.ty * self.tile_size);
-        tile.have = res.seq;
-        self.view_dirty = true;
-    }
-
-    // Number of canvas pixels across the view at the current zoom
-    visible(self)
-    {
-        return VIEW_SIZE.idiv(ZOOMS[self.zoom]);
-    }
-
-    // Keeps the view within the canvas
-    clamp_view(self)
-    {
-        let max_pos = (self.canvas_size - self.visible()).max(0);
-        self.view_x = self.view_x.clip(0, max_pos);
-        self.view_y = self.view_y.clip(0, max_pos);
-        self.view_dirty = true;
-        self.dirty = true;
-    }
-
-    // Moves the view by a number of steps, each the same distance on screen
-    // at every zoom: one canvas pixel at the starting zoom
-    pan(self, dx, dy)
-    {
-        let step = self.visible().idiv(64).max(1);
-        self.view_x = self.view_x + dx * step;
-        self.view_y = self.view_y + dy * step;
-        self.clamp_view();
-    }
-
-    // Zooms in or out by a number of levels, around the middle of the view
+    // Zooms the canvas or the circuit in or out by a number of levels
     zoom_by(self, levels)
     {
-        if (self.canvas == nil)
+        let grid = self.grid();
+
+        if (grid == nil || grid.img == nil)
             return;
 
-        let mid_x = self.view_x + self.visible().idiv(2);
-        let mid_y = self.view_y + self.visible().idiv(2);
-        self.zoom = (self.zoom + levels).clip(0, ZOOMS.len - 1);
-        self.view_x = mid_x - self.visible().idiv(2);
-        self.view_y = mid_y - self.visible().idiv(2);
+        grid.view.zoom_by(levels);
         self.hover = nil;
-        self.clamp_view();
+        self.painting = nil;
     }
 
-    // Canvas pixel at a position in the frame, or nil outside of the view
-    // or of the canvas
-    pixel_at(self, x, y)
+    // Cell of the current grid at a position in the frame, or nil
+    cell_at(self, x, y)
     {
-        if (self.canvas == nil || x < VIEW_X || y < VIEW_Y || x >= VIEW_X + VIEW_SIZE || y >= VIEW_Y + VIEW_SIZE)
-            return nil;
-
-        let cell = ZOOMS[self.zoom];
-        let px = self.view_x + (x - VIEW_X).idiv(cell);
-        let py = self.view_y + (y - VIEW_Y).idiv(cell);
-
-        if (px >= self.canvas_size || py >= self.canvas_size)
-            return nil;
-
-        return {x: px, y: py};
+        let grid = self.grid();
+        return grid == nil || grid.img == nil ? nil : grid.view.cell_at(x, y);
     }
 
-    // Paints a canvas pixel with the current color. It shows right away,
-    // and is sent to the server from update(), a few per second at most.
-    paint(self, x, y)
+    // Value of the node to place in the circuit: the one picked, turned
+    node_value(self)
     {
-        let per_row = self.canvas_size.idiv(self.tile_size);
-        let tile = self.tiles[y.idiv(self.tile_size) * per_row + x.idiv(self.tile_size)];
-        let idx = y * self.canvas_size + x;
-        let prev = self.canvas.bytes.get_u32(idx);
+        let value = NODES[self.node].value;
+        let type = cell_type(value);
+        return cell_value(type, self.rot % NUM_ROTS[type], cell_param(value));
+    }
 
-        if (self.zoom < MIN_DRAW_ZOOM || self.conn != "connected" || tile.have == -1)
+    // Changes a cell of the current grid: paints a pixel of the canvas with
+    // the current color, or places the node picked in a cell of the
+    // circuit, or empties it
+    place(self, x, y, erase)
+    {
+        let grid = self.grid();
+
+        if (self.conn != "connected")
             return;
 
-        if (prev == self.color || self.set_queue.len >= MAX_QUEUED_SETS)
+        if (grid == self.canvas) {
+            if (grid.view.zoom >= MIN_DRAW_ZOOM)
+                grid.put(x, y, self.color);
+        } else if (grid.view.zoom >= MIN_EDIT_ZOOM) {
+            grid.put(x, y, rgb(0, 0, 0) | (erase ? 0 : self.node_value()));
+        }
+    }
+
+    // Changes the cells from the last one changed to the one the mouse
+    // moved to with its button held, so that fast moves leave no gaps
+    paint_to(self, cell)
+    {
+        let from = self.painting;
+        let dx = (cell.x - from.x).abs();
+        let dy = (cell.y - from.y).abs();
+        let sx = from.x < cell.x ? 1 : -1;
+        let sy = from.y < cell.y ? 1 : -1;
+        let var err = dx - dy;
+
+        while (from.x != cell.x || from.y != cell.y) {
+            let e2 = 2 * err;
+
+            if (e2 > -dy) {
+                err = err - dy;
+                from.x = from.x + sx;
+            }
+
+            if (e2 < dx) {
+                err = err + dx;
+                from.y = from.y + sy;
+            }
+
+            self.place(from.x, from.y, from.erase);
+        }
+    }
+
+    // Handles a click on a cell of the circuit, with the left button, or
+    // with the right one, which empties cells
+    circuit_mouse_down(self, x, y, erase)
+    {
+        let cell = self.cell_at(x, y);
+
+        if (cell == nil)
             return;
 
-        self.canvas.bytes.set_u32(idx, self.color);
-        self.set_queue.push({x: x, y: y, color: self.color, prev: prev});
-        self.view_dirty = true;
+        // Clicking a switch turns it on or off, unless erasing
+        let value = self.circuit.get(cell.x, cell.y);
+        if (!erase && self.node_value() != 0 && cell_type(value) == SWITCH) {
+            if (self.conn == "connected" && self.circuit.view.zoom >= MIN_EDIT_ZOOM)
+                self.circuit.put(cell.x, cell.y, value ^ (1 << 16));
+            return;
+        }
+
+        self.place(cell.x, cell.y, erase);
+        self.painting = {x: cell.x, y: cell.y, erase: erase};
+    }
+
+    // Runs the circuit up to the present, after working it out again if
+    // its cells changed
+    update_circuit(self, now)
+    {
+        let grid = self.circuit;
+
+        if (grid.img == nil)
+            return;
+
+        if (self.sim == nil || self.sim.size != grid.size) {
+            self.sim = Sim(grid.size);
+            grid.changed = true;
+        }
+
+        if (grid.changed) {
+            self.sim.compile(grid.img.bytes);
+            grid.changed = false;
+            grid.view.dirty = true;
+        }
+
+        let tick_ms = 1000.0 / TICKS_PER_SEC;
+        let owed = ((now - self.sim_ms) / tick_ms).floor();
+        let num_ticks = owed.clip(0, MAX_TICKS_PER_FRAME);
+
+        for (let var i = 0; i < num_ticks; ++i) {
+            if (self.sim.tick())
+                grid.view.dirty = true;
+        }
+
+        // Ticks beyond that are no longer owed: the circuit falls behind
+        self.sim_ms = owed > num_ticks ? now.to_f() : self.sim_ms + num_ticks * tick_ms;
+
+        if (grid.view.dirty)
+            self.dirty = true;
     }
 
     // Picks a color of the palette to paint with
@@ -1449,10 +2514,11 @@ class App
     // Handles a click on the canvas screen that isn't on a button
     canvas_mouse_down(self, x, y)
     {
-        let pixel = self.pixel_at(x, y);
+        let pixel = self.cell_at(x, y);
 
         if (pixel != nil) {
-            self.paint(pixel.x, pixel.y);
+            self.place(pixel.x, pixel.y, false);
+            self.painting = {x: pixel.x, y: pixel.y, erase: false};
             return;
         }
 
@@ -1589,17 +2655,26 @@ class App
             return;
         }
 
+        if (ev.kind == "MOUSE_DOWN" && ev.button == "RIGHT") {
+            if (self.screen == "circuit")
+                self.circuit_mouse_down(ev.x, ev.y, true);
+            return;
+        }
+
         if (ev.kind == "MOUSE_UP") {
             self.drag_offset = nil;
             self.pick_drag = nil;
+            self.painting = nil;
             return;
         }
 
         if (ev.kind == "MOUSE_MOVE") {
-            if (self.screen == "canvas") {
-                self.hover = self.pixel_at(ev.x, ev.y);
+            if (self.grid() != nil) {
+                self.hover = self.cell_at(ev.x, ev.y);
                 if (self.pick_drag != nil)
                     self.pick(ev.x, ev.y);
+                else if (self.painting != nil && self.hover != nil)
+                    self.paint_to(self.hover);
             } else if (self.drag_offset != nil) {
                 let bar = self.scrollbar();
                 let span = (bar.h - bar.thumb_h).max(1);
@@ -1646,6 +2721,8 @@ class App
 
         if (self.screen == "canvas")
             self.canvas_mouse_down(x, y);
+        else if (self.screen == "circuit")
+            self.circuit_mouse_down(x, y, false);
     }
 
     // Switches to the view of a tab
@@ -1654,12 +2731,12 @@ class App
         if (screen == self.screen)
             return;
 
-        if (screen == "canvas")
-            self.enter_canvas();
+        if (screen != "main")
+            self.enter_grid(screen);
         else if (self.screen == "admin")
             self.leave_admin();
         else
-            self.leave_canvas();
+            self.leave_grid();
     }
 
     // Performs the action of a clicked button
@@ -1681,6 +2758,8 @@ class App
             self.select_custom();
         } else if (action == "zoom") {
             self.zoom_by(arg);
+        } else if (action == "node") {
+            self.node = arg;
         } else if (action == "open_modal") {
             self.open_modal(false);
         } else if (action == "close_modal") {
@@ -1714,7 +2793,7 @@ class App
                 }
             } else if (self.screen == "main" && self.compose.len < MAX_MSG_LEN) {
                 self.compose.push(ch);
-            } else if (self.screen == "canvas") {
+            } else if (self.grid() != nil) {
                 if (ch == "+" || ch == "=")
                     self.zoom_by(1);
                 else if (ch == "-" || ch == "_")
@@ -1737,15 +2816,21 @@ class App
         if (self.screen == "admin")
             return;
 
-        if (self.screen == "canvas") {
+        if (self.grid() != nil) {
+            let view = self.grid().view;
+
             if (key == "LEFT")
-                self.pan(-1, 0);
+                view.pan(-1, 0);
             else if (key == "RIGHT")
-                self.pan(1, 0);
+                view.pan(1, 0);
             else if (key == "UP")
-                self.pan(0, -1);
+                view.pan(0, -1);
             else if (key == "DOWN")
-                self.pan(0, 1);
+                view.pan(0, 1);
+            else if (key == "R" && self.screen == "circuit")
+                self.rot = (self.rot + 1) % 4;
+            else if (key == "D" && self.screen == "circuit")
+                self.node = NODES.len - 1;
             return;
         }
 
@@ -1798,17 +2883,11 @@ class App
             self.dirty = true;
         }
 
-        if (self.screen == "canvas" && self.conn == "connected") {
-            if (!self.canvas_polling && self.canvas_error == "" && now - self.last_poll_ms >= CANVAS_POLL_MS)
-                self.poll_canvas();
+        if (self.grid() != nil && self.conn == "connected")
+            self.grid().update(self, now);
 
-            // Send the next painted pixel
-            if (self.set_queue.len > 0 && now - self.last_set_ms >= SET_INTERVAL_MS) {
-                let set = self.set_queue.remove(0);
-                self.send({type: "canvas_set", x: set.x, y: set.y, color: set.color & 0xFF_FF_FF}, set);
-                self.last_set_ms = now;
-            }
-        }
+        if (self.screen == "circuit")
+            self.update_circuit(now);
 
         if (self.screen == "main" && !self.loading_older && !self.no_more_older && self.messages.len > 0) {
             let remaining = self.content_height() - self.scroll_y - self.panel.height;
@@ -1840,6 +2919,8 @@ class App
             self.render_admin();
         else if (self.screen == "canvas")
             self.render_canvas();
+        else if (self.screen == "circuit")
+            self.render_circuit();
         else
             self.render_main();
 
@@ -1991,15 +3072,27 @@ class App
         }
 
         let info = self.admin_info;
+        let x2 = MARGIN + 464;
+        let value_x2 = MARGIN + 734;
+
+        // Draws a count from the server, or n/a if it doesn't send it
+        fun stat(x, value_x, y, label, name) {
+            self.text(frame, x, y, label, DIM, PANEL);
+            self.text(frame, value_x, y, info.has(name) ? info[name].comma_sep() : "n/a", TEXT, PANEL);
+        }
+
         self.text(frame, x, 100, "Process uptime:", DIM, PANEL);
         self.text(frame, value_x, 100, info.uptime, TEXT, PANEL);
-        self.text(frame, x, 144, "Unique IPs:", DIM, PANEL);
-        self.text(frame, value_x, 144, info.unique_ips.comma_sep(), TEXT, PANEL);
-        self.text(frame, x, 188, "Total user accounts:", DIM, PANEL);
-        self.text(frame, value_x, 188, info.num_accounts.comma_sep(), TEXT, PANEL);
-        self.text(frame, x, 232, "Filtered messages:", DIM, PANEL);
-        let filtered = info.has("num_filtered") ? info.num_filtered.comma_sep() : "n/a";
-        self.text(frame, value_x, 232, filtered, TEXT, PANEL);
+        stat(x, value_x, 136, "Total user accounts:", "num_accounts");
+        stat(x, value_x, 172, "Filtered messages:", "num_filtered");
+        stat(x, value_x, 208, "Total connections:", "total_conns");
+        stat(x, value_x, 244, "Total get_messages:", "total_get_messages");
+
+        // IPs that connected since the server started, by what they sent
+        stat(x2, value_x2, 100, "Unique IPs:", "ips_unique");
+        stat(x2, value_x2, 136, "IPs with requests:", "ips_valid");
+        stat(x2, value_x2, 172, "IPs sent nothing:", "ips_silent");
+        stat(x2, value_x2, 208, "IPs not JSON:", "ips_not_json");
 
         frame.fill_rect(x, 290, panel_w - 48, 1, FIELD);
         self.text(frame, x, 312, "Last 10 user accounts", TEXT, PANEL);
@@ -2036,16 +3129,17 @@ class App
     // pixel as a square of the zoom's size
     render_view(self)
     {
-        let cell = ZOOMS[self.zoom];
-        let size = self.canvas_size;
-        let num = self.visible().min(size - self.view_x).min(size - self.view_y);
-        let src = self.canvas.bytes;
-        let dst = self.view_img.bytes;
+        let view = self.canvas.view;
+        let cell = view.cell();
+        let size = self.canvas.size;
+        let num = view.visible().min(size - view.x).min(size - view.y);
+        let src = self.canvas.img.bytes;
+        let dst = view.img.bytes;
 
-        self.view_img.clear(BG);
+        view.img.clear(BG);
 
         for (let var y = 0; y < num; ++y) {
-            let src_row = (self.view_y + y) * size + self.view_x;
+            let src_row = (view.y + y) * size + view.x;
             let dst_row = y * cell * VIEW_SIZE;
 
             if (cell == 1) {
@@ -2061,7 +3155,7 @@ class App
                 dst.memcpy((dst_row + k * VIEW_SIZE) * 4, dst, dst_row * 4, num * cell * 4);
         }
 
-        self.view_dirty = false;
+        view.dirty = false;
     }
 
     // Draws the square of saturations and values for the current hue
@@ -2092,41 +3186,30 @@ class App
     render_canvas(self)
     {
         let frame = self.frame;
+        let grid = self.canvas;
+        let view = grid.view;
 
         draw_full_logo(frame, MARGIN, 14, SMALL_LOGO);
         self.text(frame, MARGIN + logo_width(SMALL_LOGO) + 12, 17, "canvas", DIM, BG);
 
-        // What is in the way of drawing, if anything
-        let var status = "";
-        let var loading = self.canvas == nil;
-        for (let var i = 0; i < self.tiles.len; ++i)
-            loading = loading || self.tiles[i].have == -1;
+        let status = self.grid_status(grid, view.zoom < MIN_DRAW_ZOOM ? "zoom in to draw" : "");
 
-        if (self.conn != "connected")
-            status = self.total_views == nil ? "connecting..." : "reconnecting...";
-        else if (self.canvas_error != "")
-            status = self.canvas_error;
-        else if (loading)
-            status = "loading...";
-        else if (self.zoom < MIN_DRAW_ZOOM)
-            status = "zoom in to draw";
-
-        if (self.canvas == nil) {
+        if (grid.img == nil) {
             frame.fill_rect(VIEW_X, VIEW_Y, VIEW_SIZE, VIEW_SIZE, FIELD);
         } else {
-            if (self.view_dirty)
+            if (view.dirty)
                 self.render_view();
-            frame.blit(self.view_img, VIEW_X, VIEW_Y);
+            frame.blit(view.img, VIEW_X, VIEW_Y);
         }
 
         // Sets a dark canvas apart from the background
         draw_rect(frame, VIEW_X - 1, VIEW_Y - 1, VIEW_SIZE + 2, VIEW_SIZE + 2, BORDER);
 
         // The pixel under the mouse, in the color it would be painted
-        let cell = ZOOMS[self.zoom];
-        if (self.hover != nil && self.zoom >= MIN_DRAW_ZOOM) {
-            let hx = VIEW_X + (self.hover.x - self.view_x) * cell;
-            let hy = VIEW_Y + (self.hover.y - self.view_y) * cell;
+        let cell = view.cell();
+        if (self.hover != nil && view.zoom >= MIN_DRAW_ZOOM) {
+            let hx = VIEW_X + (self.hover.x - view.x) * cell;
+            let hy = VIEW_Y + (self.hover.y - view.y) * cell;
             frame.fill_rect(hx, hy, cell, cell, self.color);
             self.marker(hx, hy, cell, cell);
         }
@@ -2168,22 +3251,378 @@ class App
         let hex = "#" + (self.custom & 0xFF_FF_FF).to_hex(6).upper();
         self.text(frame, SIDE_X + SWATCH + 12, y + 8, hex, TEXT, BG);
 
-        // Zoom, with buttons for the mouse
         y = y + 60;
-        self.text(frame, SIDE_X, y, "zoom " + cell.to_s() + "x", TEXT, BG);
+        self.render_zoom(grid, y);
+        self.text(frame, SIDE_X, y + 72, "arrows  move", DIM, BG);
+        self.text(frame, SIDE_X, y + 98, "+ and -  zoom", DIM, BG);
+        self.text(frame, SIDE_X, y + 130, status, self.conn == "connected" && grid.error == "" ? DIM : ERROR, BG);
+    }
+
+    // What is in the way of changing a grid, if anything. zoom_hint is
+    // what to say when all that is, is the zoom.
+    grid_status(self, grid, zoom_hint)
+    {
+        if (self.conn != "connected")
+            return self.total_views == nil ? "connecting..." : "reconnecting...";
+
+        if (grid.error != "")
+            return grid.error;
+
+        return grid.loading() ? "loading..." : zoom_hint;
+    }
+
+    // Draws the zoom of a grid's view at a given height on the side, with
+    // buttons for the mouse, and under it the position of the cell under
+    // the mouse, or of the middle of the view
+    render_zoom(self, grid, y)
+    {
+        let frame = self.frame;
+        let view = grid.view;
+
+        self.text(frame, SIDE_X, y, "zoom " + view.cell().to_s() + "x", TEXT, BG);
         self.button(SIDE_X + SIDE_W - 76, y - 2, 34, 28, "-", FIELD, "zoom", -1);
         self.button(SIDE_X + SIDE_W - 34, y - 2, 34, 28, "+", FIELD, "zoom", 1);
 
-        // Position of the pixel under the mouse, or of the middle of the view
-        y = y + 40;
         if (self.hover != nil)
-            self.text(frame, SIDE_X, y, self.hover.x.to_s() + ", " + self.hover.y.to_s(), TEXT, BG);
-        else if (self.canvas != nil)
-            self.text(frame, SIDE_X, y, (self.view_x + self.visible().idiv(2)).to_s() + ", " + (self.view_y + self.visible().idiv(2)).to_s(), DIM, BG);
+            self.text(frame, SIDE_X, y + 40, self.hover.x.to_s() + ", " + self.hover.y.to_s(), TEXT, BG);
+        else if (grid.img != nil)
+            self.text(frame, SIDE_X, y + 40, (view.x + view.visible().idiv(2)).to_s() + ", " + (view.y + view.visible().idiv(2)).to_s(), DIM, BG);
+    }
 
-        self.text(frame, SIDE_X, y + 32, "arrows  move", DIM, BG);
-        self.text(frame, SIDE_X, y + 58, "+ and -  zoom", DIM, BG);
-        self.text(frame, SIDE_X, y + 90, status,self.conn == "connected" && self.canvas_error == "" ? DIM : ERROR, BG);
+    // Draws the part of a wire that reaches a side of a cell of c pixels,
+    // from that side in
+    draw_stub(self, img, x, y, c, side, depth, color)
+    {
+        // Thickness of wires, and where they start across the cell
+        let w = c.idiv(5).max(1);
+        let o = (c - w).idiv(2);
+
+        if (side == NORTH)
+            img.fill_rect(x + o, y, w, depth, color);
+        else if (side == EAST)
+            img.fill_rect(x + c - depth, y + o, depth, w, color);
+        else if (side == SOUTH)
+            img.fill_rect(x + o, y + c - depth, w, depth, color);
+        else
+            img.fill_rect(x, y + o, depth, w, color);
+    }
+
+    // Draws text into an image, leaving what is around its letters as it is
+    stamp(self, img, x, y, str, scale, color)
+    {
+        let font = self.font(scale, color, 0);
+
+        for (let var i = 0; i < str.len; ++i) {
+            let ch = font.render_char(str.char_at(i));
+
+            for (let var j = 0; j < ch.width * ch.height; ++j) {
+                if (ch.bytes.get_u32(j) != 0)
+                    img.set_pixel(x + i * ch.width + j % ch.width, y + j.idiv(ch.width), color);
+            }
+        }
+    }
+
+    // Picture of a circuit node other than a wire, in a cell of c pixels:
+    // its symbol, over the wires that reach its ports. on says whether it
+    // outputs, or is lit for an LED, and lines whether to draw the lines of
+    // the grid. Pictures are kept once drawn.
+    node_sprite(self, value, c, on, broken, lines)
+    {
+        let key = value.to_s() + ":" + c.to_s() + (on ? "o" : "") + (broken ? "b" : "") + (lines ? "l" : "");
+
+        if (self.sprites.has(key))
+            return self.sprites[key];
+
+        // Types this version doesn't know show as a question mark
+        let type = cell_type(value);
+        let param = cell_param(value);
+        let rot = NUM_ROTS[type] == 1 ? 0 : cell_rot(value);
+        let img = Image(c, c);
+        img.clear(CELL_BG);
+
+        if (lines) {
+            img.fill_rect(0, 0, c, 1, GRID_LINE);
+            img.fill_rect(0, 0, 1, c, GRID_LINE);
+        }
+
+        let outs = out_sides(value);
+        let ports = outs | in_sides(value);
+        let middle = c - (c - c.idiv(5).max(1)).idiv(2);
+        for (let var side = 0; side < 4; ++side) {
+            if (((ports >> side) & 1) == 1)
+                self.draw_stub(img, 0, 0, c, side, middle, on && ((outs >> side) & 1) == 1 ? WIRE_ON : WIRE_OFF);
+        }
+
+        // Colors of the body, its lines and its details
+        let var fill = broken ? BROKEN : NODE_COLORS[type];
+        let var detail = BG;
+
+        if (type == LED) {
+            // Dim when off
+            let lit = LED_COLORS[param % LED_COLORS.len];
+            fill = on ? lit : rgb(0, 0, 0) | ((lit >> 2) & 0x3F_3F_3F);
+            detail = on ? BG : WIRE_OFF;
+        } else if (type == SWITCH) {
+            detail = on ? WIRE_ON : WIRE_OFF;
+        }
+
+        let colors = [0, fill, WIRE_OFF, detail];
+
+        // Each pixel is the average of four points in it, turned back to
+        // where they are with the output to the east
+        for (let var py = 0; py < c; ++py) {
+            for (let var px = 0; px < c; ++px) {
+                let under = img.get_pixel(px, py);
+                let var r = 0;
+                let var g = 0;
+                let var b = 0;
+                let var hits = 0;
+
+                for (let var s = 0; s < 4; ++s) {
+                    let var u = (px + 0.25 + 0.5 * (s & 1)) / c;
+                    let var v = (py + 0.25 + 0.5 * (s >> 1)) / c;
+
+                    for (let var k = 0; k < rot; ++k) {
+                        let old_u = u;
+                        u = v;
+                        v = 1.0 - old_u;
+                    }
+
+                    let code = node_shade(type, on, u, v, c);
+                    let color = code == 0 ? under : colors[code];
+                    hits += code == 0 ? 0 : 1;
+                    r += (color >> 16) & 0xFF;
+                    g += (color >> 8) & 0xFF;
+                    b += color & 0xFF;
+                }
+
+                if (hits > 0)
+                    img.set_pixel(px, py, rgb(r.idiv(4), g.idiv(4), b.idiv(4)));
+            }
+        }
+
+        // Clocks show their rate under the wave, or alone in small cells
+        // Flip-flops are labelled D by their data input and Q by their
+        // output, each set a little in from the outline on its side.
+        // Letters are 5 by 7, from the fourth row of the 7 by 12 they are
+        // drawn in, with one more row for the tail of the Q.
+        for (let var i = 0; type == DFF && c >= DETAILS_FROM && i < 2; ++i) {
+            let size = c >= 48 ? 2 : 1;
+            let height = (i == 0 ? 7 : 8) * size;
+            let side = (WEST + rot + 2 * i) & 3;
+
+            // Where the inside of the outline starts and ends
+            let first = (0.1724 * c).ceil();
+            let last = (0.8276 * c).floor();
+
+            // One above the other, they leave less room at the ends
+            let end_gap = last - first - 15 * size >= 2 * size + 2 ? size : 1;
+            let var x = (c - 5 * size).idiv(2);
+            let var y = (c - 7 * size).idiv(2);
+
+            if (side == WEST)
+                x = first + size;
+            else if (side == EAST)
+                x = last - 6 * size;
+            else if (side == NORTH)
+                y = first + end_gap;
+            else
+                y = last - end_gap - height;
+
+            self.stamp(img, x, y - 3 * size, i == 0 ? "D" : "Q", size, WIRE_OFF);
+        }
+
+        let var symbol = type == EMPTY ? "?" : "";
+        let var scale = c >= 56 ? 3 : (c >= DETAILS_FROM ? 2 : 1);
+
+        if (type == CLOCK) {
+            let hz = clock_hz(param);
+            symbol = hz >= 1.0 ? hz.floor().to_s() : "~";
+            scale = c >= 48 ? 2 : 1;
+        }
+
+        if (symbol != "" && c >= OUTLINES_FROM) {
+            let sx = (c - 7 * scale * symbol.len).idiv(2);
+            let var sy = (c - 12 * scale).idiv(2);
+
+            if (type == CLOCK && c >= DETAILS_FROM)
+                sy = (0.62 * c - 6.5 * scale).floor();
+
+            self.stamp(img, sx, sy, symbol, scale, type == CLOCK ? BG : WIRE_OFF);
+        }
+
+        self.sprites[key] = img;
+        return img;
+    }
+
+    // Draws the node of a circuit cell in a square of c pixels. lit is the
+    // set of sides whose nets are on, broken whether it is in a loop, and
+    // lines whether the lines of the grid show.
+    draw_node(self, img, x, y, c, value, lit, broken, lines)
+    {
+        if ((value & 0xFF) == 0)
+            return;
+
+        let type = cell_type(value);
+        let w = c.idiv(5).max(1);
+        let o = (c - w).idiv(2);
+
+        if (type >= WIRE && type <= BRIDGE) {
+            let groups = wire_groups(value);
+
+            // The second wire of a bridge passes under the first
+            for (let var i = groups.len - 1; i >= 0; --i) {
+                let color = (groups[i] & lit) != 0 ? WIRE_ON : WIRE_OFF;
+
+                for (let var side = 0; side < 4; ++side) {
+                    if (((groups[i] >> side) & 1) == 1)
+                        self.draw_stub(img, x, y, c, side, c - o, color);
+                }
+
+                if (i == 1) {
+                    let gap = w.idiv(2).max(1);
+                    img.fill_rect(x + o - gap, y + o - gap, w + 2 * gap, w + 2 * gap, CELL_BG);
+                }
+            }
+
+            return;
+        }
+
+        // A switch that is on shows it even where nothing simulates it
+        let outs = out_sides(value);
+        let var on = outs == 0 ? lit != 0 : (lit & outs) != 0;
+        if (type == SWITCH)
+            on = (cell_param(value) & 1) == 1;
+
+        img.blit(self.node_sprite(value, c, on, broken, lines), x, y);
+
+        // Inputs that are on are lit up to the body
+        let ins = in_sides(value) & lit;
+        for (let var side = 0; side < 4; ++side) {
+            if (((ins >> side) & 1) == 1)
+                self.draw_stub(img, x, y, c, side, ((type == DFF ? 0.12 : 0.16) * c).floor().max(1), WIRE_ON);
+        }
+    }
+
+    // Draws the part of the circuit in view into the view image
+    render_circuit_view(self)
+    {
+        let grid = self.circuit;
+        let view = grid.view;
+        let img = view.img;
+        let c = view.cell();
+        let size = grid.size;
+        let num_x = view.visible().min(size - view.x);
+        let num_y = view.visible().min(size - view.y);
+        let cells = grid.img.bytes;
+        let sim = self.sim;
+
+        img.clear(BG);
+        img.fill_rect(0, 0, num_x * c, num_y * c, CELL_BG);
+
+        if (c >= GRID_LINES_FROM) {
+            for (let var i = 0; i < num_x; ++i)
+                img.fill_rect(i * c, 0, 1, num_y * c, GRID_LINE);
+            for (let var i = 0; i < num_y; ++i)
+                img.fill_rect(0, i * c, num_x * c, 1, GRID_LINE);
+        }
+
+        for (let var j = 0; j < num_y; ++j) {
+            let row = (view.y + j) * size + view.x;
+
+            for (let var i = 0; i < num_x; ++i) {
+                let value = cells.get_u32(row + i) & 0xFF_FF_FF;
+
+                if (value != 0)
+                    self.draw_node(img, i * c, j * c, c, value, sim.sides_on(row + i), sim.is_broken(row + i), c >= GRID_LINES_FROM);
+            }
+        }
+
+        view.dirty = false;
+    }
+
+    // Draws the circuit screen: the view of the circuit, and on its right
+    // the nodes to pick from, the one picked and the zoom
+    render_circuit(self)
+    {
+        let frame = self.frame;
+        let grid = self.circuit;
+        let view = grid.view;
+        let can_edit = view.zoom >= MIN_EDIT_ZOOM;
+
+        draw_full_logo(frame, MARGIN, 14, SMALL_LOGO);
+        self.text(frame, MARGIN + logo_width(SMALL_LOGO) + 12, 17, "circuit", DIM, BG);
+
+        let var status = self.grid_status(grid, can_edit ? "" : "zoom in to edit");
+        if (status == "" && self.sim != nil && self.sim.num_broken > 0)
+            status = "loops in pink";
+
+        if (grid.img == nil || self.sim == nil) {
+            frame.fill_rect(VIEW_X, VIEW_Y, VIEW_SIZE, VIEW_SIZE, CELL_BG);
+        } else {
+            if (view.dirty)
+                self.render_circuit_view();
+            frame.blit(view.img, VIEW_X, VIEW_Y);
+        }
+
+        draw_rect(frame, VIEW_X - 1, VIEW_Y - 1, VIEW_SIZE + 2, VIEW_SIZE + 2, BORDER);
+
+        // The cell under the mouse, with the node it would be given
+        let cell = view.cell();
+        let node = self.node_value();
+        if (self.hover != nil && can_edit) {
+            let hx = VIEW_X + (self.hover.x - view.x) * cell;
+            let hy = VIEW_Y + (self.hover.y - view.y) * cell;
+
+            // A switch is left to show, as clicking it turns it on or off
+            let over_switch = cell_type(grid.get(self.hover.x, self.hover.y)) == SWITCH;
+
+            if (node != 0 && self.painting == nil && !over_switch) {
+                frame.fill_rect(hx, hy, cell, cell, CELL_BG);
+                self.draw_node(frame, hx, hy, cell, node, 0, false, false);
+            }
+
+            self.marker(hx, hy, cell, cell);
+        }
+
+        // Nodes to pick from, as they are turned
+        for (let var i = 0; i < NODES.len; ++i) {
+            let x = SIDE_X + (i % 4) * (SWATCH + SWATCH_GAP);
+            let y = VIEW_Y + i.idiv(4) * (SWATCH + SWATCH_GAP);
+            let type = cell_type(NODES[i].value);
+            let value = cell_value(type, self.rot % NUM_ROTS[type], cell_param(NODES[i].value));
+
+            frame.fill_rect(x, y, SWATCH, SWATCH, CELL_BG);
+            self.draw_node(frame, x, y, SWATCH, value, 0, false, false);
+            self.buttons.push({x: x, y: y, w: SWATCH, h: SWATCH, action: "node", arg: i});
+
+            // The eraser is a cross
+            if (value == 0) {
+                frame.draw_line(x + 16, y + 16, x + SWATCH - 17, y + SWATCH - 17, ERROR);
+                frame.draw_line(x + SWATCH - 17, y + 16, x + 16, y + SWATCH - 17, ERROR);
+            }
+
+            if (i == self.node)
+                self.marker(x, y, SWATCH, SWATCH);
+            else
+                draw_rect(frame, x, y, SWATCH, SWATCH, FIELD);
+        }
+
+        // The node picked, as it would be placed, and its name
+        let var y = VIEW_Y + (NODES.len + 3).idiv(4) * (SWATCH + SWATCH_GAP) + 8;
+        frame.fill_rect(SIDE_X, y, PREVIEW, PREVIEW, CELL_BG);
+        draw_rect(frame, SIDE_X, y, PREVIEW, PREVIEW, BORDER);
+        self.draw_node(frame, SIDE_X, y, PREVIEW, node, 0, false, false);
+        self.text(frame, SIDE_X + PREVIEW + 12, y + (PREVIEW - CHAR_H).idiv(2), NODES[self.node].name, TEXT, BG);
+
+        y = y + PREVIEW + 16;
+        self.render_zoom(grid, y);
+        self.text(frame, SIDE_X, y + 72, "arrows  move", DIM, BG);
+        self.text(frame, SIDE_X, y + 98, "+ and -  zoom", DIM, BG);
+        self.text(frame, SIDE_X, y + 124, "R  turn", DIM, BG);
+        self.text(frame, SIDE_X, y + 150, "D  eraser", DIM, BG);
+        self.text(frame, SIDE_X, y + 176, "right  erase", DIM, BG);
+        self.text(frame, SIDE_X, y + 208, status, self.conn == "connected" && grid.error == "" ? DIM : ERROR, BG);
     }
 
     // Draws the guestbook screen: a header, the box to write a message,
