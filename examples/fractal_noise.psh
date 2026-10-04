@@ -1,0 +1,49 @@
+// Fractal Noise
+
+// This example renders an image of fractal Perlin noise using the noise
+// module of the standard library, and reports how long it took to generate.
+
+from noise import FractalNoise;
+
+let WIDTH = 512;
+let HEIGHT = 512;
+
+// The frequency sets the size of the largest features, here 128 pixels.
+// The output range maps directly to a grey level.
+let noise = FractalNoise({
+    seed: 1234,
+    frequency: 1.0 / 128.0,
+    octaves: 6,
+    min: 0,
+    max: 255.99,
+});
+
+let frame_buffer = ByteArray.with_size(WIDTH * HEIGHT * 4);
+
+let start_time = $time_current_ms();
+
+// Sample the noise once per pixel
+for (let var y = 0; y < HEIGHT; ++y) {
+    for (let var x = 0; x < WIDTH; ++x) {
+        let level = noise.sample2d(x, y).floor();
+        let color = 0xFF_00_00_00 | (level << 16) | (level << 8) | level;
+        frame_buffer.set_u32(y * WIDTH + x, color);
+    }
+}
+
+let gen_time = $time_current_ms() - start_time;
+$println("Generated " + (WIDTH * HEIGHT).comma_sep() + " samples in " + gen_time.to_s() + " ms");
+
+let window = $window_create(WIDTH, HEIGHT, "Fractal Noise", 0);
+$window_draw_frame(window, frame_buffer);
+
+loop {
+    let msg = $actor_recv();
+
+    if (!(msg instanceof UIEvent)) {
+        continue;
+    }
+    if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+        break;
+    }
+}

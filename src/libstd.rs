@@ -24,6 +24,7 @@ pub fn get_source(unit_key: &str) -> Option<&'static str>
         "datetime" => include_str!("../lib/std/datetime.psh"),
         "image" => include_str!("../lib/std/image.psh"),
         "json" => include_str!("../lib/std/json.psh"),
+        "noise" => include_str!("../lib/std/noise.psh"),
         "random" => include_str!("../lib/std/random.psh"),
         "sha256" => include_str!("../lib/std/sha256.psh"),
         "sha512" => include_str!("../lib/std/sha512.psh"),

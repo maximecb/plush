@@ -1,0 +1,92 @@
+from noise import perlin2d, perlin3d, FractalNoise;
+
+// The value is zero at lattice points, including negative ones
+assert(perlin2d(0.0, 0.0, 1) == 0.0);
+assert(perlin2d(3.0, -7.0, 1) == 0.0);
+assert(perlin3d(-2.0, 5.0, 9.0, 1) == 0.0);
+
+// Integer coordinates are accepted
+assert(perlin2d(3, -7, 1) == 0.0);
+assert(perlin3d(1, 2, 3, 1) == 0.0);
+
+// Same inputs, same value
+assert(perlin2d(1.25, -3.75, 42) == perlin2d(1.25, -3.75, 42));
+assert(perlin3d(1.25, -3.75, 0.5, 42) == perlin3d(1.25, -3.75, 0.5, 42));
+
+// Seeds too large for a fixnum still work
+assert(perlin2d(0.5, 0.5, (1 << 62) + 5).abs() <= 1.0);
+
+// Known values, to catch accidental changes to the pattern
+assert((perlin2d(0.5, 0.5, 0) - 0.48096988312782174).abs() < 1e-12);
+assert((perlin3d(0.5, 0.5, 0.5, 0) + 0.12061517856902382).abs() < 1e-12);
+
+// Single octaves stay in [-1, 1], use most of that range, are centered
+// on zero, and change with the seed
+let var lo2 = 0.0;
+let var hi2 = 0.0;
+let var lo3 = 0.0;
+let var hi3 = 0.0;
+let var sum2 = 0.0;
+let var num_diff = 0;
+for (let var j = 0; j < 100; ++j) {
+    for (let var i = 0; i < 100; ++i) {
+        let x = i * 0.137 - 6.0;
+        let y = j * 0.137 - 6.0;
+
+        let v2 = perlin2d(x, y, 7);
+        lo2 = lo2.min(v2);
+        hi2 = hi2.max(v2);
+        sum2 = sum2 + v2;
+
+        let v3 = perlin3d(x, y, (i + j) * 0.0731, 7);
+        lo3 = lo3.min(v3);
+        hi3 = hi3.max(v3);
+
+        if (perlin2d(x, y, 8) != v2)
+            num_diff = num_diff + 1;
+    }
+}
+assert(lo2 >= -1.0 && lo2 < -0.8);
+assert(hi2 <= 1.0 && hi2 > 0.8);
+assert(lo3 >= -1.0 && lo3 < -0.6);
+assert(hi3 <= 1.0 && hi3 > 0.6);
+assert((sum2 / 10000.0).abs() < 0.02);
+assert(num_diff > 9900);
+
+// The noise is continuous, including across cell boundaries
+for (let var i = 0; i < 2000; ++i) {
+    let x = i * 0.01 - 10.0;
+    assert((perlin2d(x + 0.001, 0.3, 5) - perlin2d(x, 0.3, 5)).abs() < 0.01);
+    assert((perlin3d(0.3, x + 0.001, 0.7, 5) - perlin3d(0.3, x, 0.7, 5)).abs() < 0.01);
+}
+
+// One octave with the default parameters is plain Perlin noise
+let plain = FractalNoise({ octaves: 1, seed: 9 });
+assert(plain.sample2d(1.3, 2.6) == perlin2d(1.3, 2.6, 9));
+assert(plain.sample3d(1.3, 2.6, 0.2) == perlin3d(1.3, 2.6, 0.2, 9));
+
+// Defaults apply when no parameters are given
+let defaults = FractalNoise({});
+assert(defaults.octaves == 4);
+assert(defaults.sample2d(0.4, 0.9) == FractalNoise({ seed: 0 }).sample2d(0.4, 0.9));
+
+// The frequency scales the coordinates
+let scaled = FractalNoise({ octaves: 1, frequency: 0.5 });
+assert(scaled.sample2d(2.6, 5.2) == perlin2d(1.3, 2.6, 0));
+
+// The output is mapped to [min, max], with integer parameters accepted
+let terrain = FractalNoise({ seed: 3, frequency: 0.05, octaves: 5, min: 0, max: 255 });
+let var lo = 255.0;
+let var hi = 0.0;
+for (let var j = 0; j < 100; ++j) {
+    for (let var i = 0; i < 100; ++i) {
+        let v = terrain.sample2d(i, j);
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+}
+assert(lo >= 0.0 && lo < 90.0);
+assert(hi <= 255.0 && hi > 165.0);
+
+// Lattice points map to the middle of the range
+assert(FractalNoise({ octaves: 1, min: 10, max: 20 }).sample2d(4, 4) == 15.0);

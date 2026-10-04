@@ -1,0 +1,256 @@
+// Gradient noise for procedural generation
+//
+//   from noise import perlin2d, FractalNoise;
+//
+//   // A single octave of Perlin noise, in [-1, 1]
+//   let v = perlin2d(x * 0.05, y * 0.05, 1234);
+//
+//   // Layered octaves, with the output mapped to [min, max]
+//   let terrain = FractalNoise({ seed: 1234, frequency: 0.01, octaves: 5, min: 0, max: 255 });
+//   let height = terrain.sample2d(x, y);
+//
+// The noise functions are pure: the same coordinates and seed always give
+// the same value, so a world can be sampled in any order, one chunk at a time.
+//
+// Lattice gradients come from hashing the integer coordinates with the seed,
+// rather than from a permutation table, so there is no state to set up and
+// the pattern only repeats every 2^32 units. Hash values stay within fixnum
+// range, so sampling never allocates.
+
+// 16 evenly spaced 2D gradients, scaled by sqrt(2) so that perlin2d()
+// spans [-1, 1]
+let GRAD2_X = [
+     1.4142135623730951,  1.3065629648763766,  1.0,  0.541196100146197,
+     0.0, -0.541196100146197, -1.0, -1.3065629648763766,
+    -1.4142135623730951, -1.3065629648763766, -1.0, -0.541196100146197,
+     0.0,  0.541196100146197,  1.0,  1.3065629648763766,
+];
+let GRAD2_Y = [
+     0.0,  0.541196100146197,  1.0,  1.3065629648763766,
+     1.4142135623730951,  1.3065629648763766,  1.0,  0.541196100146197,
+     0.0, -0.541196100146197, -1.0, -1.3065629648763766,
+    -1.4142135623730951, -1.3065629648763766, -1.0, -0.541196100146197,
+];
+
+// The 12 cube edge directions of Perlin's improved noise, padded to 16 by
+// repeating four of them, and scaled so that perlin3d() spans [-1, 1]
+let GRAD3_X = [
+     0.9649214285521907, -0.9649214285521907,  0.9649214285521907, -0.9649214285521907,
+     0.9649214285521907, -0.9649214285521907,  0.9649214285521907, -0.9649214285521907,
+     0.0,  0.0,  0.0,  0.0,
+     0.9649214285521907,  0.0, -0.9649214285521907,  0.0,
+];
+let GRAD3_Y = [
+     0.9649214285521907,  0.9649214285521907, -0.9649214285521907, -0.9649214285521907,
+     0.0,  0.0,  0.0,  0.0,
+     0.9649214285521907, -0.9649214285521907,  0.9649214285521907, -0.9649214285521907,
+     0.9649214285521907, -0.9649214285521907,  0.9649214285521907, -0.9649214285521907,
+];
+let GRAD3_Z = [
+     0.0,  0.0,  0.0,  0.0,
+     0.9649214285521907,  0.9649214285521907, -0.9649214285521907, -0.9649214285521907,
+     0.9649214285521907,  0.9649214285521907, -0.9649214285521907, -0.9649214285521907,
+     0.0,  0.9649214285521907,  0.0, -0.9649214285521907,
+];
+
+// Mixes a combined lattice hash and returns a gradient index in [0, 16).
+// The multiplier is under 2^29 so that the products stay fixnums.
+fun grad_index(hash)
+{
+    let var h = hash & 0xFFFFFFFF;
+    h = ((h ^ (h >> 16)) * 0x45D9F3B) & 0xFFFFFFFF;
+    h = (h ^ (h >> 16)) * 0x45D9F3B;
+    return (h >> 28) & 15;
+}
+
+// 2D Perlin noise at (x, y), in [-1, 1]. The value is 0 at integer
+// coordinates, and features are about one unit across.
+// Only the low 32 bits of the seed are used.
+fun perlin2d(x, y, seed)
+{
+    // Lattice cell, and position within it
+    let ix = x.to_f().floor();
+    let iy = y.to_f().floor();
+    let fx = x - ix;
+    let fy = y - iy;
+
+    // Per-axis hash terms for the low and high side of the cell
+    let hx0 = (ix & 0xFFFFFFFF) * 0x1B873593;
+    let hx1 = hx0 + 0x1B873593;
+    let hy0 = (iy & 0xFFFFFFFF) * 0x165667B1 + (seed & 0xFFFFFFFF);
+    let hy1 = hy0 + 0x165667B1;
+
+    // Dot product of each corner's gradient with the offset from that corner
+    let g00 = grad_index(hx0 ^ hy0);
+    let g10 = grad_index(hx1 ^ hy0);
+    let g01 = grad_index(hx0 ^ hy1);
+    let g11 = grad_index(hx1 ^ hy1);
+    let n00 = GRAD2_X[g00] * fx + GRAD2_Y[g00] * fy;
+    let n10 = GRAD2_X[g10] * (fx - 1.0) + GRAD2_Y[g10] * fy;
+    let n01 = GRAD2_X[g01] * fx + GRAD2_Y[g01] * (fy - 1.0);
+    let n11 = GRAD2_X[g11] * (fx - 1.0) + GRAD2_Y[g11] * (fy - 1.0);
+
+    // Quintic fade curves, which have zero first and second derivatives
+    // at the cell edges
+    let u = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
+    let v = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
+
+    // Bilinear blend of the four corners
+    let nx0 = n00 + u * (n10 - n00);
+    let nx1 = n01 + u * (n11 - n01);
+    return nx0 + v * (nx1 - nx0);
+}
+
+// 3D Perlin noise at (x, y, z), in [-1, 1]. Passing time as z animates
+// a 2D pattern. Only the low 32 bits of the seed are used.
+fun perlin3d(x, y, z, seed)
+{
+    // Lattice cell, and position within it
+    let ix = x.to_f().floor();
+    let iy = y.to_f().floor();
+    let iz = z.to_f().floor();
+    let fx = x - ix;
+    let fy = y - iy;
+    let fz = z - iz;
+    let fx1 = fx - 1.0;
+    let fy1 = fy - 1.0;
+    let fz1 = fz - 1.0;
+
+    // Per-axis hash terms for the low and high side of the cell
+    let hx0 = (ix & 0xFFFFFFFF) * 0x1B873593;
+    let hx1 = hx0 + 0x1B873593;
+    let hy0 = (iy & 0xFFFFFFFF) * 0x165667B1 + (seed & 0xFFFFFFFF);
+    let hy1 = hy0 + 0x165667B1;
+    let hz0 = (iz & 0xFFFFFFFF) * 0x1C69B3F7;
+    let hz1 = hz0 + 0x1C69B3F7;
+
+    // Dot product of each corner's gradient with the offset from that corner
+    let g000 = grad_index(hx0 ^ hy0 ^ hz0);
+    let g100 = grad_index(hx1 ^ hy0 ^ hz0);
+    let g010 = grad_index(hx0 ^ hy1 ^ hz0);
+    let g110 = grad_index(hx1 ^ hy1 ^ hz0);
+    let g001 = grad_index(hx0 ^ hy0 ^ hz1);
+    let g101 = grad_index(hx1 ^ hy0 ^ hz1);
+    let g011 = grad_index(hx0 ^ hy1 ^ hz1);
+    let g111 = grad_index(hx1 ^ hy1 ^ hz1);
+    let n000 = GRAD3_X[g000] * fx + GRAD3_Y[g000] * fy + GRAD3_Z[g000] * fz;
+    let n100 = GRAD3_X[g100] * fx1 + GRAD3_Y[g100] * fy + GRAD3_Z[g100] * fz;
+    let n010 = GRAD3_X[g010] * fx + GRAD3_Y[g010] * fy1 + GRAD3_Z[g010] * fz;
+    let n110 = GRAD3_X[g110] * fx1 + GRAD3_Y[g110] * fy1 + GRAD3_Z[g110] * fz;
+    let n001 = GRAD3_X[g001] * fx + GRAD3_Y[g001] * fy + GRAD3_Z[g001] * fz1;
+    let n101 = GRAD3_X[g101] * fx1 + GRAD3_Y[g101] * fy + GRAD3_Z[g101] * fz1;
+    let n011 = GRAD3_X[g011] * fx + GRAD3_Y[g011] * fy1 + GRAD3_Z[g011] * fz1;
+    let n111 = GRAD3_X[g111] * fx1 + GRAD3_Y[g111] * fy1 + GRAD3_Z[g111] * fz1;
+
+    // Quintic fade curves
+    let u = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
+    let v = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
+    let w = fz * fz * fz * (fz * (fz * 6.0 - 15.0) + 10.0);
+
+    // Trilinear blend of the eight corners
+    let nx00 = n000 + u * (n100 - n000);
+    let nx10 = n010 + u * (n110 - n010);
+    let nx01 = n001 + u * (n101 - n001);
+    let nx11 = n011 + u * (n111 - n011);
+    let nxy0 = nx00 + v * (nx10 - nx00);
+    let nxy1 = nx01 + v * (nx11 - nx01);
+    return nxy0 + w * (nxy1 - nxy0);
+}
+
+// Fractal noise (fBm): several octaves of Perlin noise summed together,
+// each at a higher frequency and lower amplitude than the last.
+//
+// Parameters are given as a dictionary, all of them optional:
+//
+//   seed        Selects the pattern, low 32 bits only (default 0)
+//   frequency   Scale applied to coordinates for the first octave (default 1.0)
+//   octaves     Number of layers, more gives finer detail (default 4)
+//   lacunarity  Frequency multiplier from one octave to the next (default 2.0)
+//   gain        Amplitude multiplier from one octave to the next (default 0.5)
+//   min, max    Output range (default -1.0 and 1.0)
+class FractalNoise
+{
+    init(self, params)
+    {
+        let defaults = {
+            seed: 0,
+            frequency: 1.0,
+            octaves: 4,
+            lacunarity: 2.0,
+            gain: 0.5,
+            min: -1.0,
+            max: 1.0,
+        };
+
+        // Reject unknown keys, which are most likely typos
+        let keys = params.keys();
+        for (let var i = 0; i < keys.len; ++i) {
+            assert(defaults.has(keys[i]));
+            defaults[keys[i]] = params[keys[i]];
+        }
+
+        assert(defaults.seed instanceof Int64);
+        assert(defaults.octaves instanceof Int64);
+        assert(defaults.octaves >= 1);
+
+        self.seed = defaults.seed;
+        self.frequency = defaults.frequency.to_f();
+        self.octaves = defaults.octaves;
+        self.lacunarity = defaults.lacunarity.to_f();
+        self.gain = defaults.gain.to_f();
+        self.min = defaults.min.to_f();
+        self.max = defaults.max.to_f();
+
+        // Sum of the octave amplitudes, which bounds the raw sum
+        let var total = 0.0;
+        let var amp = 1.0;
+        for (let var i = 0; i < self.octaves; ++i) {
+            total = total + amp;
+            amp = amp * self.gain;
+        }
+
+        // Maps the raw sum from [-total, total] to [min, max]
+        self.scale = (self.max - self.min) / (2.0 * total);
+        self.offset = (self.max + self.min) / 2.0;
+    }
+
+    // Samples the noise at (x, y)
+    sample2d(self, x, y)
+    {
+        let seed = self.seed;
+        let lacunarity = self.lacunarity;
+        let gain = self.gain;
+        let var freq = self.frequency;
+        let var amp = 1.0;
+        let var sum = 0.0;
+
+        // Each octave gets its own seed so that the layers are unrelated
+        for (let var i = 0; i < self.octaves; ++i) {
+            sum = sum + amp * perlin2d(x * freq, y * freq, seed + i);
+            freq = freq * lacunarity;
+            amp = amp * gain;
+        }
+
+        return sum * self.scale + self.offset;
+    }
+
+    // Samples the noise at (x, y, z)
+    sample3d(self, x, y, z)
+    {
+        let seed = self.seed;
+        let lacunarity = self.lacunarity;
+        let gain = self.gain;
+        let var freq = self.frequency;
+        let var amp = 1.0;
+        let var sum = 0.0;
+
+        // Each octave gets its own seed so that the layers are unrelated
+        for (let var i = 0; i < self.octaves; ++i) {
+            sum = sum + amp * perlin3d(x * freq, y * freq, z * freq, seed + i);
+            freq = freq * lacunarity;
+            amp = amp * gain;
+        }
+
+        return sum * self.scale + self.offset;
+    }
+}
