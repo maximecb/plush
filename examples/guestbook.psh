@@ -238,7 +238,8 @@ let MAX_QUEUED_SETS = 64;
 // on the cells next to them. Ports joined by wires form a net. A net is on
 // when anything drives it: a clock or switch that is on, or the output of a
 // gate or flip-flop. Gates read the nets on their input sides, ignoring the
-// sides nothing is connected to.
+// sides nothing is connected to. An LED is a piece of straight wire that
+// is lit when its net is on.
 //
 // Signals propagate instantly through wires and gates. Time advances in
 // ticks, TICKS_PER_SEC of them per second, and clocks only change from one
@@ -291,16 +292,17 @@ let SIDE_DX = [0, 1, 0, -1];
 let SIDE_DY = [-1, 0, 1, 0];
 
 // Sides of each type's ports before it is turned. Wires join the sides of
-// each of their groups: the bridge has two, which cross without touching.
-// Gates output to the east and read the other three sides, except the NOT,
-// which only reads the west. Flip-flops output to the east, and read data
-// from the west and their clock from the south.
-let WIRE_GROUPS = [[], [10], [3], [14], [15], [5, 10], [], [], [], [], [], [], [], []];
+// each of their groups: the bridge has two, which cross without touching,
+// and the LED joins two like the straight wire. Gates output to the east and
+// read the other three sides, except the NOT, which only reads the west.
+// Flip-flops output to the east, and read data from the west and their
+// clock from the south.
+let WIRE_GROUPS = [[], [10], [3], [14], [15], [5, 10], [], [], [10], [], [], [], [], []];
 let OUT_SIDES = [0, 0, 0, 0, 0, 0, 15, 15, 0, 2, 2, 2, 2, 2];
-let IN_SIDES = [0, 0, 0, 0, 0, 0, 0, 0, 15, 13, 13, 13, 8, 12];
+let IN_SIDES = [0, 0, 0, 0, 0, 0, 0, 0, 0, 13, 13, 13, 8, 12];
 
 // Number of ways each type can be turned that look different
-let NUM_ROTS = [1, 2, 4, 4, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4];
+let NUM_ROTS = [1, 2, 4, 4, 1, 1, 1, 1, 2, 4, 4, 4, 4, 4];
 
 // Builds the value of a cell
 fun cell_value(type, rot, param)
@@ -3359,7 +3361,8 @@ class App
             img.fill_rect(0, 0, 1, c, GRID_LINE);
         }
 
-        let outs = out_sides(value);
+        // The wire through an LED is on when it is lit
+        let outs = out_sides(value) | (type == LED ? wire_groups(value)[0] : 0);
         let ports = outs | in_sides(value);
         let middle = c - (c - c.idiv(8).max(1)).idiv(2);
         let live = (on ? outs : 0) | lit_ins;
