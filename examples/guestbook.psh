@@ -292,12 +292,12 @@ let SIDE_DY = [-1, 0, 1, 0];
 
 // Sides of each type's ports before it is turned. Wires join the sides of
 // each of their groups: the bridge has two, which cross without touching.
-// Gates output to the east and read the other three sides. Flip-flops
-// output to the east, and read data from the west and their clock from the
-// south.
+// Gates output to the east and read the other three sides, except the NOT,
+// which only reads the west. Flip-flops output to the east, and read data
+// from the west and their clock from the south.
 let WIRE_GROUPS = [[], [10], [3], [14], [15], [5, 10], [], [], [], [], [], [], [], []];
 let OUT_SIDES = [0, 0, 0, 0, 0, 0, 15, 15, 0, 2, 2, 2, 2, 2];
-let IN_SIDES = [0, 0, 0, 0, 0, 0, 0, 0, 15, 13, 13, 13, 13, 12];
+let IN_SIDES = [0, 0, 0, 0, 0, 0, 0, 0, 15, 13, 13, 13, 8, 12];
 
 // Number of ways each type can be turned that look different
 let NUM_ROTS = [1, 2, 4, 4, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4];
@@ -1356,9 +1356,9 @@ fun in_body(type, u, v)
         return fu * fu + (v - 0.96) * (v - 0.96) <= 0.674 && fu * fu + (v - 0.04) * (v - 0.04) <= 0.674;
     }
 
-    // A triangle around the middle, which leaves room for its bubble
+    // A triangle at the back, whose tip its bubble covers
     if (type == NOT)
-        return u >= 0.24 && dv.abs() <= 0.34 * (1.0 - (u - 0.24) / 0.46);
+        return u >= 0.19 && dv.abs() <= 0.34 * (1.0 - (u - 0.19) / 0.46);
 
     if (type == LED)
         return du * du + dv * dv <= 0.1156;
@@ -1386,9 +1386,9 @@ fun node_shade(type, on, u, v, c)
 
     // Bubble at the tip of the NOT
     if (type == NOT) {
-        let d = ((u - 0.82) * (u - 0.82) + dv * dv).sqrt();
-        if (d <= 0.12)
-            return outlined && d >= 0.07 ? 2 : 1;
+        let d = ((u - 0.7) * (u - 0.7) + dv * dv).sqrt();
+        if (d <= 0.14)
+            return outlined && d >= 0.105 ? 2 : 1;
     }
 
     if (!in_body(type, u, v))
@@ -1424,9 +1424,12 @@ fun node_shade(type, on, u, v, c)
             return 3;
     }
 
-    // Points near the edge leave the body when moved away from its middle
+    // Points near the edge leave the body when moved away from its middle,
+    // which for the triangle of the NOT is further back
     if (outlined) {
-        if (!in_body(type, 0.5 + du * 1.16, 0.5 + dv * 1.16))
+        let mid = type == NOT ? 0.36 : 0.5;
+        let grow = type == NOT ? 1.26 : 1.16;
+        if (!in_body(type, mid + (u - mid) * grow, 0.5 + dv * grow))
             return 2;
     }
 
@@ -3498,9 +3501,10 @@ class App
 
         // Inputs that are on are lit up to the body
         let ins = in_sides(value) & lit;
+        let depth = type == DFF ? 0.12 : (type == NOT ? 0.19 : 0.16);
         for (let var side = 0; side < 4; ++side) {
             if (((ins >> side) & 1) == 1)
-                self.draw_stub(img, x, y, c, side, ((type == DFF ? 0.12 : 0.16) * c).floor().max(1), WIRE_ON);
+                self.draw_stub(img, x, y, c, side, (depth * c).floor().max(1), WIRE_ON);
         }
     }
 
