@@ -1856,6 +1856,10 @@ class App
         self.hover = nil;
         self.painting = nil;
 
+        // Where the mouse last was in the frame
+        self.mouse_x = -1;
+        self.mouse_y = -1;
+
         // Simulation of the circuit, created with it, and the time up to
         // which it was run. Then the node to place, as an index in NODES,
         // and how far it is turned.
@@ -2358,7 +2362,7 @@ class App
             return;
 
         grid.view.zoom_by(levels);
-        self.hover = nil;
+        self.hover = self.cell_at(self.mouse_x, self.mouse_y);
         self.painting = nil;
     }
 
@@ -2672,6 +2676,9 @@ class App
         }
 
         if (ev.kind == "MOUSE_MOVE") {
+            self.mouse_x = ev.x;
+            self.mouse_y = ev.y;
+
             if (self.grid() != nil) {
                 self.hover = self.cell_at(ev.x, ev.y);
                 if (self.pick_drag != nil)
@@ -2834,6 +2841,9 @@ class App
                 self.rot = (self.rot + 1) % 4;
             else if (key == "D" && self.screen == "circuit")
                 self.node = NODES.len - 1;
+
+            // The view may have moved under the mouse
+            self.hover = self.cell_at(self.mouse_x, self.mouse_y);
             return;
         }
 
