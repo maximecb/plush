@@ -1,0 +1,277 @@
+// HyperLogLog, for estimating how many distinct items were seen
+//
+//   from hll import HyperLogLog;
+//
+//   let visitors = HyperLogLog(12);
+//   visitors.add("203.0.113.7");
+//   visitors.add("203.0.113.7");
+//   visitors.add("198.51.100.20");
+//   $println(visitors.count());   // 2
+//
+// The items themselves are not stored, only a fixed number of small
+// registers, so memory use doesn't grow with the number of items. A
+// precision of p uses 2^p bytes and gives a standard error of about
+// 1.04 / sqrt(2^p): 3.3% for 10, 1.6% for 12, 0.8% for 14.
+//
+// Items are Strings or ByteArrays. A String counts as the same item as a
+// ByteArray holding its UTF-8 bytes.
+//
+// Two sketches of the same precision can be merged, which gives the same
+// result as adding all the items of both to one sketch:
+//
+//   week.merge(monday);
+//   week.merge(tuesday);
+//
+// A sketch is saved by formatting it as JSON, and restored from the parsed
+// value with HyperLogLog.from_json(), which returns nil if it is malformed:
+//
+//   let text = format_json(visitors);
+//   let restored = HyperLogLog.from_json(parse_json(text));
+//
+// A sketch doesn't reveal which items it has seen, but someone who holds
+// one can test whether a given item is likely to be absent from it. If
+// that matters, prefix every item with a secret string before adding it.
+
+from base64 import base64_encode, base64_decode;
+
+let MASK = 0xFFFFFFFF;
+
+let MIN_PRECISION = 4;
+let MAX_PRECISION = 16;
+
+// Largest count reported, which keeps a restored sketch with implausibly
+// large registers from producing an estimate outside the integer range
+let MAX_COUNT = 1 << 60;
+
+// Multiplies two 32-bit integers modulo 2^32, staying within fixnum range
+fun mul32(a, b)
+{
+    let lo = (a & 0xFFFF) * b;
+    let hi = ((a >> 16) * b) & 0xFFFF;
+    return (lo + (hi << 16)) & MASK;
+}
+
+// Scrambles one 32-bit block of input before it is mixed into the hash
+fun mix_block(k, c1, c2)
+{
+    let k1 = mul32(k, c1);
+    let k2 = ((k1 << 15) | (k1 >> 17)) & MASK;
+    return mul32(k2, c2);
+}
+
+// Computes a 32-bit hash of a ByteArray, following MurmurHash3. With
+// c1 = 0xcc9e2d51 and c2 = 0x1b873593, this is MurmurHash3_x86_32.
+fun hash32(bytes, seed, c1, c2)
+{
+    let n = bytes.len;
+    let var h = seed;
+    let var i = 0;
+
+    // Mix in the full 4-byte little-endian blocks
+    while (i + 4 <= n) {
+        h = h ^ mix_block(bytes.load_u32(i), c1, c2);
+        h = ((h << 13) | (h >> 19)) & MASK;
+        h = (h * 5 + 0xe6546b64) & MASK;
+        i = i + 4;
+    }
+
+    // Mix in the 1 to 3 bytes left over
+    if (i < n) {
+        let var k = 0;
+        for (let var j = n - 1; j >= i; --j)
+            k = (k << 8) | bytes[j];
+        h = h ^ mix_block(k, c1, c2);
+    }
+
+    // Final avalanche, so that every input bit affects every output bit
+    h = h ^ n;
+    h = h ^ (h >> 16);
+    h = mul32(h, 0x85ebca6b);
+    h = h ^ (h >> 13);
+    h = mul32(h, 0xc2b2ae35);
+    return h ^ (h >> 16);
+}
+
+// Sums the series behind the estimator's correction for empty registers
+fun sigma(x)
+{
+    let var x = x;
+    let var y = 1.0;
+    let var z = x;
+
+    // Iterate until the sum stops changing
+    loop {
+        x = x * x;
+        let prev = z;
+        z = z + x * y;
+        y = y + y;
+
+        if (z == prev)
+            return z;
+    }
+}
+
+// Sums the series behind the estimator's correction for saturated registers
+fun tau(x)
+{
+    if (x == 0.0 || x == 1.0)
+        return 0.0;
+
+    let var x = x;
+    let var y = 1.0;
+    let var z = 1.0 - x;
+
+    // Iterate until the sum stops changing
+    loop {
+        x = x.sqrt();
+        let prev = z;
+        y = y * 0.5;
+        z = z - (1.0 - x) * (1.0 - x) * y;
+
+        if (z == prev)
+            return z / 3.0;
+    }
+}
+
+// Estimates the number of distinct items added to it
+class HyperLogLog
+{
+    // The precision p is between 4 and 16, and 2^p registers are used
+    init(self, precision)
+    {
+        assert(precision instanceof Int64);
+        assert(precision >= MIN_PRECISION && precision <= MAX_PRECISION);
+
+        self.precision = precision;
+
+        // One byte per register
+        self.registers = ByteArray.with_size(1 << precision);
+
+        // Scratch buffer holding the bytes of a String being added
+        self.buf = ByteArray.with_size(0);
+    }
+
+    // Adds a String or ByteArray item
+    add(self, item)
+    {
+        let var bytes = item;
+
+        if (item instanceof String) {
+            bytes = self.buf;
+            bytes.clear();
+            bytes.push_string(item);
+        }
+
+        assert(bytes instanceof ByteArray);
+
+        // Two independent 32-bit hashes form one 64-bit hash
+        let hi = hash32(bytes, 0, 0xcc9e2d51, 0x1b873593);
+        let lo = hash32(bytes, 0x9747b28c, 0x239b961b, 0xab0e9789);
+
+        // The top p bits select a register, the other q bits give the rank
+        let p = self.precision;
+        let q = 64 - p;
+        let idx = hi >> (32 - p);
+        let rest = ((hi & ((1 << (32 - p)) - 1)) << 32) | lo;
+
+        // The rank is the position of the leftmost 1 bit, or q + 1 if none
+        let var rank = 1;
+        let var bit = 1 << (q - 1);
+        while (rank <= q && (rest & bit) == 0) {
+            bit = bit >> 1;
+            rank = rank + 1;
+        }
+
+        if (rank > self.registers[idx])
+            self.registers[idx] = rank;
+    }
+
+    // Returns the estimated number of distinct items added, as an integer
+    count(self)
+    {
+        let regs = self.registers;
+        let m = regs.len;
+        let q = 64 - self.precision;
+
+        // Count how many registers hold each rank
+        let hist = Array.with_size(q + 2, 0);
+        for (let var i = 0; i < m; ++i) {
+            let rank = regs[i];
+            hist[rank] = hist[rank] + 1;
+        }
+
+        if (hist[0] == m)
+            return 0;
+
+        // Estimator from Otmar Ertl's "New cardinality estimation algorithms
+        // for HyperLogLog sketches", which needs no bias correction tables
+        let var z = m * tau((m - hist[q + 1]) / m);
+        for (let var k = q; k >= 1; --k)
+            z = (z + hist[k]) * 0.5;
+        z = z + m * sigma(hist[0] / m);
+
+        // The constant is 1 / (2 ln 2)
+        let estimate = 0.7213475204444817 * m * m / z;
+
+        // Only registers no real input produces can saturate the estimate
+        if (estimate >= MAX_COUNT)
+            return MAX_COUNT;
+
+        return (estimate + 0.5).floor();
+    }
+
+    // Adds everything another sketch of the same precision has seen
+    merge(self, other)
+    {
+        assert(other instanceof HyperLogLog);
+        assert(other.precision == self.precision);
+
+        let regs = self.registers;
+        let other_regs = other.registers;
+
+        // Keep the larger rank of each pair of registers
+        for (let var i = 0; i < regs.len; ++i) {
+            if (other_regs[i] > regs[i])
+                regs[i] = other_regs[i];
+        }
+    }
+
+    // Returns a dictionary for format_json(), with base64 registers
+    to_json(self)
+    {
+        return {
+            precision: self.precision,
+            registers: base64_encode(self.registers),
+        };
+    }
+
+    // Rebuilds a sketch from the parsed form of its JSON, or returns nil
+    // if the value is malformed. Called as HyperLogLog.from_json(val).
+    from_json(val)
+    {
+        if (!(val instanceof Dict))
+            return nil;
+        if (!val.has("precision") || !val.has("registers"))
+            return nil;
+
+        let p = val.precision;
+        if (!(p instanceof Int64) || p < MIN_PRECISION || p > MAX_PRECISION)
+            return nil;
+
+        if (!(val.registers instanceof String))
+            return nil;
+        let regs = base64_decode(val.registers);
+        if (regs == nil || regs.len != (1 << p))
+            return nil;
+
+        // No register can hold a rank larger than q + 1
+        for (let var i = 0; i < regs.len; ++i) {
+            if (regs[i] > 64 - p + 1)
+                return nil;
+        }
+
+        let hll = HyperLogLog(p);
+        hll.registers = regs;
+        return hll;
+    }
+}

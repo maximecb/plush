@@ -1,0 +1,140 @@
+from hll import HyperLogLog, hash32;
+from json import format_json, parse_json;
+
+// Hashes a string with the constants of MurmurHash3_x86_32
+fun murmur3(str, seed)
+{
+    let bytes = ByteArray.with_size(0);
+    bytes.push_string(str);
+    return hash32(bytes, seed, 0xcc9e2d51, 0x1b873593);
+}
+
+// Reference values from the MurmurHash3_x86_32 implementation
+assert(murmur3("", 0) == 0);
+assert(murmur3("", 1) == 0x514e28b7);
+assert(murmur3("abc", 0) == 0xb3dd93fa);
+assert(murmur3("test", 0) == 0xba6bd213);
+assert(murmur3("Hello, world!", 0) == 0xc0363e43);
+assert(murmur3("a", 0x9747b28c) == 0x7fa09ea6);
+assert(murmur3("aa", 0x9747b28c) == 0x5d211726);
+assert(murmur3("aaa", 0x9747b28c) == 0x283e0130);
+assert(murmur3("aaaa", 0x9747b28c) == 0x5a97808a);
+assert(murmur3("The quick brown fox jumps over the lazy dog", 0x9747b28c) == 0x2fa826cd);
+
+// An empty sketch counts nothing
+let empty = HyperLogLog(12);
+assert(empty.count() == 0);
+
+// Adding the same item again doesn't change the count
+let dups = HyperLogLog(12);
+for (let var i = 0; i < 100; ++i) {
+    dups.add("203.0.113.7");
+    assert(dups.count() == 1);
+}
+dups.add("198.51.100.20");
+dups.add("");
+assert(dups.count() == 3);
+
+// A String is the same item as its UTF-8 bytes
+let abc = ByteArray.with_size(0);
+abc.push_string("abc");
+let str_sketch = HyperLogLog(10);
+let bytes_sketch = HyperLogLog(10);
+str_sketch.add("abc");
+bytes_sketch.add(abc);
+assert(str_sketch.registers.to_hex() == bytes_sketch.registers.to_hex());
+
+// Returns a sketch holding the items with numbers in [start, end)
+fun fill(precision, start, end)
+{
+    let sketch = HyperLogLog(precision);
+    for (let var i = start; i < end; ++i)
+        sketch.add("10.1." + i.idiv(256).to_s() + "." + (i % 256).to_s());
+    return sketch;
+}
+
+// Checks that the count of a sketch is within a relative tolerance of n.
+// Being off by one is always allowed, as two items can share a register.
+fun assert_close(sketch, n, tolerance)
+{
+    let error = (sketch.count() - n).abs();
+    assert(error <= 1 || error / n <= tolerance);
+}
+
+// Small counts are exact
+for (let var n = 1; n <= 50; ++n)
+    assert(fill(12, 0, n).count() == n);
+
+// Larger counts stay within about 3 standard errors, at every precision
+let precisions = [4, 8, 10, 12, 14, 16];
+for (let var i = 0; i < precisions.len; ++i) {
+    let p = precisions[i];
+    let tolerance = 3.2 / (1 << p).to_f().sqrt();
+    let sketch = HyperLogLog(p);
+
+    // Add 20,000 items, checking the count at each power of 4
+    let var next = 4;
+    for (let var n = 1; n <= 20000; ++n) {
+        sketch.add("item-" + n.to_s());
+        if (n == next) {
+            assert_close(sketch, n, tolerance);
+            next = next * 4;
+        }
+    }
+
+    assert_close(sketch, 20000, tolerance);
+}
+
+// Merging gives the same registers as adding everything to one sketch
+let left = fill(12, 0, 6000);
+let right = fill(12, 4000, 10000);
+let both = fill(12, 0, 10000);
+left.merge(right);
+assert(left.registers.to_hex() == both.registers.to_hex());
+assert(left.count() == both.count());
+assert_close(left, 10000, 0.05);
+
+// Merging in a sketch that adds nothing new changes nothing
+left.merge(right);
+left.merge(HyperLogLog(12));
+assert(left.registers.to_hex() == both.registers.to_hex());
+
+// A sketch survives a round trip through JSON text
+let text = format_json(both);
+let restored = HyperLogLog.from_json(parse_json(text));
+assert(restored.precision == 12);
+assert(restored.registers.to_hex() == both.registers.to_hex());
+assert(restored.count() == both.count());
+
+// A restored sketch keeps counting where the original left off
+restored.add("another item");
+both.add("another item");
+assert(restored.registers.to_hex() == both.registers.to_hex());
+
+// An empty sketch round trips too
+let empty_restored = HyperLogLog.from_json(parse_json(format_json(empty)));
+assert(empty_restored.count() == 0);
+
+// Malformed values are rejected
+let good = HyperLogLog(4).to_json();
+assert(HyperLogLog.from_json(good) instanceof HyperLogLog);
+assert(HyperLogLog.from_json(nil) == nil);
+assert(HyperLogLog.from_json("hll") == nil);
+assert(HyperLogLog.from_json([4, good.registers]) == nil);
+assert(HyperLogLog.from_json({precision: 4}) == nil);
+assert(HyperLogLog.from_json({registers: good.registers}) == nil);
+assert(HyperLogLog.from_json({precision: "4", registers: good.registers}) == nil);
+assert(HyperLogLog.from_json({precision: 4.0, registers: good.registers}) == nil);
+assert(HyperLogLog.from_json({precision: 3, registers: good.registers}) == nil);
+assert(HyperLogLog.from_json({precision: 17, registers: good.registers}) == nil);
+assert(HyperLogLog.from_json({precision: 5, registers: good.registers}) == nil);
+assert(HyperLogLog.from_json({precision: 4, registers: 16}) == nil);
+assert(HyperLogLog.from_json({precision: 4, registers: "not base64!"}) == nil);
+assert(HyperLogLog.from_json({precision: 4, registers: ""}) == nil);
+
+// Sixteen registers holding 62, one more than the largest rank at p = 4
+assert(HyperLogLog.from_json({precision: 4, registers: "Pj4+Pj4+Pj4+Pj4+Pj4+Pg=="}) == nil);
+
+// Sixteen registers holding 61 are accepted, and the count saturates
+let saturated = HyperLogLog.from_json({precision: 4, registers: "PT09PT09PT09PT09PT09PQ=="});
+assert(saturated.count() == 1 << 60);

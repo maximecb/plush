@@ -22,6 +22,7 @@ pub fn get_source(unit_key: &str) -> Option<&'static str>
         "base64" => include_str!("../lib/std/base64.psh"),
         "csv" => include_str!("../lib/std/csv.psh"),
         "datetime" => include_str!("../lib/std/datetime.psh"),
+        "hll" => include_str!("../lib/std/hll.psh"),
         "image" => include_str!("../lib/std/image.psh"),
         "json" => include_str!("../lib/std/json.psh"),
         "noise" => include_str!("../lib/std/noise.psh"),
