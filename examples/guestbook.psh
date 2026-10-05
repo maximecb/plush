@@ -3297,7 +3297,7 @@ class App
     draw_stub(self, img, x, y, c, side, depth, color)
     {
         // Thickness of wires, and where they start across the cell
-        let w = c.idiv(5).max(1);
+        let w = c.idiv(8).max(1);
         let o = (c - w).idiv(2);
 
         if (side == NORTH)
@@ -3327,11 +3327,12 @@ class App
 
     // Picture of a circuit node other than a wire, in a cell of c pixels:
     // its symbol, over the wires that reach its ports. on says whether it
-    // outputs, or is lit for an LED, and lines whether to draw the lines of
-    // the grid. Pictures are kept once drawn.
-    node_sprite(self, value, c, on, broken, lines)
+    // outputs, or is lit for an LED, lit_ins which of its input sides are
+    // on, and lines whether to draw the lines of the grid. Pictures are
+    // kept once drawn.
+    node_sprite(self, value, c, on, lit_ins, broken, lines)
     {
-        let key = value.to_s() + ":" + c.to_s() + (on ? "o" : "") + (broken ? "b" : "") + (lines ? "l" : "");
+        let key = value.to_s() + ":" + c.to_s() + ":" + lit_ins.to_s() + (on ? "o" : "") + (broken ? "b" : "") + (lines ? "l" : "");
 
         if (self.sprites.has(key))
             return self.sprites[key];
@@ -3350,10 +3351,11 @@ class App
 
         let outs = out_sides(value);
         let ports = outs | in_sides(value);
-        let middle = c - (c - c.idiv(5).max(1)).idiv(2);
+        let middle = c - (c - c.idiv(8).max(1)).idiv(2);
+        let live = (on ? outs : 0) | lit_ins;
         for (let var side = 0; side < 4; ++side) {
             if (((ports >> side) & 1) == 1)
-                self.draw_stub(img, 0, 0, c, side, middle, on && ((outs >> side) & 1) == 1 ? WIRE_ON : WIRE_OFF);
+                self.draw_stub(img, 0, 0, c, side, middle, ((live >> side) & 1) == 1 ? WIRE_ON : WIRE_OFF);
         }
 
         // Colors of the body, its lines and its details
@@ -3467,7 +3469,7 @@ class App
             return;
 
         let type = cell_type(value);
-        let w = c.idiv(5).max(1);
+        let w = c.idiv(8).max(1);
         let o = (c - w).idiv(2);
 
         if (type >= WIRE && type <= BRIDGE) {
@@ -3497,15 +3499,7 @@ class App
         if (type == SWITCH)
             on = (cell_param(value) & 1) == 1;
 
-        img.blit(self.node_sprite(value, c, on, broken, lines), x, y);
-
-        // Inputs that are on are lit up to the body
-        let ins = in_sides(value) & lit;
-        let depth = type == DFF ? 0.12 : (type == NOT ? 0.19 : 0.16);
-        for (let var side = 0; side < 4; ++side) {
-            if (((ins >> side) & 1) == 1)
-                self.draw_stub(img, x, y, c, side, (depth * c).floor().max(1), WIRE_ON);
-        }
+        img.blit(self.node_sprite(value, c, on, in_sides(value) & lit, broken, lines), x, y);
     }
 
     // Draws the part of the circuit in view into the view image
