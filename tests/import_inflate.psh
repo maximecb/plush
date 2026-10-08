@@ -1,0 +1,184 @@
+from inflate import inflate, zlib_decompress;
+
+// Streams produced by zlib, each one made to use a given kind of block
+
+// A block with a code of its own, and matches
+let DYNAMIC = #[\x
+    78 DA ED CB B1 0D C0 00 10 C2 C0 59 81 07 F6 DF 20 91 B2 43 2A EC FA 00
+    80 D4 39 85 2E 90 4B 57 A1 71 EF 66 54 B3 16 72 42 E3 13 89 AF B9 B9 B9
+    B9 B9 B9 B9 B9 B9 B9 B9 7F DC 03 F3 79 8E 3E
+];
+
+// A block with the predefined codes
+let FIXED = #[\x
+    78 DA CB 48 CD C9 C9 57 C8 40 27 01 68 03 08 B1
+];
+
+// A block stored without compression
+let STORED = #[\x
+    78 01 01 3C 00 C3 FF 61 61 61 61 62 62 63 64 65 66 67 61 63 64 66 61 63
+    65 67 62 65 67 63 66 62 65 61 64 61 64 61 65 62 66 63 67 65 62 67 65 63
+    61 66 64 63 61 67 66 65 64 63 62 62 61 61 61 61 61 61 61 C7 40 17 49
+];
+
+// Matches that overlap their own output, to repeat a single byte
+let RUN = #[\x
+    78 DA 4B 4C 1C 05 A3 60 14 0C 77 00 00 F9 D8 7A F8
+];
+
+// A dynamic block, then an empty stored block, then a fixed block
+let MIXED = #[\x
+    78 DA EC CB B1 0D C0 00 10 C2 C0 59 81 07 F6 DF 20 91 B2 43 2A EC FA 00
+    80 D4 39 85 2E 90 4B 57 A1 71 EF 66 54 B3 16 72 42 E3 13 89 AF B9 B9 B9
+    B9 B9 B9 B9 B9 B9 B9 B9 7F DC 03 00 00 FF FF CB 48 CD C9 C9 57 C8 40 27
+    01 23 C9 96 EE
+];
+
+// Literals only, with codes up to 11 bits long
+let RULER = #[\x
+    78 01 05 C1 81 61 24 C9 11 04 31 DB 10 59 3D CB 7B F9 EF 8F 00 99 9C 4C
+    9E 4C 4E 26 9F 4C 4E 26 4F 26 27 93 9F 4C 4E 26 4F 26 27 93 4F 26 27 93
+    27 93 93 C9 9F 4C 4E 26 4F 26 27 93 4F 26 27 93 27 93 93 C9 4F 26 27 93
+    27 93 93 C9 27 93 93 C9 93 C9 C9 E4 9F 4C 4E 26 4F 26 27 93 4F 26 27 93
+    27 93 93 C9 4F 26 27 93 27 93 93 C9 27 93 93 C9 93 C9 C9 E4 4F 26 27 93
+    27 93 93 C9 27 93 93 C9 93 C9 C9 E4 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4
+    C9 E4 64 F2 9F 4C 4E 26 4F 26 27 93 4F 26 27 93 27 93 93 C9 4F 26 27 93
+    27 93 93 C9 27 93 93 C9 93 C9 C9 E4 4F 26 27 93 27 93 93 C9 27 93 93 C9
+    93 C9 C9 E4 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4 C9 E4 64 F2 4F 26 27 93
+    27 93 93 C9 27 93 93 C9 93 C9 C9 E4 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4
+    C9 E4 64 F2 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4 C9 E4 64 F2 93 C9 C9 E4
+    C9 E4 64 F2 C9 E4 64 F2 64 72 32 F9 9F 4C 4E 26 4F 26 27 93 4F 26 27 93
+    27 93 93 C9 4F 26 27 93 27 93 93 C9 27 93 93 C9 93 C9 C9 E4 4F 26 27 93
+    27 93 93 C9 27 93 93 C9 93 C9 C9 E4 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4
+    C9 E4 64 F2 4F 26 27 93 27 93 93 C9 27 93 93 C9 93 C9 C9 E4 27 93 93 C9
+    93 C9 C9 E4 93 C9 C9 E4 C9 E4 64 F2 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4
+    C9 E4 64 F2 93 C9 C9 E4 C9 E4 64 F2 C9 E4 64 F2 64 72 32 F9 4F 26 27 93
+    27 93 93 C9 27 93 93 C9 93 C9 C9 E4 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4
+    C9 E4 64 F2 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4 C9 E4 64 F2 93 C9 C9 E4
+    C9 E4 64 F2 C9 E4 64 F2 64 72 32 F9 27 93 93 C9 93 C9 C9 E4 93 C9 C9 E4
+    C9 E4 64 F2 93 C9 C9 E4 C9 E4 64 F2 C9 E4 64 F2 64 72 32 F9 93 C9 C9 E4
+    C9 E4 64 F2 C9 E4 64 F2 64 72 32 F9 C9 E4 64 F2 64 72 32 F9 64 72 32 79
+    32 39 99 FC 1F 4F B0 0F D2
+];
+
+// The data the dynamic and stored streams hold, letters that
+// repeat without a fixed period
+fun text(count)
+{
+    let bytes = ByteArray.with_size(count);
+    for (let var i = 0; i < count; ++i) {
+        bytes[i] = 97 + ((i * i) >> 4) % 7;
+    }
+    return bytes;
+}
+
+// The data the literals only stream holds. Each letter is half as
+// frequent as the one before it, which makes for long codes.
+fun ruler(count)
+{
+    let bytes = ByteArray.with_size(count);
+    for (let var i = 0; i < count; ++i) {
+        let var num = i + 1;
+        let var letter = 65;
+        while ((num & 1) == 0) {
+            num = num >> 1;
+            ++letter;
+        }
+        bytes[i] = letter;
+    }
+    return bytes;
+}
+
+// Gets the UTF-8 bytes of a string
+fun str_bytes(str)
+{
+    let bytes = ByteArray.with_size(0);
+    bytes.push_string(str);
+    return bytes;
+}
+
+// Copies count bytes of data, starting at a given index
+fun slice(data, start, count)
+{
+    let bytes = ByteArray.with_size(count);
+    bytes.memcpy(0, data, start, count);
+    return bytes;
+}
+
+// Checks that the bytes are the ones expected
+fun same(bytes, expected)
+{
+    return bytes != nil && bytes.to_hex() == expected.to_hex();
+}
+
+let hello = "hello hello hello hello";
+
+// Every kind of block
+assert(same(zlib_decompress(DYNAMIC, nil), text(3000)));
+assert(same(zlib_decompress(FIXED, nil), str_bytes(hello)));
+assert(same(zlib_decompress(STORED, nil), text(60)));
+assert(same(zlib_decompress(RULER, nil), ruler(2047)));
+
+// Overlapping matches
+let run = zlib_decompress(RUN, nil);
+assert(run.len == 1000);
+for (let var i = 0; i < run.len; ++i) {
+    assert(run[i] == 97);
+}
+
+// Several blocks in one stream
+let mixed = text(3000);
+mixed.push_string(hello);
+assert(same(zlib_decompress(MIXED, nil), mixed));
+
+// A deflate stream without the zlib header and checksum
+let bare = slice(DYNAMIC, 2, DYNAMIC.len - 6);
+assert(same(inflate(bare, nil), text(3000)));
+
+// The output can be as large as the maximum size, but no larger
+assert(same(zlib_decompress(DYNAMIC, 3000), text(3000)));
+assert(same(zlib_decompress(DYNAMIC, 5000), text(3000)));
+assert(zlib_decompress(DYNAMIC, 2999) == nil);
+assert(zlib_decompress(DYNAMIC, 0) == nil);
+assert(zlib_decompress(RUN, 1000).len == 1000);
+assert(zlib_decompress(RUN, 999) == nil);
+assert(zlib_decompress(STORED, 60).len == 60);
+assert(zlib_decompress(STORED, 59) == nil);
+assert(zlib_decompress(RULER, 2047).len == 2047);
+assert(zlib_decompress(RULER, 2046) == nil);
+
+// A stream cut short anywhere is malformed. The checksum that follows
+// the deflate stream is not looked at, so it can be missing.
+let streams = [DYNAMIC, FIXED, STORED, RUN, MIXED, RULER];
+for (let var i = 0; i < streams.len; ++i) {
+    let stream = streams[i];
+    let whole = zlib_decompress(stream, nil);
+
+    for (let var count = 0; count < stream.len - 4; ++count) {
+        assert(zlib_decompress(slice(stream, 0, count), nil) == nil);
+    }
+
+    assert(same(zlib_decompress(slice(stream, 0, stream.len - 4), nil), whole));
+}
+
+// Not the deflate method, bad check bits, and a preset dictionary
+assert(zlib_decompress(#[\x 79 DA 4B 04 00], nil) == nil);
+assert(zlib_decompress(#[\x 78 DB 4B 04 00], nil) == nil);
+assert(zlib_decompress(#[\x 78 20 4B 04 00], nil) == nil);
+
+// A block of the reserved type
+assert(inflate(#[\x 07], nil) == nil);
+
+// A stored block whose size doesn't match its complement
+assert(same(inflate(#[\x 01 01 00 FE FF 2A], nil), #[\x 2A]));
+assert(inflate(#[\x 01 01 00 FF FF 2A], nil) == nil);
+
+// A match that reaches back before the start of the output
+assert(inflate(#[\x 03 02], nil) == nil);
+
+// More one-bit codes than there can be
+assert(inflate(#[\x 05 00 92 04], nil) == nil);
+
+// Empty input
+assert(inflate(ByteArray.with_size(0), nil) == nil);
+assert(zlib_decompress(ByteArray.with_size(0), nil) == nil);

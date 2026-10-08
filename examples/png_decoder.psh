@@ -1,0 +1,58 @@
+// Decode a PNG file, measure how long it takes and show it in a window.
+// Run: plush examples/png_decoder.psh [path/to/image.png]
+// The default image is the structure of the pigment violet 23 molecule.
+
+from png import decode_png;
+
+// Number of times the image is decoded to measure the decoding time
+let NUM_RUNS = 5;
+
+// Load, time, and display one PNG, keeping the window alive until closed.
+fun main() {
+    let path = $cmd_get_arg_or(1, "examples/data/pigment_violet_8bpp.png");
+    let data = $read_file(path);
+    if (data == nil) {
+        $println("Could not read PNG: " + path);
+        return;
+    }
+
+    // Decode several times and keep the median, as timings are noisy
+    let times = [];
+    let var img = nil;
+    for (let var i = 0; i < NUM_RUNS; ++i) {
+        let start = $time_current_ms();
+        img = decode_png(data);
+        if (img == nil) {
+            $println("Could not decode PNG: " + path);
+            return;
+        }
+
+        // Insert the time so that the array stays sorted
+        let elapsed = $time_current_ms() - start;
+        let var idx = 0;
+        while (idx < times.len && times[idx] < elapsed) {
+            ++idx;
+        }
+        times.insert(idx, elapsed);
+    }
+
+    let median = times[NUM_RUNS.idiv(2)];
+    let megapixels = img.width * img.height / 1000000.0;
+    $println("Decoded " + img.width.to_s() + " x " + img.height.to_s() +
+             " PNG in " + median.to_s() + " ms (" +
+             (megapixels * 1000 / median.max(1)).format_decimals(1) + " megapixels/s)");
+
+    let window = $window_create(img.width, img.height, "PNG decoder: " + path, 0);
+    $window_draw_frame(window, img.bytes);
+
+    loop {
+        let event = $actor_recv();
+        if (event instanceof UIEvent &&
+            (event.kind == "CLOSE_WINDOW" ||
+             (event.kind == "KEY_DOWN" && event.key == "ESCAPE"))) {
+            break;
+        }
+    }
+}
+
+main();

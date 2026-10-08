@@ -1,0 +1,595 @@
+// Decompression of deflate data, as found in zlib streams, PNG and zip
+//
+//   from inflate import zlib_decompress;
+//
+//   let bytes = zlib_decompress(data, nil);
+//
+// inflate() takes a bare deflate stream, and zlib_decompress() one wrapped
+// in a zlib header and checksum. Both take a ByteArray and return a new
+// ByteArray, or nil if the data is malformed or cut short.
+//
+// The second argument is the largest output size to accept, or nil for no
+// limit. Data that would decompress to more than that yields nil, which
+// protects against small inputs crafted to expand to gigabytes. When the
+// size is known ahead of time, passing it also avoids growing the output.
+//
+// The Adler-32 checksum at the end of a zlib stream is not verified.
+
+// Longest run of bytes a single match can copy
+let MAX_MATCH = 258;
+
+// Table entries hold a code length in bits 0 to 3, a number of extra bits
+// in bits 4 to 7, and a value above that. This value marks an entry no
+// code leads to, and is too large to pass for a length or a distance.
+let INVALID = 0xFFFF << 8;
+
+// Value of the end of block symbol. Literals are below it, and match
+// lengths are stored above it.
+let END_BLOCK = 256;
+
+// A match copies len bytes from dist bytes back in the output. There
+// are too many lengths and distances to give each one a symbol, so a
+// symbol stands for a range of them, and is followed by extra bits that
+// pick a value within the range.
+
+// Smallest match length of each of the length symbols, 257 to 285
+let LEN_BASE = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258
+];
+
+// Number of extra bits after each length symbol, added to its base
+let LEN_EXTRA = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0
+];
+
+// Smallest distance of each of the distance symbols, 0 to 29
+let DIST_BASE = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
+    8193, 12289, 16385, 24577
+];
+
+// Number of extra bits after each distance symbol, added to its base
+let DIST_EXTRA = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13
+];
+
+// A dynamic block describes its codes as a list of code lengths, which
+// is itself compressed with a third code, over 19 symbols: the lengths
+// 0 to 15, and 16 to 18 for repeats. The code lengths of these symbols
+// are stored in this order, so that the ones rarely used come last and
+// can be left out.
+let CL_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+// Builds the table entries of the literal and length symbols, without
+// their code lengths. Folding the base length and extra bit count into
+// the entry saves two lookups per match.
+fun make_litlen_syms()
+{
+    let syms = Array.with_size(288, INVALID);
+
+    for (let var i = 0; i <= END_BLOCK; ++i) {
+        syms[i] = i << 8;
+    }
+
+    for (let var i = 0; i < LEN_BASE.len; ++i) {
+        syms[257 + i] = ((END_BLOCK + LEN_BASE[i]) << 8) | (LEN_EXTRA[i] << 4);
+    }
+
+    return syms;
+}
+
+// Builds the table entries of the distance symbols
+fun make_dist_syms()
+{
+    let syms = Array.with_size(32, INVALID);
+
+    for (let var i = 0; i < DIST_BASE.len; ++i) {
+        syms[i] = (DIST_BASE[i] << 8) | (DIST_EXTRA[i] << 4);
+    }
+
+    return syms;
+}
+
+// Builds the table entries of the code length symbols
+fun make_cl_syms()
+{
+    let syms = Array.with_size(19, 0);
+
+    for (let var i = 0; i < 19; ++i) {
+        syms[i] = i << 8;
+    }
+
+    return syms;
+}
+
+// Builds the code lengths of the fixed codes, with the 288 literal and
+// length symbols followed by the 32 distance symbols
+fun make_fixed_lens()
+{
+    let lens = Array.with_size(320, 8);
+
+    for (let var i = 144; i < 256; ++i) {
+        lens[i] = 9;
+    }
+
+    for (let var i = 256; i < 280; ++i) {
+        lens[i] = 7;
+    }
+
+    for (let var i = 288; i < 320; ++i) {
+        lens[i] = 5;
+    }
+
+    return lens;
+}
+
+let LITLEN_SYMS = make_litlen_syms();
+let DIST_SYMS = make_dist_syms();
+let CL_SYMS = make_cl_syms();
+let FIXED_LENS = make_fixed_lens();
+
+// Fills a decoding table for the Huffman code given by the code lengths
+// of count symbols, starting at index start of lens. The table is indexed
+// by the next bits of the stream, as many of them as the longest code, so
+// one lookup decodes a symbol. Returns that number of bits, or nil if the
+// lengths don't describe a valid code.
+fun build_table(table, lens, start, count, syms)
+{
+    // Count the codes of each length
+    let counts = Array.with_size(16, 0);
+    for (let var i = 0; i < count; ++i) {
+        let len = lens[start + i];
+        counts[len] = counts[len] + 1;
+    }
+    counts[0] = 0;
+
+    // Find the first code of each length, and how much of the code
+    // space is left unused
+    let next = Array.with_size(16, 0);
+    let var code = 0;
+    let var left = 1;
+    let var max_len = 1;
+    for (let var len = 1; len < 16; ++len) {
+        code = (code + counts[len - 1]) << 1;
+        next[len] = code;
+
+        left = 2 * left - counts[len];
+        if (left < 0) {
+            return nil;
+        }
+
+        if (counts[len] > 0) {
+            max_len = len;
+        }
+    }
+
+    let size = 1 << max_len;
+    if (table.len < size) {
+        table.resize(size, INVALID);
+    }
+
+    // A complete code overwrites every entry, an incomplete one doesn't
+    if (left > 0) {
+        for (let var i = 0; i < size; ++i) {
+            table[i] = INVALID;
+        }
+    }
+
+    for (let var sym = 0; sym < count; ++sym) {
+        let len = lens[start + sym];
+        if (len == 0) {
+            continue;
+        }
+
+        // Codes are stored starting from their most significant bit, but
+        // the stream is read from the least significant bit, so the table
+        // is indexed by the reversed code
+        let var bits = next[len];
+        let var rev = 0;
+        for (let var i = 0; i < len; ++i) {
+            rev = (rev << 1) | (bits & 1);
+            bits = bits >> 1;
+        }
+        next[len] = next[len] + 1;
+
+        // Fill every entry whose low bits are the code
+        let entry = syms[sym] | len;
+        let step = 1 << len;
+        for (let var i = rev; i < size; i += step) {
+            table[i] = entry;
+        }
+    }
+
+    return max_len;
+}
+
+// State of the decompression of one deflate stream
+class Inflater
+{
+    // Starts reading the stream at the given byte index of data
+    init(self, data, pos, max_size)
+    {
+        self.data = data;
+        self.pos = pos;
+
+        // Bits read from the data but not used yet, lowest bit first
+        self.bitbuf = 0;
+        self.bitcnt = 0;
+
+        // The output keeps room for one whole match past the limit, so
+        // that the space left is checked once per symbol, not per byte
+        self.max_size = max_size;
+        self.limit = max_size == nil ? (4 * data.len).max(1024) : max_size;
+        self.out = ByteArray.with_size(self.limit + MAX_MATCH);
+        self.out_len = 0;
+
+        self.lens = Array.with_size(320, 0);
+        self.cl_table = Array.with_size(128, INVALID);
+        self.lit_table = Array.with_size(512, INVALID);
+        self.dist_table = Array.with_size(32, INVALID);
+        self.lit_bits = 0;
+        self.dist_bits = 0;
+    }
+
+    // Makes sure at least count bits are buffered, at most 16. Zeros
+    // are read past the end of the data, which run() reports afterwards.
+    fill(self, count)
+    {
+        while (self.bitcnt < count) {
+            if (self.pos < self.data.len) {
+                self.bitbuf |= self.data[self.pos] << self.bitcnt;
+            }
+            self.pos += 1;
+            self.bitcnt += 8;
+        }
+    }
+
+    // Reads the next count bits as an integer, at most 16
+    bits(self, count)
+    {
+        self.fill(count);
+        let val = self.bitbuf & ((1 << count) - 1);
+        self.bitbuf = self.bitbuf >> count;
+        self.bitcnt -= count;
+        return val;
+    }
+
+    // Makes room for count more bytes of output. Returns false if that
+    // would exceed the maximum size.
+    reserve(self, count)
+    {
+        let need = self.out_len + count;
+        if (need <= self.limit) {
+            return true;
+        }
+
+        if (self.max_size != nil) {
+            return false;
+        }
+
+        self.limit = need.max(2 * self.limit);
+        self.out.resize(self.limit + MAX_MATCH);
+        return true;
+    }
+
+    // Copies a block stored without compression to the output
+    stored(self)
+    {
+        // The block starts at the next byte boundary. Drop the bits left
+        // of the current byte, and step back over the whole bytes buffered.
+        let data = self.data;
+        let pos = self.pos - (self.bitcnt >> 3);
+        self.bitbuf = 0;
+        self.bitcnt = 0;
+
+        if (pos + 4 > data.len) {
+            return false;
+        }
+
+        // The size is followed by its complement
+        let size = data.load_u16(pos);
+        if ((size ^ data.load_u16(pos + 2)) != 0xFFFF) {
+            return false;
+        }
+
+        if (pos + 4 + size > data.len || !self.reserve(size)) {
+            return false;
+        }
+
+        self.out.memcpy(self.out_len, data, pos + 4, size);
+        self.out_len += size;
+        self.pos = pos + 4 + size;
+        return true;
+    }
+
+    // Sets up the tables of a block that uses the predefined codes
+    fixed(self)
+    {
+        self.lit_bits = build_table(self.lit_table, FIXED_LENS, 0, 288, LITLEN_SYMS);
+        self.dist_bits = build_table(self.dist_table, FIXED_LENS, 288, 32, DIST_SYMS);
+        return true;
+    }
+
+    // Reads the codes a block defines for itself, and sets up its tables
+    dynamic(self)
+    {
+        let num_lit = self.bits(5) + 257;
+        let num_dist = self.bits(5) + 1;
+        let num_cl = self.bits(4) + 4;
+        if (num_lit > 286 || num_dist > 30) {
+            return false;
+        }
+
+        // The code lengths are themselves Huffman coded. Read the code
+        // used for that first.
+        let lens = self.lens;
+        for (let var i = 0; i < 19; ++i) {
+            lens[i] = 0;
+        }
+        for (let var i = 0; i < num_cl; ++i) {
+            lens[CL_ORDER[i]] = self.bits(3);
+        }
+
+        let table = self.cl_table;
+        let cl_bits = build_table(table, lens, 0, 19, CL_SYMS);
+        if (cl_bits == nil) {
+            return false;
+        }
+        let mask = (1 << cl_bits) - 1;
+
+        // Read the code lengths of both alphabets as a single sequence
+        let total = num_lit + num_dist;
+        let var i = 0;
+        while (i < total) {
+            self.fill(cl_bits);
+            let entry = table[self.bitbuf & mask];
+            self.bitbuf = self.bitbuf >> (entry & 15);
+            self.bitcnt -= entry & 15;
+            let sym = entry >> 8;
+
+            if (sym < 16) {
+                lens[i] = sym;
+                ++i;
+                continue;
+            }
+
+            // The other symbols repeat the previous length or zero
+            let var len = 0;
+            let var repeat = 0;
+            if (sym == 16) {
+                if (i == 0) {
+                    return false;
+                }
+                len = lens[i - 1];
+                repeat = 3 + self.bits(2);
+            } else if (sym == 17) {
+                repeat = 3 + self.bits(3);
+            } else if (sym == 18) {
+                repeat = 11 + self.bits(7);
+            } else {
+                return false;
+            }
+
+            if (i + repeat > total) {
+                return false;
+            }
+
+            for (let var j = 0; j < repeat; ++j) {
+                lens[i] = len;
+                ++i;
+            }
+        }
+
+        // A block can't end without an end of block code
+        if (lens[END_BLOCK] == 0) {
+            return false;
+        }
+
+        self.lit_bits = build_table(self.lit_table, lens, 0, num_lit, LITLEN_SYMS);
+        self.dist_bits = build_table(self.dist_table, lens, num_lit, num_dist, DIST_SYMS);
+        return self.lit_bits != nil && self.dist_bits != nil;
+    }
+
+    // Decodes the literals and matches of a block, up to its end. This
+    // is the hot loop, so its state is kept in local variables.
+    codes(self)
+    {
+        let data = self.data;
+        let end = data.len;
+        let lit_table = self.lit_table;
+        let dist_table = self.dist_table;
+        let lit_mask = (1 << self.lit_bits) - 1;
+        let dist_mask = (1 << self.dist_bits) - 1;
+        let out = self.out;
+
+        let var pos = self.pos;
+        let var bitbuf = self.bitbuf;
+        let var bitcnt = self.bitcnt;
+        let var out_len = self.out_len;
+        let var limit = self.limit;
+
+        loop {
+            // Up to the limit, there is room for a whole match
+            if (out_len > limit) {
+                self.out_len = out_len;
+                if (!self.reserve(1)) {
+                    return false;
+                }
+                limit = self.limit;
+            }
+
+            // Buffer at least 32 bits, four bytes at a time away from
+            // the end of the data. More than 63 bits would not fit.
+            if (bitcnt < 32) {
+                if (pos + 4 <= end) {
+                    bitbuf |= data.load_u32(pos) << bitcnt;
+                    pos += 4;
+                    bitcnt += 32;
+                } else {
+                    // Stop if more bits were used than the data holds
+                    if (pos - (bitcnt >> 3) > end) {
+                        return false;
+                    }
+
+                    while (bitcnt < 32) {
+                        if (pos < end) {
+                            bitbuf |= data[pos] << bitcnt;
+                        }
+                        ++pos;
+                        bitcnt += 8;
+                    }
+                }
+            }
+
+            // Decode a literal or length symbol
+            let var entry = lit_table[bitbuf & lit_mask];
+            let var num = entry & 15;
+            bitbuf = bitbuf >> num;
+            bitcnt -= num;
+            let val = entry >> 8;
+
+            if (val < END_BLOCK) {
+                out[out_len] = val;
+                ++out_len;
+                continue;
+            }
+
+            if (val == END_BLOCK) {
+                break;
+            }
+
+            // Read the extra bits of the match length
+            num = (entry >> 4) & 15;
+            let var len = val - END_BLOCK + (bitbuf & ((1 << num) - 1));
+            bitbuf = bitbuf >> num;
+            bitcnt -= num;
+            if (len > MAX_MATCH) {
+                return false;
+            }
+
+            // A distance takes up to 28 bits, so buffer 32 bits again
+            if (bitcnt < 32) {
+                if (pos + 4 <= end) {
+                    bitbuf |= data.load_u32(pos) << bitcnt;
+                    pos += 4;
+                    bitcnt += 32;
+                } else {
+                    while (bitcnt < 32) {
+                        if (pos < end) {
+                            bitbuf |= data[pos] << bitcnt;
+                        }
+                        ++pos;
+                        bitcnt += 8;
+                    }
+                }
+            }
+
+            // Decode the distance symbol and read its extra bits
+            entry = dist_table[bitbuf & dist_mask];
+            num = entry & 15;
+            bitbuf = bitbuf >> num;
+            bitcnt -= num;
+            num = (entry >> 4) & 15;
+            let dist = (entry >> 8) + (bitbuf & ((1 << num) - 1));
+            bitbuf = bitbuf >> num;
+            bitcnt -= num;
+            if (dist > out_len || dist > 32768) {
+                return false;
+            }
+
+            // Copy the match. When it overlaps its own output, the bytes
+            // repeat with a period of dist, so copy what is there so far
+            // and keep doubling the size of the piece copied.
+            let src = out_len - dist;
+            if (dist >= len) {
+                out.memcpy(out_len, out, src, len);
+                out_len += len;
+            } else {
+                while (len > 0) {
+                    let num_bytes = len.min(out_len - src);
+                    out.memcpy(out_len, out, src, num_bytes);
+                    out_len += num_bytes;
+                    len -= num_bytes;
+                }
+            }
+        }
+
+        self.pos = pos;
+        self.bitbuf = bitbuf;
+        self.bitcnt = bitcnt;
+        self.out_len = out_len;
+        return true;
+    }
+
+    // Decodes every block of the stream. Returns the output, or nil if
+    // the stream is malformed.
+    run(self)
+    {
+        loop {
+            let last = self.bits(1);
+            let kind = self.bits(2);
+
+            let var ok = false;
+            if (kind == 0) {
+                ok = self.stored();
+            } else if (kind == 1) {
+                ok = self.fixed() && self.codes();
+            } else if (kind == 2) {
+                ok = self.dynamic() && self.codes();
+            }
+
+            if (!ok) {
+                return nil;
+            }
+
+            if (last == 1) {
+                break;
+            }
+        }
+
+        // Reading past the end means the stream was cut short
+        if (self.pos - (self.bitcnt >> 3) > self.data.len) {
+            return nil;
+        }
+
+        self.out.resize(self.out_len);
+        return self.out;
+    }
+}
+
+// Decompresses a deflate stream with no header. Returns nil if the data
+// is malformed, or would decompress to more than max_size bytes when
+// max_size is not nil.
+fun inflate(data, max_size)
+{
+    assert(data instanceof ByteArray);
+
+    return Inflater(data, 0, max_size).run();
+}
+
+// Decompresses a zlib stream, which is a deflate stream with a two-byte
+// header and a checksum after it. Returns nil if the data is malformed,
+// or would decompress to more than max_size bytes when max_size is not nil.
+fun zlib_decompress(data, max_size)
+{
+    assert(data instanceof ByteArray);
+
+    if (data.len < 2) {
+        return nil;
+    }
+
+    // The method has to be deflate, the two bytes read as a big-endian
+    // number have to be a multiple of 31, and preset dictionaries are
+    // not supported
+    let cmf = data[0];
+    let flags = data[1];
+    if ((cmf & 15) != 8 || ((cmf << 8) | flags) % 31 != 0 || (flags & 32) != 0) {
+        return nil;
+    }
+
+    return Inflater(data, 2, max_size).run();
+}

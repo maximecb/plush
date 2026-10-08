@@ -1,0 +1,384 @@
+// PNG image decoding
+//
+//   from png import load_png;
+//
+//   let img = load_png("examples/data/pigment_violet_8bpp.png");
+//   $window_draw_frame(window, img.bytes);
+//
+// Handles images with 8 bits per channel, of every color type: greyscale,
+// RGB and palette, with or without alpha. Images with another bit depth
+// and interlaced images are not supported. Chunk checksums are not
+// verified, and neither is the checksum of the compressed data.
+
+from image import Image;
+from inflate import zlib_decompress;
+
+// Chunk types, as load_u32() reads their four characters
+let CHUNK_IHDR = 0x52444849;
+let CHUNK_PLTE = 0x45544C50;
+let CHUNK_TRNS = 0x534E5274;
+let CHUNK_IDAT = 0x54414449;
+let CHUNK_IEND = 0x444E4549;
+
+// Color types
+let TYPE_GREY = 0;
+let TYPE_RGB = 2;
+let TYPE_PALETTE = 3;
+let TYPE_GREY_ALPHA = 4;
+let TYPE_RGBA = 6;
+
+// Bytes per pixel of each color type, 0 for the types that don't exist
+let PIXEL_BYTES = [1, 0, 3, 1, 2, 0, 4];
+
+// Builds the opaque grey color for each greyscale byte value
+fun make_grey_ramp()
+{
+    let ramp = Array.with_size(256, 0);
+
+    for (let var i = 0; i < 256; ++i) {
+        ramp[i] = 0xFF_00_00_00 | (i * 0x01_01_01);
+    }
+
+    return ramp;
+}
+
+let GREY_RAMP = make_grey_ramp();
+
+// Reads a big-endian 32-bit integer, which is how PNG stores them
+fun load_u32_be(data, pos)
+{
+    return (data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3];
+}
+
+// Reverses the filtering of the rows of an image, in place. Each row is
+// stride bytes long and preceded by a byte that gives its filter type.
+// A filter stores each byte as its difference with a prediction made from
+// the bytes to its left and above, where left is one pixel back. Returns
+// false if a filter type is invalid.
+fun unfilter(raw, height, stride, px)
+{
+    let pitch = stride + 1;
+
+    for (let var y = 0; y < height; ++y) {
+        let row = y * pitch + 1;
+        let end = row + stride;
+        let var filter = raw[row - 1];
+
+        // The row above the first one counts as all zeros, which turns
+        // the Up filter into None, and the Paeth filter into Sub
+        if (y == 0) {
+            if (filter == 2) {
+                filter = 0;
+            } else if (filter == 4) {
+                filter = 1;
+            }
+        }
+
+        if (filter == 0) {
+            continue;
+        }
+
+        if (filter == 1) {
+            // Sub, predicts the byte to the left
+            for (let var i = row + px; i < end; ++i) {
+                raw[i] = (raw[i] + raw[i - px]) & 255;
+            }
+        } else if (filter == 2) {
+            // Up, predicts the byte above. Bytes are added four at a time,
+            // with their top bits apart so that no carry leaves its byte.
+            let var i = row;
+            while (i + 4 <= end) {
+                let a = raw.load_u32(i);
+
+                // Zeros mean the row is the same as the one above, which
+                // is common. Copy the whole run of them at once.
+                if (a == 0) {
+                    let start = i;
+                    i += 4;
+                    while (i + 4 <= end && raw.load_u32(i) == 0) {
+                        i += 4;
+                    }
+                    raw.memcpy(start, raw, start - pitch, i - start);
+                    continue;
+                }
+
+                let b = raw.load_u32(i - pitch);
+                let sum = (a & 0x7F_7F_7F_7F) + (b & 0x7F_7F_7F_7F);
+                raw.store_u32(i, sum ^ ((a ^ b) & 0x80_80_80_80));
+                i += 4;
+            }
+            while (i < end) {
+                raw[i] = (raw[i] + raw[i - pitch]) & 255;
+                ++i;
+            }
+        } else if (filter == 3 && y == 0) {
+            // Average, with nothing above
+            for (let var i = row + px; i < end; ++i) {
+                raw[i] = (raw[i] + (raw[i - px] >> 1)) & 255;
+            }
+        } else if (filter == 3) {
+            // Average, predicts the mean of the bytes to the left and above
+            for (let var i = row; i < row + px; ++i) {
+                raw[i] = (raw[i] + (raw[i - pitch] >> 1)) & 255;
+            }
+            for (let var i = row + px; i < end; ++i) {
+                raw[i] = (raw[i] + ((raw[i - px] + raw[i - pitch]) >> 1)) & 255;
+            }
+        } else if (filter == 4) {
+            // Paeth, predicts whichever of the bytes to the left, above
+            // and above left is closest to left + above - above left
+            for (let var i = row; i < row + px; ++i) {
+                raw[i] = (raw[i] + raw[i - pitch]) & 255;
+            }
+            for (let var i = row + px; i < end; ++i) {
+                let left = raw[i - px];
+                let up = raw[i - pitch];
+                let up_left = raw[i - pitch - px];
+
+                // In flat areas the estimate is exactly one of the
+                // three, which settles the choice without the distances
+                if (up == up_left) {
+                    raw[i] = (raw[i] + left) & 255;
+                    continue;
+                }
+                if (left == up_left) {
+                    raw[i] = (raw[i] + up) & 255;
+                    continue;
+                }
+
+                // Distances from the estimate to each of the three
+                let var d_left = up - up_left;
+                let var d_up = left - up_left;
+                let var d_up_left = d_left + d_up;
+                if (d_left < 0) d_left = -d_left;
+                if (d_up < 0) d_up = -d_up;
+                if (d_up_left < 0) d_up_left = -d_up_left;
+
+                let var pred = up_left;
+                if (d_left <= d_up && d_left <= d_up_left) {
+                    pred = left;
+                } else if (d_up <= d_up_left) {
+                    pred = up;
+                }
+
+                raw[i] = (raw[i] + pred) & 255;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Converts unfiltered rows to the pixels of an image. The palette gives
+// the color of each byte value for the color types with one byte per
+// pixel, and is nil for the others.
+fun convert_pixels(img, raw, color_type, palette)
+{
+    let dst = img.bytes;
+    let width = img.width;
+    let var src = 0;
+    let var idx = 0;
+
+    for (let var y = 0; y < img.height; ++y) {
+        // Skip the filter type
+        ++src;
+        let end = idx + width;
+
+        if (palette != nil) {
+            // One byte per pixel, read four at a time
+            while (idx + 4 <= end) {
+                let word = raw.load_u32(src);
+                let first = word & 255;
+
+                if (word == first * 0x01_01_01_01) {
+                    // Runs of one color are common. Find where this one
+                    // ends, and fill it all at once.
+                    let var num = 4;
+                    while (idx + num + 4 <= end && raw.load_u32(src + num) == word) {
+                        num += 4;
+                    }
+                    dst.fill_u32(idx, num, palette[first]);
+                    src += num;
+                    idx += num;
+                } else {
+                    dst.set_u32(idx, palette[first]);
+                    dst.set_u32(idx + 1, palette[(word >> 8) & 255]);
+                    dst.set_u32(idx + 2, palette[(word >> 16) & 255]);
+                    dst.set_u32(idx + 3, palette[word >> 24]);
+                    src += 4;
+                    idx += 4;
+                }
+            }
+
+            // Pixels left over at the end of the row
+            while (idx < end) {
+                dst.set_u32(idx, palette[raw[src]]);
+                ++src;
+                ++idx;
+            }
+        } else if (color_type == TYPE_RGB) {
+            while (idx < end) {
+                dst.set_u32(idx, 0xFF_00_00_00 | (raw[src] << 16) | (raw[src + 1] << 8) | raw[src + 2]);
+                src += 3;
+                ++idx;
+            }
+        } else if (color_type == TYPE_GREY_ALPHA) {
+            while (idx < end) {
+                dst.set_u32(idx, (raw[src + 1] << 24) | (raw[src] * 0x01_01_01));
+                src += 2;
+                ++idx;
+            }
+        } else {
+            // The bytes are R, G, B, A and pixels are B, G, R, A, so
+            // swap the red and blue bytes
+            while (idx < end) {
+                let c = raw.load_u32(src);
+                dst.set_u32(idx, (c & 0xFF_00_FF_00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF));
+                src += 4;
+                ++idx;
+            }
+        }
+    }
+}
+
+// Decodes the bytes of a PNG file into an Image. Returns nil if the data
+// is not a PNG file, is malformed or cut short, or is in a format that
+// is not supported: only 8 bits per channel, non-interlaced images are.
+fun decode_png(data)
+{
+    assert(data instanceof ByteArray);
+
+    if (data.len < 8) {
+        return nil;
+    }
+
+    if (data.load_u32(0) != 0x47_4E_50_89 || data.load_u32(4) != 0x0A_1A_0A_0D) {
+        return nil;
+    }
+
+    let var width = 0;
+    let var height = 0;
+    let var color_type = 0;
+    let var px = 0;
+    let var palette = nil;
+
+    // Position and size of each piece of the compressed data
+    let idat_pos = [];
+    let idat_sizes = [];
+    let var idat_size = 0;
+
+    // Walk the chunks, each one a size, a type, a body and a checksum
+    let var pos = 8;
+    loop {
+        if (pos + 12 > data.len) {
+            return nil;
+        }
+
+        let size = load_u32_be(data, pos);
+        let kind = data.load_u32(pos + 4);
+        let body = pos + 8;
+        pos = body + size + 4;
+        if (pos > data.len) {
+            return nil;
+        }
+
+        if (kind == CHUNK_IEND) {
+            break;
+        }
+
+        if (kind == CHUNK_IHDR) {
+            if (size != 13) {
+                return nil;
+            }
+
+            width = load_u32_be(data, body);
+            height = load_u32_be(data, body + 4);
+            color_type = data[body + 9];
+
+            // 8 bits per channel, and no interlacing. The compression
+            // and filter methods only have one valid value.
+            if (data[body + 8] != 8 || data[body + 10] != 0 || data[body + 11] != 0 || data[body + 12] != 0) {
+                return nil;
+            }
+
+            px = color_type < PIXEL_BYTES.len ? PIXEL_BYTES[color_type] : 0;
+        } else if (kind == CHUNK_PLTE) {
+            // Indices past the end of the palette are left black
+            palette = Array.with_size(256, 0xFF_00_00_00);
+            let count = size.idiv(3).min(256);
+            for (let var i = 0; i < count; ++i) {
+                let p = body + 3 * i;
+                palette[i] = 0xFF_00_00_00 | (data[p] << 16) | (data[p + 1] << 8) | data[p + 2];
+            }
+        } else if (kind == CHUNK_TRNS && palette != nil) {
+            // Alpha of the first palette entries, the rest are opaque
+            let count = size.min(256);
+            for (let var i = 0; i < count; ++i) {
+                palette[i] = (palette[i] & 0xFF_FF_FF) | (data[body + i] << 24);
+            }
+        } else if (kind == CHUNK_IDAT) {
+            idat_pos.push(body);
+            idat_sizes.push(size);
+            idat_size += size;
+        }
+    }
+
+    if (width == 0 || height == 0 || px == 0) {
+        return nil;
+    }
+
+    // Greyscale is converted like a palette of greys. Other color types
+    // may have a palette too, but only as a suggestion to ignore.
+    if (color_type == TYPE_GREY) {
+        palette = GREY_RAMP;
+    } else if (color_type != TYPE_PALETTE) {
+        palette = nil;
+    } else if (palette == nil) {
+        return nil;
+    }
+
+    // Deflate can't expand data more than 1032 times. A header asking
+    // for more rows than that allows is wrong, and would allocate memory
+    // for nothing. Dividing keeps huge sizes from overflowing.
+    let stride = width * px;
+    if (height > (1032 * idat_size).idiv(stride + 1)) {
+        return nil;
+    }
+    let raw_size = height * (stride + 1);
+
+    // The compressed data is one stream, split over one or more chunks
+    let idat = ByteArray.with_size(idat_size);
+    let var idat_end = 0;
+    for (let var i = 0; i < idat_pos.len; ++i) {
+        idat.memcpy(idat_end, data, idat_pos[i], idat_sizes[i]);
+        idat_end += idat_sizes[i];
+    }
+
+    let raw = zlib_decompress(idat, raw_size);
+    if (raw == nil || raw.len != raw_size) {
+        return nil;
+    }
+
+    if (!unfilter(raw, height, stride, px)) {
+        return nil;
+    }
+
+    let img = Image(width, height);
+    convert_pixels(img, raw, color_type, palette);
+    return img;
+}
+
+// Reads a PNG file into an Image, see decode_png() for the formats handled.
+// Returns nil if the file can't be read or is not in one of these formats.
+fun load_png(path)
+{
+    let data = $read_file(path);
+
+    if (data == nil) {
+        return nil;
+    }
+
+    return decode_png();
+}

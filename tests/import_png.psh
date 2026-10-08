@@ -1,0 +1,284 @@
+from png import decode_png;
+from image import rgb, rgba;
+
+// Images of 21 by 12 pixels, one per color type, written by an encoder
+// that is not this library. The filter type changes on every row, and
+// the first row has a different one in each image.
+
+let PNG_GREY = #[\x
+    89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 00 00 00 15 00 00 00 0C
+    08 00 00 00 00 A8 A5 A9 19 00 00 00 B1 49 44 41 54 78 DA 63 60 50 F5 CA
+    9F B2 F3 1E B3 86 6F D1 F4 3D 0F D9 B4 03 4A 67 ED 7F C2 98 AA AA 86 09
+    99 52 D3 D2 D2 D3 33 32 32 33 B3 B2 B2 B3 73 72 72 73 F3 F2 F2 F3 99 4F
+    1D 73 77 5B 76 61 EF AA E9 2C 1F EF 9D DE B1 54 E8 7F A3 B7 D7 69 96 54
+    75 75 75 79 06 24 90 A7 9E AF CE F0 53 C1 23 5F 03 19 CC 38 F0 9C 9F 31
+    0E C8 08 42 56 7B 0F 28 C0 94 0A B4 0E 59 90 01 64 1D F3 F1 13 1E 1E 87
+    91 45 A7 F8 9C 39 C3 92 AA A9 85 0A 73 F3 34 B5 18 3E C9 B8 15 CC 3A F2
+    4E C2 29 67 DA 81 57 22 76 19 93 F6 3C 13 B0 62 0C D7 D2 C6 84 00 C3 0E
+    47 8A DB AF 8E 6F 00 00 00 00 49 45 4E 44 AE 42 60 82
+];
+
+let PNG_RGB = #[\x
+    89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 00 00 00 15 00 00 00 0C
+    08 02 00 00 00 02 AC 61 92 00 00 01 45 49 44 41 54 78 DA 63 64 B0 2E 53
+    A5 00 30 A5 82 41 1A 18 A4 83 41 06 18 64 82 41 16 18 64 83 41 0E 18 E4
+    82 41 1E 18 E4 E7 E7 33 CF D8 7A D9 ED 98 1B 10 1D 77 77 07 22 08 F0 F0
+    38 01 84 10 C2 13 0A 4E 02 91 D7 29 AF 53 40 E4 05 02 DE 20 70 9A 05 68
+    B9 9A 9A 5A 9A BA 3A 90 6C 2B 4E 38 C6 00 04 21 0C 8E 20 8A E3 EB A3 47
+    E7 81 68 CF 1E 86 02 10 DF 9C 41 85 E1 DF BF D7 37 72 27 4F 56 07 A9 CF
+    03 92 0C 53 CE 73 ED FE 66 F8 48 36 82 D3 A5 5E 23 A0 82 18 A4 9D B6 30
+    A8 F7 44 E5 96 F7 0B 6E 8B 31 FE 34 C9 07 1A A3 A1 A1 01 24 77 2E 9B CC
+    40 04 28 68 9E 06 51 0F 24 99 90 03 8F 81 38 00 0F 3C 50 F8 4D D9 74 1E
+    18 70 C0 80 02 06 DE B7 B7 8F 89 D1 1F 93 96 EF E3 E3 03 0C 3C 1F 9F 33
+    A0 F0 D3 4C 03 42 10 68 2D 8A 27 D2 7E 4D CD 3C 90 86 7C 4D 86 DE 13 CC
+    DB 3E EA 3C 90 0E 03 86 9F 71 DE CA 98 E9 97 DA 0E FE 59 FF 4A F5 A6 88
+    3F 93 6D 85 4E FA A2 D0 09 A7 EB 77 7D 5D F1 58 EE 12 AF C7 6F B3 42 D5
+    84 D9 7E 9D 47 2A 36 BF 5B 78 47 FC 34 9B 23 E3 27 DD 0C 2D 0A 00 A5 E9
+    0F 00 65 89 D7 0A 50 45 44 1B 00 00 00 00 49 45 4E 44 AE 42 60 82
+];
+
+// With a palette of 40 colors, the first 10 of them translucent
+let PNG_PALETTE = #[\x
+    89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 00 00 00 15 00 00 00 0C
+    08 03 00 00 00 BA 10 06 F7 00 00 00 78 50 4C 54 45 00 FF 00 05 FC 01 0A
+    F9 04 0F F6 09 14 F3 10 19 F0 19 1E ED 24 23 EA 31 28 E7 40 2D E4 51 32
+    E1 64 37 DE 79 3C DB 90 41 D8 A9 46 D5 C4 4B D2 E1 50 CF 00 55 CC 21 5A
+    C9 44 5F C6 69 64 C3 90 69 C0 B9 6E BD E4 73 BA 11 78 B7 40 7D B4 71 82
+    B1 A4 87 AE D9 8C AB 10 91 A8 49 96 A5 84 9B A2 C1 A0 9F 00 A5 9C 41 AA
+    99 84 AF 96 C9 B4 93 10 B9 90 59 BE 8D A4 C3 8A F1 E6 CF DA 29 00 00 00
+    0A 74 52 4E 53 00 14 28 3C 50 64 78 8C A0 B4 83 4F C5 41 00 00 00 AD 49
+    44 41 54 78 DA 55 8A 59 0E 82 40 10 05 A7 7B 60 94 4D BE D8 11 13 13 BD
+    FF 79 3C 81 1B 2A 20 0C 9B 3D 9A 10 13 78 1F AF 92 4A 21 3B EC 77 69 E4
+    F3 89 62 22 F7 EA A6 91 1B 6E D9 B2 3D 47 9A E3 6C BA 6B 59 69 39 F9 44
+    2F A2 1F D6 15 D1 83 E8 48 C4 56 BA 86 6C BE 6D 6A 1A 90 2A F5 94 73 CB
+    95 52 98 EB C2 5F B6 59 E6 72 53 CA B6 9B DB A6 7A 8F 9A C7 0A B6 6C 81
+    01 63 80 7C 61 23 D3 B2 C1 03 2C 10 F0 FF 10 C3 09 10 73 21 82 20 0C 0D
+    23 8E 93 C4 B6 9D BA C9 5C 97 8B B6 6B 2F 45 D9 F5 FD AD AC 86 71 18 EF
+    F5 F8 F9 02 6F 91 4A 48 15 0C F7 62 00 00 00 00 49 45 4E 44 AE 42 60 82
+];
+
+let PNG_GREY_ALPHA = #[\x
+    89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 00 00 00 15 00 00 00 0C
+    08 04 00 00 00 27 C7 3E 4E 00 00 01 36 49 44 41 54 78 DA 63 66 B0 56 75
+    B6 08 F5 CA 88 AD CA EF 6D 9A 3F C5 48 DD C5 32 DC 27 33 AE A6 B0 AF 79
+    E1 34 63 0D 37 EB 08 DF EC 84 DA A2 09 AD 8B 58 52 53 55 55 D5 D4 A0 38
+    23 03 C1 56 53 CD CE 51 43 92 CB 67 38 C5 FA 41 5B 2C D0 A6 3C 69 6E C7
+    E1 75 2F AF F0 FF 32 55 88 76 6B CC 59 3E E9 EC 8E CF F7 24 59 EC B5 52
+    03 BA CB 36 CE B9 7E E8 2F A3 7E 96 9A 9A BA BA 9A 5A 5B 31 03 0E 30 75
+    05 48 5E 5D 9D 29 35 35 0D 08 D2 D3 19 70 82 3C 20 C8 07 02 E6 F5 67 DD
+    8E 1D 77 77 77 BF 7B 19 97 D2 FC 0A 6F 20 F0 39 03 F4 56 9A 06 08 EC B4
+    C7 6D 2A 50 3A 3F 5F 83 E1 F0 BF D7 6A 22 FE 36 E5 1A 01 B8 60 F1 BA 39
+    D7 8F FC 7F AB C1 A8 91 AC 09 06 AD 45 B8 4C DD 79 06 A2 02 E8 2D 88 C7
+    B8 E5 4C DC E3 0A DB 67 6D 3C 72 EB 2D 8B B8 AE 43 78 56 C3 E4 55 7B 2F
+    3F FB 2B 90 9B 0B F1 18 F3 9A 93 1E 27 4E 78 78 42 81 D7 A9 53 5E 20 00
+    F2 88 F7 E9 D3 DE 67 7C 20 C0 F7 EC 59 5F A0 B7 52 B5 B4 B5 B5 20 38 23
+    03 C1 CE CE 46 B0 F3 F2 80 34 00 0F 50 88 E3 FA 80 A7 36 00 00 00 00 49
+    45 4E 44 AE 42 60 82
+];
+
+let PNG_RGBA = #[\x
+    89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 00 00 00 15 00 00 00 0C
+    08 06 00 00 00 8D CE F6 C5 00 00 01 FE 49 44 41 54 78 DA 63 61 B0 2E DB
+    A8 4A 65 C0 90 BA E0 B6 58 D7 51 06 EB 0D AF D5 12 AF 0A 78 B7 FD 36 2B
+    5C A3 10 3D ED A2 5B E3 9E EF D9 CB 1E CA 4C 3C C3 EE B4 ED A3 4E FA 1D
+    F1 A0 5E 46 9B F2 4D EA 49 73 6F F8 B4 1F FA 5B B4 F6 85 F2 F4 4B BC 1E
+    7B 7F 18 E7 3D 92 8D 98 CC E1 5C B7 53 37 63 F1 BD E0 BE 93 2C 8C A7 58
+    1D AA D5 A8 0C 98 52 A1 20 0D 0A 8E 6D 5E D0 BB A0 B7 2A BD 2A 3D C4 31
+    C4 51 4F 5A 4F 9A E3 2B C7 D7 47 E7 1F 9D DF B3 72 CF CA 69 CD D3 9A 0B
+    62 0B 62 BD CC BD CC 55 04 55 04 FF BD FE F7 FA C6 D1 5C 20 C8 83 82 7C
+    20 60 AE 9D B5 E3 AA BB FB 71 77 30 06 22 01 B6 BF 9F 19 48 04 3B 0F F9
+    84 9E F6 06 03 10 75 9A 05 E4 4A 75 20 D0 48 D3 D0 48 03 D2 3B 97 4D 6E
+    20 D5 50 90 4B 35 34 34 F2 C0 E6 68 E4 6B 30 C4 CD BC C2 DF 76 F0 8F F9
+    BA 97 2A F1 D7 04 7D DA 35 02 2A 16 90 8A D9 1C 6B B6 EB 65 2E B9 1F 06
+    8C D5 BA 9D 5F F4 19 0F FF B3 2C 01 DA A2 A1 09 04 20 FA CD CD 63 9B 49
+    75 A9 77 5C 61 0B 4C 3F 88 66 42 8E A4 74 20 60 20 03 20 47 12 38 A2 2A
+    A7 6F B9 04 8A 21 0F 8F 13 60 24 AD A2 67 AE 6F E1 E4 ED E2 17 FE 30 22
+    29 FB 6B 5E 39 23 57 13 B7 A8 9C B8 A2 96 89 B6 A9 9D 87 A3 57 C8 DD D0
+    B8 8C 8F 59 25 7F D9 EB 38 04 A5 A7 C8 AA 1B 80 62 C7 07 02 CE F8 FA 9E
+    F5 05 47 94 16 08 A4 69 69 A5 6B C1 41 06 84 CA 04 A3 2C 84 78 36 84 CA
+    01 23 10 C8 45 C8 E5 69 69 E5 83 11 43 F8 A4 B3 1C C0 CC 63 B4 E6 B9 52
+    2C 28 A2 40 B9 46 3B 6D E1 1D 50 A0 37 EC FE 66 B8 FA 99 62 0C 28 A7 81
+    B2 B3 16 30 FB 85 4E 38 CD 56 BF EB AB C1 AA A7 0A D1 57 F8 BD 5A FF 5B
+    95 6E D0 4C 99 7F 2B A4 FF 14 2B 28 92 56 3E 91 8F 02 00 20 0D 1B 47 52
+    0A DE 54 00 00 00 00 49 45 4E 44 AE 42 60 82
+];
+
+// The greyscale image with its data split over four chunks, one of them
+// empty, and with other kinds of chunks before and among them
+let PNG_SPLIT = #[\x
+    89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 00 00 00 15 00 00 00 0C
+    08 00 00 00 00 A8 A5 A9 19 00 00 00 04 67 41 4D 41 00 00 B1 8F 0B FC 61
+    05 00 00 00 07 49 44 41 54 78 DA 63 62 50 F5 CA 14 0F 58 D2 00 00 00 00
+    49 44 41 54 35 AF 06 1E 00 00 00 03 74 45 58 74 6B 00 76 CB 04 F3 90 00
+    00 00 21 49 44 41 54 9F B2 F3 1E B3 86 6F D1 F4 3D 0F D9 B4 03 4A 67 ED
+    7F C2 9C EA EA E6 E6 EE 76 DC DD C3 DD C3 E3 E4 4E 86 F9 67 00 00 00 92
+    49 44 41 54 09 4F 4F 2F 4F AF 53 A7 59 52 D5 80 20 03 44 A8 65 83 49 B5
+    3C 35 35 06 FD D0 9A 45 1A C8 60 EF 13 2E 43 C6 29 EA EA EA F2 0C 48 80
+    19 28 C0 94 9A 9A 96 86 2C C8 90 9B 97 97 CF FC C8 DD DD 63 25 B2 E8 B2
+    D3 67 7C 58 52 35 34 35 50 D5 6A 6A 68 32 68 04 56 2D 46 B1 ED 21 97 71
+    0C 63 AF A6 16 26 64 02 5A 96 9E 9E 91 91 99 99 95 95 9D 9D 93 93 0B B2
+    2C 9F F9 9E 87 A7 87 E7 C9 53 9E 5E 5E DE A7 4E 7B FB 78 FB F8 9C F5 F1
+    05 00 28 19 42 12 6B 74 B8 46 00 00 00 00 49 45 4E 44 AE 42 60 82
+];
+
+let WIDTH = 21;
+let HEIGHT = 12;
+
+// The value of a channel of a pixel in the images above. There is a
+// flat area in the middle, and values with no pattern around it.
+fun sample(x, y, c)
+{
+    if (x >= 4 && x < 17 && y >= 3 && y < 9) {
+        return 40 * (c + 1);
+    }
+
+    return (x * 37 + y * 101 + c * 59 + ((x * y) >> 1)) & 255;
+}
+
+// Decodes an image and checks every pixel against a function that
+// gives the expected color
+fun check(data, color_fn)
+{
+    let img = decode_png(data);
+    assert(img != nil);
+    assert(img.width == WIDTH);
+    assert(img.height == HEIGHT);
+
+    for (let var y = 0; y < HEIGHT; ++y) {
+        for (let var x = 0; x < WIDTH; ++x) {
+            assert(img.get_pixel(x, y) == color_fn(x, y));
+        }
+    }
+}
+
+// The color of an entry of the palette image's palette
+fun palette_color(idx)
+{
+    let alpha = idx < 10 ? idx * 20 : 255;
+    return rgba(idx * 5, 255 - idx * 3, (idx * idx) & 255, alpha);
+}
+
+fun grey(x, y)
+{
+    let v = sample(x, y, 0);
+    return rgb(v, v, v);
+}
+
+fun grey_alpha(x, y)
+{
+    let v = sample(x, y, 0);
+    return rgba(v, v, v, sample(x, y, 1));
+}
+
+check(PNG_GREY, grey);
+check(PNG_SPLIT, grey);
+check(PNG_GREY_ALPHA, grey_alpha);
+check(PNG_RGB, |x, y| rgb(sample(x, y, 0), sample(x, y, 1), sample(x, y, 2)));
+check(PNG_RGBA, |x, y| rgba(sample(x, y, 0), sample(x, y, 1), sample(x, y, 2), sample(x, y, 3)));
+check(PNG_PALETTE, |x, y| palette_color(sample(x, y, 0) % 40));
+
+// Appends a big-endian 32-bit integer
+fun push_u32_be(out, val)
+{
+    out.push_u8((val >> 24) & 255);
+    out.push_u8((val >> 16) & 255);
+    out.push_u8((val >> 8) & 255);
+    out.push_u8(val & 255);
+}
+
+// Appends a chunk. The checksum is left as zero, the decoder ignores it.
+fun push_chunk(out, kind, body)
+{
+    push_u32_be(out, body.len);
+    out.push_string(kind);
+
+    let pos = out.len;
+    out.resize(pos + body.len);
+    out.memcpy(pos, body, 0, body.len);
+    out.push_u32(0);
+}
+
+// Builds a PNG file with a given header, around the bytes of filtered
+// rows. These are stored without compression, which takes no encoder.
+fun make_png(width, height, depth, color_type, interlace, raw)
+{
+    let out = #[\x 89 50 4E 47 0D 0A 1A 0A];
+
+    let header = ByteArray.with_size(0);
+    push_u32_be(header, width);
+    push_u32_be(header, height);
+    header.push_u8(depth);
+    header.push_u8(color_type);
+    header.push_u8(0);
+    header.push_u8(0);
+    header.push_u8(interlace);
+    push_chunk(out, "IHDR", header);
+
+    // A zlib header, one stored block, and a checksum left as zero
+    let idat = #[\x 78 01 01];
+    idat.push_u16(raw.len);
+    idat.push_u16(raw.len ^ 0xFFFF);
+    let pos = idat.len;
+    idat.resize(pos + raw.len);
+    idat.memcpy(pos, raw, 0, raw.len);
+    idat.push_u32(0);
+    push_chunk(out, "IDAT", idat);
+
+    push_chunk(out, "IEND", ByteArray.with_size(0));
+    return out;
+}
+
+// A 2 by 2 greyscale image, to check that make_png() works
+let small = decode_png(make_png(2, 2, 8, 0, 0, #[\x 00 0A 14 00 1E 28]));
+assert(small.width == 2);
+assert(small.height == 2);
+assert(small.get_pixel(0, 0) == rgb(10, 10, 10));
+assert(small.get_pixel(1, 0) == rgb(20, 20, 20));
+assert(small.get_pixel(0, 1) == rgb(30, 30, 30));
+assert(small.get_pixel(1, 1) == rgb(40, 40, 40));
+
+// A single pixel
+let pixel = decode_png(make_png(1, 1, 8, 6, 0, #[\x 00 01 02 03 04]));
+assert(pixel.get_pixel(0, 0) == rgba(1, 2, 3, 4));
+
+// Filter types that don't exist
+assert(decode_png(make_png(2, 2, 8, 0, 0, #[\x 05 0A 14 00 1E 28])) == nil);
+assert(decode_png(make_png(2, 2, 8, 0, 0, #[\x 00 0A 14 FF 1E 28])) == nil);
+
+// Too few rows and too many
+assert(decode_png(make_png(2, 2, 8, 0, 0, #[\x 00 0A 14 00 1E])) == nil);
+assert(decode_png(make_png(2, 2, 8, 0, 0, #[\x 00 0A 14 00 1E 28 00])) == nil);
+assert(decode_png(make_png(2, 2, 8, 0, 0, ByteArray.with_size(0))) == nil);
+
+// Formats that are not supported: other bit depths and interlacing
+assert(decode_png(make_png(2, 2, 16, 0, 0, #[\x 00 0A 14 00 1E 28])) == nil);
+assert(decode_png(make_png(2, 2, 4, 0, 0, #[\x 00 0A 00 1E])) == nil);
+assert(decode_png(make_png(2, 2, 8, 0, 1, #[\x 00 0A 14 00 1E 28])) == nil);
+
+// Color types that don't exist
+assert(decode_png(make_png(2, 2, 8, 1, 0, #[\x 00 0A 14 00 1E 28])) == nil);
+assert(decode_png(make_png(2, 2, 8, 5, 0, #[\x 00 0A 14 00 1E 28])) == nil);
+assert(decode_png(make_png(2, 2, 8, 7, 0, #[\x 00 0A 14 00 1E 28])) == nil);
+
+// A palette image with no palette
+assert(decode_png(make_png(2, 2, 8, 3, 0, #[\x 00 0A 14 00 1E 28])) == nil);
+
+// Empty sizes
+assert(decode_png(make_png(0, 2, 8, 0, 0, #[\x 00 00])) == nil);
+assert(decode_png(make_png(2, 0, 8, 0, 0, ByteArray.with_size(0))) == nil);
+
+// Enormous sizes, which must fail without allocating or overflowing
+assert(decode_png(make_png(60000, 60000, 8, 6, 0, #[\x 00 0A 14 00 1E 28])) == nil);
+assert(decode_png(make_png(0xFFFFFFFF, 0xFFFFFFFF, 8, 6, 0, #[\x 00 0A 14 00 1E 28])) == nil);
+assert(decode_png(make_png(1, 0xFFFFFFFF, 8, 0, 0, #[\x 00 0A 14 00 1E 28])) == nil);
+
+// Not a PNG file
+assert(decode_png(ByteArray.with_size(0)) == nil);
+assert(decode_png(ByteArray.with_size(100)) == nil);
+
+// A file cut short anywhere
+for (let var count = 0; count < PNG_GREY.len; ++count) {
+    let part = ByteArray.with_size(count);
+    part.memcpy(0, PNG_GREY, 0, count);
+    assert(decode_png(part) == nil);
+}
