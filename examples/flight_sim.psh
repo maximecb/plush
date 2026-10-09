@@ -21,6 +21,7 @@
 //   A / D         rudder
 //   W / S         throttle up / down
 //   shift         boost, while the charge lasts
+//   space         fire the cannon
 //   R             start over
 //   escape / Q    quit
 //
@@ -30,7 +31,10 @@
 
 from noise import FractalNoise;
 from image import Image, save_tga;
+from random import Xoshiro128;
 from ./monogram_font import Font;
+
+let rng = Xoshiro128(2025);
 
 let FRAME_WIDTH = 960;
 let FRAME_HEIGHT = 540;
@@ -1165,6 +1169,11 @@ let var in_roll = 0.0;
 let var in_yaw = 0.0;
 let var in_throttle = 0.0;
 let var in_boost = false;
+let var in_fire = false;
+
+// Barrel temperature of the cannon from 0 to 1, and whether it has overheated
+let var gun_heat = 0.0;
+let var gun_hot = false;
 
 // Where the control surfaces are, which trails the inputs
 let var ctl_pitch = 0.0;
@@ -1221,6 +1230,7 @@ fun reset_flight() {
     boost_on = false;
     boost_spent = false;
     crash_timer = 0.0;
+    clear_cannon();
 }
 
 // Highest ground within the crash clearance of a position. On a steep
@@ -1337,7 +1347,7 @@ fun hud_clip(x0, y0, x1, y1) {
 }
 
 // Draw a line between two points given as floats
-fun hud_line(x0, y0, x1, y1) {
+fun draw_line(x0, y0, x1, y1, color) {
     let dx = x1 - x0;
     let dy = y1 - y0;
     let n = dx.abs().max(dy.abs()).ceil().max(1);
@@ -1351,13 +1361,18 @@ fun hud_line(x0, y0, x1, y1) {
         let x = (x0 + step_x * k).floor();
         let y = (y0 + step_y * k).floor();
         if (x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1) {
-            fb.set_u32(y * FRAME_WIDTH + x, HUD_GREEN);
+            fb.set_u32(y * FRAME_WIDTH + x, color);
         }
     }
 }
 
+// Draw a line in the color of the display
+fun hud_line(x0, y0, x1, y1) {
+    draw_line(x0, y0, x1, y1, HUD_GREEN);
+}
+
 // Fill a rectangle
-fun hud_rect(x, y, w, h) {
+fun fill_rect(x, y, w, h, color) {
     let x0 = x.max(0);
     let x1 = (x + w).min(FRAME_WIDTH);
     let y0 = y.max(0);
@@ -1365,8 +1380,13 @@ fun hud_rect(x, y, w, h) {
     if (x0 >= x1) return;
 
     for (let var row = y0; row < y1; ++row) {
-        frame_buffer.fill_u32(row * FRAME_WIDTH + x0, x1 - x0, HUD_GREEN);
+        frame_buffer.fill_u32(row * FRAME_WIDTH + x0, x1 - x0, color);
     }
+}
+
+// Fill a rectangle in the color of the display
+fun hud_rect(x, y, w, h) {
+    fill_rect(x, y, w, h, HUD_GREEN);
 }
 
 // Draw the outline of a rectangle
@@ -1557,11 +1577,22 @@ fun draw_readout(x, y, value, caption) {
 }
 
 // A labelled bar filled to a fraction of its length
-fun draw_bar(x, y, label, frac) {
+fun draw_bar(x, y, label, frac, color) {
     hud_text(font_small, label, x, y - 2);
     let bx = x + 4 * font_small.char_w;
     hud_frame(bx, y, 104, 9);
-    hud_rect(bx + 2, y + 2, (frac.clip(0.0, 1.0) * 100.0).floor(), 5);
+    fill_rect(bx + 2, y + 2, (frac.clip(0.0, 1.0) * 100.0).floor(), 5, color);
+}
+
+// Color for a temperature from 0 to 1, going from green through
+// yellow to red
+fun heat_color(heat) {
+    let t = heat.clip(0.0, 1.0) * 2.0;
+    if (t < 1.0) {
+        return rgb32(lerp(56.0, 255.0, t).floor(), lerp(255.0, 220.0, t).floor(),
+            lerp(88.0, 40.0, t).floor());
+    }
+    return rgb32(255, lerp(220.0, 42.0, t - 1.0).floor(), lerp(40.0, 30.0, t - 1.0).floor());
 }
 
 // Would the plane hit the ground within a few seconds on its present course?
@@ -1585,8 +1616,10 @@ fun draw_hud() {
     draw_readout(CX.floor() - 210, low_y, (speed * 3.6).floor(), "KM/H");
     draw_readout(CX.floor() + 100, low_y, cam_y.floor(), "ALT M");
 
-    draw_bar(24, FRAME_HEIGHT - 46, "THR", throttle);
-    draw_bar(24, FRAME_HEIGHT - 28, "BST", boost_charge);
+    draw_bar(24, FRAME_HEIGHT - 64, "GUN", gun_heat, heat_color(gun_heat));
+    if (gun_hot) draw_text(font_small, "OVERHEAT", 164, FRAME_HEIGHT - 66, WARN_RED);
+    draw_bar(24, FRAME_HEIGHT - 46, "THR", throttle, HUD_GREEN);
+    draw_bar(24, FRAME_HEIGHT - 28, "BST", boost_charge, HUD_GREEN);
     if (boost_on) hud_text(font_small, "BOOST", 164, FRAME_HEIGHT - 30);
     else if (boost_spent) hud_text(font_small, "CHARGING", 164, FRAME_HEIGHT - 30);
 
@@ -1632,9 +1665,317 @@ fun draw_crash() {
     if (t > 0.2) hud_text_centered(font_title, "CRASHED", CX.floor(), CY.floor());
 }
 
+// --- Cannon ---
+//
+// A rotary cannon, which takes a moment to spin up to its full rate of
+// fire. Every round drawn is a tracer. They fly on their own once fired,
+// carrying the plane's speed and dropping under gravity.
+
+// Tracers per second with the barrels at full speed
+let GUN_RATE = 40.0;
+let MUZZLE_SPEED = 1050.0;
+
+// Seconds for the barrels to spin up and to run down again
+let GUN_SPIN_UP = 0.3;
+let GUN_SPIN_DOWN = 0.8;
+
+// Where the muzzle is relative to the pilot's eye, which is under the nose,
+// and the distance ahead at which the rounds cross the line of sight
+let GUN_RIGHT = 0.0;
+let GUN_UP = -1.0;
+let GUN_FWD = 1.5;
+let GUN_CONVERGE = 700.0;
+
+// Seconds of firing to overheat from cold, and to cool back down. Once
+// overheated, the gun stays out until it has cooled to the restart level.
+let GUN_HEAT_TIME = 4.0;
+let GUN_COOL_TIME = 7.0;
+let GUN_RESTART = 0.35;
+
+// Scatter of the rounds, in radians
+let GUN_SPREAD = 0.0022;
+
+let ROUND_LIFE = 2.6;
+let TRACER_LENGTH = 34.0;
+let TRACER_BODY = 0xFFFFD21E;
+let TRACER_HEAD = 0xFFFFF7B4;
+
+// Rounds in flight. A negative age marks a free slot.
+let MAX_ROUNDS = 128;
+let rd_x = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_y = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_z = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_vx = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_vy = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_vz = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_age = Array.with_size(MAX_ROUNDS, -1.0);
+let var rd_next = 0;
+
+// Puffs thrown up where rounds hit the ground
+let MAX_IMPACTS = 48;
+let IMPACT_LIFE = 0.4;
+let im_x = Array.with_size(MAX_IMPACTS, 0.0);
+let im_y = Array.with_size(MAX_IMPACTS, 0.0);
+let im_z = Array.with_size(MAX_IMPACTS, 0.0);
+let im_age = Array.with_size(MAX_IMPACTS, -1.0);
+let var im_next = 0;
+
+let var gun_spin = 0.0;
+let var gun_accum = 0.0;
+
+// Remove every round and puff, and cool the gun
+fun clear_cannon() {
+    for (let var i = 0; i < MAX_ROUNDS; ++i) rd_age[i] = -1.0;
+    for (let var i = 0; i < MAX_IMPACTS; ++i) im_age[i] = -1.0;
+    gun_spin = 0.0;
+    gun_accum = 0.0;
+    gun_heat = 0.0;
+    gun_hot = false;
+}
+
+// Fire one round, which left the muzzle `lead` seconds ago
+fun fire_round(lead) {
+    // Aim along the nose, angled in to cross the line of sight, and scattered
+    let side = rng.normal(0.0, GUN_SPREAD) - GUN_RIGHT / GUN_CONVERGE;
+    let rise = rng.normal(0.0, GUN_SPREAD) - GUN_UP / GUN_CONVERGE;
+    let dx = fwd_x + right_x * side + up_x * rise;
+    let dy = fwd_y + right_y * side + up_y * rise;
+    let dz = fwd_z + right_z * side + up_z * rise;
+
+    // The round keeps the speed the plane gave it
+    let vx = dx * MUZZLE_SPEED + fwd_x * speed;
+    let vy = dy * MUZZLE_SPEED + climb_rate;
+    let vz = dz * MUZZLE_SPEED + fwd_z * speed;
+
+    let i = rd_next;
+    rd_next = (rd_next + 1) % MAX_ROUNDS;
+    rd_x[i] = cam_x + right_x * GUN_RIGHT + up_x * GUN_UP + fwd_x * GUN_FWD + vx * lead;
+    rd_y[i] = cam_y + right_y * GUN_RIGHT + up_y * GUN_UP + fwd_y * GUN_FWD + vy * lead;
+    rd_z[i] = cam_z + right_z * GUN_RIGHT + up_z * GUN_UP + fwd_z * GUN_FWD + vz * lead;
+    rd_vx[i] = vx;
+    rd_vy[i] = vy;
+    rd_vz[i] = vz;
+    rd_age[i] = lead;
+}
+
+// Leave a puff where a round came down
+fun add_impact(x, y, z) {
+    let i = im_next;
+    im_next = (im_next + 1) % MAX_IMPACTS;
+    im_x[i] = x;
+    im_y[i] = y;
+    im_z[i] = z;
+    im_age[i] = 0.0;
+}
+
+// Advance the cannon and everything it has fired by one time step
+fun update_cannon(dt) {
+    // Move the rounds already in flight
+    for (let var i = 0; i < MAX_ROUNDS; ++i) {
+        let age = rd_age[i];
+        if (age < 0.0) continue;
+
+        rd_vy[i] = rd_vy[i] - GRAVITY * dt;
+        let x = rd_x[i] + rd_vx[i] * dt;
+        let y = rd_y[i] + rd_vy[i] * dt;
+        let z = rd_z[i] + rd_vz[i] * dt;
+        rd_x[i] = x;
+        rd_y[i] = y;
+        rd_z[i] = z;
+        rd_age[i] = age + dt;
+
+        let ground = ground_height(x, z);
+        if (y <= ground) {
+            add_impact(x, ground, z);
+            rd_age[i] = -1.0;
+        } else if (age + dt > ROUND_LIFE) {
+            rd_age[i] = -1.0;
+        }
+    }
+
+    for (let var i = 0; i < MAX_IMPACTS; ++i) {
+        let age = im_age[i];
+        if (age < 0.0) continue;
+        im_age[i] = age + dt;
+        if (age + dt > IMPACT_LIFE) im_age[i] = -1.0;
+    }
+
+    // Spin the barrels up while the trigger is held
+    if (gun_hot && gun_heat <= GUN_RESTART) gun_hot = false;
+    let firing = in_fire && !gun_hot && crash_timer <= 0.0;
+    if (firing) gun_spin = (gun_spin + dt / GUN_SPIN_UP).min(1.0);
+    else gun_spin = (gun_spin - dt / GUN_SPIN_DOWN).max(0.0);
+
+    // The barrels cool whenever no rounds are going through them
+    if (!firing || gun_spin < 0.3) {
+        gun_heat = (gun_heat - dt / GUN_COOL_TIME).max(0.0);
+        return;
+    }
+
+    gun_heat = gun_heat + dt / GUN_HEAT_TIME;
+    if (gun_heat >= 1.0) {
+        gun_heat = 1.0;
+        gun_hot = true;
+    }
+
+    // Rounds due within this step are spread back along it, so that
+    // they stay evenly spaced whatever the frame rate
+    let rate = GUN_RATE * gun_spin;
+    gun_accum = gun_accum + rate * dt;
+    while (gun_accum >= 1.0) {
+        gun_accum = gun_accum - 1.0;
+        fire_round(gun_accum / rate);
+    }
+}
+
+// Position of the last point passed to `view_point`, in view space
+let var pt_x = 0.0;
+let var pt_y = 0.0;
+let var pt_z = 0.0;
+
+// Transform a world position into view space. The world wraps, so the
+// copy of the point nearest the camera is the one that is used.
+fun view_point(x, y, z) {
+    let var dx = x - cam_x;
+    let var dz = z - cam_z;
+    let dy = y - cam_y;
+    if (dx > WORLD * 0.5) dx = dx - WORLD;
+    else if (dx < WORLD * -0.5) dx = dx + WORLD;
+    if (dz > WORLD * 0.5) dz = dz - WORLD;
+    else if (dz < WORLD * -0.5) dz = dz + WORLD;
+
+    pt_x = dx * right_x + dy * right_y + dz * right_z;
+    pt_y = dx * up_x + dy * up_y + dz * up_z;
+    pt_z = dx * fwd_x + dy * fwd_y + dz * fwd_z;
+}
+
+// Can a point be seen from the camera, or is there ground in the way?
+// The terrain is drawn without a depth buffer, so anything drawn over it
+// has to find this out by walking the line of sight.
+fun sight_clear(x, y, z) {
+    let var dx = x - cam_x;
+    let var dz = z - cam_z;
+    let dy = y - cam_y;
+    if (dx > WORLD * 0.5) dx = dx - WORLD;
+    else if (dx < WORLD * -0.5) dx = dx + WORLD;
+    if (dz > WORLD * 0.5) dz = dz - WORLD;
+    else if (dz < WORLD * -0.5) dz = dz + WORLD;
+
+    for (let var k = 1; k <= 7; ++k) {
+        let t = k / 8.0;
+        if (ground_height(cam_x + dx * t, cam_z + dz * t) > cam_y + dy * t) return false;
+    }
+    return true;
+}
+
+// Draw a line several pixels wide
+fun draw_wide_line(x0, y0, x1, y1, width, color) {
+    let steep = (y1 - y0).abs() > (x1 - x0).abs();
+
+    for (let var k = 0; k < width; ++k) {
+        let off = k.to_f() - (width - 1) * 0.5;
+        if (steep) draw_line(x0 + off, y0, x1 + off, y1, color);
+        else draw_line(x0, y0 + off, x1, y1 + off, color);
+    }
+}
+
+// Fill a disc
+fun fill_disc(cx, cy, radius, color) {
+    let r = radius.max(0.5);
+    let y0 = (cy - r).ceil().max(0);
+    let y1 = (cy + r).floor().min(FRAME_HEIGHT - 1);
+
+    for (let var y = y0; y <= y1; ++y) {
+        let dy = y - cy;
+        let half = (r * r - dy * dy).max(0.0).sqrt();
+        let x0 = (cx - half).ceil().max(0);
+        let x1 = (cx + half).floor().min(FRAME_WIDTH - 1);
+        if (x0 <= x1) frame_buffer.fill_u32(y * FRAME_WIDTH + x0, x1 - x0 + 1, color);
+    }
+}
+
+// Draw the puffs where rounds have hit: a flash, then dust or spray
+fun draw_impacts() {
+    for (let var i = 0; i < MAX_IMPACTS; ++i) {
+        let age = im_age[i];
+        if (age < 0.0) continue;
+
+        view_point(im_x[i], im_y[i] + 2.0, im_z[i]);
+        if (pt_z < 2.0) continue;
+        if (!sight_clear(im_x[i], im_y[i] + 3.0, im_z[i])) continue;
+
+        let var color = 0xFFFFF0A0;
+        if (age > 0.06) {
+            if (im_y[i] <= 0.0) color = 0xFFE6EEF6; else color = 0xFFB6A488;
+        }
+
+        let scale = FOCAL / pt_z;
+        let radius = (1.2 + age * 12.0) * scale;
+        fill_disc(CX + pt_x * scale, CY - pt_y * scale, radius.min(40.0), color);
+    }
+}
+
+// Draw the rounds in flight as streaks
+fun draw_tracers() {
+    for (let var i = 0; i < MAX_ROUNDS; ++i) {
+        let age = rd_age[i];
+        if (age < 0.0) continue;
+
+        let x = rd_x[i];
+        let y = rd_y[i];
+        let z = rd_z[i];
+        let vx = rd_vx[i];
+        let vy = rd_vy[i];
+        let vz = rd_vz[i];
+
+        view_point(x, y, z);
+        let var hx = pt_x;
+        let var hy = pt_y;
+        let var hz = pt_z;
+
+        // The streak trails back along the path, but not past the muzzle
+        let v_len = (vx * vx + vy * vy + vz * vz).sqrt();
+        let back = TRACER_LENGTH.min(age * MUZZLE_SPEED) / v_len;
+        view_point(x - vx * back, y - vy * back, z - vz * back);
+        let var tx = pt_x;
+        let var ty = pt_y;
+        let var tz = pt_z;
+
+        // Clip whichever end is behind the camera
+        let near = 0.5;
+        if (hz < near && tz < near) continue;
+        if (tz < near) {
+            let t = (near - tz) / (hz - tz);
+            tx = tx + (hx - tx) * t;
+            ty = ty + (hy - ty) * t;
+            tz = near;
+        } else if (hz < near) {
+            let t = (near - hz) / (tz - hz);
+            hx = hx + (tx - hx) * t;
+            hy = hy + (ty - hy) * t;
+            hz = near;
+        }
+
+        if (hz > 60.0 && !sight_clear(x, y, z)) continue;
+
+        let head_x = CX + hx * FOCAL / hz;
+        let head_y = CY - hy * FOCAL / hz;
+        let tail_x = CX + tx * FOCAL / tz;
+        let tail_y = CY - ty * FOCAL / tz;
+
+        // Thicker up close, and brightest at the head
+        let width = (FOCAL * 0.3 / hz).floor().clip(1, 4);
+        draw_wide_line(tail_x, tail_y, head_x, head_y, width, TRACER_BODY);
+        draw_wide_line(lerp(tail_x, head_x, 0.65), lerp(tail_y, head_y, 0.65),
+            head_x, head_y, width, TRACER_HEAD);
+    }
+}
+
 // Render one frame
 fun render_frame() {
     render_world();
+    draw_impacts();
+    draw_tracers();
     if (crash_timer > 0.0) draw_crash(); else draw_hud();
 }
 
@@ -1655,7 +1996,9 @@ fun run_bench(num_frames, shot_dir) {
         in_pitch = (t * 0.45).sin() * 0.25;
         in_yaw = (t * 0.3).sin() * 0.5;
         hud_time = t;
+        in_fire = frame % 60 >= 20 && frame % 60 < 50;
         update_flight(dt);
+        update_cannon(dt);
 
         let start_ms = $time_current_ms();
         render_frame();
@@ -1724,6 +2067,7 @@ fun set_key(key, down) {
     else if (key == 'W') key_faster = down;
     else if (key == 'S') key_slower = down;
     else if (key == 'SHIFT') in_boost = down;
+    else if (key == 'SPACE') in_fire = down;
 }
 
 let start_ms = $time_current_ms();
@@ -1763,6 +2107,7 @@ loop {
     in_throttle = key_axis(key_slower, key_faster);
     hud_time = (now_ms - start_ms).to_f() * 0.001;
     update_flight(dt);
+    update_cannon(dt);
 
     let render_start = $time_current_ms();
     render_frame();
