@@ -199,7 +199,7 @@ let var ex_body = 0.0;
 // hand. What is left to chance is the path the arpeggio takes through each
 // chord, which is drawn afresh for every section.
 
-let MUSIC_BPM = 108;
+let MUSIC_BPM = 126;
 let MUSIC_LEVEL = 0.42;
 
 // Samples in a sixteenth note, which is one step of the sequencer
@@ -209,18 +209,22 @@ let MU_STEP = (SAMPLE_RATE * 60).idiv(MUSIC_BPM * 4);
 let ECHO_LEN = 3 * MU_STEP;
 let echo_buf = ByteArray.with_size(ECHO_LEN * 4);
 
-// One chord per bar, in A minor: Am, F, C, G. The bass plays the root, and
-// the pad a voicing of each chord that moves as little as possible.
-let BASS_NOTES = [45, 41, 48, 43];
+// One chord per bar, in A minor: Am, F, Dm, E. Staying on minor chords and
+// ending on the major fifth, which pulls hard back to the start, is what
+// keeps it dark. The bass plays the root, and the pad a voicing of each
+// chord that moves as little as possible.
+let BASS_NOTES = [45, 41, 38, 40];
 let PAD_NOTES = [
     [57, 60, 64],
     [57, 60, 65],
-    [55, 60, 64],
-    [55, 59, 62],
+    [57, 62, 65],
+    [56, 59, 64],
 ];
 
-// Steps of the bar on which the bass jumps up an octave
-let BASS_JUMP = [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1];
+// Steps of the bar the bass plays on, a gallop that rests on every
+// second sixteenth, and the one on which it jumps up an octave
+let BASS_PLAY = [1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1];
+let BASS_JUMP = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
 
 // The parts that can play in a section
 let PART_PAD = 1;
@@ -345,7 +349,7 @@ fun music_step() {
     let chord = mu_bar % 4;
     let parts = mu_parts;
 
-    if ((parts & PART_BASS) != 0) {
+    if ((parts & PART_BASS) != 0 && BASS_PLAY[step] != 0) {
         bass_freq = note_freq(BASS_NOTES[chord] + 12 * BASS_JUMP[step]);
         bass_env = 1.0;
         if (step % 4 != 0) bass_env = 0.8;
@@ -377,7 +381,7 @@ fun music_step() {
 
     if ((parts & PART_ARP) != 0) {
         let idx = arp_pattern[step];
-        let note = PAD_NOTES[chord][idx % 3] + 12 * idx.idiv(3) + 12;
+        let note = PAD_NOTES[chord][idx % 3] + 12 * idx.idiv(3);
         arp_freq = note_freq(note);
         arp_env = 1.0;
     }
@@ -428,10 +432,14 @@ fun music_sample(white) {
     // Bass: a saw through a filter that snaps shut after each note
     bass_phase = bass_phase + bass_freq * step;
     if (bass_phase >= 1.0) bass_phase = bass_phase - 1.0;
-    let bass_cut = 0.02 + 0.22 * bass_env * bass_env;
+    let bass_cut = 0.025 + 0.30 * bass_env * bass_env;
     bass_lp1 = bass_lp1 + ((bass_phase * 2.0 - 1.0) * bass_env - bass_lp1) * bass_cut;
     bass_lp2 = bass_lp2 + (bass_lp1 - bass_lp2) * bass_cut;
-    bass_env = bass_env * 0.99975;
+    bass_env = bass_env * 0.99978;
+
+    // Overdriven, which is where the growl comes from
+    let bass_hot = bass_lp2 * 4.5;
+    let bass = bass_hot / (1.0 + bass_hot.abs());
 
     // Pad: six saws, through a filter that slowly opens and closes
     let var pad = 0.0;
@@ -443,7 +451,7 @@ fun music_sample(white) {
     }
     pad_lfo = pad_lfo + 0.07 * step;
     if (pad_lfo >= 1.0) pad_lfo = pad_lfo - 1.0;
-    let pad_cut = 0.045 + 0.025 * (pad_lfo * tau).sin();
+    let pad_cut = 0.032 + 0.016 * (pad_lfo * tau).sin();
     pad_lp1 = pad_lp1 + ((pad - 3.0) * 0.33 - pad_lp1) * pad_cut;
     pad_lp2 = pad_lp2 + (pad_lp1 - pad_lp2) * pad_cut;
     let var pad_tgt = 0.0;
@@ -461,8 +469,8 @@ fun music_sample(white) {
     echo_pos = echo_pos + 1;
     if (echo_pos >= ECHO_LEN) echo_pos = 0;
 
-    return kick * 0.85 + snare * 0.30 + hat * 0.11
-         + (bass_lp2 * 0.9 + pad_lp2 * pad_gain * 0.9 + arp * 0.42) * duck;
+    return kick * 1.0 + snare * 0.42 + hat * 0.11
+         + (bass * 0.42 + pad_lp2 * pad_gain * 0.9 + arp * 0.42) * duck;
 }
 
 // Synthesize the next n samples into a buffer
