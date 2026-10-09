@@ -1,0 +1,1785 @@
+// Flight sim over procedural terrain
+//
+// The world is a heightmap generated from fractal noise at startup, which
+// wraps around at its edges so that it can be flown over forever. Colors
+// are picked from height and slope, and sunlight is baked into them, so the
+// rasterizer only has to interpolate a color across each triangle.
+//
+// The terrain is drawn as nested rings of grid cells around the camera, each
+// ring twice as coarse as the one inside it. Cells are visited front to back
+// and an s-buffer tracks which parts of each scanline are covered, so that
+// every pixel is written once. What the terrain leaves uncovered is sky.
+// Towards the outside of a ring its vertices slide onto the surface of the
+// coarser ring beyond, so that detail fades in instead of popping.
+//
+// Usage:
+//   plush examples/flight_sim.psh
+//   plush examples/flight_sim.psh --bench [num_frames] [shot_dir]
+//
+//   up / down     pitch the nose down / up
+//   left / right  roll
+//   A / D         rudder
+//   W / S         throttle up / down
+//   shift         boost, while the charge lasts
+//   R             start over
+//   escape / Q    quit
+//
+// With --bench, a set flight is rendered without opening a window and the
+// time per frame is reported. Given a directory as well, a TGA screenshot
+// is written there every so often.
+
+from noise import FractalNoise;
+from image import Image, save_tga;
+from ./monogram_font import Font;
+
+let FRAME_WIDTH = 960;
+let FRAME_HEIGHT = 540;
+
+let PI = 3.1415926535;
+let FOV_X_DEG = 75.0;
+let CX = FRAME_WIDTH.to_f() * 0.5;
+let CY = FRAME_HEIGHT.to_f() * 0.5;
+let FOCAL = CX / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
+
+// Anything closer than this is clipped away. It has to be well inside
+// the distance at which the ground counts as hit, or the clipping shows.
+let NEAR_Z = 0.4;
+
+// --- World ---
+
+// The heightmap is a power of two on a side so that wrapping is a mask
+let MAP_SHIFT = 10;
+let MAP_SIZE = 1 << MAP_SHIFT;
+let MAP_MASK = MAP_SIZE - 1;
+
+// Size of a heightmap cell and of the whole world, in meters
+let CELL = 64.0;
+let WORLD = MAP_SIZE.to_f() * CELL;
+
+// Width of the band, in cells, over which the far edges of the map are
+// blended into the near ones to make the terrain tile
+let WRAP_MARGIN = 96;
+
+let TERRAIN_SEED = 4242;
+
+// Direction towards the sun
+let SUN_X = 0.48;
+let SUN_Y = 0.62;
+let SUN_Z = 0.62;
+let AMBIENT = 0.38;
+let DIFFUSE = 0.80;
+
+// --- Level of detail ---
+
+// Each level is a square of 2 * LOD_RADIUS cells on a side, with cells twice
+// the size of the level before. The radius must be even for levels to nest.
+let LOD_RADIUS = 32;
+let LOD_LEVELS = 5;
+let LOD_GRID = 2 * LOD_RADIUS;
+let LOD_VERTS = LOD_GRID + 1;
+
+// Distances from the camera, in cells of a level, between which the level
+// blends into the shape of the next one out. The blend has to start outside
+// the hole left for the finer level, which reaches LOD_RADIUS / 2 + 2 cells,
+// and be complete by the nearest edge of the level, at LOD_RADIUS - 2.
+let MORPH_START = LOD_RADIUS * 0.6;
+let MORPH_END = LOD_RADIUS - 2.0;
+
+// Terrain fades into the haze between these distances, the far one
+// being just short of where the last level ends
+let FOG_START = 1500.0;
+let FOG_END = 30000.0;
+let FOG_R = 196.0;
+let FOG_G = 214.0;
+let FOG_B = 232.0;
+
+// --- Colors ---
+
+fun rgb32(r, g, b) {
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+fun lerp(a, b, t) {
+    return a + (b - a) * t;
+}
+
+// Ramp from 0 to 1 as x goes from lo to hi, with eased ends
+fun smoothstep(lo, hi, x) {
+    let t = ((x - lo) / (hi - lo)).clip(0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// --- Terrain generation ---
+
+// Broad shape of the land, with features several kilometers across
+let base_noise = FractalNoise({
+    seed: TERRAIN_SEED,
+    frequency: 1.0 / 220.0,
+    octaves: 5,
+});
+
+// Finer detail, which is given more weight the higher the ground is
+let rough_noise = FractalNoise({
+    seed: TERRAIN_SEED + 100,
+    frequency: 1.0 / 28.0,
+    octaves: 5,
+});
+
+// Blend a noise function across the map edges so that it tiles
+fun sample_tiled(noise, x, z) {
+    let size = MAP_SIZE;
+    let edge = size - WRAP_MARGIN;
+    let var v = noise.sample2d(x, z);
+
+    if (x >= edge) {
+        let t = (x - edge).to_f() / WRAP_MARGIN;
+        v = lerp(v, noise.sample2d(x - size, z), t);
+    }
+
+    if (z >= edge) {
+        let var w = noise.sample2d(x, z - size);
+        if (x >= edge) {
+            let t = (x - edge).to_f() / WRAP_MARGIN;
+            w = lerp(w, noise.sample2d(x - size, z - size), t);
+        }
+        v = lerp(v, w, (z - edge).to_f() / WRAP_MARGIN);
+    }
+
+    return v;
+}
+
+// Ground height in meters at each grid point. Water is flat at zero.
+let height_map = ByteArray.with_size(MAP_SIZE * MAP_SIZE * 4);
+
+// Sunlit color of each grid point, as 0xRRGGBB
+let color_map = ByteArray.with_size(MAP_SIZE * MAP_SIZE * 4);
+
+// Fill in the height map. The signed elevation and the detail noise are
+// kept as well, since choosing the colors needs them.
+fun generate_heights(elev_map, rough_map) {
+    for (let var z = 0; z < MAP_SIZE; ++z) {
+        for (let var x = 0; x < MAP_SIZE; ++x) {
+            let rough = sample_tiled(rough_noise, x, z) * 2.0;
+            let elev = sample_tiled(base_noise, x, z) * 2.1 + 0.06 + rough * 0.03;
+
+            // Raising the elevation to a power flattens the lowlands
+            // and leaves the peaks steep
+            let var h = 0.0;
+            if (elev > 0.0) {
+                h = elev.pow(1.7) * 3400.0 + rough * elev * 520.0;
+                if (h < 0.0) h = 0.0;
+            }
+
+            let idx = (z << MAP_SHIFT) | x;
+            height_map.set_f32(idx, h);
+            elev_map.set_f32(idx, elev);
+            rough_map.set_f32(idx, rough);
+        }
+    }
+}
+
+// Pick the color of each grid point from its height and slope,
+// and bake the sunlight into it
+fun generate_colors(elev_map, rough_map) {
+    let sun_len = (SUN_X * SUN_X + SUN_Y * SUN_Y + SUN_Z * SUN_Z).sqrt();
+    let sun_x = SUN_X / sun_len;
+    let sun_y = SUN_Y / sun_len;
+    let sun_z = SUN_Z / sun_len;
+
+    for (let var z = 0; z < MAP_SIZE; ++z) {
+        let row = z << MAP_SHIFT;
+        let row_n = ((z - 1) & MAP_MASK) << MAP_SHIFT;
+        let row_s = ((z + 1) & MAP_MASK) << MAP_SHIFT;
+
+        for (let var x = 0; x < MAP_SIZE; ++x) {
+            let idx = row | x;
+            let h = height_map.get_f32(idx);
+            let elev = elev_map.get_f32(idx);
+            let rough = rough_map.get_f32(idx);
+
+            // Surface normal from the heights of the four neighbors
+            let var nx = height_map.get_f32(row | ((x - 1) & MAP_MASK))
+                       - height_map.get_f32(row | ((x + 1) & MAP_MASK));
+            let var nz = height_map.get_f32(row_n | x) - height_map.get_f32(row_s | x);
+            let var ny = 2.0 * CELL;
+            let n_len = (nx * nx + ny * ny + nz * nz).sqrt();
+            nx = nx / n_len;
+            ny = ny / n_len;
+            nz = nz / n_len;
+
+            let var r = 0.0;
+            let var g = 0.0;
+            let var b = 0.0;
+
+            if (h <= 0.0) {
+                // Water, turquoise in the shallows and darker with depth
+                let t = smoothstep(0.0, 0.35, 0.0 - elev);
+                r = lerp(62.0, 16.0, t);
+                g = lerp(150.0, 62.0, t);
+                b = lerp(168.0, 128.0, t);
+            } else {
+                // Grass thinning out into darker upland with height
+                let up = smoothstep(150.0, 1100.0, h + rough * 250.0);
+                r = lerp(92.0, 58.0, up) + rough * 22.0;
+                g = lerp(132.0, 96.0, up) + rough * 16.0;
+                b = lerp(58.0, 50.0, up) + rough * 8.0;
+
+                // Sand along the shore
+                let sand = 1.0 - smoothstep(4.0, 26.0, h);
+                r = lerp(r, 214.0, sand);
+                g = lerp(g, 200.0, sand);
+                b = lerp(b, 150.0, sand);
+
+                // Bare rock where it is steep or high
+                let steep = smoothstep(0.10, 0.26, 1.0 - ny);
+                let high = smoothstep(1300.0, 1900.0, h + rough * 300.0);
+                let rock = steep.max(high);
+                r = lerp(r, 124.0 + rough * 20.0, rock);
+                g = lerp(g, 114.0 + rough * 18.0, rock);
+                b = lerp(b, 104.0 + rough * 16.0, rock);
+
+                // Snow on the peaks, which does not hold on the steepest faces
+                let snow = smoothstep(2000.0, 2400.0, h + rough * 350.0)
+                         * (1.0 - smoothstep(0.30, 0.50, 1.0 - ny));
+                r = lerp(r, 242.0, snow);
+                g = lerp(g, 246.0, snow);
+                b = lerp(b, 252.0, snow);
+            }
+
+            let sun = (nx * sun_x + ny * sun_y + nz * sun_z).max(0.0);
+            let lum = AMBIENT + DIFFUSE * sun;
+
+            // Channels stay clear of 0 and 255 so that rounding in the
+            // rasterizer cannot carry from one channel into the next
+            let ri = (r * lum).floor().clip(4, 251);
+            let gi = (g * lum).floor().clip(4, 251);
+            let bi = (b * lum).floor().clip(4, 251);
+            color_map.set_u32(idx, (ri << 16) | (gi << 8) | bi);
+        }
+    }
+}
+
+// Generate the world
+fun generate_terrain() {
+    let start_ms = $time_current_ms();
+    let elev_map = ByteArray.with_size(MAP_SIZE * MAP_SIZE * 4);
+    let rough_map = ByteArray.with_size(MAP_SIZE * MAP_SIZE * 4);
+
+    generate_heights(elev_map, rough_map);
+    generate_colors(elev_map, rough_map);
+
+    $println("Generated terrain in " + ($time_current_ms() - start_ms).to_s() + " ms");
+}
+
+// Ground height at a world position. This follows the two triangles a cell
+// is drawn as, so that it agrees exactly with the surface on screen.
+fun ground_height(x, z) {
+    let gx = x / CELL;
+    let gz = z / CELL;
+    let ix = gx.floor();
+    let iz = gz.floor();
+    let tx = gx - ix;
+    let tz = gz - iz;
+
+    let x0 = ix & MAP_MASK;
+    let x1 = (ix + 1) & MAP_MASK;
+    let row0 = (iz & MAP_MASK) << MAP_SHIFT;
+    let row1 = ((iz + 1) & MAP_MASK) << MAP_SHIFT;
+
+    let ha = height_map.get_f32(row0 | x0);
+    let hd = height_map.get_f32(row1 | x1);
+
+    // The cell is split along the diagonal from a to d
+    if (tx > tz) {
+        let hb = height_map.get_f32(row0 | x1);
+        return ha + (hb - ha) * tx + (hd - hb) * tz;
+    }
+
+    let hc = height_map.get_f32(row1 | x0);
+    return ha + (hc - ha) * tz + (hd - hc) * tx;
+}
+
+// --- Camera ---
+
+// Position in world space, where x is east, y is up and z is north
+let var cam_x = 0.0;
+let var cam_y = 0.0;
+let var cam_z = 0.0;
+
+// Orientation, as the three axes of the camera in world space
+let var right_x = 1.0;
+let var right_y = 0.0;
+let var right_z = 0.0;
+let var up_x = 0.0;
+let var up_y = 1.0;
+let var up_z = 0.0;
+let var fwd_x = 0.0;
+let var fwd_y = 0.0;
+let var fwd_z = 1.0;
+
+// Pitch the nose up by an angle in radians
+fun cam_pitch(angle) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let fx = fwd_x * c + up_x * s;
+    let fy = fwd_y * c + up_y * s;
+    let fz = fwd_z * c + up_z * s;
+    up_x = up_x * c - fwd_x * s;
+    up_y = up_y * c - fwd_y * s;
+    up_z = up_z * c - fwd_z * s;
+    fwd_x = fx;
+    fwd_y = fy;
+    fwd_z = fz;
+}
+
+// Roll to the right, lowering the right wing
+fun cam_roll(angle) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let rx = right_x * c - up_x * s;
+    let ry = right_y * c - up_y * s;
+    let rz = right_z * c - up_z * s;
+    up_x = up_x * c + right_x * s;
+    up_y = up_y * c + right_y * s;
+    up_z = up_z * c + right_z * s;
+    right_x = rx;
+    right_y = ry;
+    right_z = rz;
+}
+
+// Yaw the nose to the right
+fun cam_yaw(angle) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let fx = fwd_x * c + right_x * s;
+    let fy = fwd_y * c + right_y * s;
+    let fz = fwd_z * c + right_z * s;
+    right_x = right_x * c - fwd_x * s;
+    right_y = right_y * c - fwd_y * s;
+    right_z = right_z * c - fwd_z * s;
+    fwd_x = fx;
+    fwd_y = fy;
+    fwd_z = fz;
+}
+
+// Make the axes unit length and square to each other again, since
+// rotating them a little every frame lets them drift
+fun cam_normalize() {
+    let f_len = (fwd_x * fwd_x + fwd_y * fwd_y + fwd_z * fwd_z).sqrt();
+    fwd_x = fwd_x / f_len;
+    fwd_y = fwd_y / f_len;
+    fwd_z = fwd_z / f_len;
+
+    // right = up x fwd
+    let rx = up_y * fwd_z - up_z * fwd_y;
+    let ry = up_z * fwd_x - up_x * fwd_z;
+    let rz = up_x * fwd_y - up_y * fwd_x;
+    let r_len = (rx * rx + ry * ry + rz * rz).sqrt();
+    right_x = rx / r_len;
+    right_y = ry / r_len;
+    right_z = rz / r_len;
+
+    // up = fwd x right
+    up_x = fwd_y * right_z - fwd_z * right_y;
+    up_y = fwd_z * right_x - fwd_x * right_z;
+    up_z = fwd_x * right_y - fwd_y * right_x;
+}
+
+// --- Frame buffer ---
+
+let frame_image = Image(FRAME_WIDTH, FRAME_HEIGHT);
+let frame_buffer = frame_image.bytes;
+
+// --- The s-buffer ---
+//
+// The covered intervals of each scanline, kept sorted, disjoint and
+// coalesced. They live in parallel arrays and link by index, and are handed
+// out by a bump allocator that resets each frame, so drawing allocates nothing.
+
+let MAX_SPANS = 16384;
+let NO_SPAN = -1;
+
+let sp_x0 = Array.with_size(MAX_SPANS, 0);
+let sp_x1 = Array.with_size(MAX_SPANS, 0);
+let sp_next = Array.with_size(MAX_SPANS, NO_SPAN);
+let var sp_top = 0;
+
+let sb_head = Array.with_size(FRAME_HEIGHT, NO_SPAN);
+let sb_full = Array.with_size(FRAME_HEIGHT, false);
+let var sb_num_full = 0;
+
+// Set once every scanline is covered, at which point drawing can stop
+let var screen_done = false;
+
+// The visible parts of the last interval inserted
+let MAX_VIS = 64;
+let vis_x0 = Array.with_size(MAX_VIS, 0);
+let vis_x1 = Array.with_size(MAX_VIS, 0);
+
+// Empty the s-buffer at the start of a frame
+fun sbuf_reset() {
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+        sb_head[y] = NO_SPAN;
+        sb_full[y] = false;
+    }
+
+    sb_num_full = 0;
+    sp_top = 0;
+    screen_done = false;
+}
+
+// Mark a scanline as needing nothing more drawn on it
+fun sbuf_retire(y) {
+    sb_full[y] = true;
+    sb_num_full = sb_num_full + 1;
+    if (sb_num_full >= FRAME_HEIGHT) screen_done = true;
+}
+
+// Insert [x0, x1) into scanline y. The parts of it that were not already
+// covered are left in vis_x0/vis_x1, and their number is returned.
+fun sbuf_insert(y, x0, x1) {
+    if (sb_full[y]) return 0;
+
+    let var n_vis = 0;
+    let var prev = NO_SPAN;
+    let var cur = sb_head[y];
+
+    // Skip the intervals left of x0. One ending exactly at x0 is kept,
+    // so that the two coalesce.
+    while (cur != NO_SPAN && sp_x1[cur] < x0) {
+        prev = cur;
+        cur = sp_next[cur];
+    }
+
+    // Walk the overlapped run. The gaps in it are what is visible,
+    // and the whole run merges into one interval.
+    let var mx0 = x0;
+    let var mx1 = x1;
+    let var cx = x0;
+    let var scan = cur;
+    while (scan != NO_SPAN) {
+        let sx0 = sp_x0[scan];
+        if (sx0 > x1) break;
+        let sx1 = sp_x1[scan];
+
+        if (sx0 > cx && n_vis < MAX_VIS) {
+            vis_x0[n_vis] = cx;
+            vis_x1[n_vis] = sx0;
+            n_vis = n_vis + 1;
+        }
+
+        if (sx1 > cx) cx = sx1;
+        if (sx0 < mx0) mx0 = sx0;
+        if (sx1 > mx1) mx1 = sx1;
+        scan = sp_next[scan];
+    }
+
+    if (cx < x1 && n_vis < MAX_VIS) {
+        vis_x0[n_vis] = cx;
+        vis_x1[n_vis] = x1;
+        n_vis = n_vis + 1;
+    }
+
+    // Hidden behind what is already there
+    if (n_vis == 0) return 0;
+
+    if (cur == scan) {
+        // Nothing overlapped, link in a new interval. If the pool is
+        // spent, retiring the scanline keeps what is nearest on it.
+        if (sp_top >= MAX_SPANS) {
+            sbuf_retire(y);
+            return 0;
+        }
+
+        let s = sp_top;
+        sp_top = sp_top + 1;
+        sp_x0[s] = mx0;
+        sp_x1[s] = mx1;
+        sp_next[s] = scan;
+        if (prev == NO_SPAN) sb_head[y] = s; else sp_next[prev] = s;
+    } else {
+        // Widen the first interval of the run over all of it
+        sp_x0[cur] = mx0;
+        sp_x1[cur] = mx1;
+        sp_next[cur] = scan;
+    }
+
+    if (mx0 <= 0 && mx1 >= FRAME_WIDTH) sbuf_retire(y);
+    return n_vis;
+}
+
+// --- Vertex buffer ---
+//
+// The vertices of the level being drawn, transformed once and shared by
+// the triangles around them. A few spare slots at the end hold the
+// vertices made by clipping a triangle against the near plane.
+
+let CLIP_SLOT = LOD_VERTS * LOD_VERTS;
+let NUM_SLOTS = CLIP_SLOT + 8;
+
+// Position in view space
+let v_vx = Array.with_size(NUM_SLOTS, 0.0);
+let v_vy = Array.with_size(NUM_SLOTS, 0.0);
+let v_vz = Array.with_size(NUM_SLOTS, 0.0);
+
+// Position on screen, only valid in front of the near plane
+let v_sx = Array.with_size(NUM_SLOTS, 0.0);
+let v_sy = Array.with_size(NUM_SLOTS, 0.0);
+
+// Color with the haze applied, each channel in 0..255
+let v_r = Array.with_size(NUM_SLOTS, 0.0);
+let v_g = Array.with_size(NUM_SLOTS, 0.0);
+let v_b = Array.with_size(NUM_SLOTS, 0.0);
+
+// Which of the frustum planes the vertex is outside of
+let v_code = Array.with_size(NUM_SLOTS, 0);
+
+let CODE_LEFT = 1;
+let CODE_RIGHT = 2;
+let CODE_TOP = 4;
+let CODE_BOTTOM = 8;
+let CODE_NEAR = 16;
+
+// --- Rasterization ---
+
+// Colors are interpolated along a span as three 8.12 fixed point channels
+// packed into one integer, twenty bits apart, so that one add steps them all
+let COL_ONE = 4096.0;
+let R_SHIFT = 40;
+let G_SHIFT = 20;
+
+// Past this much color change per pixel a triangle is a sliver,
+// and gets a single color instead
+let GRAD_LIMIT = 48.0;
+
+let FP_ONE = 65536.0;
+let FRAME_WIDTH_F = FRAME_WIDTH.to_f();
+
+let var tris_drawn = 0;
+
+// Position of an edge at the center of a scanline, less half a pixel, so
+// that rounding it up gives the first pixel whose center is right of the
+// edge. An edge shared by two triangles gets the same value from both, as
+// long as it is given from the same end, which makes the mesh watertight.
+//
+// Edges are walked as floats. Up close a triangle can reach thousands of
+// pixels off screen, and its edges only stay true there if nothing along
+// the way is clamped to fit a fixed point range.
+fun edge_start(x_top, y_top, slope, y) {
+    return x_top + (y.to_f() + 0.5 - y_top) * slope - 0.5;
+}
+
+// Draw the parts of a Gouraud shaded triangle that nothing nearer covers.
+// Takes three vertex buffer slots.
+fun raster_tri(ia, ib, ic) {
+    let ax = v_sx[ia];
+    let ay = v_sy[ia];
+    let bx = v_sx[ib];
+    let by = v_sy[ib];
+    let cx = v_sx[ic];
+    let cy = v_sy[ic];
+
+    // Triangles facing away are behind the ground that is facing us
+    let det = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    if (det <= 0.000001) return;
+
+    // Sort the vertices by height on screen
+    let var i0 = ia;
+    let var i1 = ib;
+    let var i2 = ic;
+    if (v_sy[i0] > v_sy[i1]) { let t = i0; i0 = i1; i1 = t; }
+    if (v_sy[i0] > v_sy[i2]) { let t = i0; i0 = i2; i2 = t; }
+    if (v_sy[i1] > v_sy[i2]) { let t = i1; i1 = i2; i2 = t; }
+
+    let x0 = v_sx[i0];
+    let y0 = v_sy[i0];
+    let x1 = v_sx[i1];
+    let y1 = v_sy[i1];
+    let x2 = v_sx[i2];
+    let y2 = v_sy[i2];
+
+    // Rows whose centers fall inside the triangle
+    let y_start = (y0 - 0.5).ceil().max(0);
+    let y_end = (y2 - 0.5).ceil().min(FRAME_HEIGHT);
+    if (y_start >= y_end) return;
+    let y_mid = (y1 - 0.5).ceil();
+
+    // Sorting may have flipped the winding. A positive determinant here
+    // puts the middle vertex right of the long edge.
+    let e1x = x1 - x0;
+    let e1y = y1 - y0;
+    let e2x = x2 - x0;
+    let e2y = y2 - y0;
+    let sdet = e1x * e2y - e2x * e1y;
+    let long_left = sdet > 0.0;
+    let inv_det = 1.0 / sdet;
+
+    // Color gradients, which are constant over the triangle
+    let var r0 = v_r[i0];
+    let var g0 = v_g[i0];
+    let var b0 = v_b[i0];
+    let e1r = v_r[i1] - r0;
+    let e2r = v_r[i2] - r0;
+    let e1g = v_g[i1] - g0;
+    let e2g = v_g[i2] - g0;
+    let e1b = v_b[i1] - b0;
+    let e2b = v_b[i2] - b0;
+
+    let var drdx = (e1r * e2y - e2r * e1y) * inv_det;
+    let var drdy = (e2r * e1x - e1r * e2x) * inv_det;
+    let var dgdx = (e1g * e2y - e2g * e1y) * inv_det;
+    let var dgdy = (e2g * e1x - e1g * e2x) * inv_det;
+    let var dbdx = (e1b * e2y - e2b * e1y) * inv_det;
+    let var dbdy = (e2b * e1x - e1b * e2x) * inv_det;
+
+    // A sliver gets the average of its corners
+    let grad = drdx.abs().max(drdy.abs()).max(dgdx.abs()).max(dgdy.abs())
+        .max(dbdx.abs()).max(dbdy.abs());
+    if (grad > GRAD_LIMIT) {
+        r0 = r0 + (e1r + e2r) / 3.0;
+        g0 = g0 + (e1g + e2g) / 3.0;
+        b0 = b0 + (e1b + e2b) / 3.0;
+        drdx = 0.0; drdy = 0.0;
+        dgdx = 0.0; dgdy = 0.0;
+        dbdx = 0.0; dbdy = 0.0;
+    }
+
+    // Packed step from one pixel to the next
+    let drdx_fx = drdx * COL_ONE;
+    let dgdx_fx = dgdx * COL_ONE;
+    let dbdx_fx = dbdx * COL_ONE;
+    let drdy_fx = drdy * COL_ONE;
+    let dgdy_fx = dgdy * COL_ONE;
+    let dbdy_fx = dbdy * COL_ONE;
+    let dc = (drdx_fx.floor() << R_SHIFT) + (dgdx_fx.floor() << G_SHIFT) + dbdx_fx.floor();
+
+    // Colors at the center of pixel 0 of the first row
+    let x_off = 0.5 - x0;
+    let y_off = y_start.to_f() + 0.5 - y0;
+    let var r_row = (r0 + x_off * drdx + y_off * drdy) * COL_ONE;
+    let var g_row = (g0 + x_off * dgdx + y_off * dgdy) * COL_ONE;
+    let var b_row = (b0 + x_off * dbdx + y_off * dbdy) * COL_ONE;
+
+    // The long edge runs the full height, the other side is two edges
+    let long_slope = e2x / e2y;
+    let long_x = edge_start(x0, y0, long_slope, y_start);
+
+    let var short_x = 0.0;
+    let var short_slope = 0.0;
+    if (y_start < y_mid) {
+        short_slope = e1x / e1y;
+        short_x = edge_start(x0, y0, short_slope, y_start);
+    }
+
+    let var xl = short_x;
+    let var xl_step = short_slope;
+    let var xr = long_x;
+    let var xr_step = long_slope;
+    if (long_left) {
+        xl = long_x;
+        xl_step = long_slope;
+        xr = short_x;
+        xr_step = short_slope;
+    }
+
+    let fb = frame_buffer;
+    let width = FRAME_WIDTH;
+    let width_f = FRAME_WIDTH_F;
+    let var row = y_start * width;
+    tris_drawn = tris_drawn + 1;
+
+    for (let var y = y_start; y < y_end; ++y) {
+        // Switch to the lower of the two short edges
+        if (y == y_mid || (y == y_start && y >= y_mid)) {
+            let slope = (x2 - x1) / (y2 - y1);
+            let x = edge_start(x1, y1, slope, y);
+            if (long_left) {
+                xr = x;
+                xr_step = slope;
+            } else {
+                xl = x;
+                xl_step = slope;
+            }
+        }
+
+        // Round the edges to pixels, keeping to the frame
+        let var span_x0 = 0;
+        if (xl > 0.0) {
+            if (xl < width_f) span_x0 = xl.ceil(); else span_x0 = width;
+        }
+        let var span_x1 = width;
+        if (xr < width_f) {
+            if (xr > 0.0) span_x1 = xr.ceil(); else span_x1 = 0;
+        }
+
+        if (span_x0 < span_x1) {
+            let n_vis = sbuf_insert(y, span_x0, span_x1);
+
+            if (n_vis > 0) {
+                // Packed color at the start of the span
+                let c0 = ((r_row + span_x0 * drdx_fx).floor() << R_SHIFT)
+                       + ((g_row + span_x0 * dgdx_fx).floor() << G_SHIFT)
+                       + (b_row + span_x0 * dbdx_fx).floor();
+
+                for (let var k = 0; k < n_vis; ++k) {
+                    let vx0 = vis_x0[k];
+                    let var c = c0 + (vx0 - span_x0) * dc;
+                    let var i = row + vx0;
+                    let end_i = row + vis_x1[k];
+
+                    while (i < end_i) {
+                        fb.set_u32(i, ((c >> 36) & 0xFF0000)
+                                    | ((c >> 24) & 0xFF00)
+                                    | ((c >> 12) & 0xFF));
+                        c = c + dc;
+                        ++i;
+                    }
+                }
+            }
+        }
+
+        xl = xl + xl_step;
+        xr = xr + xr_step;
+        r_row = r_row + drdy_fx;
+        g_row = g_row + dgdy_fx;
+        b_row = b_row + dbdy_fx;
+        row = row + width;
+    }
+}
+
+// Project a vertex in front of the near plane onto the screen
+fun project_slot(i) {
+    let inv = FOCAL / v_vz[i];
+    v_sx[i] = CX + v_vx[i] * inv;
+    v_sy[i] = CY - v_vy[i] * inv;
+}
+
+// Write the point where an edge crosses the near plane into a slot
+fun clip_edge(dst, a, b) {
+    let t = (NEAR_Z - v_vz[a]) / (v_vz[b] - v_vz[a]);
+    v_vx[dst] = lerp(v_vx[a], v_vx[b], t);
+    v_vy[dst] = lerp(v_vy[a], v_vy[b], t);
+    v_vz[dst] = NEAR_Z;
+    v_r[dst] = lerp(v_r[a], v_r[b], t);
+    v_g[dst] = lerp(v_g[a], v_g[b], t);
+    v_b[dst] = lerp(v_b[a], v_b[b], t);
+    project_slot(dst);
+}
+
+// Triangle being clipped, and the polygon that comes out
+let clip_in = [0, 0, 0];
+let clip_out = [0, 0, 0, 0];
+
+// Draw a triangle that crosses the near plane, by clipping it first
+fun raster_tri_clipped(ia, ib, ic) {
+    clip_in[0] = ia;
+    clip_in[1] = ib;
+    clip_in[2] = ic;
+    let var n = 0;
+    let var slot = CLIP_SLOT;
+
+    // Keep the vertices in front, adding one wherever an edge crosses
+    for (let var k = 0; k < 3; ++k) {
+        let a = clip_in[k];
+        let b = clip_in[(k + 1) % 3];
+        let a_in = v_vz[a] >= NEAR_Z;
+        let b_in = v_vz[b] >= NEAR_Z;
+
+        if (a_in) {
+            clip_out[n] = a;
+            n = n + 1;
+        }
+
+        if (a_in != b_in) {
+            // Always clip from the same end, so that an edge shared by
+            // two triangles is cut at exactly the same point
+            if (a_in) clip_edge(slot, a, b); else clip_edge(slot, b, a);
+            clip_out[n] = slot;
+            n = n + 1;
+            slot = slot + 1;
+        }
+    }
+
+    if (n < 3) return;
+    raster_tri(clip_out[0], clip_out[1], clip_out[2]);
+    if (n == 4) raster_tri(clip_out[0], clip_out[2], clip_out[3]);
+}
+
+// --- Terrain ---
+
+// Order in which the columns and rows of a level are visited
+let order_i = Array.with_size(LOD_GRID, 0);
+let order_j = Array.with_size(LOD_GRID, 0);
+
+// Fill an array with the indices 0..LOD_GRID, starting from a given
+// one and working outwards on both sides of it
+fun fill_order(order, start) {
+    let var n = 0;
+    for (let var i = start; i < LOD_GRID; ++i) {
+        order[n] = i;
+        n = n + 1;
+    }
+
+    for (let var i = start - 1; i >= 0; --i) {
+        order[n] = i;
+        n = n + 1;
+    }
+}
+
+// Transform the vertices of one level into the vertex buffer. The level's
+// origin is given in units of its own cells, as is the hole left in it for
+// the finer level inside, and the position of the camera.
+fun transform_level(stride, bx0, bz0, cam_u, cam_v, hole_x, hole_z, has_hole) {
+    let step = CELL * stride;
+    let fog_scale = 1.0 / (FOG_END - FOG_START);
+    let morph_scale = 1.0 / (MORPH_END - MORPH_START);
+    let hole_x1 = hole_x + LOD_RADIUS;
+    let hole_z1 = hole_z + LOD_RADIUS;
+
+    // View space step from one vertex to the next along a row
+    let step_vx = step * right_x;
+    let step_vy = step * up_x;
+    let step_vz = step * fwd_x;
+
+    let var slot = 0;
+    for (let var j = 0; j <= LOD_GRID; ++j) {
+        let gz = (bz0 + j) * stride;
+        let map_row = (gz & MAP_MASK) << MAP_SHIFT;
+        let dist_j = (j - cam_v).abs();
+        let in_hole_rows = has_hole && j > hole_z && j < hole_z1;
+
+        // View space position of the start of the row, at the height of the camera
+        let dx = (bx0 * stride).to_f() * CELL - cam_x;
+        let dz = gz.to_f() * CELL - cam_z;
+        let var row_vx = dx * right_x + dz * right_z - cam_y * right_y;
+        let var row_vy = dx * up_x + dz * up_z - cam_y * up_y;
+        let var row_vz = dx * fwd_x + dz * fwd_z - cam_y * fwd_y;
+
+        for (let var i = 0; i <= LOD_GRID; ++i) {
+            // Vertices inside the hole are not part of any triangle
+            if (in_hole_rows && i > hole_x && i < hole_x1) {
+                row_vx = row_vx + step_vx;
+                row_vy = row_vy + step_vy;
+                row_vz = row_vz + step_vz;
+                ++slot;
+                continue;
+            }
+
+            let gx = (bx0 + i) * stride;
+            let idx = map_row | (gx & MAP_MASK);
+            let color = color_map.get_u32(idx);
+            let var h = height_map.get_f32(idx);
+            let var r = ((color >> 16) & 255).to_f();
+            let var g = ((color >> 8) & 255).to_f();
+            let var b = (color & 255).to_f();
+
+            // A vertex at an odd position has no counterpart in the next
+            // level out. Moving it midway between the two neighbors that do
+            // puts it on that level's surface: along an edge of one of its
+            // cells, or along the diagonal a cell is split by. Doing so by
+            // degrees is what fades the detail out, and having it complete
+            // at the edge is what keeps the two levels from cracking apart.
+            if (((i | j) & 1) != 0) {
+                let dist_i = (i - cam_u).abs();
+                let dist = dist_i.max(dist_j);
+
+                if (dist > MORPH_START) {
+                    let m = ((dist - MORPH_START) * morph_scale).min(1.0);
+                    let ox = (i & 1) * stride;
+                    let oz = (j & 1) * stride;
+                    let ia = (((gz - oz) & MAP_MASK) << MAP_SHIFT) | ((gx - ox) & MAP_MASK);
+                    let ib = (((gz + oz) & MAP_MASK) << MAP_SHIFT) | ((gx + ox) & MAP_MASK);
+                    let ca = color_map.get_u32(ia);
+                    let cb = color_map.get_u32(ib);
+
+                    h = h + ((height_map.get_f32(ia) + height_map.get_f32(ib)) * 0.5 - h) * m;
+                    r = r + ((((ca >> 16) & 255) + ((cb >> 16) & 255)) * 0.5 - r) * m;
+                    g = g + ((((ca >> 8) & 255) + ((cb >> 8) & 255)) * 0.5 - g) * m;
+                    b = b + (((ca & 255) + (cb & 255)) * 0.5 - b) * m;
+                }
+            }
+
+            let vx = row_vx + h * right_y;
+            let vy = row_vy + h * up_y;
+            let vz = row_vz + h * fwd_y;
+            row_vx = row_vx + step_vx;
+            row_vy = row_vy + step_vy;
+            row_vz = row_vz + step_vz;
+
+            // Each side of the frustum is a plane through the eye, so the
+            // test holds for points behind the camera as well
+            let var code = 0;
+            let fx = vx * FOCAL;
+            let fy = vy * FOCAL;
+            if (fx < 0.0 - vz * CX) code = CODE_LEFT;
+            else if (fx > vz * CX) code = CODE_RIGHT;
+            if (fy > vz * CY) code = code | CODE_TOP;
+            else if (fy < 0.0 - vz * CY) code = code | CODE_BOTTOM;
+
+            if (vz < NEAR_Z) {
+                code = code | CODE_NEAR;
+            } else {
+                let inv = FOCAL / vz;
+                v_sx[slot] = CX + vx * inv;
+                v_sy[slot] = CY - vy * inv;
+            }
+
+            // Fade into the haze with distance
+            let dist = (vx * vx + vy * vy + vz * vz).sqrt();
+            let fog = ((dist - FOG_START) * fog_scale).clip(0.0, 1.0);
+
+            v_vx[slot] = vx;
+            v_vy[slot] = vy;
+            v_vz[slot] = vz;
+            v_r[slot] = r + (FOG_R - r) * fog;
+            v_g[slot] = g + (FOG_G - g) * fog;
+            v_b[slot] = b + (FOG_B - b) * fog;
+            v_code[slot] = code;
+            ++slot;
+        }
+    }
+}
+
+// Draw the cells of one level front to back
+fun draw_level(cam_u, cam_v, hole_x, hole_z, has_hole) {
+    let hole_x1 = hole_x + LOD_RADIUS;
+    let hole_z1 = hole_z + LOD_RADIUS;
+
+    // Starting from the camera's own row and column and working outwards
+    // visits the cells in an order where none can hide an earlier one
+    fill_order(order_i, cam_u.floor().clip(0, LOD_GRID - 1));
+    fill_order(order_j, cam_v.floor().clip(0, LOD_GRID - 1));
+
+    for (let var nj = 0; nj < LOD_GRID; ++nj) {
+        let j = order_j[nj];
+        let in_hole_rows = has_hole && j >= hole_z && j < hole_z1;
+        let row_slot = j * LOD_VERTS;
+        let local_v = cam_v - j;
+
+        for (let var ni = 0; ni < LOD_GRID; ++ni) {
+            let i = order_i[ni];
+            if (in_hole_rows && i >= hole_x && i < hole_x1) continue;
+
+            // Corners of the cell
+            let a = row_slot + i;
+            let b = a + 1;
+            let c = a + LOD_VERTS;
+            let d = c + 1;
+
+            let code_a = v_code[a];
+            let code_b = v_code[b];
+            let code_c = v_code[c];
+            let code_d = v_code[d];
+            if ((code_a & code_b & code_c & code_d) != 0) continue;
+
+            // The cell is split along the diagonal from a to d. The half
+            // on the camera's side of it is the nearer one.
+            let b_first = (cam_u - i) > local_v;
+
+            if (((code_a | code_b | code_c | code_d) & CODE_NEAR) != 0) {
+                if (b_first) {
+                    raster_tri_clipped(a, d, b);
+                    raster_tri_clipped(a, c, d);
+                } else {
+                    raster_tri_clipped(a, c, d);
+                    raster_tri_clipped(a, d, b);
+                }
+            } else if (b_first) {
+                if ((code_a & code_d & code_b) == 0) raster_tri(a, d, b);
+                if ((code_a & code_c & code_d) == 0) raster_tri(a, c, d);
+            } else {
+                if ((code_a & code_c & code_d) == 0) raster_tri(a, c, d);
+                if ((code_a & code_d & code_b) == 0) raster_tri(a, d, b);
+            }
+        }
+
+        if (screen_done) return;
+    }
+}
+
+// Draw the terrain around the camera, nearest level first
+fun draw_terrain() {
+    let var prev_bx0 = 0;
+    let var prev_bz0 = 0;
+
+    for (let var level = 0; level < LOD_LEVELS; ++level) {
+        let stride = 1 << level;
+        let step = CELL * stride;
+
+        // Camera position in units of this level's cells
+        let cam_cu = cam_x / step;
+        let cam_cv = cam_z / step;
+
+        // The origin is kept even so that the next level's cells,
+        // which are twice the size, line up with the edges of this one
+        let bx0 = ((cam_cu.floor() >> 1) << 1) - LOD_RADIUS;
+        let bz0 = ((cam_cv.floor() >> 1) << 1) - LOD_RADIUS;
+
+        // The level before covers the middle of this one
+        let has_hole = level > 0;
+        let hole_x = (prev_bx0 >> 1) - bx0;
+        let hole_z = (prev_bz0 >> 1) - bz0;
+
+        transform_level(stride, bx0, bz0, cam_cu - bx0, cam_cv - bz0, hole_x, hole_z, has_hole);
+        draw_level(cam_cu - bx0, cam_cv - bz0, hole_x, hole_z, has_hole);
+        if (screen_done) return;
+
+        prev_bx0 = bx0;
+        prev_bz0 = bz0;
+    }
+}
+
+// --- Sky ---
+
+// The sky is a gradient running from the horizon to the zenith, baked into
+// a table indexed by how steeply a pixel's view ray climbs. That slope is
+// linear in screen x and y, so a span walks the table at a constant rate.
+let SKY_ENTRIES = 1024;
+let SKY_RANGE = 2.3;
+let SKY_SCALE = SKY_ENTRIES.to_f() / (2.0 * SKY_RANGE);
+let sky_table = ByteArray.with_size(SKY_ENTRIES * 4);
+
+// Bake the sky gradient
+fun build_sky() {
+    for (let var i = 0; i < SKY_ENTRIES; ++i) {
+        let slope = (i.to_f() + 0.5) / SKY_SCALE - SKY_RANGE;
+
+        // Haze at the horizon, which thins out quickly, then a slow
+        // deepening of the blue towards the zenith
+        let low = smoothstep(0.0, 0.30, slope);
+        let high = smoothstep(0.15, 1.60, slope);
+        let r = lerp(lerp(FOG_R, 112.0, low), 40.0, high);
+        let g = lerp(lerp(FOG_G, 164.0, low), 92.0, high);
+        let b = lerp(lerp(FOG_B, 226.0, low), 182.0, high);
+
+        sky_table.set_u32(i, rgb32(r.floor(), g.floor(), b.floor()));
+    }
+}
+
+// Paint [x0, x1) of a scanline with sky
+fun sky_fill(y, x0, x1) {
+    let fb = frame_buffer;
+    let row = y * FRAME_WIDTH;
+
+    // Table position at the first pixel, and its step per pixel, in 16.16
+    let slope = fwd_y + ((x0.to_f() + 0.5 - CX) * right_y + (CY - y.to_f() - 0.5) * up_y) / FOCAL;
+    let var pos = ((slope + SKY_RANGE) * SKY_SCALE * FP_ONE).floor();
+    let step = (right_y / FOCAL * SKY_SCALE * FP_ONE).floor();
+
+    // With the wings level a whole scanline is one color
+    if (step == 0) {
+        fb.fill_u32(row + x0, x1 - x0, sky_table.get_u32(pos >> 16));
+        return;
+    }
+
+    // The gradient is shallow, so each table entry covers a run of pixels
+    let var x = x0;
+    while (x < x1) {
+        let idx = pos >> 16;
+        let var n = 0;
+        if (step > 0) n = (((idx + 1) << 16) - pos + step - 1).idiv(step);
+        else n = (pos - (idx << 16)).idiv(0 - step) + 1;
+        if (n > x1 - x) n = x1 - x;
+
+        fb.fill_u32(row + x, n, sky_table.get_u32(idx));
+        x = x + n;
+        pos = pos + n * step;
+    }
+}
+
+// Fill in everything the terrain left uncovered. The s-buffer's intervals
+// are sorted and coalesced, so the gaps between them are exactly that.
+fun draw_sky() {
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+        if (sb_full[y]) continue;
+
+        let var x = 0;
+        let var cur = sb_head[y];
+        while (cur != NO_SPAN) {
+            let sx0 = sp_x0[cur];
+            if (sx0 > x) sky_fill(y, x, sx0.min(FRAME_WIDTH));
+            let sx1 = sp_x1[cur];
+            if (sx1 > x) x = sx1;
+            cur = sp_next[cur];
+        }
+
+        if (x < FRAME_WIDTH) sky_fill(y, x, FRAME_WIDTH);
+    }
+}
+
+// Render the world as seen from the camera
+fun render_world() {
+    tris_drawn = 0;
+    sbuf_reset();
+    draw_terrain();
+    draw_sky();
+}
+
+// --- Flight ---
+
+// An arcade flight model. The plane always moves along its nose, and its
+// speed is the balance of thrust, drag and the pull of gravity on a climb.
+
+let GRAVITY = 9.81;
+
+// Turn rates at full deflection, in radians per second
+let PITCH_RATE = 1.1;
+let ROLL_RATE = 2.2;
+let YAW_RATE = 0.35;
+
+// How quickly the controls follow the keys
+let CONTROL_LAG = 7.0;
+
+// Below this speed the controls lose their bite
+let CORNER_SPEED = 140.0;
+
+// How strongly banking turns the plane, relative to a real coordinated turn
+let BANK_TURN = 2.5;
+
+// Acceleration at full throttle, and the speed in level flight at which
+// drag cancels it. Drag grows with the square of the speed.
+let THRUST = 32.0;
+let TOP_SPEED = 290.0;
+let DRAG = THRUST / (TOP_SPEED * TOP_SPEED);
+
+// Speed lost to pulling hard, in m/s per second
+let TURN_DRAG = 7.0;
+
+// Below this speed the wings stop holding the plane up
+let STALL_SPEED = 62.0;
+
+// The boost multiplies thrust while its charge lasts. Once spent, it has
+// to recharge part of the way before it can be lit again.
+let BOOST_THRUST = 2.4;
+let BOOST_TIME = 6.0;
+let BOOST_RECHARGE = 18.0;
+let BOOST_RESTART = 0.25;
+
+// Coming closer to the ground than this is a crash
+let CRASH_CLEARANCE = 3.0;
+let CRASH_TIME = 3.0;
+
+// Control inputs, each from -1 to 1
+let var in_pitch = 0.0;
+let var in_roll = 0.0;
+let var in_yaw = 0.0;
+let var in_throttle = 0.0;
+let var in_boost = false;
+
+// Where the control surfaces are, which trails the inputs
+let var ctl_pitch = 0.0;
+let var ctl_roll = 0.0;
+let var ctl_yaw = 0.0;
+
+let var speed = 0.0;
+let var throttle = 0.0;
+let var climb_rate = 0.0;
+let var stalled = false;
+let var boost_charge = 1.0;
+let var boost_on = false;
+let var boost_spent = false;
+
+// Counts down after a crash, until the flight starts over
+let var crash_timer = 0.0;
+
+// Turn the camera to the right about the world's vertical axis
+fun cam_turn(angle) {
+    let c = angle.cos();
+    let s = angle.sin();
+
+    let rx = right_x * c + right_z * s;
+    right_z = right_z * c - right_x * s;
+    right_x = rx;
+
+    let ux = up_x * c + up_z * s;
+    up_z = up_z * c - up_x * s;
+    up_x = ux;
+
+    let fx = fwd_x * c + fwd_z * s;
+    fwd_z = fwd_z * c - fwd_x * s;
+    fwd_x = fx;
+}
+
+// Start the flight over, level and heading north
+fun reset_flight() {
+    cam_x = WORLD * 0.5;
+    cam_z = WORLD * 0.5;
+    cam_y = ground_height(cam_x, cam_z) + 900.0;
+
+    right_x = 1.0; right_y = 0.0; right_z = 0.0;
+    up_x = 0.0; up_y = 1.0; up_z = 0.0;
+    fwd_x = 0.0; fwd_y = 0.0; fwd_z = 1.0;
+
+    ctl_pitch = 0.0;
+    ctl_roll = 0.0;
+    ctl_yaw = 0.0;
+    speed = 220.0;
+    throttle = 0.7;
+    climb_rate = 0.0;
+    stalled = false;
+    boost_charge = 1.0;
+    boost_on = false;
+    boost_spent = false;
+    crash_timer = 0.0;
+}
+
+// Highest ground within the crash clearance of a position. On a steep
+// slope the ground beside the plane is much nearer than the ground below
+// it, so the height underneath alone would let a wing into the hillside.
+fun ground_near(x, z) {
+    let d = CRASH_CLEARANCE;
+    return ground_height(x, z)
+        .max(ground_height(x - d, z))
+        .max(ground_height(x + d, z))
+        .max(ground_height(x, z - d))
+        .max(ground_height(x, z + d));
+}
+
+// Advance the flight by one time step
+fun update_flight(dt) {
+    // Sit in the wreckage for a moment, then start over
+    if (crash_timer > 0.0) {
+        crash_timer = crash_timer - dt;
+        if (crash_timer <= 0.0) reset_flight();
+        return;
+    }
+
+    // Ease the controls towards the inputs
+    let ease = (CONTROL_LAG * dt).min(1.0);
+    ctl_pitch = ctl_pitch + (in_pitch - ctl_pitch) * ease;
+    ctl_roll = ctl_roll + (in_roll - ctl_roll) * ease;
+    ctl_yaw = ctl_yaw + (in_yaw - ctl_yaw) * ease;
+
+    let authority = (speed / CORNER_SPEED).clip(0.25, 1.0);
+    cam_pitch(ctl_pitch * PITCH_RATE * authority * dt);
+    cam_roll(ctl_roll * ROLL_RATE * authority * dt);
+    cam_yaw(ctl_yaw * YAW_RATE * authority * dt);
+
+    // A banked wing pulls the plane round towards its low side
+    cam_turn((0.0 - right_y) * BANK_TURN * GRAVITY / speed.max(STALL_SPEED) * dt);
+
+    throttle = (throttle + in_throttle * 0.6 * dt).clip(0.0, 1.0);
+
+    // Boost burns its charge while held and recovers when released
+    if (boost_spent && boost_charge >= BOOST_RESTART) boost_spent = false;
+    boost_on = in_boost && !boost_spent && boost_charge > 0.0;
+    if (boost_on) {
+        boost_charge = boost_charge - dt / BOOST_TIME;
+        if (boost_charge <= 0.0) {
+            boost_charge = 0.0;
+            boost_spent = true;
+        }
+    } else {
+        boost_charge = (boost_charge + dt / BOOST_RECHARGE).min(1.0);
+    }
+
+    let var thrust = THRUST * throttle;
+    if (boost_on) thrust = THRUST * BOOST_THRUST;
+    let accel = thrust - DRAG * speed * speed - GRAVITY * fwd_y
+              - TURN_DRAG * ctl_pitch.abs() * authority;
+    speed = (speed + accel * dt).max(15.0);
+
+    // Too slow, and the nose drops and the plane sinks until it picks
+    // up speed again
+    let lift = speed / STALL_SPEED;
+    let stall = (1.0 - lift * lift).clip(0.0, 1.0);
+    stalled = stall > 0.0;
+    fwd_y = fwd_y - stall * 0.9 * dt;
+    cam_normalize();
+
+    climb_rate = fwd_y * speed - stall * 45.0;
+    cam_x = cam_x + fwd_x * speed * dt;
+    cam_y = cam_y + climb_rate * dt;
+    cam_z = cam_z + fwd_z * speed * dt;
+
+    // The terrain repeats, so wrapping the position goes unnoticed
+    if (cam_x < 0.0) cam_x = cam_x + WORLD;
+    if (cam_x >= WORLD) cam_x = cam_x - WORLD;
+    if (cam_z < 0.0) cam_z = cam_z + WORLD;
+    if (cam_z >= WORLD) cam_z = cam_z - WORLD;
+
+    // Hitting the ground ends the flight. The camera is left just above
+    // the surface, to keep the wreck from looking out from under it.
+    let floor_y = ground_near(cam_x, cam_z) + CRASH_CLEARANCE;
+    if (cam_y < floor_y) {
+        cam_y = floor_y;
+        crash_timer = CRASH_TIME;
+    }
+}
+
+// --- Head-up display ---
+
+let HUD_GREEN = 0xFF38FF58;
+let HUD_SHADOW = 0xFF000000;
+let WARN_RED = 0xFFFF2A1E;
+
+// Glyphs are rendered on a background of zero and used as masks
+let font_small = Font(1, HUD_GREEN, 0);
+let font_large = Font(2, HUD_GREEN, 0);
+let font_warn = Font(4, HUD_GREEN, 0);
+let font_title = Font(5, HUD_GREEN, 0);
+
+// Lines are clipped to this rectangle
+let var clip_x0 = 0;
+let var clip_y0 = 0;
+let var clip_x1 = FRAME_WIDTH;
+let var clip_y1 = FRAME_HEIGHT;
+
+// Seconds since the start, for things that blink
+let var hud_time = 0.0;
+
+// Restrict lines to a rectangle of the frame
+fun hud_clip(x0, y0, x1, y1) {
+    clip_x0 = x0.max(0);
+    clip_y0 = y0.max(0);
+    clip_x1 = x1.min(FRAME_WIDTH);
+    clip_y1 = y1.min(FRAME_HEIGHT);
+}
+
+// Draw a line between two points given as floats
+fun hud_line(x0, y0, x1, y1) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let n = dx.abs().max(dy.abs()).ceil().max(1);
+    if (n > 4000) return;
+
+    let step_x = dx / n;
+    let step_y = dy / n;
+    let fb = frame_buffer;
+
+    for (let var k = 0; k <= n; ++k) {
+        let x = (x0 + step_x * k).floor();
+        let y = (y0 + step_y * k).floor();
+        if (x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1) {
+            fb.set_u32(y * FRAME_WIDTH + x, HUD_GREEN);
+        }
+    }
+}
+
+// Fill a rectangle
+fun hud_rect(x, y, w, h) {
+    let x0 = x.max(0);
+    let x1 = (x + w).min(FRAME_WIDTH);
+    let y0 = y.max(0);
+    let y1 = (y + h).min(FRAME_HEIGHT);
+    if (x0 >= x1) return;
+
+    for (let var row = y0; row < y1; ++row) {
+        frame_buffer.fill_u32(row * FRAME_WIDTH + x0, x1 - x0, HUD_GREEN);
+    }
+}
+
+// Draw the outline of a rectangle
+fun hud_frame(x, y, w, h) {
+    hud_rect(x, y, w, 1);
+    hud_rect(x, y + h - 1, w, 1);
+    hud_rect(x, y, 1, h);
+    hud_rect(x + w - 1, y, 1, h);
+}
+
+// Paint the lit pixels of a glyph in one color
+fun draw_glyph(glyph, x, y, color) {
+    let fb = frame_buffer;
+    let bits = glyph.bytes;
+    let w = glyph.width;
+
+    for (let var gy = 0; gy < glyph.height; ++gy) {
+        let py = y + gy;
+        if (py < 0 || py >= FRAME_HEIGHT) continue;
+
+        for (let var gx = 0; gx < w; ++gx) {
+            let px = x + gx;
+            if (px < 0 || px >= FRAME_WIDTH) continue;
+            if (bits.get_u32(gy * w + gx) != 0) fb.set_u32(py * FRAME_WIDTH + px, color);
+        }
+    }
+}
+
+// Draw a string with its top left corner at (x, y), over a drop shadow
+// that keeps it readable against snow and sky
+fun draw_text(font, text, x, y, color) {
+    for (let var i = 0; i < text.len; ++i) {
+        let glyph = font.render_char(text.char_at(i));
+        let gx = x + i * font.char_w;
+        draw_glyph(glyph, gx + 1, y + 1, HUD_SHADOW);
+        draw_glyph(glyph, gx, y, color);
+    }
+}
+
+// Draw a string in the color of the display
+fun hud_text(font, text, x, y) {
+    draw_text(font, text, x, y, HUD_GREEN);
+}
+
+// Draw a string centered on a point
+fun hud_text_centered(font, text, cx, cy) {
+    hud_text(font, text, cx - (text.len * font.char_w).idiv(2), cy - font.char_h.idiv(2));
+}
+
+// Angle of the point (x, y) from the x axis, in radians
+fun atan2(y, x) {
+    if (x > 0.0) return (y / x).atan();
+    if (x < 0.0) {
+        if (y >= 0.0) return (y / x).atan() + PI;
+        return (y / x).atan() - PI;
+    }
+    if (y > 0.0) return PI * 0.5;
+    if (y < 0.0) return 0.0 - PI * 0.5;
+    return 0.0;
+}
+
+// The fixed cross that marks where the nose is pointing
+fun draw_boresight() {
+    hud_line(CX - 18.0, CY, CX - 6.0, CY);
+    hud_line(CX + 6.0, CY, CX + 18.0, CY);
+    hud_line(CX, CY - 18.0, CX, CY - 6.0);
+    hud_line(CX, CY + 6.0, CX, CY + 18.0);
+    hud_rect(CX.floor(), CY.floor(), 1, 1);
+}
+
+// The pitch ladder: a line for every ten degrees of climb or dive, drawn
+// where that elevation really is, so the zero line lies on the horizon
+fun draw_ladder() {
+    // Heading along the ground, which is undefined looking straight up or down
+    let h_len = (fwd_x * fwd_x + fwd_z * fwd_z).sqrt();
+    if (h_len < 0.05) return;
+    let hx = fwd_x / h_len;
+    let hz = fwd_z / h_len;
+
+    // Direction on screen of a level line, and of down the ladder
+    let var ux = hz * right_x - hx * right_z;
+    let var uy = hx * up_z - hz * up_x;
+    let u_len = (ux * ux + uy * uy).sqrt();
+    if (u_len < 0.01) return;
+    ux = ux / u_len;
+    uy = uy / u_len;
+    let down_x = 0.0 - uy;
+    let down_y = ux;
+
+    let pitch_deg = atan2(fwd_y, h_len) * 180.0 / PI;
+    hud_clip(CX.floor() - 230, CY.floor() - 160, CX.floor() + 230, CY.floor() + 160);
+
+    for (let var deg = -90; deg <= 90; deg += 10) {
+        if ((deg - pitch_deg).abs() > 30.0) continue;
+
+        // Where a point at this elevation, dead ahead, falls on screen
+        let angle = deg * PI / 180.0;
+        let dx = hx * angle.cos();
+        let dy = angle.sin();
+        let dz = hz * angle.cos();
+        let vz = dx * fwd_x + dy * fwd_y + dz * fwd_z;
+        if (vz < 0.2) continue;
+        let px = CX + FOCAL * (dx * right_x + dy * right_y + dz * right_z) / vz;
+        let py = CY - FOCAL * (dx * up_x + dy * up_y + dz * up_z) / vz;
+
+        // The horizon is one long line with a gap for the boresight
+        if (deg == 0) {
+            hud_line(px - ux * 220.0, py - uy * 220.0, px - ux * 44.0, py - uy * 44.0);
+            hud_line(px + ux * 44.0, py + uy * 44.0, px + ux * 220.0, py + uy * 220.0);
+            continue;
+        }
+
+        for (let var side = -1; side <= 1; side += 2) {
+            let sx = ux * side;
+            let sy = uy * side;
+
+            // Solid above the horizon, dashed below
+            if (deg > 0) {
+                hud_line(px + sx * 40.0, py + sy * 40.0, px + sx * 96.0, py + sy * 96.0);
+            } else {
+                hud_line(px + sx * 40.0, py + sy * 40.0, px + sx * 60.0, py + sy * 60.0);
+                hud_line(px + sx * 76.0, py + sy * 76.0, px + sx * 96.0, py + sy * 96.0);
+            }
+
+            // The end of each rung is turned towards the horizon
+            let var tick = 7.0;
+            if (deg < 0) tick = -7.0;
+            let ex = px + sx * 96.0;
+            let ey = py + sy * 96.0;
+            hud_line(ex, ey, ex + down_x * tick, ey + down_y * tick);
+
+            let lx = (px + sx * 112.0).floor();
+            let ly = (py + sy * 112.0).floor();
+            if (lx > clip_x0 + 8 && lx < clip_x1 - 8 && ly > clip_y0 + 8 && ly < clip_y1 - 8) {
+                hud_text_centered(font_small, deg.abs().to_s(), lx, ly);
+            }
+        }
+    }
+
+    hud_clip(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+}
+
+// The compass strip along the top of the screen
+fun draw_heading() {
+    let var heading = atan2(fwd_x, fwd_z) * 180.0 / PI;
+    if (heading < 0.0) heading = heading + 360.0;
+
+    let px_per_deg = 4.0;
+    let span = 32.0;
+    let base_y = 34;
+
+    // A tick every five degrees and a label every ten
+    let first = ((heading - span) / 5.0).ceil() * 5;
+    for (let var deg = first; deg <= heading + span; deg += 5) {
+        let x = (CX + (deg - heading) * px_per_deg).floor();
+
+        if (deg % 10 != 0) {
+            hud_rect(x, base_y - 4, 1, 4);
+            continue;
+        }
+        hud_rect(x, base_y - 8, 1, 8);
+
+        let compass = ((deg % 360) + 360) % 360;
+        let var label = compass.idiv(10).to_s().lpad(2, "0");
+        if (compass == 0) label = "N";
+        else if (compass == 90) label = "E";
+        else if (compass == 180) label = "S";
+        else if (compass == 270) label = "W";
+        hud_text_centered(font_small, label, x, base_y - 16);
+    }
+
+    // Pointer and readout under the strip
+    hud_line(CX, base_y + 3.0, CX - 5.0, base_y + 9.0);
+    hud_line(CX, base_y + 3.0, CX + 5.0, base_y + 9.0);
+    let readout = (heading.floor() % 360).to_s().lpad(3, "0");
+    hud_text_centered(font_small, readout, CX.floor(), base_y + 18);
+}
+
+// A boxed number with a caption to the right of it
+fun draw_readout(x, y, value, caption) {
+    let w = 5 * font_large.char_w + 12;
+    let h = font_large.char_h + 6;
+    hud_frame(x, y, w, h);
+
+    let text = value.to_s();
+    hud_text(font_large, text, x + w - 6 - text.len * font_large.char_w, y + 3);
+    hud_text(font_small, caption, x + w + 6, y + (h - font_small.char_h).idiv(2));
+}
+
+// A labelled bar filled to a fraction of its length
+fun draw_bar(x, y, label, frac) {
+    hud_text(font_small, label, x, y - 2);
+    let bx = x + 4 * font_small.char_w;
+    hud_frame(bx, y, 104, 9);
+    hud_rect(bx + 2, y + 2, (frac.clip(0.0, 1.0) * 100.0).floor(), 5);
+}
+
+// Would the plane hit the ground within a few seconds on its present course?
+fun ground_ahead() {
+    for (let var k = 1; k <= 3; ++k) {
+        let t = k.to_f();
+        let x = cam_x + fwd_x * speed * t;
+        let z = cam_z + fwd_z * speed * t;
+        if (cam_y + climb_rate * t < ground_height(x, z) + 25.0) return true;
+    }
+    return false;
+}
+
+// Draw the head-up display over the finished frame
+fun draw_hud() {
+    draw_boresight();
+    draw_ladder();
+    draw_heading();
+
+    let low_y = FRAME_HEIGHT - 46;
+    draw_readout(CX.floor() - 210, low_y, (speed * 3.6).floor(), "KM/H");
+    draw_readout(CX.floor() + 100, low_y, cam_y.floor(), "ALT M");
+
+    draw_bar(24, FRAME_HEIGHT - 46, "THR", throttle);
+    draw_bar(24, FRAME_HEIGHT - 28, "BST", boost_charge);
+    if (boost_on) hud_text(font_small, "BOOST", 164, FRAME_HEIGHT - 30);
+    else if (boost_spent) hud_text(font_small, "CHARGING", 164, FRAME_HEIGHT - 30);
+
+    // Warnings blink under the boresight
+    let blink = (hud_time * 4.0).floor() % 2 == 0;
+    if (blink) {
+        if (stalled) {
+            hud_text_centered(font_large, "STALL", CX.floor(), CY.floor() + 100);
+        } else if (ground_ahead()) {
+            let text = "PULL UP";
+            let x = CX.floor() - (text.len * font_warn.char_w).idiv(2);
+            draw_text(font_warn, text, x, CY.floor() + 76, WARN_RED);
+        }
+    }
+}
+
+// Blend the whole frame towards a color, by an amount from 0 to 256
+fun tint_frame(r, g, b, amount) {
+    let fb = frame_buffer;
+    let keep = 256 - amount;
+    let add_rb = ((r << 16) | b) * amount;
+    let add_g = (g << 8) * amount;
+
+    // Red and blue are far enough apart to share a multiply
+    for (let var i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; ++i) {
+        let c = fb.get_u32(i);
+        let rb = (((c & 0xFF00FF) * keep + add_rb) >> 8) & 0xFF00FF;
+        let gg = (((c & 0xFF00) * keep + add_g) >> 8) & 0xFF00;
+        fb.set_u32(i, rb | gg);
+    }
+}
+
+// The moments after a crash: a flash that burns down into the dark
+fun draw_crash() {
+    let t = (1.0 - crash_timer / CRASH_TIME).clip(0.0, 1.0);
+    let glow = (1.0 - t * 3.0).max(0.0);
+    let r = lerp(70.0, 255.0, glow).floor();
+    let g = lerp(8.0, 225.0, glow * glow).floor();
+    let b = lerp(4.0, 150.0, glow * glow * glow).floor();
+    let amount = lerp(150.0, 235.0, (glow).max(t * t)).floor();
+
+    tint_frame(r, g, b, amount);
+    if (t > 0.2) hud_text_centered(font_title, "CRASHED", CX.floor(), CY.floor());
+}
+
+// Render one frame
+fun render_frame() {
+    render_world();
+    if (crash_timer > 0.0) draw_crash(); else draw_hud();
+}
+
+// --- Benchmark ---
+
+// Render a set flight without a window and report the time per frame
+fun run_bench(num_frames, shot_dir) {
+    let dt = 1.0 / 30.0;
+    let var render_ms = 0;
+    let var tri_total = 0;
+
+    if (shot_dir != "") $make_dir(shot_dir);
+
+    for (let var frame = 0; frame < num_frames; ++frame) {
+        // Weave and porpoise, so that the view rolls and the horizon moves
+        let t = frame.to_f() * dt;
+        in_roll = (t * 0.7).cos() * 0.4;
+        in_pitch = (t * 0.45).sin() * 0.25;
+        in_yaw = (t * 0.3).sin() * 0.5;
+        hud_time = t;
+        update_flight(dt);
+
+        let start_ms = $time_current_ms();
+        render_frame();
+        render_ms = render_ms + ($time_current_ms() - start_ms);
+        tri_total = tri_total + tris_drawn;
+
+        if (shot_dir != "" && frame % 30 == 29) {
+            // The rasterizer leaves the alpha channel unset
+            for (let var i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; ++i) {
+                frame_buffer.set_u32(i, frame_buffer.get_u32(i) | 0xFF000000);
+            }
+            save_tga(shot_dir + "/frame" + frame.to_s().lpad(4, "0") + ".tga", frame_image);
+        }
+    }
+
+    let ms = render_ms.to_f() / num_frames;
+    $println(num_frames.to_s() + " frames, " + ms.format_decimals(2) + " ms/frame ("
+        + (1000.0 / ms).format_decimals(1) + " fps), "
+        + tri_total.idiv(num_frames).to_s() + " triangles/frame");
+}
+
+// --- Main ---
+
+generate_terrain();
+build_sky();
+reset_flight();
+
+if ($cmd_get_arg_or(1, "") == "--bench") {
+    let num_frames = $cmd_get_arg_or(2, "120").parse_int(10);
+    if (num_frames == nil || num_frames < 1) {
+        $println("expected a number of frames");
+        $exit(1);
+    }
+
+    run_bench(num_frames, $cmd_get_arg_or(3, ""));
+    $exit(0);
+}
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Flight Sim", 0);
+
+let var key_pitch_up = false;
+let var key_pitch_down = false;
+let var key_roll_left = false;
+let var key_roll_right = false;
+let var key_yaw_left = false;
+let var key_yaw_right = false;
+let var key_faster = false;
+let var key_slower = false;
+
+// The input along one axis from the pair of keys that push it either way
+fun key_axis(negative, positive) {
+    let var v = 0.0;
+    if (positive) v = v + 1.0;
+    if (negative) v = v - 1.0;
+    return v;
+}
+
+// Record a key going down or coming up
+fun set_key(key, down) {
+    if (key == 'DOWN') key_pitch_up = down;
+    else if (key == 'UP') key_pitch_down = down;
+    else if (key == 'LEFT') key_roll_left = down;
+    else if (key == 'RIGHT') key_roll_right = down;
+    else if (key == 'A') key_yaw_left = down;
+    else if (key == 'D') key_yaw_right = down;
+    else if (key == 'W') key_faster = down;
+    else if (key == 'S') key_slower = down;
+    else if (key == 'SHIFT') in_boost = down;
+}
+
+let start_ms = $time_current_ms();
+let var last_ms = start_ms;
+let var last_report_ms = last_ms;
+let var frame_count = 0;
+let var render_ms_total = 0;
+
+loop {
+    let now_ms = $time_current_ms();
+    let dt = ((now_ms - last_ms).to_f() * 0.001).min(0.1);
+    last_ms = now_ms;
+
+    // Handle pending events
+    let var quit = false;
+    loop {
+        let msg = $actor_poll();
+        if (msg == nil) break;
+        if (!(msg instanceof UIEvent)) continue;
+
+        if (msg.kind == 'CLOSE_WINDOW') {
+            quit = true;
+        } else if (msg.kind == 'KEY_DOWN') {
+            if (msg.key == 'ESCAPE' || msg.key == 'Q') quit = true;
+            if (msg.key == 'R') reset_flight();
+            set_key(msg.key, true);
+        } else if (msg.kind == 'KEY_UP') {
+            set_key(msg.key, false);
+        }
+    }
+    if (quit) break;
+
+    // Controls
+    in_pitch = key_axis(key_pitch_down, key_pitch_up);
+    in_roll = key_axis(key_roll_left, key_roll_right);
+    in_yaw = key_axis(key_yaw_left, key_yaw_right);
+    in_throttle = key_axis(key_slower, key_faster);
+    hud_time = (now_ms - start_ms).to_f() * 0.001;
+    update_flight(dt);
+
+    let render_start = $time_current_ms();
+    render_frame();
+    render_ms_total = render_ms_total + ($time_current_ms() - render_start);
+    frame_count = frame_count + 1;
+
+    // Report the frame time once a second
+    if (now_ms - last_report_ms >= 1000) {
+        let ms = render_ms_total.to_f() / frame_count;
+        $println("render: " + ms.format_decimals(1) + " ms, "
+            + (1000.0 / ms.max(0.001)).format_decimals(1) + " fps, "
+            + tris_drawn.to_s() + " triangles, speed " + (speed * 3.6).floor().to_s() + " km/h, altitude "
+            + cam_y.floor().to_s() + " m");
+        frame_count = 0;
+        render_ms_total = 0;
+        last_report_ms = now_ms;
+    }
+
+    $window_draw_frame(window, frame_buffer);
+}
