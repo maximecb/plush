@@ -113,6 +113,234 @@ fun smoothstep(lo, hi, x) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+// --- Audio ---
+//
+// All sound is synthesized by an actor of its own, which the main loop
+// keeps informed with a message every frame. It is spawned before the
+// terrain exists, since an actor starts with a copy of its parent's heap.
+
+let SAMPLE_RATE = 44100;
+let BENCH_MODE = $cmd_get_arg_or(1, "") == "--bench";
+
+// Bursts per second of the cannon's buzz with the barrels at full speed
+let GUN_SOUND_HZ = 100.0;
+
+// The pull up warning is a tone that slides upwards, then a gap
+let WARN_PERIOD = 0.62;
+let WARN_TONE = 0.47;
+
+// What the main loop tells the audio actor
+class AudioState {
+    init(self, power, wind, gun, warn, crashes, gain, stop) {
+        // Engine power, from idle at 0 to 1, and beyond with the boost
+        self.power = power;
+
+        // Rush of air past the canopy, from 0 to 1
+        self.wind = wind;
+
+        // How fast the cannon is firing, from 0 to 1
+        self.gun = gun;
+
+        // Whether the pull up warning is sounding
+        self.warn = warn;
+
+        // Number of crashes so far, each new one setting off an explosion
+        self.crashes = crashes;
+
+        // Level of the engine and wind, which a crash silences
+        self.gain = gain;
+
+        // Set to make the actor exit
+        self.stop = stop;
+    }
+}
+
+// What was last asked for
+let var au_power_tgt = 0.0;
+let var au_wind_tgt = 0.0;
+let var au_gain_tgt = 0.0;
+let var au_gun = 0.0;
+let var au_warn = false;
+let var au_crashes = 0;
+
+// Smoothed values, so that nothing steps from one buffer to the next
+let var au_power = 0.0;
+let var au_wind = 0.0;
+let var au_gain = 0.0;
+
+let var au_seed = 12345;
+let var en_lp1 = 0.0;
+let var en_lp2 = 0.0;
+let var en_rumble = 0.0;
+let var en_crackle = 0.0;
+let var en_phase = 0.0;
+let var wind_lp = 0.0;
+let var gn_phase = 0.0;
+let var gn_env = 0.0;
+let var gn_lp = 0.0;
+let var gn_body = 0.0;
+let var gn_ring1 = 0.0;
+let var gn_ring2 = 0.0;
+let var wr_level = 0.0;
+let var wr_time = 0.0;
+let var wr_phase = 0.0;
+let var ex_env = 0.0;
+let var ex_lp = 0.0;
+let var ex_body = 0.0;
+
+// Synthesize the next n samples into a buffer
+fun audio_fill(buf, n) {
+    let step = 1.0 / SAMPLE_RATE;
+    let tau = 2.0 * PI;
+    let gun_step = GUN_SOUND_HZ * au_gun * step;
+    let var warn_tgt = 0.0;
+    if (au_warn) warn_tgt = 1.0;
+
+    // The boost builds more slowly than the throttle
+    let var spool = 0.00004;
+    if (au_power_tgt > 1.0) spool = spool / 3.0;
+
+    for (let var i = 0; i < n; ++i) {
+        // The engine takes a moment to spool up or down
+        au_power = au_power + (au_power_tgt - au_power) * spool;
+        au_wind = au_wind + (au_wind_tgt - au_wind) * 0.0002;
+        au_gain = au_gain + (au_gain_tgt - au_gain) * 0.0005;
+        let power = au_power;
+
+        // White noise from a linear congruential generator
+        au_seed = (au_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+        let white = au_seed / 1073741824.0 - 1.0;
+
+        // Jet roar: filtered noise that opens up and gets louder with power,
+        // over a deeper rumble
+        let cutoff = 0.0067 + 0.027 * power.min(1.0);
+        en_lp1 = en_lp1 + (white - en_lp1) * cutoff;
+        en_lp2 = en_lp2 + (en_lp1 - en_lp2) * cutoff;
+        en_rumble = en_rumble + (white - en_rumble) * 0.003;
+        let var roar = en_lp2 * (1.6 + 4.0 * power) + en_rumble * 5.0 * power;
+
+        // The boost tears at it
+        if (power > 1.0) {
+            en_crackle = en_crackle + (white - en_crackle) * 0.01;
+            roar = roar * (1.0 + (power - 1.0) * (1.6 + en_crackle * 9.0));
+        }
+
+        // Whine of the turbine, climbing with power
+        en_phase = en_phase + (268.0 + 770.0 * power.min(1.2)) * step;
+        if (en_phase >= 1.0) en_phase = en_phase - 1.0;
+        let c = en_phase * tau;
+        let whine = (c.sin() * 0.030 + (c * 2.0).sin() * 0.012) * (0.4 + 0.6 * power);
+
+        // Wind is the top of the noise, growing with the square of the speed
+        wind_lp = wind_lp + (white - wind_lp) * 0.3;
+        let wind = (white - wind_lp) * 0.09 * au_wind * au_wind;
+
+        let var v = (roar * 0.345 + whine + wind) * 0.8 * au_gain;
+
+        // Cannon: a burst of noise for every round, which run together into
+        // a buzz. The rate follows the barrels as they spin up.
+        if (gun_step > 0.0) {
+            gn_phase = gn_phase + gun_step;
+            if (gn_phase >= 1.0) {
+                gn_phase = gn_phase - 1.0;
+                gn_env = 0.75 + 0.25 * white.abs();
+            }
+        }
+        gn_env = gn_env * 0.9958;
+        let shot = white * gn_env;
+        gn_lp = gn_lp + (shot - gn_lp) * 0.50;
+        gn_body = gn_body + (gn_lp - gn_body) * 0.09;
+
+        // Each burst also rings a resonator, for a hard metallic edge
+        let ring = shot + gn_ring1 * 1.8846 - gn_ring2 * 0.9604;
+        gn_ring2 = gn_ring1;
+        gn_ring1 = ring;
+
+        // Most of the level is in what the low pass removed, which is the crack
+        v = v + (shot - gn_lp) * 0.95 + gn_lp * 0.70 + gn_body * 1.0 + ring * 0.045;
+
+        // Pull up warning. The cycle restarts once the warning has faded
+        // out, so that the next one opens with a whole tone.
+        wr_level = wr_level + (warn_tgt - wr_level) * 0.002;
+        if (wr_level > 0.001) {
+            wr_time = wr_time + step;
+            if (wr_time >= WARN_PERIOD) wr_time = wr_time - WARN_PERIOD;
+
+            if (wr_time < WARN_TONE) {
+                // The pitch holds, then slides up towards the end
+                let u = wr_time / WARN_TONE;
+                wr_phase = wr_phase + (780.0 + 640.0 * u * u * u) * step;
+                if (wr_phase >= 1.0) wr_phase = wr_phase - 1.0;
+
+                // Short ramps at either end keep it from clicking
+                let env = (wr_time * 100.0).min((WARN_TONE - wr_time) * 50.0).min(1.0);
+                let w = wr_phase * tau;
+                v = v + (w.sin() * 0.6 + (w * 3.0).sin() * 0.2) * env * wr_level * 0.32;
+            }
+        } else {
+            wr_time = 0.0;
+            wr_phase = 0.0;
+        }
+
+        // Explosion: a burst of noise that dulls as it dies away
+        if (ex_env > 0.0005) {
+            ex_env = ex_env * 0.99996;
+            ex_lp = ex_lp + (white * ex_env - ex_lp) * (0.02 + 0.3 * ex_env * ex_env);
+            ex_body = ex_body + (ex_lp - ex_body) * 0.02;
+            v = v + ex_lp * 2.2 + ex_body * 7.0;
+        }
+
+        // Squash the peaks instead of clipping them
+        v = v * 0.7;
+        buf.set_f32(i, v / (1.0 + v.abs()));
+    }
+}
+
+// Take in the latest state from the main loop
+fun audio_set(state) {
+    au_power_tgt = state.power;
+    au_wind_tgt = state.wind;
+    au_gain_tgt = state.gain;
+    au_gun = state.gun;
+    au_warn = state.warn;
+
+    if (state.crashes != au_crashes) {
+        au_crashes = state.crashes;
+        ex_env = 1.0;
+    }
+}
+
+// Body of the audio actor: fill a buffer whenever the device asks for one
+fun audio_actor() {
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+    if (dev == nil) $println("no audio device, running silent");
+
+    let var buf = ByteArray.with_size(0);
+
+    // Without a device this still runs, to take the main loop's messages
+    loop {
+        let msg = $actor_recv();
+
+        if (msg instanceof AudioState) {
+            if (msg.stop) break;
+            audio_set(msg);
+            continue;
+        }
+        if (dev == nil || !(msg instanceof AudioNeeded)) continue;
+
+        // The buffer is reused, to give the collector nothing to do
+        let n = msg.num_samples;
+        if (buf.len != n * 4) buf = ByteArray.with_size(n * 4);
+        audio_fill(buf, n);
+        $audio_write_samples(dev, buf);
+    }
+
+    return 0;
+}
+
+let var audio_id = nil;
+if (!BENCH_MODE) audio_id = $actor_spawn(audio_actor);
+
 // --- Terrain generation ---
 
 // Broad shape of the land, with features several kilometers across
@@ -1171,9 +1399,17 @@ let var in_throttle = 0.0;
 let var in_boost = false;
 let var in_fire = false;
 
-// Barrel temperature of the cannon from 0 to 1, and whether it has overheated
+// Barrel temperature of the cannon from 0 to 1, whether it has overheated,
+// and whether rounds are leaving it
 let var gun_heat = 0.0;
 let var gun_hot = false;
+let var gun_firing = false;
+
+// Whether the ground is coming up fast enough to warn about
+let var pull_up = false;
+
+// How many times the plane has crashed
+let var crash_count = 0;
 
 // Where the control surfaces are, which trails the inputs
 let var ctl_pitch = 0.0;
@@ -1314,6 +1550,7 @@ fun update_flight(dt) {
     if (cam_y < floor_y) {
         cam_y = floor_y;
         crash_timer = CRASH_TIME;
+        crash_count = crash_count + 1;
     }
 }
 
@@ -1628,7 +1865,7 @@ fun draw_hud() {
     if (blink) {
         if (stalled) {
             hud_text_centered(font_large, "STALL", CX.floor(), CY.floor() + 100);
-        } else if (ground_ahead()) {
+        } else if (pull_up) {
             let text = "PULL UP";
             let x = CX.floor() - (text.len * font_warn.char_w).idiv(2);
             draw_text(font_warn, text, x, CY.floor() + 76, WARN_RED);
@@ -1807,7 +2044,8 @@ fun update_cannon(dt) {
     else gun_spin = (gun_spin - dt / GUN_SPIN_DOWN).max(0.0);
 
     // The barrels cool whenever no rounds are going through them
-    if (!firing || gun_spin < 0.3) {
+    gun_firing = firing && gun_spin >= 0.3;
+    if (!gun_firing) {
         gun_heat = (gun_heat - dt / GUN_COOL_TIME).max(0.0);
         return;
     }
@@ -1971,6 +2209,30 @@ fun draw_tracers() {
     }
 }
 
+// Advance the whole simulation by one time step
+fun update_sim(dt) {
+    update_flight(dt);
+    update_cannon(dt);
+    pull_up = crash_timer <= 0.0 && !stalled && ground_ahead();
+}
+
+// Tell the audio actor what it should be playing
+fun send_audio() {
+    let crashed = crash_timer > 0.0;
+
+    let var power = 0.15 + 0.85 * throttle;
+    if (boost_on) power = 1.6;
+
+    let var gun = 0.0;
+    if (gun_firing) gun = gun_spin;
+
+    let var gain = 1.0;
+    if (crashed) gain = 0.0;
+
+    $actor_send(audio_id, AudioState(power, (speed / 450.0).min(1.0), gun,
+        pull_up, crash_count, gain, false));
+}
+
 // Render one frame
 fun render_frame() {
     render_world();
@@ -1997,8 +2259,7 @@ fun run_bench(num_frames, shot_dir) {
         in_yaw = (t * 0.3).sin() * 0.5;
         hud_time = t;
         in_fire = frame % 60 >= 20 && frame % 60 < 50;
-        update_flight(dt);
-        update_cannon(dt);
+        update_sim(dt);
 
         let start_ms = $time_current_ms();
         render_frame();
@@ -2026,7 +2287,7 @@ generate_terrain();
 build_sky();
 reset_flight();
 
-if ($cmd_get_arg_or(1, "") == "--bench") {
+if (BENCH_MODE) {
     let num_frames = $cmd_get_arg_or(2, "120").parse_int(10);
     if (num_frames == nil || num_frames < 1) {
         $println("expected a number of frames");
@@ -2106,8 +2367,8 @@ loop {
     in_yaw = key_axis(key_yaw_left, key_yaw_right);
     in_throttle = key_axis(key_slower, key_faster);
     hud_time = (now_ms - start_ms).to_f() * 0.001;
-    update_flight(dt);
-    update_cannon(dt);
+    update_sim(dt);
+    send_audio();
 
     let render_start = $time_current_ms();
     render_frame();
@@ -2128,3 +2389,7 @@ loop {
 
     $window_draw_frame(window, frame_buffer);
 }
+
+// Shut the audio actor down
+$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, crash_count, 0.0, true));
+$actor_join(audio_id);
