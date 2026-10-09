@@ -22,6 +22,7 @@
 //   W / S         throttle up / down
 //   shift         boost, while the charge lasts
 //   space         fire the cannon
+//   M             music on / off
 //   R             start over
 //   escape / Q    quit
 //
@@ -131,7 +132,10 @@ let WARN_TONE = 0.47;
 
 // What the main loop tells the audio actor
 class AudioState {
-    init(self, power, wind, gun, warn, crashes, gain, stop) {
+    init(self, power, wind, gun, warn, crashes, gain, music, stop) {
+        // Whether the music is playing
+        self.music = music;
+
         // Engine power, from idle at 0 to 1, and beyond with the boost
         self.power = power;
 
@@ -187,6 +191,279 @@ let var wr_phase = 0.0;
 let var ex_env = 0.0;
 let var ex_lp = 0.0;
 let var ex_body = 0.0;
+
+// --- Music ---
+//
+// A synthwave track: a pulsing bass, drums, a pad holding the chord and an
+// arpeggio through an echo. The chords and the rhythm are written out by
+// hand. What is left to chance is the path the arpeggio takes through each
+// chord, which is drawn afresh for every section.
+
+let MUSIC_BPM = 108;
+let MUSIC_LEVEL = 0.42;
+
+// Samples in a sixteenth note, which is one step of the sequencer
+let MU_STEP = (SAMPLE_RATE * 60).idiv(MUSIC_BPM * 4);
+
+// The echo on the arpeggio trails it by three steps
+let ECHO_LEN = 3 * MU_STEP;
+let echo_buf = ByteArray.with_size(ECHO_LEN * 4);
+
+// One chord per bar, in A minor: Am, F, C, G. The bass plays the root, and
+// the pad a voicing of each chord that moves as little as possible.
+let BASS_NOTES = [45, 41, 48, 43];
+let PAD_NOTES = [
+    [57, 60, 64],
+    [57, 60, 65],
+    [55, 60, 64],
+    [55, 59, 62],
+];
+
+// Steps of the bar on which the bass jumps up an octave
+let BASS_JUMP = [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1];
+
+// The parts that can play in a section
+let PART_PAD = 1;
+let PART_BASS = 2;
+let PART_KICK = 4;
+let PART_HAT = 8;
+let PART_SNARE = 16;
+let PART_ARP = 32;
+let PART_ALL = 63;
+
+// The parts playing in each section of eight bars. Having played through,
+// the track goes back to MU_LOOP_TO, so the opening is only heard once.
+let MU_SECTIONS = [
+    PART_PAD | PART_BASS,
+    PART_PAD | PART_BASS | PART_KICK | PART_HAT,
+    PART_PAD | PART_BASS | PART_KICK | PART_HAT | PART_ARP,
+    PART_ALL,
+    PART_ALL,
+    PART_PAD | PART_ARP,
+    PART_PAD | PART_BASS | PART_ARP | PART_HAT,
+    PART_ALL,
+    PART_ALL,
+];
+let MU_LOOP_TO = 2;
+
+let var mu_on = false;
+let var mu_gain = 0.0;
+let var mu_count = MU_STEP;
+let var mu_step = 15;
+let var mu_bar = -1;
+let var mu_section = -1;
+let var mu_parts = 0;
+
+// Which note of the chord the arpeggio plays on each step, counting up
+// through the chord's three notes over two octaves
+let arp_pattern = [0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 2, 3, 4, 3, 2, 1];
+
+let var kick_env = 0.0;
+let var kick_drop = 0.0;
+let var kick_phase = 0.0;
+let var snare_env = 0.0;
+let var snare_lp = 0.0;
+let var snare_phase = 0.0;
+let var hat_env = 0.0;
+let var hat_decay = 0.997;
+let var hat_lp = 0.0;
+let var bass_freq = 110.0;
+let var bass_phase = 0.0;
+let var bass_env = 0.0;
+let var bass_lp1 = 0.0;
+let var bass_lp2 = 0.0;
+let var arp_freq = 440.0;
+let var arp_phase = 0.0;
+let var arp_env = 0.0;
+let var arp_lp = 0.0;
+let var echo_pos = 0;
+let var pad_gain = 0.0;
+let var pad_lfo = 0.0;
+let var pad_lp1 = 0.0;
+let var pad_lp2 = 0.0;
+
+// Two slightly detuned oscillators for each of the pad's three notes
+let pad_freq = Array.with_size(6, 220.0);
+let pad_phase = [0.0, 0.31, 0.62, 0.17, 0.48, 0.79];
+
+// Frequency of a MIDI note number
+fun note_freq(note) {
+    return 440.0 * (2.0).pow((note - 69) / 12.0);
+}
+
+// A random integer in [0, n), from the same generator as the noise
+fun au_rand(n) {
+    au_seed = (au_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (au_seed >> 8) % n;
+}
+
+// Draw a new path for the arpeggio: a walk up and down the notes of the
+// chord, which mostly keeps going the way it was, sometimes skips a note
+// and sometimes turns back
+fun new_arp_pattern() {
+    let var idx = au_rand(3);
+    let var dir = 1;
+
+    for (let var s = 0; s < 16; ++s) {
+        arp_pattern[s] = idx;
+
+        let roll = au_rand(100);
+        if (roll < 18) dir = 0 - dir;
+        if (roll >= 82) idx = idx + 2 * dir; else idx = idx + dir;
+
+        // Turn round at either end of the range
+        if (idx > 5) { idx = 4; dir = -1; }
+        if (idx < 0) { idx = 1; dir = 1; }
+    }
+}
+
+// Advance the sequencer by one sixteenth note and trigger what falls on it
+fun music_step() {
+    mu_step = (mu_step + 1) % 16;
+
+    if (mu_step == 0) {
+        mu_bar = mu_bar + 1;
+
+        // A new section every eight bars
+        if (mu_bar % 8 == 0) {
+            mu_section = mu_section + 1;
+            if (mu_section >= MU_SECTIONS.len) mu_section = MU_LOOP_TO;
+            mu_parts = MU_SECTIONS[mu_section];
+            if (mu_section > MU_LOOP_TO) new_arp_pattern();
+        }
+
+        // Move the pad to the chord of this bar
+        let notes = PAD_NOTES[mu_bar % 4];
+        for (let var k = 0; k < 3; ++k) {
+            let f = note_freq(notes[k]);
+            pad_freq[k * 2] = f * 0.9965;
+            pad_freq[k * 2 + 1] = f * 1.0035;
+        }
+    }
+
+    let step = mu_step;
+    let chord = mu_bar % 4;
+    let parts = mu_parts;
+
+    if ((parts & PART_BASS) != 0) {
+        bass_freq = note_freq(BASS_NOTES[chord] + 12 * BASS_JUMP[step]);
+        bass_env = 1.0;
+        if (step % 4 != 0) bass_env = 0.8;
+    }
+
+    if ((parts & PART_KICK) != 0 && step % 4 == 0) {
+        kick_env = 1.0;
+        kick_drop = 1.0;
+        kick_phase = 0.0;
+    }
+
+    if ((parts & PART_SNARE) != 0) {
+        // The last bar of a section ends on a roll
+        let roll = mu_bar % 8 == 7 && step >= 12;
+        if (step == 4 || step == 12) snare_env = 1.0;
+        else if (roll) snare_env = 0.45 + 0.12 * (step - 12);
+    }
+
+    // Open hats on the off beats, and quiet closed ones in between
+    if ((parts & PART_HAT) != 0) {
+        if (step % 4 == 2) {
+            hat_env = 1.0;
+            hat_decay = 0.9990;
+        } else {
+            hat_env = 0.35;
+            hat_decay = 0.9965;
+        }
+    }
+
+    if ((parts & PART_ARP) != 0) {
+        let idx = arp_pattern[step];
+        let note = PAD_NOTES[chord][idx % 3] + 12 * idx.idiv(3) + 12;
+        arp_freq = note_freq(note);
+        arp_env = 1.0;
+    }
+}
+
+// Synthesize one sample of music, given a sample of white noise
+fun music_sample(white) {
+    let step = 1.0 / SAMPLE_RATE;
+    let tau = 2.0 * PI;
+
+    mu_count = mu_count + 1;
+    if (mu_count >= MU_STEP) {
+        mu_count = 0;
+        music_step();
+    }
+
+    // Kick: a sine that drops quickly in pitch
+    let var kick = 0.0;
+    if (kick_env > 0.001) {
+        kick_phase = kick_phase + (46.0 + 120.0 * kick_drop) * step;
+        kick = (kick_phase * tau).sin() * kick_env;
+        kick_env = kick_env * 0.99982;
+        kick_drop = kick_drop * 0.9990;
+    }
+
+    // Everything sustained ducks under the kick, which is the pumping
+    // that the style is known for
+    let duck = 1.0 - 0.55 * kick_env;
+
+    // Snare: the top of the noise, over a short tone
+    let var snare = 0.0;
+    if (snare_env > 0.001) {
+        snare_lp = snare_lp + (white - snare_lp) * 0.25;
+        snare_phase = snare_phase + 190.0 * step;
+        if (snare_phase >= 1.0) snare_phase = snare_phase - 1.0;
+        snare = ((white - snare_lp) * 0.8 + (snare_phase * tau).sin() * 0.5 * snare_env) * snare_env;
+        snare_env = snare_env * 0.99945;
+    }
+
+    // Hats: only the very top of the noise
+    let var hat = 0.0;
+    if (hat_env > 0.001) {
+        hat_lp = hat_lp + (white - hat_lp) * 0.6;
+        hat = (white - hat_lp) * hat_env;
+        hat_env = hat_env * hat_decay;
+    }
+
+    // Bass: a saw through a filter that snaps shut after each note
+    bass_phase = bass_phase + bass_freq * step;
+    if (bass_phase >= 1.0) bass_phase = bass_phase - 1.0;
+    let bass_cut = 0.02 + 0.22 * bass_env * bass_env;
+    bass_lp1 = bass_lp1 + ((bass_phase * 2.0 - 1.0) * bass_env - bass_lp1) * bass_cut;
+    bass_lp2 = bass_lp2 + (bass_lp1 - bass_lp2) * bass_cut;
+    bass_env = bass_env * 0.99975;
+
+    // Pad: six saws, through a filter that slowly opens and closes
+    let var pad = 0.0;
+    for (let var k = 0; k < 6; ++k) {
+        let var ph = pad_phase[k] + pad_freq[k] * step;
+        if (ph >= 1.0) ph = ph - 1.0;
+        pad_phase[k] = ph;
+        pad = pad + ph;
+    }
+    pad_lfo = pad_lfo + 0.07 * step;
+    if (pad_lfo >= 1.0) pad_lfo = pad_lfo - 1.0;
+    let pad_cut = 0.045 + 0.025 * (pad_lfo * tau).sin();
+    pad_lp1 = pad_lp1 + ((pad - 3.0) * 0.33 - pad_lp1) * pad_cut;
+    pad_lp2 = pad_lp2 + (pad_lp1 - pad_lp2) * pad_cut;
+    let var pad_tgt = 0.0;
+    if ((mu_parts & PART_PAD) != 0) pad_tgt = 1.0;
+    pad_gain = pad_gain + (pad_tgt - pad_gain) * 0.00005;
+
+    // Arpeggio: a plucked saw, repeated by an echo three steps behind
+    arp_phase = arp_phase + arp_freq * step;
+    if (arp_phase >= 1.0) arp_phase = arp_phase - 1.0;
+    arp_lp = arp_lp + ((arp_phase * 2.0 - 1.0) * arp_env - arp_lp) * (0.06 + 0.30 * arp_env);
+    arp_env = arp_env * 0.99965;
+    let echo = echo_buf.get_f32(echo_pos);
+    let arp = arp_lp + echo * 0.5;
+    echo_buf.set_f32(echo_pos, arp_lp + echo * 0.42);
+    echo_pos = echo_pos + 1;
+    if (echo_pos >= ECHO_LEN) echo_pos = 0;
+
+    return kick * 0.85 + snare * 0.30 + hat * 0.11
+         + (bass_lp2 * 0.9 + pad_lp2 * pad_gain * 0.9 + arp * 0.42) * duck;
+}
 
 // Synthesize the next n samples into a buffer
 fun audio_fill(buf, n) {
@@ -290,6 +567,12 @@ fun audio_fill(buf, n) {
             v = v + ex_lp * 2.2 + ex_body * 7.0;
         }
 
+        // The music fades in and out, and the sequencer holds its place
+        // while it is silent
+        if (mu_on) mu_gain = mu_gain + (1.0 - mu_gain) * 0.0002;
+        else mu_gain = mu_gain * 0.9998;
+        if (mu_gain > 0.0005) v = v + music_sample(white) * mu_gain * MUSIC_LEVEL;
+
         // Squash the peaks instead of clipping them
         v = v * 0.7;
         buf.set_f32(i, v / (1.0 + v.abs()));
@@ -303,6 +586,7 @@ fun audio_set(state) {
     au_gain_tgt = state.gain;
     au_gun = state.gun;
     au_warn = state.warn;
+    mu_on = state.music;
 
     if (state.crashes != au_crashes) {
         au_crashes = state.crashes;
@@ -1411,6 +1695,8 @@ let var pull_up = false;
 // How many times the plane has crashed
 let var crash_count = 0;
 
+let var music_on = true;
+
 // Where the control surfaces are, which trails the inputs
 let var ctl_pitch = 0.0;
 let var ctl_roll = 0.0;
@@ -2230,7 +2516,7 @@ fun send_audio() {
     if (crashed) gain = 0.0;
 
     $actor_send(audio_id, AudioState(power, (speed / 450.0).min(1.0), gun,
-        pull_up, crash_count, gain, false));
+        pull_up, crash_count, gain, music_on, false));
 }
 
 // Render one frame
@@ -2354,6 +2640,7 @@ loop {
         } else if (msg.kind == 'KEY_DOWN') {
             if (msg.key == 'ESCAPE' || msg.key == 'Q') quit = true;
             if (msg.key == 'R') reset_flight();
+            if (msg.key == 'M') music_on = !music_on;
             set_key(msg.key, true);
         } else if (msg.kind == 'KEY_UP') {
             set_key(msg.key, false);
@@ -2391,5 +2678,5 @@ loop {
 }
 
 // Shut the audio actor down
-$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, crash_count, 0.0, true));
+$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, crash_count, 0.0, false, true));
 $actor_join(audio_id);
