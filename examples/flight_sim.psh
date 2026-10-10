@@ -1651,6 +1651,10 @@ let PITCH_RATE = 1.1;
 let ROLL_RATE = 2.2;
 let YAW_RATE = 0.35;
 
+// The hardest the plane can pull, in g. This caps the pitch rate at high
+// speed, where the full rate would take far more.
+let G_LIMIT = 9.0;
+
 // How quickly the controls follow the keys
 let CONTROL_LAG = 7.0;
 
@@ -1665,6 +1669,11 @@ let BANK_TURN = 2.5;
 let THRUST = 32.0;
 let TOP_SPEED = 290.0;
 let DRAG = THRUST / (TOP_SPEED * TOP_SPEED);
+
+// The throttle setting a flight starts with, and the speed it settles
+// at in level flight, which is also the speed the enemies fly at
+let START_THROTTLE = 0.7;
+let CRUISE_SPEED = TOP_SPEED * START_THROTTLE.sqrt();
 
 // Speed lost to pulling hard, in m/s per second
 let TURN_DRAG = 7.0;
@@ -1761,7 +1770,7 @@ fun reset_flight() {
     ctl_roll = 0.0;
     ctl_yaw = 0.0;
     speed = 220.0;
-    throttle = 0.7;
+    throttle = START_THROTTLE;
     climb_rate = 0.0;
     stalled = false;
     boost_charge = 1.0;
@@ -1799,7 +1808,11 @@ fun update_flight(dt) {
     ctl_yaw = ctl_yaw + (in_yaw - ctl_yaw) * ease;
 
     let authority = (speed / CORNER_SPEED).clip(0.25, 1.0);
-    cam_pitch(ctl_pitch * PITCH_RATE * authority * dt);
+
+    // The faster the plane, the less sharply it can turn within the g limit
+    let pitch_max = G_LIMIT * GRAVITY / speed;
+    let pitch_rate = (ctl_pitch * PITCH_RATE * authority).clip(0.0 - pitch_max, pitch_max);
+    cam_pitch(pitch_rate * dt);
     cam_roll(ctl_roll * ROLL_RATE * authority * dt);
     cam_yaw(ctl_yaw * YAW_RATE * authority * dt);
 
@@ -1862,6 +1875,7 @@ fun update_flight(dt) {
 let HUD_GREEN = 0xFF38FF58;
 let HUD_SHADOW = 0xFF000000;
 let WARN_RED = 0xFFFF2A1E;
+let CRASH_RED = 0xFFFF1A10;
 
 // Glyphs are rendered on a background of zero and used as masks
 let font_small = Font(1, HUD_GREEN, 0);
@@ -2213,7 +2227,11 @@ fun draw_crash() {
     let amount = lerp(150.0, 235.0, (glow).max(t * t)).floor();
 
     tint_frame(r, g, b, amount);
-    if (t > 0.2) hud_text_centered(font_title, "CRASHED", CX.floor(), CY.floor());
+    if (t > 0.2) {
+        let text = "CRASHED";
+        let x = CX.floor() - (text.len * font_title.char_w).idiv(2);
+        draw_text(font_title, text, x, CY.floor() - font_title.char_h.idiv(2), CRASH_RED);
+    }
 }
 
 // --- Cannon ---
@@ -2730,7 +2748,7 @@ fun spawn_enemy(i) {
     fo_yaw[i] = bearing + PI + rng.float(-0.8, 0.8);
     fo_pitch[i] = 0.0;
     fo_roll[i] = 0.0;
-    fo_speed[i] = rng.float(175.0, 210.0);
+    fo_speed[i] = CRUISE_SPEED;
     fo_health[i] = ENEMY_HEALTH;
     fo_mode[i] = MODE_CRUISE;
     fo_timer[i] = 0.0;
