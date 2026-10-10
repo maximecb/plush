@@ -132,9 +132,12 @@ let WARN_TONE = 0.47;
 
 // What the main loop tells the audio actor
 class AudioState {
-    init(self, power, wind, gun, warn, crashes, gain, music, stop) {
+    init(self, power, wind, gun, warn, crashes, gain, music, buffet, stop) {
         // Whether the music is playing
         self.music = music;
+
+        // How hard the airframe is shaking, from 0 to 1
+        self.buffet = buffet;
 
         // Engine power, from idle at 0 to 1, and beyond with the boost
         self.power = power;
@@ -165,6 +168,9 @@ let var au_wind_tgt = 0.0;
 let var au_gain_tgt = 0.0;
 let var au_gun = 0.0;
 let var au_warn = false;
+let var au_buffet_tgt = 0.0;
+let var au_buffet = 0.0;
+let var bf_phase = 0.0;
 let var au_crashes = 0;
 
 // Smoothed values, so that nothing steps from one buffer to the next
@@ -520,7 +526,13 @@ fun audio_fill(buf, n) {
         wind_lp = wind_lp + (white - wind_lp) * 0.3;
         let wind = (white - wind_lp) * 0.09 * au_wind * au_wind;
 
-        let var v = (roar * 0.345 + whine + wind) * 0.8 * au_gain;
+        // Buffet: the rumble again, throbbing as the airframe shakes
+        au_buffet = au_buffet + (au_buffet_tgt - au_buffet) * 0.0003;
+        bf_phase = bf_phase + 19.0 * step;
+        if (bf_phase >= 1.0) bf_phase = bf_phase - 1.0;
+        let buffet = en_rumble * 4.0 * au_buffet * (0.6 + 0.4 * (bf_phase * tau).sin());
+
+        let var v = (roar * 0.345 + whine + wind + buffet) * 0.8 * au_gain;
 
         // Cannon: a burst of noise for every round, which run together into
         // a buzz. The rate follows the barrels as they spin up.
@@ -594,6 +606,7 @@ fun audio_set(state) {
     au_gain_tgt = state.gain;
     au_gun = state.gun;
     au_warn = state.warn;
+    au_buffet_tgt = state.buffet;
     mu_on = state.music;
 
     if (state.crashes != au_crashes) {
@@ -1688,6 +1701,15 @@ let BOOST_TIME = 6.0;
 let BOOST_RECHARGE = 18.0;
 let BOOST_RESTART = 0.25;
 
+// Speed of sound at sea level, and the range of Mach numbers over
+// which the plane buffets
+let SOUND_SPEED = 340.3;
+let BUFFET_FROM = 0.82;
+let BUFFET_TO = 1.2;
+
+// How far the buffet throws the view about at its worst, in radians
+let BUFFET_SHAKE = 0.0045;
+
 // Coming closer to the ground than this is a crash
 let CRASH_CLEARANCE = 3.0;
 let CRASH_TIME = 3.0;
@@ -1705,6 +1727,9 @@ let var in_fire = false;
 let var gun_heat = 0.0;
 let var gun_hot = false;
 let var gun_firing = false;
+
+// How hard the airframe is shaking, from 0 to 1
+let var buffet = 0.0;
 
 // Whether the ground is coming up fast enough to warn about
 let var pull_up = false;
@@ -1847,6 +1872,11 @@ fun update_flight(dt) {
     stalled = stall > 0.0;
     fwd_y = fwd_y - stall * 0.9 * dt;
     cam_normalize();
+
+    // The airframe shakes on its way through the speed of sound,
+    // hardest at Mach 1 itself, and is smooth again beyond
+    let mach = speed / SOUND_SPEED;
+    buffet = smoothstep(BUFFET_FROM, 1.0, mach) * (1.0 - smoothstep(1.0, BUFFET_TO, mach));
 
     climb_rate = fwd_y * speed - stall * 45.0;
     cam_x = cam_x + fwd_x * speed * dt;
@@ -2179,6 +2209,7 @@ fun draw_hud() {
 
     let low_y = FRAME_HEIGHT - 46;
     draw_readout(CX.floor() - 210, low_y, (speed * 3.6).floor(), "KM/H");
+    hud_text(font_small, "M " + (speed / SOUND_SPEED).format_decimals(2), CX.floor() - 210, low_y - 16);
     draw_readout(CX.floor() + 100, low_y, cam_y.floor(), "ALT M");
 
     draw_bar(24, FRAME_HEIGHT - 64, "GUN", gun_heat, heat_color(gun_heat));
@@ -3341,17 +3372,38 @@ fun send_audio() {
     if (crashed) gain = 0.0;
 
     $actor_send(audio_id, AudioState(power, (speed / 450.0).min(1.0), gun,
-        pull_up, boom_count, gain, music_on, false));
+        pull_up, boom_count, gain, music_on, buffet, false));
 }
 
 // Render one frame
 fun render_frame() {
+    // The buffet shakes the view only. The plane's own axes are put back
+    // afterwards, so its course and its aim are untouched, and the head-up
+    // display holds still while the world jitters behind it.
+    let rx = right_x; let ry = right_y; let rz = right_z;
+    let ux = up_x; let uy = up_y; let uz = up_z;
+    let fx = fwd_x; let fy = fwd_y; let fz = fwd_z;
+
+    if (buffet > 0.0 && crash_timer <= 0.0) {
+        // A few sines that never line up pass for a random shudder
+        let t = hud_time * 2.0 * PI;
+        let amount = buffet * BUFFET_SHAKE;
+        cam_pitch(amount * ((t * 17.0).sin() + 0.6 * (t * 29.3 + 1.0).sin()) * 0.62);
+        cam_yaw(amount * ((t * 13.7 + 2.0).sin() + 0.6 * (t * 23.1).sin()) * 0.40);
+        cam_roll(amount * ((t * 11.3 + 4.0).sin() + 0.6 * (t * 19.9).sin()) * 0.90);
+    }
+
     render_world();
     draw_enemies();
     draw_particles(PART_SMOKE);
     draw_particles(PART_FIRE);
     draw_impacts();
     draw_tracers();
+
+    right_x = rx; right_y = ry; right_z = rz;
+    up_x = ux; up_y = uy; up_z = uz;
+    fwd_x = fx; fwd_y = fy; fwd_z = fz;
+
     if (crash_timer > 0.0) draw_crash(); else draw_hud();
 }
 
@@ -3507,5 +3559,5 @@ loop {
 }
 
 // Shut the audio actor down
-$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, crash_count, 0.0, false, true));
+$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, crash_count, 0.0, false, 0.0, true));
 $actor_join(audio_id);
