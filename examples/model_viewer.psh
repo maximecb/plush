@@ -1,0 +1,1478 @@
+// Look at a textured 3D model from all sides
+//
+// The model is read from a binary glTF file, with its texture, and drawn
+// with the span loop of examples/tremor.psh and an s-buffer: a list, for
+// each scanline, of the spans of pixels that have been drawn on.
+//
+// A level has a BSP tree to hand its faces over nearest first, exactly, so
+// the s-buffer of tremor only needs to know which pixels are covered. A
+// model has no such tree, so here each span also knows how far away it is,
+// and a new span takes the pixels where it is nearer than what is there.
+// That gives the right picture in any order, and where triangles pass
+// through each other.
+//
+// Triangles facing away from the eye are dropped, and the rest are still
+// sorted by distance every frame, roughly, which is cheap. With the nearest
+// ones first, few pixels are drawn and then drawn over.
+//
+// Light is worked out per vertex, from the angle between its normal and a
+// lamp that stays put next to the eye, and interpolated across each triangle
+// along with the texture coordinates.
+//
+// Usage: plush examples/model_viewer.psh [model.glb] [--tex-256] [--shots directory]
+//
+//   drag, arrows   turn the model
+//   W S            move closer and further
+//   space          start and stop the turntable
+//   escape / q     quit
+//
+// With --tex-256, textures larger than 256 pixels along either axis are
+// scaled down to that size. With --shots, no window is opened: the model is
+// drawn from eight sides, each one is written to the directory as a TGA
+// image, and the time taken per frame is reported.
+
+from image import Image, rgb, save_tga;
+from jpeg import decode_jpeg;
+from json import parse_json, Error;
+from png import decode_png;
+from ./monogram_font import Font;
+
+let FRAME_WIDTH = 960;
+let FRAME_HEIGHT = 720;
+
+// --- Command line ---
+
+let var model_path = "examples/data/models/shotgun.glb";
+let var max_tex_size = 0;
+let var shots_dir = nil;
+
+for (let var i = 1; i < $cmd_num_args(); ++i) {
+    let arg = $cmd_get_arg(i);
+
+    if (arg == "--tex-256") {
+        max_tex_size = 256;
+    } else if (arg == "--shots" && i + 1 < $cmd_num_args()) {
+        ++i;
+        shots_dir = $cmd_get_arg(i);
+    } else if (arg.byte_at(0) == 45) {
+        $println("unknown option " + arg);
+        $exit(1);
+    } else {
+        model_path = arg;
+    }
+}
+
+// --- View ---
+
+// Projection. FOCAL is the distance to the screen in pixels, which makes
+// this a view of about 50 degrees from top to bottom.
+let FOCAL = FRAME_HEIGHT.to_f() * 1.1;
+let CENTER_X = (FRAME_WIDTH.idiv(2)).to_f();
+let CENTER_Y = (FRAME_HEIGHT.idiv(2)).to_f();
+
+let PI = 3.14159265358979;
+let TURN_SPEED = 1.8;
+let SPIN_SPEED = 0.2;
+let DRAG_SENS = 0.008;
+let PITCH_LIMIT = 1.5;
+let ZOOM_SPEED = 1.2;
+let BG_COLOR = 0xFF_23_27_2E;
+
+// The model turns about its center in front of an eye that stays put,
+// cam_dist away from that center
+let var yaw = 0.0;
+let var pitch = 0.0;
+let var cam_dist = 1.0;
+
+// --- Lighting ---
+
+// The direction the light comes from, in view space: above the eye and to
+// its right. Its length is one.
+let LIGHT_X = 0.38;
+let LIGHT_Y = 0.52;
+let LIGHT_Z = 0.765;
+
+// The level a vertex facing away from the light is left with, and what the
+// light adds to one facing it squarely. A level of one leaves the texture
+// as it is.
+let AMBIENT = 0.3;
+let DIFFUSE = 0.7;
+
+// --- The span loop ---
+
+// The span loop interpolates texture coordinates in fixed point, with u and v
+// packed into the two halves of one integer:
+//
+//   bits 63..32: v, as 16.16 fixed point
+//   bits 31..0:  u, as 16.16 fixed point
+//
+// Integers in this VM are 62-bit fixnums, and going past that boxes the value
+// and allocates, which would be ruinous per pixel. Both halves are therefore
+// wrapped into their texture dimensions before the sub-span starts, which
+// keeps them under 2^24, and then biased by EXC_FX so that a half stepping
+// backwards stays positive instead of borrowing from the half above it. The
+// bias is a whole number of texture widths, so the mask at lookup time
+// removes it again.
+let FP_BITS = 16;
+let FP_ONE = 65536.0;
+let U_SHIFT = FP_BITS;
+let BIAS_TEXELS = 8192.0;
+
+// The longest a sub-span may run, and the matching cap on how far u or v may
+// travel in one pixel. Their product is the backwards step the bias has to
+// cover.
+let SUB_MAX = 32;
+let GRAD_LIMIT_FX = 64;
+let GRAD_LIMIT = 64.0;
+let EXC_FX = (SUB_MAX * GRAD_LIMIT_FX) << FP_BITS;
+
+// How far 1/z may swing across one sub-span, as a fraction of itself. The
+// perspective divide is done once per sub-span, and the step between its
+// ends is affine, which is exact wherever 1/z holds still.
+let PERSP_TOL = 0.04;
+
+// The light level is a multiplier from 0 to 255, carried across a sub-span
+// with this many fractional bits. Both ends of a sub-span are clamped to
+// the range below before the step between them is taken, which keeps every
+// pixel along it in range too. The floor is one whole step rather than zero
+// because the step is itself floored, and can undershoot.
+let L_ONE = 65536.0;
+let L_SHIFT = 16;
+let L_MIN_FX = 65536;
+let L_MAX_FX = 16711680;
+
+// Red and blue sit sixteen bits apart in a pixel, which is what lets them
+// share a multiply with green once green is moved out of the way
+let MASK_RB = 0x00FF00FF;
+let MASK_G = 0x0000FF00;
+
+// Reciprocals of the sub-span lengths, so the per-sub-span gradient is a
+// multiply rather than a divide
+let INV_N = Array.with_size(SUB_MAX + 1, 0.0);
+for (let var i = 1; i <= SUB_MAX; ++i) INV_N[i] = 1.0 / i.to_f();
+
+// The corners of the triangle being drawn, on screen
+let pX = Array.with_size(3, 0.0);
+let pY = Array.with_size(3, 0.0);
+
+// Gradients of the triangle being drawn. u/z, v/z, 1/z and light/z are the
+// quantities that are linear in screen space.
+let var g_duzdx = 0.0; let var g_duzdy = 0.0;
+let var g_dvzdx = 0.0; let var g_dvzdy = 0.0;
+let var g_dlzdx = 0.0; let var g_dlzdy = 0.0;
+let var g_dwdx = 0.0;  let var g_dwdy = 0.0;
+let var g_uz0 = 0.0;   let var g_vz0 = 0.0;
+let var g_lz0 = 0.0;   let var g_w0 = 0.0;
+let var g_ref_x = 0.0; let var g_ref_y = 0.0;
+
+// Its texture
+let var g_pix = nil;
+let var g_umask = 0;
+let var g_vshift = 0;
+let var g_vmask = 0;
+let var g_uwrap = 0;
+let var g_vwrap = 0;
+
+let var pixels_drawn = 0;
+let var tris_drawn = 0;
+
+let frame_image = Image(FRAME_WIDTH, FRAME_HEIGHT);
+let frame_buffer = frame_image.bytes;
+
+// --- The s-buffer ---
+
+// One span of a scanline: the pixels from x0 up to x1 that a triangle has
+// been drawn on, and how far away it is there. The spans of a scanline are
+// kept sorted and disjoint.
+//
+// The distance is kept as 1/z, which is linear along a scanline, so two
+// numbers give it at every pixel of the span: its value at x = 0, and how
+// much it changes per pixel. Keeping the value at x = 0 rather than at x0
+// means that a span can be cut shorter without touching them.
+//
+// A new span is compared with those it overlaps, and takes from them the
+// pixels where it is nearer. Where the two cross, which is where their
+// triangles pass through each other, each gets its side of the crossing.
+// The result is the same in whatever order triangles come. The order only
+// decides how many pixels are drawn and then drawn over.
+//
+// Spans live in parallel arrays and link by index rather than being objects,
+// so that drawing a frame allocates nothing. Those that end up wholly behind
+// a new span go on a free list.
+let MAX_SPANS = 131072;
+let NO_SPAN = 0 - 1;
+
+let sp_x0 = Array.with_size(MAX_SPANS, 0);
+let sp_x1 = Array.with_size(MAX_SPANS, 0);
+let sp_w = Array.with_size(MAX_SPANS, 0.0);
+let sp_dw = Array.with_size(MAX_SPANS, 0.0);
+let sp_next = Array.with_size(MAX_SPANS, NO_SPAN);
+let var sp_top = 0;
+let var sp_free = NO_SPAN;
+
+let sb_head = Array.with_size(FRAME_HEIGHT, NO_SPAN);
+
+let MAX_VIS = 128;
+let vis_x0 = Array.with_size(MAX_VIS, 0);
+let vis_x1 = Array.with_size(MAX_VIS, 0);
+
+fun sbuf_reset() {
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) sb_head[y] = NO_SPAN;
+    sp_top = 0;
+    sp_free = NO_SPAN;
+}
+
+// Link a new span into scanline y, between two spans that follow each other,
+// either of which may be NO_SPAN. Returns the new span, or the one before
+// if the pool is spent, in which case the pixels are left as not covered.
+fun sbuf_link(y, prev, next, x0, x1, w, dw) {
+    let var s = sp_free;
+    if (s != NO_SPAN) {
+        sp_free = sp_next[s];
+    } else if (sp_top < MAX_SPANS) {
+        s = sp_top;
+        sp_top = sp_top + 1;
+    } else {
+        return prev;
+    }
+
+    sp_x0[s] = x0;
+    sp_x1[s] = x1;
+    sp_w[s] = w;
+    sp_dw[s] = dw;
+    sp_next[s] = next;
+    if (prev == NO_SPAN) sb_head[y] = s; else sp_next[prev] = s;
+    return s;
+}
+
+// Insert [x0, x1) into scanline y, with 1/z being w at x = 0 and changing by
+// dw per pixel, and report which parts of it are to be drawn, in
+// vis_x0/vis_x1: those not covered yet, and those nearer than what is there.
+fun sbuf_insert(y, x0, x1, w, dw) {
+    let var n_vis = 0;
+    let var prev = NO_SPAN;
+    let var cur = sb_head[y];
+
+    // Skip the spans entirely left of x0
+    while (cur != NO_SPAN && sp_x1[cur] <= x0) {
+        prev = cur;
+        cur = sp_next[cur];
+    }
+
+    // Everything left of cx has been dealt with. Pixels from run up to cx
+    // are a part to draw that is not in the list yet, if run is not
+    // negative. It belongs between prev and cur.
+    let var cx = x0;
+    let var run = 0 - 1;
+
+    while (cur != NO_SPAN && cx < x1) {
+        let sx0 = sp_x0[cur];
+        if (sx0 >= x1) break;
+        let sx1 = sp_x1[cur];
+
+        // Nothing is in the way before this span
+        if (sx0 > cx) {
+            if (run < 0) run = cx;
+            cx = sx0;
+        }
+
+        // The pixels shared with this span, and how much nearer the new
+        // span is at the first and the last of them
+        let var end = sx1 < x1 ? sx1 : x1;
+        let dw_diff = dw - sp_dw[cur];
+        let w_diff = w - sp_w[cur];
+        let near_start = w_diff + cx * dw_diff;
+        let near_end = w_diff + (end - 1) * dw_diff;
+
+        // If it is nearer at one end only, the two cross. Stop at the
+        // crossing, and the rest comes around again.
+        if ((near_start > 0.0) != (near_end > 0.0)) {
+            end = ((cx - near_start / dw_diff).floor() + 1).clip(cx + 1, end - 1);
+        }
+
+        if (near_start > 0.0) {
+            // The new span takes these pixels, and what was there keeps
+            // the pixels on either side of them
+            if (cx > sx0) {
+                let next = sp_next[cur];
+                sp_x1[cur] = cx;
+                prev = cur;
+                cur = next;
+                if (end < sx1) cur = sbuf_link(y, prev, next, end, sx1, sp_w[prev], sp_dw[prev]);
+                if (cur == prev) cur = next;
+            } else if (end < sx1) {
+                sp_x0[cur] = end;
+            } else {
+                // Nothing is left of it
+                let next = sp_next[cur];
+                if (prev == NO_SPAN) sb_head[y] = next; else sp_next[prev] = next;
+                sp_next[cur] = sp_free;
+                sp_free = cur;
+                cur = next;
+            }
+
+            if (run < 0) run = cx;
+            cx = end;
+        } else {
+            // The new span is hidden here, which ends the part to draw
+            if (run >= 0) {
+                if (n_vis < MAX_VIS) {
+                    vis_x0[n_vis] = run;
+                    vis_x1[n_vis] = cx;
+                    n_vis = n_vis + 1;
+                }
+                prev = sbuf_link(y, prev, cur, run, cx, w, dw);
+                run = 0 - 1;
+            }
+
+            cx = end;
+            if (end == sx1) {
+                prev = cur;
+                cur = sp_next[cur];
+            }
+        }
+    }
+
+    // Nothing is in the way after the last span
+    if (cx < x1) {
+        if (run < 0) run = cx;
+        cx = x1;
+    }
+
+    if (run >= 0) {
+        if (n_vis < MAX_VIS) {
+            vis_x0[n_vis] = run;
+            vis_x1[n_vis] = cx;
+            n_vis = n_vis + 1;
+        }
+        sbuf_link(y, prev, cur, run, cx, w, dw);
+    }
+
+    return n_vis;
+}
+
+// --- Textures ---
+
+// Returns the largest power of two that is at most n
+fun floor_pow2(n) {
+    let var p = 1;
+    while (p * 2 <= n) p = p * 2;
+    return p;
+}
+
+// A texture, and the masks the span loop wraps its coordinates with. The
+// span loop needs power-of-two sizes, so an image of another size is scaled
+// down to the nearest one, and to max_size if that is not zero.
+class Texture {
+    init(self, img, max_size) {
+        let var w = floor_pow2(img.width);
+        let var h = floor_pow2(img.height);
+        if (max_size > 0) {
+            w = w.min(max_size);
+            h = h.min(max_size);
+        }
+
+        let var t = img;
+        if (w != img.width || h != img.height) t = img.resize(w, h);
+
+        self.pix = t.bytes;
+        self.width = w;
+        self.height = h;
+
+        let var shift = 0;
+        while ((1 << shift) < w) shift = shift + 1;
+
+        self.umask = w - 1;
+        self.vshift = 32 + FP_BITS - shift;
+        self.vmask = (h - 1) << shift;
+        self.uwrap = (w << FP_BITS) - 1;
+        self.vwrap = (h << FP_BITS) - 1;
+    }
+}
+
+// --- Loading a model ---
+
+// A .glb file is a JSON description of a scene followed by a block of binary
+// data holding its vertices, indices and images. Only what a static, textured
+// model needs is read: positions, normals, texture coordinates and the base
+// color texture of each material, which may be a JPEG or a PNG stored in the
+// file. Node transforms, skins and animations are ignored, so the meshes are
+// loaded as they were modelled.
+
+// Chunk types, as load_u32() reads their four characters
+let MAGIC_GLTF = 0x46546C67;
+let CHUNK_JSON = 0x4E4F534A;
+let CHUNK_BIN = 0x004E4942;
+
+// Component types of accessors
+let COMP_I8 = 5120;
+let COMP_U8 = 5121;
+let COMP_I16 = 5122;
+let COMP_U16 = 5123;
+let COMP_U32 = 5125;
+let COMP_F32 = 5126;
+
+// The only kind of primitive that is loaded
+let MODE_TRIANGLES = 4;
+
+// A triangle mesh. Vertices are shared between triangles, and each
+// triangle has one texture.
+class Model
+{
+    init(self)
+    {
+        // Three floats per vertex for positions and unit normals, and two
+        // for texture coordinates, which run from 0 to 1 across the image
+        // with v pointing down
+        self.positions = [];
+        self.normals = [];
+        self.uvs = [];
+
+        // Three vertex numbers per triangle, counter-clockwise when the
+        // triangle is seen from its front
+        self.indices = [];
+
+        // For each triangle, the index of its texture
+        self.tri_textures = [];
+
+        // Images, of any size
+        self.textures = [];
+    }
+
+    num_verts(self)
+    {
+        return self.positions.len.idiv(3);
+    }
+
+    num_tris(self)
+    {
+        return self.indices.len.idiv(3);
+    }
+}
+
+// Prints why a file could not be loaded, and returns nil
+fun fail(path, msg)
+{
+    $println(path + ": " + msg);
+    return nil;
+}
+
+// Returns the value of a key of a dictionary, or a default if it's absent
+fun get_or(dict, key, default)
+{
+    return dict.has(key) ? dict[key] : default;
+}
+
+// Number of bytes of a component type, zero if it doesn't exist
+fun comp_size(comp_type)
+{
+    if (comp_type == COMP_I8 || comp_type == COMP_U8) return 1;
+    if (comp_type == COMP_I16 || comp_type == COMP_U16) return 2;
+    if (comp_type == COMP_U32 || comp_type == COMP_F32) return 4;
+    return 0;
+}
+
+// Number of components of the elements of an accessor type
+fun type_comps(name)
+{
+    if (name == "SCALAR") return 1;
+    if (name == "VEC2") return 2;
+    if (name == "VEC3") return 3;
+    if (name == "VEC4") return 4;
+    return 0;
+}
+
+// The parts of a file that is being loaded
+class GlbFile
+{
+    init(self, json, bin)
+    {
+        self.json = json;
+        self.bin = bin;
+
+        // Texture index in the model of each image and flat color in use
+        self.image_slots = {};
+    }
+
+    // Reads the elements of an accessor into a flat array, which must have
+    // num_comps components each. Floats and normalized integers are read as
+    // floats, and other integers as they are. Returns nil if the accessor
+    // is of another kind or runs past the end of the data.
+    read_accessor(self, index, num_comps)
+    {
+        let bin = self.bin;
+        let acc = self.json.accessors[index];
+        if (acc.has("sparse") || !acc.has("bufferView") || type_comps(acc.type) != num_comps) {
+            return nil;
+        }
+
+        let view = self.json.bufferViews[acc.bufferView];
+        let comp_type = acc.componentType;
+        let size = comp_size(comp_type);
+        if (size == 0 || get_or(view, "buffer", 0) != 0) {
+            return nil;
+        }
+
+        // Elements are packed unless the view gives a distance between them
+        let stride = get_or(view, "byteStride", size * num_comps);
+        let start = get_or(view, "byteOffset", 0) + get_or(acc, "byteOffset", 0);
+        let count = acc.count;
+        if (count < 0 || start < 0 || stride < size * num_comps) {
+            return nil;
+        }
+        if (count > 0 && start + (count - 1) * stride + size * num_comps > bin.len) {
+            return nil;
+        }
+
+        // Normalized integers stand for the range 0 to 1, or -1 to 1
+        let normalized = get_or(acc, "normalized", false);
+        let out = Array.with_size(count * num_comps, 0);
+
+        for (let var i = 0; i < count; ++i) {
+            for (let var j = 0; j < num_comps; ++j) {
+                let pos = start + i * stride + j * size;
+                let var val = 0;
+
+                if (comp_type == COMP_F32) {
+                    val = bin.load_f32(pos);
+                } else if (comp_type == COMP_U32) {
+                    val = bin.load_u32(pos);
+                } else if (comp_type == COMP_U16) {
+                    val = bin.load_u16(pos);
+                    if (normalized) val = val / 65535.0;
+                } else if (comp_type == COMP_I16) {
+                    val = bin.load_u16(pos);
+                    if (val >= 32768) val -= 65536;
+                    if (normalized) val = (val / 32767.0).max(-1.0);
+                } else if (comp_type == COMP_U8) {
+                    val = bin[pos];
+                    if (normalized) val = val / 255.0;
+                } else {
+                    val = bin[pos];
+                    if (val >= 128) val -= 256;
+                    if (normalized) val = (val / 127.0).max(-1.0);
+                }
+
+                out[i * num_comps + j] = val;
+            }
+        }
+
+        return out;
+    }
+
+    // Decodes an image stored in the file. Returns nil if it is stored
+    // elsewhere, or in a format that can't be decoded.
+    read_image(self, index)
+    {
+        let image = self.json.images[index];
+        if (!image.has("bufferView")) {
+            return nil;
+        }
+
+        let view = self.json.bufferViews[image.bufferView];
+        let start = get_or(view, "byteOffset", 0);
+        let size = view.byteLength;
+        if (start < 0 || size < 4 || start + size > self.bin.len) {
+            return nil;
+        }
+
+        let data = ByteArray.with_size(size);
+        data.memcpy(0, self.bin, start, size);
+
+        // Tell the formats apart by how they start
+        if (data[0] == 0xFF && data[1] == 0xD8) {
+            return decode_jpeg(data);
+        }
+
+        return decode_png(data);
+    }
+
+    // Returns the index in a model of the texture of a primitive, adding
+    // it to the model if this is its first use. A primitive with no
+    // texture gets one pixel of the base color of its material.
+    texture_slot(self, model, path, prim)
+    {
+        let var key = "white";
+        let var img = nil;
+        let var color = rgb(255, 255, 255);
+
+        if (prim.has("material")) {
+            let pbr = get_or(self.json.materials[prim.material], "pbrMetallicRoughness", {});
+
+            if (pbr.has("baseColorFactor")) {
+                let f = pbr.baseColorFactor;
+                let r = (f[0] * 255.0).floor().clip(0, 255);
+                let g = (f[1] * 255.0).floor().clip(0, 255);
+                let b = (f[2] * 255.0).floor().clip(0, 255);
+                color = rgb(r, g, b);
+                key = "color " + color.to_s();
+            }
+
+            if (pbr.has("baseColorTexture")) {
+                let texture = self.json.textures[pbr.baseColorTexture.index];
+                if (texture.has("source")) {
+                    let image_key = "image " + texture.source.to_s();
+                    if (self.image_slots.has(image_key)) {
+                        return self.image_slots[image_key];
+                    }
+
+                    img = self.read_image(texture.source);
+                    if (img == nil) {
+                        $println(path + ": could not decode image " + texture.source.to_s());
+                    } else {
+                        key = image_key;
+                    }
+                }
+            }
+        }
+
+        if (self.image_slots.has(key)) {
+            return self.image_slots[key];
+        }
+
+        if (img == nil) {
+            img = Image(1, 1);
+            img.clear(color);
+        }
+
+        let slot = model.textures.len;
+        model.textures.push(img);
+        self.image_slots[key] = slot;
+        return slot;
+    }
+
+    // Appends the triangles of a primitive to a model. Returns an error
+    // message, or nil on success.
+    add_primitive(self, model, path, prim)
+    {
+        // Points, lines, strips and fans are skipped
+        if (get_or(prim, "mode", MODE_TRIANGLES) != MODE_TRIANGLES || !prim.attributes.has("POSITION")) {
+            return nil;
+        }
+
+        let attrs = prim.attributes;
+        let positions = self.read_accessor(attrs.POSITION, 3);
+        if (positions == nil) {
+            return "unsupported vertex positions";
+        }
+        let count = positions.len.idiv(3);
+
+        // Vertices are used in order when there are no indices
+        let var indices = nil;
+        if (prim.has("indices")) {
+            indices = self.read_accessor(prim.indices, 1);
+            if (indices == nil) {
+                return "unsupported vertex indices";
+            }
+        } else {
+            indices = Array.with_size(count, 0);
+            for (let var i = 0; i < count; ++i) {
+                indices[i] = i;
+            }
+        }
+
+        for (let var i = 0; i < indices.len; ++i) {
+            if (indices[i] < 0 || indices[i] >= count) {
+                return "vertex index out of range";
+            }
+        }
+        indices.resize(indices.len - indices.len % 3, 0);
+
+        let var normals = nil;
+        if (attrs.has("NORMAL")) {
+            normals = self.read_accessor(attrs.NORMAL, 3);
+        }
+        if (normals == nil || normals.len != positions.len) {
+            normals = compute_normals(positions, indices);
+        }
+
+        let var uvs = nil;
+        if (attrs.has("TEXCOORD_0")) {
+            uvs = self.read_accessor(attrs.TEXCOORD_0, 2);
+        }
+        if (uvs == nil || uvs.len != count * 2) {
+            uvs = Array.with_size(count * 2, 0.0);
+        }
+
+        // Vertex numbers are relative to the start of the primitive
+        let base = model.num_verts();
+        let slot = self.texture_slot(model, path, prim);
+
+        for (let var i = 0; i < positions.len; ++i) {
+            model.positions.push(positions[i].to_f());
+        }
+        for (let var i = 0; i < uvs.len; ++i) {
+            model.uvs.push(uvs[i].to_f());
+        }
+
+        // Make sure normals are of unit length
+        for (let var i = 0; i < normals.len; i += 3) {
+            let nx = normals[i].to_f();
+            let ny = normals[i + 1].to_f();
+            let nz = normals[i + 2].to_f();
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            let scale = len > 0.0 ? 1.0 / len : 0.0;
+            model.normals.push(nx * scale);
+            model.normals.push(ny * scale);
+            model.normals.push(nz * scale);
+        }
+
+        for (let var i = 0; i < indices.len; ++i) {
+            model.indices.push(base + indices[i]);
+        }
+        for (let var i = 0; i < indices.len; i += 3) {
+            model.tri_textures.push(slot);
+        }
+
+        return nil;
+    }
+}
+
+// Computes a normal for each vertex of a mesh that has none, as the sum
+// of the normals of the triangles around it, weighted by their areas
+fun compute_normals(positions, indices)
+{
+    let normals = Array.with_size(positions.len, 0.0);
+
+    for (let var i = 0; i < indices.len; i += 3) {
+        let a = indices[i] * 3;
+        let b = indices[i + 1] * 3;
+        let c = indices[i + 2] * 3;
+
+        // The cross product of two edges is as long as twice the area
+        let ux = positions[b] - positions[a];
+        let uy = positions[b + 1] - positions[a + 1];
+        let uz = positions[b + 2] - positions[a + 2];
+        let vx = positions[c] - positions[a];
+        let vy = positions[c + 1] - positions[a + 1];
+        let vz = positions[c + 2] - positions[a + 2];
+        let nx = uy * vz - uz * vy;
+        let ny = uz * vx - ux * vz;
+        let nz = ux * vy - uy * vx;
+
+        for (let var j = 0; j < 3; ++j) {
+            let v = indices[i + j] * 3;
+            normals[v] += nx;
+            normals[v + 1] += ny;
+            normals[v + 2] += nz;
+        }
+    }
+
+    return normals;
+}
+
+// Loads the meshes of a binary glTF file into a Model. Prints a message
+// and returns nil if the file can't be read or is malformed.
+fun load_glb(path)
+{
+    let data = $read_file(path);
+    if (data == nil) {
+        return fail(path, "could not read the file");
+    }
+
+    // A header of magic number, version and total size
+    if (data.len < 12 || data.load_u32(0) != MAGIC_GLTF) {
+        return fail(path, "not a binary glTF file");
+    }
+    if (data.load_u32(4) != 2) {
+        return fail(path, "only version 2 of glTF is supported");
+    }
+
+    // Then chunks, each one a size, a type and a body
+    let var json_text = nil;
+    let var bin = ByteArray.with_size(0);
+    let var pos = 12;
+    while (pos + 8 <= data.len) {
+        let size = data.load_u32(pos);
+        let kind = data.load_u32(pos + 4);
+        pos += 8;
+        if (pos + size > data.len) {
+            return fail(path, "the file is cut short");
+        }
+
+        if (kind == CHUNK_JSON && json_text == nil) {
+            json_text = String.from_utf8(data, pos, size);
+        } else if (kind == CHUNK_BIN && bin.len == 0) {
+            bin = ByteArray.with_size(size);
+            bin.memcpy(0, data, pos, size);
+        }
+
+        pos += size;
+    }
+
+    if (json_text == nil) {
+        return fail(path, "no scene description");
+    }
+    let json = parse_json(json_text);
+    if (json instanceof Error) {
+        return fail(path, json.msg);
+    }
+
+    let file = GlbFile(json, bin);
+    let model = Model();
+    let meshes = get_or(json, "meshes", []);
+
+    for (let var i = 0; i < meshes.len; ++i) {
+        let prims = meshes[i].primitives;
+        for (let var j = 0; j < prims.len; ++j) {
+            let error = file.add_primitive(model, path, prims[j]);
+            if (error != nil) {
+                return fail(path, error);
+            }
+        }
+    }
+
+    if (model.num_tris() == 0) {
+        return fail(path, "no triangles");
+    }
+
+    return model;
+}
+
+// --- The model ---
+
+let model = load_glb(model_path);
+if (model == nil) $exit(1);
+
+let NUM_VERTS = model.num_verts();
+let NUM_TRIS = model.num_tris();
+let positions = model.positions;
+let normals = model.normals;
+let indices = model.indices;
+
+let textures = [];
+for (let var i = 0; i < model.textures.len; ++i) {
+    let img = model.textures[i];
+    let tex = Texture(img, max_tex_size);
+    textures.push(tex);
+    $println("texture " + i.to_s() + ": " + img.width.to_s() + " x " + img.height.to_s()
+           + ", drawn at " + tex.width.to_s() + " x " + tex.height.to_s());
+}
+
+// The texture of each triangle
+let tri_tex = Array.with_size(NUM_TRIS, nil);
+for (let var t = 0; t < NUM_TRIS; ++t) tri_tex[t] = textures[model.tri_textures[t]];
+
+// Texture coordinates of each vertex in texels. A vertex belongs to the
+// triangles of one texture only, so it can take them from any of these.
+let vert_u = Array.with_size(NUM_VERTS, 0.0);
+let vert_v = Array.with_size(NUM_VERTS, 0.0);
+for (let var i = 0; i < indices.len; ++i) {
+    let v = indices[i];
+    let tex = tri_tex[i.idiv(3)];
+    vert_u[v] = model.uvs[v * 2] * tex.width;
+    vert_v[v] = model.uvs[v * 2 + 1] * tex.height;
+}
+
+// The middle of the box around the model, which is what it turns about, and
+// the distance from there to its furthest vertex
+let var min_x = positions[0]; let var max_x = min_x;
+let var min_y = positions[1]; let var max_y = min_y;
+let var min_z = positions[2]; let var max_z = min_z;
+for (let var i = 0; i < NUM_VERTS; ++i) {
+    min_x = min_x.min(positions[i * 3]);     max_x = max_x.max(positions[i * 3]);
+    min_y = min_y.min(positions[i * 3 + 1]); max_y = max_y.max(positions[i * 3 + 1]);
+    min_z = min_z.min(positions[i * 3 + 2]); max_z = max_z.max(positions[i * 3 + 2]);
+}
+let MID_X = (min_x + max_x) * 0.5;
+let MID_Y = (min_y + max_y) * 0.5;
+let MID_Z = (min_z + max_z) * 0.5;
+
+let var far_sq = 0.0;
+for (let var i = 0; i < NUM_VERTS; ++i) {
+    let dx = positions[i * 3] - MID_X;
+    let dy = positions[i * 3 + 1] - MID_Y;
+    let dz = positions[i * 3 + 2] - MID_Z;
+    far_sq = far_sq.max(dx * dx + dy * dy + dz * dz);
+}
+let RADIUS = far_sq.sqrt().max(0.000001);
+
+// The eye stays outside of the sphere around the model, which is what
+// lets triangles be drawn without clipping them against a near plane
+let MIN_DIST = RADIUS * 1.15;
+let MAX_DIST = RADIUS * 12.0;
+let START_DIST = RADIUS * 2.7;
+cam_dist = START_DIST;
+
+$println(model_path + ": " + NUM_VERTS.to_s() + " vertices, " + NUM_TRIS.to_s() + " triangles");
+
+// --- Transformed vertices ---
+
+// Screen position and distance of each vertex, and the four quantities
+// the span loop interpolates
+let vX = Array.with_size(NUM_VERTS, 0.0);
+let vY = Array.with_size(NUM_VERTS, 0.0);
+let vD = Array.with_size(NUM_VERTS, 0.0);
+let vW = Array.with_size(NUM_VERTS, 0.0);
+let vUZ = Array.with_size(NUM_VERTS, 0.0);
+let vVZ = Array.with_size(NUM_VERTS, 0.0);
+let vLZ = Array.with_size(NUM_VERTS, 0.0);
+
+// Turn, project and light every vertex
+fun transform_vertices() {
+    let sin_yaw = yaw.sin();
+    let cos_yaw = yaw.cos();
+    let sin_pitch = pitch.sin();
+    let cos_pitch = pitch.cos();
+    let dist = cam_dist;
+
+    for (let var i = 0; i < NUM_VERTS; ++i) {
+        let p = i * 3;
+        let mx = positions[p] - MID_X;
+        let my = positions[p + 1] - MID_Y;
+        let mz = positions[p + 2] - MID_Z;
+
+        // Yaw about the up axis, then pitch. x points right, y up and z
+        // towards the eye, as in the file.
+        let rx = mx * cos_yaw + mz * sin_yaw;
+        let tz = mz * cos_yaw - mx * sin_yaw;
+        let ry = my * cos_pitch - tz * sin_pitch;
+        let rz = my * sin_pitch + tz * cos_pitch;
+
+        let depth = dist - rz;
+        let w = 1.0 / depth;
+        vX[i] = CENTER_X + FOCAL * rx * w;
+        vY[i] = CENTER_Y - FOCAL * ry * w;
+        vD[i] = depth;
+        vW[i] = w;
+
+        // The normal turns with the model, and the light does not
+        let nx = normals[p] * cos_yaw + normals[p + 2] * sin_yaw;
+        let ntz = normals[p + 2] * cos_yaw - normals[p] * sin_yaw;
+        let ny = normals[p + 1] * cos_pitch - ntz * sin_pitch;
+        let nz = normals[p + 1] * sin_pitch + ntz * cos_pitch;
+
+        let var facing = nx * LIGHT_X + ny * LIGHT_Y + nz * LIGHT_Z;
+        if (facing < 0.0) facing = 0.0;
+        let level = (AMBIENT + DIFFUSE * facing) * 255.0;
+
+        vUZ[i] = vert_u[i] * w;
+        vVZ[i] = vert_v[i] * w;
+        vLZ[i] = level * w;
+    }
+}
+
+// --- Sorting ---
+
+// Triangles that face the eye are sorted by the distance of their middle
+// with a counting sort, which takes time in proportion to their number.
+// The range of distances the model can span is cut into this many steps.
+let NUM_BUCKETS = 2048;
+let bucket_pos = Array.with_size(NUM_BUCKETS, 0);
+let front_tri = Array.with_size(NUM_TRIS, 0);
+let front_bucket = Array.with_size(NUM_TRIS, 0);
+let draw_order = Array.with_size(NUM_TRIS, 0);
+
+// Fill draw_order with the triangles that face the eye, nearest first, and
+// return how many there are
+fun sort_triangles() {
+    // Three times the distance of the nearest point of the sphere around
+    // the model, as the keys are sums over three corners
+    let key_min = 3.0 * (cam_dist - RADIUS);
+    let key_scale = NUM_BUCKETS.to_f() / (6.0 * RADIUS);
+    let last_bucket = NUM_BUCKETS - 1;
+
+    for (let var i = 0; i < NUM_BUCKETS; ++i) bucket_pos[i] = 0;
+
+    let var count = 0;
+    for (let var t = 0; t < NUM_TRIS; ++t) {
+        let a = indices[t * 3];
+        let b = indices[t * 3 + 1];
+        let c = indices[t * 3 + 2];
+
+        // The front of a triangle is the side its corners run
+        // counter-clockwise on. Rows run down the screen, which turns
+        // that into a negative area here.
+        let ax = vX[a];
+        let ay = vY[a];
+        let area = (vX[b] - ax) * (vY[c] - ay) - (vX[c] - ax) * (vY[b] - ay);
+        if (area >= 0.0) continue;
+
+        let bucket = ((vD[a] + vD[b] + vD[c] - key_min) * key_scale).floor().clip(0, last_bucket);
+        front_tri[count] = t;
+        front_bucket[count] = bucket;
+        bucket_pos[bucket] = bucket_pos[bucket] + 1;
+        count = count + 1;
+    }
+
+    // Turn the number of triangles in each bucket into where it starts
+    let var start = 0;
+    for (let var i = 0; i < NUM_BUCKETS; ++i) {
+        let n = bucket_pos[i];
+        bucket_pos[i] = start;
+        start = start + n;
+    }
+
+    for (let var i = 0; i < count; ++i) {
+        let bucket = front_bucket[i];
+        draw_order[bucket_pos[bucket]] = front_tri[i];
+        bucket_pos[bucket] = bucket_pos[bucket] + 1;
+    }
+
+    return count;
+}
+
+// --- Rasterization ---
+
+// Walk the triangle in pX/pY scanline by scanline, hand each span to the
+// s-buffer, and draw whatever comes back as visible
+fun raster_triangle() {
+    let var top = 0;
+    let var y_min = pY[0];
+    let var bot = 0;
+    let var y_max = pY[0];
+    for (let var i = 1; i < 3; ++i) {
+        if (pY[i] < y_min) { y_min = pY[i]; top = i; }
+        if (pY[i] > y_max) { y_max = pY[i]; bot = i; }
+    }
+
+    let var scan_y = y_min.floor();
+    if (scan_y < 0) scan_y = 0;
+    let var end_y = y_max.floor();
+    if (end_y > FRAME_HEIGHT) end_y = FRAME_HEIGHT;
+    if (scan_y >= end_y) return;
+
+    // Values at x = 0 of the current scanline. These stay floats: at x = 0
+    // the value can sit far outside the triangle, which a float carries
+    // without losing the precision that matters once a span start brings it
+    // back inside.
+    let y_off = scan_y + 0.5 - g_ref_y;
+    let x_off = 0.5 - g_ref_x;
+    let var uz_row = g_uz0 + x_off * g_duzdx + y_off * g_duzdy;
+    let var vz_row = g_vz0 + x_off * g_dvzdx + y_off * g_dvzdy;
+    let var lz_row = g_lz0 + x_off * g_dlzdx + y_off * g_dlzdy;
+    let var w_row = g_w0 + x_off * g_dwdx + y_off * g_dwdy;
+
+    let duzdx = g_duzdx; let dvzdx = g_dvzdx;
+    let dlzdx = g_dlzdx; let dwdx = g_dwdx;
+    let pix = g_pix;
+    let umask = g_umask;
+    let vshift = g_vshift;
+    let vmask = g_vmask;
+    let uwrap = g_uwrap;
+    let vwrap = g_vwrap;
+    let mask_rb = MASK_RB;
+    let fb = frame_buffer;
+
+    // Every triangle drawn faces the eye, so the corners after the top one
+    // run down its left side, and those before it down its right side.
+    // Per side: the corner reached so far, the current x, how far x moves
+    // per scanline, and the scanline its current edge runs out on.
+    let var cl = top; let var xl = 0.0; let var dxl = 0.0; let var end_l = scan_y;
+    let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = scan_y;
+    let var row = scan_y * FRAME_WIDTH;
+
+    // Counted locally and handed to the global once the triangle is done
+    let var span_px = 0;
+
+    while (scan_y < end_y) {
+        // Step either side the current scanline has run past. Edges too short
+        // to cover a scanline are skipped by the same loop.
+        while (scan_y >= end_l && cl != bot) {
+            let ya = pY[cl];
+            let xa = pX[cl];
+            cl = (cl + 1) % 3;
+            let yb = pY[cl];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_l = e;
+            if (end_l > scan_y && yb > ya) {
+                dxl = (pX[cl] - xa) / (yb - ya);
+                xl = xa + (scan_y + 1 - ya) * dxl;
+            }
+        }
+        while (scan_y >= end_r && cr != bot) {
+            let ya = pY[cr];
+            let xa = pX[cr];
+            cr = (cr + 2) % 3;
+            let yb = pY[cr];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_r = e;
+            if (end_r > scan_y && yb > ya) {
+                dxr = (pX[cr] - xa) / (yb - ya);
+                xr = xa + (scan_y + 1 - ya) * dxr;
+            }
+        }
+
+        // Both edges hold for this band, so it runs with no further checks
+        let var band_end = end_l;
+        if (end_r < band_end) band_end = end_r;
+        if (band_end <= scan_y) break;
+
+        while (scan_y < band_end) {
+            let var xa = xl.floor();
+            if (xa < 0) xa = 0;
+            let var xb = xr.floor();
+            if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+
+            if (xa < xb) {
+                let n_vis = sbuf_insert(scan_y, xa, xb, w_row, dwdx);
+                for (let var k = 0; k < n_vis; ++k) {
+                    let var x = vis_x0[k];
+                    let piece_end = vis_x1[k];
+
+                    // Perspective values at the start of this piece
+                    let var uz = uz_row + x * duzdx;
+                    let var vz = vz_row + x * dvzdx;
+                    let var lz = lz_row + x * dlzdx;
+                    let var w = w_row + x * dwdx;
+                    let var z = 1.0 / w;
+                    let var u = uz * z;
+                    let var v = vz * z;
+
+                    // 1/z is what makes the affine step inside a sub-span
+                    // drift, so the length follows it: the longest run with
+                    // run * |dwdx| <= PERSP_TOL * w. The divide is hoisted
+                    // here, leaving a multiply per sub-span.
+                    let var wscale = 0.0;
+                    let adw = dwdx.abs();
+                    if (adw > 0.0) wscale = PERSP_TOL / adw;
+
+                    // The light at the near end of the run, clamped. Each
+                    // sub-span ends where the next one begins, so the far end
+                    // worked out below carries over.
+                    let var lfx = (lz * z * L_ONE).floor();
+                    if (lfx < L_MIN_FX) lfx = L_MIN_FX;
+                    else if (lfx > L_MAX_FX) lfx = L_MAX_FX;
+
+                    while (x < piece_end) {
+                        let var run = SUB_MAX;
+                        if (wscale > 0.0) {
+                            // Compare as a float so a near-zero dwdx can't
+                            // overflow the integer conversion
+                            let nf = w * wscale;
+                            if (nf < SUB_MAX.to_f()) {
+                                run = nf.floor();
+                                if (run < 1) run = 1;
+                            }
+                        }
+
+                        let var xe = x + run;
+                        if (xe > piece_end) xe = piece_end;
+                        let len = xe - x;
+
+                        // One divide per sub-span buys a correct u, v and
+                        // light at its far end; in between the step is affine
+                        let uz_e = uz + len * duzdx;
+                        let vz_e = vz + len * dvzdx;
+                        let lz_e = lz + len * dlzdx;
+                        let w_e = w + len * dwdx;
+                        let z_e = 1.0 / w_e;
+                        let u_e = uz_e * z_e;
+                        let v_e = vz_e * z_e;
+
+                        let inv_len = INV_N[len];
+                        let var du = (u_e - u) * inv_len;
+                        let var dv = (v_e - v) * inv_len;
+                        if (du > GRAD_LIMIT) du = GRAD_LIMIT;
+                        else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
+                        if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
+                        else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
+
+                        let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & uwrap) + EXC_FX;
+                        let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & vwrap) + EXC_FX;
+                        let var t = (vfx << 32) + ufx;
+                        let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
+
+                        // Both ends of the sub-span are clamped and the step
+                        // is taken between the clamped pair, so every pixel
+                        // along it is in range as well
+                        let var lfx_e = (lz_e * z_e * L_ONE).floor();
+                        if (lfx_e < L_MIN_FX) lfx_e = L_MIN_FX;
+                        else if (lfx_e > L_MAX_FX) lfx_e = L_MAX_FX;
+
+                        let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
+
+                        let var lp = lfx;
+                        let var i = row + x;
+                        let end_i = row + xe;
+                        span_px = span_px + len;
+                        while (i < end_i) {
+                            let c = pix.get_u32(((t >> vshift) & vmask)
+                                              | ((t >> U_SHIFT) & umask));
+
+                            // Red and blue are already sixteen bits apart;
+                            // moving green up to bit 32 puts all three that far
+                            // apart, so one multiply scales them without their
+                            // products running into each other
+                            let x = ((c & mask_rb) | ((c & MASK_G) << 24))
+                                  * (lp >> L_SHIFT);
+
+                            fb.set_u32(i, ((x >> 8) & mask_rb)
+                                        | ((x >> 32) & 0xFF00));
+                            t = t + dt;
+                            lp = lp + dl;
+                            i = i + 1;
+                        }
+
+                        lfx = lfx_e;
+                        uz = uz_e; vz = vz_e; lz = lz_e; w = w_e;
+                        u = u_e; v = v_e;
+                        x = xe;
+                    }
+                }
+            }
+
+            xl = xl + dxl;
+            xr = xr + dxr;
+            uz_row = uz_row + g_duzdy;
+            vz_row = vz_row + g_dvzdy;
+            lz_row = lz_row + g_dlzdy;
+            w_row = w_row + g_dwdy;
+            row = row + FRAME_WIDTH;
+            scan_y = scan_y + 1;
+        }
+    }
+
+    pixels_drawn = pixels_drawn + span_px;
+}
+
+// Work out the gradients the span loop runs on for one triangle, and draw it
+fun draw_triangle(t) {
+    let a = indices[t * 3];
+    let b = indices[t * 3 + 1];
+    let c = indices[t * 3 + 2];
+
+    let x0 = vX[a];
+    let y0 = vY[a];
+    pX[0] = x0;    pY[0] = y0;
+    pX[1] = vX[b]; pY[1] = vY[b];
+    pX[2] = vX[c]; pY[2] = vY[c];
+
+    // Too thin to cover a pixel, or to take gradients from
+    let e1x = pX[1] - x0; let e1y = pY[1] - y0;
+    let e2x = pX[2] - x0; let e2y = pY[2] - y0;
+    let det = e1x * e2y - e2x * e1y;
+    if (det > -0.000001) return;
+    let inv_det = 1.0 / det;
+
+    // Each quantity is linear in screen space, so its gradient comes from
+    // its values at the three corners
+    let uz0 = vUZ[a];
+    let d1u = vUZ[b] - uz0;
+    let d2u = vUZ[c] - uz0;
+    g_duzdx = (d1u * e2y - d2u * e1y) * inv_det;
+    g_duzdy = (d2u * e1x - d1u * e2x) * inv_det;
+
+    let vz0 = vVZ[a];
+    let d1v = vVZ[b] - vz0;
+    let d2v = vVZ[c] - vz0;
+    g_dvzdx = (d1v * e2y - d2v * e1y) * inv_det;
+    g_dvzdy = (d2v * e1x - d1v * e2x) * inv_det;
+
+    let lz0 = vLZ[a];
+    let d1l = vLZ[b] - lz0;
+    let d2l = vLZ[c] - lz0;
+    g_dlzdx = (d1l * e2y - d2l * e1y) * inv_det;
+    g_dlzdy = (d2l * e1x - d1l * e2x) * inv_det;
+
+    let w0 = vW[a];
+    let d1w = vW[b] - w0;
+    let d2w = vW[c] - w0;
+    g_dwdx = (d1w * e2y - d2w * e1y) * inv_det;
+    g_dwdy = (d2w * e1x - d1w * e2x) * inv_det;
+
+    g_uz0 = uz0; g_vz0 = vz0; g_lz0 = lz0; g_w0 = w0;
+    g_ref_x = x0; g_ref_y = y0;
+
+    let tex = tri_tex[t];
+    g_pix = tex.pix;
+    g_umask = tex.umask;
+    g_vshift = tex.vshift;
+    g_vmask = tex.vmask;
+    g_uwrap = tex.uwrap;
+    g_vwrap = tex.vwrap;
+
+    raster_triangle();
+}
+
+// Draw the model into the frame buffer
+fun render_frame() {
+    frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, BG_COLOR);
+    sbuf_reset();
+    pixels_drawn = 0;
+
+    transform_vertices();
+    tris_drawn = sort_triangles();
+    for (let var i = 0; i < tris_drawn; ++i) draw_triangle(draw_order[i]);
+}
+
+// --- Screenshots ---
+
+// Draw the model from eight sides without opening a window, write each
+// view to a directory, and report how long a frame takes
+fun render_shots(dir) {
+    let NUM_VIEWS = 8;
+    let NUM_RUNS = 5;
+    let var total_ms = 0;
+    let var total_px = 0;
+    let var total_tris = 0;
+
+    pitch = 0.3;
+    for (let var i = 0; i < NUM_VIEWS; ++i) {
+        yaw = i * 2.0 * PI / NUM_VIEWS;
+
+        // Take the median of a few runs of each view
+        let times = [];
+        for (let var run = 0; run < NUM_RUNS; ++run) {
+            let start = $time_current_ms();
+            render_frame();
+            let elapsed = $time_current_ms() - start;
+
+            let var idx = 0;
+            while (idx < times.len && times[idx] < elapsed) ++idx;
+            times.insert(idx, elapsed);
+        }
+        total_ms = total_ms + times[NUM_RUNS.idiv(2)];
+        total_px = total_px + pixels_drawn;
+        total_tris = total_tris + tris_drawn;
+
+        // The span loop leaves the alpha of a pixel at zero
+        for (let var p = 0; p < FRAME_WIDTH * FRAME_HEIGHT; ++p) {
+            frame_buffer.set_u32(p, frame_buffer.get_u32(p) | 0xFF_00_00_00);
+        }
+
+        let path = dir + "/view_" + i.to_s() + ".tga";
+        if (!save_tga(path, frame_image)) {
+            $println("could not write " + path);
+            $exit(1);
+        }
+    }
+
+    $println("render: " + (total_ms.to_f() / NUM_VIEWS).format_decimals(1) + " ms per frame, "
+           + total_tris.idiv(NUM_VIEWS).to_s() + " triangles and "
+           + total_px.idiv(NUM_VIEWS).to_s() + " pixels drawn on average");
+}
+
+if (shots_dir != nil) {
+    render_shots(shots_dir);
+    $exit(0);
+}
+
+// --- Window ---
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Model viewer: " + model_path, 0);
+let hud_font = Font(2, 0xFFFFFFFF, BG_COLOR);
+let FPS_FIELD_WIDTH = 5;
+let var fps_text = "FPS: " + "--".lpad(FPS_FIELD_WIDTH, " ");
+
+// Draw a line of text with its top left corner at a position
+fun draw_text(text, x, y) {
+    for (let var i = 0; i < text.len; ++i) {
+        hud_font.draw_char(frame_image, x + i * hud_font.char_w, y, text.char_at(i));
+    }
+}
+
+// --- Input state ---
+
+let var key_left = false;
+let var key_right = false;
+let var key_up = false;
+let var key_down = false;
+let var key_closer = false;
+let var key_further = false;
+
+let var spinning = true;
+let var dragging = false;
+let var drag_x = 0;
+let var drag_y = 0;
+
+fun set_key(key, down) {
+    if (key == 'LEFT') key_left = down;
+    else if (key == 'RIGHT') key_right = down;
+    else if (key == 'UP') key_up = down;
+    else if (key == 'DOWN') key_down = down;
+    else if (key == 'W') key_closer = down;
+    else if (key == 'S') key_further = down;
+}
+
+// --- Main loop ---
+
+let var last_ms = $time_current_ms();
+let var frame_count = 0;
+let var render_ms_total = 0;
+let var last_report_ms = last_ms;
+
+loop {
+    let now_ms = $time_current_ms();
+    let var dt = (now_ms - last_ms).to_f() * 0.001;
+    last_ms = now_ms;
+    if (dt > 0.1) dt = 0.1;
+
+    let var quit = false;
+    loop {
+        let msg = $actor_poll();
+        if (msg == nil) break;
+        if (!(msg instanceof UIEvent)) continue;
+
+        if (msg.kind == 'CLOSE_WINDOW') {
+            quit = true;
+            break;
+        }
+
+        if (msg.kind == 'KEY_DOWN') {
+            if (msg.key == 'ESCAPE' || msg.key == 'Q') {
+                quit = true;
+                break;
+            }
+            if (msg.key == 'SPACE') spinning = !spinning;
+
+            set_key(msg.key, true);
+        }
+        else if (msg.kind == 'KEY_UP') {
+            set_key(msg.key, false);
+        }
+        else if (msg.kind == 'MOUSE_DOWN') {
+            if (msg.button == 'LEFT') {
+                dragging = true;
+                drag_x = msg.x;
+                drag_y = msg.y;
+            }
+        }
+        else if (msg.kind == 'MOUSE_UP') {
+            if (msg.button == 'LEFT') dragging = false;
+        }
+        else if (msg.kind == 'MOUSE_MOVE') {
+            // The model follows the pointer while the button is held
+            if (dragging) {
+                yaw = yaw + (msg.x - drag_x) * DRAG_SENS;
+                pitch = pitch + (msg.y - drag_y) * DRAG_SENS;
+                drag_x = msg.x;
+                drag_y = msg.y;
+            }
+        }
+    }
+    if (quit) break;
+
+    if (spinning && !dragging) yaw = yaw + SPIN_SPEED * dt;
+    if (key_left) yaw = yaw - TURN_SPEED * dt;
+    if (key_right) yaw = yaw + TURN_SPEED * dt;
+    if (key_up) pitch = pitch - TURN_SPEED * dt;
+    if (key_down) pitch = pitch + TURN_SPEED * dt;
+    pitch = pitch.clip(0.0 - PITCH_LIMIT, PITCH_LIMIT);
+
+    // Moving by a share of the distance feels even at any range
+    if (key_closer) cam_dist = cam_dist * (1.0 - ZOOM_SPEED * dt);
+    if (key_further) cam_dist = cam_dist * (1.0 + ZOOM_SPEED * dt);
+    cam_dist = cam_dist.clip(MIN_DIST, MAX_DIST);
+
+    let render_start = $time_current_ms();
+    render_frame();
+    render_ms_total = render_ms_total + ($time_current_ms() - render_start);
+
+    frame_count = frame_count + 1;
+    let report_ms = $time_current_ms();
+    if (report_ms - last_report_ms >= 1000) {
+        let render_ms = render_ms_total.to_f() / frame_count.to_f();
+        let fps = 1000.0 / render_ms.max(0.001);
+        fps_text = "FPS: " + fps.format_decimals(1).lpad(FPS_FIELD_WIDTH, " ");
+        frame_count = 0;
+        render_ms_total = 0;
+        last_report_ms = report_ms;
+    }
+
+    draw_text(tris_drawn.to_s() + " of " + NUM_TRIS.to_s() + " triangles", 8, 8);
+    draw_text(fps_text, FRAME_WIDTH - fps_text.len * hud_font.char_w - 8, 8);
+    $window_draw_frame(window, frame_buffer);
+}
