@@ -20,16 +20,16 @@
 // along with the texture coordinates.
 //
 // A model with a skeleton comes with animations. Each one is turned into a
-// pose of the whole model twelve times a second when the file is loaded,
-// and playing it back mixes the two poses around the current time, which
-// costs next to nothing per frame. Everything about a model is in the
-// Model class, so that it can be moved to another program as it is.
+// pose of the whole model at the rate of its keys in the file, when the file
+// is loaded, and playing it back mixes the two poses around the current
+// time, which costs next to nothing per frame. Everything about a model is
+// in the Model class, so that it can be moved to another program as it is.
 //
 // Usage: plush examples/model_viewer.psh [model.glb] [--tex-256] [--shots directory]
 //
 //   drag, arrows   turn the model
 //   W S            move closer and further
-//   space          start and stop the turntable
+//   space, R       start and stop the turntable
 //   N              next animation, and after the last one, none
 //   escape / q     quit
 //
@@ -1076,7 +1076,8 @@ class Skeleton
 
 // --- Models ---
 
-// The number of poses of an animation that are kept per second
+// The number of poses per second for an animation whose keys do not tell
+// a rate, which is one that has no channel with more than two keys
 let BAKE_FPS = 12;
 
 // Floats per vertex of a pose: a position and a normal
@@ -1090,12 +1091,15 @@ let bucket_pos = Array.with_size(NUM_BUCKETS, 0);
 // One animation of a model, as the pose of the model at regular times
 class Clip
 {
-    init(self, name, duration, num_frames, frames, travel_x, travel_z)
+    init(self, name, duration, src_fps, num_frames, frames, travel_x, travel_z)
     {
         self.name = name;
 
         // Length in seconds, after which it starts over
         self.duration = duration;
+
+        // Keys per second in the file, 0 if it has no animated channel
+        self.src_fps = src_fps;
 
         // How far the animation would carry the model over the ground in
         // that time, in the space of the model. The poses stay in place,
@@ -1117,7 +1121,7 @@ class Clip
 //
 // A pose is the position and the normal of every vertex. Animations are
 // not played back from the skeleton: when the model is loaded, each one is
-// turned into a pose every 1 / BAKE_FPS seconds, and the pose at a given
+// turned into a pose for each of its keys, and the pose at a given
 // time is a mix of the two around it. This takes memory, but mixing two
 // poses is a few calls that run over whole arrays, whatever the number of
 // joints.
@@ -1214,7 +1218,21 @@ class Model
             duration = duration.max(times[times.len - 1].to_f());
         }
 
-        let num_frames = (duration * BAKE_FPS + 0.5).floor().max(1);
+        // The key rate is that of the channel with the most keys, as a
+        // constant channel only has one at each end
+        let var src_fps = 0.0;
+        let var most_keys = 2;
+        for (let var i = 0; i < channels.len; ++i) {
+            let times = channels[i].times;
+            let span = times[times.len - 1].to_f() - times[0].to_f();
+            if (times.len > most_keys && span > 0.0) {
+                most_keys = times.len;
+                src_fps = (times.len - 1).to_f() / span;
+            }
+        }
+
+        let bake_fps = src_fps > 0.0 ? src_fps : BAKE_FPS.to_f();
+        let num_frames = (duration * bake_fps + 0.5).floor().max(1);
         let frame_floats = self.num_verts * POSE_FLOATS;
         let frames = ByteArray.with_size(num_frames * frame_floats * 4);
         let positions = mesh.positions;
@@ -1290,7 +1308,7 @@ class Model
             }
         }
 
-        self.clips.push(Clip(name, duration, num_frames, frames, travel_x, travel_z));
+        self.clips.push(Clip(name, duration, src_fps, num_frames, frames, travel_x, travel_z));
     }
 
     // Works out the box and the sphere around the model in all of its
@@ -1597,7 +1615,8 @@ for (let var i = 0; i < model.clips.len; ++i) {
     let clip = model.clips[i];
     let travel = (clip.travel_x * clip.travel_x + clip.travel_z * clip.travel_z).sqrt();
     $println("animation " + i.to_s() + ": " + clip.num_frames.to_s() + " poses over "
-           + clip.duration.format_decimals(2) + " s, travels " + travel.format_decimals(2) + ", " + clip.name);
+           + clip.duration.format_decimals(2) + " s, " + clip.src_fps.format_decimals(1) + " fps in file, travels "
+           + travel.format_decimals(2) + ", " + clip.name);
 }
 
 // The eye stays outside of the sphere around the model, which is what
@@ -2009,10 +2028,24 @@ fun draw_text(text, x, y) {
 let CLIP_TEXT_MAX = 56;
 let var clip_text = "";
 
+// The line under it, with the rate of the animation
+let var rate_text = "";
+
 fun update_clip_text() {
+    rate_text = "";
     if (model.clips.len == 0) {
         clip_text = "";
         return;
+    }
+
+    if (clip_idx >= 0) {
+        let fps = model.clips[clip_idx].src_fps;
+        if (fps > 0.0) {
+            let whole = (fps + 0.5).floor();
+            let near = fps > whole.to_f() - 0.05 && fps < whole.to_f() + 0.05;
+            let rate = near ? whole.to_s() : fps.format_decimals(1);
+            rate_text = rate + " fps";
+        }
     }
 
     let var name = "pose of the mesh";
@@ -2026,8 +2059,7 @@ fun update_clip_text() {
         text = text + ch;
     }
 
-    // Pad it, so that a shorter name wipes a longer one
-    clip_text = text.rpad(CLIP_TEXT_MAX, " ");
+    clip_text = text;
 }
 
 // Go on to the next animation, and after the last one to no animation
@@ -2094,7 +2126,7 @@ loop {
                 quit = true;
                 break;
             }
-            if (msg.key == 'SPACE') spinning = !spinning;
+            if (msg.key == 'SPACE' || msg.key == 'R') spinning = !spinning;
             if (msg.key == 'N') next_clip();
 
             set_key(msg.key, true);
@@ -2160,6 +2192,7 @@ loop {
 
     draw_text(model.tris_drawn.to_s() + " of " + model.num_tris.to_s() + " triangles", 8, 8);
     draw_text(clip_text, 8, 12 + hud_font.char_h);
+    draw_text(rate_text, 8, 16 + 2 * hud_font.char_h);
     draw_text(fps_text, FRAME_WIDTH - fps_text.len * hud_font.char_w - 8, 8);
     $window_draw_frame(window, frame_buffer);
 }
