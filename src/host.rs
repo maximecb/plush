@@ -390,6 +390,7 @@ def_host_fns! {
         fill_u32: ba_fill_u32(4),
 
         has: dict_has(2),
+        get_or: dict_get_or(3),
         keys: dict_keys(1),
 
         dump_bytecode: fun_dump_bytecode(1),

@@ -63,3 +63,18 @@ for (let var i = 0; i < ks.len; ++i)
 // Overwritten keys are not listed twice
 assert(d2.keys().len == 1);
 assert(d2.keys()[0] == 'x');
+
+// get_or() returns the stored value, or the default for a missing key
+assert({}.get_or('a', 5) == 5);
+assert({ a: 1 }.get_or('a', 5) == 1);
+assert({ a: nil }.get_or('a', 5) == nil);
+assert(d.get_or('100', -1) == 200);
+assert(d.get_or('500', -1) == -1);
+assert(d.get_or('500', 'x') == 'x');
+let counts = {};
+for (let var i = 0; i < 10; ++i)
+{
+    let k = (i % 3).to_s();
+    counts[k] = counts.get_or(k, 0) + 1;
+}
+assert(counts['0'] == 4 && counts['1'] == 3 && counts['2'] == 3);

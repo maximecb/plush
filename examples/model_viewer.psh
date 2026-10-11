@@ -468,12 +468,6 @@ fun fail(path, msg)
     return nil;
 }
 
-// Returns the value of a key of a dictionary, or a default if it's absent
-fun get_or(dict, key, default)
-{
-    return dict.has(key) ? dict[key] : default;
-}
-
 // Number of bytes of a component type, zero if it doesn't exist
 fun comp_size(comp_type)
 {
@@ -521,13 +515,13 @@ class GlbFile
         let view = self.json.bufferViews[acc.bufferView];
         let comp_type = acc.componentType;
         let size = comp_size(comp_type);
-        if (size == 0 || get_or(view, "buffer", 0) != 0) {
+        if (size == 0 || view.get_or("buffer", 0) != 0) {
             return nil;
         }
 
         // Elements are packed unless the view gives a distance between them
-        let stride = get_or(view, "byteStride", size * num_comps);
-        let start = get_or(view, "byteOffset", 0) + get_or(acc, "byteOffset", 0);
+        let stride = view.get_or("byteStride", size * num_comps);
+        let start = view.get_or("byteOffset", 0) + acc.get_or("byteOffset", 0);
         let count = acc.count;
         if (count < 0 || start < 0 || stride < size * num_comps) {
             return nil;
@@ -537,7 +531,7 @@ class GlbFile
         }
 
         // Normalized integers stand for the range 0 to 1, or -1 to 1
-        let normalized = get_or(acc, "normalized", false);
+        let normalized = acc.get_or("normalized", false);
         let out = Array.with_size(count * num_comps, 0);
 
         for (let var i = 0; i < count; ++i) {
@@ -582,7 +576,7 @@ class GlbFile
         }
 
         let view = self.json.bufferViews[image.bufferView];
-        let start = get_or(view, "byteOffset", 0);
+        let start = view.get_or("byteOffset", 0);
         let size = view.byteLength;
         if (start < 0 || size < 4 || start + size > self.bin.len) {
             return nil;
@@ -609,7 +603,7 @@ class GlbFile
         let var color = rgb(255, 255, 255);
 
         if (prim.has("material")) {
-            let pbr = get_or(self.json.materials[prim.material], "pbrMetallicRoughness", {});
+            let pbr = self.json.materials[prim.material].get_or("pbrMetallicRoughness", {});
 
             if (pbr.has("baseColorFactor")) {
                 let f = pbr.baseColorFactor;
@@ -659,7 +653,7 @@ class GlbFile
     add_primitive(self, mesh, path, prim, skinned)
     {
         // Points, lines, strips and fans are skipped
-        if (get_or(prim, "mode", MODE_TRIANGLES) != MODE_TRIANGLES || !prim.attributes.has("POSITION")) {
+        if (prim.get_or("mode", MODE_TRIANGLES) != MODE_TRIANGLES || !prim.attributes.has("POSITION")) {
             return nil;
         }
 
@@ -931,7 +925,7 @@ class Skeleton
         // The parent of each node, -1 for those that have none
         self.parents = Array.with_size(nodes.len, 0 - 1);
         for (let var i = 0; i < nodes.len; ++i) {
-            let children = get_or(nodes[i], "children", []);
+            let children = nodes[i].get_or("children", []);
             for (let var j = 0; j < children.len; ++j) {
                 self.parents[children[j]] = i;
             }
@@ -1018,9 +1012,9 @@ class Skeleton
                 let var t = parts[n * 3];
                 let var q = parts[n * 3 + 1];
                 let var s = parts[n * 3 + 2];
-                if (t == nil) t = get_or(node, "translation", [0.0, 0.0, 0.0]);
-                if (q == nil) q = get_or(node, "rotation", [0.0, 0.0, 0.0, 1.0]);
-                if (s == nil) s = get_or(node, "scale", [1.0, 1.0, 1.0]);
+                if (t == nil) t = node.get_or("translation", [0.0, 0.0, 0.0]);
+                if (q == nil) q = node.get_or("rotation", [0.0, 0.0, 0.0, 1.0]);
+                if (s == nil) s = node.get_or("scale", [1.0, 1.0, 1.0]);
                 local = mat_from_trs(t, q, s);
             }
 
@@ -1059,7 +1053,7 @@ class Skeleton
             if (part < 0) continue;
 
             // Curves between keys would take other values than these
-            let kind = get_or(sampler, "interpolation", "LINEAR");
+            let kind = sampler.get_or("interpolation", "LINEAR");
             if (kind != "LINEAR" && kind != "STEP") continue;
 
             let times = file.read_accessor(sampler.input, 1);
@@ -1578,7 +1572,7 @@ class Model
 
         // A mesh is skinned when the node that uses it names a skin. Only one
         // skin is supported: the vertices of meshes with another don't move.
-        let nodes = get_or(json, "nodes", []);
+        let nodes = json.get_or("nodes", []);
         let var skin_idx = 0 - 1;
         let skinned_meshes = {};
         for (let var i = 0; i < nodes.len; ++i) {
@@ -1589,7 +1583,7 @@ class Model
 
         let file = GlbFile(json, bin);
         let mesh = MeshData();
-        let meshes = get_or(json, "meshes", []);
+        let meshes = json.get_or("meshes", []);
 
         for (let var i = 0; i < meshes.len; ++i) {
             let prims = meshes[i].primitives;
@@ -1609,14 +1603,14 @@ class Model
         let model = Model(mesh, max_tex_size);
 
         // The skeleton is only needed to turn the animations into poses
-        let anims = get_or(json, "animations", []);
+        let anims = json.get_or("animations", []);
         if (skin_idx >= 0 && anims.len > 0) {
             let skeleton = Skeleton(file, json.skins[skin_idx]);
             for (let var i = 0; i < anims.len; ++i) {
                 let channels = skeleton.read_channels(file, anims[i]);
                 if (channels.len == 0) continue;
 
-                let name = get_or(anims[i], "name", "animation " + i.to_s());
+                let name = anims[i].get_or("name", "animation " + i.to_s());
                 model.bake_clip(mesh, skeleton, name, channels);
             }
         }

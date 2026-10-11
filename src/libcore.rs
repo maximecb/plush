@@ -548,6 +548,13 @@ pub(crate) fn dict_has(_actor: &mut Actor, d: Value, key: Value) -> HostResult
     Value::from(d.has(key)).into()
 }
 
+pub(crate) fn dict_get_or(_actor: &mut Actor, d: Value, key: Value, default: Value) -> HostResult
+{
+    let d = unwrap_dict!(d);
+    let key = unwrap_str!(key);
+    d.get(key).unwrap_or(default).into()
+}
+
 /// Array of the keys of a dict, in no particular order
 pub(crate) fn dict_keys(actor: &mut Actor, mut d: Value) -> HostResult
 {
@@ -660,6 +667,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::ByteArray, "to_hex") => ba_to_hex,
 
         (Type::Dict, "has") => dict_has,
+        (Type::Dict, "get_or") => dict_get_or,
         (Type::Dict, "keys") => dict_keys,
 
         (Type::Fun, "dump_bytecode") => fun_dump_bytecode,
