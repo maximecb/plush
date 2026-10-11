@@ -157,6 +157,28 @@ class Image
         return out;
     }
 
+    // Return a new image scaled to a given size. When shrinking, each
+    // pixel is the mean of the area it covers. When enlarging, it is
+    // interpolated between the two nearest pixels in each direction.
+    // Alpha is scaled like the color channels.
+    resize(self, width, height)
+    {
+        assert(width instanceof Int64 && width > 0);
+        assert(height instanceof Int64 && height > 0);
+
+        // Shrinking by whole factors is the common case, and faster
+        if (self.width % width == 0 && self.height % height == 0) {
+            return shrink_blocks(self, self.width.idiv(width), self.height.idiv(height));
+        }
+
+        // Scale the width, then the height
+        let wide = Image(width, self.height);
+        resample(self, wide, true);
+        let out = Image(width, height);
+        resample(wide, out, false);
+        return out;
+    }
+
     // Return a new image mirrored left to right
     hflip(self)
     {
@@ -259,6 +281,116 @@ class Image
             } else {
                 d = d + 4 * x + 6;
             }
+        }
+    }
+}
+
+// Returns a new image where each pixel is the mean of a block of fx by fy
+// pixels of an image, whose size must be a multiple of the block's
+fun shrink_blocks(img, fx, fy)
+{
+    let out = Image(img.width.idiv(fx), img.height.idiv(fy));
+    let src = img.bytes;
+    let count = fx * fy;
+    let half = count.idiv(2);
+
+    for (let var y = 0; y < out.height; ++y) {
+        for (let var x = 0; x < out.width; ++x) {
+            // Sum blue and red in one integer, 32 bits apart, and green
+            // and alpha in another
+            let var rb = 0;
+            let var ag = 0;
+            for (let var j = 0; j < fy; ++j) {
+                let row = (y * fy + j) * img.width + x * fx;
+                for (let var i = 0; i < fx; ++i) {
+                    let p = src.get_u32(row + i);
+                    rb += (p & 0xFF) | ((p & 0xFF_00_00) << 16);
+                    ag += ((p >> 8) & 0xFF) | ((p >> 24) << 32);
+                }
+            }
+
+            let b = ((rb & 0xFFFF_FFFF) + half).idiv(count);
+            let r = ((rb >> 32) + half).idiv(count);
+            let g = ((ag & 0xFFFF_FFFF) + half).idiv(count);
+            let a = ((ag >> 32) + half).idiv(count);
+            out.bytes.set_u32(y * out.width + x, (a << 24) | (r << 16) | (g << 8) | b);
+        }
+    }
+
+    return out;
+}
+
+// Scales an image along one axis, into an image of the same size along
+// the other axis. A pixel is a weighted mean of pixels of its line, the
+// row or column it is in. The weights are whole numbers with the same
+// sum for every pixel, so that a flat color stays exactly the same.
+fun resample(src_img, dst_img, horizontal)
+{
+    let src = src_img.bytes;
+    let dst = dst_img.bytes;
+
+    // Size along the axis, then the distance in pixels between the
+    // pixels of a line, and between lines
+    let src_size = horizontal ? src_img.width : src_img.height;
+    let dst_size = horizontal ? dst_img.width : dst_img.height;
+    let src_step = horizontal ? 1 : src_img.width;
+    let dst_step = horizontal ? 1 : dst_img.width;
+    let src_pitch = horizontal ? src_img.width : 1;
+    let dst_pitch = horizontal ? dst_img.width : 1;
+    let num_lines = horizontal ? src_img.height : src_img.width;
+
+    let shrink = dst_size < src_size;
+    let total = shrink ? src_size : 2 * dst_size;
+    let half = total.idiv(2);
+    let weights = [];
+
+    for (let var pos = 0; pos < dst_size; ++pos) {
+        // Find the first source pixel that counts, and the weight of
+        // it and of those that follow
+        let var first = 0;
+        weights.resize(0, 0);
+
+        if (shrink) {
+            // The span covered, in units where a source pixel is
+            // dst_size long. A weight is how much of it a pixel overlaps.
+            let start = pos * src_size;
+            let end = start + src_size;
+            first = start.idiv(dst_size);
+            for (let var i = first; i * dst_size < end; ++i) {
+                weights.push(((i + 1) * dst_size).min(end) - (i * dst_size).max(start));
+            }
+        } else {
+            // Where the center falls between two source pixel centers,
+            // in units where they are total apart
+            let center = ((2 * pos + 1) * src_size - dst_size).clip(0, (src_size - 1) * total);
+            first = center.idiv(total);
+            let frac = center % total;
+            weights.push(total - frac);
+            if (frac > 0) {
+                weights.push(frac);
+            }
+        }
+
+        // Apply these weights at this position of every line
+        for (let var line = 0; line < num_lines; ++line) {
+            let var idx = line * src_pitch + first * src_step;
+
+            // Sum blue and red in one integer, 32 bits apart, and green
+            // and alpha in another
+            let var rb = 0;
+            let var ag = 0;
+            for (let var i = 0; i < weights.len; ++i) {
+                let p = src.get_u32(idx);
+                rb += ((p & 0xFF) | ((p & 0xFF_00_00) << 16)) * weights[i];
+                ag += (((p >> 8) & 0xFF) | ((p >> 24) << 32)) * weights[i];
+                idx += src_step;
+            }
+
+            let b = ((rb & 0xFFFF_FFFF) + half).idiv(total);
+            let r = ((rb >> 32) + half).idiv(total);
+            let g = ((ag & 0xFFFF_FFFF) + half).idiv(total);
+            let a = ((ag >> 32) + half).idiv(total);
+            dst.set_u32(line * dst_pitch + pos * dst_step, (a << 24) | (r << 16) | (g << 8) | b);
         }
     }
 }

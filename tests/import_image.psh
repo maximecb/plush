@@ -169,3 +169,106 @@ assert(img24.get_pixel(0, 0) == COLOR_RED);
 assert(img24.get_pixel(1, 0) == COLOR_GREEN);
 assert(img24.get_pixel(0, 1) == COLOR_BLUE);
 assert(img24.get_pixel(1, 1) == COLOR_BLUE);
+
+// Builds an image of opaque greys, one row or one column of them
+fun strip(levels, horizontal)
+{
+    let out = horizontal ? Image(levels.len, 1) : Image(1, levels.len);
+
+    for (let var i = 0; i < levels.len; ++i) {
+        out.bytes.set_u32(i, rgb(levels[i], levels[i], levels[i]));
+    }
+
+    return out;
+}
+
+// Checks the size of an image and that it holds these opaque greys
+fun check_greys(img, width, height, levels)
+{
+    assert(img.width == width);
+    assert(img.height == height);
+
+    for (let var i = 0; i < levels.len; ++i) {
+        assert(img.bytes.get_u32(i) == rgb(levels[i], levels[i], levels[i]));
+    }
+}
+
+// Resizing along one axis, with strips that are rows or columns
+fun check_axis(across)
+{
+    // Sizes of a strip of a given length
+    let w = |len| across ? len : 1;
+    let h = |len| across ? 1 : len;
+
+    // Shrinking by a whole factor takes the mean of blocks, rounded
+    let blocks = strip([10, 20, 30, 43], across);
+    check_greys(blocks.resize(w(2), h(2)), w(2), h(2), [15, 37]);
+    check_greys(blocks.resize(1, 1), 1, 1, [26]);
+
+    // Shrinking otherwise weighs pixels by the area that is covered
+    let thirds = strip([0, 90, 180], across);
+    check_greys(thirds.resize(w(2), h(2)), w(2), h(2), [30, 150]);
+    let fifths = strip([0, 30, 60, 90, 120], across);
+    check_greys(fifths.resize(w(2), h(2)), w(2), h(2), [24, 96]);
+
+    // Enlarging interpolates, and repeats the pixels at the ends
+    let pair = strip([0, 200], across);
+    check_greys(pair.resize(w(4), h(4)), w(4), h(4), [0, 50, 150, 200]);
+    check_greys(pair.resize(w(3), h(3)), w(3), h(3), [0, 100, 200]);
+    check_greys(strip([77], across).resize(w(5), h(5)), w(5), h(5), [77, 77, 77, 77, 77]);
+}
+
+check_axis(true);
+check_axis(false);
+
+// Both axes at once, each by a whole factor, and then neither
+let ramp = Image(4, 4);
+for (let var y = 0; y < 4; ++y) {
+    for (let var x = 0; x < 4; ++x) {
+        let level = 10 * x + 40 * y;
+        ramp.set_pixel(x, y, rgb(level, level, level));
+    }
+}
+check_greys(ramp.resize(2, 2), 2, 2, [25, 45, 105, 125]);
+check_greys(ramp.resize(4, 1), 4, 1, [60, 70, 80, 90]);
+check_greys(ramp.resize(1, 2), 1, 2, [35, 115]);
+check_greys(ramp.resize(3, 3), 3, 3, [13, 25, 38, 63, 75, 88, 113, 125, 138]);
+
+// One axis shrinks while the other is enlarged
+check_greys(strip([0, 100, 100, 200], true).resize(2, 3), 2, 3, [50, 150, 50, 150, 50, 150]);
+
+// The four channels are scaled apart from each other, on both paths
+let duo = Image(2, 3);
+for (let var y = 0; y < 3; ++y) {
+    duo.set_pixel(0, y, rgba(10, 20, 30, 40));
+    duo.set_pixel(1, y, rgba(50, 60, 70, 80));
+}
+assert(duo.resize(1, 3).get_pixel(0, 2) == rgba(30, 40, 50, 60));
+assert(duo.resize(1, 2).get_pixel(0, 1) == rgba(30, 40, 50, 60));
+assert(duo.resize(3, 2).get_pixel(1, 0) == rgba(30, 40, 50, 60));
+
+// A flat color stays the same at any size
+let tint = Image(7, 5);
+tint.clear(0x80_12_FE_FF);
+let sizes = [[7, 5], [1, 1], [3, 4], [13, 9], [7, 2], [2, 11], [14, 10]];
+for (let var i = 0; i < sizes.len; ++i) {
+    let scaled = tint.resize(sizes[i][0], sizes[i][1]);
+    assert(scaled.width == sizes[i][0]);
+    assert(scaled.height == sizes[i][1]);
+    for (let var j = 0; j < scaled.width * scaled.height; ++j) {
+        assert(scaled.bytes.get_u32(j) == 0x80_12_FE_FF);
+    }
+}
+
+// The same size gives a copy, and the image is left as it was
+let copy = mixed.resize(mixed.width, mixed.height);
+assert(same_image(copy, mixed));
+copy.set_pixel(0, 0, COLOR_MAGENTA);
+assert(mixed.get_pixel(0, 0) == COLOR_WHITE);
+
+// Blocks of many pixels, whose sums are large
+let big = Image(40, 40);
+big.clear(COLOR_WHITE);
+big.fill_rect(0, 0, 20, 40, COLOR_BLACK);
+check_greys(big.resize(1, 1), 1, 1, [128]);
+check_greys(big.resize(2, 1), 2, 1, [0, 255]);
