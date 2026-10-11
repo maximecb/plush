@@ -1,0 +1,366 @@
+from jpeg import decode_jpeg;
+from image import color_r, color_g, color_b;
+
+// Images written at quality 100 by an encoder that is not this library,
+// from the pixels that source_r(), source_g() and source_b() give
+
+// Greyscale, 27 by 17, holding the green channel
+let JPEG_GREY = #[\x
+    FF D8 FF E0 00 10 4A 46 49 46 00 01 01 00 00 01 00 01 00 00 FF DB 00 43
+    00 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 FF C0 00 0B 08 00 11
+    00 1B 01 01 11 00 FF C4 00 19 00 01 00 02 03 00 00 00 00 00 00 00 00 00
+    00 00 00 02 04 09 00 06 0A FF C4 00 31 10 00 03 01 00 01 02 03 02 0D 05
+    00 00 00 00 00 00 01 02 03 04 05 08 12 00 11 13 14 34 18 22 33 35 44 46
+    52 53 72 74 75 82 83 85 B4 B5 B6 C5 FF DA 00 08 01 01 00 00 3F 00 A2 D1
+    D1 2A 04 52 38 A7 48 23 83 2A 88 85 B7 1B 65 0D 55 56 69 23 28 CE 15 9E
+    C8 F1 47 94 E4 F4 D9 8E 75 E3 6B BF 04 11 E8 90 83 45 6E 11 3B FB 3C F4
+    E6 10 44 96 99 22 05 F6 8C FD C2 92 9B CE 54 01 94 9A 46 11 A0 95 4E 9E
+    0B 4C 6D 93 3E 04 9F 26 47 19 F6 93 2E A7 CD F8 60 F8 B6 A5 FF 00 66 57
+    4D 4F F7 58 77 57 E6 CE 4F C0 6E 88 33 B3 31 A7 07 BE 54 2C DE A4 E3 C7
+    72 9A 24 B4 F3 21 FB 6D 0D 99 91 FC DF CD 9B D4 8A 69 56 25 76 77 6B 5B
+    BB 76 0A 3A 25 72 EA 47 14 8F 77 40 65 51 12 D1 E4 A2 C5 AA AA CD 24 56
+    3A 0B 2B D9 1E 28 95 A5 52 9B 31 CE 5C 94 B7 E0 B8 1D 12 A0 45 23 8A 74
+    82 38 32 A8 88 5B 71 B6 50 D5 55 66 92 32 8C E1 59 EC 8F 14 79 4E 4F 4D
+    98 E7 5E 36 BB F0 41 1E 89 08 34 56 E1 13 BF B3 CF 4E 61 04 49 69 92 20
+    5F 68 CF DC 29 29 BC E5 40 19 49 A4 61 1A 09 54 E9 E0 B4 C6 D9 12 F4 43
+    77 50 65 C6 62 AC C0 ED 46 D5 C6 71 F5 D0 02 7C 4F 4A AD B7 6C 35 07 8F
+    6F A2 67 74 67 88 98 89 B6 80 82 F5 BA 9B 7B A1 FD 53 90 FF 00 35 C5 F8
+    99 F4 FE 47 F8 3F D9 74 78 8F 8F EA E7 F4 DF FB 5E 34 FE 53 DF 1B F2 F8
+    7F B1 CF E3 FF D9
+];
+
+// Color, 27 by 17, with no chroma subsampling, the standard Huffman
+// tables, and a restart marker after every MCU
+let JPEG_444 = #[\x
+    FF D8 FF E0 00 10 4A 46 49 46 00 01 01 00 00 01 00 01 00 00 FF DB 00 43
+    00 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 FF DB 00 43 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 FF C0 00 11 08 00 11 00 1B 03
+    01 11 00 02 11 01 03 11 01 FF C4 00 1F 00 00 01 05 01 01 01 01 01 01 00
+    00 00 00 00 00 00 00 01 02 03 04 05 06 07 08 09 0A 0B FF C4 00 B5 10 00
+    02 01 03 03 02 04 03 05 05 04 04 00 00 01 7D 01 02 03 00 04 11 05 12 21
+    31 41 06 13 51 61 07 22 71 14 32 81 91 A1 08 23 42 B1 C1 15 52 D1 F0 24
+    33 62 72 82 09 0A 16 17 18 19 1A 25 26 27 28 29 2A 34 35 36 37 38 39 3A
+    43 44 45 46 47 48 49 4A 53 54 55 56 57 58 59 5A 63 64 65 66 67 68 69 6A
+    73 74 75 76 77 78 79 7A 83 84 85 86 87 88 89 8A 92 93 94 95 96 97 98 99
+    9A A2 A3 A4 A5 A6 A7 A8 A9 AA B2 B3 B4 B5 B6 B7 B8 B9 BA C2 C3 C4 C5 C6
+    C7 C8 C9 CA D2 D3 D4 D5 D6 D7 D8 D9 DA E1 E2 E3 E4 E5 E6 E7 E8 E9 EA F1
+    F2 F3 F4 F5 F6 F7 F8 F9 FA FF C4 00 1F 01 00 03 01 01 01 01 01 01 01 01
+    01 00 00 00 00 00 00 01 02 03 04 05 06 07 08 09 0A 0B FF C4 00 B5 11 00
+    02 01 02 04 04 03 04 07 05 04 04 00 01 02 77 00 01 02 03 11 04 05 21 31
+    06 12 41 51 07 61 71 13 22 32 81 08 14 42 91 A1 B1 C1 09 23 33 52 F0 15
+    62 72 D1 0A 16 24 34 E1 25 F1 17 18 19 1A 26 27 28 29 2A 35 36 37 38 39
+    3A 43 44 45 46 47 48 49 4A 53 54 55 56 57 58 59 5A 63 64 65 66 67 68 69
+    6A 73 74 75 76 77 78 79 7A 82 83 84 85 86 87 88 89 8A 92 93 94 95 96 97
+    98 99 9A A2 A3 A4 A5 A6 A7 A8 A9 AA B2 B3 B4 B5 B6 B7 B8 B9 BA C2 C3 C4
+    C5 C6 C7 C8 C9 CA D2 D3 D4 D5 D6 D7 D8 D9 DA E2 E3 E4 E5 E6 E7 E8 E9 EA
+    F2 F3 F4 F5 F6 F7 F8 F9 FA FF DD 00 04 00 01 FF DA 00 0C 03 01 00 02 11
+    03 11 00 3F 00 FC 8D F0 FF 00 C0 94 09 11 16 AE 90 23 AF 95 28 40 B3 69
+    B3 28 69 55 59 A2 46 51 6E 15 9E 64 68 51 E2 8E 27 92 F2 CE 29 74 D9 6F
+    EC 20 FF 00 7F B8 C7 C7 6F E2 FF 00 B6 F7 7F C4 5E 9D FF 00 E0 BF EF 23
+    F1 0F 0E FC 54 FE 07 FB 4F F2 FD AF 4F BA FD 9E 9A E8 CF FF D0 FC FF 00
+    D0 3E 04 10 4A B6 9C 9B F6 03 73 6C 23 44 8A E6 24 4D BF 68 B7 DD E6 45
+    1B C7 14 80 32 93 24 30 43 20 8A 51 73 A1 5C C3 35 A7 FA A7 C6 3E 3B 7F
+    17 FD B3 BF FC BC F3 7E 7F F0 DD E2 7F 40 78 77 E2 A7 F0 3F DA 7F 95 2F
+    7F D3 BB FC 1F 9D 99 FF D1 F9 BF C3 FF 00 02 7F D4 11 6F EA 96 B7 4F 0F
+    D2 07 B2 BD 49 CF FB 96 AE 97 4F FF 00 3C AC 6F 9F FE 41 9A 9D 7F 53 F1
+    8F 8E DF C5 FF 00 6C FE 6F F9 79 E7 AF 5F EB B3 DC FF 00 5C 3C 3B F1 53
+    F8 1F ED 3F CA 97 BF E9 DD FE 0F CE CC FF D2 E0 A1 F8 09 6E D1 A9 93 4E
+    BF 8A 42 5B CC 8E 1B 1D 52 78 96 40 CC 1F 6C B0 5F 5A A3 E5 F2 CD E6 41
+    1D CA B1 2B 78 1A ED 67 66 FA 4C 57 8E DF ED 15 BF DB 3E DB FB 7E 9E BF
+    99 FF 00 44 F8 0F 15 17 D4 F0 FF 00 ED 1F F2 ED 7D B5 DD F7 77 3F FF D3
+    EC 3C 3D F0 2A 42 F0 91 6A B2 4E E8 BE 54 A1 59 A1 D4 A1 62 65 0A CD 12
+    2B 19 CB 2B CC 8F 0A 2C B2 4A 92 5E 59 C7 0E A5 15 FD 84 FF 00 B0 71 8F
+    8E DF C5 FF 00 6C FE 6F F9 79 DB 5F EB 4F 54 F7 3F C6 8F 0E FC 54 FE 07
+    FB 4F F2 FD BF 4D 3C AF D9 E9 AE 87 FF D4 FA 77 C3 DF 02 90 24 24 5A BA
+    40 8C BE 54 A1 40 9B 4D 99 41 94 2B 34 48 EA 2D C2 BB CC 8F 0A 49 14 71
+    3C 97 96 71 C9 A6 CB 7F 61 07 E6 7C 63 E3 B7 F1 7F DB 3F 99 FF 00 13 EE
+    FB 5F 8F DC FA 1F CB 1E 1D F8 A9 FC 0F F6 9F E5 FB 7E 9A 79 5F B3 D3 5D
+    0F FF D5 FD 0F D0 3E 04 30 25 5B 4F 4D FB 01 B9 B6 11 C6 91 5C C4 88 17
+    ED 16 DB BC C8 A3 68 E2 90 06 52 66 86 08 65 11 4A 6E 34 2B 88 66 B4 FE
+    07 E3 1F 1D BF 8B FE D9 FC DF F2 F3 BE BF D6 9E A9 6E 7E 91 E1 DF 8A 9F
+    C0 FF 00 69 FE 5F B7 B6 DB DD FE 0F CE CC FF D6 FD 66 B6 F8 0D 70 F0 44
+    61 B7 B3 96 20 A1 51 AE 74 FD 3E 5B 80 13 E4 F2 A5 6B DB D8 6E 83 42 57
+    C9 31 CE 8C F0 84 10 99 AE 02 09 E4 FF 00 20 F1 7E 3B 7F B4 D6 FF 00 6C
+    FB 7F CF E4 BD 7F 37 EA 7F A0 18 0F 15 7F D8 F0 FF 00 ED 2F F8 6B FE 5E
+    2E EF BB B9 FF D7 FD 14 D1 7F E3 D0 7F D8 52 FB FF 00 4F 5A 4D 7F 3A F1
+    97 FC BD FF 00 0B FD 0F F9 C1 F0 EF FE 5C 7F 86 27 FF D0 FD 90 D0 3F E3
+    FE FF 00 FE DD 7F F5 25 9A BF CC AE 31 DE AF AC FF 00 23 FC B1 F0 EF FE
+    5C 7F 86 27 FF D1 FD F8 F0 A7 FC CB 5F F7 0B FF 00 DC C5 7F 83 FC 61 FF
+    00 2F 7E 5F A9 F9 0F 87 7F F2 E3 FC 31 3F FF D2 FE 87 2F BF D7 AF FD 7A
+    D8 7F E9 0D BD 7F CC C6 33 FD EA B7 F8 DF E4 8F D7 32 FF 00 F7 2C 3F FD
+    7B 5F 9B 3F FF D9
+];
+
+// Color, 27 by 17, with chroma at half the size in both directions
+let JPEG_420 = #[\x
+    FF D8 FF E0 00 10 4A 46 49 46 00 01 01 00 00 01 00 01 00 00 FF DB 00 43
+    00 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 FF DB 00 43 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 FF C0 00 11 08 00 11 00 1B 03
+    01 22 00 02 11 01 03 11 01 FF C4 00 17 00 01 01 01 01 00 00 00 00 00 00
+    00 00 00 00 00 00 07 00 09 06 FF C4 00 30 10 00 02 02 01 04 01 00 04 0F
+    00 00 00 00 00 00 00 02 03 01 04 05 00 07 12 13 06 11 14 33 34 22 35 46
+    51 53 71 72 74 75 84 85 B4 B5 B6 C5 FF C4 00 17 01 01 01 01 01 00 00 00
+    00 00 00 00 00 00 00 00 00 09 08 07 0A FF C4 00 33 11 00 00 01 05 0B 0C
+    03 00 00 00 00 00 00 00 00 00 01 00 02 07 08 11 03 04 21 25 31 35 41 43
+    44 61 71 05 13 15 23 24 34 51 62 72 83 B1 C2 73 81 F0 FF DA 00 0C 03 01
+    00 02 11 03 11 00 3F 00 C8 DF 1F D8 90 80 54 C5 53 04 01 8F 53 60 20 5D
+    8D 70 C1 34 44 89 40 43 15 E0 48 DC 04 90 35 2D 46 CB 94 D4 DC 6B 6F D0
+    43 96 03 62 26 26 44 B1 C1 CF 84 4D 9A D0 B0 05 59 50 07 1F 58 AF CB B1
+    4B 35 A9 91 04 33 2C 4A 12 C8 53 62 CE 0A CA 5D 53 4C 3C 7B 62 99 26 99
+    8A A2 C7 98 0F 53 60 48 93 92 49 4C B6 04 89 40 25 2F 92 13 70 1A 40 5A
+    C6 83 2E 53 5A 72 4A BF 41 ED BE 3D B1 41 00 99 8A A6 08 02 1E A6 C0 C4
+    3B 1A E1 89 6C 09 12 80 C6 2B C0 99 B8 0D 20 C5 2D 46 CB 94 D6 CC 6B 6F
+    D0 45 B2 98 57 B2 07 D0 E9 99 40 EB 45 2D EA C0 A7 45 76 5A 8D C2 31 1A
+    AA EE 9B FF 00 34 7E F3 4B C7 F6 27 D8 4C 57 F9 C2 AD A3 4F D4 83 A5 74
+    1F 3F 62 A9 85 A3 FA 2A 37 8F E2 CC 9E 94 D3 B0 95 C9 63 2C C7 5F 53 26
+    4B B1 69 A3 94 7A 85 90 45 07 C5 A8 BD 54 0F D2 7E 92 2E C4 2E C8 94 C8
+    DC 82 B6 2F 22 D4 CC 06 C4 14 4C 89 63 C3 9F 08 9B 35 A1 6B 05 59 50 04
+    0F AC 56 E5 D8 A5 92 D4 C8 82 19 97 25 09 6C 29 B3 63 05 61 2E A8 AF 5B
+    61 AC 1A 15 29 AF 4D AA 81 81 02 B3 8F C7 B6 C4 40 7C 0E A6 95 DB A9 B5
+    04 99 1E 99 5B C0 8D 30 10 99 75 88 08 7B 0B C4 90 BD 8C CA 41 1C C3 9C
+    3C 07 68 E0 DE 6B C9 C3 43 4B 51 12 CE 2C D4 B9 D6 B6 97 3B C8 B7 0B EE
+    91 F8 A5 EF E6 B1 3A 7C C0 7B FD FF 00 CA FF 00 65 76 AD 5A C2 93 1C AF
+    9C 4E F2 05 C8 1A BB 58 3B 5E 84 D1 E2 9F 26 BF 4B FF 00 63 5D 25 EF 6E
+    3F 75 A1 FB 1A FA B5 68 BA 49 53 98 7C 87 F8 27 11 0D 4C BD 97 3F 42 FF
+    D9
+];
+
+// Color, 19 by 11, with chroma at half the width, and each component
+// in a scan of its own
+let JPEG_422 = #[\x
+    FF D8 FF E0 00 10 4A 46 49 46 00 01 01 00 00 01 00 01 00 00 FF DB 00 43
+    00 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 FF DB 00 43 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 FF C0 00 11 08 00 0B 00 13 03
+    01 21 00 02 11 01 03 11 01 FF C4 00 15 00 01 01 00 00 00 00 00 00 00 00
+    00 00 00 00 00 00 07 09 FF C4 00 1F 10 00 03 01 01 01 00 02 03 01 00 00
+    00 00 00 00 00 01 02 03 04 05 12 06 13 07 11 22 14 FF DA 00 08 01 01 00
+    00 3F 00 91 BF 1F FC 12 81 24 46 57 48 23 AF D5 50 81 6D CD B2 86 AA AB
+    34 91 94 67 0A CF 64 68 A3 CA 72 7A 6C C7 2A F3 6B BF 04 1C B8 1F 82 08
+    25 5B 9C 9E FC 03 A7 30 9A 24 B4 C9 13 CF FA 33 FA FB 25 37 9C A8 03 29
+    34 8C 23 41 2A 8D 3C 2D 31 B6 45 9C DF 81 6E F0 91 96 6C 55 98 5F 28 DA
+    B0 73 EB A0 04 25 3E AA B6 DD F0 D4 1E 3E 7E 93 3B CC BC 44 C4 4D 74 04
+    17 A3 AF C5 F9 1C CA 3F 16 8F 8E 25 F7 26 14 D4 C0 32 9B 2D CF 45 E9 EB
+    CB 00 18 D3 2C 6C 8E A1 5E 5A 05 34 49 92 F6 B5 28 D1 F1 FE 47 31 71 59
+    D7 1C 55 F1 B6 77 CA CA 19 4C 0B 71 AB D0 FD 4C AB 0F 28 BA 81 79 CC 7F
+    12 4A 5A 12 54 CF 7B 49 D3 75 F2 39 33 B0 55 E6 73 C8 30 C8 FF 00 DE 3C
+    F4 3F BA 65 8D 18 06 A4 D9 82 06 72 27 30 42 49 02 CA 4A 93 44 45 FF C4
+    00 16 01 01 01 01 00 00 00 00 00 00 00 00 00 00 00 00 00 08 07 09 FF C4
+    00 2D 11 00 00 03 04 04 0F 00 00 00 00 00 00 00 00 00 00 01 03 24 00 05
+    07 62 02 11 43 52 13 21 23 32 33 34 41 42 51 61 71 72 B1 C1 D1 FF DA 00
+    08 01 02 11 00 3F 00 DA 88 C3 1D B5 A5 B7 87 49 DB C0 7D 7C 61 19 B1 DF
+    2A 62 DB 4A 76 93 0C C1 E0 3A 03 47 A3 0B E5 E8 A1 69 F8 EB DA 12 CA C2
+    23 1F 2F 4C 21 8B 8F CF A5 BC 17 87 93 7F FF C4 00 16 01 01 01 01 00 00
+    00 00 00 00 00 00 00 00 00 00 00 09 04 0A FF C4 00 2D 11 00 00 02 05 08
+    0B 00 00 00 00 00 00 00 00 00 00 01 03 00 02 05 24 61 04 07 08 11 33 41
+    43 52 13 14 23 42 51 53 62 71 81 91 D1 FF DA 00 08 01 03 11 00 3F 00 A6
+    8E F3 AB 56 A0 F3 CA DF 1E 9E 3E BC 77 44 D2 4F 3A BB 02 1E 46 C4 AC 40
+    C8 AC 53 3D 14 77 69 CB DC 5E 8D C3 BC 3E 40 11 34 21 A6 D0 D0 12 F4 6D
+    91 77 86 45 60 9F FF D9
+];
+
+// Color, 13 by 9, stored as RGB rather than YCbCr
+let JPEG_RGB = #[\x
+    FF D8 FF EE 00 0E 41 64 6F 62 65 00 64 00 00 00 00 00 FF DB 00 43 00 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
+    01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 FF C0 00 11 08 00 09 00 0D
+    03 52 11 00 47 11 00 42 11 00 FF C4 00 18 00 01 00 03 01 00 00 00 00 00
+    00 00 00 00 00 00 00 09 02 08 0A 03 FF C4 00 2E 10 00 02 02 01 02 02 08
+    05 05 00 00 00 00 00 00 00 02 03 01 04 05 12 13 00 07 06 08 11 14 15 34
+    75 B6 21 22 24 83 B4 33 36 44 84 B3 FF DA 00 0C 03 52 00 47 00 42 00 00
+    3F 00 CF 8F 57 F9 08 0C 7C C1 18 20 0D 52 A6 C4 C0 BB 1A E1 89 68 89 12
+    84 86 2B C0 91 B8 0D 20 6A 5A 8D 97 29 AD B8 D6 DF A0 80 B6 3A 92 84 00
+    CC 62 8C 10 07 12 A6 C2 60 5D 8D 70 C1 34 44 89 40 43 15 E0 48 DC 06 90
+    35 2D 46 CB 94 D6 DC 6B 6F D0 46 85 FA 6D CD C0 80 64 C5 C3 04 01 CC A9
+    B0 C8 17 63 5C 30 4D 11 22 54 10 C5 78 12 37 01 A4 0D 4B 51 B2 E5 35 B7
+    1A DB F4 10 CC 72 CD 9B 18 2F 9A EF 85 B8 B6 21 BA 1F DD 51 67 42 E7 6D
+    8A D3 56 F2 E7 4A C8 7B 53 1A 76 00 D7 B2 FB 38 F6 50 D9 94 F5 29 D8 22
+    D5 57 C2 DC 5A 61 BA 3E 95 16 74 0C 6D B1 5A 6A 5E 5C E9 59 0F 6A 63 4E
+    C0 12 F6 5F 67 1E CA 1B 35 4B A4 5C E0 D8 C8 1E AC BF 85 B8 BE 0D D1 67
+    BA A2 CE 88 1D B6 2B 4D 6B CB 9D 2B 21 ED 4C 69 D8 03 5E CB EC E3 D9 43
+    64 71 E4 07 9F 3F EA 7B 95 FC 37 1F CF C8 FD 8F 72 D8 E2 5D 37 F3 F9 6F
+    B3 EE 5B 1C 33 5C 9E FD AD 43 D2 F1 DF ED 92 E3 A6 2B CA D3 F4 BA 7F 91
+    90 E2 AA DC FD 4A 9E 97 57 F2 6F F1 FF D9
+];
+
+// Largest difference to accept between a channel and its expected value,
+// as the encoder and the decoder each round values a few times
+let TOLERANCE = 4;
+
+// The channels of a pixel of the source images. Each is a gradient plus
+// a pattern, which is the same for the three so that it has no color.
+// The position may be a float.
+fun pattern(x, y) { return ((x * 7 + y * 13) % 5) * 4; }
+fun source_r(x, y) { return 30 + 7 * x; }
+fun source_g(x, y) { return 20 + 12 * y; }
+fun source_b(x, y) { return 215 - 3 * x - 5 * y; }
+
+// Brightness of a color, the Y of YCbCr
+fun luma(r, g, b)
+{
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+// Mean position of the pixels that share a chroma sample with a pixel,
+// in one direction. Past the edge, the encoder repeats the last pixel.
+fun chroma_pos(pos, step, size)
+{
+    let first = pos - pos % step;
+    let var sum = 0;
+
+    for (let var i = 0; i < step; ++i) {
+        sum += (first + i).min(size - 1);
+    }
+
+    return sum / step;
+}
+
+// Decodes an image and checks its size and every pixel. One chroma
+// sample covers hstep by vstep pixels, and nil is for a greyscale image.
+fun check(data, width, height, hstep, vstep)
+{
+    let img = decode_jpeg(data);
+    assert(img != nil);
+    assert(img.width == width);
+    assert(img.height == height);
+
+    for (let var y = 0; y < height; ++y) {
+        for (let var x = 0; x < width; ++x) {
+            let var r = source_g(x, y) + pattern(x, y);
+            let var g = r;
+            let var b = r;
+
+            if (hstep != nil) {
+                // The pixel has its own brightness, and the color of the
+                // gradients at the middle of its chroma sample
+                let cx = chroma_pos(x, hstep, width);
+                let cy = chroma_pos(y, vstep, height);
+                let cr = source_r(cx, cy);
+                let cg = source_g(cx, cy);
+                let cb = source_b(cx, cy);
+                let shift = luma(source_r(x, y), source_g(x, y), source_b(x, y)) - luma(cr, cg, cb);
+
+                r = cr + shift + pattern(x, y);
+                g = cg + shift + pattern(x, y);
+                b = cb + shift + pattern(x, y);
+            }
+
+            let pixel = img.get_pixel(x, y);
+            assert(pixel >> 24 == 255);
+            assert((color_r(pixel) - r).abs() <= TOLERANCE);
+            assert((color_g(pixel) - g).abs() <= TOLERANCE);
+            assert((color_b(pixel) - b).abs() <= TOLERANCE);
+        }
+    }
+}
+
+check(JPEG_GREY, 27, 17, nil, nil);
+check(JPEG_444, 27, 17, 1, 1);
+check(JPEG_420, 27, 17, 2, 2);
+check(JPEG_422, 19, 11, 2, 1);
+check(JPEG_RGB, 13, 9, 1, 1);
+
+// Returns the position of the first marker of a given kind
+fun find_marker(data, marker)
+{
+    for (let var pos = 0; pos + 1 < data.len; ++pos) {
+        if (data[pos] == 0xFF && data[pos + 1] == marker) {
+            return pos;
+        }
+    }
+
+    assert(false);
+}
+
+// Returns a copy of the first count bytes of some data
+fun prefix(data, count)
+{
+    let out = ByteArray.with_size(count);
+    out.memcpy(0, data, 0, count);
+    return out;
+}
+
+// Returns a copy of some data with one byte changed
+fun patch(data, pos, value)
+{
+    let out = prefix(data, data.len);
+    out[pos] = value;
+    return out;
+}
+
+// Positions of the frame header, and of the first table of each kind
+let frame = find_marker(JPEG_420, 0xC0);
+let quant = find_marker(JPEG_420, 0xDB);
+let huffman = find_marker(JPEG_420, 0xC4);
+let scan = find_marker(JPEG_420, 0xDA);
+
+// An extended sequential frame is decoded like a baseline one
+check(patch(JPEG_420, frame + 1, 0xC1), 27, 17, 2, 2);
+
+// Formats that are not supported: progressive, arithmetic coding, 12 bits
+// per sample, and components that aren't a whole number of pixels
+assert(decode_jpeg(patch(JPEG_420, frame + 1, 0xC2)) == nil);
+assert(decode_jpeg(patch(JPEG_420, frame + 1, 0xC9)) == nil);
+assert(decode_jpeg(patch(JPEG_420, frame + 4, 12)) == nil);
+assert(decode_jpeg(patch(JPEG_420, frame + 14, 0x31)) == nil);
+
+// Empty sizes
+assert(decode_jpeg(patch(JPEG_420, frame + 6, 0)) == nil);
+assert(decode_jpeg(patch(JPEG_420, frame + 8, 0)) == nil);
+
+// Enormous sizes, which must fail without allocating
+assert(decode_jpeg(patch(JPEG_420, frame + 5, 0xFF)) == nil);
+assert(decode_jpeg(patch(JPEG_420, frame + 7, 0xFF)) == nil);
+assert(decode_jpeg(patch(patch(JPEG_420, frame + 5, 0xFF), frame + 7, 0xFF)) == nil);
+
+// A missing table or scan, with its segment turned into a comment
+assert(decode_jpeg(patch(JPEG_420, quant + 1, 0xFE)) == nil);
+assert(decode_jpeg(patch(JPEG_420, huffman + 1, 0xFE)) == nil);
+assert(decode_jpeg(patch(JPEG_420, scan + 1, 0xFE)) == nil);
+assert(decode_jpeg(patch(JPEG_422, find_marker(JPEG_422, 0xDA) + 1, 0xFE)) == nil);
+
+// Restart markers out of order, and at the wrong interval
+let interval = find_marker(JPEG_444, 0xDD);
+assert(decode_jpeg(patch(JPEG_444, find_marker(JPEG_444, 0xD3) + 1, 0xD4)) == nil);
+assert(decode_jpeg(patch(JPEG_444, interval + 5, 2)) == nil);
+
+// Not a JPEG file
+assert(decode_jpeg(ByteArray.with_size(0)) == nil);
+assert(decode_jpeg(ByteArray.with_size(100)) == nil);
+assert(decode_jpeg(#[\x FF D8 FF D9]) == nil);
+
+// A file cut short anywhere
+for (let var count = 0; count < JPEG_420.len; ++count) {
+    assert(decode_jpeg(prefix(JPEG_420, count)) == nil);
+}
+for (let var count = 0; count < JPEG_422.len; ++count) {
+    assert(decode_jpeg(prefix(JPEG_422, count)) == nil);
+}
+
+// A wrong byte anywhere may or may not yield an image, but must not
+// make the decoder fail in some other way
+fun corrupt(data)
+{
+    for (let var pos = 0; pos < data.len; ++pos) {
+        let img = decode_jpeg(patch(data, pos, data[pos] ^ 0xFF));
+        assert(img == nil || img.bytes.len == 4 * img.width * img.height);
+    }
+}
+
+corrupt(JPEG_444);
+corrupt(JPEG_420);
+corrupt(JPEG_422);

@@ -1,0 +1,879 @@
+// JPEG image decoding
+//
+//   from jpeg import load_jpeg;
+//
+//   let img = load_jpeg("examples/data/great_wave_800.jpg");
+//   $window_draw_frame(window, img.bytes);
+//
+// Handles sequential, Huffman-coded images with 8 bits per sample, which
+// is what most encoders write by default: greyscale, YCbCr and RGB, with
+// any chroma subsampling by a whole factor. Progressive, arithmetic-coded,
+// lossless, 12-bit and four-component (CMYK) images are not supported.
+//
+// Subsampled chroma is scaled up by repeating samples, without smoothing.
+
+from image import Image;
+
+// Markers, the byte that follows 0xFF
+let MARKER_SOF0 = 0xC0;
+let MARKER_SOF1 = 0xC1;
+let MARKER_DHT = 0xC4;
+let MARKER_SOF15 = 0xCF;
+let MARKER_RST0 = 0xD0;
+let MARKER_RST7 = 0xD7;
+let MARKER_SOI = 0xD8;
+let MARKER_EOI = 0xD9;
+let MARKER_SOS = 0xDA;
+let MARKER_DQT = 0xDB;
+let MARKER_DRI = 0xDD;
+let MARKER_APP14 = 0xEE;
+
+// Number of bits of a code the fast Huffman table is indexed with
+let FAST_BITS = 9;
+
+// Position in a block of each coefficient, in the order they are stored
+let ZIGZAG = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+    12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63
+];
+
+// Builds the 8 by 8 block of samples that each coefficient stands for,
+// as 64 f32 values per coefficient, in the order coefficients are stored.
+// The inverse DCT of a block is then the sum of these blocks, each one
+// scaled by its coefficient, which axpy_f32() computes.
+fun make_basis()
+{
+    // Value at each of 8 positions of the cosine of each of 8 frequencies
+    let cosines = Array.with_size(64, 0.0);
+    for (let var x = 0; x < 8; ++x) {
+        for (let var u = 0; u < 8; ++u) {
+            let scale = u == 0 ? 0.3535533905932738 : 0.5;
+            cosines[x * 8 + u] = scale * ((2 * x + 1) * u * 0.19634954084936207).cos();
+        }
+    }
+
+    let basis = ByteArray.with_size(64 * 64 * 4);
+    for (let var k = 0; k < 64; ++k) {
+        let u = ZIGZAG[k] & 7;
+        let v = ZIGZAG[k] >> 3;
+
+        for (let var y = 0; y < 8; ++y) {
+            for (let var x = 0; x < 8; ++x) {
+                basis.set_f32(k * 64 + y * 8 + x, cosines[x * 8 + u] * cosines[y * 8 + v]);
+            }
+        }
+    }
+
+    return basis;
+}
+
+let BASIS = make_basis();
+
+// A table of Huffman codes. Codes of a given length are consecutive
+// numbers, and are stored from the shortest to the longest.
+class JPEGHuffman
+{
+    init(self)
+    {
+        // Symbols in the order of their codes
+        self.symbols = [];
+
+        // Indexed with the next FAST_BITS bits of the input. Entries hold
+        // a code length in bits 8 and up, and its symbol below that, or
+        // zero if the code is longer than FAST_BITS.
+        self.fast = Array.with_size(1 << FAST_BITS, 0);
+
+        // Largest code of each length, -1 if there are none
+        self.max_code = Array.with_size(17, -1);
+
+        // What to add to a code of each length to get its symbol index
+        self.offset = Array.with_size(17, 0);
+    }
+}
+
+// Builds a Huffman table from its definition at pos: the number of codes
+// of each length from 1 to 16, then the symbols. Returns nil if it
+// doesn't fit before end, or has more codes than a length allows.
+fun read_huffman_table(data, pos, end)
+{
+    if (pos + 16 > end) {
+        return nil;
+    }
+
+    let table = JPEGHuffman();
+    let var sym_pos = pos + 16;
+    let var code = 0;
+
+    for (let var len = 1; len <= 16; ++len) {
+        let count = data[pos + len - 1];
+        if (code + count > (1 << len) || sym_pos + count > end) {
+            return nil;
+        }
+
+        table.offset[len] = table.symbols.len - code;
+        if (count > 0) {
+            table.max_code[len] = code + count - 1;
+        }
+
+        for (let var i = 0; i < count; ++i) {
+            let symbol = data[sym_pos + i];
+            table.symbols.push(symbol);
+
+            // Every index that starts with a short code leads to it
+            if (len <= FAST_BITS) {
+                let copies = 1 << (FAST_BITS - len);
+                let start = (code + i) * copies;
+                for (let var j = 0; j < copies; ++j) {
+                    table.fast[start + j] = (len << 8) | symbol;
+                }
+            }
+        }
+
+        sym_pos += count;
+        code = (code + count) << 1;
+    }
+
+    return table;
+}
+
+// Decodes a code longer than FAST_BITS from the next 16 bits of the input.
+// Returns an entry like those of the fast table, or zero if there is no
+// such code.
+fun decode_long_code(table, next16)
+{
+    for (let var len = FAST_BITS + 1; len <= 16; ++len) {
+        let code = next16 >> (16 - len);
+        if (code <= table.max_code[len]) {
+            return (len << 8) | table.symbols[table.offset[len] + code];
+        }
+    }
+
+    return 0;
+}
+
+// One of the color channels of an image
+class JPEGComponent
+{
+    init(self, id, h, v, quant_id)
+    {
+        self.id = id;
+        self.quant_id = quant_id;
+
+        // Sampling factors: blocks per MCU in each direction
+        self.h = h;
+        self.v = v;
+
+        // Number of image pixels per sample in each direction
+        self.hscale = 1;
+        self.vscale = 1;
+
+        // Size in blocks of the part that covers the image, which is
+        // what a scan of this component alone stores
+        self.block_cols = 0;
+        self.block_rows = 0;
+
+        // Samples as f32 values centered on zero, in rows of stride
+        // samples. The size is a whole number of MCUs.
+        self.stride = 0;
+        self.samples = nil;
+
+        // Tables in use for the current scan
+        self.quant = nil;
+        self.dc_table = nil;
+        self.ac_table = nil;
+
+        // DC coefficient of the last block decoded
+        self.pred = 0;
+
+        // Set once a scan has stored this component
+        self.scanned = false;
+    }
+}
+
+// Adds a row of a component, times scale, to a row of f32 values that
+// is width pixels wide, repeating samples that cover several pixels
+fun add_row(dst, comp, y, width, scale)
+{
+    let step = comp.hscale;
+    let src = y.idiv(comp.vscale) * comp.stride;
+
+    for (let var i = 0; i < step; ++i) {
+        let count = (width - i + step - 1).idiv(step);
+        dst.axpy_f32(i, step, comp.samples, src, 1, count, scale);
+    }
+}
+
+// State of the decoding of one image
+class JPEGDecoder
+{
+    init(self, data)
+    {
+        self.data = data;
+        self.pos = 2;
+
+        self.width = 0;
+        self.height = 0;
+        self.components = [];
+
+        // Size of the image in MCUs, the groups of blocks that scans
+        // with several components are made of
+        self.mcu_cols = 0;
+        self.mcu_rows = 0;
+
+        // Tables by identifier. Quantization tables are arrays of 64
+        // floats, in the order coefficients are stored.
+        self.quant = Array.with_size(4, nil);
+        self.dc_tables = Array.with_size(4, nil);
+        self.ac_tables = Array.with_size(4, nil);
+
+        // Number of MCUs between restart markers, zero for no markers
+        self.restart_interval = 0;
+
+        // Color transform from an Adobe segment, -1 if there is none
+        self.adobe_transform = -1;
+
+        // Bits read from the scan and not used yet, in the low bits of
+        // buf. The bits above them are of no meaning.
+        self.buf = 0;
+        self.bits = 0;
+
+        // Number of zero bytes added to buf past the end of the scan
+        self.pad = 0;
+
+        // Samples of the block being decoded
+        self.block = ByteArray.with_size(64 * 4);
+    }
+
+    // Reads a big-endian 16-bit integer
+    u16(self, pos)
+    {
+        return (self.data[pos] << 8) | self.data[pos + 1];
+    }
+
+    // Moves past the next marker and returns it, or -1 if there is none
+    next_marker(self)
+    {
+        let data = self.data;
+        let var pos = self.pos;
+
+        // Markers are 0xFF and a byte, and may be preceded by more 0xFF
+        while (pos < data.len && data[pos] != 255) {
+            ++pos;
+        }
+        while (pos < data.len && data[pos] == 255) {
+            ++pos;
+        }
+
+        if (pos >= data.len) {
+            self.pos = pos;
+            return -1;
+        }
+
+        self.pos = pos + 1;
+        return data[pos];
+    }
+
+    // Reads the quantization tables of a DQT segment
+    read_quant(self, start, end)
+    {
+        let data = self.data;
+        let var pos = start;
+
+        while (pos < end) {
+            // Values are 8 or 16 bits each
+            let wide = data[pos] >> 4;
+            let id = data[pos] & 15;
+            ++pos;
+            if (wide > 1 || id > 3 || pos + 64 * (wide + 1) > end) {
+                return false;
+            }
+
+            let table = Array.with_size(64, 0.0);
+            for (let var i = 0; i < 64; ++i) {
+                if (wide == 1) {
+                    table[i] = self.u16(pos).to_f();
+                    pos += 2;
+                } else {
+                    table[i] = data[pos].to_f();
+                    ++pos;
+                }
+            }
+
+            self.quant[id] = table;
+        }
+
+        return true;
+    }
+
+    // Reads the Huffman tables of a DHT segment
+    read_huffman(self, start, end)
+    {
+        let data = self.data;
+        let var pos = start;
+
+        while (pos < end) {
+            // DC and AC coefficients have separate sets of tables
+            let kind = data[pos] >> 4;
+            let id = data[pos] & 15;
+            if (kind > 1 || id > 3) {
+                return false;
+            }
+
+            let table = read_huffman_table(data, pos + 1, end);
+            if (table == nil) {
+                return false;
+            }
+
+            if (kind == 0) {
+                self.dc_tables[id] = table;
+            } else {
+                self.ac_tables[id] = table;
+            }
+
+            pos += 17 + table.symbols.len;
+        }
+
+        return true;
+    }
+
+    // Reads the size and components of the image from a frame header,
+    // and allocates the samples
+    read_frame(self, start, end)
+    {
+        let data = self.data;
+
+        // Only one frame, with 8 bits per sample
+        if (self.components.len > 0 || start + 6 > end || data[start] != 8) {
+            return false;
+        }
+
+        self.height = self.u16(start + 1);
+        self.width = self.u16(start + 3);
+        let count = data[start + 5];
+
+        if (self.width == 0 || self.height == 0) {
+            return false;
+        }
+
+        if ((count != 1 && count != 3) || start + 6 + 3 * count != end) {
+            return false;
+        }
+
+        let var max_h = 1;
+        let var max_v = 1;
+
+        for (let var i = 0; i < count; ++i) {
+            let pos = start + 6 + 3 * i;
+            let var h = data[pos + 1] >> 4;
+            let var v = data[pos + 1] & 15;
+            let quant_id = data[pos + 2];
+
+            if (h < 1 || h > 4 || v < 1 || v > 4 || quant_id > 3) {
+                return false;
+            }
+
+            // The factors of a lone component have no effect
+            if (count == 1) {
+                h = 1;
+                v = 1;
+            }
+
+            self.components.push(JPEGComponent(data[pos], h, v, quant_id));
+            max_h = max_h.max(h);
+            max_v = max_v.max(v);
+        }
+
+        self.mcu_cols = (self.width + 8 * max_h - 1).idiv(8 * max_h);
+        self.mcu_rows = (self.height + 8 * max_v - 1).idiv(8 * max_v);
+
+        // A block takes at least two bits. A header asking for more
+        // blocks than the data can hold is wrong, and would allocate
+        // memory for nothing.
+        let var num_blocks = 0;
+        for (let var i = 0; i < count; ++i) {
+            let comp = self.components[i];
+            num_blocks += self.mcu_cols * comp.h * self.mcu_rows * comp.v;
+        }
+        if (num_blocks > 4 * data.len) {
+            return false;
+        }
+
+        for (let var i = 0; i < count; ++i) {
+            let comp = self.components[i];
+
+            // Samples must cover a whole number of pixels
+            if (max_h % comp.h != 0 || max_v % comp.v != 0) {
+                return false;
+            }
+
+            comp.hscale = max_h.idiv(comp.h);
+            comp.vscale = max_v.idiv(comp.v);
+            comp.block_cols = (self.width + 8 * comp.hscale - 1).idiv(8 * comp.hscale);
+            comp.block_rows = (self.height + 8 * comp.vscale - 1).idiv(8 * comp.vscale);
+
+            comp.stride = self.mcu_cols * comp.h * 8;
+            comp.samples = ByteArray.with_size(comp.stride * self.mcu_rows * comp.v * 8 * 4);
+        }
+
+        return true;
+    }
+
+    // Tops up the bit buffer from the scan data, to more than 48 bits.
+    // A marker ends the scan. Zeros are added past it, and counted.
+    fill(self)
+    {
+        let data = self.data;
+        let var pos = self.pos;
+        let var bits = self.bits;
+        let var buf = self.buf & ((1 << bits) - 1);
+
+        while (bits <= 48) {
+            let var byte = 0;
+
+            if (pos + 1 < data.len) {
+                byte = data[pos];
+
+                if (byte != 255) {
+                    ++pos;
+                } else if (data[pos + 1] == 0) {
+                    // A data byte of 0xFF is followed by a zero to
+                    // tell it apart from a marker
+                    pos += 2;
+                } else {
+                    byte = 0;
+                    ++self.pad;
+                }
+            } else {
+                ++self.pad;
+            }
+
+            buf = (buf << 8) | byte;
+            bits += 8;
+        }
+
+        self.pos = pos;
+        self.buf = buf;
+        self.bits = bits;
+    }
+
+    // Decodes the block of a component at a position in blocks, and
+    // stores its samples. Returns false if the data is malformed.
+    decode_block(self, comp, bx, by)
+    {
+        let basis = BASIS;
+        let block = self.block;
+        let quant = comp.quant;
+        let var buf = self.buf;
+        let var bits = self.bits;
+
+        // More than enough for a 16-bit code and its 15-bit value
+        if (bits < 32) {
+            self.fill();
+            buf = self.buf;
+            bits = self.bits;
+        }
+
+        // The DC coefficient is the mean of the block. Its symbol is the
+        // size in bits of its difference with that of the last block.
+        let var entry = comp.dc_table.fast[(buf >> (bits - FAST_BITS)) & 511];
+        if (entry == 0) {
+            entry = decode_long_code(comp.dc_table, (buf >> (bits - 16)) & 0xFFFF);
+        }
+
+        let dc_size = entry & 255;
+        if (entry == 0 || dc_size > 11) {
+            return false;
+        }
+        bits -= entry >> 8;
+
+        if (dc_size > 0) {
+            // Values with a leading zero bit are the negative ones
+            bits -= dc_size;
+            let var value = (buf >> bits) & ((1 << dc_size) - 1);
+            if (value < (1 << (dc_size - 1))) {
+                value -= (1 << dc_size) - 1;
+            }
+            comp.pred += value;
+        }
+
+        block.zero_fill();
+        block.axpy_f32(0, 1, basis, 0, 1, 64, comp.pred * quant[0]);
+
+        // The AC coefficients. A symbol holds a count of zero coefficients
+        // to skip in its top 4 bits, and the size in bits of the value
+        // of the one that follows in its low 4 bits.
+        let ac_table = comp.ac_table;
+        let ac_fast = ac_table.fast;
+        let var k = 1;
+
+        while (k < 64) {
+            if (bits < 32) {
+                self.buf = buf;
+                self.bits = bits;
+                self.fill();
+                buf = self.buf;
+                bits = self.bits;
+            }
+
+            entry = ac_fast[(buf >> (bits - FAST_BITS)) & 511];
+            if (entry == 0) {
+                entry = decode_long_code(ac_table, (buf >> (bits - 16)) & 0xFFFF);
+                if (entry == 0) {
+                    return false;
+                }
+            }
+            bits -= entry >> 8;
+
+            let size = entry & 15;
+            if (size == 0) {
+                // Sixteen zeros, or else the rest of the block is zeros
+                if ((entry & 255) != 0xF0) {
+                    break;
+                }
+                k += 16;
+                continue;
+            }
+
+            k += (entry >> 4) & 15;
+            if (k > 63) {
+                return false;
+            }
+
+            bits -= size;
+            let var value = (buf >> bits) & ((1 << size) - 1);
+            if (value < (1 << (size - 1))) {
+                value -= (1 << size) - 1;
+            }
+
+            block.axpy_f32(0, 1, basis, k * 64, 1, 64, value * quant[k]);
+            ++k;
+        }
+
+        self.buf = buf;
+        self.bits = bits;
+
+        // Copy the rows of the block to their place
+        let samples = comp.samples;
+        let pitch = comp.stride * 4;
+        let var dst = by * 8 * pitch + bx * 32;
+        for (let var src = 0; src < 256; src += 32) {
+            samples.memcpy(dst, block, src, 32);
+            dst += pitch;
+        }
+
+        return true;
+    }
+
+    // Moves past a restart marker, which the scan data is cut by so that
+    // decoding can pick up again after an error. Returns false if the
+    // marker is not the one expected.
+    restart(self, number)
+    {
+        // Bits of the padding must not have been used as data
+        if (self.pad * 8 > self.bits) {
+            return false;
+        }
+
+        self.buf = 0;
+        self.bits = 0;
+        self.pad = 0;
+
+        // Differences between DC coefficients start over
+        for (let var i = 0; i < self.components.len; ++i) {
+            self.components[i].pred = 0;
+        }
+
+        return self.next_marker() == MARKER_RST0 + number;
+    }
+
+    // Reads a scan header, and decodes the blocks of its components from
+    // the data that follows
+    read_scan(self, start, end)
+    {
+        let data = self.data;
+
+        if (self.components.len == 0 || start >= end) {
+            return false;
+        }
+
+        let count = data[start];
+        if (count < 1 || count > self.components.len || start + 4 + 2 * count != end) {
+            return false;
+        }
+
+        // The components in the scan, and the Huffman tables of each
+        let scan = [];
+        for (let var i = 0; i < count; ++i) {
+            let id = data[start + 1 + 2 * i];
+            let dc_id = data[start + 2 + 2 * i] >> 4;
+            let ac_id = data[start + 2 + 2 * i] & 15;
+            if (dc_id > 3 || ac_id > 3) {
+                return false;
+            }
+
+            let var comp = nil;
+            for (let var j = 0; j < self.components.len; ++j) {
+                if (self.components[j].id == id) {
+                    comp = self.components[j];
+                    break;
+                }
+            }
+            if (comp == nil) {
+                return false;
+            }
+
+            comp.quant = self.quant[comp.quant_id];
+            comp.dc_table = self.dc_tables[dc_id];
+            comp.ac_table = self.ac_tables[ac_id];
+            if (comp.quant == nil || comp.dc_table == nil || comp.ac_table == nil) {
+                return false;
+            }
+
+            comp.pred = 0;
+            comp.scanned = true;
+            scan.push(comp);
+        }
+
+        // A sequential scan holds all 64 coefficients, at full precision
+        if (data[end - 3] != 0 || data[end - 2] != 63 || data[end - 1] != 0) {
+            return false;
+        }
+
+        self.pos = end;
+        self.buf = 0;
+        self.bits = 0;
+        self.pad = 0;
+
+        // A scan of one component stores its blocks one by one, and
+        // only those that cover the image
+        let single = count == 1;
+        let cols = single ? scan[0].block_cols : self.mcu_cols;
+        let rows = single ? scan[0].block_rows : self.mcu_rows;
+        let interval = self.restart_interval;
+        let var until_restart = interval;
+        let var restart_number = 0;
+
+        for (let var my = 0; my < rows; ++my) {
+            for (let var mx = 0; mx < cols; ++mx) {
+                if (interval > 0) {
+                    if (until_restart == 0) {
+                        if (!self.restart(restart_number)) {
+                            return false;
+                        }
+                        restart_number = (restart_number + 1) & 7;
+                        until_restart = interval;
+                    }
+                    --until_restart;
+                }
+
+                if (single) {
+                    if (!self.decode_block(scan[0], mx, my)) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                // An MCU holds h by v blocks of each component
+                for (let var i = 0; i < count; ++i) {
+                    let comp = scan[i];
+                    let bx = mx * comp.h;
+                    let by = my * comp.v;
+
+                    for (let var v = 0; v < comp.v; ++v) {
+                        for (let var h = 0; h < comp.h; ++h) {
+                            if (!self.decode_block(comp, bx + h, by + v)) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The data was cut short if bits of the padding were used
+        return self.pad * 8 <= self.bits;
+    }
+
+    // Converts the samples of the components to the pixels of an image
+    to_image(self)
+    {
+        let img = Image(self.width, self.height);
+        let out = img.bytes;
+        let width = self.width;
+        let comps = self.components;
+        let grey = comps.len == 1;
+
+        // Three components are Y, Cb and Cr unless an Adobe segment
+        // says they are R, G and B, or their identifiers spell it
+        let var rgb = false;
+        if (!grey) {
+            rgb = self.adobe_transform == 0;
+            if (self.adobe_transform < 0) {
+                rgb = comps[0].id == 82 && comps[1].id == 71 && comps[2].id == 66;
+            }
+        }
+
+        // One row of each color channel, as f32 values
+        let red = ByteArray.with_size(width * 4);
+        let green = ByteArray.with_size(width * 4);
+        let blue = ByteArray.with_size(width * 4);
+
+        // Rows start as the bit pattern of 128.5. Samples are centered
+        // on zero, and the half makes floor() round to nearest.
+        red.store_f32(0, 128.5);
+        let bias = red.load_u32(0);
+
+        for (let var y = 0; y < self.height; ++y) {
+            let row = y * width;
+            red.fill_u32(0, width, bias);
+
+            if (grey) {
+                add_row(red, comps[0], y, width, 1.0);
+
+                for (let var x = 0; x < width; ++x) {
+                    let level = red.get_f32(x).floor().clip(0, 255);
+                    out.set_u32(row + x, 0xFF_00_00_00 | (level * 0x01_01_01));
+                }
+
+                continue;
+            }
+
+            green.fill_u32(0, width, bias);
+            blue.fill_u32(0, width, bias);
+
+            if (rgb) {
+                add_row(red, comps[0], y, width, 1.0);
+                add_row(green, comps[1], y, width, 1.0);
+                add_row(blue, comps[2], y, width, 1.0);
+            } else {
+                add_row(red, comps[0], y, width, 1.0);
+                add_row(green, comps[0], y, width, 1.0);
+                add_row(blue, comps[0], y, width, 1.0);
+                add_row(green, comps[1], y, width, -0.344136);
+                add_row(blue, comps[1], y, width, 1.772);
+                add_row(red, comps[2], y, width, 1.402);
+                add_row(green, comps[2], y, width, -0.714136);
+            }
+
+            for (let var x = 0; x < width; ++x) {
+                let var r = red.get_f32(x).floor();
+                let var g = green.get_f32(x).floor();
+                let var b = blue.get_f32(x).floor();
+
+                // Clip to a byte, which few values need
+                if (((r | g | b) & -256) != 0) {
+                    r = r.clip(0, 255);
+                    g = g.clip(0, 255);
+                    b = b.clip(0, 255);
+                }
+
+                out.set_u32(row + x, 0xFF_00_00_00 | (r << 16) | (g << 8) | b);
+            }
+        }
+
+        return img;
+    }
+
+    // Walks the segments of the file, each one a marker, a size and a
+    // body, and decodes the image. Returns nil on failure.
+    decode(self)
+    {
+        let data = self.data;
+
+        loop {
+            let marker = self.next_marker();
+            if (marker == MARKER_EOI) {
+                break;
+            }
+            if (marker < 0 || marker == MARKER_SOI) {
+                return nil;
+            }
+
+            // These markers stand alone, the others start a segment
+            if (marker <= 1 || (marker >= MARKER_RST0 && marker <= MARKER_RST7)) {
+                continue;
+            }
+
+            if (self.pos + 2 > data.len) {
+                return nil;
+            }
+            let size = self.u16(self.pos);
+            let start = self.pos + 2;
+            let end = self.pos + size;
+            if (size < 2 || end > data.len) {
+                return nil;
+            }
+
+            self.pos = end;
+            let var ok = true;
+
+            if (marker == MARKER_DQT) {
+                ok = self.read_quant(start, end);
+            } else if (marker == MARKER_DHT) {
+                ok = self.read_huffman(start, end);
+            } else if (marker == MARKER_SOF0 || marker == MARKER_SOF1) {
+                ok = self.read_frame(start, end);
+            } else if (marker >= MARKER_SOF0 && marker <= MARKER_SOF15) {
+                // Progressive, lossless or arithmetic-coded
+                return nil;
+            } else if (marker == MARKER_SOS) {
+                ok = self.read_scan(start, end);
+            } else if (marker == MARKER_DRI) {
+                ok = size == 4;
+                if (ok) {
+                    self.restart_interval = self.u16(start);
+                }
+            } else if (marker == MARKER_APP14 && size >= 14) {
+                // An Adobe segment starts with that name
+                if (data.load_u32(start) == 0x626F6441 && data[start + 4] == 0x65) {
+                    self.adobe_transform = data[start + 11];
+                }
+            }
+
+            if (!ok) {
+                return nil;
+            }
+        }
+
+        // Every component must have been stored by a scan
+        if (self.components.len == 0) {
+            return nil;
+        }
+        for (let var i = 0; i < self.components.len; ++i) {
+            if (!self.components[i].scanned) {
+                return nil;
+            }
+        }
+
+        return self.to_image();
+    }
+}
+
+// Decodes the bytes of a JPEG file into an Image. Returns nil if the data
+// is not a JPEG file, is malformed or cut short, or is in a format that
+// is not supported, see the top of this file.
+fun decode_jpeg(data)
+{
+    assert(data instanceof ByteArray);
+
+    if (data.len < 4 || data[0] != 0xFF || data[1] != MARKER_SOI) {
+        return nil;
+    }
+
+    return JPEGDecoder(data).decode();
+}
+
+// Reads a JPEG file into an Image, see decode_jpeg() for the formats handled.
+// Returns nil if the file can't be read or is not in one of these formats.
+fun load_jpeg(path)
+{
+    let data = $read_file(path);
+
+    if (data == nil) {
+        return nil;
+    }
+
+    return decode_jpeg(data);
+}

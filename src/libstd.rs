@@ -25,6 +25,7 @@ pub fn get_source(unit_key: &str) -> Option<&'static str>
         "hll" => include_str!("../lib/std/hll.psh"),
         "image" => include_str!("../lib/std/image.psh"),
         "inflate" => include_str!("../lib/std/inflate.psh"),
+        "jpeg" => include_str!("../lib/std/jpeg.psh"),
         "json" => include_str!("../lib/std/json.psh"),
         "noise" => include_str!("../lib/std/noise.psh"),
         "png" => include_str!("../lib/std/png.psh"),
