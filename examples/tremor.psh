@@ -341,6 +341,23 @@ let MAX_VIS = 128;
 let vis_x0 = Array.with_size(MAX_VIS, 0);
 let vis_x1 = Array.with_size(MAX_VIS, 0);
 
+// TODO: meshes. The plan is to keep this one s-buffer and give it a second
+// insert, as examples/model_viewer.psh has: the triangles of a mesh have no
+// BSP order among themselves, so their spans carry 1/z, as its value at x = 0
+// and its step per pixel, and a new one takes the pixels where it is nearer.
+//
+// A mesh is drawn when the traversal reaches where it stands. Faces met
+// before it are nearer and faces met after it are further, so a face needs
+// no real depth: `sbuf_insert` stays as it is, and only has to store a 1/z
+// larger than any real one in each interval it makes or widens. The mesh
+// insert then loses to faces with no special case, and once the mesh is done
+// its spans are plain coverage that `sbuf_insert` merges like any other.
+//
+// Only `sbuf_insert` may mark a scanline full: one covered in part by the
+// spans of a mesh can still take nearer spans of that mesh. And those spans
+// are not merged, so `sbuf_covers_rect` misses what a mesh hides until they
+// are, which costs time but not correctness.
+
 // --- Faces held back to blend ---
 //
 // A face you can see through cannot be drawn where it is met, because what it
