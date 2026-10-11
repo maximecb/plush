@@ -370,7 +370,7 @@ fun floor_pow2(n) {
 // A texture, and the masks the span loop wraps its coordinates with. The
 // span loop needs power-of-two sizes, so an image of another size is scaled
 // down to the nearest one, and to max_size if that is not zero.
-class Texture {
+class MeshTexture {
     init(self, img, max_size) {
         let var w = floor_pow2(img.width);
         let var h = floor_pow2(img.height);
@@ -1076,17 +1076,12 @@ class Skeleton
 
 // --- Models ---
 
-// The number of poses per second for an animation whose keys do not tell
-// a rate, which is one that has no channel with more than two keys
-let BAKE_FPS = 12;
-
 // Floats per vertex of a pose: a position and a normal
 let POSE_FLOATS = 6;
 
 // The range of distances a model can span is cut into this many steps, to
 // sort its triangles by step with a counting sort
 let NUM_BUCKETS = 2048;
-let bucket_pos = Array.with_size(NUM_BUCKETS, 0);
 
 // One animation of a model, as the pose of the model at regular times
 class Clip
@@ -1115,6 +1110,33 @@ class Clip
     }
 }
 
+// How view space turns into pixels: the distance to the screen in pixels,
+// and the pixel where the axis of the eye meets it
+class Projection
+{
+    init(self, focal, center_x, center_y)
+    {
+        self.focal = focal;
+        self.center_x = center_x;
+        self.center_y = center_y;
+    }
+}
+
+// The light a model is lit by, in view space: the unit vector it comes
+// from, the level a vertex facing away from it is left with, and what it
+// adds to one facing it squarely. A level of one leaves the texture as it is.
+class Light
+{
+    init(self, x, y, z, ambient, diffuse)
+    {
+        self.x = x;
+        self.y = y;
+        self.z = z;
+        self.ambient = ambient;
+        self.diffuse = diffuse;
+    }
+}
+
 // A model that can be posed and drawn. Everything about one kind of model
 // is in here, so that several of them can be on screen: what is loaded
 // once, and the working arrays that drawing one takes.
@@ -1127,7 +1149,11 @@ class Clip
 // joints.
 //
 // A model is made with Model.load(), which reads it from a file. To draw
-// it: set_pose(), then transform(), then draw(). The same
+// it: set_pose(), then transform(), then sort(). That leaves the screen
+// position, depth and light of its vertices in vX, vY, vD, vW, vUZ, vVZ and
+// vLZ, and the triangles that face the eye in draw_order, nearest first,
+// tris_drawn of them. Drawing those is up to the renderer, which reads
+// indices and tri_tex for the corners and texture of each. The same
 // Model can be drawn several times in a frame, each time with another
 // pose and transform, as the working arrays are only used in between.
 class Model
@@ -1145,7 +1171,7 @@ class Model
         // Textures, and that of each triangle
         self.textures = [];
         for (let var i = 0; i < mesh.textures.len; ++i) {
-            self.textures.push(Texture(mesh.textures[i], max_tex_size));
+            self.textures.push(MeshTexture(mesh.textures[i], max_tex_size));
         }
         self.tri_tex = Array.with_size(num_tris, nil);
         for (let var t = 0; t < num_tris; ++t) {
@@ -1199,7 +1225,9 @@ class Model
         // Distance of the middle of the model in the current transform
         self.mid_depth = 0.0;
 
-        // Triangles that face the eye, before and after sorting
+        // Triangles that face the eye, before and after sorting, and
+        // where each step of the sort starts
+        self.bucket_pos = Array.with_size(NUM_BUCKETS, 0);
         self.front_tri = Array.with_size(num_tris, 0);
         self.front_bucket = Array.with_size(num_tris, 0);
         self.draw_order = Array.with_size(num_tris, 0);
@@ -1231,8 +1259,10 @@ class Model
             }
         }
 
-        let bake_fps = src_fps > 0.0 ? src_fps : BAKE_FPS.to_f();
-        let num_frames = (duration * bake_fps + 0.5).floor().max(1);
+        // One pose for each key of that rate. With no channel that has a
+        // key between its ends there is no rate, and the clip is one pose.
+        let var num_frames = 1;
+        if (src_fps > 0.0) num_frames = (duration * src_fps + 0.5).floor().max(1);
         let frame_floats = self.num_verts * POSE_FLOATS;
         let frames = ByteArray.with_size(num_frames * frame_floats * 4);
         let positions = mesh.positions;
@@ -1387,8 +1417,16 @@ class Model
     // model there. It must not scale, and must turn the right-handed
     // space of the model into this left-handed one, as the side a triangle
     // is seen from is told from which way around its corners are on screen.
-    transform(self, m)
+    // The projection and the light are those of a Projection and a Light.
+    transform(self, m, proj, light)
     {
+        let focal = proj.focal;
+        let center_x = proj.center_x;
+        let center_y = proj.center_y;
+        let light_x = light.x; let light_y = light.y; let light_z = light.z;
+        let ambient = light.ambient;
+        let diffuse = light.diffuse;
+
         let pose = self.pose;
         let vX = self.vX; let vY = self.vY; let vD = self.vD; let vW = self.vW;
         let vUZ = self.vUZ; let vVZ = self.vVZ; let vLZ = self.vLZ;
@@ -1409,8 +1447,8 @@ class Model
 
             let depth = m8 * x + m9 * y + m10 * z + m11;
             let w = 1.0 / depth;
-            vX[i] = CENTER_X + FOCAL * (m0 * x + m1 * y + m2 * z + m3) * w;
-            vY[i] = CENTER_Y - FOCAL * (m4 * x + m5 * y + m6 * z + m7) * w;
+            vX[i] = center_x + focal * (m0 * x + m1 * y + m2 * z + m3) * w;
+            vY[i] = center_y - focal * (m4 * x + m5 * y + m6 * z + m7) * w;
             vD[i] = depth;
             vW[i] = w;
 
@@ -1418,11 +1456,11 @@ class Model
             let nx = pose.get_f32(p + 3);
             let ny = pose.get_f32(p + 4);
             let nz = pose.get_f32(p + 5);
-            let var facing = (m0 * nx + m1 * ny + m2 * nz) * LIGHT_X
-                           + (m4 * nx + m5 * ny + m6 * nz) * LIGHT_Y
-                           + (m8 * nx + m9 * ny + m10 * nz) * LIGHT_Z;
+            let var facing = (m0 * nx + m1 * ny + m2 * nz) * light_x
+                           + (m4 * nx + m5 * ny + m6 * nz) * light_y
+                           + (m8 * nx + m9 * ny + m10 * nz) * light_z;
             if (facing < 0.0) facing = 0.0;
-            let level = (AMBIENT + DIFFUSE * facing) * 255.0;
+            let level = (ambient + diffuse * facing) * 255.0;
 
             vUZ[i] = vert_u[i] * w;
             vVZ[i] = vert_v[i] * w;
@@ -1441,6 +1479,7 @@ class Model
         let front_tri = self.front_tri;
         let front_bucket = self.front_bucket;
         let draw_order = self.draw_order;
+        let bucket_pos = self.bucket_pos;
 
         // Three times the distance of the nearest point of the sphere
         // around the model, as the keys are sums over three corners
@@ -1486,18 +1525,6 @@ class Model
         }
 
         self.tris_drawn = count;
-    }
-
-    // Draws the model as transform() left it, through the s-buffer. The
-    // whole of it has to be in front of the eye.
-    draw(self)
-    {
-        self.sort();
-
-        let draw_order = self.draw_order;
-        for (let var i = 0; i < self.tris_drawn; ++i) {
-            draw_triangle(self, draw_order[i]);
-        }
     }
 
     // Loads a binary glTF file into a new Model, with textures scaled down
@@ -1939,6 +1966,21 @@ fun draw_triangle(model, t) {
     raster_triangle();
 }
 
+// Draw a model that transform() has left in view space, through the
+// s-buffer. The whole of it has to be in front of the eye.
+fun draw_model(model) {
+    model.sort();
+
+    let draw_order = model.draw_order;
+    for (let var i = 0; i < model.tris_drawn; ++i) {
+        draw_triangle(model, draw_order[i]);
+    }
+}
+
+// How the model is seen, and lit
+let projection = Projection(FOCAL, CENTER_X, CENTER_Y);
+let light = Light(LIGHT_X, LIGHT_Y, LIGHT_Z, AMBIENT, DIFFUSE);
+
 // Draw the model into the frame buffer
 fun render_frame() {
     frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, BG_COLOR);
@@ -1947,8 +1989,8 @@ fun render_frame() {
 
     update_view();
     model.set_pose(clip_idx, clip_time);
-    model.transform(view_mat);
-    model.draw();
+    model.transform(view_mat, projection, light);
+    draw_model(model);
 }
 
 // --- Screenshots ---
