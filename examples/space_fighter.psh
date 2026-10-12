@@ -905,36 +905,42 @@ fun lay_pipes() {
 
 let NUM_SLOTS = 40;
 let MAX_NODES = 1600;
-let MAX_POLYS = 800;
-let POLY_VERTS = 5;
+let MAX_POLYS = 1200;
+let POLY_VERTS = 8;
 
 // How many times a cell may be split, and the tallest a stack of blocks
 // can get
 let MAX_DEPTH = 3;
-let MAX_BLOCK = 6.0;
+let MAX_BLOCK = 16.0;
 
 // How far a block may stand out of the one under it, as a fraction of its
 // width, and how likely one is to be split, both by depth. The chance of
 // a split is the first number in a bare patch, rising by the second in a
 // busy one.
-let RAISE = [0.10, 0.22, 0.32, 0.40];
+let RAISE = [0.40, 0.88, 1.28, 1.60];
 let SPLIT_BASE = [0.15, 0.10, 0.0];
 let SPLIT_BUSY = [0.60, 0.50, 0.35];
 
-// A bare cell near a pipe is split anyway when the glow changes by this
-// much across it, so that the light falls off in steps too small to see
-let GLOW_SPLIT = 0.10;
+// A pipe's glow is brightest on what touches it and is gone within a few
+// meters, this far from its surface for a pipe of no width and that much
+// further for each meter of radius
+let GLOW_FALL = 2.5;
+let GLOW_FALL_R = 1.5;
+let GLOW_LEVEL = 1.0;
 
-// How far a pipe's glow reaches for its radius, and how bright it is
-let GLOW_REACH = 3.0;
-let GLOW_LEVEL = 0.95;
+// What a full measure of red light adds to a color
+let GLOW_R = 150.0;
+let GLOW_G = 10.0;
+let GLOW_B = 8.0;
 
 // The section each slot holds
 let slot_section = Array.with_size(NUM_SLOTS, -1);
 
 // For each node: its corner on the wall, its width, how far it stands out,
 // the first of its four children if it has any, and the color of its top
-// and of the sides that face up and down the tunnel and across the wall
+// and of the sides that face up and down the tunnel and across the wall.
+// The top's color leaves out the glow of the pipes, which is kept for each
+// of its corners and blended across it, along with whether there is any.
 let nd_u = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
 let nd_z = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
 let nd_size = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
@@ -945,6 +951,11 @@ let nd_front = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
 let nd_back = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
 let nd_lo = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
 let nd_hi = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
+let nd_glow0 = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
+let nd_glow1 = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
+let nd_glow2 = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
+let nd_glow3 = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
+let nd_lit = Array.with_size(NUM_SLOTS * MAX_NODES, false);
 
 // For each cell of a section: its root node, and its share of the faces
 // of the pipes
@@ -978,8 +989,8 @@ let var gen_polys = 0;
 let var gen_wall = 0;
 
 // The axes of the pipes near the section being built, each a line along
-// one of the world's axes from a low end to a high end, with how bright it
-// is and one over the square of how far its glow reaches
+// one of the world's axes from a low end to a high end, with its radius
+// and one over how far its glow reaches from its surface
 let MAX_NEAR = 96;
 let gl_x0 = Array.with_size(MAX_NEAR, 0.0);
 let gl_y0 = Array.with_size(MAX_NEAR, 0.0);
@@ -987,6 +998,7 @@ let gl_z0 = Array.with_size(MAX_NEAR, 0.0);
 let gl_x1 = Array.with_size(MAX_NEAR, 0.0);
 let gl_y1 = Array.with_size(MAX_NEAR, 0.0);
 let gl_z1 = Array.with_size(MAX_NEAR, 0.0);
+let gl_r = Array.with_size(MAX_NEAR, 0.0);
 let gl_inv = Array.with_size(MAX_NEAR, 0.0);
 let gl_id = Array.with_size(MAX_NEAR, -1);
 let var gl_n = 0;
@@ -1004,26 +1016,26 @@ fun note_pipe(id) {
     gl_n = gl_n + 1;
     gl_id[i] = id;
 
-    // The axis runs through the middle of the half that shows
+    // A pipe rests on the wall, so its axis is its radius out from it
     if (pk_kind[id] == PIPE_ALONG) {
-        wall_point(w, pk_at[id], r * 0.5);
+        wall_point(w, pk_at[id], r);
         gl_x0[i] = wp_x; gl_x1[i] = wp_x;
         gl_y0[i] = wp_y; gl_y1[i] = wp_y;
         gl_z0[i] = pk_lo[id] * CELL;
         gl_z1[i] = (pk_hi[id] + 1) * CELL;
     } else {
-        wall_point(w, WALL_U0[w] + pk_lo[id] * CELL, r * 0.5);
+        wall_point(w, WALL_U0[w] + pk_lo[id] * CELL, r);
         let xa = wp_x;
         let ya = wp_y;
-        wall_point(w, WALL_U0[w] + (pk_hi[id] + 1) * CELL, r * 0.5);
+        wall_point(w, WALL_U0[w] + (pk_hi[id] + 1) * CELL, r);
         gl_x0[i] = xa.min(wp_x); gl_x1[i] = xa.max(wp_x);
         gl_y0[i] = ya.min(wp_y); gl_y1[i] = ya.max(wp_y);
         gl_z0[i] = pk_at[id];
         gl_z1[i] = pk_at[id];
     }
 
-    let reach = GLOW_REACH * r + 5.0;
-    gl_inv[i] = 1.0 / (reach * reach);
+    gl_r[i] = r;
+    gl_inv[i] = 1.0 / (GLOW_FALL + GLOW_FALL_R * r);
 }
 
 // How much red light reaches a point on a surface that faces a given way,
@@ -1036,13 +1048,17 @@ fun red_at(x, y, z, nx, ny, nz) {
         let dx = x.clip(gl_x0[i], gl_x1[i]) - x;
         let dy = y.clip(gl_y0[i], gl_y1[i]) - y;
         let dz = z.clip(gl_z0[i], gl_z1[i]) - z;
-        let d2 = dx * dx + dy * dy + dz * dz;
+        let dist = (dx * dx + dy * dy + dz * dz + 0.0001).sqrt();
+
+        // Nothing at all past the reach of the glow
+        let t = 1.0 - (dist - gl_r[i]) * gl_inv[i];
+        if (t <= 0.0) continue;
 
         let var facing = 0.15;
-        let toward = (dx * nx + dy * ny + dz * nz) / (d2 + 0.0001).sqrt();
+        let toward = (dx * nx + dy * ny + dz * nz) / dist;
         if (toward > 0.0) facing = 0.45 + 0.55 * toward;
 
-        sum = sum + GLOW_LEVEL * facing / (1.0 + d2 * gl_inv[i]);
+        sum = sum + GLOW_LEVEL * facing * t.min(1.0) * t.min(1.0);
     }
 
     return sum.min(1.0);
@@ -1097,9 +1113,25 @@ fun build_node(n, u0, z0, size, depth, base_h, flat) {
     // one ends and the next begins when they are level
     let g = 1.0 / (size * 0.7);
     let tone = 0.86 + 0.34 * perlin3d(x * g + 9.1, y * g, zc * g, TONE_SEED + depth);
-    let white = 0.31 + 0.12 * light_noise.sample3d(x, y, zc);
+    let white = 0.236 + 0.091 * light_noise.sample3d(x, y, zc);
 
-    nd_top[n] = face_color(tone, white, uc, h + 0.3, zc, 0.0, 1.0, 0.0);
+    // The glow at each corner of the top, in the order they are drawn in
+    let nx = WALL_HX[w];
+    let ny = WALL_HY[w];
+    wall_point(w, u0, h);
+    let glow0 = red_at(wp_x, wp_y, z0, nx, ny, 0.0);
+    wall_point(w, u0 + size, h);
+    let glow1 = red_at(wp_x, wp_y, z0, nx, ny, 0.0);
+    let glow2 = red_at(wp_x, wp_y, z0 + size, nx, ny, 0.0);
+    wall_point(w, u0, h);
+    let glow3 = red_at(wp_x, wp_y, z0 + size, nx, ny, 0.0);
+    nd_glow0[n] = glow0;
+    nd_glow1[n] = glow1;
+    nd_glow2[n] = glow2;
+    nd_glow3[n] = glow3;
+    nd_lit[n] = glow0 + glow1 + glow2 + glow3 > 0.004;
+
+    nd_top[n] = metal_color(tone, white, 0.0);
     if (h > 0.0) {
         let half = size * 0.5 + 0.3;
         let mid = h * 0.5;
@@ -1113,19 +1145,15 @@ fun build_node(n, u0, z0, size, depth, base_h, flat) {
 
     let var split = false;
     if (flat) {
-        // Split where the glow is uneven
-        if (depth < 2 && gl_n > 0) {
-            let hx = WALL_HX[w];
-            let hy = WALL_HY[w];
-            let var lo = red_at(x, y, zc, hx, hy, 0.0);
-            let var hi = lo;
-            for (let var k = 0; k < 4; ++k) {
-                wall_point(w, u0 + (k & 1) * size, 0.0);
-                let red = red_at(wp_x, wp_y, z0 + (k >> 1) * size, hx, hy, 0.0);
-                lo = lo.min(red);
-                hi = hi.max(red);
+        // The glow is only known at corners, so there have to be enough
+        // of them near a pipe to catch it. A cell is always split once,
+        // and then again wherever any of the glow lands on it.
+        split = depth == 0;
+        if (depth == 1) {
+            for (let var k = 0; k < 9 && !split; ++k) {
+                wall_point(w, u0 + (k % 3) * size * 0.5, 0.0);
+                split = red_at(wp_x, wp_y, z0 + k.idiv(3) * size * 0.5, nx, ny, 0.0) > 0.0;
             }
-            split = hi - lo > GLOW_SPLIT;
         }
     } else {
         let s = 1.0 / (size * 1.1);
@@ -1149,10 +1177,12 @@ let fv_u = Array.with_size(POLY_VERTS, 0.0);
 let fv_h = Array.with_size(POLY_VERTS, 0.0);
 let fv_z = Array.with_size(POLY_VERTS, 0.0);
 
+// A pipe is the same full red all over
+let PIPE_COLOR = 0xFFFF1408;
+
 // Add a face of a pipe from the corners in the fv arrays, given the way it
-// faces in the wall's own terms. Its color follows how far it is turned
-// towards the middle of the tunnel, which is what makes the pipe look round.
-fun add_pipe_face(count, nu, nh, nz, shade) {
+// faces in the wall's own terms
+fun add_pipe_face(count, nu, nh, nz) {
     if (gen_polys >= MAX_POLYS) return;
 
     let w = gen_wall;
@@ -1171,14 +1201,17 @@ fun add_pipe_face(count, nu, nh, nz, shade) {
     pp_ny[p] = nu * WALL_UY[w] + nh * WALL_HY[w];
     pp_nz[p] = nz;
 
-    let r = (255.0 * shade).floor();
-    let g = ((14.0 + 38.0 * shade * shade) * shade).floor();
-    let b = (16.0 * shade).floor();
-    pp_color[p] = 0xFF000000 | (r << 16) | (g << 8) | b;
+    pp_color[p] = PIPE_COLOR;
 }
 
-// The half of a pipe that shows is half of an octagon, which is four faces
-let PIPE_SIDES = 4;
+// A pipe is eight sided
+let PIPE_SIDES = 8;
+
+// The angle of one of a pipe's corners about its axis, turned so that a
+// flat side rests on the wall
+fun pipe_angle(j) {
+    return (j + 0.5) * 2.0 * PI / PIPE_SIDES;
+}
 
 // Add the part of a pipe along the tunnel that crosses a row
 fun add_along(id, row) {
@@ -1188,27 +1221,27 @@ fun add_along(id, row) {
     let z1 = z0 + CELL;
 
     for (let var j = 0; j < PIPE_SIDES; ++j) {
-        let a0 = PI - j * PI / PIPE_SIDES;
-        let a1 = PI - (j + 1) * PI / PIPE_SIDES;
+        let a0 = pipe_angle(j);
+        let a1 = pipe_angle(j + 1);
         let am = (a0 + a1) * 0.5;
-        fv_u[0] = uc + r * a0.cos(); fv_h[0] = r * a0.sin(); fv_z[0] = z0;
-        fv_u[1] = uc + r * a1.cos(); fv_h[1] = r * a1.sin(); fv_z[1] = z0;
+        fv_u[0] = uc + r * a0.cos(); fv_h[0] = r + r * a0.sin(); fv_z[0] = z0;
+        fv_u[1] = uc + r * a1.cos(); fv_h[1] = r + r * a1.sin(); fv_z[1] = z0;
         fv_u[2] = fv_u[1]; fv_h[2] = fv_h[1]; fv_z[2] = z1;
         fv_u[3] = fv_u[0]; fv_h[3] = fv_h[0]; fv_z[3] = z1;
-        add_pipe_face(4, am.cos(), am.sin(), 0.0, 0.5 + 0.5 * am.sin());
+        add_pipe_face(4, am.cos(), am.sin(), 0.0);
     }
 
     // The ends are closed off
     for (let var end = 0; end < 2; ++end) {
         if (end == 0 && row != pk_lo[id]) continue;
         if (end == 1 && row != pk_hi[id]) continue;
-        for (let var j = 0; j <= PIPE_SIDES; ++j) {
-            let a = PI - j * PI / PIPE_SIDES;
+        for (let var j = 0; j < PIPE_SIDES; ++j) {
+            let a = pipe_angle(j);
             fv_u[j] = uc + r * a.cos();
-            fv_h[j] = r * a.sin();
+            fv_h[j] = r + r * a.sin();
             fv_z[j] = z0 + end * CELL;
         }
-        add_pipe_face(PIPE_SIDES + 1, 0.0, 0.0, end * 2.0 - 1.0, 0.7);
+        add_pipe_face(PIPE_SIDES, 0.0, 0.0, end * 2.0 - 1.0);
     }
 }
 
@@ -1221,27 +1254,27 @@ fun add_across(id, cell) {
     let u1 = u0 + CELL;
 
     for (let var j = 0; j < PIPE_SIDES; ++j) {
-        let a0 = PI - j * PI / PIPE_SIDES;
-        let a1 = PI - (j + 1) * PI / PIPE_SIDES;
+        let a0 = pipe_angle(j);
+        let a1 = pipe_angle(j + 1);
         let am = (a0 + a1) * 0.5;
-        fv_u[0] = u0; fv_h[0] = r * a0.sin(); fv_z[0] = zc + r * a0.cos();
-        fv_u[1] = u0; fv_h[1] = r * a1.sin(); fv_z[1] = zc + r * a1.cos();
+        fv_u[0] = u0; fv_h[0] = r + r * a0.sin(); fv_z[0] = zc + r * a0.cos();
+        fv_u[1] = u0; fv_h[1] = r + r * a1.sin(); fv_z[1] = zc + r * a1.cos();
         fv_u[2] = u1; fv_h[2] = fv_h[1]; fv_z[2] = fv_z[1];
         fv_u[3] = u1; fv_h[3] = fv_h[0]; fv_z[3] = fv_z[0];
-        add_pipe_face(4, 0.0, am.sin(), am.cos(), 0.5 + 0.5 * am.sin());
+        add_pipe_face(4, 0.0, am.sin(), am.cos());
     }
 
     // An end that stops short of the edge of the wall is closed off
     for (let var end = 0; end < 2; ++end) {
         if (end == 0 && (cell != pk_lo[id] || cell == 0)) continue;
         if (end == 1 && (cell != pk_hi[id] || cell == WALL_CELLS[w] - 1)) continue;
-        for (let var j = 0; j <= PIPE_SIDES; ++j) {
-            let a = PI - j * PI / PIPE_SIDES;
+        for (let var j = 0; j < PIPE_SIDES; ++j) {
+            let a = pipe_angle(j);
             fv_u[j] = u0 + end * CELL;
-            fv_h[j] = r * a.sin();
+            fv_h[j] = r + r * a.sin();
             fv_z[j] = zc + r * a.cos();
         }
-        add_pipe_face(PIPE_SIDES + 1, end * 2.0 - 1.0, 0.0, 0.0, 0.7);
+        add_pipe_face(PIPE_SIDES, end * 2.0 - 1.0, 0.0, 0.0);
     }
 }
 
@@ -1348,6 +1381,11 @@ let MAX_CORNERS = 8;
 let tX = Array.with_size(MAX_CORNERS, 0.0);
 let tY = Array.with_size(MAX_CORNERS, 0.0);
 let tZ = Array.with_size(MAX_CORNERS, 0.0);
+
+// The color at each of those corners, for a face that is blended
+let tR = Array.with_size(MAX_CORNERS, 0.0);
+let tG = Array.with_size(MAX_CORNERS, 0.0);
+let tB = Array.with_size(MAX_CORNERS, 0.0);
 
 // Which of those corners make up the polygon to clip
 let cI = Array.with_size(MAX_CORNERS, 0);
@@ -1522,6 +1560,154 @@ fun fill_face(a, b, c, d, color) {
     fill_poly(4, color);
 }
 
+// Colors are blended along a span as three 8.12 fixed point channels
+// packed into one integer, twenty bits apart, so that one add steps them all
+let COL_ONE = 4096.0;
+let COL_MIN = 0.25;
+let COL_MAX = 255.9;
+
+// The furthest anything is taken to be, which keeps a sample that lands
+// just past the horizon of a face seen edge on from dividing by nothing
+let W_MIN = 1.0 / 20000.0;
+
+// The step from one pixel to the next for each number of steps in a span
+let INV_STEPS = Array.with_size(FRAME_WIDTH + 1, 0.0);
+for (let var i = 1; i <= FRAME_WIDTH; ++i) INV_STEPS[i] = COL_ONE / i.to_f();
+
+// Fill a triangle with a blend of the colors at its three corners.
+//
+// A color that changes evenly across a face in space does so on screen
+// once it is divided by depth, as does one over the depth itself. For a
+// value a known at the corners P, the vector A with A . P = a at each of
+// them gives a / z at any pixel as A . (x, y, 1), with x and y on the plane
+// at depth one. Solving for A takes the inverse of the matrix of corners,
+// whose columns are the cross products below. The true color is worked out
+// that way at both ends of each span and stepped evenly in between.
+fun blend_tri(a, b, c) {
+    let x0 = tX[a]; let y0 = tY[a]; let z0 = tZ[a];
+    let x1 = tX[b]; let y1 = tY[b]; let z1 = tZ[b];
+    let x2 = tX[c]; let y2 = tY[c]; let z2 = tZ[c];
+
+    let c12x = y1 * z2 - z1 * y2; let c12y = z1 * x2 - x1 * z2; let c12z = x1 * y2 - y1 * x2;
+    let c20x = y2 * z0 - z2 * y0; let c20y = z2 * x0 - x2 * z0; let c20z = x2 * y0 - y2 * x0;
+    let c01x = y0 * z1 - z0 * y1; let c01y = z0 * x1 - x0 * z1; let c01z = x0 * y1 - y0 * x1;
+
+    // Next to nothing when the face is edge on to the camera
+    let det = x0 * c12x + y0 * c12y + z0 * c12z;
+    if (det.abs() < 0.000001) return;
+
+    cI[0] = a; cI[1] = b; cI[2] = c;
+    let m = clip_project(3);
+    if (m < 3) return;
+    if (!scan_poly(m)) return;
+    polys_drawn = polys_drawn + 1;
+
+    // Offsets that take a vector to its value at the center of the top
+    // left pixel
+    let inv = 1.0 / det;
+    let kx = (0.5 - CX) * INV_FOCAL;
+    let ky = (CY - 0.5) * INV_FOCAL;
+
+    let var ax = (c12x + c20x + c01x) * inv;
+    let var ay = (c12y + c20y + c01y) * inv;
+    let var az = (c12z + c20z + c01z) * inv;
+    let dwdx = ax * INV_FOCAL;
+    let dwdy = 0.0 - ay * INV_FOCAL;
+    let w00 = az + ax * kx + ay * ky;
+
+    let var a0 = tR[a]; let var a1 = tR[b]; let var a2 = tR[c];
+    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
+    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
+    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
+    let drdx = ax * INV_FOCAL;
+    let drdy = 0.0 - ay * INV_FOCAL;
+    let r00 = az + ax * kx + ay * ky;
+
+    a0 = tG[a]; a1 = tG[b]; a2 = tG[c];
+    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
+    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
+    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
+    let dgdx = ax * INV_FOCAL;
+    let dgdy = 0.0 - ay * INV_FOCAL;
+    let g00 = az + ax * kx + ay * ky;
+
+    a0 = tB[a]; a1 = tB[b]; a2 = tB[c];
+    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
+    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
+    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
+    let dbdx = ax * INV_FOCAL;
+    let dbdy = 0.0 - ay * INV_FOCAL;
+    let b00 = az + ax * kx + ay * ky;
+
+    let fb = frame_buffer;
+    let lo = COL_MIN;
+    let hi = COL_MAX;
+    let var y = scan_y0;
+    let end_y = scan_y1;
+    let var w_row = w00 + y * dwdy;
+    let var r_row = r00 + y * drdy;
+    let var g_row = g00 + y * dgdy;
+    let var b_row = b00 + y * dbdy;
+    let var row = y * FRAME_WIDTH;
+
+    while (y < end_y) {
+        let xa = row_x0[y];
+        let xb = row_x1[y];
+
+        if (xa < xb) {
+            // Both ends of the span are clamped and the step taken between
+            // the clamped pair, so no channel can run into its neighbour
+            let var w = w_row + xa * dwdx;
+            if (w < W_MIN) w = W_MIN;
+            let var z = 1.0 / w;
+            let var ra = (r_row + xa * drdx) * z;
+            if (ra < lo) ra = lo; else if (ra > hi) ra = hi;
+            let var ga = (g_row + xa * dgdx) * z;
+            if (ga < lo) ga = lo; else if (ga > hi) ga = hi;
+            let var ba = (b_row + xa * dbdx) * z;
+            if (ba < lo) ba = lo; else if (ba > hi) ba = hi;
+
+            let var col = ((ra * COL_ONE).floor() << 40) + ((ga * COL_ONE).floor() << 20)
+                        + (ba * COL_ONE).floor();
+            let var i = row + xa;
+            let steps = xb - xa - 1;
+
+            if (steps == 0) {
+                fb.set_u32(i, 0xFF000000 | ((col >> 36) & 0xFF0000) | ((col >> 24) & 0xFF00) | ((col >> 12) & 0xFF));
+            } else {
+                let xe = xb - 1;
+                w = w_row + xe * dwdx;
+                if (w < W_MIN) w = W_MIN;
+                z = 1.0 / w;
+                let var re = (r_row + xe * drdx) * z;
+                if (re < lo) re = lo; else if (re > hi) re = hi;
+                let var ge = (g_row + xe * dgdx) * z;
+                if (ge < lo) ge = lo; else if (ge > hi) ge = hi;
+                let var be = (b_row + xe * dbdx) * z;
+                if (be < lo) be = lo; else if (be > hi) be = hi;
+
+                let k = INV_STEPS[steps];
+                let dc = (((re - ra) * k).floor() << 40) + (((ge - ga) * k).floor() << 20)
+                       + ((be - ba) * k).floor();
+
+                let end_i = row + xb;
+                while (i < end_i) {
+                    fb.set_u32(i, 0xFF000000 | ((col >> 36) & 0xFF0000) | ((col >> 24) & 0xFF00) | ((col >> 12) & 0xFF));
+                    col = col + dc;
+                    i = i + 1;
+                }
+            }
+        }
+
+        w_row = w_row + dwdy;
+        r_row = r_row + drdy;
+        g_row = g_row + dgdy;
+        b_row = b_row + dbdy;
+        row = row + FRAME_WIDTH;
+        y = y + 1;
+    }
+}
+
 // --- Drawing the world ---
 //
 // Sections go down far to near. Within one, the far row of cells goes
@@ -1538,13 +1724,6 @@ let var anim_time = 0.0;
 // How much of the light is left after the fog at a distance
 fun fog_at(dist) {
     return 1.0 - smoothstep(FOG_START, FOG_END, dist);
-}
-
-// A pulse of brightness that runs down the pipes towards the core
-fun pipe_pulse(z) {
-    let s = (z * 0.008 - anim_time * 3.0).sin();
-    let p = s.max(0.0);
-    return 0.62 + 0.38 * p * p * p;
 }
 
 // The wall being drawn. A place on it, given by how far across it is, how
@@ -1609,6 +1788,31 @@ fun set_corners(u0, z0, size, h) {
     tX[7] = tX[3] + hx; tY[7] = tY[3] + hy; tZ[7] = tZ[3] + hz;
 }
 
+// Give one corner of a block's top its color, which is the color of the
+// top with that corner's share of the glow added, dimmed by the fog
+fun glow_corner(j, r, g, b, glow, fog) {
+    tR[j] = (r + GLOW_R * glow).min(255.0) * fog;
+    tG[j] = (g + GLOW_G * glow).min(255.0) * fog;
+    tB[j] = (b + GLOW_B * glow).min(255.0) * fog;
+}
+
+// Draw the top of a block that the glow of a pipe reaches, blending the
+// glow from corner to corner
+fun blend_top(n) {
+    let c = nd_top[n];
+    let r = ((c >> 16) & 0xFF).to_f();
+    let g = ((c >> 8) & 0xFF).to_f();
+    let b = (c & 0xFF).to_f();
+    let fog = fog_k / 256.0;
+
+    glow_corner(4, r, g, b, nd_glow0[n], fog);
+    glow_corner(5, r, g, b, nd_glow1[n], fog);
+    glow_corner(6, r, g, b, nd_glow2[n], fog);
+    glow_corner(7, r, g, b, nd_glow3[n], fog);
+    blend_tri(4, 5, 6);
+    blend_tri(4, 6, 7);
+}
+
 // Draw a node as a single block: its top and whichever of its sides face
 // the camera
 fun draw_block(n) {
@@ -1621,7 +1825,10 @@ fun draw_block(n) {
     if (tZ[4] < NEAR_Z && tZ[5] < NEAR_Z && tZ[6] < NEAR_Z && tZ[7] < NEAR_Z
         && tZ[0] < NEAR_Z && tZ[1] < NEAR_Z && tZ[2] < NEAR_Z && tZ[3] < NEAR_Z) return;
 
-    if (wall_cam_h > h) fill_face(4, 5, 6, 7, nd_top[n]);
+    if (wall_cam_h > h) {
+        if (nd_lit[n]) blend_top(n);
+        else fill_face(4, 5, 6, 7, nd_top[n]);
+    }
     if (h <= 0.0) return;
 
     if (cam_z < z0) fill_face(0, 1, 5, 4, nd_front[n]);
@@ -1681,10 +1888,7 @@ fun draw_pipe_face(p) {
     if (!ahead) return;
 
     // A pipe glows, so the fog dims it but no light is needed to see it
-    let keep = fog_k;
-    fog_k = (keep * pipe_pulse(z)).floor();
     fill_poly(count, pp_color[p]);
-    fog_k = keep;
 }
 
 // Nothing stands further out of a wall than this
@@ -1947,7 +2151,7 @@ let CONTROL_LAG = 7.0;
 // The engines never throttle down below the lowest of these speeds
 let MIN_SPEED = 1000.0 / 3.6;
 let MAX_SPEED = 1800.0 / 3.6;
-let BOOST_SPEED = 700.0;
+let BOOST_SPEED = 3000.0 / 3.6;
 let START_THROTTLE = 0.5;
 let ACCEL = 70.0;
 
@@ -2047,7 +2251,8 @@ fun hits_tunnel(x, y, z) {
             let id = ids[i];
             if (pk_wall[id] != w) continue;
 
-            // How far it is from the pipe's axis, which lies on the wall
+            // How far it is from the pipe's axis, across the wall and out
+            // from it
             let var across = z - pk_at[id];
             if (pk_kind[id] == PIPE_ALONG) {
                 across = u - pk_at[id];
@@ -2056,8 +2261,9 @@ fun hits_tunnel(x, y, z) {
                 if (cell < pk_lo[id] || cell > pk_hi[id]) continue;
             }
 
-            let reach = pk_r[id] + margin;
-            if (across * across + h * h < reach * reach) return true;
+            let r = pk_r[id];
+            let reach = r + margin;
+            if (across * across + (h - r) * (h - r) < reach * reach) return true;
         }
     }
 
@@ -2471,7 +2677,7 @@ fun draw_hud() {
 
     // The warning blinks under the boresight
     if ((anim_time * 4.0).floor() % 2 == 0 && wall_warn) {
-        draw_text_centered(font_warn, "OBSTACLE", CX.floor(), CY.floor() + 90, WARN_RED);
+        draw_text_centered(font_warn, "COLLISION", CX.floor(), CY.floor() + 90, WARN_RED);
     }
 }
 
@@ -2578,7 +2784,7 @@ fun glow_disc(cx, cy, radius, color) {
 let rng = Xoshiro128(2025);
 
 // Tracers per second from the pair with the barrels at full speed
-let GUN_RATE = 60.0;
+let GUN_RATE = 160.0;
 let MUZZLE_SPEED = 1400.0;
 
 // Seconds for the barrels to spin up and to run down again
@@ -2615,7 +2821,7 @@ let TRACER_CORE = 0xFFFFE0A0;
 let FLASH_COLOR = 0xFFFF9030;
 
 // Rounds in flight. A negative age marks a free slot.
-let MAX_ROUNDS = 128;
+let MAX_ROUNDS = 256;
 let rd_x = Array.with_size(MAX_ROUNDS, 0.0);
 let rd_y = Array.with_size(MAX_ROUNDS, 0.0);
 let rd_z = Array.with_size(MAX_ROUNDS, 0.0);
