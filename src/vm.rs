@@ -3504,6 +3504,27 @@ mod tests
     }
 
     #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn string_slice_out_of_bounds()
+    {
+        eval("return 'abc'.slice(1, 4);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn string_slice_start_after_end()
+    {
+        eval("return 'abc'.slice(2, 1);");
+    }
+
+    #[test]
+    #[should_panic(expected = "explicit panic")]
+    fn string_slice_not_char_boundary()
+    {
+        eval("return 'h\\u{E9}llo'.slice(0, 2);");
+    }
+
+    #[test]
     fn actor_send()
     {
         eval_eq(

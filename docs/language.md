@@ -406,6 +406,7 @@ $println(rng.int(0, 100));
     -   `from_utf8(bytes, start, len)`: Decode `len` bytes of a `ByteArray`, starting at index `start`, as UTF-8. Returns `nil` if that run of bytes is not valid UTF-8. This is how to turn bytes read with `$net_read()` or `$read_file()` into a string.
     -   `byte_at(byte_idx)`: Get the UTF-8 byte at the given byte index.
     -   `char_at(byte_idx)`: Get a string for the single character at the given byte index. Returns `nil` if invalid.
+    -   `slice(start, end)`: Returns a new string holding the bytes from `start` (inclusive) to `end` (exclusive).
     -   `parse_int(radix)`: Try to parse the entire string as an integer of the given `radix`. Returns `nil` on failure.
     -   `parse_float()`: Try to parse the entire string as a float. Returns `nil` on failure.
     -   `find(substr)`: Get the byte index of the first occurrence of `substr`. Returns `nil` if not found.

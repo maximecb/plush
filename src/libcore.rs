@@ -309,6 +309,27 @@ pub(crate) fn string_byte_at(_actor: &mut Actor, s: Value, idx: Value) -> HostRe
     }
 }
 
+/// Copy the `[start, end)` byte range of a string into a new string
+pub(crate) fn string_slice(actor: &mut Actor, s: Value, start: Value, end: Value) -> HostResult
+{
+    let s = unwrap_str!(s);
+    let start = unwrap_usize!(start);
+    let end = unwrap_usize!(end);
+
+    if start > end || end > s.len() {
+        error!("slice range {}..{} is out of bounds for a string of length {}", start, end, s.len());
+    }
+
+    if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
+        error!("slice range {}..{} is not on a character boundary", start, end);
+    }
+
+    // Copy the bytes out in case we have to trigger GC
+    let sub = s[start..end].to_owned();
+    actor.gc_check(Str::alloc_size(sub.len()), &mut []);
+    Str::new(&sub, &mut actor.alloc).into()
+}
+
 /// Get a string containing the single character at the given byte index
 /// Returns nil if not a valid character boundary or character
 pub(crate) fn string_char_at(actor: &mut Actor, s: Value, byte_idx: Value) -> HostResult
@@ -622,6 +643,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
 
         (Type::String, "byte_at") => string_byte_at,
         (Type::String, "char_at") => string_char_at,
+        (Type::String, "slice") => string_slice,
         (Type::String, "parse_int") => string_parse_int,
         (Type::String, "parse_float") => string_parse_float,
         (Type::String, "find") => string_find,

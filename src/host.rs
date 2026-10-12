@@ -344,6 +344,7 @@ def_host_fns! {
         from_utf8: string_from_utf8(4),
         byte_at: string_byte_at(2),
         char_at: string_char_at(2),
+        slice: string_slice(3),
         parse_int: string_parse_int(2),
         parse_float: string_parse_float(1),
         find: string_find(2),
