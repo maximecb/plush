@@ -891,6 +891,79 @@ fun lay_pipes() {
     }
 }
 
+// --- Side tunnels ---
+//
+// Here and there a pair of other tunnels open off the main one, straight
+// out through two walls that face each other. A mouth is square and takes
+// up the whole width of the wall it opens in, so it is as long as that
+// wall is wide. The fighter cannot turn sharply enough to take one, so
+// each is only a dead end that runs off into the dark.
+
+// For each: the wall it opens in, the first of the rows of cells it takes
+// up and how many rows that is
+let st_wall = [];
+let st_row = [];
+let st_rows = [];
+
+// Which side tunnel opens in each wall of each row, if any
+let row_side = Array.with_size(NUM_ROWS * NUM_WALLS, -1);
+
+// How often a pair starts at a row, out of a thousand
+let SIDE_CHANCE = 120;
+
+// The fewest rows of cells between one pair and the next, which is 1500
+// meters
+let SIDE_GAP = 60;
+
+// How far a side tunnel goes, in rows of cells and in meters
+let SIDE_ROWS = 8;
+let SIDE_DEPTH = SIDE_ROWS * CELL;
+
+// What the node of a cell is given for a height when there is no wall
+// there, which keeps it from being drawn
+let WALL_OPEN = -1.0;
+
+// Whether a stretch of a wall is free of pipes and of side tunnels, with a
+// row to spare at either end
+fun wall_clear(w, row, rows) {
+    for (let var at = row - 1; at <= row + rows; ++at) {
+        if (row_side[at * NUM_WALLS + w] >= 0) return false;
+        let ids = row_pipes[at];
+        for (let var i = 0; i < ids.len; ++i) {
+            if (pk_wall[ids[i]] == w) return false;
+        }
+    }
+    return true;
+}
+
+// These go in after the pipes, and only where no pipe is in the way
+fun lay_sides() {
+    let gen = Xoshiro128(WORLD_SEED + 60);
+
+    // The row the last pair ended at
+    let var last_end = 0;
+
+    for (let var row = 8; row < NUM_ROWS - 40; ++row) {
+        if (gen.int(0, 1000) >= SIDE_CHANCE) continue;
+        if (row < last_end + SIDE_GAP) continue;
+
+        // Either the floor and the ceiling, or the two sides
+        let first = gen.index(2) * 2;
+        let rows = WALL_CELLS[first];
+        if (!wall_clear(first, row, rows) || !wall_clear(first + 1, row, rows)) continue;
+        last_end = row + rows;
+
+        for (let var w = first; w < first + 2; ++w) {
+            let id = st_wall.len;
+            st_wall.push(w);
+            st_row.push(row);
+            st_rows.push(rows);
+            for (let var at = row; at < row + rows; ++at) row_side[at * NUM_WALLS + w] = id;
+        }
+    }
+}
+
+
 // --- Tunnel sections ---
 //
 // The walls are a field of square blocks standing out by different
@@ -938,7 +1011,11 @@ let GLOW_B = 8.0;
 // those of the sections
 let HULL_NODES = 48000;
 let HULL_NODE0 = NUM_SLOTS * MAX_NODES;
-let NODE_POOL = HULL_NODE0 + HULL_NODES;
+
+// So are the walls of the side tunnels, which come after those
+let SIDE_NODES = 6000;
+let SIDE_NODE0 = HULL_NODE0 + HULL_NODES;
+let NODE_POOL = SIDE_NODE0 + SIDE_NODES;
 
 // The section each slot holds
 let slot_section = Array.with_size(NUM_SLOTS, -1);
@@ -1329,7 +1406,18 @@ fun build_section(k, slot) {
         let root = gen_node0 + gen_nodes;
         gen_nodes = gen_nodes + 1;
         cell_node[slot * SEC_CELLS + c] = root;
-        build_node(root, WALL_U0[w] + cell * CELL, row * CELL, CELL, 0, 0.0, flat);
+
+        // Where a side tunnel opens there is no wall, and so nothing to draw
+        if (row_side[row * NUM_WALLS + w] >= 0) {
+            nd_u[root] = WALL_U0[w] + cell * CELL;
+            nd_z[root] = row * CELL;
+            nd_size[root] = CELL;
+            nd_h[root] = WALL_OPEN;
+            nd_child[root] = -1;
+            nd_lit[root] = false;
+        } else {
+            build_node(root, WALL_U0[w] + cell * CELL, row * CELL, CELL, 0, 0.0, flat);
+        }
 
         cell_poly0[slot * SEC_CELLS + c] = gen_poly0 + gen_polys;
         for (let var i = 0; i < ids.len; ++i) {
@@ -2107,6 +2195,330 @@ fun draw_cell(slot, row, w, cell) {
     for (let var p = cell_poly0[c]; p < end; ++p) draw_pipe_face(p);
 }
 
+// Put a place on the wall being drawn into one of the view space corners,
+// given how far across the wall it is, how far down the tunnel and how far
+// out from the wall, which is less than nothing for a place behind it
+fun wall_corner(j, u, v, h) {
+    tX[j] = wall_bx + u * wall_ux + v * wall_vx + h * wall_hx;
+    tY[j] = wall_by + u * wall_uy + v * wall_vy + h * wall_hy;
+    tZ[j] = wall_bz + u * wall_uz + v * wall_vz + h * wall_hz;
+}
+
+// The four walls of a side tunnel are covered in blocks like those of the
+// main tunnel. Working out a set for every side tunnel would take a lot of
+// nodes for something that is passed in a moment, so there is one set for
+// each of the two sizes of mouth, and every wall of every side tunnel of a
+// size is drawn from it. They go by too fast for the repeat to show.
+
+// The tallest a stack of blocks can get on a wall of a side tunnel, and
+// how many times a cell of one may be split
+let SIDE_BLOCK = 12.0;
+let SIDE_SPLITS = 2;
+let SIDE_SEED = WORLD_SEED + 70;
+
+// The root node of each cell of the two sets, row by row from the mouth,
+// and how many cells there are to a row in each
+let side_roots = [[], []];
+let SIDE_CELLS = [WALL_CELLS[0], WALL_CELLS[2]];
+let var side_nodes = 0;
+
+// Fill in a node of a wall of a side tunnel and whatever stands on it
+fun build_side_node(n, u0, v0, size, depth, base_h, seed) {
+    let uc = u0 + size * 0.5;
+    let vc = v0 + size * 0.5;
+    let busy = smoothstep(0.32, 0.68, busy_noise.sample3d(uc, vc, seed * 7.7));
+
+    let f = 1.0 / (size * 1.6);
+    let hn = perlin3d(uc * f, vc * f, 1.7, seed + depth);
+    let raise = ((hn + 0.05) * 2.2).clip(0.0, 1.0) * size * RAISE[depth] * (0.3 + busy);
+    let h = (base_h + (raise * 4.0).floor() * 0.25).min(SIDE_BLOCK);
+
+    nd_u[n] = u0;
+    nd_z[n] = v0;
+    nd_size[n] = size;
+    nd_h[n] = h;
+    nd_child[n] = -1;
+    nd_lit[n] = false;
+
+    // The same metal under the same light as the walls of the main tunnel
+    let g = 1.0 / (size * 0.7);
+    let tone = 0.86 + 0.34 * perlin3d(uc * g + 9.1, vc * g, 4.2, seed + 100 + depth);
+    let white = 0.236 + 0.091 * light_noise.sample3d(uc, vc, seed * 3.1);
+    nd_top[n] = metal_color(tone, white, 0.0);
+    nd_front[n] = metal_color(tone, white * 0.80, 0.0);
+    nd_back[n] = nd_front[n];
+    nd_lo[n] = metal_color(tone, white * 0.62, 0.0);
+    nd_hi[n] = nd_lo[n];
+
+    if (depth >= SIDE_SPLITS || side_nodes + 4 > SIDE_NODES) return;
+    let s = 1.0 / (size * 1.1);
+    let sn = 0.5 + 0.9 * perlin3d(uc * s + 31.7, vc * s, 6.4, seed + 200 + depth);
+    if (sn >= SPLIT_BASE[depth] + SPLIT_BUSY[depth] * busy) return;
+
+    let child = SIDE_NODE0 + side_nodes;
+    side_nodes = side_nodes + 4;
+    nd_child[n] = child;
+
+    let half = size * 0.5;
+    for (let var k = 0; k < 4; ++k) {
+        build_side_node(child + k, u0 + (k & 1) * half, v0 + (k >> 1) * half, half, depth + 1, h, seed);
+    }
+}
+
+// Two pipes run round a side tunnel just inside its mouth, this far in
+// and this thick, and their glow reaches this far from their surfaces
+let RIM_AT = [8.75, 15.0];
+let RIM_R = 1.3;
+let RIM_FALL = 5.0;
+
+// How much of the rim pipes' glow reaches the wall they rest on, at a depth
+fun rim_glow(v) {
+    let var sum = 0.0;
+    for (let var i = 0; i < RIM_AT.len; ++i) {
+        let along = v - RIM_AT[i];
+        let dist = (along * along + RIM_R * RIM_R).sqrt();
+        let t = (1.0 - (dist - RIM_R) / RIM_FALL).clip(0.0, 1.0);
+        sum = sum + GLOW_LEVEL * (0.45 + 0.55 * RIM_R / dist) * t * t;
+    }
+    return sum.min(1.0);
+}
+
+// Fill in a node of the first row of a wall of a side tunnel, which is
+// kept bare for the pipe to rest on, and cut small enough to show its glow
+fun build_rim_node(n, u0, v0, size, depth, seed) {
+    nd_u[n] = u0;
+    nd_z[n] = v0;
+    nd_size[n] = size;
+    nd_h[n] = 0.0;
+    nd_child[n] = -1;
+
+    let g = 1.0 / (size * 0.7);
+    let uc = u0 + size * 0.5;
+    let vc = v0 + size * 0.5;
+    let tone = 0.86 + 0.34 * perlin3d(uc * g + 9.1, vc * g, 4.2, seed + 100 + depth);
+    nd_top[n] = metal_color(tone, 0.236, 0.0);
+
+    // The corners go round the square, so two are at each depth
+    nd_glow0[n] = rim_glow(v0);
+    nd_glow1[n] = nd_glow0[n];
+    nd_glow2[n] = rim_glow(v0 + size);
+    nd_glow3[n] = nd_glow2[n];
+    nd_lit[n] = nd_glow0[n] + nd_glow2[n] > 0.002;
+
+    if (depth >= 2 || side_nodes + 4 > SIDE_NODES) return;
+    let child = SIDE_NODE0 + side_nodes;
+    side_nodes = side_nodes + 4;
+    nd_child[n] = child;
+
+    let half = size * 0.5;
+    for (let var k = 0; k < 4; ++k) {
+        build_rim_node(child + k, u0 + (k & 1) * half, v0 + (k >> 1) * half, half, depth + 1, seed);
+    }
+}
+
+fun build_sides() {
+    for (let var t = 0; t < 2; ++t) {
+        for (let var c = 0; c < SIDE_ROWS * SIDE_CELLS[t]; ++c) {
+            let root = SIDE_NODE0 + side_nodes;
+            side_nodes = side_nodes + 1;
+            side_roots[t].push(root);
+
+            let u0 = (c % SIDE_CELLS[t]) * CELL;
+            let v0 = c.idiv(SIDE_CELLS[t]) * CELL;
+            let seed = SIDE_SEED + t * 1000;
+            if (v0 == 0.0) build_rim_node(root, u0, v0, CELL, 0, seed);
+            else build_side_node(root, u0, v0, CELL, 0, 0.0, seed);
+        }
+    }
+}
+
+// Set up a wall to draw that lies anywhere, given a corner of it and
+// three directions from there: across it, along it, and the way it faces
+fun set_frame(ox, oy, oz, ux, uy, uz, vx, vy, vz, hx, hy, hz) {
+    let dx = cam_x - ox;
+    let dy = cam_y - oy;
+    let dz = cam_z - oz;
+    wall_cam_u = dx * ux + dy * uy + dz * uz;
+    wall_cam_v = dx * vx + dy * vy + dz * vz;
+    wall_cam_h = dx * hx + dy * hy + dz * hz;
+
+    wall_bx = 0.0 - (dx * right_x + dy * right_y + dz * right_z);
+    wall_by = 0.0 - (dx * up_x + dy * up_y + dz * up_z);
+    wall_bz = 0.0 - (dx * fwd_x + dy * fwd_y + dz * fwd_z);
+
+    wall_ux = ux * right_x + uy * right_y + uz * right_z;
+    wall_uy = ux * up_x + uy * up_y + uz * up_z;
+    wall_uz = ux * fwd_x + uy * fwd_y + uz * fwd_z;
+    wall_vx = vx * right_x + vy * right_y + vz * right_z;
+    wall_vy = vx * up_x + vy * up_y + vz * up_z;
+    wall_vz = vx * fwd_x + vy * fwd_y + vz * fwd_z;
+    wall_hx = hx * right_x + hy * right_y + hz * right_z;
+    wall_hy = hx * up_x + hy * up_y + hz * up_z;
+    wall_hz = hx * fwd_x + hy * fwd_y + hz * fwd_z;
+}
+
+// Whether a square of the wall being drawn can be left out, being behind
+// the camera or off the part of the screen being drawn by more than
+// anything standing on it could reach back in
+fun square_hidden(u0, v0, size, reach) {
+    set_corners(u0, v0, size, 0.0);
+    let za = tZ[0]; let zb = tZ[1]; let zc = tZ[2]; let zd = tZ[3];
+    let far = za.max(zb).max(zc).max(zd);
+    if (far < NEAR_Z - reach) return true;
+
+    let near = za.min(zb).min(zc).min(zd);
+    if (near <= reach + 1.0) return false;
+
+    let xa = CX + tX[0] * FOCAL / za; let ya = CY - tY[0] * FOCAL / za;
+    let xb = CX + tX[1] * FOCAL / zb; let yb = CY - tY[1] * FOCAL / zb;
+    let xc = CX + tX[2] * FOCAL / zc; let yc = CY - tY[2] * FOCAL / zc;
+    let xd = CX + tX[3] * FOCAL / zd; let yd = CY - tY[3] * FOCAL / zd;
+    let margin = FOCAL * reach / (near - reach);
+
+    if (xa.max(xb).max(xc).max(xd) + margin < 0.0) return true;
+    if (xa.min(xb).min(xc).min(xd) - margin > FRAME_WIDTH) return true;
+    if (ya.max(yb).max(yc).max(yd) + margin < render_y0) return true;
+    return ya.min(yb).min(yc).min(yd) - margin > render_y1;
+}
+
+// Draw the wall of a side tunnel that has been set up, from one of the two
+// sets of blocks, if the camera is on the side of it that shows. It gets
+// darker the further in it goes, on top of what the fog does to it.
+fun draw_side_wall(t, fog) {
+    if (wall_cam_h <= 0.0) return;
+
+    let cells = SIDE_CELLS[t];
+    let roots = side_roots[t];
+    let mid = (wall_cam_u / CELL).floor().clip(0, cells - 1);
+    draw_depth = SIDE_SPLITS;
+
+    // The far end first, and each row in from both edges towards the
+    // camera
+    for (let var row = SIDE_ROWS - 1; row >= 0; --row) {
+        let left = 1.0 - (row + 0.5) / SIDE_ROWS;
+        let dim = (fog * left * left * 256.0).floor();
+        if (dim <= 0) continue;
+
+        for (let var pass = 0; pass < 2; ++pass) {
+            let var cell = 0;
+            let var step = 1;
+            let var count = mid;
+            if (pass == 1) {
+                cell = cells - 1;
+                step = -1;
+                count = cells - mid;
+            }
+
+            for (let var i = 0; i < count; ++i) {
+                if (!square_hidden(cell * CELL, row * CELL, CELL, SIDE_BLOCK)) {
+                    fog_k = dim;
+                    draw_node(roots[row * cells + cell], 0);
+                }
+                cell = cell + step;
+            }
+        }
+    }
+
+    // The pipes round the mouth lie across this wall from edge to edge,
+    // and the one further in goes first. They glow, so only the fog dims
+    // them. Each side of a pipe is drawn if the camera is on the side of
+    // it that faces out.
+    fog_k = (fog * 256.0).floor();
+    let width = cells * CELL;
+    for (let var i = RIM_AT.len - 1; i >= 0; --i) {
+        let at = RIM_AT[i];
+
+        for (let var j = 0; j < PIPE_SIDES; ++j) {
+            let a0 = pipe_angle(j);
+            let a1 = pipe_angle(j + 1);
+            let am = (a0 + a1) * 0.5;
+            let v0 = at + RIM_R * a0.cos();
+            let h0 = RIM_R + RIM_R * a0.sin();
+            if ((wall_cam_v - v0) * am.cos() + (wall_cam_h - h0) * am.sin() <= 0.0) continue;
+
+            let v1 = at + RIM_R * a1.cos();
+            let h1 = RIM_R + RIM_R * a1.sin();
+            wall_corner(0, 0.0, v0, h0);
+            wall_corner(1, 0.0, v1, h1);
+            wall_corner(2, width, v1, h1);
+            wall_corner(3, width, v0, h0);
+            fill_face(0, 1, 2, 3, PIPE_COLOR);
+        }
+    }
+}
+
+// Counts the frames drawn, and the frame each side tunnel was last drawn in
+let var draw_stamp = 0;
+let side_stamp = [];
+
+// Draw a side tunnel, unless it has been drawn this frame. It lies wholly
+// behind the wall it opens in, so it has to go before any of the cells of
+// the sections it runs along, which is to say when the first of those
+// sections comes up. Whatever of it should not show through the mouth is
+// then covered by the cells around the mouth.
+fun draw_side(id) {
+    while (side_stamp.len <= id) side_stamp.push(-1);
+    if (side_stamp[id] == draw_stamp) return;
+    side_stamp[id] = draw_stamp;
+
+    let w = st_wall[id];
+    let u0 = WALL_U0[w];
+    let u1 = u0 + WALL_CELLS[w] * CELL;
+    let v0 = st_row[id] * CELL;
+    let v1 = v0 + st_rows[id] * CELL;
+
+    // The fog is taken at the near edge of the mouth
+    let fog = fog_at((cam_z.clip(v0, v1) - cam_z).abs());
+    if (fog <= 0.0) return;
+
+    // The far end is black
+    set_wall(w);
+    wall_corner(0, u0, v0, 0.0 - SIDE_DEPTH);
+    wall_corner(1, u1, v0, 0.0 - SIDE_DEPTH);
+    wall_corner(2, u1, v1, 0.0 - SIDE_DEPTH);
+    wall_corner(3, u0, v1, 0.0 - SIDE_DEPTH);
+    fog_k = 256;
+    fill_face(0, 1, 2, 3, 0xFF000000);
+
+    // The two corners of the mouth at its near end, and the directions
+    // across the wall it opens in and out through that wall
+    wall_point(w, u0, 0.0);
+    let xa = wp_x;
+    let ya = wp_y;
+    wall_point(w, u1, 0.0);
+    let xb = wp_x;
+    let yb = wp_y;
+    let ux = WALL_UX[w];
+    let uy = WALL_UY[w];
+    let ox = 0.0 - WALL_HX[w];
+    let oy = 0.0 - WALL_HY[w];
+    let t = w >> 1;
+
+    // Its four walls: the two that run along the main tunnel, then the
+    // near and the far one
+    set_frame(xa, ya, v0, 0.0, 0.0, 1.0, ox, oy, 0.0, ux, uy, 0.0);
+    draw_side_wall(t, fog);
+    set_frame(xb, yb, v0, 0.0, 0.0, 1.0, ox, oy, 0.0, 0.0 - ux, 0.0 - uy, 0.0);
+    draw_side_wall(t, fog);
+    set_frame(xa, ya, v0, ux, uy, 0.0, ox, oy, 0.0, 0.0, 0.0, 1.0);
+    draw_side_wall(t, fog);
+    set_frame(xa, ya, v1, ux, uy, 0.0, ox, oy, 0.0, 0.0, 0.0, -1.0);
+    draw_side_wall(t, fog);
+}
+
+
+
+// Draw whatever side tunnels open off a section
+fun draw_sides(k) {
+    for (let var row = k * SEC_ROWS; row < (k + 1) * SEC_ROWS; ++row) {
+        for (let var w = 0; w < NUM_WALLS; ++w) {
+            let id = row_side[row * NUM_WALLS + w];
+            if (id >= 0) draw_side(id);
+        }
+    }
+}
+
+
 // Draw the wall that closes off the far end of the run
 fun draw_end_wall() {
     view_corner(0, 0.0 - HALF_W, 0.0 - HALF_H, RUN_LEN);
@@ -2129,6 +2541,7 @@ fun draw_section(k) {
     if (dist > 18) draw_depth = 0;
 
     if (k == NUM_SECTIONS - 1) draw_end_wall();
+    draw_sides(k);
 
     // The row further from the camera goes first
     let row0 = k * SEC_ROWS;
@@ -2262,6 +2675,7 @@ fun draw_stars() {
 
 fun render_world() {
     polys_drawn = 0;
+    draw_stamp = draw_stamp + 1;
     frame_buffer.fill_u32(render_y0 * FRAME_WIDTH, (render_y1 - render_y0) * FRAME_WIDTH, 0xFF000000);
     sort_walls();
 
@@ -2527,7 +2941,6 @@ fun hits_tunnel(x, y, z) {
         return 0.0 - z < hull_height(x, y).max(0.0) + margin;
     }
 
-    if (x.abs() > HALF_W - margin || y.abs() > HALF_H - margin) return true;
     if (z >= RUN_LEN) return false;
 
     let row = (z / CELL).floor();
@@ -2538,6 +2951,20 @@ fun hits_tunnel(x, y, z) {
         let u = wc_u;
         let h = wc_h;
         if (h > MAX_BLOCK + margin) continue;
+
+        // Where a side tunnel opens there is no wall, only its own walls
+        // at either end of it and its far end
+        let side = row_side[row * NUM_WALLS + w];
+        if (side >= 0) {
+            if (h < margin - SIDE_DEPTH) return true;
+            if (h < margin) {
+                let v0 = st_row[side] * CELL;
+                let v1 = v0 + st_rows[side] * CELL;
+                if (z < v0 + margin || z > v1 - margin) return true;
+            }
+            continue;
+        }
+
         if (h < block_height(w, u, z) + margin) return true;
 
         for (let var i = 0; i < ids.len; ++i) {
@@ -3466,6 +3893,8 @@ fun run_bench(num_frames, shot_dir) {
 // --- Main ---
 
 lay_pipes();
+lay_sides();
+build_sides();
 build_hull();
 build_stars();
 reset_flight();
