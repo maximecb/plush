@@ -190,17 +190,6 @@ class JSONParser
         return self.text.byte_at(self.pos);
     }
 
-    // The text between two byte positions, as a string
-    slice(self, start, end)
-    {
-        let buf = ByteArray.with_size(0);
-
-        for (let var i = start; i < end; ++i)
-            buf.push_u8(self.text.byte_at(i));
-
-        return String.from_utf8(buf, 0, buf.len);
-    }
-
     // Skips the whitespace JSON allows between tokens
     eat_ws(self)
     {
@@ -587,7 +576,7 @@ class JSONParser
         if (is_int && num_digits <= 18)
             return neg ? -int_val : int_val;
 
-        let text = self.slice(start, self.pos);
+        let text = self.text.slice(start, self.pos);
 
         if (is_int) {
             let parsed = text.parse_int(10);
