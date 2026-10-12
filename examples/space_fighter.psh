@@ -4,6 +4,7 @@
 // blocks that stand out by different amounts, big ones with smaller ones
 // on top of them, placed by noise so that they come in clumps. Glowing red
 // pipes run along and across the walls and light the blocks around them.
+// The run starts outside, facing the side of the ship the tunnel opens in.
 //
 // Nothing is textured. Every face is a flat color with its light worked
 // into it, and everything is drawn far to near in an order that puts what
@@ -933,6 +934,12 @@ let GLOW_R = 150.0;
 let GLOW_G = 10.0;
 let GLOW_B = 8.0;
 
+// The outside of the ship is made of nodes too, which are kept after
+// those of the sections
+let HULL_NODES = 48000;
+let HULL_NODE0 = NUM_SLOTS * MAX_NODES;
+let NODE_POOL = HULL_NODE0 + HULL_NODES;
+
 // The section each slot holds
 let slot_section = Array.with_size(NUM_SLOTS, -1);
 
@@ -941,21 +948,21 @@ let slot_section = Array.with_size(NUM_SLOTS, -1);
 // and of the sides that face up and down the tunnel and across the wall.
 // The top's color leaves out the glow of the pipes, which is kept for each
 // of its corners and blended across it, along with whether there is any.
-let nd_u = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
-let nd_z = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
-let nd_size = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
-let nd_h = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
-let nd_child = Array.with_size(NUM_SLOTS * MAX_NODES, -1);
-let nd_top = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
-let nd_front = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
-let nd_back = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
-let nd_lo = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
-let nd_hi = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
-let nd_glow0 = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
-let nd_glow1 = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
-let nd_glow2 = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
-let nd_glow3 = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
-let nd_lit = Array.with_size(NUM_SLOTS * MAX_NODES, false);
+let nd_u = Array.with_size(NODE_POOL, 0.0);
+let nd_z = Array.with_size(NODE_POOL, 0.0);
+let nd_size = Array.with_size(NODE_POOL, 0.0);
+let nd_h = Array.with_size(NODE_POOL, 0.0);
+let nd_child = Array.with_size(NODE_POOL, -1);
+let nd_top = Array.with_size(NODE_POOL, 0);
+let nd_front = Array.with_size(NODE_POOL, 0);
+let nd_back = Array.with_size(NODE_POOL, 0);
+let nd_lo = Array.with_size(NODE_POOL, 0);
+let nd_hi = Array.with_size(NODE_POOL, 0);
+let nd_glow0 = Array.with_size(NODE_POOL, 0.0);
+let nd_glow1 = Array.with_size(NODE_POOL, 0.0);
+let nd_glow2 = Array.with_size(NODE_POOL, 0.0);
+let nd_glow3 = Array.with_size(NODE_POOL, 0.0);
+let nd_lit = Array.with_size(NODE_POOL, false);
 
 // For each cell of a section: its root node, and its share of the faces
 // of the pipes
@@ -1368,7 +1375,167 @@ fun block_height(w, u, z) {
     return nd_h[n];
 }
 
+// --- The outside of the ship ---
+//
+// The run starts outside, facing the side of the ship that the tunnel
+// opens in. That side is covered in blocks like the walls of the tunnel,
+// but is a single quadtree, with the mouth of the tunnel left open in the
+// middle of it. Its blocks are smallest around the mouth, where the
+// fighter passes close to them, and get bigger further out. It is worked
+// out once at startup, before the render workers are spawned, so that each
+// of them gets a copy.
+//
+// Across it u is x and what is z for a wall of the tunnel is y, and its
+// blocks stand out towards the fighter as it comes in, which is along -z.
 
+// How far the side of the ship reaches from the middle of the mouth, which
+// has to be a power of two times the size of a cell
+let HULL_HALF = 1600.0;
+
+// The tallest a stack of blocks can get on it, and how far one may stand
+// out of the one under it as a fraction of its width
+let HULL_MAX = 40.0;
+let HULL_RAISE = 0.45;
+
+// What a node is given for a height when it lies in the mouth, and when it
+// lies partly over the mouth and so is never drawn in one piece
+let HULL_OPEN = -1.0;
+let HULL_PARTLY = -2.0;
+
+// How the sun falls on the top of a block and on each of its four sides
+let HULL_TOP = 0.50;
+let HULL_DOWN = 0.20;
+let HULL_UP = 0.62;
+let HULL_LEFT = 0.42;
+let HULL_RIGHT = 0.30;
+
+let HULL_SEED = WORLD_SEED + 40;
+let var hull_nodes = 1;
+
+// Fill in a node of the side of the ship and whatever stands on it
+fun build_hull_node(n, u0, v0, size, base_h) {
+    let u1 = u0 + size;
+    let v1 = v0 + size;
+    nd_u[n] = u0;
+    nd_z[n] = v0;
+    nd_size[n] = size;
+    nd_child[n] = -1;
+    nd_lit[n] = false;
+
+    if (u0 >= 0.0 - HALF_W && u1 <= HALF_W && v0 >= 0.0 - HALF_H && v1 <= HALF_H) {
+        nd_h[n] = HULL_OPEN;
+        return;
+    }
+    let partly = u0 < HALF_W && u1 > 0.0 - HALF_W && v0 < HALF_H && v1 > 0.0 - HALF_H;
+
+    // How far its middle is from the edge of the mouth
+    let uc = u0 + size * 0.5;
+    let vc = v0 + size * 0.5;
+    let du = (uc.abs() - HALF_W).max(0.0);
+    let dv = (vc.abs() - HALF_H).max(0.0);
+    let dist = (du * du + dv * dv).sqrt();
+
+    let seed = HULL_SEED + size.floor();
+    let busy = smoothstep(0.32, 0.68, busy_noise.sample3d(uc, vc, -77.0));
+    let f = 1.0 / (size * 1.6);
+    let hn = perlin3d(uc * f, vc * f, 3.3, seed);
+    let raise = ((hn + 0.05) * 2.2).clip(0.0, 1.0) * size * HULL_RAISE * (0.3 + busy);
+    let h = (base_h + (raise * 4.0).floor() * 0.25).min(HULL_MAX);
+
+    let g = 1.0 / (size * 0.7);
+    let tone = 0.86 + 0.34 * perlin3d(uc * g + 9.1, vc * g, 5.5, seed + 1000);
+    nd_h[n] = h;
+    nd_top[n] = metal_color(tone, HULL_TOP, 0.0);
+    nd_front[n] = metal_color(tone, HULL_DOWN, 0.0);
+    nd_back[n] = metal_color(tone, HULL_UP, 0.0);
+    nd_lo[n] = metal_color(tone, HULL_LEFT, 0.0);
+    nd_hi[n] = metal_color(tone, HULL_RIGHT, 0.0);
+
+    // A node is split if it lies partly over the mouth, or is too big for
+    // how near the mouth it is. Otherwise it is left to the noise, as long
+    // as that would not make blocks too small for how far out it is.
+    let var split = partly || size > (dist * 0.25).max(CELL);
+    if (!split && size * 0.5 >= (dist * 0.05).clip(CELL * 0.25, 200.0)) {
+        let s = 1.0 / (size * 1.1);
+        let sn = 0.5 + 0.9 * perlin3d(uc * s + 31.7, vc * s, 8.8, seed + 2000);
+        split = sn < 0.30 + 0.45 * busy;
+    }
+
+    if (!split || hull_nodes + 4 > HULL_NODES) {
+        if (partly) nd_h[n] = HULL_OPEN;
+        return;
+    }
+
+    let child = HULL_NODE0 + hull_nodes;
+    hull_nodes = hull_nodes + 4;
+    nd_child[n] = child;
+
+    let var stand = h;
+    if (partly) {
+        nd_h[n] = HULL_PARTLY;
+        stand = 0.0;
+    }
+
+    let half = size * 0.5;
+    for (let var k = 0; k < 4; ++k) {
+        build_hull_node(child + k, u0 + (k & 1) * half, v0 + (k >> 1) * half, half, stand);
+    }
+}
+
+fun build_hull() {
+    build_hull_node(HULL_NODE0, 0.0 - HULL_HALF, 0.0 - HULL_HALF, HULL_HALF * 2.0, 0.0);
+}
+
+// How far the blocks stand out from the side of the ship at a place on
+// it, or less than nothing where it is open
+fun hull_height(x, y) {
+    if (x.abs() >= HULL_HALF || y.abs() >= HULL_HALF) return 0.0;
+
+    let var n = HULL_NODE0;
+    loop {
+        let child = nd_child[n];
+        if (child < 0) break;
+        let half = nd_size[n] * 0.5;
+        let var pick = child;
+        if (x >= nd_u[n] + half) pick = pick + 1;
+        if (y >= nd_z[n] + half) pick = pick + 2;
+        n = pick;
+    }
+
+    return nd_h[n];
+}
+
+// The stars, as directions from the camera, and how bright each is
+let NUM_STARS = 600;
+let star_x = Array.with_size(NUM_STARS, 0.0);
+let star_y = Array.with_size(NUM_STARS, 0.0);
+let star_z = Array.with_size(NUM_STARS, 0.0);
+let star_color = Array.with_size(NUM_STARS, 0);
+
+fun build_stars() {
+    let gen = Xoshiro128(WORLD_SEED + 50);
+
+    for (let var i = 0; i < NUM_STARS; ++i) {
+        // Evenly over the sphere
+        let x = gen.normal(0.0, 1.0);
+        let y = gen.normal(0.0, 1.0);
+        let z = gen.normal(0.0, 1.0);
+        let len = (x * x + y * y + z * z).sqrt().max(0.001);
+        star_x[i] = x / len;
+        star_y[i] = y / len;
+        star_z[i] = z / len;
+
+        // Most are faint, and some lean blue or yellow
+        let level = gen.float(0.0, 1.0);
+        let b = (60.0 + 195.0 * level * level * level).floor();
+        let tint = gen.int(0, 3);
+        let var r = b;
+        let var bl = b;
+        if (tint == 1) r = (b * 4).idiv(5);
+        if (tint == 2) bl = (b * 4).idiv(5);
+        star_color[i] = 0xFF000000 | (r << 16) | (b << 8) | bl;
+    }
+}
 
 // --- Rasterization ---
 
@@ -1732,10 +1899,12 @@ fun fog_at(dist) {
 let var wall_bx = 0.0; let var wall_by = 0.0; let var wall_bz = 0.0;
 let var wall_ux = 0.0; let var wall_uy = 0.0; let var wall_uz = 0.0;
 let var wall_hx = 0.0; let var wall_hy = 0.0; let var wall_hz = 0.0;
+let var wall_vx = 0.0; let var wall_vy = 0.0; let var wall_vz = 0.0;
 
 // Where the camera is, as a place on that wall
 let var wall_cam_u = 0.0;
 let var wall_cam_h = 0.0;
+let var wall_cam_v = 0.0;
 
 // How far down their quadtrees the cells are drawn, which is less the
 // further off they are
@@ -1748,6 +1917,12 @@ fun set_wall(w) {
     wall_coords(w, cam_x, cam_y);
     wall_cam_u = wc_u;
     wall_cam_h = wc_h;
+    wall_cam_v = cam_z;
+
+    // The third direction is down the tunnel
+    wall_vx = right_z;
+    wall_vy = up_z;
+    wall_vz = fwd_z;
 
     let ux = WALL_UX[w]; let uy = WALL_UY[w];
     let hx = WALL_HX[w]; let hy = WALL_HY[w];
@@ -1770,11 +1945,11 @@ fun set_wall(w) {
 // of the view space corners, and the same square raised by a height into
 // the next four
 fun set_corners(u0, z0, size, h) {
-    let x = wall_bx + u0 * wall_ux + z0 * right_z;
-    let y = wall_by + u0 * wall_uy + z0 * up_z;
-    let z = wall_bz + u0 * wall_uz + z0 * fwd_z;
+    let x = wall_bx + u0 * wall_ux + z0 * wall_vx;
+    let y = wall_by + u0 * wall_uy + z0 * wall_vy;
+    let z = wall_bz + u0 * wall_uz + z0 * wall_vz;
     let sux = size * wall_ux; let suy = size * wall_uy; let suz = size * wall_uz;
-    let szx = size * right_z; let szy = size * up_z; let szz = size * fwd_z;
+    let szx = size * wall_vx; let szy = size * wall_vy; let szz = size * wall_vz;
     let hx = h * wall_hx; let hy = h * wall_hy; let hz = h * wall_hz;
 
     tX[0] = x; tY[0] = y; tZ[0] = z;
@@ -1820,6 +1995,7 @@ fun draw_block(n) {
     let z0 = nd_z[n];
     let size = nd_size[n];
     let h = nd_h[n];
+    if (h < 0.0) return;
     set_corners(u0, z0, size, h);
 
     if (tZ[4] < NEAR_Z && tZ[5] < NEAR_Z && tZ[6] < NEAR_Z && tZ[7] < NEAR_Z
@@ -1831,8 +2007,8 @@ fun draw_block(n) {
     }
     if (h <= 0.0) return;
 
-    if (cam_z < z0) fill_face(0, 1, 5, 4, nd_front[n]);
-    else if (cam_z > z0 + size) fill_face(3, 2, 6, 7, nd_back[n]);
+    if (wall_cam_v < z0) fill_face(0, 1, 5, 4, nd_front[n]);
+    else if (wall_cam_v > z0 + size) fill_face(3, 2, 6, 7, nd_back[n]);
 
     if (wall_cam_u < u0) fill_face(0, 3, 7, 4, nd_lo[n]);
     else if (wall_cam_u > u0 + size) fill_face(1, 2, 6, 5, nd_hi[n]);
@@ -1852,7 +2028,7 @@ fun draw_node(n, depth) {
     let var far_u = 0;
     if (wall_cam_u < nd_u[n] + half) far_u = 1;
     let var far_z = 0;
-    if (cam_z < nd_z[n] + half) far_z = 2;
+    if (wall_cam_v < nd_z[n] + half) far_z = 2;
 
     draw_node(child + far_z + far_u, depth + 1);
     draw_node(child + far_z + (1 - far_u), depth + 1);
@@ -1999,15 +2175,112 @@ fun sort_walls() {
     }
 }
 
+// Set the side of the ship up as the wall being drawn
+fun set_hull() {
+    wall_cam_u = cam_x;
+    wall_cam_v = cam_y;
+    wall_cam_h = 0.0 - cam_z;
+
+    wall_ux = right_x; wall_uy = up_x; wall_uz = fwd_x;
+    wall_vx = right_y; wall_vy = up_y; wall_vz = fwd_y;
+    wall_hx = 0.0 - right_z; wall_hy = 0.0 - up_z; wall_hz = 0.0 - fwd_z;
+
+    wall_bx = 0.0 - (cam_x * right_x + cam_y * right_y + cam_z * right_z);
+    wall_by = 0.0 - (cam_x * up_x + cam_y * up_y + cam_z * up_z);
+    wall_bz = 0.0 - (cam_x * fwd_x + cam_y * fwd_y + cam_z * fwd_z);
+}
+
+// A node of the side of the ship is drawn in one piece once it is no more
+// than this many pixels across
+let HULL_DETAIL = 7.0;
+
+// Draw a node of the side of the ship and what stands on it, the quarters
+// furthest from the camera first
+fun draw_hull_node(n) {
+    let h = nd_h[n];
+    if (h == HULL_OPEN) return;
+
+    // Leave it out if it is behind the camera, or off the part of the
+    // screen being drawn by more than anything on it could reach back in
+    let u0 = nd_u[n];
+    let v0 = nd_z[n];
+    let size = nd_size[n];
+    set_corners(u0, v0, size, 0.0);
+    let za = tZ[0]; let zb = tZ[1]; let zc = tZ[2]; let zd = tZ[3];
+    let far = za.max(zb).max(zc).max(zd);
+    if (far < NEAR_Z - HULL_MAX) return;
+
+    let near = za.min(zb).min(zc).min(zd);
+    if (near > HULL_MAX + 1.0) {
+        let xa = CX + tX[0] * FOCAL / za; let ya = CY - tY[0] * FOCAL / za;
+        let xb = CX + tX[1] * FOCAL / zb; let yb = CY - tY[1] * FOCAL / zb;
+        let xc = CX + tX[2] * FOCAL / zc; let yc = CY - tY[2] * FOCAL / zc;
+        let xd = CX + tX[3] * FOCAL / zd; let yd = CY - tY[3] * FOCAL / zd;
+        let margin = FOCAL * HULL_MAX / (near - HULL_MAX);
+
+        if (xa.max(xb).max(xc).max(xd) + margin < 0.0) return;
+        if (xa.min(xb).min(xc).min(xd) - margin > FRAME_WIDTH) return;
+        if (ya.max(yb).max(yc).max(yd) + margin < render_y0) return;
+        if (ya.min(yb).min(yc).min(yd) - margin > render_y1) return;
+    }
+
+    let child = nd_child[n];
+    if (child < 0 || (h != HULL_PARTLY && size * FOCAL < HULL_DETAIL * near.max(1.0))) {
+        draw_block(n);
+        return;
+    }
+
+    let half = size * 0.5;
+    let var far_u = 0;
+    if (wall_cam_u < u0 + half) far_u = 1;
+    let var far_v = 0;
+    if (wall_cam_v < v0 + half) far_v = 2;
+
+    draw_hull_node(child + far_v + far_u);
+    draw_hull_node(child + far_v + (1 - far_u));
+    draw_hull_node(child + (2 - far_v) + far_u);
+    draw_hull_node(child + (2 - far_v) + (1 - far_u));
+}
+
+// Draw the stars that fall on the part of the screen being drawn
+fun draw_stars() {
+    let fb = frame_buffer;
+
+    for (let var i = 0; i < NUM_STARS; ++i) {
+        let dx = star_x[i];
+        let dy = star_y[i];
+        let dz = star_z[i];
+        let z = dx * fwd_x + dy * fwd_y + dz * fwd_z;
+        if (z < 0.05) continue;
+
+        let x = (CX + FOCAL * (dx * right_x + dy * right_y + dz * right_z) / z).floor();
+        let y = (CY - FOCAL * (dx * up_x + dy * up_y + dz * up_z) / z).floor();
+        if (x < 0 || x >= FRAME_WIDTH || y < render_y0 || y >= render_y1) continue;
+        fb.set_u32(y * FRAME_WIDTH + x, star_color[i]);
+    }
+}
+
 fun render_world() {
     polys_drawn = 0;
     frame_buffer.fill_u32(render_y0 * FRAME_WIDTH, (render_y1 - render_y0) * FRAME_WIDTH, 0xFF000000);
     sort_walls();
 
+    // From outside, the stars are behind everything
+    let outside = cam_z < 0.0;
+    if (outside) draw_stars();
+
     let cam_k = (cam_z / SEC_LEN).floor();
     for (let var d = DRAW_AHEAD; d >= 0; --d) {
         if (d > 0 && d <= DRAW_BEHIND) draw_section(cam_k - d);
         draw_section(cam_k + d);
+    }
+
+    // The side of the ship is nearer than anything seen through the mouth.
+    // There is no fog out here to dim it.
+    if (outside) {
+        set_hull();
+        fog_k = 256;
+        draw_hull_node(HULL_NODE0);
     }
 }
 
@@ -2164,7 +2437,13 @@ let BOOST_RESTART = 0.25;
 let CRASH_CLEARANCE = 3.0;
 let CRASH_TIME = 2.0;
 let RESPAWN_BACK = 300.0;
-let START_Z = 150.0;
+
+// The run starts this far outside the ship, facing the mouth of the tunnel.
+// It is as far back as it can be with no way of turning aside: even with
+// the engines throttled right back to tighten the turn, the fighter gets
+// about three quarters of the way round to flying along the side of the
+// ship before it hits. From 900 meters it can get clear.
+let START_Z = -850.0;
 
 // Control inputs, each from -1 to 1
 let var in_pitch = 0.0;
@@ -2201,6 +2480,10 @@ let var crash_count = 0;
 // Whether the fighter is on course to hit something
 let var wall_warn = false;
 
+// Seconds the mission is given, and how many of them are left
+let MISSION_TIME = 300.0;
+let var time_left = MISSION_TIME;
+
 let var music_on = true;
 
 // Put the fighter in the middle of the tunnel at a depth, flying level
@@ -2226,6 +2509,7 @@ fun place_fighter(z) {
 // Start the run over
 fun reset_flight() {
     place_fighter(START_Z);
+    time_left = MISSION_TIME;
     boost_charge = 1.0;
     boost_spent = false;
     clear_cannons();
@@ -2234,8 +2518,17 @@ fun reset_flight() {
 // Whether a position is too close to a wall, a block or a pipe
 fun hits_tunnel(x, y, z) {
     let margin = CRASH_CLEARANCE;
+
+    // Outside, there is only the side of the ship to hit, which is open
+    // where the tunnel is
+    if (z < 0.0) {
+        if (z < 0.0 - HULL_MAX - margin) return false;
+        if (x.abs() <= HALF_W - margin && y.abs() <= HALF_H - margin) return false;
+        return 0.0 - z < hull_height(x, y).max(0.0) + margin;
+    }
+
     if (x.abs() > HALF_W - margin || y.abs() > HALF_H - margin) return true;
-    if (z < 0.0 || z >= RUN_LEN) return false;
+    if (z >= RUN_LEN) return false;
 
     let row = (z / CELL).floor();
     let ids = row_pipes[row];
@@ -2287,8 +2580,11 @@ fun update_flight(dt) {
     ctl_yaw = ctl_yaw + (in_yaw - ctl_yaw) * ease;
     ctl_roll = ctl_roll + (in_roll - ctl_roll) * ease;
 
-    // The faster the fighter, the wider it turns at the same g
-    let turn = TURN_G * GRAVITY / speed * dt;
+    // The faster the fighter, the wider it turns at the same g. Pitching
+    // and turning at once share that g between them.
+    let var turn = TURN_G * GRAVITY / speed * dt;
+    let pull = (ctl_pitch * ctl_pitch + ctl_yaw * ctl_yaw).sqrt();
+    if (pull > 1.0) turn = turn / pull;
     cam_pitch(ctl_pitch * turn);
     cam_yaw(ctl_yaw * turn);
 
@@ -2334,10 +2630,12 @@ fun update_flight(dt) {
 
     if (hits_tunnel(cam_x, cam_y, cam_z)) {
         // Back inside the walls, to keep the wreck from looking through them
-        let limit_x = HALF_W - CRASH_CLEARANCE;
-        let limit_y = HALF_H - CRASH_CLEARANCE;
-        cam_x = cam_x.clip(0.0 - limit_x, limit_x);
-        cam_y = cam_y.clip(0.0 - limit_y, limit_y);
+        if (cam_z >= 0.0) {
+            let limit_x = HALF_W - CRASH_CLEARANCE;
+            let limit_y = HALF_H - CRASH_CLEARANCE;
+            cam_x = cam_x.clip(0.0 - limit_x, limit_x);
+            cam_y = cam_y.clip(0.0 - limit_y, limit_y);
+        }
         crash_timer = CRASH_TIME;
         crash_count = crash_count + 1;
     }
@@ -2597,13 +2895,17 @@ fun draw_heading() {
     hud_text_centered(font_small, readout, CX.floor(), base_y + 18);
 }
 
-// A boxed value with a caption to the right of it
-fun draw_readout(x, y, text, caption) {
-    let w = 5 * font_large.char_w + 12;
+// A boxed value with a caption to the right of it, in a color. The box has
+// room for a number of characters, and the value sits at its right.
+fun draw_readout(x, y, chars, text, caption, color) {
+    let w = chars * font_large.char_w + 12;
     let h = font_large.char_h + 6;
-    hud_frame(x, y, w, h);
-    hud_text(font_large, text, x + w - 6 - text.len * font_large.char_w, y + 3);
-    hud_text(font_small, caption, x + w + 6, y + (h - font_small.char_h).idiv(2));
+    fill_rect(x, y, w, 1, color);
+    fill_rect(x, y + h - 1, w, 1, color);
+    fill_rect(x, y, 1, h, color);
+    fill_rect(x + w - 1, y, 1, h, color);
+    draw_text(font_large, text, x + w - 6 - text.len * font_large.char_w, y + 3, color);
+    draw_text(font_small, caption, x + w + 6, y + (h - font_small.char_h).idiv(2), color);
 }
 
 // A labelled bar filled to a fraction of its length
@@ -2648,6 +2950,20 @@ fun tint_frame(r, g, b, amount) {
     }
 }
 
+// The time left as minutes, seconds and hundredths of a second, boxed and
+// captioned like the other readouts but in red, at the bottom right
+fun draw_timer(y) {
+    let hundredths = (time_left * 100.0).floor();
+    let text = hundredths.idiv(6000).to_s().lpad(2, "0") + ":"
+        + (hundredths.idiv(100) % 60).to_s().lpad(2, "0") + "."
+        + (hundredths % 100).to_s().lpad(2, "0");
+    let caption = "COUNTDOWN";
+
+    let w = text.len * font_large.char_w + 12;
+    let x = FRAME_WIDTH - 24 - caption.len * font_small.char_w - 6 - w;
+    draw_readout(x, y, text.len, text, caption, WARN_RED);
+}
+
 // How long the reminder of the controls stays up at the start
 let HINT_TIME = 12.0;
 
@@ -2658,9 +2974,10 @@ fun draw_hud() {
     draw_boresight(HUD_ORANGE);
 
     let low_y = FRAME_HEIGHT - 46;
-    draw_readout(CX.floor() - 210, low_y, (speed * 3.6).floor().to_s(), "KM/H");
+    draw_readout(CX.floor() - 210, low_y, 5, (speed * 3.6).floor().to_s(), "KM/H", HUD_ORANGE);
     let target_km = (RUN_LEN - cam_z).max(0.0) * 0.001;
-    draw_readout(CX.floor() + 100, low_y, target_km.format_decimals(2), "TARGET KM");
+    draw_readout(CX.floor() + 100, low_y, 5, target_km.format_decimals(2), "TARGET KM", WARN_RED);
+    draw_timer(low_y);
 
     draw_bar(24, FRAME_HEIGHT - 64, "GUN", gun_heat, heat_color(gun_heat));
     if (gun_hot) draw_text(font_small, "OVERHEAT", 164, FRAME_HEIGHT - 66, WARN_RED);
@@ -2929,7 +3246,9 @@ fun update_cannons(dt) {
         rd_age[i] = age + dt;
 
         if (z >= RUN_LEN || hits_tunnel(x, y, z)) {
-            add_impact(x.clip(0.0 - HALF_W, HALF_W), y.clip(0.0 - HALF_H, HALF_H), z.min(RUN_LEN));
+            // A round that struck inside the tunnel flashes on its wall
+            if (z < 0.0) add_impact(x, y, z);
+            else add_impact(x.clip(0.0 - HALF_W, HALF_W), y.clip(0.0 - HALF_H, HALF_H), z.min(RUN_LEN));
             rd_age[i] = -1.0;
         } else if (age + dt > ROUND_LIFE) {
             rd_age[i] = -1.0;
@@ -3071,6 +3390,7 @@ fun update_sim(dt) {
     update_flight(dt);
     update_cannons(dt);
     wall_warn = crash_timer <= 0.0 && wall_ahead();
+    time_left = (time_left - dt).max(0.0);
 }
 
 // Tell the audio actor what it should be playing
@@ -3146,6 +3466,8 @@ fun run_bench(num_frames, shot_dir) {
 // --- Main ---
 
 lay_pipes();
+build_hull();
+build_stars();
 reset_flight();
 start_workers();
 
