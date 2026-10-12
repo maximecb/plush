@@ -1,14 +1,13 @@
 // Space fighter run through the tunnels of an alien ship
 //
-// The tunnel is a long rectangular shaft cut into sections along its axis.
-// Sections are drawn far to near, and the walls of a shaft never hide
-// anything inside it, so painter's order is exact without any depth test.
+// The tunnel is a long rectangular shaft. Its walls are covered in square
+// blocks that stand out by different amounts, big ones with smaller ones
+// on top of them, placed by noise so that they come in clumps. Glowing red
+// pipes run along and across the walls and light the blocks around them.
 //
-// Walls are texture mapped with perspective correction, done once per
-// sub-span as in examples/tremor.psh. Each vertex carries two light levels,
-// a white one that scales the whole texel and a red one that adds to its red
-// channel only, which is what lets the glowing strips tint the metal around
-// them. Fog fades both to black, so it costs nothing per pixel.
+// Nothing is textured. Every face is a flat color with its light worked
+// into it, and everything is drawn far to near in an order that puts what
+// is in front last, so there is no depth test either.
 //
 // Usage:
 //   plush examples/space_fighter.psh [workers]
@@ -30,8 +29,8 @@
 // time per frame is reported. Given a directory as well, a TGA screenshot
 // is written there every so often.
 
-from noise import FractalNoise;
-from image import Image, load_tga, save_tga;
+from noise import FractalNoise, perlin3d;
+from image import Image, save_tga;
 from random import Xoshiro128;
 from ./monogram_font import Font;
 
@@ -608,40 +607,35 @@ if (!BENCH_MODE) audio_id = $actor_spawn(audio_actor);
 let HALF_W = 100.0;
 let HALF_H = 62.5;
 
-// Length of a section, and of the square panels that tile its walls
-let SEC_LEN = 50.0;
-let PANEL = 25.0;
-let PANELS_X = 8;
-let PANELS_Y = 5;
-let PANELS_Z = 2;
+// The walls are tiled with square cells of this size, which is also the
+// largest a block standing out of them can be
+let CELL = 25.0;
+
+// A section is two rows of cells long
+let SEC_ROWS = 2;
+let SEC_LEN = CELL * SEC_ROWS;
 
 // Two minutes at cruise speed
 let NUM_SECTIONS = 936;
+let NUM_ROWS = NUM_SECTIONS * SEC_ROWS;
 let RUN_LEN = NUM_SECTIONS.to_f() * SEC_LEN;
 
-// A frame juts in from the walls at the start of every few sections
-let RIB_EVERY = 4;
-let RIB_LEN = 4.0;
-let RIB_DEPTH = 6.0;
-
-// Width of the light strips that run along the four corners
-let STRIP_W = 2.5;
-
-// How many times a texture repeats across a panel
-let TEX_REPEAT = 2.0;
-
-// How far the glow of a corner strip and of a rib reaches
-let STRIP_REACH = 17.0;
-let RIB_REACH = 14.0;
+// The four walls: floor, ceiling, left and right. Each has an axis that
+// runs across it, called u, which is x for the floor and ceiling and y for
+// the other two. Below are the number of cells across each wall, where u
+// starts, and where the wall's cells start in a row of all four.
+let NUM_WALLS = 4;
+let WALL_CELLS = [8, 8, 5, 5];
+let WALL_U0 = [0.0 - HALF_W, 0.0 - HALF_W, 0.0 - HALF_H, 0.0 - HALF_H];
+let WALL_FIRST = [0, 8, 16, 21];
+let ROW_CELLS = 26;
+let SEC_CELLS = ROW_CELLS * SEC_ROWS;
 
 // Everything fades to black between these distances
 let FOG_START = 300.0;
 let FOG_END = 1600.0;
 let DRAW_AHEAD = 32;
 let DRAW_BEHIND = 1;
-
-let STRIP_COLOR = 0xFFFF2A14;
-let RIB_GLOW_COLOR = 0xFFFF6A22;
 
 fun lerp(a, b, t) {
     return a + (b - a) * t;
@@ -659,386 +653,6 @@ fun color_scale(c, t) {
     let g = (((c >> 8) & 0xFF) * k) >> 8;
     let b = ((c & 0xFF) * k) >> 8;
     return 0xFF000000 | (r << 16) | (g << 8) | b;
-}
-
-// --- Textures ---
-
-// Average brightness every texture is scaled to, since the lights can only
-// darken a texel and most of these start out nearly black
-let TEX_LEVEL = 120.0;
-let MIN_MIP_SIZE = 8;
-
-// A power-of-two texture and its chain of half-sized copies
-class Texture {
-    init(self, name) {
-        let img = load_tga(TEX_DIR + name + ".tga");
-        if (img == nil) {
-            $println(name + ": could not read an uncompressed 32-bit TGA");
-            $exit(1);
-        }
-
-        let var w = img.width;
-        let var h = img.height;
-        if ((w & (w - 1)) != 0 || (h & (h - 1)) != 0) {
-            $println(name + ": expected a power-of-two sized texture");
-            $exit(1);
-        }
-
-        let var pix = img.bytes;
-        normalize_level(pix, w * h);
-
-        // What the texture looks like from too far away to make out
-        let var sum_r = 0;
-        let var sum_g = 0;
-        let var sum_b = 0;
-        for (let var i = 0; i < w * h; ++i) {
-            let c = pix.get_u32(i);
-            sum_r = sum_r + ((c >> 16) & 0xFF);
-            sum_g = sum_g + ((c >> 8) & 0xFF);
-            sum_b = sum_b + (c & 0xFF);
-        }
-        self.avg_r = sum_r.to_f() / (w * h);
-        self.avg_g = sum_g.to_f() / (w * h);
-        self.avg_b = sum_b.to_f() / (w * h);
-
-        self.pix = [];
-        self.width = [];
-        self.height = [];
-        self.shift = [];
-
-        loop {
-            let var shift = 0;
-            while ((1 << shift) < w) ++shift;
-            self.pix.push(pix);
-            self.width.push(w);
-            self.height.push(h);
-            self.shift.push(shift);
-
-            if (w <= MIN_MIP_SIZE || h <= MIN_MIP_SIZE) break;
-            pix = halve(pix, w, h);
-            w = w >> 1;
-            h = h >> 1;
-        }
-
-        self.num_levels = self.pix.len;
-    }
-}
-
-// Brighten or darken a texture to the common average level
-fun normalize_level(pix, count) {
-    let var sum = 0;
-    for (let var i = 0; i < count; ++i) {
-        let c = pix.get_u32(i);
-        sum = sum + ((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF);
-    }
-
-    let gain = (TEX_LEVEL * 3.0 * count / sum.max(1)).min(4.0);
-    let k = (gain * 256.0).floor();
-    for (let var i = 0; i < count; ++i) {
-        let c = pix.get_u32(i);
-        let r = ((((c >> 16) & 0xFF) * k) >> 8).min(255);
-        let g = ((((c >> 8) & 0xFF) * k) >> 8).min(255);
-        let b = (((c & 0xFF) * k) >> 8).min(255);
-        pix.set_u32(i, 0xFF000000 | (r << 16) | (g << 8) | b);
-    }
-}
-
-// Box filter a texture down to half its size
-fun halve(src, w, h) {
-    let w2 = w >> 1;
-    let h2 = h >> 1;
-    let dst = ByteArray.with_size(w2 * h2 * 4);
-
-    for (let var y = 0; y < h2; ++y) {
-        for (let var x = 0; x < w2; ++x) {
-            let i = (y * 2) * w + x * 2;
-            let a = src.get_u32(i);
-            let b = src.get_u32(i + 1);
-            let c = src.get_u32(i + w);
-            let d = src.get_u32(i + w + 1);
-
-            // Red and blue average together, green on its own
-            let rb = ((a & 0xFF00FF) + (b & 0xFF00FF) + (c & 0xFF00FF) + (d & 0xFF00FF)) >> 2;
-            let g = ((a & 0xFF00) + (b & 0xFF00) + (c & 0xFF00) + (d & 0xFF00)) >> 2;
-            dst.set_u32(y * w2 + x, 0xFF000000 | (rb & 0xFF00FF) | (g & 0xFF00));
-        }
-    }
-
-    return dst;
-}
-
-let tex_metal_dark = Texture("metal_dark");
-let tex_metal_panels = Texture("metal_panels");
-let tex_metal_riveted = Texture("metal_riveted");
-let tex_tech_panel = Texture("tech_panel_teal");
-let tex_metal_plate = Texture("metal_plate");
-let tex_metal_bolted = Texture("metal_bolted");
-let tex_floor_plate = Texture("floor_plate");
-let tex_concrete = Texture("concrete_01");
-let tex_asphalt = Texture("asphalt_01");
-let tex_floor_tread = Texture("floor_tread");
-
-// What the bands of wall between two ribs are picked from, the plainer
-// ones listed more often so that the busy ones stand out
-let WALL_TEXTURES = [
-    tex_metal_dark, tex_metal_dark, tex_metal_riveted, tex_metal_riveted,
-    tex_metal_plate, tex_metal_plate, tex_metal_bolted, tex_metal_bolted,
-    tex_concrete, tex_asphalt, tex_floor_plate,
-    tex_metal_panels, tex_tech_panel,
-];
-
-// --- World geometry ---
-
-// Every surface is a quad owning four consecutive vertices, wound so that
-// it faces into the open space. A quad without a texture is a flat color
-// that glows, which the fog dims but the lights do not touch.
-let vert_x = [];
-let vert_y = [];
-let vert_z = [];
-let vert_u = [];
-let vert_v = [];
-let vert_lw = [];
-let vert_lr = [];
-
-let quad_tex = [];
-let quad_color = [];
-
-// The quads of each section: walls first, then whatever stands inside them
-let sec_first = Array.with_size(NUM_SECTIONS + 1, 0);
-
-let light_noise = FractalNoise({ seed: WORLD_SEED, frequency: 1.0 / 90.0, octaves: 2 });
-let gen_rng = Xoshiro128(WORLD_SEED);
-
-// Brightness of the panel being generated, which sets it apart from its
-// neighbours
-let var gen_gain = 1.0;
-
-// Where the nearest rib is along the tunnel
-fun rib_center(z) {
-    let spacing = RIB_EVERY.to_f() * SEC_LEN;
-    return (z / spacing + 0.5).floor().to_f() * spacing + RIB_LEN * 0.5;
-}
-
-// White and red light reaching a point, each from 0 to 1 and summing to
-// no more than 1. The red comes from the corner strips and the ribs.
-let var lit_white = 0.0;
-let var lit_red = 0.0;
-
-fun light_at(x, y, z) {
-    let dx = HALF_W - x.abs();
-    let dy = HALF_H - y.abs();
-    let corner = (dx * dx + dy * dy) / (STRIP_REACH * STRIP_REACH);
-    let dz = (z - rib_center(z)) / RIB_REACH;
-
-    let red = 0.80 / (1.0 + corner) + 0.55 / (1.0 + dz * dz);
-    let white = 0.20 + 0.12 * light_noise.sample3d(x, y, z);
-
-    lit_white = (white * gen_gain).clip(0.02, 0.95);
-    lit_red = (red * gen_gain).clip(0.0, 1.0 - lit_white);
-}
-
-fun add_vert(x, y, z, u, v) {
-    light_at(x, y, z);
-    vert_x.push(x);
-    vert_y.push(y);
-    vert_z.push(z);
-    vert_u.push(u);
-    vert_v.push(v);
-    vert_lw.push(lit_white);
-    vert_lr.push(lit_red);
-}
-
-// Close the quad made of the last four vertices, turning it to face along
-// the given normal
-fun end_quad(tex, color, nx, ny, nz) {
-    let i = vert_x.len - 4;
-    let ax = vert_x[i + 1] - vert_x[i];
-    let ay = vert_y[i + 1] - vert_y[i];
-    let az = vert_z[i + 1] - vert_z[i];
-    let bx = vert_x[i + 2] - vert_x[i];
-    let by = vert_y[i + 2] - vert_y[i];
-    let bz = vert_z[i + 2] - vert_z[i];
-    let cx = ay * bz - az * by;
-    let cy = az * bx - ax * bz;
-    let cz = ax * by - ay * bx;
-
-    // Facing the wrong way, so swap two opposite corners
-    if (cx * nx + cy * ny + cz * nz < 0.0) {
-        swap_verts(vert_x, i); swap_verts(vert_y, i); swap_verts(vert_z, i);
-        swap_verts(vert_u, i); swap_verts(vert_v, i);
-        swap_verts(vert_lw, i); swap_verts(vert_lr, i);
-    }
-
-    quad_tex.push(tex);
-    quad_color.push(color);
-}
-
-fun swap_verts(arr, i) {
-    let tmp = arr[i + 1];
-    arr[i + 1] = arr[i + 3];
-    arr[i + 3] = tmp;
-}
-
-// Where texture coordinates measure z from. This is the start of the
-// section being generated, a whole number of repeats from the origin, which
-// keeps the coordinates small.
-let var gen_z0 = 0.0;
-
-// Add a rectangle that lies in a plane of constant x, y or z, given as two
-// opposite corners. Texture coordinates follow the two axes it spans, at
-// one repeat per `tile` meters.
-fun add_rect(tex, color, x0, y0, z0, x1, y1, z1, nx, ny, nz, tile) {
-    let wa = (z0 - gen_z0) / tile;
-    let wb = (z1 - gen_z0) / tile;
-
-    if (x0 == x1) {
-        add_vert(x0, y0, z0, wa, y0 / tile);
-        add_vert(x0, y0, z1, wb, y0 / tile);
-        add_vert(x0, y1, z1, wb, y1 / tile);
-        add_vert(x0, y1, z0, wa, y1 / tile);
-    } else if (y0 == y1) {
-        add_vert(x0, y0, z0, x0 / tile, wa);
-        add_vert(x1, y0, z0, x1 / tile, wa);
-        add_vert(x1, y0, z1, x1 / tile, wb);
-        add_vert(x0, y0, z1, x0 / tile, wb);
-    } else {
-        add_vert(x0, y0, z0, x0 / tile, y0 / tile);
-        add_vert(x1, y0, z0, x1 / tile, y0 / tile);
-        add_vert(x1, y1, z0, x1 / tile, y1 / tile);
-        add_vert(x0, y1, z0, x0 / tile, y1 / tile);
-    }
-    end_quad(tex, color, nx, ny, nz);
-}
-
-// Size of one repeat of a texture
-let TILE = PANEL / TEX_REPEAT;
-
-// Tile one wall of a section with panels. The wall lies at `level` along
-// one axis and spans `count` panels along the other, starting at `start`.
-fun add_wall(k, vertical, level, start, count, n, textures) {
-    let z0 = k.to_f() * SEC_LEN;
-
-    for (let var i = 0; i < count; ++i) {
-        let a0 = start + i.to_f() * PANEL;
-        let a1 = a0 + PANEL;
-
-        for (let var j = 0; j < PANELS_Z; ++j) {
-            let za = z0 + j.to_f() * PANEL;
-            let zb = za + PANEL;
-            gen_gain = gen_rng.float(0.72, 1.0);
-
-            if (vertical) add_rect(textures[i], 0, level, a0, za, level, a1, zb, n, 0.0, 0.0, TILE);
-            else add_rect(textures[i], 0, a0, level, za, a1, level, zb, 0.0, n, 0.0, TILE);
-        }
-    }
-}
-
-// The four bars of a rectangular frame around the tunnel at depth z, facing
-// along nz, between an outer and an inner margin from the walls
-fun add_frame(tex, color, z, nz, outer, inner) {
-    let xo = HALF_W - outer; let yo = HALF_H - outer;
-    let xi = HALF_W - inner; let yi = HALF_H - inner;
-    add_rect(tex, color, -xo, -yo, z, xo, -yi, z, 0.0, 0.0, nz, TILE);
-    add_rect(tex, color, -xo, yi, z, xo, yo, z, 0.0, 0.0, nz, TILE);
-    add_rect(tex, color, -xo, -yi, z, -xi, yi, z, 0.0, 0.0, nz, TILE);
-    add_rect(tex, color, xi, -yi, z, xo, yi, z, 0.0, 0.0, nz, TILE);
-}
-
-// A frame that juts in from the walls, with a glowing band around its face
-fun add_rib(z0) {
-    let z1 = z0 + RIB_LEN;
-    let xi = HALF_W - RIB_DEPTH;
-    let yi = HALF_H - RIB_DEPTH;
-    let tex = tex_metal_riveted;
-    gen_gain = 1.0;
-
-    // Far face first, then the inner faces, then the near face
-    add_frame(tex, 0, z1, 1.0, 0.0, RIB_DEPTH);
-    add_rect(tex, 0, -xi, -yi, z0, xi, -yi, z1, 0.0, 1.0, 0.0, TILE);
-    add_rect(tex, 0, -xi, yi, z0, xi, yi, z1, 0.0, -1.0, 0.0, TILE);
-    add_rect(tex, 0, -xi, -yi, z0, -xi, yi, z1, 1.0, 0.0, 0.0, TILE);
-    add_rect(tex, 0, xi, -yi, z0, xi, yi, z1, -1.0, 0.0, 0.0, TILE);
-    add_frame(tex, 0, z0, -1.0, 0.0, RIB_DEPTH);
-    add_frame(nil, RIB_GLOW_COLOR, z0 - 0.1, -1.0, RIB_DEPTH * 0.5 - 0.5, RIB_DEPTH * 0.5 + 0.5);
-}
-
-// A glowing strip across each corner of the tunnel
-fun add_strips(za, zb) {
-    for (let var c = 0; c < 4; ++c) {
-        let sx = [-1.0, 1.0, 1.0, -1.0][c];
-        let sy = [-1.0, -1.0, 1.0, 1.0][c];
-        add_vert(sx * (HALF_W - STRIP_W), sy * HALF_H, za, 0.0, 0.0);
-        add_vert(sx * HALF_W, sy * (HALF_H - STRIP_W), za, 0.0, 0.0);
-        add_vert(sx * HALF_W, sy * (HALF_H - STRIP_W), zb, 0.0, 0.0);
-        add_vert(sx * (HALF_W - STRIP_W), sy * HALF_H, zb, 0.0, 0.0);
-        end_quad(nil, STRIP_COLOR, 0.0 - sx, 0.0 - sy, 0.0);
-    }
-}
-
-// Pick a texture for each band of panels across a wall
-fun pick_bands(count, runway) {
-    let bands = [];
-    for (let var i = 0; i < count; ++i) {
-        bands.push(gen_rng.choice(WALL_TEXTURES));
-    }
-
-    // A tread plate track down the middle of the floor
-    if (runway) {
-        bands[count.idiv(2) - 1] = tex_floor_tread;
-        bands[count.idiv(2)] = tex_floor_tread;
-    }
-
-    return bands;
-}
-
-fun generate_world() {
-    let var floor_tex = nil;
-    let var ceil_tex = nil;
-    let var left_tex = nil;
-    let var right_tex = nil;
-
-    for (let var k = 0; k < NUM_SECTIONS; ++k) {
-        sec_first[k] = quad_tex.len;
-        let z0 = k.to_f() * SEC_LEN;
-        let has_rib = k % RIB_EVERY == 0;
-        gen_z0 = z0;
-
-        // The bands of texture change at each rib
-        if (has_rib) {
-            floor_tex = pick_bands(PANELS_X, true);
-            ceil_tex = pick_bands(PANELS_X, false);
-            left_tex = pick_bands(PANELS_Y, false);
-            right_tex = pick_bands(PANELS_Y, false);
-        }
-
-        add_wall(k, false, 0.0 - HALF_H, 0.0 - HALF_W, PANELS_X, 1.0, floor_tex);
-        add_wall(k, false, HALF_H, 0.0 - HALF_W, PANELS_X, -1.0, ceil_tex);
-        add_wall(k, true, 0.0 - HALF_W, 0.0 - HALF_H, PANELS_Y, 1.0, left_tex);
-        add_wall(k, true, HALF_W, 0.0 - HALF_H, PANELS_Y, -1.0, right_tex);
-
-        // The strips break off a little short of each section's end
-        if (has_rib) {
-            add_strips(z0 + RIB_LEN + 2.0, z0 + SEC_LEN - 4.0);
-            add_rib(z0);
-        } else {
-            add_strips(z0 + 4.0, z0 + SEC_LEN - 4.0);
-        }
-
-        // A wall closes off the far end of the run
-        if (k == NUM_SECTIONS - 1) {
-            gen_gain = 1.0;
-            for (let var i = 0; i < PANELS_X; ++i) {
-                for (let var j = 0; j < PANELS_Y; ++j) {
-                    let x = i.to_f() * PANEL - HALF_W;
-                    let y = j.to_f() * PANEL - HALF_H;
-                    add_rect(tex_metal_panels, 0, x, y, RUN_LEN, x + PANEL, y + PANEL, RUN_LEN,
-                        0.0, 0.0, -1.0, TILE);
-                }
-            }
-        }
-    }
-
-    sec_first[NUM_SECTIONS] = quad_tex.len;
 }
 
 // --- Camera ---
@@ -1128,68 +742,619 @@ fun cam_normalize() {
     up_z = fwd_x * right_y - fwd_y * right_x;
 }
 
+// --- Walls ---
+
+// Where each wall's origin is, the direction its u axis runs in, and the
+// direction it faces, which is the way a block's height is measured
+let WALL_OX = [0.0, 0.0, 0.0 - HALF_W, HALF_W];
+let WALL_OY = [0.0 - HALF_H, HALF_H, 0.0, 0.0];
+let WALL_UX = [1.0, 1.0, 0.0, 0.0];
+let WALL_UY = [0.0, 0.0, 1.0, 1.0];
+let WALL_HX = [0.0, 0.0, 1.0, -1.0];
+let WALL_HY = [1.0, -1.0, 0.0, 0.0];
+
+// The point last given to `wall_point`, in the world
+let var wp_x = 0.0;
+let var wp_y = 0.0;
+
+// Where a point of a wall is in the world, given how far across the wall
+// it is and how far out from it
+fun wall_point(w, u, h) {
+    wp_x = WALL_OX[w] + u * WALL_UX[w] + h * WALL_HX[w];
+    wp_y = WALL_OY[w] + u * WALL_UY[w] + h * WALL_HY[w];
+}
+
+// The point last given to `wall_coords`, as seen from a wall
+let var wc_u = 0.0;
+let var wc_h = 0.0;
+
+// How far across a wall a point in the world is, and how far out from it
+fun wall_coords(w, x, y) {
+    wc_u = x * WALL_UX[w] + y * WALL_UY[w];
+    wc_h = (x - WALL_OX[w]) * WALL_HX[w] + (y - WALL_OY[w]) * WALL_HY[w];
+}
+
+// --- Pipes ---
+//
+// Glowing red pipes lie half sunk into the walls. Some run along the
+// tunnel, alone or side by side, and others cross a wall or ring the whole
+// tunnel. They are laid out for the whole run at startup, being few, and
+// the parts of the walls around them are worked out as they come into view.
+
+let PIPE_ALONG = 0;
+let PIPE_ACROSS = 1;
+
+// For each pipe: which way it runs, the wall it lies on and its radius.
+// Then where it is, which is how far across the wall for a pipe along the
+// tunnel and how far down the tunnel for one across it, and the first and
+// last of the rows or of the wall's cells that it covers.
+let pk_kind = [];
+let pk_wall = [];
+let pk_r = [];
+let pk_at = [];
+let pk_lo = [];
+let pk_hi = [];
+
+// The pipes that pass through each row of cells
+let row_pipes = [];
+for (let var i = 0; i < NUM_ROWS; ++i) row_pipes.push([]);
+
+fun add_pipe(kind, wall, r, at, lo, hi) {
+    let id = pk_kind.len;
+    pk_kind.push(kind);
+    pk_wall.push(wall);
+    pk_r.push(r);
+    pk_at.push(at);
+    pk_lo.push(lo);
+    pk_hi.push(hi);
+
+    if (kind == PIPE_ALONG) {
+        for (let var row = lo; row <= hi; ++row) row_pipes[row].push(id);
+    } else {
+        row_pipes[(at / CELL).floor()].push(id);
+    }
+}
+
+// How thick the pipes of a group are, which is thinner the more of them
+// there are side by side
+fun pipe_radius(gen, count) {
+    if (count >= 3) return gen.choice([1.2, 1.5]);
+    if (count == 2) return gen.choice([1.6, 2.1]);
+    return gen.choice([2.2, 3.0]);
+}
+
+// One to three pipes side by side along the tunnel, starting at a row
+fun lay_along(gen, row) {
+    let wall = gen.index(NUM_WALLS);
+    let count = gen.int(1, 4);
+    let r = pipe_radius(gen, count);
+    let center = WALL_U0[wall] + (gen.index(WALL_CELLS[wall]) + 0.5) * CELL;
+    let last = (row + gen.int(3, 22)).min(NUM_ROWS - 2);
+
+    for (let var j = 0; j < count; ++j) {
+        add_pipe(PIPE_ALONG, wall, r, center + (j - (count - 1) * 0.5) * r * 2.8, row, last);
+    }
+}
+
+// One to three pipes side by side across a wall, or across the wall
+// opposite as well, or all the way round the tunnel
+fun lay_across(gen, row, count) {
+    let r = pipe_radius(gen, count);
+    let reach = gen.int(0, 3);
+    let wall = gen.index(NUM_WALLS);
+
+    for (let var w = 0; w < NUM_WALLS; ++w) {
+        // The floor and ceiling are a pair, as are the two sides
+        let var wanted = w == wall;
+        if (reach == 1) wanted = (w >> 1) == (wall >> 1);
+        if (reach == 2) wanted = true;
+        if (!wanted) continue;
+
+        // A pipe on one wall alone may stop short of its edges
+        let var lo = 0;
+        let var hi = WALL_CELLS[w] - 1;
+        if (reach == 0 && gen.bool()) {
+            lo = gen.int(0, hi);
+            hi = gen.int(lo + 1, hi + 1);
+        }
+
+        for (let var j = 0; j < count; ++j) {
+            let z = (row + 0.5) * CELL + (j - (count - 1) * 0.5) * r * 2.8;
+            add_pipe(PIPE_ACROSS, w, r, z, lo, hi);
+        }
+    }
+}
+
+fun lay_pipes() {
+    let gen = Xoshiro128(WORLD_SEED);
+    let var row = 6;
+
+    while (row < NUM_ROWS - 24) {
+        let pick = gen.int(0, 100);
+        if (pick < 45) {
+            lay_along(gen, row);
+        } else if (pick < 80) {
+            lay_across(gen, row, gen.int(1, 4));
+        } else {
+            // A run of single pipes across one wall, like the rungs of a ladder
+            let rungs = gen.int(3, 8);
+            let wall = gen.index(NUM_WALLS);
+            let r = gen.choice([1.5, 2.2]);
+            for (let var j = 0; j < rungs; ++j) {
+                add_pipe(PIPE_ACROSS, wall, r, (row + j * 2 + 0.5) * CELL, 0, WALL_CELLS[wall] - 1);
+            }
+            row = row + rungs * 2;
+        }
+
+        row = row + gen.int(1, 6);
+    }
+}
+
+// --- Tunnel sections ---
+//
+// The walls are a field of square blocks standing out by different
+// amounts. Each cell of a wall is the root of a quadtree: a node is a block
+// of some height, and where the noise says so it is split into four smaller
+// blocks that stand on top of it, which may be split in turn. Since the
+// noise is smooth, busy patches and bare ones both come in clumps.
+//
+// A section's blocks are worked out when it first comes into view and kept
+// in a slot of a fixed pool, which the sections that follow reuse. This is
+// done by each render worker for itself, the result depending only on the
+// seed.
+
+let NUM_SLOTS = 40;
+let MAX_NODES = 1600;
+let MAX_POLYS = 800;
+let POLY_VERTS = 5;
+
+// How many times a cell may be split, and the tallest a stack of blocks
+// can get
+let MAX_DEPTH = 3;
+let MAX_BLOCK = 6.0;
+
+// How far a block may stand out of the one under it, as a fraction of its
+// width, and how likely one is to be split, both by depth. The chance of
+// a split is the first number in a bare patch, rising by the second in a
+// busy one.
+let RAISE = [0.10, 0.22, 0.32, 0.40];
+let SPLIT_BASE = [0.15, 0.10, 0.0];
+let SPLIT_BUSY = [0.60, 0.50, 0.35];
+
+// A bare cell near a pipe is split anyway when the glow changes by this
+// much across it, so that the light falls off in steps too small to see
+let GLOW_SPLIT = 0.10;
+
+// How far a pipe's glow reaches for its radius, and how bright it is
+let GLOW_REACH = 3.0;
+let GLOW_LEVEL = 0.95;
+
+// The section each slot holds
+let slot_section = Array.with_size(NUM_SLOTS, -1);
+
+// For each node: its corner on the wall, its width, how far it stands out,
+// the first of its four children if it has any, and the color of its top
+// and of the sides that face up and down the tunnel and across the wall
+let nd_u = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
+let nd_z = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
+let nd_size = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
+let nd_h = Array.with_size(NUM_SLOTS * MAX_NODES, 0.0);
+let nd_child = Array.with_size(NUM_SLOTS * MAX_NODES, -1);
+let nd_top = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
+let nd_front = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
+let nd_back = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
+let nd_lo = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
+let nd_hi = Array.with_size(NUM_SLOTS * MAX_NODES, 0);
+
+// For each cell of a section: its root node, and its share of the faces
+// of the pipes
+let cell_node = Array.with_size(NUM_SLOTS * SEC_CELLS, 0);
+let cell_poly0 = Array.with_size(NUM_SLOTS * SEC_CELLS, 0);
+let cell_poly1 = Array.with_size(NUM_SLOTS * SEC_CELLS, 0);
+
+// The faces of the pipes: how many corners each has, its color, the way it
+// faces and where its corners are
+let pp_n = Array.with_size(NUM_SLOTS * MAX_POLYS, 0);
+let pp_color = Array.with_size(NUM_SLOTS * MAX_POLYS, 0);
+let pp_nx = Array.with_size(NUM_SLOTS * MAX_POLYS, 0.0);
+let pp_ny = Array.with_size(NUM_SLOTS * MAX_POLYS, 0.0);
+let pp_nz = Array.with_size(NUM_SLOTS * MAX_POLYS, 0.0);
+let pp_x = Array.with_size(NUM_SLOTS * MAX_POLYS * POLY_VERTS, 0.0);
+let pp_y = Array.with_size(NUM_SLOTS * MAX_POLYS * POLY_VERTS, 0.0);
+let pp_z = Array.with_size(NUM_SLOTS * MAX_POLYS * POLY_VERTS, 0.0);
+
+let light_noise = FractalNoise({ seed: WORLD_SEED, frequency: 1.0 / 90.0, octaves: 2 });
+let busy_noise = FractalNoise({ seed: WORLD_SEED + 1, frequency: 1.0 / 140.0, octaves: 2, min: 0.0, max: 1.0 });
+let HEIGHT_SEED = WORLD_SEED + 10;
+let SPLIT_SEED = WORLD_SEED + 20;
+let TONE_SEED = WORLD_SEED + 30;
+
+// The section being built: where its nodes and faces start in the pools,
+// how many it has so far, and the wall being worked on
+let var gen_node0 = 0;
+let var gen_nodes = 0;
+let var gen_poly0 = 0;
+let var gen_polys = 0;
+let var gen_wall = 0;
+
+// The axes of the pipes near the section being built, each a line along
+// one of the world's axes from a low end to a high end, with how bright it
+// is and one over the square of how far its glow reaches
+let MAX_NEAR = 96;
+let gl_x0 = Array.with_size(MAX_NEAR, 0.0);
+let gl_y0 = Array.with_size(MAX_NEAR, 0.0);
+let gl_z0 = Array.with_size(MAX_NEAR, 0.0);
+let gl_x1 = Array.with_size(MAX_NEAR, 0.0);
+let gl_y1 = Array.with_size(MAX_NEAR, 0.0);
+let gl_z1 = Array.with_size(MAX_NEAR, 0.0);
+let gl_inv = Array.with_size(MAX_NEAR, 0.0);
+let gl_id = Array.with_size(MAX_NEAR, -1);
+let var gl_n = 0;
+
+// Take note of a pipe near the section being built, unless it is known
+fun note_pipe(id) {
+    for (let var i = 0; i < gl_n; ++i) {
+        if (gl_id[i] == id) return;
+    }
+    if (gl_n >= MAX_NEAR) return;
+
+    let w = pk_wall[id];
+    let r = pk_r[id];
+    let i = gl_n;
+    gl_n = gl_n + 1;
+    gl_id[i] = id;
+
+    // The axis runs through the middle of the half that shows
+    if (pk_kind[id] == PIPE_ALONG) {
+        wall_point(w, pk_at[id], r * 0.5);
+        gl_x0[i] = wp_x; gl_x1[i] = wp_x;
+        gl_y0[i] = wp_y; gl_y1[i] = wp_y;
+        gl_z0[i] = pk_lo[id] * CELL;
+        gl_z1[i] = (pk_hi[id] + 1) * CELL;
+    } else {
+        wall_point(w, WALL_U0[w] + pk_lo[id] * CELL, r * 0.5);
+        let xa = wp_x;
+        let ya = wp_y;
+        wall_point(w, WALL_U0[w] + (pk_hi[id] + 1) * CELL, r * 0.5);
+        gl_x0[i] = xa.min(wp_x); gl_x1[i] = xa.max(wp_x);
+        gl_y0[i] = ya.min(wp_y); gl_y1[i] = ya.max(wp_y);
+        gl_z0[i] = pk_at[id];
+        gl_z1[i] = pk_at[id];
+    }
+
+    let reach = GLOW_REACH * r + 5.0;
+    gl_inv[i] = 1.0 / (reach * reach);
+}
+
+// How much red light reaches a point on a surface that faces a given way,
+// from 0 to 1. A surface turned away from a pipe still gets a little, as if
+// off the walls around it.
+fun red_at(x, y, z, nx, ny, nz) {
+    let var sum = 0.0;
+
+    for (let var i = 0; i < gl_n; ++i) {
+        let dx = x.clip(gl_x0[i], gl_x1[i]) - x;
+        let dy = y.clip(gl_y0[i], gl_y1[i]) - y;
+        let dz = z.clip(gl_z0[i], gl_z1[i]) - z;
+        let d2 = dx * dx + dy * dy + dz * dz;
+
+        let var facing = 0.15;
+        let toward = (dx * nx + dy * ny + dz * nz) / (d2 + 0.0001).sqrt();
+        if (toward > 0.0) facing = 0.45 + 0.55 * toward;
+
+        sum = sum + GLOW_LEVEL * facing / (1.0 + d2 * gl_inv[i]);
+    }
+
+    return sum.min(1.0);
+}
+
+// The color of bare metal of a given tone under white and red light
+fun metal_color(tone, white, red) {
+    let r = (126.0 * tone * (white + red)).min(255.0).floor();
+    let g = (128.0 * tone * (white + red * 0.07)).min(255.0).floor();
+    let b = (136.0 * tone * (white + red * 0.05)).min(255.0).floor();
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// The color of one face of a block, given a point just off the middle of
+// it as a place on the wall, the way it faces in the wall's own terms, and
+// how much of the white light gets to it
+fun face_color(tone, white, u, h, z, nu, nh, nz) {
+    let w = gen_wall;
+    wall_point(w, u, h);
+    let nx = nu * WALL_UX[w] + nh * WALL_HX[w];
+    let ny = nu * WALL_UY[w] + nh * WALL_HY[w];
+    return metal_color(tone, white, red_at(wp_x, wp_y, z, nx, ny, nz));
+}
+
+// Fill in a node and whatever stands on it. A flat node has a pipe over
+// its cell, and so is kept bare.
+fun build_node(n, u0, z0, size, depth, base_h, flat) {
+    let w = gen_wall;
+    let uc = u0 + size * 0.5;
+    let zc = z0 + size * 0.5;
+    wall_point(w, uc, 0.0);
+    let x = wp_x;
+    let y = wp_y;
+    let busy = smoothstep(0.32, 0.68, busy_noise.sample3d(x, y, zc));
+
+    // How far it stands out, in steps of a quarter of a meter
+    let var h = base_h;
+    if (!flat) {
+        let f = 1.0 / (size * 1.6);
+        let hn = perlin3d(x * f, y * f, zc * f, HEIGHT_SEED + depth);
+        let raise = ((hn + 0.05) * 2.2).clip(0.0, 1.0) * size * RAISE[depth] * (0.3 + busy);
+        h = (base_h + (raise * 4.0).floor() * 0.25).min(MAX_BLOCK);
+    }
+
+    nd_u[n] = u0;
+    nd_z[n] = z0;
+    nd_size[n] = size;
+    nd_h[n] = h;
+    nd_child[n] = -1;
+
+    // No two blocks are quite the same shade, which is what shows where
+    // one ends and the next begins when they are level
+    let g = 1.0 / (size * 0.7);
+    let tone = 0.86 + 0.34 * perlin3d(x * g + 9.1, y * g, zc * g, TONE_SEED + depth);
+    let white = 0.31 + 0.12 * light_noise.sample3d(x, y, zc);
+
+    nd_top[n] = face_color(tone, white, uc, h + 0.3, zc, 0.0, 1.0, 0.0);
+    if (h > 0.0) {
+        let half = size * 0.5 + 0.3;
+        let mid = h * 0.5;
+        nd_front[n] = face_color(tone, white * 0.80, uc, mid, zc - half, 0.0, 0.0, -1.0);
+        nd_back[n] = face_color(tone, white * 0.80, uc, mid, zc + half, 0.0, 0.0, 1.0);
+        nd_lo[n] = face_color(tone, white * 0.62, uc - half, mid, zc, -1.0, 0.0, 0.0);
+        nd_hi[n] = face_color(tone, white * 0.62, uc + half, mid, zc, 1.0, 0.0, 0.0);
+    }
+
+    if (depth >= MAX_DEPTH || gen_nodes + 4 > MAX_NODES) return;
+
+    let var split = false;
+    if (flat) {
+        // Split where the glow is uneven
+        if (depth < 2 && gl_n > 0) {
+            let hx = WALL_HX[w];
+            let hy = WALL_HY[w];
+            let var lo = red_at(x, y, zc, hx, hy, 0.0);
+            let var hi = lo;
+            for (let var k = 0; k < 4; ++k) {
+                wall_point(w, u0 + (k & 1) * size, 0.0);
+                let red = red_at(wp_x, wp_y, z0 + (k >> 1) * size, hx, hy, 0.0);
+                lo = lo.min(red);
+                hi = hi.max(red);
+            }
+            split = hi - lo > GLOW_SPLIT;
+        }
+    } else {
+        let s = 1.0 / (size * 1.1);
+        let sn = 0.5 + 0.9 * perlin3d(x * s + 31.7, y * s, zc * s, SPLIT_SEED + depth);
+        split = sn < SPLIT_BASE[depth] + SPLIT_BUSY[depth] * busy;
+    }
+    if (!split) return;
+
+    let child = gen_node0 + gen_nodes;
+    gen_nodes = gen_nodes + 4;
+    nd_child[n] = child;
+
+    let half = size * 0.5;
+    for (let var k = 0; k < 4; ++k) {
+        build_node(child + k, u0 + (k & 1) * half, z0 + (k >> 1) * half, half, depth + 1, h, flat);
+    }
+}
+
+// Corners of the face of a pipe being added, as places on the wall
+let fv_u = Array.with_size(POLY_VERTS, 0.0);
+let fv_h = Array.with_size(POLY_VERTS, 0.0);
+let fv_z = Array.with_size(POLY_VERTS, 0.0);
+
+// Add a face of a pipe from the corners in the fv arrays, given the way it
+// faces in the wall's own terms. Its color follows how far it is turned
+// towards the middle of the tunnel, which is what makes the pipe look round.
+fun add_pipe_face(count, nu, nh, nz, shade) {
+    if (gen_polys >= MAX_POLYS) return;
+
+    let w = gen_wall;
+    let p = gen_poly0 + gen_polys;
+    gen_polys = gen_polys + 1;
+
+    for (let var j = 0; j < count; ++j) {
+        wall_point(w, fv_u[j], fv_h[j]);
+        pp_x[p * POLY_VERTS + j] = wp_x;
+        pp_y[p * POLY_VERTS + j] = wp_y;
+        pp_z[p * POLY_VERTS + j] = fv_z[j];
+    }
+
+    pp_n[p] = count;
+    pp_nx[p] = nu * WALL_UX[w] + nh * WALL_HX[w];
+    pp_ny[p] = nu * WALL_UY[w] + nh * WALL_HY[w];
+    pp_nz[p] = nz;
+
+    let r = (255.0 * shade).floor();
+    let g = ((14.0 + 38.0 * shade * shade) * shade).floor();
+    let b = (16.0 * shade).floor();
+    pp_color[p] = 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// The half of a pipe that shows is half of an octagon, which is four faces
+let PIPE_SIDES = 4;
+
+// Add the part of a pipe along the tunnel that crosses a row
+fun add_along(id, row) {
+    let r = pk_r[id];
+    let uc = pk_at[id];
+    let z0 = row * CELL;
+    let z1 = z0 + CELL;
+
+    for (let var j = 0; j < PIPE_SIDES; ++j) {
+        let a0 = PI - j * PI / PIPE_SIDES;
+        let a1 = PI - (j + 1) * PI / PIPE_SIDES;
+        let am = (a0 + a1) * 0.5;
+        fv_u[0] = uc + r * a0.cos(); fv_h[0] = r * a0.sin(); fv_z[0] = z0;
+        fv_u[1] = uc + r * a1.cos(); fv_h[1] = r * a1.sin(); fv_z[1] = z0;
+        fv_u[2] = fv_u[1]; fv_h[2] = fv_h[1]; fv_z[2] = z1;
+        fv_u[3] = fv_u[0]; fv_h[3] = fv_h[0]; fv_z[3] = z1;
+        add_pipe_face(4, am.cos(), am.sin(), 0.0, 0.5 + 0.5 * am.sin());
+    }
+
+    // The ends are closed off
+    for (let var end = 0; end < 2; ++end) {
+        if (end == 0 && row != pk_lo[id]) continue;
+        if (end == 1 && row != pk_hi[id]) continue;
+        for (let var j = 0; j <= PIPE_SIDES; ++j) {
+            let a = PI - j * PI / PIPE_SIDES;
+            fv_u[j] = uc + r * a.cos();
+            fv_h[j] = r * a.sin();
+            fv_z[j] = z0 + end * CELL;
+        }
+        add_pipe_face(PIPE_SIDES + 1, 0.0, 0.0, end * 2.0 - 1.0, 0.7);
+    }
+}
+
+// Add the part of a pipe across a wall that crosses one of its cells
+fun add_across(id, cell) {
+    let w = pk_wall[id];
+    let r = pk_r[id];
+    let zc = pk_at[id];
+    let u0 = WALL_U0[w] + cell * CELL;
+    let u1 = u0 + CELL;
+
+    for (let var j = 0; j < PIPE_SIDES; ++j) {
+        let a0 = PI - j * PI / PIPE_SIDES;
+        let a1 = PI - (j + 1) * PI / PIPE_SIDES;
+        let am = (a0 + a1) * 0.5;
+        fv_u[0] = u0; fv_h[0] = r * a0.sin(); fv_z[0] = zc + r * a0.cos();
+        fv_u[1] = u0; fv_h[1] = r * a1.sin(); fv_z[1] = zc + r * a1.cos();
+        fv_u[2] = u1; fv_h[2] = fv_h[1]; fv_z[2] = fv_z[1];
+        fv_u[3] = u1; fv_h[3] = fv_h[0]; fv_z[3] = fv_z[0];
+        add_pipe_face(4, 0.0, am.sin(), am.cos(), 0.5 + 0.5 * am.sin());
+    }
+
+    // An end that stops short of the edge of the wall is closed off
+    for (let var end = 0; end < 2; ++end) {
+        if (end == 0 && (cell != pk_lo[id] || cell == 0)) continue;
+        if (end == 1 && (cell != pk_hi[id] || cell == WALL_CELLS[w] - 1)) continue;
+        for (let var j = 0; j <= PIPE_SIDES; ++j) {
+            let a = PI - j * PI / PIPE_SIDES;
+            fv_u[j] = u0 + end * CELL;
+            fv_h[j] = r * a.sin();
+            fv_z[j] = zc + r * a.cos();
+        }
+        add_pipe_face(PIPE_SIDES + 1, end * 2.0 - 1.0, 0.0, 0.0, 0.7);
+    }
+}
+
+// Whether a pipe passes over a cell of a wall in the row it is listed for
+fun pipe_over(id, w, cell) {
+    if (pk_wall[id] != w) return false;
+    if (pk_kind[id] == PIPE_ACROSS) return cell >= pk_lo[id] && cell <= pk_hi[id];
+
+    let at = ((pk_at[id] - WALL_U0[w]) / CELL).floor().clip(0, WALL_CELLS[w] - 1);
+    return at == cell;
+}
+
+// Work out a section and put it in a slot
+fun build_section(k, slot) {
+    slot_section[slot] = k;
+    gen_node0 = slot * MAX_NODES;
+    gen_nodes = 0;
+    gen_poly0 = slot * MAX_POLYS;
+    gen_polys = 0;
+
+    // The pipes close enough to light it, which includes those in the rows
+    // to either side
+    let row0 = k * SEC_ROWS;
+    gl_n = 0;
+    for (let var row = row0 - 1; row <= row0 + SEC_ROWS; ++row) {
+        if (row < 0 || row >= NUM_ROWS) continue;
+        let ids = row_pipes[row];
+        for (let var i = 0; i < ids.len; ++i) note_pipe(ids[i]);
+    }
+
+    for (let var c = 0; c < SEC_CELLS; ++c) {
+        let row = row0 + c.idiv(ROW_CELLS);
+        let in_row = c % ROW_CELLS;
+        let var w = 0;
+        while (w < NUM_WALLS - 1 && in_row >= WALL_FIRST[w + 1]) ++w;
+        let cell = in_row - WALL_FIRST[w];
+        let ids = row_pipes[row];
+        gen_wall = w;
+
+        let var flat = false;
+        for (let var i = 0; i < ids.len; ++i) {
+            if (pipe_over(ids[i], w, cell)) flat = true;
+        }
+
+        let root = gen_node0 + gen_nodes;
+        gen_nodes = gen_nodes + 1;
+        cell_node[slot * SEC_CELLS + c] = root;
+        build_node(root, WALL_U0[w] + cell * CELL, row * CELL, CELL, 0, 0.0, flat);
+
+        cell_poly0[slot * SEC_CELLS + c] = gen_poly0 + gen_polys;
+        for (let var i = 0; i < ids.len; ++i) {
+            let id = ids[i];
+            if (!pipe_over(id, w, cell)) continue;
+            if (pk_kind[id] == PIPE_ALONG) add_along(id, row);
+            else add_across(id, cell);
+        }
+        cell_poly1[slot * SEC_CELLS + c] = gen_poly0 + gen_polys;
+    }
+}
+
+// The slot a section is in, working the section out first if need be
+fun section_slot(k) {
+    let slot = k % NUM_SLOTS;
+    if (slot_section[slot] != k) build_section(k, slot);
+    return slot;
+}
+
+// How far the blocks stand out from a wall at a place on it, as long as
+// that part of the tunnel is one of those near the camera
+fun block_height(w, u, z) {
+    let row = (z / CELL).floor();
+    let k = row.idiv(SEC_ROWS);
+    let near = (cam_z / SEC_LEN).floor();
+    if (k < 0 || k >= NUM_SECTIONS || k < near - 2 || k > near + NUM_SLOTS - 4) return 0.0;
+
+    let slot = section_slot(k);
+    let cell = ((u - WALL_U0[w]) / CELL).floor().clip(0, WALL_CELLS[w] - 1);
+    let var n = cell_node[slot * SEC_CELLS + (row % SEC_ROWS) * ROW_CELLS + WALL_FIRST[w] + cell];
+
+    // Down to the smallest block the place is on
+    loop {
+        let child = nd_child[n];
+        if (child < 0) break;
+        let half = nd_size[n] * 0.5;
+        let var pick = child;
+        if (u >= nd_u[n] + half) pick = pick + 1;
+        if (z >= nd_z[n] + half) pick = pick + 2;
+        n = pick;
+    }
+
+    return nd_h[n];
+}
+
+
+
 // --- Rasterization ---
 
 let frame_image = Image(FRAME_WIDTH, FRAME_HEIGHT);
 let frame_buffer = frame_image.bytes;
 
-// Texture coordinates are interpolated in fixed point, with u and v packed
-// into the two halves of one integer so that a single add steps both:
-//
-//   bits 63..32: v, as 16.16 fixed point
-//   bits 31..0:  u, as 16.16 fixed point
-//
-// Both halves are wrapped into the texture before a sub-span starts and then
-// biased by EXC_FX, so that a half stepping backwards stays positive rather
-// than borrowing from the half above. See examples/tremor.psh.
-let FP_ONE = 65536.0;
-let BIAS_TEXELS = 8192.0;
-let SUB_MAX = 32;
-let GRAD_LIMIT = 64.0;
-let EXC_FX = (SUB_MAX * 64) << 16;
+// View space corners of what is being drawn. For a block these are its
+// four corners on the wall, then the four of its top.
+let MAX_CORNERS = 8;
+let tX = Array.with_size(MAX_CORNERS, 0.0);
+let tY = Array.with_size(MAX_CORNERS, 0.0);
+let tZ = Array.with_size(MAX_CORNERS, 0.0);
 
-// How far 1/z may swing across one sub-span, as a fraction of itself
-let PERSP_TOL = 0.12;
-
-// A sample just outside a polygon seen edge on can land past its horizon,
-// so 1/z and what is divided by it are kept within these bounds
-let W_MIN = 1.0 / 20000.0;
-let UV_LIMIT = 1000000.0;
-
-// Light levels run 1..255 in 16.16 fixed point, and the white and red
-// levels of a pixel never sum past 255, which keeps the red channel from
-// spilling into green
-let L_ONE = 65536.0;
-let L_MIN = 1 << 16;
-let L_MAX_WHITE = 254 << 16;
-let L_TOP = 255 << 16;
-
-let MASK_RB = 0x00FF00FF;
-
-// Reciprocals of the sub-span lengths, as floats and in 0.16 fixed point
-let INV_N = Array.with_size(SUB_MAX + 1, 0.0);
-let INV_N_FX = Array.with_size(SUB_MAX + 1, 0);
-for (let var i = 1; i <= SUB_MAX; ++i) {
-    INV_N[i] = 1.0 / i.to_f();
-    INV_N_FX[i] = (65536.0 / i.to_f()).floor();
-}
-
-// View space vertices of the quad being drawn. Texture coordinates are in
-// texels and light levels in fixed point.
-let tX = Array.with_size(4, 0.0);
-let tY = Array.with_size(4, 0.0);
-let tZ = Array.with_size(4, 0.0);
-let tU = Array.with_size(4, 0.0);
-let tV = Array.with_size(4, 0.0);
-let tLW = Array.with_size(4, 0.0);
-let tLR = Array.with_size(4, 0.0);
-
-// Which of those vertices make up the polygon to clip
-let cI = Array.with_size(4, 0);
+// Which of those corners make up the polygon to clip
+let cI = Array.with_size(MAX_CORNERS, 0);
 
 // The polygon on screen, after clipping to the near plane
-let pX = Array.with_size(8, 0.0);
-let pY = Array.with_size(8, 0.0);
+let pX = Array.with_size(MAX_CORNERS * 2, 0.0);
+let pY = Array.with_size(MAX_CORNERS * 2, 0.0);
 
 // The span of each scanline a polygon covers, from scan_y0 up to scan_y1
 let row_x0 = Array.with_size(FRAME_HEIGHT, 0);
@@ -1201,15 +1366,7 @@ let var scan_y1 = 0;
 let var render_y0 = 0;
 let var render_y1 = FRAME_HEIGHT;
 
-// Texture level being drawn
-let var g_pix = nil;
-let var g_umask = 0;
-let var g_vshift = 0;
-let var g_vmask = 0;
-let var g_uwrap = 0;
-let var g_vwrap = 0;
-
-let var tris_drawn = 0;
+let var polys_drawn = 0;
 
 // Clip the polygon listed in cI to the near plane and project it into pX
 // and pY, returning its number of corners
@@ -1333,508 +1490,315 @@ fun scan_poly(m) {
     return scan_y1 > scan_y0;
 }
 
-// Draw one textured, lit triangle of the quad in the tX arrays.
-//
-// Anything linear over the triangle in space is linear on screen once
-// divided by z, and so is 1/z. For a value a known at the three corners P,
-// the vector A with A . P = a at each of them gives a/z at any pixel as
-// A . (x, y, 1), with x and y on the plane at depth one. Solving for A
-// takes the inverse of the matrix of corners, whose columns are the cross
-// products below. This works from the corners as they are in view space, so
-// clipping only has to produce the outline.
-fun draw_tri(a, b, c) {
-    let x0 = tX[a]; let y0 = tY[a]; let z0 = tZ[a];
-    let x1 = tX[b]; let y1 = tY[b]; let z1 = tZ[b];
-    let x2 = tX[c]; let y2 = tY[c]; let z2 = tZ[c];
-    if (z0 < NEAR_Z && z1 < NEAR_Z && z2 < NEAR_Z) return;
+// How much of a color is left after the fog, out of 256
+let var fog_k = 256;
 
-    let c12x = y1 * z2 - z1 * y2; let c12y = z1 * x2 - x1 * z2; let c12z = x1 * y2 - y1 * x2;
-    let c20x = y2 * z0 - z2 * y0; let c20y = z2 * x0 - x2 * z0; let c20z = x2 * y0 - y2 * x0;
-    let c01x = y0 * z1 - z0 * y1; let c01y = z0 * x1 - x0 * z1; let c01z = x0 * y1 - y0 * x1;
-
-    // The determinant is negative when the triangle faces the eye
-    let det = x0 * c12x + y0 * c12y + z0 * c12z;
-    if (det > -0.000001) return;
-
-    cI[0] = a; cI[1] = b; cI[2] = c;
-    let m = clip_project(3);
+// Fill the polygon made of the first `count` corners listed in cI with a
+// color, dimmed by the fog
+fun fill_poly(count, color) {
+    let m = clip_project(count);
     if (m < 3) return;
     if (!scan_poly(m)) return;
-    tris_drawn = tris_drawn + 1;
+    polys_drawn = polys_drawn + 1;
 
-    // Offsets that take a gradient vector to its value at the center of
-    // the top left pixel
-    let inv = 1.0 / det;
-    let kx = (0.5 - CX) * INV_FOCAL;
-    let ky = (CY - 0.5) * INV_FOCAL;
+    let k = fog_k;
+    let c = 0xFF000000 | ((((color & 0xFF00FF) * k) >> 8) & 0xFF00FF)
+          | ((((color & 0xFF00) * k) >> 8) & 0xFF00);
 
-    let var ax = (c12x + c20x + c01x) * inv;
-    let var ay = (c12y + c20y + c01y) * inv;
-    let var az = (c12z + c20z + c01z) * inv;
-    let dwdx = ax * INV_FOCAL;
-    let dwdy = 0.0 - ay * INV_FOCAL;
-    let w00 = az + ax * kx + ay * ky;
-
-    let var a0 = tU[a]; let var a1 = tU[b]; let var a2 = tU[c];
-    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
-    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
-    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
-    let duzdx = ax * INV_FOCAL;
-    let duzdy = 0.0 - ay * INV_FOCAL;
-    let uz00 = az + ax * kx + ay * ky;
-
-    a0 = tV[a]; a1 = tV[b]; a2 = tV[c];
-    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
-    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
-    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
-    let dvzdx = ax * INV_FOCAL;
-    let dvzdy = 0.0 - ay * INV_FOCAL;
-    let vz00 = az + ax * kx + ay * ky;
-
-    a0 = tLW[a]; a1 = tLW[b]; a2 = tLW[c];
-    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
-    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
-    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
-    let dlwdx = ax * INV_FOCAL;
-    let dlwdy = 0.0 - ay * INV_FOCAL;
-    let lw00 = az + ax * kx + ay * ky;
-
-    a0 = tLR[a]; a1 = tLR[b]; a2 = tLR[c];
-    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
-    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
-    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
-    let dlrdx = ax * INV_FOCAL;
-    let dlrdy = 0.0 - ay * INV_FOCAL;
-    let lr00 = az + ax * kx + ay * ky;
-
-    // The longest run over which 1/z stays within tolerance is a multiple
-    // of 1/z itself, and the factor holds for the whole triangle
-    let var wscale = 0.0;
-    if (dwdx.abs() > 0.0) wscale = PERSP_TOL / dwdx.abs();
-    let sub_max_f = SUB_MAX.to_f();
-
-    let pix = g_pix;
-    let umask = g_umask;
-    let vshift = g_vshift;
-    let vmask = g_vmask;
-    let uwrap = g_uwrap;
-    let vwrap = g_vwrap;
-    let mask_rb = MASK_RB;
     let fb = frame_buffer;
-
-    let var y = scan_y0;
     let end_y = scan_y1;
-    let var uz_row = uz00 + y * duzdy;
-    let var vz_row = vz00 + y * dvzdy;
-    let var lw_row = lw00 + y * dlwdy;
-    let var lr_row = lr00 + y * dlrdy;
-    let var w_row = w00 + y * dwdy;
-    let var row = y * FRAME_WIDTH;
-
-    while (y < end_y) {
-        let var x = row_x0[y];
-        let piece_end = row_x1[y];
-
-        if (x < piece_end) {
-            // Perspective values at the start of the span
-            let var uz = uz_row + x * duzdx;
-            let var vz = vz_row + x * dvzdx;
-            let var lwz = lw_row + x * dlwdx;
-            let var lrz = lr_row + x * dlrdx;
-            let var w = w_row + x * dwdx;
-            if (w < W_MIN) w = W_MIN;
-            let var z = 1.0 / w;
-            let var u = uz * z;
-            if (u > UV_LIMIT) u = UV_LIMIT;
-            else if (u < 0.0 - UV_LIMIT) u = 0.0 - UV_LIMIT;
-            let var v = vz * z;
-            if (v > UV_LIMIT) v = UV_LIMIT;
-            else if (v < 0.0 - UV_LIMIT) v = 0.0 - UV_LIMIT;
-
-            let var lw = (lwz * z).floor();
-            if (lw < L_MIN) lw = L_MIN;
-            else if (lw > L_MAX_WHITE) lw = L_MAX_WHITE;
-            let var lr = (lrz * z).floor();
-            if (lr < L_MIN) lr = L_MIN;
-            else if (lr > L_TOP - lw) lr = L_TOP - lw;
-
-            while (x < piece_end) {
-                let var run = SUB_MAX;
-                if (wscale > 0.0) {
-                    let nf = w * wscale;
-                    if (nf < sub_max_f) {
-                        run = nf.floor();
-                        if (run < 1) run = 1;
-                    }
-                }
-
-                let var xe = x + run;
-                if (xe > piece_end) xe = piece_end;
-                let len = xe - x;
-
-                // One divide per sub-span buys correct values at its far
-                // end, and in between the step is affine
-                uz = uz + len * duzdx;
-                vz = vz + len * dvzdx;
-                lwz = lwz + len * dlwdx;
-                lrz = lrz + len * dlrdx;
-                w = w + len * dwdx;
-                if (w < W_MIN) w = W_MIN;
-                z = 1.0 / w;
-
-                let var u_e = uz * z;
-                if (u_e > UV_LIMIT) u_e = UV_LIMIT;
-                else if (u_e < 0.0 - UV_LIMIT) u_e = 0.0 - UV_LIMIT;
-                let var v_e = vz * z;
-                if (v_e > UV_LIMIT) v_e = UV_LIMIT;
-                else if (v_e < 0.0 - UV_LIMIT) v_e = 0.0 - UV_LIMIT;
-
-                let inv_len = INV_N[len];
-                let var du = (u_e - u) * inv_len;
-                let var dv = (v_e - v) * inv_len;
-                if (du > GRAD_LIMIT) du = GRAD_LIMIT;
-                else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
-                if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
-                else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
-
-                let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & uwrap) + EXC_FX;
-                let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & vwrap) + EXC_FX;
-                let var t = (vfx << 32) + ufx;
-                let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
-
-                // Both ends are clamped and the step taken between the
-                // clamped pair, so every pixel between them is in range
-                let var lw_e = (lwz * z).floor();
-                if (lw_e < L_MIN) lw_e = L_MIN;
-                else if (lw_e > L_MAX_WHITE) lw_e = L_MAX_WHITE;
-                let var lr_e = (lrz * z).floor();
-                if (lr_e < L_MIN) lr_e = L_MIN;
-                else if (lr_e > L_TOP - lw_e) lr_e = L_TOP - lw_e;
-
-                // The shift rounds down, so a step never overshoots its end
-                let inv_fx = INV_N_FX[len];
-                let dlw = ((lw_e - lw) * inv_fx) >> 16;
-                let dlr = ((lr_e - lr) * inv_fx) >> 16;
-
-                let var i = row + x;
-                let end_i = row + xe;
-                while (i < end_i) {
-                    let c = pix.get_u32(((t >> vshift) & vmask) | ((t >> 16) & umask));
-
-                    // Green moves up to bit 32, which puts the channels
-                    // sixteen bits apart, so one multiply scales all three
-                    // by the white level. Red alone is scaled again by the
-                    // red level and lands on top of its own product.
-                    let p = ((c & mask_rb) | ((c & 0xFF00) << 24)) * (lw >> 16)
-                          + (c & 0xFF0000) * (lr >> 16);
-
-                    fb.set_u32(i, ((p >> 8) & mask_rb) | ((p >> 32) & 0xFF00));
-                    t = t + dt;
-                    lw = lw + dlw;
-                    lr = lr + dlr;
-                    i = i + 1;
-                }
-
-                lw = lw_e;
-                lr = lr_e;
-                u = u_e;
-                v = v_e;
-                x = xe;
-            }
-        }
-
-        uz_row = uz_row + duzdy;
-        vz_row = vz_row + dvzdy;
-        lw_row = lw_row + dlwdy;
-        lr_row = lr_row + dlrdy;
-        w_row = w_row + dwdy;
+    let var row = scan_y0 * FRAME_WIDTH;
+    for (let var y = scan_y0; y < end_y; ++y) {
+        let xa = row_x0[y];
+        let xb = row_x1[y];
+        if (xa < xb) fb.fill_u32(row + xa, xb - xa, c);
         row = row + FRAME_WIDTH;
-        y = y + 1;
     }
 }
 
-// Colors are interpolated along a span as three 8.12 fixed point channels
-// packed into one integer, twenty bits apart, so that one add steps them all
-let COL_ONE = 4096.0;
-let COL_MIN = 0.25;
-let COL_MAX = 255.9;
-
-// Past this much color change per pixel a triangle is a sliver, and gets
-// a single color instead
-let COL_GRAD_LIMIT = 48.0;
-
-// Reciprocals of the number of steps along a span
-let INV_STEPS = Array.with_size(FRAME_WIDTH + 1, 0.0);
-for (let var i = 1; i <= FRAME_WIDTH; ++i) INV_STEPS[i] = COL_ONE / i.to_f();
-
-// Draw one triangle of the quad in the tX arrays as a blend of the colors
-// at its corners, which are in tU, tV and tLW as red, green and blue. This
-// is for what is too far away to show a texture, so the blend is affine and
-// the triangle has to be wholly in front of the near plane.
-fun shade_tri(a, b, c) {
-    let x0 = tX[a]; let y0 = tY[a]; let z0 = tZ[a];
-    let x1 = tX[b]; let y1 = tY[b]; let z1 = tZ[b];
-    let x2 = tX[c]; let y2 = tY[c]; let z2 = tZ[c];
-    let det = x0 * (y1 * z2 - z1 * y2) + y0 * (z1 * x2 - x1 * z2) + z0 * (x1 * y2 - y1 * x2);
-    if (det > -0.000001) return;
-
-    let s0 = FOCAL / z0;
-    let s1 = FOCAL / z1;
-    let s2 = FOCAL / z2;
-    let ax = CX + x0 * s0; let ay = CY - y0 * s0;
-    let bx = CX + x1 * s1; let by = CY - y1 * s1;
-    let cx = CX + x2 * s2; let cy = CY - y2 * s2;
-    pX[0] = ax; pY[0] = ay;
-    pX[1] = bx; pY[1] = by;
-    pX[2] = cx; pY[2] = cy;
-    if (!scan_poly(3)) return;
-    tris_drawn = tris_drawn + 1;
-
-    // Color gradients, which are constant over the triangle
-    let e1x = bx - ax; let e1y = by - ay;
-    let e2x = cx - ax; let e2y = cy - ay;
-    let sdet = e1x * e2y - e2x * e1y;
-    if (sdet.abs() < 0.000001) return;
-    let inv_det = 1.0 / sdet;
-
-    let var r0 = tU[a]; let e1r = tU[b] - r0; let e2r = tU[c] - r0;
-    let var g0 = tV[a]; let e1g = tV[b] - g0; let e2g = tV[c] - g0;
-    let var b0 = tLW[a]; let e1b = tLW[b] - b0; let e2b = tLW[c] - b0;
-
-    let var drdx = (e1r * e2y - e2r * e1y) * inv_det;
-    let var drdy = (e2r * e1x - e1r * e2x) * inv_det;
-    let var dgdx = (e1g * e2y - e2g * e1y) * inv_det;
-    let var dgdy = (e2g * e1x - e1g * e2x) * inv_det;
-    let var dbdx = (e1b * e2y - e2b * e1y) * inv_det;
-    let var dbdy = (e2b * e1x - e1b * e2x) * inv_det;
-
-    // A sliver gets the average of its corners
-    if (drdx.abs() + drdy.abs() + dgdx.abs() + dgdy.abs() + dbdx.abs() + dbdy.abs() > COL_GRAD_LIMIT) {
-        r0 = r0 + (e1r + e2r) / 3.0;
-        g0 = g0 + (e1g + e2g) / 3.0;
-        b0 = b0 + (e1b + e2b) / 3.0;
-        drdx = 0.0; drdy = 0.0;
-        dgdx = 0.0; dgdy = 0.0;
-        dbdx = 0.0; dbdy = 0.0;
-    }
-
-    // Colors at the center of pixel 0 of the first row
-    let var y = scan_y0;
-    let end_y = scan_y1;
-    let x_off = 0.5 - ax;
-    let y_off = y + 0.5 - ay;
-    let var r_row = r0 + x_off * drdx + y_off * drdy;
-    let var g_row = g0 + x_off * dgdx + y_off * dgdy;
-    let var b_row = b0 + x_off * dbdx + y_off * dbdy;
-
-    let fb = frame_buffer;
-    let lo = COL_MIN;
-    let hi = COL_MAX;
-    let var row = y * FRAME_WIDTH;
-
-    while (y < end_y) {
-        let xa = row_x0[y];
-        let xb = row_x1[y];
-
-        if (xa < xb) {
-            // Both ends of the span are clamped and the step taken between
-            // the clamped pair, so no channel can run into its neighbour
-            let var ra = r_row + xa * drdx;
-            if (ra < lo) ra = lo; else if (ra > hi) ra = hi;
-            let var ga = g_row + xa * dgdx;
-            if (ga < lo) ga = lo; else if (ga > hi) ga = hi;
-            let var ba = b_row + xa * dbdx;
-            if (ba < lo) ba = lo; else if (ba > hi) ba = hi;
-
-            let var col = ((ra * COL_ONE).floor() << 40) + ((ga * COL_ONE).floor() << 20)
-                        + (ba * COL_ONE).floor();
-            let var i = row + xa;
-            let steps = xb - xa - 1;
-
-            if (steps == 0) {
-                fb.set_u32(i, ((col >> 36) & 0xFF0000) | ((col >> 24) & 0xFF00) | ((col >> 12) & 0xFF));
-            } else {
-                let var re = r_row + (xb - 1) * drdx;
-                if (re < lo) re = lo; else if (re > hi) re = hi;
-                let var ge = g_row + (xb - 1) * dgdx;
-                if (ge < lo) ge = lo; else if (ge > hi) ge = hi;
-                let var be = b_row + (xb - 1) * dbdx;
-                if (be < lo) be = lo; else if (be > hi) be = hi;
-
-                let k = INV_STEPS[steps];
-                let dc = (((re - ra) * k).floor() << 40) + (((ge - ga) * k).floor() << 20)
-                       + ((be - ba) * k).floor();
-
-                let end_i = row + xb;
-                while (i < end_i) {
-                    fb.set_u32(i, ((col >> 36) & 0xFF0000) | ((col >> 24) & 0xFF00) | ((col >> 12) & 0xFF));
-                    col = col + dc;
-                    i = i + 1;
-                }
-            }
-        }
-
-        r_row = r_row + drdy;
-        g_row = g_row + dgdy;
-        b_row = b_row + dbdy;
-        row = row + FRAME_WIDTH;
-        y = y + 1;
-    }
-}
-
-// Fill the quad in the tX arrays with one color, if it faces the eye
-fun draw_flat_quad(color) {
-    let x0 = tX[0]; let y0 = tY[0]; let z0 = tZ[0];
-    let x1 = tX[1]; let y1 = tY[1]; let z1 = tZ[1];
-    let x2 = tX[2]; let y2 = tY[2]; let z2 = tZ[2];
-    let det = x0 * (y1 * z2 - z1 * y2) + y0 * (z1 * x2 - x1 * z2) + z0 * (x1 * y2 - y1 * x2);
-    if (det > -0.000001) return;
-
-    cI[0] = 0; cI[1] = 1; cI[2] = 2; cI[3] = 3;
-    let m = clip_project(4);
-    if (m < 3) return;
-    if (!scan_poly(m)) return;
-
-    let fb = frame_buffer;
-    for (let var y = scan_y0; y < scan_y1; ++y) {
-        let xa = row_x0[y];
-        let xb = row_x1[y];
-        if (xa < xb) fb.fill_u32(y * FRAME_WIDTH + xa, xb - xa, color);
-    }
+// Fill a four cornered face
+fun fill_face(a, b, c, d, color) {
+    cI[0] = a; cI[1] = b; cI[2] = c; cI[3] = d;
+    fill_poly(4, color);
 }
 
 // --- Drawing the world ---
+//
+// Sections go down far to near. Within one, the far row of cells goes
+// before the near one, the walls furthest from the camera before those it
+// is close to, and the cells of a wall from its far edges in towards the
+// camera. A cell's blocks are then drawn by walking its quadtree, taking
+// the quarters furthest from the camera first. Each of these splits is
+// along a plane with the camera to one side, so what is drawn later can
+// only be in front, and no depth test is needed.
 
 // Seconds since the start, for things that pulse or blink
 let var anim_time = 0.0;
 
-// Texels of the full-size texture that one pixel covers at a distance of
-// one meter, looking square on
-let TEXEL_RATE = 256.0 / TILE * INV_FOCAL;
-
-// The level past the smallest copy of a texture, where a surface is drawn
-// in the texture's average color instead
-let FLAT_LEVEL = 5;
-
-// Which texture level suits a section at this distance down the tunnel.
-// Walls are seen at a glancing angle, so they shrink faster than the
-// square-on rate suggests, and the levels switch earlier to match.
-fun mip_level(dist) {
-    let var rate = dist * TEXEL_RATE * 1.4;
-    let var level = 0;
-    while (rate > 1.0) {
-        rate = rate * 0.5;
-        level = level + 1;
-    }
-    return level;
-}
-
-fun set_texture(tex, level) {
-    let lv = level.min(tex.num_levels - 1);
-    let w = tex.width[lv];
-    let h = tex.height[lv];
-    let shift = tex.shift[lv];
-    g_pix = tex.pix[lv];
-    g_umask = w - 1;
-    g_vshift = 48 - shift;
-    g_vmask = (h - 1) << shift;
-    g_uwrap = (w << 16) - 1;
-    g_vwrap = (h << 16) - 1;
-}
-
-// How much light is left after the fog at a distance down the tunnel
+// How much of the light is left after the fog at a distance
 fun fog_at(dist) {
     return 1.0 - smoothstep(FOG_START, FOG_END, dist);
 }
 
-// A pulse of brightness that runs down the strips towards the core
-fun strip_pulse(z) {
+// A pulse of brightness that runs down the pipes towards the core
+fun pipe_pulse(z) {
     let s = (z * 0.008 - anim_time * 3.0).sin();
     let p = s.max(0.0);
-    return 0.5 + 0.5 * p * p * p;
+    return 0.62 + 0.38 * p * p * p;
+}
+
+// The wall being drawn. A place on it, given by how far across it is, how
+// far out from it and how far down the tunnel, is turned into view space
+// by adding up that much of each of three vectors from a starting point.
+let var wall_bx = 0.0; let var wall_by = 0.0; let var wall_bz = 0.0;
+let var wall_ux = 0.0; let var wall_uy = 0.0; let var wall_uz = 0.0;
+let var wall_hx = 0.0; let var wall_hy = 0.0; let var wall_hz = 0.0;
+
+// Where the camera is, as a place on that wall
+let var wall_cam_u = 0.0;
+let var wall_cam_h = 0.0;
+
+// How far down their quadtrees the cells are drawn, which is less the
+// further off they are
+let var draw_depth = 0;
+
+// The walls in the order they are drawn in, furthest from the camera first
+let wall_order = [0, 1, 2, 3];
+
+fun set_wall(w) {
+    wall_coords(w, cam_x, cam_y);
+    wall_cam_u = wc_u;
+    wall_cam_h = wc_h;
+
+    let ux = WALL_UX[w]; let uy = WALL_UY[w];
+    let hx = WALL_HX[w]; let hy = WALL_HY[w];
+    wall_ux = ux * right_x + uy * right_y;
+    wall_uy = ux * up_x + uy * up_y;
+    wall_uz = ux * fwd_x + uy * fwd_y;
+    wall_hx = hx * right_x + hy * right_y;
+    wall_hy = hx * up_x + hy * up_y;
+    wall_hz = hx * fwd_x + hy * fwd_y;
+
+    let dx = WALL_OX[w] - cam_x;
+    let dy = WALL_OY[w] - cam_y;
+    let dz = 0.0 - cam_z;
+    wall_bx = dx * right_x + dy * right_y + dz * right_z;
+    wall_by = dx * up_x + dy * up_y + dz * up_z;
+    wall_bz = dx * fwd_x + dy * fwd_y + dz * fwd_z;
+}
+
+// Put the corners of a square of the wall being drawn into the first four
+// of the view space corners, and the same square raised by a height into
+// the next four
+fun set_corners(u0, z0, size, h) {
+    let x = wall_bx + u0 * wall_ux + z0 * right_z;
+    let y = wall_by + u0 * wall_uy + z0 * up_z;
+    let z = wall_bz + u0 * wall_uz + z0 * fwd_z;
+    let sux = size * wall_ux; let suy = size * wall_uy; let suz = size * wall_uz;
+    let szx = size * right_z; let szy = size * up_z; let szz = size * fwd_z;
+    let hx = h * wall_hx; let hy = h * wall_hy; let hz = h * wall_hz;
+
+    tX[0] = x; tY[0] = y; tZ[0] = z;
+    tX[1] = x + sux; tY[1] = y + suy; tZ[1] = z + suz;
+    tX[2] = x + sux + szx; tY[2] = y + suy + szy; tZ[2] = z + suz + szz;
+    tX[3] = x + szx; tY[3] = y + szy; tZ[3] = z + szz;
+
+    tX[4] = tX[0] + hx; tY[4] = tY[0] + hy; tZ[4] = tZ[0] + hz;
+    tX[5] = tX[1] + hx; tY[5] = tY[1] + hy; tZ[5] = tZ[1] + hz;
+    tX[6] = tX[2] + hx; tY[6] = tY[2] + hy; tZ[6] = tZ[2] + hz;
+    tX[7] = tX[3] + hx; tY[7] = tY[3] + hy; tZ[7] = tZ[3] + hz;
+}
+
+// Draw a node as a single block: its top and whichever of its sides face
+// the camera
+fun draw_block(n) {
+    let u0 = nd_u[n];
+    let z0 = nd_z[n];
+    let size = nd_size[n];
+    let h = nd_h[n];
+    set_corners(u0, z0, size, h);
+
+    if (tZ[4] < NEAR_Z && tZ[5] < NEAR_Z && tZ[6] < NEAR_Z && tZ[7] < NEAR_Z
+        && tZ[0] < NEAR_Z && tZ[1] < NEAR_Z && tZ[2] < NEAR_Z && tZ[3] < NEAR_Z) return;
+
+    if (wall_cam_h > h) fill_face(4, 5, 6, 7, nd_top[n]);
+    if (h <= 0.0) return;
+
+    if (cam_z < z0) fill_face(0, 1, 5, 4, nd_front[n]);
+    else if (cam_z > z0 + size) fill_face(3, 2, 6, 7, nd_back[n]);
+
+    if (wall_cam_u < u0) fill_face(0, 3, 7, 4, nd_lo[n]);
+    else if (wall_cam_u > u0 + size) fill_face(1, 2, 6, 5, nd_hi[n]);
+}
+
+// Draw a node and what stands on it, the quarters furthest from the
+// camera first
+fun draw_node(n, depth) {
+    let child = nd_child[n];
+    if (child < 0 || depth >= draw_depth) {
+        draw_block(n);
+        return;
+    }
+
+    // Which half is the far one, across the wall and down the tunnel
+    let half = nd_size[n] * 0.5;
+    let var far_u = 0;
+    if (wall_cam_u < nd_u[n] + half) far_u = 1;
+    let var far_z = 0;
+    if (cam_z < nd_z[n] + half) far_z = 2;
+
+    draw_node(child + far_z + far_u, depth + 1);
+    draw_node(child + far_z + (1 - far_u), depth + 1);
+    draw_node(child + (2 - far_z) + far_u, depth + 1);
+    draw_node(child + (2 - far_z) + (1 - far_u), depth + 1);
+}
+
+// Put a point of the world into one of the view space corners
+fun view_corner(j, x, y, z) {
+    let dx = x - cam_x;
+    let dy = y - cam_y;
+    let dz = z - cam_z;
+    tX[j] = dx * right_x + dy * right_y + dz * right_z;
+    tY[j] = dx * up_x + dy * up_y + dz * up_z;
+    tZ[j] = dx * fwd_x + dy * fwd_y + dz * fwd_z;
+}
+
+// Draw a face of a pipe, if it is turned towards the camera
+fun draw_pipe_face(p) {
+    let v = p * POLY_VERTS;
+    let x = pp_x[v];
+    let y = pp_y[v];
+    let z = pp_z[v];
+    if ((cam_x - x) * pp_nx[p] + (cam_y - y) * pp_ny[p] + (cam_z - z) * pp_nz[p] <= 0.0) return;
+
+    let count = pp_n[p];
+    let var ahead = false;
+    for (let var j = 0; j < count; ++j) {
+        view_corner(j, pp_x[v + j], pp_y[v + j], pp_z[v + j]);
+        cI[j] = j;
+        if (tZ[j] >= NEAR_Z) ahead = true;
+    }
+    if (!ahead) return;
+
+    // A pipe glows, so the fog dims it but no light is needed to see it
+    let keep = fog_k;
+    fog_k = (keep * pipe_pulse(z)).floor();
+    fill_poly(count, pp_color[p]);
+    fog_k = keep;
+}
+
+// Nothing stands further out of a wall than this
+let MAX_REACH = MAX_BLOCK + 1.0;
+
+// Draw one cell of the wall that has been set: its blocks, then whatever
+// pipes lie over it
+fun draw_cell(slot, row, w, cell) {
+    let u0 = WALL_U0[w] + cell * CELL;
+    let z0 = row * CELL;
+
+    // Leave it out if it is behind the camera, or off the part of the
+    // screen being drawn by more than anything on it could reach back in
+    set_corners(u0, z0, CELL, 0.0);
+    let za = tZ[0]; let zb = tZ[1]; let zc = tZ[2]; let zd = tZ[3];
+    let far = za.max(zb).max(zc).max(zd);
+    if (far < NEAR_Z - MAX_REACH) return;
+
+    let near = za.min(zb).min(zc).min(zd);
+    if (near > MAX_REACH + 1.0) {
+        let xa = CX + tX[0] * FOCAL / za; let ya = CY - tY[0] * FOCAL / za;
+        let xb = CX + tX[1] * FOCAL / zb; let yb = CY - tY[1] * FOCAL / zb;
+        let xc = CX + tX[2] * FOCAL / zc; let yc = CY - tY[2] * FOCAL / zc;
+        let xd = CX + tX[3] * FOCAL / zd; let yd = CY - tY[3] * FOCAL / zd;
+        let margin = FOCAL * MAX_REACH / (near - MAX_REACH);
+
+        if (xa.max(xb).max(xc).max(xd) + margin < 0.0) return;
+        if (xa.min(xb).min(xc).min(xd) - margin > FRAME_WIDTH) return;
+        if (ya.max(yb).max(yc).max(yd) + margin < render_y0) return;
+        if (ya.min(yb).min(yc).min(yd) - margin > render_y1) return;
+    }
+
+    fog_k = (fog_at((z0 + CELL * 0.5 - cam_z).abs()) * 256.0).floor();
+    if (fog_k <= 0) return;
+
+    let c = slot * SEC_CELLS + (row % SEC_ROWS) * ROW_CELLS + WALL_FIRST[w] + cell;
+    draw_node(cell_node[c], 0);
+
+    let end = cell_poly1[c];
+    for (let var p = cell_poly0[c]; p < end; ++p) draw_pipe_face(p);
+}
+
+// Draw the wall that closes off the far end of the run
+fun draw_end_wall() {
+    view_corner(0, 0.0 - HALF_W, 0.0 - HALF_H, RUN_LEN);
+    view_corner(1, HALF_W, 0.0 - HALF_H, RUN_LEN);
+    view_corner(2, HALF_W, HALF_H, RUN_LEN);
+    view_corner(3, 0.0 - HALF_W, HALF_H, RUN_LEN);
+    fog_k = (fog_at((RUN_LEN - cam_z).abs()) * 256.0).floor();
+    fill_face(0, 1, 2, 3, 0xFF262830);
 }
 
 fun draw_section(k) {
     if (k < 0 || k >= NUM_SECTIONS) return;
+    let slot = section_slot(k);
 
-    let mid_z = (k.to_f() + 0.5) * SEC_LEN;
-    let level = mip_level((mid_z - cam_z).abs());
-    let end = sec_first[k + 1];
-    let var last_tex = nil;
-    let var usize = 0.0;
-    let var vsize = 0.0;
+    // Less of the detail is drawn the further off the section is
+    let dist = (k - (cam_z / SEC_LEN).floor()).abs();
+    draw_depth = 3;
+    if (dist > 4) draw_depth = 2;
+    if (dist > 10) draw_depth = 1;
+    if (dist > 18) draw_depth = 0;
 
-    for (let var q = sec_first[k]; q < end; ++q) {
-        let tex = quad_tex[q];
-        let base = q * 4;
+    if (k == NUM_SECTIONS - 1) draw_end_wall();
 
-        // Into view space
-        let var ahead = false;
-        for (let var j = 0; j < 4; ++j) {
-            let i = base + j;
-            let dx = vert_x[i] - cam_x;
-            let dy = vert_y[i] - cam_y;
-            let dz = vert_z[i] - cam_z;
-            let z = dx * fwd_x + dy * fwd_y + dz * fwd_z;
-            tX[j] = dx * right_x + dy * right_y + dz * right_z;
-            tY[j] = dx * up_x + dy * up_y + dz * up_z;
-            tZ[j] = z;
-            if (z >= NEAR_Z) ahead = true;
+    // The row further from the camera goes first
+    let row0 = k * SEC_ROWS;
+    let var first = row0 + SEC_ROWS - 1;
+    let var step = -1;
+    if (cam_z > (k + 0.5) * SEC_LEN) {
+        first = row0;
+        step = 1;
+    }
+
+    for (let var r = 0; r < SEC_ROWS; ++r) {
+        let row = first + r * step;
+
+        for (let var i = 0; i < NUM_WALLS; ++i) {
+            let w = wall_order[i];
+            set_wall(w);
+
+            // In from both edges towards the cell the camera is over
+            let count = WALL_CELLS[w];
+            let mid = ((wall_cam_u - WALL_U0[w]) / CELL).floor().clip(0, count - 1);
+            for (let var cell = 0; cell < mid; ++cell) draw_cell(slot, row, w, cell);
+            for (let var cell = count - 1; cell >= mid; --cell) draw_cell(slot, row, w, cell);
         }
-        if (!ahead) continue;
-        let whole = tZ[0] >= NEAR_Z && tZ[1] >= NEAR_Z && tZ[2] >= NEAR_Z && tZ[3] >= NEAR_Z;
-
-        if (tex == nil) {
-            let z = (vert_z[base] + vert_z[base + 2]) * 0.5;
-            let var glow = fog_at((z - cam_z).abs());
-            if (quad_color[q] == STRIP_COLOR) glow = glow * strip_pulse(z);
-            draw_flat_quad(color_scale(quad_color[q], glow));
-            continue;
-        }
-
-        // Too far to make out the texture
-        if (level >= FLAT_LEVEL && whole) {
-            for (let var j = 0; j < 4; ++j) {
-                let i = base + j;
-                let light = fog_at((vert_z[i] - cam_z).abs());
-                let white = vert_lw[i] * light;
-                tU[j] = tex.avg_r * (white + vert_lr[i] * light);
-                tV[j] = tex.avg_g * white;
-                tLW[j] = tex.avg_b * white;
-            }
-
-            shade_tri(0, 1, 2);
-            shade_tri(0, 2, 3);
-            last_tex = nil;
-            continue;
-        }
-
-        if (tex != last_tex) {
-            set_texture(tex, level);
-            last_tex = tex;
-            usize = (g_umask + 1).to_f();
-            vsize = ((g_vwrap + 1) >> 16).to_f();
-        }
-
-        for (let var j = 0; j < 4; ++j) {
-            let i = base + j;
-            let light = fog_at((vert_z[i] - cam_z).abs()) * 255.0 * L_ONE;
-            tU[j] = vert_u[i] * usize;
-            tV[j] = vert_v[i] * vsize;
-            tLW[j] = vert_lw[i] * light;
-            tLR[j] = vert_lr[i] * light;
-        }
-
-        draw_tri(0, 1, 2);
-        draw_tri(0, 2, 3);
     }
 }
 
-// Sections go down far to near, those behind the camera along with the
-// ones as far ahead of it
+// Put the walls in order, the one the camera is furthest from first
+fun sort_walls() {
+    let dist = [0.0, 0.0, 0.0, 0.0];
+    for (let var w = 0; w < NUM_WALLS; ++w) {
+        wall_coords(w, cam_x, cam_y);
+        dist[w] = wc_h;
+        wall_order[w] = w;
+    }
+
+    for (let var i = 1; i < NUM_WALLS; ++i) {
+        let w = wall_order[i];
+        let var j = i;
+        while (j > 0 && dist[wall_order[j - 1]] < dist[w]) {
+            wall_order[j] = wall_order[j - 1];
+            j = j - 1;
+        }
+        wall_order[j] = w;
+    }
+}
+
 fun render_world() {
-    tris_drawn = 0;
+    polys_drawn = 0;
     frame_buffer.fill_u32(render_y0 * FRAME_WIDTH, (render_y1 - render_y0) * FRAME_WIDTH, 0xFF000000);
+    sort_walls();
 
     let cam_k = (cam_z / SEC_LEN).floor();
     for (let var d = DRAW_AHEAD; d >= 0; --d) {
@@ -1842,6 +1806,8 @@ fun render_world() {
         draw_section(cam_k + d);
     }
 }
+
+
 
 // --- Render workers ---
 //
@@ -1909,7 +1875,7 @@ fun worker_loop() {
         render_world();
         let num_bytes = (render_y1 - render_y0) * FRAME_WIDTH * 4;
         pixels.memcpy(0, frame_buffer, render_y0 * FRAME_WIDTH * 4, num_bytes);
-        $actor_send($actor_parent(), BandResult(msg.frame_id, render_y0, num_bytes, pixels, tris_drawn));
+        $actor_send($actor_parent(), BandResult(msg.frame_id, render_y0, num_bytes, pixels, polys_drawn));
     }
 }
 
@@ -1946,7 +1912,7 @@ fun render_world_parallel() {
         $actor_send(worker_ids[i], BandRequest(frame_id, y0, y1));
     }
 
-    tris_drawn = 0;
+    polys_drawn = 0;
     let var received = 0;
     while (received < n) {
         let msg = $actor_recv();
@@ -1957,7 +1923,7 @@ fun render_world_parallel() {
         if (!(msg instanceof BandResult) || msg.frame_id != frame_id) continue;
 
         frame_buffer.memcpy(msg.y0 * FRAME_WIDTH * 4, msg.pixels, 0, msg.num_bytes);
-        tris_drawn = tris_drawn + msg.tris;
+        polys_drawn = polys_drawn + msg.tris;
         received = received + 1;
     }
 }
@@ -2061,20 +2027,44 @@ fun reset_flight() {
     clear_cannons();
 }
 
-// Whether a position is too close to a wall or a rib
+// Whether a position is too close to a wall, a block or a pipe
 fun hits_tunnel(x, y, z) {
-    let var margin = CRASH_CLEARANCE;
+    let margin = CRASH_CLEARANCE;
+    if (x.abs() > HALF_W - margin || y.abs() > HALF_H - margin) return true;
+    if (z < 0.0 || z >= RUN_LEN) return false;
 
-    let k = (z / SEC_LEN).floor();
-    if (k % RIB_EVERY == 0) {
-        let dz = z - k.to_f() * SEC_LEN;
-        if (dz < RIB_LEN + CRASH_CLEARANCE) margin = margin + RIB_DEPTH;
-    } else if ((k + 1) % RIB_EVERY == 0) {
-        if ((k + 1).to_f() * SEC_LEN - z < CRASH_CLEARANCE) margin = margin + RIB_DEPTH;
+    let row = (z / CELL).floor();
+    let ids = row_pipes[row];
+
+    for (let var w = 0; w < NUM_WALLS; ++w) {
+        wall_coords(w, x, y);
+        let u = wc_u;
+        let h = wc_h;
+        if (h > MAX_BLOCK + margin) continue;
+        if (h < block_height(w, u, z) + margin) return true;
+
+        for (let var i = 0; i < ids.len; ++i) {
+            let id = ids[i];
+            if (pk_wall[id] != w) continue;
+
+            // How far it is from the pipe's axis, which lies on the wall
+            let var across = z - pk_at[id];
+            if (pk_kind[id] == PIPE_ALONG) {
+                across = u - pk_at[id];
+            } else {
+                let cell = ((u - WALL_U0[w]) / CELL).floor();
+                if (cell < pk_lo[id] || cell > pk_hi[id]) continue;
+            }
+
+            let reach = pk_r[id] + margin;
+            if (across * across + h * h < reach * reach) return true;
+        }
     }
 
-    return x.abs() > HALF_W - margin || y.abs() > HALF_H - margin;
+    return false;
 }
+
+
 
 // Advance the flight by one time step
 fun update_flight(dt) {
@@ -2464,7 +2454,7 @@ fun draw_hud() {
     let low_y = FRAME_HEIGHT - 46;
     draw_readout(CX.floor() - 210, low_y, (speed * 3.6).floor().to_s(), "KM/H");
     let target_km = (RUN_LEN - cam_z).max(0.0) * 0.001;
-    draw_readout(CX.floor() + 100, low_y, target_km.format_decimals(1), "TARGET KM");
+    draw_readout(CX.floor() + 100, low_y, target_km.format_decimals(2), "TARGET KM");
 
     draw_bar(24, FRAME_HEIGHT - 64, "GUN", gun_heat, heat_color(gun_heat));
     if (gun_hot) draw_text(font_small, "OVERHEAT", 164, FRAME_HEIGHT - 66, WARN_RED);
@@ -2934,7 +2924,7 @@ fun run_bench(num_frames, shot_dir) {
         let start_ms = $time_current_ms();
         render_frame();
         render_ms = render_ms + ($time_current_ms() - start_ms);
-        tri_total = tri_total + tris_drawn;
+        tri_total = tri_total + polys_drawn;
 
         if (shot_dir != "" && frame % 30 == 29) {
             save_tga(shot_dir + "/frame" + frame.to_s().lpad(4, "0") + ".tga", frame_image);
@@ -2944,12 +2934,12 @@ fun run_bench(num_frames, shot_dir) {
     let ms = render_ms.to_f() / num_frames;
     $println(num_frames.to_s() + " frames, " + ms.format_decimals(2) + " ms/frame ("
         + (1000.0 / ms).format_decimals(1) + " fps), "
-        + tri_total.idiv(num_frames).to_s() + " triangles/frame");
+        + tri_total.idiv(num_frames).to_s() + " polygons/frame");
 }
 
 // --- Main ---
 
-generate_world();
+lay_pipes();
 reset_flight();
 start_workers();
 
