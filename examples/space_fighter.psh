@@ -1,0 +1,3068 @@
+// Space fighter run through the tunnels of an alien ship
+//
+// The tunnel is a long rectangular shaft cut into sections along its axis.
+// Sections are drawn far to near, and the walls of a shaft never hide
+// anything inside it, so painter's order is exact without any depth test.
+//
+// Walls are texture mapped with perspective correction, done once per
+// sub-span as in examples/tremor.psh. Each vertex carries two light levels,
+// a white one that scales the whole texel and a red one that adds to its red
+// channel only, which is what lets the glowing strips tint the metal around
+// them. Fog fades both to black, so it costs nothing per pixel.
+//
+// Usage:
+//   plush examples/space_fighter.psh [workers]
+//   plush examples/space_fighter.psh --bench [num_frames] [shot_dir] [workers]
+//
+// The world is drawn by eight render workers unless told otherwise.
+//
+//   up / down     pitch the nose up / down
+//   left / right  turn left / right
+//   A / D         roll left / right
+//   W / S        throttle up / down
+//   shift         boost, while the charge lasts
+//   space         fire the cannons
+//   M             music on / off
+//   R             start over
+//   escape / Q    quit
+//
+// With --bench, a set flight is rendered without opening a window and the
+// time per frame is reported. Given a directory as well, a TGA screenshot
+// is written there every so often.
+
+from noise import FractalNoise;
+from image import Image, load_tga, save_tga;
+from random import Xoshiro128;
+from ./monogram_font import Font;
+
+let FRAME_WIDTH = 960;
+let FRAME_HEIGHT = 540;
+
+let PI = 3.1415926535;
+let FOV_X_DEG = 75.0;
+let CX = FRAME_WIDTH.to_f() * 0.5;
+let CY = FRAME_HEIGHT.to_f() * 0.5;
+let FOCAL = CX / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
+let INV_FOCAL = 1.0 / FOCAL;
+let NEAR_Z = 0.5;
+
+let BENCH_MODE = $cmd_get_arg_or(1, "") == "--bench";
+let TEX_DIR = "examples/data/textures/";
+let WORLD_SEED = 7741;
+
+// --- Audio ---
+//
+// All sound is synthesized by an actor of its own, which the main loop
+// keeps informed with a message every frame. It is spawned before the
+// world exists, since an actor starts with a copy of its parent's heap.
+
+let SAMPLE_RATE = 44100;
+
+// Reports per second from the cannons with the barrels at full speed,
+// slow enough to hear each one
+let GUN_SOUND_HZ = 26.4;
+
+// Center of the band a report's bark is heard through and the top of the
+// band its thump is, in Hz, and how far each strays from one report to the
+// next
+let GUN_MID_HZ = 560.0;
+let GUN_MID_VARY = 170.0;
+let GUN_LOW_HZ = 250.0;
+let GUN_LOW_VARY = 50.0;
+
+// How much the bark's band pass is damped. At one it does not ring at all.
+let GUN_MID_DAMP = 1.0;
+
+// What a report's level is multiplied by every sample, and how hard it is
+// driven into the limit
+let GUN_DECAY = 0.99905;
+let GUN_DRIVE = 3.2;
+
+// The wall warning is a tone that slides upwards, then a gap
+let WARN_PERIOD = 0.62;
+let WARN_TONE = 0.47;
+
+// What the main loop tells the audio actor
+class AudioState {
+    init(self, power, gun, warn, crashes, gain, music, stop) {
+        // Whether the music is playing
+        self.music = music;
+
+        // Engine power, from idle at 0 to 1, and beyond with the boost
+        self.power = power;
+
+        // How fast the cannons are firing, from 0 to 1
+        self.gun = gun;
+
+        // Whether the wall warning is sounding
+        self.warn = warn;
+
+        // Number of crashes so far, each new one setting off an explosion
+        self.crashes = crashes;
+
+        // Level of the engine, which a crash silences
+        self.gain = gain;
+
+        // Set to make the actor exit
+        self.stop = stop;
+    }
+}
+
+// What was last asked for
+let var au_power_tgt = 0.0;
+let var au_gain_tgt = 0.0;
+let var au_gun = 0.0;
+let var au_warn = false;
+let var au_crashes = 0;
+
+// Smoothed values, so that nothing steps from one buffer to the next
+let var au_power = 0.0;
+let var au_gain = 0.0;
+
+let var au_seed = 12345;
+let var en_lp1 = 0.0;
+let var en_lp2 = 0.0;
+let var en_rumble = 0.0;
+let var en_throb = 0.0;
+let var en_phase = 0.0;
+let var gn_phase = 0.0;
+let var gn_env = 0.0;
+let var gn_crack = 0.0;
+let var gn_mid_f = 0.08;
+let var gn_low_f = 0.035;
+let var gn_bp = 0.0;
+let var gn_bp_low = 0.0;
+let var gn_lp1 = 0.0;
+let var gn_lp2 = 0.0;
+let var gn_hp = 0.0;
+let var wr_level = 0.0;
+let var wr_time = 0.0;
+let var wr_phase = 0.0;
+let var ex_env = 0.0;
+let var ex_lp = 0.0;
+let var ex_body = 0.0;
+
+// --- Music ---
+//
+// A synthwave track: a pulsing bass, drums, a pad holding the chord and an
+// arpeggio through an echo. The chords and the rhythm are written out by
+// hand. What is left to chance is the path the arpeggio takes through each
+// chord, which is drawn afresh for every section.
+
+let MUSIC_BPM = 150;
+let MUSIC_LEVEL = 0.42;
+
+// Samples in a sixteenth note, which is one step of the sequencer
+let MU_STEP = (SAMPLE_RATE * 60).idiv(MUSIC_BPM * 4);
+
+// The echo on the arpeggio trails it by three steps
+let ECHO_LEN = 3 * MU_STEP;
+let echo_buf = ByteArray.with_size(ECHO_LEN * 4);
+
+// One chord per bar, low in E minor: Em, C, F, B. The F is a semitone
+// above the home note, which is the menace in it, and the major fifth at
+// the end pulls hard back to the start. The bass plays the root, and the
+// pad a voicing of each chord that moves as little as possible.
+let BASS_NOTES = [40, 36, 41, 35];
+let PAD_NOTES = [
+    [52, 55, 59],
+    [52, 55, 60],
+    [53, 57, 60],
+    [51, 54, 59],
+];
+
+// The arpeggio plays this many semitones above the pad, clear of the bass
+let ARP_LIFT = 12;
+
+// Steps of the bar the bass plays on, which is every sixteenth, and the
+// one on which it jumps up an octave
+let BASS_PLAY = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+let BASS_JUMP = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
+
+// The parts that can play in a section
+let PART_PAD = 1;
+let PART_BASS = 2;
+let PART_KICK = 4;
+let PART_HAT = 8;
+let PART_SNARE = 16;
+let PART_ARP = 32;
+let PART_ALL = 63;
+
+// The parts playing in each section of eight bars. Having played through,
+// the track goes back to MU_LOOP_TO, so the opening is only heard once.
+let MU_SECTIONS = [
+    PART_PAD | PART_BASS | PART_KICK,
+    PART_PAD | PART_BASS | PART_KICK | PART_HAT | PART_SNARE,
+    PART_ALL,
+    PART_ALL,
+    PART_BASS | PART_KICK | PART_HAT | PART_ARP,
+    PART_ALL,
+    PART_ALL,
+];
+let MU_LOOP_TO = 1;
+
+let var mu_on = false;
+let var mu_gain = 0.0;
+let var mu_count = MU_STEP;
+let var mu_step = 15;
+let var mu_bar = -1;
+let var mu_section = -1;
+let var mu_parts = 0;
+
+// Which note of the chord the arpeggio plays on each step, counting up
+// through the chord's three notes over two octaves
+let arp_pattern = [0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 2, 3, 4, 3, 2, 1];
+
+let var kick_env = 0.0;
+let var kick_drop = 0.0;
+let var kick_phase = 0.0;
+let var snare_env = 0.0;
+let var snare_lp = 0.0;
+let var snare_phase = 0.0;
+let var hat_env = 0.0;
+let var hat_decay = 0.997;
+let var hat_lp = 0.0;
+let var bass_freq = 110.0;
+let var bass_phase = 0.0;
+let var bass_env = 0.0;
+let var bass_lp1 = 0.0;
+let var bass_lp2 = 0.0;
+let var arp_freq = 440.0;
+let var arp_phase = 0.0;
+let var arp_env = 0.0;
+let var arp_lp = 0.0;
+let var echo_pos = 0;
+let var pad_gain = 0.0;
+let var pad_lfo = 0.0;
+let var pad_lp1 = 0.0;
+let var pad_lp2 = 0.0;
+
+// Two slightly detuned oscillators for each of the pad's three notes
+let pad_freq = Array.with_size(6, 220.0);
+let pad_phase = [0.0, 0.31, 0.62, 0.17, 0.48, 0.79];
+
+// Frequency of a MIDI note number
+fun note_freq(note) {
+    return 440.0 * (2.0).pow((note - 69) / 12.0);
+}
+
+// A random integer in [0, n), from the same generator as the noise
+fun au_rand(n) {
+    au_seed = (au_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (au_seed >> 8) % n;
+}
+
+// Draw a new path for the arpeggio: a walk up and down the notes of the
+// chord, which mostly keeps going the way it was, sometimes skips a note
+// and sometimes turns back
+fun new_arp_pattern() {
+    let var idx = au_rand(3);
+    let var dir = 1;
+
+    for (let var s = 0; s < 16; ++s) {
+        arp_pattern[s] = idx;
+
+        let roll = au_rand(100);
+        if (roll < 18) dir = 0 - dir;
+        if (roll >= 82) idx = idx + 2 * dir; else idx = idx + dir;
+
+        // Turn round at either end of the range
+        if (idx > 5) { idx = 4; dir = -1; }
+        if (idx < 0) { idx = 1; dir = 1; }
+    }
+}
+
+// Advance the sequencer by one sixteenth note and trigger what falls on it
+fun music_step() {
+    mu_step = (mu_step + 1) % 16;
+
+    if (mu_step == 0) {
+        mu_bar = mu_bar + 1;
+
+        // A new section every eight bars
+        if (mu_bar % 8 == 0) {
+            mu_section = mu_section + 1;
+            if (mu_section >= MU_SECTIONS.len) mu_section = MU_LOOP_TO;
+            mu_parts = MU_SECTIONS[mu_section];
+            if (mu_section > MU_LOOP_TO) new_arp_pattern();
+        }
+
+        // Move the pad to the chord of this bar
+        let notes = PAD_NOTES[mu_bar % 4];
+        for (let var k = 0; k < 3; ++k) {
+            let f = note_freq(notes[k]);
+            pad_freq[k * 2] = f * 0.9965;
+            pad_freq[k * 2 + 1] = f * 1.0035;
+        }
+    }
+
+    let step = mu_step;
+    let chord = mu_bar % 4;
+    let parts = mu_parts;
+
+    if ((parts & PART_BASS) != 0 && BASS_PLAY[step] != 0) {
+        bass_freq = note_freq(BASS_NOTES[chord] + 12 * BASS_JUMP[step]);
+        bass_env = 1.0;
+        if (step % 4 != 0) bass_env = 0.8;
+    }
+
+    if ((parts & PART_KICK) != 0 && step % 4 == 0) {
+        kick_env = 1.0;
+        kick_drop = 1.0;
+        kick_phase = 0.0;
+    }
+
+    if ((parts & PART_SNARE) != 0) {
+        // The last bar of a section ends on a roll
+        let roll = mu_bar % 8 == 7 && step >= 12;
+        if (step == 4 || step == 12) snare_env = 1.0;
+        else if (roll) snare_env = 0.45 + 0.12 * (step - 12);
+    }
+
+    // Open hats on the off beats, and quiet closed ones in between
+    if ((parts & PART_HAT) != 0) {
+        if (step % 4 == 2) {
+            hat_env = 1.0;
+            hat_decay = 0.9990;
+        } else {
+            hat_env = 0.35;
+            hat_decay = 0.9965;
+        }
+    }
+
+    if ((parts & PART_ARP) != 0) {
+        let idx = arp_pattern[step];
+        let note = PAD_NOTES[chord][idx % 3] + 12 * idx.idiv(3) + ARP_LIFT;
+        arp_freq = note_freq(note);
+        arp_env = 1.0;
+    }
+}
+
+// Synthesize one sample of music, given a sample of white noise
+fun music_sample(white) {
+    let step = 1.0 / SAMPLE_RATE;
+    let tau = 2.0 * PI;
+
+    mu_count = mu_count + 1;
+    if (mu_count >= MU_STEP) {
+        mu_count = 0;
+        music_step();
+    }
+
+    // Kick: a sine that drops quickly in pitch
+    let var kick = 0.0;
+    if (kick_env > 0.001) {
+        kick_phase = kick_phase + (46.0 + 120.0 * kick_drop) * step;
+        kick = (kick_phase * tau).sin() * kick_env;
+        kick_env = kick_env * 0.99982;
+        kick_drop = kick_drop * 0.9990;
+    }
+
+    // Everything sustained ducks under the kick, which is the pumping
+    // that the style is known for
+    let duck = 1.0 - 0.55 * kick_env;
+
+    // Snare: the top of the noise, over a short tone
+    let var snare = 0.0;
+    if (snare_env > 0.001) {
+        snare_lp = snare_lp + (white - snare_lp) * 0.25;
+        snare_phase = snare_phase + 190.0 * step;
+        if (snare_phase >= 1.0) snare_phase = snare_phase - 1.0;
+        snare = ((white - snare_lp) * 0.8 + (snare_phase * tau).sin() * 0.5 * snare_env) * snare_env;
+        snare_env = snare_env * 0.99945;
+    }
+
+    // Hats: only the very top of the noise
+    let var hat = 0.0;
+    if (hat_env > 0.001) {
+        hat_lp = hat_lp + (white - hat_lp) * 0.6;
+        hat = (white - hat_lp) * hat_env;
+        hat_env = hat_env * hat_decay;
+    }
+
+    // Bass: a saw through a filter that snaps shut after each note
+    bass_phase = bass_phase + bass_freq * step;
+    if (bass_phase >= 1.0) bass_phase = bass_phase - 1.0;
+    let bass_cut = 0.025 + 0.40 * bass_env * bass_env;
+    bass_lp1 = bass_lp1 + ((bass_phase * 2.0 - 1.0) * bass_env - bass_lp1) * bass_cut;
+    bass_lp2 = bass_lp2 + (bass_lp1 - bass_lp2) * bass_cut;
+    bass_env = bass_env * 0.99978;
+
+    // Overdriven, which is where the growl comes from
+    let bass_hot = bass_lp2 * 8.0;
+    let bass = bass_hot / (1.0 + bass_hot.abs());
+
+    // Pad: six saws, through a filter that slowly opens and closes
+    let var pad = 0.0;
+    for (let var k = 0; k < 6; ++k) {
+        let var ph = pad_phase[k] + pad_freq[k] * step;
+        if (ph >= 1.0) ph = ph - 1.0;
+        pad_phase[k] = ph;
+        pad = pad + ph;
+    }
+    pad_lfo = pad_lfo + 0.07 * step;
+    if (pad_lfo >= 1.0) pad_lfo = pad_lfo - 1.0;
+    let pad_cut = 0.022 + 0.010 * (pad_lfo * tau).sin();
+    pad_lp1 = pad_lp1 + ((pad - 3.0) * 0.33 - pad_lp1) * pad_cut;
+    pad_lp2 = pad_lp2 + (pad_lp1 - pad_lp2) * pad_cut;
+    let var pad_tgt = 0.0;
+    if ((mu_parts & PART_PAD) != 0) pad_tgt = 1.0;
+    pad_gain = pad_gain + (pad_tgt - pad_gain) * 0.00005;
+
+    // Arpeggio: a plucked saw, repeated by an echo three steps behind
+    arp_phase = arp_phase + arp_freq * step;
+    if (arp_phase >= 1.0) arp_phase = arp_phase - 1.0;
+    arp_lp = arp_lp + ((arp_phase * 2.0 - 1.0) * arp_env - arp_lp) * (0.06 + 0.30 * arp_env);
+    arp_env = arp_env * 0.99965;
+    let echo = echo_buf.get_f32(echo_pos);
+    let arp = arp_lp + echo * 0.5;
+    echo_buf.set_f32(echo_pos, arp_lp + echo * 0.42);
+    echo_pos = echo_pos + 1;
+    if (echo_pos >= ECHO_LEN) echo_pos = 0;
+
+    return kick * 1.0 + snare * 0.55 + hat * 0.11
+         + (bass * 0.50 + pad_lp2 * pad_gain * 0.9 + arp * 0.36) * duck;
+}
+
+// Synthesize the next n samples into a buffer
+fun audio_fill(buf, n) {
+    let step = 1.0 / SAMPLE_RATE;
+    let tau = 2.0 * PI;
+    let gun_step = GUN_SOUND_HZ * au_gun * step;
+    let var warn_tgt = 0.0;
+    if (au_warn) warn_tgt = 1.0;
+
+    // The boost builds more slowly than the throttle
+    let var spool = 0.00004;
+    if (au_power_tgt > 1.0) spool = spool / 3.0;
+
+    for (let var i = 0; i < n; ++i) {
+        // The engine takes a moment to spool up or down
+        au_power = au_power + (au_power_tgt - au_power) * spool;
+        au_gain = au_gain + (au_gain_tgt - au_gain) * 0.0005;
+        let power = au_power;
+
+        // White noise from a linear congruential generator
+        au_seed = (au_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+        let white = au_seed / 1073741824.0 - 1.0;
+
+        // Jet roar: filtered noise that opens up and gets louder with power,
+        // over a deeper rumble
+        let cutoff = 0.0067 + 0.027 * power.min(1.0);
+        en_lp1 = en_lp1 + (white - en_lp1) * cutoff;
+        en_lp2 = en_lp2 + (en_lp1 - en_lp2) * cutoff;
+        en_rumble = en_rumble + (white - en_rumble) * 0.003;
+        let base = power.min(1.0);
+        let boost = (power - 1.0).max(0.0);
+        let var roar = en_lp2 * (1.6 + 4.0 * base) + en_rumble * 5.0 * base;
+
+        // The boost adds no hiss, there being no air to tear at. It is a
+        // deep throb under the engine and more of its rumble.
+        en_throb = en_throb + (52.0 + 30.0 * boost) * step;
+        if (en_throb >= 1.0) en_throb = en_throb - 1.0;
+        let t = en_throb * tau;
+        roar = roar + en_rumble * 9.0 * boost + (t.sin() * 0.9 + (t * 2.0).sin() * 0.35) * boost;
+
+        // Whine of the turbine, climbing with power
+        en_phase = en_phase + (268.0 + 770.0 * power.min(1.6)) * step;
+        if (en_phase >= 1.0) en_phase = en_phase - 1.0;
+        let c = en_phase * tau;
+        let whine = (c.sin() * 0.030 + (c * 2.0).sin() * 0.012) * (0.4 + 0.6 * power);
+
+        let var v = (roar * 0.345 + whine) * 0.8 * au_gain;
+
+        // Cannons: a report is a burst of noise and nothing else, since
+        // anything with a pitch makes it sound hollow. The burst starts at
+        // once and dies away, and is heard through three bands: a broad one
+        // in the middle that is the bark, a low one that is the thump, and
+        // a trace of the top for the crack. The middle and low bands move a
+        // little from one report to the next. The rate follows the barrels
+        // as they spin up.
+        if (gun_step > 0.0) {
+            gn_phase = gn_phase + gun_step;
+            if (gn_phase >= 1.0) {
+                gn_phase = gn_phase - 1.0;
+                gn_env = 0.8 + 0.2 * white.abs();
+                gn_crack = gn_env;
+
+                let mid = GUN_MID_HZ + GUN_MID_VARY * (au_rand(2001) - 1000) * 0.001;
+                let low = GUN_LOW_HZ + GUN_LOW_VARY * (au_rand(2001) - 1000) * 0.001;
+                gn_mid_f = 2.0 * (PI * mid * step).sin();
+                gn_low_f = 2.0 * PI * low * step;
+            }
+        }
+
+        gn_env = gn_env * GUN_DECAY;
+        let burst = white * gn_env;
+
+        // The bark, through a band pass too broad to ring
+        gn_bp_low = gn_bp_low + gn_mid_f * gn_bp;
+        gn_bp = gn_bp + gn_mid_f * (burst - gn_bp_low - GUN_MID_DAMP * gn_bp);
+
+        // The thump
+        gn_lp1 = gn_lp1 + (burst - gn_lp1) * gn_low_f;
+        gn_lp2 = gn_lp2 + (gn_lp1 - gn_lp2) * gn_low_f;
+
+        // The crack is over almost before it starts
+        gn_crack = gn_crack * 0.9930;
+        let top = white * gn_crack;
+        gn_hp = gn_hp + (top - gn_hp) * 0.35;
+
+        // Driven hard into the limit, which is where the punch comes from.
+        // Nothing comes back off the walls, there being no air to carry it.
+        let var shot = (gn_bp * 1.0 + gn_lp2 * 4.5 + (top - gn_hp) * 0.12) * GUN_DRIVE;
+        shot = shot / (1.0 + shot.abs());
+        v = v + shot * 0.85;
+
+        // Wall warning. The cycle restarts once the warning has faded
+        // out, so that the next one opens with a whole tone.
+        wr_level = wr_level + (warn_tgt - wr_level) * 0.002;
+        if (wr_level > 0.001) {
+            wr_time = wr_time + step;
+            if (wr_time >= WARN_PERIOD) wr_time = wr_time - WARN_PERIOD;
+
+            if (wr_time < WARN_TONE) {
+                // The pitch holds, then slides up towards the end
+                let u = wr_time / WARN_TONE;
+                wr_phase = wr_phase + (780.0 + 640.0 * u * u * u) * step;
+                if (wr_phase >= 1.0) wr_phase = wr_phase - 1.0;
+
+                // Short ramps at either end keep it from clicking
+                let env = (wr_time * 100.0).min((WARN_TONE - wr_time) * 50.0).min(1.0);
+                let w = wr_phase * tau;
+                v = v + (w.sin() * 0.6 + (w * 3.0).sin() * 0.2) * env * wr_level * 0.32;
+            }
+        } else {
+            wr_time = 0.0;
+            wr_phase = 0.0;
+        }
+
+        // Explosion: a burst of noise that dulls as it dies away
+        if (ex_env > 0.0005) {
+            ex_env = ex_env * 0.99996;
+            ex_lp = ex_lp + (white * ex_env - ex_lp) * (0.02 + 0.3 * ex_env * ex_env);
+            ex_body = ex_body + (ex_lp - ex_body) * 0.02;
+            v = v + ex_lp * 2.2 + ex_body * 7.0;
+        }
+
+        // The music fades in and out, and the sequencer holds its place
+        // while it is silent
+        if (mu_on) mu_gain = mu_gain + (1.0 - mu_gain) * 0.0002;
+        else mu_gain = mu_gain * 0.9998;
+        if (mu_gain > 0.0005) v = v + music_sample(white) * mu_gain * MUSIC_LEVEL;
+
+        // Squash the peaks instead of clipping them
+        v = v * 0.7;
+        buf.set_f32(i, v / (1.0 + v.abs()));
+    }
+}
+
+// Take in the latest state from the main loop
+fun audio_set(state) {
+    au_power_tgt = state.power;
+    au_gain_tgt = state.gain;
+    au_gun = state.gun;
+    au_warn = state.warn;
+    mu_on = state.music;
+
+    if (state.crashes != au_crashes) {
+        au_crashes = state.crashes;
+        ex_env = 1.0;
+    }
+}
+
+// Body of the audio actor: fill a buffer whenever the device asks for one
+fun audio_actor() {
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+    if (dev == nil) $println("no audio device, running silent");
+
+    let var buf = ByteArray.with_size(0);
+
+    // Without a device this still runs, to take the main loop's messages
+    loop {
+        let msg = $actor_recv();
+
+        if (msg instanceof AudioState) {
+            if (msg.stop) break;
+            audio_set(msg);
+            continue;
+        }
+        if (dev == nil || !(msg instanceof AudioNeeded)) continue;
+
+        // The buffer is reused, to give the collector nothing to do
+        let n = msg.num_samples;
+        if (buf.len != n * 4) buf = ByteArray.with_size(n * 4);
+        audio_fill(buf, n);
+        $audio_write_samples(dev, buf);
+    }
+
+    return 0;
+}
+
+let var audio_id = nil;
+if (!BENCH_MODE) audio_id = $actor_spawn(audio_actor);
+
+// --- Tunnel dimensions ---
+
+// The tunnel runs along +z, centered on x = 0 and y = 0
+let HALF_W = 100.0;
+let HALF_H = 62.5;
+
+// Length of a section, and of the square panels that tile its walls
+let SEC_LEN = 50.0;
+let PANEL = 25.0;
+let PANELS_X = 8;
+let PANELS_Y = 5;
+let PANELS_Z = 2;
+
+// Two minutes at cruise speed
+let NUM_SECTIONS = 936;
+let RUN_LEN = NUM_SECTIONS.to_f() * SEC_LEN;
+
+// A frame juts in from the walls at the start of every few sections
+let RIB_EVERY = 4;
+let RIB_LEN = 4.0;
+let RIB_DEPTH = 6.0;
+
+// Width of the light strips that run along the four corners
+let STRIP_W = 2.5;
+
+// How many times a texture repeats across a panel
+let TEX_REPEAT = 2.0;
+
+// How far the glow of a corner strip and of a rib reaches
+let STRIP_REACH = 17.0;
+let RIB_REACH = 14.0;
+
+// Everything fades to black between these distances
+let FOG_START = 300.0;
+let FOG_END = 1600.0;
+let DRAW_AHEAD = 32;
+let DRAW_BEHIND = 1;
+
+let STRIP_COLOR = 0xFFFF2A14;
+let RIB_GLOW_COLOR = 0xFFFF6A22;
+
+fun lerp(a, b, t) {
+    return a + (b - a) * t;
+}
+
+fun smoothstep(lo, hi, x) {
+    let t = ((x - lo) / (hi - lo)).clip(0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// Scale the channels of a color by a factor from 0 to 1
+fun color_scale(c, t) {
+    let k = (t.clip(0.0, 1.0) * 256.0).floor();
+    let r = (((c >> 16) & 0xFF) * k) >> 8;
+    let g = (((c >> 8) & 0xFF) * k) >> 8;
+    let b = ((c & 0xFF) * k) >> 8;
+    return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// --- Textures ---
+
+// Average brightness every texture is scaled to, since the lights can only
+// darken a texel and most of these start out nearly black
+let TEX_LEVEL = 120.0;
+let MIN_MIP_SIZE = 8;
+
+// A power-of-two texture and its chain of half-sized copies
+class Texture {
+    init(self, name) {
+        let img = load_tga(TEX_DIR + name + ".tga");
+        if (img == nil) {
+            $println(name + ": could not read an uncompressed 32-bit TGA");
+            $exit(1);
+        }
+
+        let var w = img.width;
+        let var h = img.height;
+        if ((w & (w - 1)) != 0 || (h & (h - 1)) != 0) {
+            $println(name + ": expected a power-of-two sized texture");
+            $exit(1);
+        }
+
+        let var pix = img.bytes;
+        normalize_level(pix, w * h);
+
+        // What the texture looks like from too far away to make out
+        let var sum_r = 0;
+        let var sum_g = 0;
+        let var sum_b = 0;
+        for (let var i = 0; i < w * h; ++i) {
+            let c = pix.get_u32(i);
+            sum_r = sum_r + ((c >> 16) & 0xFF);
+            sum_g = sum_g + ((c >> 8) & 0xFF);
+            sum_b = sum_b + (c & 0xFF);
+        }
+        self.avg_r = sum_r.to_f() / (w * h);
+        self.avg_g = sum_g.to_f() / (w * h);
+        self.avg_b = sum_b.to_f() / (w * h);
+
+        self.pix = [];
+        self.width = [];
+        self.height = [];
+        self.shift = [];
+
+        loop {
+            let var shift = 0;
+            while ((1 << shift) < w) ++shift;
+            self.pix.push(pix);
+            self.width.push(w);
+            self.height.push(h);
+            self.shift.push(shift);
+
+            if (w <= MIN_MIP_SIZE || h <= MIN_MIP_SIZE) break;
+            pix = halve(pix, w, h);
+            w = w >> 1;
+            h = h >> 1;
+        }
+
+        self.num_levels = self.pix.len;
+    }
+}
+
+// Brighten or darken a texture to the common average level
+fun normalize_level(pix, count) {
+    let var sum = 0;
+    for (let var i = 0; i < count; ++i) {
+        let c = pix.get_u32(i);
+        sum = sum + ((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF);
+    }
+
+    let gain = (TEX_LEVEL * 3.0 * count / sum.max(1)).min(4.0);
+    let k = (gain * 256.0).floor();
+    for (let var i = 0; i < count; ++i) {
+        let c = pix.get_u32(i);
+        let r = ((((c >> 16) & 0xFF) * k) >> 8).min(255);
+        let g = ((((c >> 8) & 0xFF) * k) >> 8).min(255);
+        let b = (((c & 0xFF) * k) >> 8).min(255);
+        pix.set_u32(i, 0xFF000000 | (r << 16) | (g << 8) | b);
+    }
+}
+
+// Box filter a texture down to half its size
+fun halve(src, w, h) {
+    let w2 = w >> 1;
+    let h2 = h >> 1;
+    let dst = ByteArray.with_size(w2 * h2 * 4);
+
+    for (let var y = 0; y < h2; ++y) {
+        for (let var x = 0; x < w2; ++x) {
+            let i = (y * 2) * w + x * 2;
+            let a = src.get_u32(i);
+            let b = src.get_u32(i + 1);
+            let c = src.get_u32(i + w);
+            let d = src.get_u32(i + w + 1);
+
+            // Red and blue average together, green on its own
+            let rb = ((a & 0xFF00FF) + (b & 0xFF00FF) + (c & 0xFF00FF) + (d & 0xFF00FF)) >> 2;
+            let g = ((a & 0xFF00) + (b & 0xFF00) + (c & 0xFF00) + (d & 0xFF00)) >> 2;
+            dst.set_u32(y * w2 + x, 0xFF000000 | (rb & 0xFF00FF) | (g & 0xFF00));
+        }
+    }
+
+    return dst;
+}
+
+let tex_metal_dark = Texture("metal_dark");
+let tex_metal_panels = Texture("metal_panels");
+let tex_metal_riveted = Texture("metal_riveted");
+let tex_tech_panel = Texture("tech_panel_teal");
+let tex_metal_plate = Texture("metal_plate");
+let tex_metal_bolted = Texture("metal_bolted");
+let tex_floor_plate = Texture("floor_plate");
+let tex_concrete = Texture("concrete_01");
+let tex_asphalt = Texture("asphalt_01");
+let tex_floor_tread = Texture("floor_tread");
+
+// What the bands of wall between two ribs are picked from, the plainer
+// ones listed more often so that the busy ones stand out
+let WALL_TEXTURES = [
+    tex_metal_dark, tex_metal_dark, tex_metal_riveted, tex_metal_riveted,
+    tex_metal_plate, tex_metal_plate, tex_metal_bolted, tex_metal_bolted,
+    tex_concrete, tex_asphalt, tex_floor_plate,
+    tex_metal_panels, tex_tech_panel,
+];
+
+// --- World geometry ---
+
+// Every surface is a quad owning four consecutive vertices, wound so that
+// it faces into the open space. A quad without a texture is a flat color
+// that glows, which the fog dims but the lights do not touch.
+let vert_x = [];
+let vert_y = [];
+let vert_z = [];
+let vert_u = [];
+let vert_v = [];
+let vert_lw = [];
+let vert_lr = [];
+
+let quad_tex = [];
+let quad_color = [];
+
+// The quads of each section: walls first, then whatever stands inside them
+let sec_first = Array.with_size(NUM_SECTIONS + 1, 0);
+
+let light_noise = FractalNoise({ seed: WORLD_SEED, frequency: 1.0 / 90.0, octaves: 2 });
+let gen_rng = Xoshiro128(WORLD_SEED);
+
+// Brightness of the panel being generated, which sets it apart from its
+// neighbours
+let var gen_gain = 1.0;
+
+// Where the nearest rib is along the tunnel
+fun rib_center(z) {
+    let spacing = RIB_EVERY.to_f() * SEC_LEN;
+    return (z / spacing + 0.5).floor().to_f() * spacing + RIB_LEN * 0.5;
+}
+
+// White and red light reaching a point, each from 0 to 1 and summing to
+// no more than 1. The red comes from the corner strips and the ribs.
+let var lit_white = 0.0;
+let var lit_red = 0.0;
+
+fun light_at(x, y, z) {
+    let dx = HALF_W - x.abs();
+    let dy = HALF_H - y.abs();
+    let corner = (dx * dx + dy * dy) / (STRIP_REACH * STRIP_REACH);
+    let dz = (z - rib_center(z)) / RIB_REACH;
+
+    let red = 0.80 / (1.0 + corner) + 0.55 / (1.0 + dz * dz);
+    let white = 0.20 + 0.12 * light_noise.sample3d(x, y, z);
+
+    lit_white = (white * gen_gain).clip(0.02, 0.95);
+    lit_red = (red * gen_gain).clip(0.0, 1.0 - lit_white);
+}
+
+fun add_vert(x, y, z, u, v) {
+    light_at(x, y, z);
+    vert_x.push(x);
+    vert_y.push(y);
+    vert_z.push(z);
+    vert_u.push(u);
+    vert_v.push(v);
+    vert_lw.push(lit_white);
+    vert_lr.push(lit_red);
+}
+
+// Close the quad made of the last four vertices, turning it to face along
+// the given normal
+fun end_quad(tex, color, nx, ny, nz) {
+    let i = vert_x.len - 4;
+    let ax = vert_x[i + 1] - vert_x[i];
+    let ay = vert_y[i + 1] - vert_y[i];
+    let az = vert_z[i + 1] - vert_z[i];
+    let bx = vert_x[i + 2] - vert_x[i];
+    let by = vert_y[i + 2] - vert_y[i];
+    let bz = vert_z[i + 2] - vert_z[i];
+    let cx = ay * bz - az * by;
+    let cy = az * bx - ax * bz;
+    let cz = ax * by - ay * bx;
+
+    // Facing the wrong way, so swap two opposite corners
+    if (cx * nx + cy * ny + cz * nz < 0.0) {
+        swap_verts(vert_x, i); swap_verts(vert_y, i); swap_verts(vert_z, i);
+        swap_verts(vert_u, i); swap_verts(vert_v, i);
+        swap_verts(vert_lw, i); swap_verts(vert_lr, i);
+    }
+
+    quad_tex.push(tex);
+    quad_color.push(color);
+}
+
+fun swap_verts(arr, i) {
+    let tmp = arr[i + 1];
+    arr[i + 1] = arr[i + 3];
+    arr[i + 3] = tmp;
+}
+
+// Where texture coordinates measure z from. This is the start of the
+// section being generated, a whole number of repeats from the origin, which
+// keeps the coordinates small.
+let var gen_z0 = 0.0;
+
+// Add a rectangle that lies in a plane of constant x, y or z, given as two
+// opposite corners. Texture coordinates follow the two axes it spans, at
+// one repeat per `tile` meters.
+fun add_rect(tex, color, x0, y0, z0, x1, y1, z1, nx, ny, nz, tile) {
+    let wa = (z0 - gen_z0) / tile;
+    let wb = (z1 - gen_z0) / tile;
+
+    if (x0 == x1) {
+        add_vert(x0, y0, z0, wa, y0 / tile);
+        add_vert(x0, y0, z1, wb, y0 / tile);
+        add_vert(x0, y1, z1, wb, y1 / tile);
+        add_vert(x0, y1, z0, wa, y1 / tile);
+    } else if (y0 == y1) {
+        add_vert(x0, y0, z0, x0 / tile, wa);
+        add_vert(x1, y0, z0, x1 / tile, wa);
+        add_vert(x1, y0, z1, x1 / tile, wb);
+        add_vert(x0, y0, z1, x0 / tile, wb);
+    } else {
+        add_vert(x0, y0, z0, x0 / tile, y0 / tile);
+        add_vert(x1, y0, z0, x1 / tile, y0 / tile);
+        add_vert(x1, y1, z0, x1 / tile, y1 / tile);
+        add_vert(x0, y1, z0, x0 / tile, y1 / tile);
+    }
+    end_quad(tex, color, nx, ny, nz);
+}
+
+// Size of one repeat of a texture
+let TILE = PANEL / TEX_REPEAT;
+
+// Tile one wall of a section with panels. The wall lies at `level` along
+// one axis and spans `count` panels along the other, starting at `start`.
+fun add_wall(k, vertical, level, start, count, n, textures) {
+    let z0 = k.to_f() * SEC_LEN;
+
+    for (let var i = 0; i < count; ++i) {
+        let a0 = start + i.to_f() * PANEL;
+        let a1 = a0 + PANEL;
+
+        for (let var j = 0; j < PANELS_Z; ++j) {
+            let za = z0 + j.to_f() * PANEL;
+            let zb = za + PANEL;
+            gen_gain = gen_rng.float(0.72, 1.0);
+
+            if (vertical) add_rect(textures[i], 0, level, a0, za, level, a1, zb, n, 0.0, 0.0, TILE);
+            else add_rect(textures[i], 0, a0, level, za, a1, level, zb, 0.0, n, 0.0, TILE);
+        }
+    }
+}
+
+// The four bars of a rectangular frame around the tunnel at depth z, facing
+// along nz, between an outer and an inner margin from the walls
+fun add_frame(tex, color, z, nz, outer, inner) {
+    let xo = HALF_W - outer; let yo = HALF_H - outer;
+    let xi = HALF_W - inner; let yi = HALF_H - inner;
+    add_rect(tex, color, -xo, -yo, z, xo, -yi, z, 0.0, 0.0, nz, TILE);
+    add_rect(tex, color, -xo, yi, z, xo, yo, z, 0.0, 0.0, nz, TILE);
+    add_rect(tex, color, -xo, -yi, z, -xi, yi, z, 0.0, 0.0, nz, TILE);
+    add_rect(tex, color, xi, -yi, z, xo, yi, z, 0.0, 0.0, nz, TILE);
+}
+
+// A frame that juts in from the walls, with a glowing band around its face
+fun add_rib(z0) {
+    let z1 = z0 + RIB_LEN;
+    let xi = HALF_W - RIB_DEPTH;
+    let yi = HALF_H - RIB_DEPTH;
+    let tex = tex_metal_riveted;
+    gen_gain = 1.0;
+
+    // Far face first, then the inner faces, then the near face
+    add_frame(tex, 0, z1, 1.0, 0.0, RIB_DEPTH);
+    add_rect(tex, 0, -xi, -yi, z0, xi, -yi, z1, 0.0, 1.0, 0.0, TILE);
+    add_rect(tex, 0, -xi, yi, z0, xi, yi, z1, 0.0, -1.0, 0.0, TILE);
+    add_rect(tex, 0, -xi, -yi, z0, -xi, yi, z1, 1.0, 0.0, 0.0, TILE);
+    add_rect(tex, 0, xi, -yi, z0, xi, yi, z1, -1.0, 0.0, 0.0, TILE);
+    add_frame(tex, 0, z0, -1.0, 0.0, RIB_DEPTH);
+    add_frame(nil, RIB_GLOW_COLOR, z0 - 0.1, -1.0, RIB_DEPTH * 0.5 - 0.5, RIB_DEPTH * 0.5 + 0.5);
+}
+
+// A glowing strip across each corner of the tunnel
+fun add_strips(za, zb) {
+    for (let var c = 0; c < 4; ++c) {
+        let sx = [-1.0, 1.0, 1.0, -1.0][c];
+        let sy = [-1.0, -1.0, 1.0, 1.0][c];
+        add_vert(sx * (HALF_W - STRIP_W), sy * HALF_H, za, 0.0, 0.0);
+        add_vert(sx * HALF_W, sy * (HALF_H - STRIP_W), za, 0.0, 0.0);
+        add_vert(sx * HALF_W, sy * (HALF_H - STRIP_W), zb, 0.0, 0.0);
+        add_vert(sx * (HALF_W - STRIP_W), sy * HALF_H, zb, 0.0, 0.0);
+        end_quad(nil, STRIP_COLOR, 0.0 - sx, 0.0 - sy, 0.0);
+    }
+}
+
+// Pick a texture for each band of panels across a wall
+fun pick_bands(count, runway) {
+    let bands = [];
+    for (let var i = 0; i < count; ++i) {
+        bands.push(gen_rng.choice(WALL_TEXTURES));
+    }
+
+    // A tread plate track down the middle of the floor
+    if (runway) {
+        bands[count.idiv(2) - 1] = tex_floor_tread;
+        bands[count.idiv(2)] = tex_floor_tread;
+    }
+
+    return bands;
+}
+
+fun generate_world() {
+    let var floor_tex = nil;
+    let var ceil_tex = nil;
+    let var left_tex = nil;
+    let var right_tex = nil;
+
+    for (let var k = 0; k < NUM_SECTIONS; ++k) {
+        sec_first[k] = quad_tex.len;
+        let z0 = k.to_f() * SEC_LEN;
+        let has_rib = k % RIB_EVERY == 0;
+        gen_z0 = z0;
+
+        // The bands of texture change at each rib
+        if (has_rib) {
+            floor_tex = pick_bands(PANELS_X, true);
+            ceil_tex = pick_bands(PANELS_X, false);
+            left_tex = pick_bands(PANELS_Y, false);
+            right_tex = pick_bands(PANELS_Y, false);
+        }
+
+        add_wall(k, false, 0.0 - HALF_H, 0.0 - HALF_W, PANELS_X, 1.0, floor_tex);
+        add_wall(k, false, HALF_H, 0.0 - HALF_W, PANELS_X, -1.0, ceil_tex);
+        add_wall(k, true, 0.0 - HALF_W, 0.0 - HALF_H, PANELS_Y, 1.0, left_tex);
+        add_wall(k, true, HALF_W, 0.0 - HALF_H, PANELS_Y, -1.0, right_tex);
+
+        // The strips break off a little short of each section's end
+        if (has_rib) {
+            add_strips(z0 + RIB_LEN + 2.0, z0 + SEC_LEN - 4.0);
+            add_rib(z0);
+        } else {
+            add_strips(z0 + 4.0, z0 + SEC_LEN - 4.0);
+        }
+
+        // A wall closes off the far end of the run
+        if (k == NUM_SECTIONS - 1) {
+            gen_gain = 1.0;
+            for (let var i = 0; i < PANELS_X; ++i) {
+                for (let var j = 0; j < PANELS_Y; ++j) {
+                    let x = i.to_f() * PANEL - HALF_W;
+                    let y = j.to_f() * PANEL - HALF_H;
+                    add_rect(tex_metal_panels, 0, x, y, RUN_LEN, x + PANEL, y + PANEL, RUN_LEN,
+                        0.0, 0.0, -1.0, TILE);
+                }
+            }
+        }
+    }
+
+    sec_first[NUM_SECTIONS] = quad_tex.len;
+}
+
+// --- Camera ---
+
+// Position in world space, where x is right, y is up and z runs down the
+// tunnel
+let var cam_x = 0.0;
+let var cam_y = 0.0;
+let var cam_z = 0.0;
+
+// Orientation, as the three axes of the camera in world space
+let var right_x = 1.0;
+let var right_y = 0.0;
+let var right_z = 0.0;
+let var up_x = 0.0;
+let var up_y = 1.0;
+let var up_z = 0.0;
+let var fwd_x = 0.0;
+let var fwd_y = 0.0;
+let var fwd_z = 1.0;
+
+// Pitch the nose up by an angle in radians
+fun cam_pitch(angle) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let fx = fwd_x * c + up_x * s;
+    let fy = fwd_y * c + up_y * s;
+    let fz = fwd_z * c + up_z * s;
+    up_x = up_x * c - fwd_x * s;
+    up_y = up_y * c - fwd_y * s;
+    up_z = up_z * c - fwd_z * s;
+    fwd_x = fx;
+    fwd_y = fy;
+    fwd_z = fz;
+}
+
+// Roll to the right, lowering the right wing
+fun cam_roll(angle) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let rx = right_x * c - up_x * s;
+    let ry = right_y * c - up_y * s;
+    let rz = right_z * c - up_z * s;
+    up_x = up_x * c + right_x * s;
+    up_y = up_y * c + right_y * s;
+    up_z = up_z * c + right_z * s;
+    right_x = rx;
+    right_y = ry;
+    right_z = rz;
+}
+
+// Yaw the nose to the right
+fun cam_yaw(angle) {
+    let c = angle.cos();
+    let s = angle.sin();
+    let fx = fwd_x * c + right_x * s;
+    let fy = fwd_y * c + right_y * s;
+    let fz = fwd_z * c + right_z * s;
+    right_x = right_x * c - fwd_x * s;
+    right_y = right_y * c - fwd_y * s;
+    right_z = right_z * c - fwd_z * s;
+    fwd_x = fx;
+    fwd_y = fy;
+    fwd_z = fz;
+}
+
+// Make the axes unit length and square to each other again, since
+// rotating them a little every frame lets them drift
+fun cam_normalize() {
+    let f_len = (fwd_x * fwd_x + fwd_y * fwd_y + fwd_z * fwd_z).sqrt();
+    fwd_x = fwd_x / f_len;
+    fwd_y = fwd_y / f_len;
+    fwd_z = fwd_z / f_len;
+
+    // right = up x fwd
+    let rx = up_y * fwd_z - up_z * fwd_y;
+    let ry = up_z * fwd_x - up_x * fwd_z;
+    let rz = up_x * fwd_y - up_y * fwd_x;
+    let r_len = (rx * rx + ry * ry + rz * rz).sqrt();
+    right_x = rx / r_len;
+    right_y = ry / r_len;
+    right_z = rz / r_len;
+
+    // up = fwd x right
+    up_x = fwd_y * right_z - fwd_z * right_y;
+    up_y = fwd_z * right_x - fwd_x * right_z;
+    up_z = fwd_x * right_y - fwd_y * right_x;
+}
+
+// --- Rasterization ---
+
+let frame_image = Image(FRAME_WIDTH, FRAME_HEIGHT);
+let frame_buffer = frame_image.bytes;
+
+// Texture coordinates are interpolated in fixed point, with u and v packed
+// into the two halves of one integer so that a single add steps both:
+//
+//   bits 63..32: v, as 16.16 fixed point
+//   bits 31..0:  u, as 16.16 fixed point
+//
+// Both halves are wrapped into the texture before a sub-span starts and then
+// biased by EXC_FX, so that a half stepping backwards stays positive rather
+// than borrowing from the half above. See examples/tremor.psh.
+let FP_ONE = 65536.0;
+let BIAS_TEXELS = 8192.0;
+let SUB_MAX = 32;
+let GRAD_LIMIT = 64.0;
+let EXC_FX = (SUB_MAX * 64) << 16;
+
+// How far 1/z may swing across one sub-span, as a fraction of itself
+let PERSP_TOL = 0.12;
+
+// A sample just outside a polygon seen edge on can land past its horizon,
+// so 1/z and what is divided by it are kept within these bounds
+let W_MIN = 1.0 / 20000.0;
+let UV_LIMIT = 1000000.0;
+
+// Light levels run 1..255 in 16.16 fixed point, and the white and red
+// levels of a pixel never sum past 255, which keeps the red channel from
+// spilling into green
+let L_ONE = 65536.0;
+let L_MIN = 1 << 16;
+let L_MAX_WHITE = 254 << 16;
+let L_TOP = 255 << 16;
+
+let MASK_RB = 0x00FF00FF;
+
+// Reciprocals of the sub-span lengths, as floats and in 0.16 fixed point
+let INV_N = Array.with_size(SUB_MAX + 1, 0.0);
+let INV_N_FX = Array.with_size(SUB_MAX + 1, 0);
+for (let var i = 1; i <= SUB_MAX; ++i) {
+    INV_N[i] = 1.0 / i.to_f();
+    INV_N_FX[i] = (65536.0 / i.to_f()).floor();
+}
+
+// View space vertices of the quad being drawn. Texture coordinates are in
+// texels and light levels in fixed point.
+let tX = Array.with_size(4, 0.0);
+let tY = Array.with_size(4, 0.0);
+let tZ = Array.with_size(4, 0.0);
+let tU = Array.with_size(4, 0.0);
+let tV = Array.with_size(4, 0.0);
+let tLW = Array.with_size(4, 0.0);
+let tLR = Array.with_size(4, 0.0);
+
+// Which of those vertices make up the polygon to clip
+let cI = Array.with_size(4, 0);
+
+// The polygon on screen, after clipping to the near plane
+let pX = Array.with_size(8, 0.0);
+let pY = Array.with_size(8, 0.0);
+
+// The span of each scanline a polygon covers, from scan_y0 up to scan_y1
+let row_x0 = Array.with_size(FRAME_HEIGHT, 0);
+let row_x1 = Array.with_size(FRAME_HEIGHT, 0);
+let var scan_y0 = 0;
+let var scan_y1 = 0;
+
+// The rows being rendered, which is a band of the frame in a render worker
+let var render_y0 = 0;
+let var render_y1 = FRAME_HEIGHT;
+
+// Texture level being drawn
+let var g_pix = nil;
+let var g_umask = 0;
+let var g_vshift = 0;
+let var g_vmask = 0;
+let var g_uwrap = 0;
+let var g_vwrap = 0;
+
+let var tris_drawn = 0;
+
+// Clip the polygon listed in cI to the near plane and project it into pX
+// and pY, returning its number of corners
+fun clip_project(n) {
+    let var m = 0;
+    for (let var i = 0; i < n; ++i) {
+        let a = cI[i];
+        let var j = i + 1;
+        if (j == n) j = 0;
+        let b = cI[j];
+        let za = tZ[a];
+        let zb = tZ[b];
+
+        if (za >= NEAR_Z) {
+            let s = FOCAL / za;
+            pX[m] = CX + tX[a] * s;
+            pY[m] = CY - tY[a] * s;
+            m = m + 1;
+        }
+
+        if ((za >= NEAR_Z) != (zb >= NEAR_Z)) {
+            let t = (NEAR_Z - za) / (zb - za);
+            let s = FOCAL / NEAR_Z;
+            pX[m] = CX + (tX[a] + (tX[b] - tX[a]) * t) * s;
+            pY[m] = CY - (tY[a] + (tY[b] - tY[a]) * t) * s;
+            m = m + 1;
+        }
+    }
+
+    return m;
+}
+
+// Walk the edges of the convex polygon in pX and pY, recording the span it
+// covers on each scanline. Returns false if none of it is on screen.
+fun scan_poly(m) {
+    let var top = 0;
+    let var bot = 0;
+    let var y_min = pY[0];
+    let var y_max = pY[0];
+    let var x_min = pX[0];
+    let var x_max = pX[0];
+    for (let var i = 1; i < m; ++i) {
+        if (pY[i] < y_min) { y_min = pY[i]; top = i; }
+        if (pY[i] > y_max) { y_max = pY[i]; bot = i; }
+        if (pX[i] < x_min) x_min = pX[i];
+        if (pX[i] > x_max) x_max = pX[i];
+    }
+
+    if (x_max < 0.0 || x_min >= FRAME_WIDTH || y_max < render_y0 || y_min >= render_y1) return false;
+
+    let var scan_y = y_min.floor();
+    if (scan_y < render_y0) scan_y = render_y0;
+    let var end_y = y_max.floor();
+    if (end_y > render_y1) end_y = render_y1;
+    if (scan_y >= end_y) return false;
+
+    // Which way round the left chain runs, from the winding on screen
+    let var area = 0.0;
+    for (let var i = 0; i < m; ++i) {
+        let var j = i + 1;
+        if (j == m) j = 0;
+        area = area + pX[i] * pY[j] - pX[j] * pY[i];
+    }
+    let var step_l = 1;
+    if (area > 0.0) step_l = m - 1;
+    let step_r = m - step_l;
+
+    // Per chain: the corner reached so far, the current x, how far x moves
+    // per scanline, and the scanline its current edge runs out on
+    let var cl = top; let var xl = 0.0; let var dxl = 0.0; let var end_l = scan_y;
+    let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = scan_y;
+    scan_y0 = scan_y;
+
+    while (scan_y < end_y) {
+        // Step either chain the current scanline has run past
+        while (scan_y >= end_l && cl != bot) {
+            let ya = pY[cl];
+            let xa = pX[cl];
+            cl = (cl + step_l) % m;
+            let yb = pY[cl];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_l = e;
+            if (end_l > scan_y && yb > ya) {
+                dxl = (pX[cl] - xa) / (yb - ya);
+                xl = xa + (scan_y + 1 - ya) * dxl;
+            }
+        }
+        while (scan_y >= end_r && cr != bot) {
+            let ya = pY[cr];
+            let xa = pX[cr];
+            cr = (cr + step_r) % m;
+            let yb = pY[cr];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_r = e;
+            if (end_r > scan_y && yb > ya) {
+                dxr = (pX[cr] - xa) / (yb - ya);
+                xr = xa + (scan_y + 1 - ya) * dxr;
+            }
+        }
+
+        let var band_end = end_l;
+        if (end_r < band_end) band_end = end_r;
+        if (band_end <= scan_y) break;
+
+        while (scan_y < band_end) {
+            let var xa = xl.floor();
+            if (xa < 0) xa = 0;
+            let var xb = xr.floor();
+            if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+            row_x0[scan_y] = xa;
+            row_x1[scan_y] = xb;
+            xl = xl + dxl;
+            xr = xr + dxr;
+            scan_y = scan_y + 1;
+        }
+    }
+
+    scan_y1 = scan_y;
+    return scan_y1 > scan_y0;
+}
+
+// Draw one textured, lit triangle of the quad in the tX arrays.
+//
+// Anything linear over the triangle in space is linear on screen once
+// divided by z, and so is 1/z. For a value a known at the three corners P,
+// the vector A with A . P = a at each of them gives a/z at any pixel as
+// A . (x, y, 1), with x and y on the plane at depth one. Solving for A
+// takes the inverse of the matrix of corners, whose columns are the cross
+// products below. This works from the corners as they are in view space, so
+// clipping only has to produce the outline.
+fun draw_tri(a, b, c) {
+    let x0 = tX[a]; let y0 = tY[a]; let z0 = tZ[a];
+    let x1 = tX[b]; let y1 = tY[b]; let z1 = tZ[b];
+    let x2 = tX[c]; let y2 = tY[c]; let z2 = tZ[c];
+    if (z0 < NEAR_Z && z1 < NEAR_Z && z2 < NEAR_Z) return;
+
+    let c12x = y1 * z2 - z1 * y2; let c12y = z1 * x2 - x1 * z2; let c12z = x1 * y2 - y1 * x2;
+    let c20x = y2 * z0 - z2 * y0; let c20y = z2 * x0 - x2 * z0; let c20z = x2 * y0 - y2 * x0;
+    let c01x = y0 * z1 - z0 * y1; let c01y = z0 * x1 - x0 * z1; let c01z = x0 * y1 - y0 * x1;
+
+    // The determinant is negative when the triangle faces the eye
+    let det = x0 * c12x + y0 * c12y + z0 * c12z;
+    if (det > -0.000001) return;
+
+    cI[0] = a; cI[1] = b; cI[2] = c;
+    let m = clip_project(3);
+    if (m < 3) return;
+    if (!scan_poly(m)) return;
+    tris_drawn = tris_drawn + 1;
+
+    // Offsets that take a gradient vector to its value at the center of
+    // the top left pixel
+    let inv = 1.0 / det;
+    let kx = (0.5 - CX) * INV_FOCAL;
+    let ky = (CY - 0.5) * INV_FOCAL;
+
+    let var ax = (c12x + c20x + c01x) * inv;
+    let var ay = (c12y + c20y + c01y) * inv;
+    let var az = (c12z + c20z + c01z) * inv;
+    let dwdx = ax * INV_FOCAL;
+    let dwdy = 0.0 - ay * INV_FOCAL;
+    let w00 = az + ax * kx + ay * ky;
+
+    let var a0 = tU[a]; let var a1 = tU[b]; let var a2 = tU[c];
+    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
+    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
+    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
+    let duzdx = ax * INV_FOCAL;
+    let duzdy = 0.0 - ay * INV_FOCAL;
+    let uz00 = az + ax * kx + ay * ky;
+
+    a0 = tV[a]; a1 = tV[b]; a2 = tV[c];
+    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
+    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
+    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
+    let dvzdx = ax * INV_FOCAL;
+    let dvzdy = 0.0 - ay * INV_FOCAL;
+    let vz00 = az + ax * kx + ay * ky;
+
+    a0 = tLW[a]; a1 = tLW[b]; a2 = tLW[c];
+    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
+    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
+    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
+    let dlwdx = ax * INV_FOCAL;
+    let dlwdy = 0.0 - ay * INV_FOCAL;
+    let lw00 = az + ax * kx + ay * ky;
+
+    a0 = tLR[a]; a1 = tLR[b]; a2 = tLR[c];
+    ax = (a0 * c12x + a1 * c20x + a2 * c01x) * inv;
+    ay = (a0 * c12y + a1 * c20y + a2 * c01y) * inv;
+    az = (a0 * c12z + a1 * c20z + a2 * c01z) * inv;
+    let dlrdx = ax * INV_FOCAL;
+    let dlrdy = 0.0 - ay * INV_FOCAL;
+    let lr00 = az + ax * kx + ay * ky;
+
+    // The longest run over which 1/z stays within tolerance is a multiple
+    // of 1/z itself, and the factor holds for the whole triangle
+    let var wscale = 0.0;
+    if (dwdx.abs() > 0.0) wscale = PERSP_TOL / dwdx.abs();
+    let sub_max_f = SUB_MAX.to_f();
+
+    let pix = g_pix;
+    let umask = g_umask;
+    let vshift = g_vshift;
+    let vmask = g_vmask;
+    let uwrap = g_uwrap;
+    let vwrap = g_vwrap;
+    let mask_rb = MASK_RB;
+    let fb = frame_buffer;
+
+    let var y = scan_y0;
+    let end_y = scan_y1;
+    let var uz_row = uz00 + y * duzdy;
+    let var vz_row = vz00 + y * dvzdy;
+    let var lw_row = lw00 + y * dlwdy;
+    let var lr_row = lr00 + y * dlrdy;
+    let var w_row = w00 + y * dwdy;
+    let var row = y * FRAME_WIDTH;
+
+    while (y < end_y) {
+        let var x = row_x0[y];
+        let piece_end = row_x1[y];
+
+        if (x < piece_end) {
+            // Perspective values at the start of the span
+            let var uz = uz_row + x * duzdx;
+            let var vz = vz_row + x * dvzdx;
+            let var lwz = lw_row + x * dlwdx;
+            let var lrz = lr_row + x * dlrdx;
+            let var w = w_row + x * dwdx;
+            if (w < W_MIN) w = W_MIN;
+            let var z = 1.0 / w;
+            let var u = uz * z;
+            if (u > UV_LIMIT) u = UV_LIMIT;
+            else if (u < 0.0 - UV_LIMIT) u = 0.0 - UV_LIMIT;
+            let var v = vz * z;
+            if (v > UV_LIMIT) v = UV_LIMIT;
+            else if (v < 0.0 - UV_LIMIT) v = 0.0 - UV_LIMIT;
+
+            let var lw = (lwz * z).floor();
+            if (lw < L_MIN) lw = L_MIN;
+            else if (lw > L_MAX_WHITE) lw = L_MAX_WHITE;
+            let var lr = (lrz * z).floor();
+            if (lr < L_MIN) lr = L_MIN;
+            else if (lr > L_TOP - lw) lr = L_TOP - lw;
+
+            while (x < piece_end) {
+                let var run = SUB_MAX;
+                if (wscale > 0.0) {
+                    let nf = w * wscale;
+                    if (nf < sub_max_f) {
+                        run = nf.floor();
+                        if (run < 1) run = 1;
+                    }
+                }
+
+                let var xe = x + run;
+                if (xe > piece_end) xe = piece_end;
+                let len = xe - x;
+
+                // One divide per sub-span buys correct values at its far
+                // end, and in between the step is affine
+                uz = uz + len * duzdx;
+                vz = vz + len * dvzdx;
+                lwz = lwz + len * dlwdx;
+                lrz = lrz + len * dlrdx;
+                w = w + len * dwdx;
+                if (w < W_MIN) w = W_MIN;
+                z = 1.0 / w;
+
+                let var u_e = uz * z;
+                if (u_e > UV_LIMIT) u_e = UV_LIMIT;
+                else if (u_e < 0.0 - UV_LIMIT) u_e = 0.0 - UV_LIMIT;
+                let var v_e = vz * z;
+                if (v_e > UV_LIMIT) v_e = UV_LIMIT;
+                else if (v_e < 0.0 - UV_LIMIT) v_e = 0.0 - UV_LIMIT;
+
+                let inv_len = INV_N[len];
+                let var du = (u_e - u) * inv_len;
+                let var dv = (v_e - v) * inv_len;
+                if (du > GRAD_LIMIT) du = GRAD_LIMIT;
+                else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
+                if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
+                else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
+
+                let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & uwrap) + EXC_FX;
+                let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & vwrap) + EXC_FX;
+                let var t = (vfx << 32) + ufx;
+                let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
+
+                // Both ends are clamped and the step taken between the
+                // clamped pair, so every pixel between them is in range
+                let var lw_e = (lwz * z).floor();
+                if (lw_e < L_MIN) lw_e = L_MIN;
+                else if (lw_e > L_MAX_WHITE) lw_e = L_MAX_WHITE;
+                let var lr_e = (lrz * z).floor();
+                if (lr_e < L_MIN) lr_e = L_MIN;
+                else if (lr_e > L_TOP - lw_e) lr_e = L_TOP - lw_e;
+
+                // The shift rounds down, so a step never overshoots its end
+                let inv_fx = INV_N_FX[len];
+                let dlw = ((lw_e - lw) * inv_fx) >> 16;
+                let dlr = ((lr_e - lr) * inv_fx) >> 16;
+
+                let var i = row + x;
+                let end_i = row + xe;
+                while (i < end_i) {
+                    let c = pix.get_u32(((t >> vshift) & vmask) | ((t >> 16) & umask));
+
+                    // Green moves up to bit 32, which puts the channels
+                    // sixteen bits apart, so one multiply scales all three
+                    // by the white level. Red alone is scaled again by the
+                    // red level and lands on top of its own product.
+                    let p = ((c & mask_rb) | ((c & 0xFF00) << 24)) * (lw >> 16)
+                          + (c & 0xFF0000) * (lr >> 16);
+
+                    fb.set_u32(i, ((p >> 8) & mask_rb) | ((p >> 32) & 0xFF00));
+                    t = t + dt;
+                    lw = lw + dlw;
+                    lr = lr + dlr;
+                    i = i + 1;
+                }
+
+                lw = lw_e;
+                lr = lr_e;
+                u = u_e;
+                v = v_e;
+                x = xe;
+            }
+        }
+
+        uz_row = uz_row + duzdy;
+        vz_row = vz_row + dvzdy;
+        lw_row = lw_row + dlwdy;
+        lr_row = lr_row + dlrdy;
+        w_row = w_row + dwdy;
+        row = row + FRAME_WIDTH;
+        y = y + 1;
+    }
+}
+
+// Colors are interpolated along a span as three 8.12 fixed point channels
+// packed into one integer, twenty bits apart, so that one add steps them all
+let COL_ONE = 4096.0;
+let COL_MIN = 0.25;
+let COL_MAX = 255.9;
+
+// Past this much color change per pixel a triangle is a sliver, and gets
+// a single color instead
+let COL_GRAD_LIMIT = 48.0;
+
+// Reciprocals of the number of steps along a span
+let INV_STEPS = Array.with_size(FRAME_WIDTH + 1, 0.0);
+for (let var i = 1; i <= FRAME_WIDTH; ++i) INV_STEPS[i] = COL_ONE / i.to_f();
+
+// Draw one triangle of the quad in the tX arrays as a blend of the colors
+// at its corners, which are in tU, tV and tLW as red, green and blue. This
+// is for what is too far away to show a texture, so the blend is affine and
+// the triangle has to be wholly in front of the near plane.
+fun shade_tri(a, b, c) {
+    let x0 = tX[a]; let y0 = tY[a]; let z0 = tZ[a];
+    let x1 = tX[b]; let y1 = tY[b]; let z1 = tZ[b];
+    let x2 = tX[c]; let y2 = tY[c]; let z2 = tZ[c];
+    let det = x0 * (y1 * z2 - z1 * y2) + y0 * (z1 * x2 - x1 * z2) + z0 * (x1 * y2 - y1 * x2);
+    if (det > -0.000001) return;
+
+    let s0 = FOCAL / z0;
+    let s1 = FOCAL / z1;
+    let s2 = FOCAL / z2;
+    let ax = CX + x0 * s0; let ay = CY - y0 * s0;
+    let bx = CX + x1 * s1; let by = CY - y1 * s1;
+    let cx = CX + x2 * s2; let cy = CY - y2 * s2;
+    pX[0] = ax; pY[0] = ay;
+    pX[1] = bx; pY[1] = by;
+    pX[2] = cx; pY[2] = cy;
+    if (!scan_poly(3)) return;
+    tris_drawn = tris_drawn + 1;
+
+    // Color gradients, which are constant over the triangle
+    let e1x = bx - ax; let e1y = by - ay;
+    let e2x = cx - ax; let e2y = cy - ay;
+    let sdet = e1x * e2y - e2x * e1y;
+    if (sdet.abs() < 0.000001) return;
+    let inv_det = 1.0 / sdet;
+
+    let var r0 = tU[a]; let e1r = tU[b] - r0; let e2r = tU[c] - r0;
+    let var g0 = tV[a]; let e1g = tV[b] - g0; let e2g = tV[c] - g0;
+    let var b0 = tLW[a]; let e1b = tLW[b] - b0; let e2b = tLW[c] - b0;
+
+    let var drdx = (e1r * e2y - e2r * e1y) * inv_det;
+    let var drdy = (e2r * e1x - e1r * e2x) * inv_det;
+    let var dgdx = (e1g * e2y - e2g * e1y) * inv_det;
+    let var dgdy = (e2g * e1x - e1g * e2x) * inv_det;
+    let var dbdx = (e1b * e2y - e2b * e1y) * inv_det;
+    let var dbdy = (e2b * e1x - e1b * e2x) * inv_det;
+
+    // A sliver gets the average of its corners
+    if (drdx.abs() + drdy.abs() + dgdx.abs() + dgdy.abs() + dbdx.abs() + dbdy.abs() > COL_GRAD_LIMIT) {
+        r0 = r0 + (e1r + e2r) / 3.0;
+        g0 = g0 + (e1g + e2g) / 3.0;
+        b0 = b0 + (e1b + e2b) / 3.0;
+        drdx = 0.0; drdy = 0.0;
+        dgdx = 0.0; dgdy = 0.0;
+        dbdx = 0.0; dbdy = 0.0;
+    }
+
+    // Colors at the center of pixel 0 of the first row
+    let var y = scan_y0;
+    let end_y = scan_y1;
+    let x_off = 0.5 - ax;
+    let y_off = y + 0.5 - ay;
+    let var r_row = r0 + x_off * drdx + y_off * drdy;
+    let var g_row = g0 + x_off * dgdx + y_off * dgdy;
+    let var b_row = b0 + x_off * dbdx + y_off * dbdy;
+
+    let fb = frame_buffer;
+    let lo = COL_MIN;
+    let hi = COL_MAX;
+    let var row = y * FRAME_WIDTH;
+
+    while (y < end_y) {
+        let xa = row_x0[y];
+        let xb = row_x1[y];
+
+        if (xa < xb) {
+            // Both ends of the span are clamped and the step taken between
+            // the clamped pair, so no channel can run into its neighbour
+            let var ra = r_row + xa * drdx;
+            if (ra < lo) ra = lo; else if (ra > hi) ra = hi;
+            let var ga = g_row + xa * dgdx;
+            if (ga < lo) ga = lo; else if (ga > hi) ga = hi;
+            let var ba = b_row + xa * dbdx;
+            if (ba < lo) ba = lo; else if (ba > hi) ba = hi;
+
+            let var col = ((ra * COL_ONE).floor() << 40) + ((ga * COL_ONE).floor() << 20)
+                        + (ba * COL_ONE).floor();
+            let var i = row + xa;
+            let steps = xb - xa - 1;
+
+            if (steps == 0) {
+                fb.set_u32(i, ((col >> 36) & 0xFF0000) | ((col >> 24) & 0xFF00) | ((col >> 12) & 0xFF));
+            } else {
+                let var re = r_row + (xb - 1) * drdx;
+                if (re < lo) re = lo; else if (re > hi) re = hi;
+                let var ge = g_row + (xb - 1) * dgdx;
+                if (ge < lo) ge = lo; else if (ge > hi) ge = hi;
+                let var be = b_row + (xb - 1) * dbdx;
+                if (be < lo) be = lo; else if (be > hi) be = hi;
+
+                let k = INV_STEPS[steps];
+                let dc = (((re - ra) * k).floor() << 40) + (((ge - ga) * k).floor() << 20)
+                       + ((be - ba) * k).floor();
+
+                let end_i = row + xb;
+                while (i < end_i) {
+                    fb.set_u32(i, ((col >> 36) & 0xFF0000) | ((col >> 24) & 0xFF00) | ((col >> 12) & 0xFF));
+                    col = col + dc;
+                    i = i + 1;
+                }
+            }
+        }
+
+        r_row = r_row + drdy;
+        g_row = g_row + dgdy;
+        b_row = b_row + dbdy;
+        row = row + FRAME_WIDTH;
+        y = y + 1;
+    }
+}
+
+// Fill the quad in the tX arrays with one color, if it faces the eye
+fun draw_flat_quad(color) {
+    let x0 = tX[0]; let y0 = tY[0]; let z0 = tZ[0];
+    let x1 = tX[1]; let y1 = tY[1]; let z1 = tZ[1];
+    let x2 = tX[2]; let y2 = tY[2]; let z2 = tZ[2];
+    let det = x0 * (y1 * z2 - z1 * y2) + y0 * (z1 * x2 - x1 * z2) + z0 * (x1 * y2 - y1 * x2);
+    if (det > -0.000001) return;
+
+    cI[0] = 0; cI[1] = 1; cI[2] = 2; cI[3] = 3;
+    let m = clip_project(4);
+    if (m < 3) return;
+    if (!scan_poly(m)) return;
+
+    let fb = frame_buffer;
+    for (let var y = scan_y0; y < scan_y1; ++y) {
+        let xa = row_x0[y];
+        let xb = row_x1[y];
+        if (xa < xb) fb.fill_u32(y * FRAME_WIDTH + xa, xb - xa, color);
+    }
+}
+
+// --- Drawing the world ---
+
+// Seconds since the start, for things that pulse or blink
+let var anim_time = 0.0;
+
+// Texels of the full-size texture that one pixel covers at a distance of
+// one meter, looking square on
+let TEXEL_RATE = 256.0 / TILE * INV_FOCAL;
+
+// The level past the smallest copy of a texture, where a surface is drawn
+// in the texture's average color instead
+let FLAT_LEVEL = 5;
+
+// Which texture level suits a section at this distance down the tunnel.
+// Walls are seen at a glancing angle, so they shrink faster than the
+// square-on rate suggests, and the levels switch earlier to match.
+fun mip_level(dist) {
+    let var rate = dist * TEXEL_RATE * 1.4;
+    let var level = 0;
+    while (rate > 1.0) {
+        rate = rate * 0.5;
+        level = level + 1;
+    }
+    return level;
+}
+
+fun set_texture(tex, level) {
+    let lv = level.min(tex.num_levels - 1);
+    let w = tex.width[lv];
+    let h = tex.height[lv];
+    let shift = tex.shift[lv];
+    g_pix = tex.pix[lv];
+    g_umask = w - 1;
+    g_vshift = 48 - shift;
+    g_vmask = (h - 1) << shift;
+    g_uwrap = (w << 16) - 1;
+    g_vwrap = (h << 16) - 1;
+}
+
+// How much light is left after the fog at a distance down the tunnel
+fun fog_at(dist) {
+    return 1.0 - smoothstep(FOG_START, FOG_END, dist);
+}
+
+// A pulse of brightness that runs down the strips towards the core
+fun strip_pulse(z) {
+    let s = (z * 0.008 - anim_time * 3.0).sin();
+    let p = s.max(0.0);
+    return 0.5 + 0.5 * p * p * p;
+}
+
+fun draw_section(k) {
+    if (k < 0 || k >= NUM_SECTIONS) return;
+
+    let mid_z = (k.to_f() + 0.5) * SEC_LEN;
+    let level = mip_level((mid_z - cam_z).abs());
+    let end = sec_first[k + 1];
+    let var last_tex = nil;
+    let var usize = 0.0;
+    let var vsize = 0.0;
+
+    for (let var q = sec_first[k]; q < end; ++q) {
+        let tex = quad_tex[q];
+        let base = q * 4;
+
+        // Into view space
+        let var ahead = false;
+        for (let var j = 0; j < 4; ++j) {
+            let i = base + j;
+            let dx = vert_x[i] - cam_x;
+            let dy = vert_y[i] - cam_y;
+            let dz = vert_z[i] - cam_z;
+            let z = dx * fwd_x + dy * fwd_y + dz * fwd_z;
+            tX[j] = dx * right_x + dy * right_y + dz * right_z;
+            tY[j] = dx * up_x + dy * up_y + dz * up_z;
+            tZ[j] = z;
+            if (z >= NEAR_Z) ahead = true;
+        }
+        if (!ahead) continue;
+        let whole = tZ[0] >= NEAR_Z && tZ[1] >= NEAR_Z && tZ[2] >= NEAR_Z && tZ[3] >= NEAR_Z;
+
+        if (tex == nil) {
+            let z = (vert_z[base] + vert_z[base + 2]) * 0.5;
+            let var glow = fog_at((z - cam_z).abs());
+            if (quad_color[q] == STRIP_COLOR) glow = glow * strip_pulse(z);
+            draw_flat_quad(color_scale(quad_color[q], glow));
+            continue;
+        }
+
+        // Too far to make out the texture
+        if (level >= FLAT_LEVEL && whole) {
+            for (let var j = 0; j < 4; ++j) {
+                let i = base + j;
+                let light = fog_at((vert_z[i] - cam_z).abs());
+                let white = vert_lw[i] * light;
+                tU[j] = tex.avg_r * (white + vert_lr[i] * light);
+                tV[j] = tex.avg_g * white;
+                tLW[j] = tex.avg_b * white;
+            }
+
+            shade_tri(0, 1, 2);
+            shade_tri(0, 2, 3);
+            last_tex = nil;
+            continue;
+        }
+
+        if (tex != last_tex) {
+            set_texture(tex, level);
+            last_tex = tex;
+            usize = (g_umask + 1).to_f();
+            vsize = ((g_vwrap + 1) >> 16).to_f();
+        }
+
+        for (let var j = 0; j < 4; ++j) {
+            let i = base + j;
+            let light = fog_at((vert_z[i] - cam_z).abs()) * 255.0 * L_ONE;
+            tU[j] = vert_u[i] * usize;
+            tV[j] = vert_v[i] * vsize;
+            tLW[j] = vert_lw[i] * light;
+            tLR[j] = vert_lr[i] * light;
+        }
+
+        draw_tri(0, 1, 2);
+        draw_tri(0, 2, 3);
+    }
+}
+
+// Sections go down far to near, those behind the camera along with the
+// ones as far ahead of it
+fun render_world() {
+    tris_drawn = 0;
+    frame_buffer.fill_u32(render_y0 * FRAME_WIDTH, (render_y1 - render_y0) * FRAME_WIDTH, 0xFF000000);
+
+    let cam_k = (cam_z / SEC_LEN).floor();
+    for (let var d = DRAW_AHEAD; d >= 0; --d) {
+        if (d > 0 && d <= DRAW_BEHIND) draw_section(cam_k - d);
+        draw_section(cam_k + d);
+    }
+}
+
+// --- Render workers ---
+//
+// The world is drawn by a set of actors, each of which owns one horizontal
+// band of the frame. They are spawned once the world has been generated,
+// which gives each a private copy of it, and after that all they need each
+// frame is where the camera is. What moves is drawn over the finished
+// frame by the main actor.
+
+// How many, which the last argument can change. Fewer than two and the
+// main actor draws the world itself.
+fun worker_count() {
+    let var arg = $cmd_get_arg_or(1, "8");
+    if (BENCH_MODE) arg = $cmd_get_arg_or(4, "8");
+
+    let n = arg.parse_int(10);
+    if (n == nil || n < 0 || n > 64) {
+        $println("expected a number of render workers");
+        $exit(1);
+    }
+    return n;
+}
+
+let NUM_WORKERS = worker_count();
+
+class BandRequest {
+    init(self, frame_id, y0, y1) {
+        self.frame_id = frame_id;
+        self.y0 = y0;
+        self.y1 = y1;
+        self.cam_x = cam_x; self.cam_y = cam_y; self.cam_z = cam_z;
+        self.right_x = right_x; self.right_y = right_y; self.right_z = right_z;
+        self.up_x = up_x; self.up_y = up_y; self.up_z = up_z;
+        self.fwd_x = fwd_x; self.fwd_y = fwd_y; self.fwd_z = fwd_z;
+        self.anim_time = anim_time;
+    }
+}
+
+class BandResult {
+    init(self, frame_id, y0, num_bytes, pixels, tris) {
+        self.frame_id = frame_id;
+        self.y0 = y0;
+        self.num_bytes = num_bytes;
+        self.pixels = pixels;
+        self.tris = tris;
+    }
+}
+
+fun worker_loop() {
+    // Reused for every result, since sending copies it
+    let pixels = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+
+    loop {
+        let msg = $actor_recv();
+        if (msg == nil) return;
+
+        render_y0 = msg.y0;
+        render_y1 = msg.y1;
+        cam_x = msg.cam_x; cam_y = msg.cam_y; cam_z = msg.cam_z;
+        right_x = msg.right_x; right_y = msg.right_y; right_z = msg.right_z;
+        up_x = msg.up_x; up_y = msg.up_y; up_z = msg.up_z;
+        fwd_x = msg.fwd_x; fwd_y = msg.fwd_y; fwd_z = msg.fwd_z;
+        anim_time = msg.anim_time;
+
+        render_world();
+        let num_bytes = (render_y1 - render_y0) * FRAME_WIDTH * 4;
+        pixels.memcpy(0, frame_buffer, render_y0 * FRAME_WIDTH * 4, num_bytes);
+        $actor_send($actor_parent(), BandResult(msg.frame_id, render_y0, num_bytes, pixels, tris_drawn));
+    }
+}
+
+let worker_ids = [];
+let var frame_id = 0;
+
+// Input that arrived while waiting on the workers
+let pending_events = [];
+
+fun start_workers() {
+    if (NUM_WORKERS < 2) return;
+    for (let var i = 0; i < NUM_WORKERS; ++i) {
+        worker_ids.push($actor_spawn(worker_loop));
+    }
+}
+
+fun stop_workers() {
+    for (let var i = 0; i < worker_ids.len; ++i) $actor_send(worker_ids[i], nil);
+    for (let var i = 0; i < worker_ids.len; ++i) $actor_join(worker_ids[i]);
+}
+
+// Draw the world into the frame buffer, on the workers if there are any
+fun render_world_parallel() {
+    let n = worker_ids.len;
+    if (n == 0) {
+        render_world();
+        return;
+    }
+
+    frame_id = frame_id + 1;
+    for (let var i = 0; i < n; ++i) {
+        let y0 = (i * FRAME_HEIGHT).idiv(n);
+        let y1 = ((i + 1) * FRAME_HEIGHT).idiv(n);
+        $actor_send(worker_ids[i], BandRequest(frame_id, y0, y1));
+    }
+
+    tris_drawn = 0;
+    let var received = 0;
+    while (received < n) {
+        let msg = $actor_recv();
+        if (msg instanceof UIEvent) {
+            pending_events.push(msg);
+            continue;
+        }
+        if (!(msg instanceof BandResult) || msg.frame_id != frame_id) continue;
+
+        frame_buffer.memcpy(msg.y0 * FRAME_WIDTH * 4, msg.pixels, 0, msg.num_bytes);
+        tris_drawn = tris_drawn + msg.tris;
+        received = received + 1;
+    }
+}
+
+// --- Flight model ---
+
+let GRAVITY = 9.81;
+
+// The hardest the fighter can turn, in g. At these speeds that is a
+// circle far wider than the tunnel, so there is no turning back.
+let TURN_G = 12.0;
+
+// The nose stops short of straight up or down, where turning left and
+// right would lose its meaning
+let MAX_PITCH = 0.9;
+let ROLL_RATE = 1.47;
+
+// How quickly the controls follow the inputs
+let CONTROL_LAG = 7.0;
+
+// The engines never throttle down below the lowest of these speeds
+let MIN_SPEED = 1000.0 / 3.6;
+let MAX_SPEED = 1800.0 / 3.6;
+let BOOST_SPEED = 700.0;
+let START_THROTTLE = 0.5;
+let ACCEL = 70.0;
+
+let BOOST_TIME = 6.0;
+let BOOST_RECHARGE = 18.0;
+let BOOST_RESTART = 0.25;
+
+// How near the hull may come to a surface, and how long the wreck sits
+// there before the flight resumes
+let CRASH_CLEARANCE = 3.0;
+let CRASH_TIME = 2.0;
+let RESPAWN_BACK = 300.0;
+let START_Z = 150.0;
+
+// Control inputs, each from -1 to 1
+let var in_pitch = 0.0;
+let var in_yaw = 0.0;
+let var in_roll = 0.0;
+let var in_throttle = 0.0;
+let var in_boost = false;
+let var in_fire = false;
+
+// Where the controls are, which trails the inputs
+let var ctl_pitch = 0.0;
+let var ctl_yaw = 0.0;
+let var ctl_roll = 0.0;
+
+// How far the fighter is banked to the right, in radians
+let var roll = 0.0;
+
+// Barrel temperature of the cannons from 0 to 1, whether they have
+// overheated, and whether rounds are leaving them
+let var gun_heat = 0.0;
+let var gun_hot = false;
+let var gun_firing = false;
+
+let var speed = 0.0;
+let var throttle = 0.0;
+let var boost_charge = 1.0;
+let var boost_on = false;
+let var boost_spent = false;
+
+// Counts down after a crash, until the flight resumes
+let var crash_timer = 0.0;
+let var crash_count = 0;
+
+// Whether the fighter is on course to hit something
+let var wall_warn = false;
+
+let var music_on = true;
+
+// Put the fighter in the middle of the tunnel at a depth, flying level
+fun place_fighter(z) {
+    cam_x = 0.0;
+    cam_y = 0.0;
+    cam_z = z;
+
+    right_x = 1.0; right_y = 0.0; right_z = 0.0;
+    up_x = 0.0; up_y = 1.0; up_z = 0.0;
+    fwd_x = 0.0; fwd_y = 0.0; fwd_z = 1.0;
+
+    ctl_pitch = 0.0;
+    ctl_yaw = 0.0;
+    ctl_roll = 0.0;
+    roll = 0.0;
+    throttle = START_THROTTLE;
+    speed = lerp(MIN_SPEED, MAX_SPEED, throttle);
+    boost_on = false;
+    crash_timer = 0.0;
+}
+
+// Start the run over
+fun reset_flight() {
+    place_fighter(START_Z);
+    boost_charge = 1.0;
+    boost_spent = false;
+    clear_cannons();
+}
+
+// Whether a position is too close to a wall or a rib
+fun hits_tunnel(x, y, z) {
+    let var margin = CRASH_CLEARANCE;
+
+    let k = (z / SEC_LEN).floor();
+    if (k % RIB_EVERY == 0) {
+        let dz = z - k.to_f() * SEC_LEN;
+        if (dz < RIB_LEN + CRASH_CLEARANCE) margin = margin + RIB_DEPTH;
+    } else if ((k + 1) % RIB_EVERY == 0) {
+        if ((k + 1).to_f() * SEC_LEN - z < CRASH_CLEARANCE) margin = margin + RIB_DEPTH;
+    }
+
+    return x.abs() > HALF_W - margin || y.abs() > HALF_H - margin;
+}
+
+// Advance the flight by one time step
+fun update_flight(dt) {
+    // Sit in the wreckage for a moment, then pick up a little way back
+    if (crash_timer > 0.0) {
+        crash_timer = crash_timer - dt;
+        if (crash_timer <= 0.0) place_fighter((cam_z - RESPAWN_BACK).max(START_Z));
+        return;
+    }
+
+    // Ease the controls towards the inputs
+    let ease = (CONTROL_LAG * dt).min(1.0);
+    ctl_pitch = ctl_pitch + (in_pitch - ctl_pitch) * ease;
+    ctl_yaw = ctl_yaw + (in_yaw - ctl_yaw) * ease;
+    ctl_roll = ctl_roll + (in_roll - ctl_roll) * ease;
+
+    // The faster the fighter, the wider it turns at the same g
+    let turn = TURN_G * GRAVITY / speed * dt;
+    cam_pitch(ctl_pitch * turn);
+    cam_yaw(ctl_yaw * turn);
+
+    // The wings are set level with the tunnel floor and then banked again,
+    // so that the bank is only ever what the roll controls made it
+    roll = roll + ctl_roll * ROLL_RATE * dt;
+    if (roll > PI) roll = roll - 2.0 * PI;
+    else if (roll < 0.0 - PI) roll = roll + 2.0 * PI;
+    fwd_y = fwd_y.clip(0.0 - MAX_PITCH, MAX_PITCH);
+    up_x = 0.0; up_y = 1.0; up_z = 0.0;
+    cam_normalize();
+    cam_roll(roll);
+
+    throttle = (throttle + in_throttle * 0.6 * dt).clip(0.0, 1.0);
+
+    // Boost burns its charge while held and recovers when released
+    if (boost_spent && boost_charge >= BOOST_RESTART) boost_spent = false;
+    boost_on = in_boost && !boost_spent && boost_charge > 0.0;
+    if (boost_on) {
+        boost_charge = boost_charge - dt / BOOST_TIME;
+        if (boost_charge <= 0.0) {
+            boost_charge = 0.0;
+            boost_spent = true;
+        }
+    } else {
+        boost_charge = (boost_charge + dt / BOOST_RECHARGE).min(1.0);
+    }
+
+    let var target = lerp(MIN_SPEED, MAX_SPEED, throttle);
+    if (boost_on) target = BOOST_SPEED;
+    let step = ACCEL * dt;
+    speed = speed + (target - speed).clip(0.0 - step, step);
+
+    cam_x = cam_x + fwd_x * speed * dt;
+    cam_y = cam_y + fwd_y * speed * dt;
+    cam_z = cam_z + fwd_z * speed * dt;
+
+    // The run ends at the far wall for now, and starts over
+    if (cam_z > RUN_LEN - 400.0) {
+        reset_flight();
+        return;
+    }
+
+    if (hits_tunnel(cam_x, cam_y, cam_z)) {
+        // Back inside the walls, to keep the wreck from looking through them
+        let limit_x = HALF_W - CRASH_CLEARANCE;
+        let limit_y = HALF_H - CRASH_CLEARANCE;
+        cam_x = cam_x.clip(0.0 - limit_x, limit_x);
+        cam_y = cam_y.clip(0.0 - limit_y, limit_y);
+        crash_timer = CRASH_TIME;
+        crash_count = crash_count + 1;
+    }
+}
+
+// --- Head-up display ---
+
+let HUD_ORANGE = 0xFFFF9A1E;
+let HUD_SHADOW = 0xFF000000;
+let WARN_RED = 0xFFFF2A1E;
+let CRASH_RED = 0xFFFF1A10;
+
+// Glyphs are rendered on a background of zero and used as masks
+let font_small = Font(1, HUD_ORANGE, 0);
+let font_large = Font(2, HUD_ORANGE, 0);
+let font_warn = Font(4, HUD_ORANGE, 0);
+let font_title = Font(5, HUD_ORANGE, 0);
+
+// Lines are clipped to this rectangle
+let var clip_x0 = 0;
+let var clip_y0 = 0;
+let var clip_x1 = FRAME_WIDTH;
+let var clip_y1 = FRAME_HEIGHT;
+
+// Restrict lines to a rectangle of the frame
+fun hud_clip(x0, y0, x1, y1) {
+    clip_x0 = x0.max(0);
+    clip_y0 = y0.max(0);
+    clip_x1 = x1.min(FRAME_WIDTH);
+    clip_y1 = y1.min(FRAME_HEIGHT);
+}
+
+// Draw a line between two points given as floats
+fun draw_line(x0, y0, x1, y1, color) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let n = dx.abs().max(dy.abs()).ceil().max(1);
+    if (n > 4000) return;
+
+    let step_x = dx / n;
+    let step_y = dy / n;
+    let fb = frame_buffer;
+
+    for (let var k = 0; k <= n; ++k) {
+        let x = (x0 + step_x * k).floor();
+        let y = (y0 + step_y * k).floor();
+        if (x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1) {
+            fb.set_u32(y * FRAME_WIDTH + x, color);
+        }
+    }
+}
+
+// Draw a line in the color of the display
+fun hud_line(x0, y0, x1, y1) {
+    draw_line(x0, y0, x1, y1, HUD_ORANGE);
+}
+
+// Fill a rectangle
+fun fill_rect(x, y, w, h, color) {
+    let x0 = x.max(0);
+    let x1 = (x + w).min(FRAME_WIDTH);
+    let y0 = y.max(0);
+    let y1 = (y + h).min(FRAME_HEIGHT);
+    if (x0 >= x1) return;
+
+    for (let var row = y0; row < y1; ++row) {
+        frame_buffer.fill_u32(row * FRAME_WIDTH + x0, x1 - x0, color);
+    }
+}
+
+// Paint the lit pixels of a glyph in one color
+fun draw_glyph(glyph, x, y, color) {
+    let fb = frame_buffer;
+    let bits = glyph.bytes;
+    let w = glyph.width;
+
+    for (let var gy = 0; gy < glyph.height; ++gy) {
+        let py = y + gy;
+        if (py < 0 || py >= FRAME_HEIGHT) continue;
+
+        for (let var gx = 0; gx < w; ++gx) {
+            let px = x + gx;
+            if (px < 0 || px >= FRAME_WIDTH) continue;
+            if (bits.get_u32(gy * w + gx) != 0) fb.set_u32(py * FRAME_WIDTH + px, color);
+        }
+    }
+}
+
+// Draw a string with its top left corner at (x, y), over a drop shadow
+fun draw_text(font, text, x, y, color) {
+    for (let var i = 0; i < text.len; ++i) {
+        let glyph = font.render_char(text.char_at(i));
+        let gx = x + i * font.char_w;
+        draw_glyph(glyph, gx + 1, y + 1, HUD_SHADOW);
+        draw_glyph(glyph, gx, y, color);
+    }
+}
+
+// Draw a string centered on a point
+fun draw_text_centered(font, text, cx, cy, color) {
+    draw_text(font, text, cx - (text.len * font.char_w).idiv(2), cy - font.char_h.idiv(2), color);
+}
+
+// Draw a string in the color of the display
+fun hud_text(font, text, x, y) {
+    draw_text(font, text, x, y, HUD_ORANGE);
+}
+
+fun hud_text_centered(font, text, cx, cy) {
+    draw_text_centered(font, text, cx, cy, HUD_ORANGE);
+}
+
+// Fill a rectangle in the color of the display
+fun hud_rect(x, y, w, h) {
+    fill_rect(x, y, w, h, HUD_ORANGE);
+}
+
+// Draw the outline of a rectangle
+fun hud_frame(x, y, w, h) {
+    hud_rect(x, y, w, 1);
+    hud_rect(x, y + h - 1, w, 1);
+    hud_rect(x, y, 1, h);
+    hud_rect(x + w - 1, y, 1, h);
+}
+
+// Angle of the point (x, y) from the x axis, in radians
+fun atan2(y, x) {
+    if (x > 0.0) return (y / x).atan();
+    if (x < 0.0) {
+        if (y >= 0.0) return (y / x).atan() + PI;
+        return (y / x).atan() - PI;
+    }
+    if (y > 0.0) return PI * 0.5;
+    if (y < 0.0) return 0.0 - PI * 0.5;
+    return 0.0;
+}
+
+// The fixed cross that marks where the nose is pointing
+fun draw_boresight(color) {
+    draw_line(CX - 18.0, CY, CX - 6.0, CY, color);
+    draw_line(CX + 6.0, CY, CX + 18.0, CY, color);
+    draw_line(CX, CY - 18.0, CX, CY - 6.0, color);
+    draw_line(CX, CY + 6.0, CX, CY + 18.0, color);
+    fill_rect(CX.floor(), CY.floor(), 1, 1, color);
+}
+
+// The pitch ladder: a line for every ten degrees the nose is above or
+// below the tunnel's axis, drawn where that elevation really is. The zero
+// line passes through the point the tunnel runs to, which gets a diamond.
+fun draw_ladder() {
+    let h_len = (fwd_x * fwd_x + fwd_z * fwd_z).sqrt();
+    if (h_len < 0.05) return;
+    let hx = fwd_x / h_len;
+    let hz = fwd_z / h_len;
+
+    // Direction on screen of a level line, and of down the ladder
+    let var ux = hz * right_x - hx * right_z;
+    let var uy = hx * up_z - hz * up_x;
+    let u_len = (ux * ux + uy * uy).sqrt();
+    if (u_len < 0.01) return;
+    ux = ux / u_len;
+    uy = uy / u_len;
+    let down_x = 0.0 - uy;
+    let down_y = ux;
+
+    let pitch_deg = atan2(fwd_y, h_len) * 180.0 / PI;
+    hud_clip(CX.floor() - 230, CY.floor() - 160, CX.floor() + 230, CY.floor() + 160);
+
+    for (let var deg = -90; deg <= 90; deg += 10) {
+        if ((deg - pitch_deg).abs() > 30.0) continue;
+
+        // Where a point at this elevation, dead ahead, falls on screen
+        let angle = deg * PI / 180.0;
+        let dx = hx * angle.cos();
+        let dy = angle.sin();
+        let dz = hz * angle.cos();
+        let vz = dx * fwd_x + dy * fwd_y + dz * fwd_z;
+        if (vz < 0.2) continue;
+        let px = CX + FOCAL * (dx * right_x + dy * right_y + dz * right_z) / vz;
+        let py = CY - FOCAL * (dx * up_x + dy * up_y + dz * up_z) / vz;
+
+        // The level line is one long line with a gap for the boresight
+        if (deg == 0) {
+            hud_line(px - ux * 220.0, py - uy * 220.0, px - ux * 44.0, py - uy * 44.0);
+            hud_line(px + ux * 44.0, py + uy * 44.0, px + ux * 220.0, py + uy * 220.0);
+            continue;
+        }
+
+        for (let var side = -1; side <= 1; side += 2) {
+            let sx = ux * side;
+            let sy = uy * side;
+
+            // Solid above the axis, dashed below
+            if (deg > 0) {
+                hud_line(px + sx * 40.0, py + sy * 40.0, px + sx * 96.0, py + sy * 96.0);
+            } else {
+                hud_line(px + sx * 40.0, py + sy * 40.0, px + sx * 60.0, py + sy * 60.0);
+                hud_line(px + sx * 76.0, py + sy * 76.0, px + sx * 96.0, py + sy * 96.0);
+            }
+
+            // The end of each rung is turned towards the level line
+            let var tick = 7.0;
+            if (deg < 0) tick = -7.0;
+            let ex = px + sx * 96.0;
+            let ey = py + sy * 96.0;
+            hud_line(ex, ey, ex + down_x * tick, ey + down_y * tick);
+
+            let lx = (px + sx * 112.0).floor();
+            let ly = (py + sy * 112.0).floor();
+            if (lx > clip_x0 + 8 && lx < clip_x1 - 8 && ly > clip_y0 + 8 && ly < clip_y1 - 8) {
+                hud_text_centered(font_small, deg.abs().to_s(), lx, ly);
+            }
+        }
+    }
+
+    // Where the tunnel is headed
+    if (fwd_z > 0.2) {
+        let ax = CX + FOCAL * right_z / fwd_z;
+        let ay = CY - FOCAL * up_z / fwd_z;
+        hud_line(ax - 7.0, ay, ax, ay - 7.0);
+        hud_line(ax, ay - 7.0, ax + 7.0, ay);
+        hud_line(ax + 7.0, ay, ax, ay + 7.0);
+        hud_line(ax, ay + 7.0, ax - 7.0, ay);
+    }
+
+    hud_clip(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+}
+
+// The strip along the top of the screen, which shows how far the nose is
+// turned off the tunnel's axis
+fun draw_heading() {
+    let heading = atan2(fwd_x, fwd_z) * 180.0 / PI;
+
+    let px_per_deg = 4.0;
+    let span = 32.0;
+    let base_y = 34;
+
+    // A tick every five degrees and a label every ten
+    let first = ((heading - span) / 5.0).ceil() * 5;
+    for (let var deg = first; deg <= heading + span; deg += 5) {
+        let x = (CX + (deg - heading) * px_per_deg).floor();
+
+        if (deg % 10 != 0) {
+            hud_rect(x, base_y - 4, 1, 4);
+            continue;
+        }
+        hud_rect(x, base_y - 8, 1, 8);
+        hud_text_centered(font_small, deg.abs().to_s().lpad(2, "0"), x, base_y - 16);
+    }
+
+    // Pointer and readout under the strip
+    hud_line(CX, base_y + 3.0, CX - 5.0, base_y + 9.0);
+    hud_line(CX, base_y + 3.0, CX + 5.0, base_y + 9.0);
+    let var side = "R ";
+    if (heading < 0.0) side = "L ";
+    let readout = side + heading.abs().floor().to_s().lpad(2, "0");
+    hud_text_centered(font_small, readout, CX.floor(), base_y + 18);
+}
+
+// A boxed value with a caption to the right of it
+fun draw_readout(x, y, text, caption) {
+    let w = 5 * font_large.char_w + 12;
+    let h = font_large.char_h + 6;
+    hud_frame(x, y, w, h);
+    hud_text(font_large, text, x + w - 6 - text.len * font_large.char_w, y + 3);
+    hud_text(font_small, caption, x + w + 6, y + (h - font_small.char_h).idiv(2));
+}
+
+// A labelled bar filled to a fraction of its length
+fun draw_bar(x, y, label, frac, color) {
+    hud_text(font_small, label, x, y - 2);
+    let bx = x + 4 * font_small.char_w;
+    hud_frame(bx, y, 104, 9);
+    fill_rect(bx + 2, y + 2, (frac.clip(0.0, 1.0) * 100.0).floor(), 5, color);
+}
+
+// Color for a temperature from 0 to 1, going from the display's orange
+// to red
+fun heat_color(heat) {
+    let t = heat.clip(0.0, 1.0);
+    let g = lerp(154.0, 42.0, t).floor();
+    return 0xFFFF0000 | (g << 8) | 0x1E;
+}
+
+// Would the fighter hit something within a second or so on its present
+// course?
+fun wall_ahead() {
+    for (let var k = 1; k <= 3; ++k) {
+        let d = speed * k * 0.35;
+        if (hits_tunnel(cam_x + fwd_x * d, cam_y + fwd_y * d, cam_z + fwd_z * d)) return true;
+    }
+    return false;
+}
+
+// Blend the whole frame towards a color
+fun tint_frame(r, g, b, amount) {
+    let k = (amount.clip(0.0, 1.0) * 256.0).floor();
+    let inv = 256 - k;
+    let add_rb = (((r << 16) | b) * k) >> 8;
+    let add_g = ((g << 8) * k) >> 8;
+    let fb = frame_buffer;
+
+    for (let var i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; ++i) {
+        let c = fb.get_u32(i);
+        let rb = ((((c & 0xFF00FF) * inv) >> 8) + add_rb) & 0xFF00FF;
+        let gg = ((((c & 0xFF00) * inv) >> 8) + add_g) & 0xFF00;
+        fb.set_u32(i, 0xFF000000 | rb | gg);
+    }
+}
+
+// How long the reminder of the controls stays up at the start
+let HINT_TIME = 12.0;
+
+// Draw the head-up display over the finished frame
+fun draw_hud() {
+    draw_ladder();
+    draw_heading();
+    draw_boresight(HUD_ORANGE);
+
+    let low_y = FRAME_HEIGHT - 46;
+    draw_readout(CX.floor() - 210, low_y, (speed * 3.6).floor().to_s(), "KM/H");
+    let target_km = (RUN_LEN - cam_z).max(0.0) * 0.001;
+    draw_readout(CX.floor() + 100, low_y, target_km.format_decimals(1), "TARGET KM");
+
+    draw_bar(24, FRAME_HEIGHT - 64, "GUN", gun_heat, heat_color(gun_heat));
+    if (gun_hot) draw_text(font_small, "OVERHEAT", 164, FRAME_HEIGHT - 66, WARN_RED);
+    draw_bar(24, FRAME_HEIGHT - 46, "THR", throttle, HUD_ORANGE);
+    draw_bar(24, FRAME_HEIGHT - 28, "BST", boost_charge, HUD_ORANGE);
+    if (boost_on) hud_text(font_small, "BOOST", 164, FRAME_HEIGHT - 30);
+    else if (boost_spent) hud_text(font_small, "CHARGING", 164, FRAME_HEIGHT - 30);
+
+    if (anim_time < HINT_TIME) {
+        hud_text_centered(font_small,
+            "ARROWS STEER   A/D ROLL   W/S THROTTLE   SHIFT BOOST   SPACE FIRE   R RESTART",
+            CX.floor(), CY.floor() + 180);
+    }
+
+    // The warning blinks under the boresight
+    if ((anim_time * 4.0).floor() % 2 == 0 && wall_warn) {
+        draw_text_centered(font_warn, "OBSTACLE", CX.floor(), CY.floor() + 90, WARN_RED);
+    }
+}
+
+fun draw_crash() {
+    let t = crash_timer / CRASH_TIME;
+    tint_frame(255, 60, 20, 0.35 + 0.5 * t * t);
+    draw_text_centered(font_title, "HULL BREACH", FRAME_WIDTH.idiv(2), FRAME_HEIGHT.idiv(2), CRASH_RED);
+}
+
+// --- Glow ---
+
+// Light is added to the pixels already in the frame, each channel stopping
+// at full brightness. Red and blue are added in one go, and a channel that
+// carries into the bit above it is filled in.
+
+// Add a color along a line between two points given as floats
+fun glow_line(x0, y0, x1, y1, color) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let n = dx.abs().max(dy.abs()).ceil().max(1);
+    if (n > 4000) return;
+
+    let step_x = dx / n;
+    let step_y = dy / n;
+    let fb = frame_buffer;
+    let src_rb = color & 0xFF00FF;
+    let src_g = color & 0xFF00;
+
+    for (let var k = 0; k <= n; ++k) {
+        let x = (x0 + step_x * k).floor();
+        let y = (y0 + step_y * k).floor();
+        if (x >= 0 && x < FRAME_WIDTH && y >= 0 && y < FRAME_HEIGHT) {
+            let i = y * FRAME_WIDTH + x;
+            let d = fb.get_u32(i);
+            let rb = (d & 0xFF00FF) + src_rb;
+            let g = (d & 0xFF00) + src_g;
+            let over_rb = rb & 0x1000100;
+            let over_g = g & 0x10000;
+            fb.set_u32(i, 0xFF000000
+                | ((rb | (over_rb - (over_rb >> 8))) & 0xFF00FF)
+                | ((g | (over_g - (over_g >> 8))) & 0xFF00));
+        }
+    }
+}
+
+// Add a streak of light that is brightest along its middle and fades out
+// over `half` pixels to either side
+fun glow_streak(x0, y0, x1, y1, half, color) {
+    let steep = (y1 - y0).abs() > (x1 - x0).abs();
+    let reach = half.ceil();
+
+    for (let var k = 0 - reach; k <= reach; ++k) {
+        let t = k.abs() / half;
+        if (t >= 1.0) continue;
+
+        let c = color_scale(color, (1.0 - t) * (1.0 - t));
+        let off = k.to_f();
+        if (steep) glow_line(x0 + off, y0, x1 + off, y1, c);
+        else glow_line(x0, y0 + off, x1, y1 + off, c);
+    }
+}
+
+// Add a disc of light that fades out towards its edge
+fun glow_disc(cx, cy, radius, color) {
+    let r = radius.max(1.0);
+    let y0 = (cy - r).ceil().max(0);
+    let y1 = (cy + r).floor().min(FRAME_HEIGHT - 1);
+    let inv_r2 = 1.0 / (r * r);
+    let fb = frame_buffer;
+    let src_rb = color & 0xFF00FF;
+    let src_g = color & 0xFF00;
+
+    for (let var y = y0; y <= y1; ++y) {
+        let dy = y - cy;
+        let half = (r * r - dy * dy).max(0.0).sqrt();
+        let x0 = (cx - half).ceil().max(0);
+        let x1 = (cx + half).floor().min(FRAME_WIDTH - 1);
+        let var i = y * FRAME_WIDTH + x0;
+
+        for (let var x = x0; x <= x1; ++x) {
+            let dx = x - cx;
+            let f = 1.0 - (dx * dx + dy * dy) * inv_r2;
+            let k = (f * f * 256.0).floor();
+
+            let d = fb.get_u32(i);
+            let rb = (d & 0xFF00FF) + (((src_rb * k) >> 8) & 0xFF00FF);
+            let g = (d & 0xFF00) + (((src_g * k) >> 8) & 0xFF00);
+            let over_rb = rb & 0x1000100;
+            let over_g = g & 0x10000;
+            fb.set_u32(i, 0xFF000000
+                | ((rb | (over_rb - (over_rb >> 8))) & 0xFF00FF)
+                | ((g | (over_g - (over_g >> 8))) & 0xFF00));
+            i = i + 1;
+        }
+    }
+}
+
+// --- Cannons ---
+//
+// A rotary cannon on either side of the nose, firing in turn. They take a
+// moment to spin up to their full rate of fire. Every round drawn is a
+// tracer, and flies on its own once fired, carrying the fighter's speed.
+
+let rng = Xoshiro128(2025);
+
+// Tracers per second from the pair with the barrels at full speed
+let GUN_RATE = 60.0;
+let MUZZLE_SPEED = 1400.0;
+
+// Seconds for the barrels to spin up and to run down again
+let GUN_SPIN_UP = 0.25;
+let GUN_SPIN_DOWN = 0.8;
+
+// Where the muzzles are relative to the pilot's eye, and the distance
+// ahead at which the rounds cross the line of sight
+let GUN_RIGHT = 2.7;
+let GUN_UP = 0.0;
+let GUN_FWD = 1.0;
+
+// How far above or below the muzzle a round may start, since the barrels
+// of a rotary cannon are not all at one height
+let GUN_HEIGHT_SPREAD = 0.22;
+
+// A round this close to its muzzle is drawn as a streak all the way back
+// to it, which is what shows it coming in from the side
+let MUZZLE_STREAK = 100.0;
+let GUN_CONVERGE = 500.0;
+
+// Seconds of firing to overheat from cold, and to cool back down. Once
+// overheated, the guns stay out until they have cooled to the restart level.
+let GUN_HEAT_TIME = 5.0;
+let GUN_COOL_TIME = 6.0;
+let GUN_RESTART = 0.35;
+
+// Scatter of the rounds, in radians
+let GUN_SPREAD = 0.0022;
+
+let ROUND_LIFE = 1.4;
+let TRACER_LENGTH = 45.0;
+let TRACER_CORE = 0xFFFFE0A0;
+let FLASH_COLOR = 0xFFFF9030;
+
+// Rounds in flight. A negative age marks a free slot.
+let MAX_ROUNDS = 128;
+let rd_x = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_y = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_z = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_vx = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_vy = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_vz = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_age = Array.with_size(MAX_ROUNDS, -1.0);
+
+// Where each round's muzzle is, to the right of and above the pilot's eye
+let rd_gx = Array.with_size(MAX_ROUNDS, 0.0);
+let rd_gy = Array.with_size(MAX_ROUNDS, 0.0);
+
+// Width of each round's streak as a factor, and the color of its glow,
+// which runs from orange to yellow
+let rd_size = Array.with_size(MAX_ROUNDS, 1.0);
+let rd_color = Array.with_size(MAX_ROUNDS, 0);
+let var rd_next = 0;
+
+// Flashes where rounds have struck the walls
+let MAX_IMPACTS = 48;
+let IMPACT_LIFE = 0.3;
+let im_x = Array.with_size(MAX_IMPACTS, 0.0);
+let im_y = Array.with_size(MAX_IMPACTS, 0.0);
+let im_z = Array.with_size(MAX_IMPACTS, 0.0);
+let im_age = Array.with_size(MAX_IMPACTS, -1.0);
+let var im_next = 0;
+
+let var gun_spin = 0.0;
+let var gun_accum = 0.0;
+
+// Which side fires next, as 1 or -1
+let var gun_side = 1.0;
+
+// Remove every round and flash, and cool the guns
+fun clear_cannons() {
+    for (let var i = 0; i < MAX_ROUNDS; ++i) rd_age[i] = -1.0;
+    for (let var i = 0; i < MAX_IMPACTS; ++i) im_age[i] = -1.0;
+    gun_spin = 0.0;
+    gun_accum = 0.0;
+    gun_heat = 0.0;
+    gun_hot = false;
+    gun_firing = false;
+}
+
+// Fire one round, which left the muzzle `lead` seconds ago
+fun fire_round(lead) {
+    let gx = GUN_RIGHT * gun_side;
+    let gy = GUN_UP + rng.float(0.0 - GUN_HEIGHT_SPREAD, GUN_HEIGHT_SPREAD);
+    gun_side = 0.0 - gun_side;
+
+    // Aim along the nose, angled in to cross the line of sight, and
+    // scattered. A round that starts high or low keeps that height.
+    let side = rng.normal(0.0, GUN_SPREAD) - gx / GUN_CONVERGE;
+    let rise = rng.normal(0.0, GUN_SPREAD) - GUN_UP / GUN_CONVERGE;
+    let dx = fwd_x + right_x * side + up_x * rise;
+    let dy = fwd_y + right_y * side + up_y * rise;
+    let dz = fwd_z + right_z * side + up_z * rise;
+
+    // The round keeps the speed the fighter gave it
+    let vx = dx * MUZZLE_SPEED + fwd_x * speed;
+    let vy = dy * MUZZLE_SPEED + fwd_y * speed;
+    let vz = dz * MUZZLE_SPEED + fwd_z * speed;
+
+    let i = rd_next;
+    rd_next = (rd_next + 1) % MAX_ROUNDS;
+    rd_x[i] = cam_x + right_x * gx + up_x * gy + fwd_x * GUN_FWD + vx * lead;
+    rd_y[i] = cam_y + right_y * gx + up_y * gy + fwd_y * GUN_FWD + vy * lead;
+    rd_z[i] = cam_z + right_z * gx + up_z * gy + fwd_z * GUN_FWD + vz * lead;
+    rd_gx[i] = gx;
+    rd_gy[i] = gy;
+
+    // No two tracers are quite the same width or shade
+    let shade = rng.float(0.0, 1.0);
+    rd_size[i] = rng.float(0.75, 1.3);
+    rd_color[i] = 0xFFFF0000 | (lerp(112.0, 208.0, shade).floor() << 8) | lerp(20.0, 40.0, shade).floor();
+    rd_vx[i] = vx;
+    rd_vy[i] = vy;
+    rd_vz[i] = vz;
+    rd_age[i] = lead;
+}
+
+// Leave a flash where a round struck
+fun add_impact(x, y, z) {
+    let i = im_next;
+    im_next = (im_next + 1) % MAX_IMPACTS;
+    im_x[i] = x;
+    im_y[i] = y;
+    im_z[i] = z;
+    im_age[i] = 0.0;
+}
+
+// Advance the cannons and everything they have fired by one time step
+fun update_cannons(dt) {
+    // Move the rounds already in flight
+    for (let var i = 0; i < MAX_ROUNDS; ++i) {
+        let age = rd_age[i];
+        if (age < 0.0) continue;
+
+        let x = rd_x[i] + rd_vx[i] * dt;
+        let y = rd_y[i] + rd_vy[i] * dt;
+        let z = rd_z[i] + rd_vz[i] * dt;
+        rd_x[i] = x;
+        rd_y[i] = y;
+        rd_z[i] = z;
+        rd_age[i] = age + dt;
+
+        if (z >= RUN_LEN || hits_tunnel(x, y, z)) {
+            add_impact(x.clip(0.0 - HALF_W, HALF_W), y.clip(0.0 - HALF_H, HALF_H), z.min(RUN_LEN));
+            rd_age[i] = -1.0;
+        } else if (age + dt > ROUND_LIFE) {
+            rd_age[i] = -1.0;
+        }
+    }
+
+    for (let var i = 0; i < MAX_IMPACTS; ++i) {
+        let age = im_age[i];
+        if (age < 0.0) continue;
+        im_age[i] = age + dt;
+        if (age + dt > IMPACT_LIFE) im_age[i] = -1.0;
+    }
+
+    // Spin the barrels up while the trigger is held
+    if (gun_hot && gun_heat <= GUN_RESTART) gun_hot = false;
+    let firing = in_fire && !gun_hot && crash_timer <= 0.0;
+    if (firing) gun_spin = (gun_spin + dt / GUN_SPIN_UP).min(1.0);
+    else gun_spin = (gun_spin - dt / GUN_SPIN_DOWN).max(0.0);
+
+    // The barrels cool whenever no rounds are going through them
+    gun_firing = firing && gun_spin >= 0.3;
+    if (!gun_firing) {
+        gun_heat = (gun_heat - dt / GUN_COOL_TIME).max(0.0);
+        return;
+    }
+
+    gun_heat = gun_heat + dt / GUN_HEAT_TIME;
+    if (gun_heat >= 1.0) {
+        gun_heat = 1.0;
+        gun_hot = true;
+    }
+
+    // Rounds due within this step are spread back along it, so that
+    // they stay evenly spaced whatever the frame rate
+    let rate = GUN_RATE * gun_spin;
+    gun_accum = gun_accum + rate * dt;
+    while (gun_accum >= 1.0) {
+        gun_accum = gun_accum - 1.0;
+        fire_round(gun_accum / rate);
+    }
+}
+
+// Position of the last point passed to `view_point`, in view space
+let var pt_x = 0.0;
+let var pt_y = 0.0;
+let var pt_z = 0.0;
+
+// Transform a world position into view space
+fun view_point(x, y, z) {
+    let dx = x - cam_x;
+    let dy = y - cam_y;
+    let dz = z - cam_z;
+    pt_x = dx * right_x + dy * right_y + dz * right_z;
+    pt_y = dx * up_x + dy * up_y + dz * up_z;
+    pt_z = dx * fwd_x + dy * fwd_y + dz * fwd_z;
+}
+
+// Draw the flashes where rounds have struck, which swell as they fade
+fun draw_impacts() {
+    for (let var i = 0; i < MAX_IMPACTS; ++i) {
+        let age = im_age[i];
+        if (age < 0.0) continue;
+
+        view_point(im_x[i], im_y[i], im_z[i]);
+        if (pt_z < 2.0) continue;
+
+        let scale = FOCAL / pt_z;
+        let fade = (1.0 - age / IMPACT_LIFE) * fog_at(pt_z);
+        let radius = ((1.5 + age * 14.0) * scale).clip(2.0, 48.0);
+        glow_disc(CX + pt_x * scale, CY - pt_y * scale, radius, color_scale(FLASH_COLOR, fade));
+    }
+}
+
+// Draw the rounds in flight as glowing streaks
+fun draw_tracers() {
+    for (let var i = 0; i < MAX_ROUNDS; ++i) {
+        let age = rd_age[i];
+        if (age < 0.0) continue;
+
+        let x = rd_x[i];
+        let y = rd_y[i];
+        let z = rd_z[i];
+        let vx = rd_vx[i];
+        let vy = rd_vy[i];
+        let vz = rd_vz[i];
+
+        view_point(x, y, z);
+        let var hx = pt_x;
+        let var hy = pt_y;
+        let var hz = pt_z;
+
+        // The streak trails back along the path, but not past the muzzle
+        let v_len = (vx * vx + vy * vy + vz * vz).sqrt();
+        let back = TRACER_LENGTH.min(age * MUZZLE_SPEED) / v_len;
+        view_point(x - vx * back, y - vy * back, z - vz * back);
+        let var tx = pt_x;
+        let var ty = pt_y;
+        let var tz = pt_z;
+
+        // A round fresh out of the barrel trails all the way back to it
+        if (age * MUZZLE_SPEED < MUZZLE_STREAK) {
+            tx = rd_gx[i];
+            ty = rd_gy[i];
+            tz = GUN_FWD;
+        }
+
+        // Clip whichever end is behind the camera
+        let near = 0.5;
+        if (hz < near && tz < near) continue;
+        if (tz < near) {
+            let t = (near - tz) / (hz - tz);
+            tx = tx + (hx - tx) * t;
+            ty = ty + (hy - ty) * t;
+            tz = near;
+        } else if (hz < near) {
+            let t = (near - hz) / (tz - hz);
+            hx = hx + (tx - hx) * t;
+            hy = hy + (ty - hy) * t;
+            hz = near;
+        }
+
+        let head_x = CX + hx * FOCAL / hz;
+        let head_y = CY - hy * FOCAL / hz;
+        let tail_x = CX + tx * FOCAL / tz;
+        let tail_y = CY - ty * FOCAL / tz;
+
+        // A wide halo with a hot core, wider up close and dimmer in the fog
+        let fade = fog_at(hz);
+        let half = (FOCAL * 0.5 / hz).clip(1.6, 7.0) * rd_size[i];
+        glow_streak(tail_x, tail_y, head_x, head_y, half, color_scale(rd_color[i], fade));
+        glow_streak(lerp(tail_x, head_x, 0.4), lerp(tail_y, head_y, 0.4), head_x, head_y,
+            half * 0.4, color_scale(TRACER_CORE, fade));
+    }
+}
+
+// --- Frame ---
+
+fun update_sim(dt) {
+    update_flight(dt);
+    update_cannons(dt);
+    wall_warn = crash_timer <= 0.0 && wall_ahead();
+}
+
+// Tell the audio actor what it should be playing
+fun send_audio() {
+    let crashed = crash_timer > 0.0;
+
+    let var power = 0.15 + 0.85 * throttle;
+    if (boost_on) power = 1.6;
+
+    let var gun = 0.0;
+    if (gun_firing) gun = gun_spin;
+
+    let var gain = 1.0;
+    if (crashed) gain = 0.0;
+
+    $actor_send(audio_id, AudioState(power, gun, wall_warn, crash_count, gain, music_on, false));
+}
+
+fun render_frame() {
+    render_world_parallel();
+    draw_impacts();
+    draw_tracers();
+    if (crash_timer > 0.0) draw_crash(); else draw_hud();
+}
+
+// --- Benchmark ---
+
+// Point the camera along a direction, wings level with the tunnel floor
+fun look_along(dx, dy, dz) {
+    fwd_x = dx; fwd_y = dy; fwd_z = dz;
+    up_x = 0.0; up_y = 1.0; up_z = 0.0;
+    cam_normalize();
+}
+
+// Render a set flight without a window and report the time per frame
+fun run_bench(num_frames, shot_dir) {
+    let dt = 1.0 / 30.0;
+    let var render_ms = 0;
+    let var tri_total = 0;
+
+    if (shot_dir != "") $make_dir(shot_dir);
+
+    for (let var frame = 0; frame < num_frames; ++frame) {
+        // Weave along a set path, rolling from side to side
+        let t = frame.to_f() * dt;
+        let z = START_Z + 350.0 * t;
+        cam_x = 70.0 * (z / 800.0).sin();
+        cam_y = 40.0 * (z / 530.0 + 1.0).sin();
+        cam_z = z;
+        look_along(70.0 / 800.0 * (z / 800.0).cos(), 40.0 / 530.0 * (z / 530.0 + 1.0).cos(), 1.0);
+        cam_roll(0.6 * (z / 1100.0).sin());
+        speed = 350.0;
+        anim_time = t;
+        in_fire = frame % 60 >= 20 && frame % 60 < 50;
+        update_cannons(dt);
+
+        let start_ms = $time_current_ms();
+        render_frame();
+        render_ms = render_ms + ($time_current_ms() - start_ms);
+        tri_total = tri_total + tris_drawn;
+
+        if (shot_dir != "" && frame % 30 == 29) {
+            save_tga(shot_dir + "/frame" + frame.to_s().lpad(4, "0") + ".tga", frame_image);
+        }
+    }
+
+    let ms = render_ms.to_f() / num_frames;
+    $println(num_frames.to_s() + " frames, " + ms.format_decimals(2) + " ms/frame ("
+        + (1000.0 / ms).format_decimals(1) + " fps), "
+        + tri_total.idiv(num_frames).to_s() + " triangles/frame");
+}
+
+// --- Main ---
+
+generate_world();
+reset_flight();
+start_workers();
+
+if (BENCH_MODE) {
+    let num_frames = $cmd_get_arg_or(2, "120").parse_int(10);
+    if (num_frames == nil || num_frames < 1) {
+        $println("expected a number of frames");
+        $exit(1);
+    }
+
+    run_bench(num_frames, $cmd_get_arg_or(3, ""));
+    stop_workers();
+    $exit(0);
+}
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Space Fighter", 0);
+$println("up/down: nose up/down, left/right: turn, A/D: roll, W/S: throttle, shift: boost, space: fire, M: music");
+
+let var key_pitch_up = false;
+let var key_pitch_down = false;
+let var key_yaw_left = false;
+let var key_yaw_right = false;
+let var key_roll_left = false;
+let var key_roll_right = false;
+let var key_faster = false;
+let var key_slower = false;
+
+// The input along one axis from the pair of keys that push it either way
+fun key_axis(negative, positive) {
+    let var v = 0.0;
+    if (positive) v = v + 1.0;
+    if (negative) v = v - 1.0;
+    return v;
+}
+
+// Record a key going down or coming up
+fun set_key(key, down) {
+    if (key == 'UP') key_pitch_up = down;
+    else if (key == 'DOWN') key_pitch_down = down;
+    else if (key == 'LEFT') key_yaw_left = down;
+    else if (key == 'RIGHT') key_yaw_right = down;
+    else if (key == 'A') key_roll_left = down;
+    else if (key == 'D') key_roll_right = down;
+    else if (key == 'W') key_faster = down;
+    else if (key == 'S') key_slower = down;
+    else if (key == 'SHIFT') in_boost = down;
+    else if (key == 'SPACE') in_fire = down;
+}
+
+let start_ms = $time_current_ms();
+let var last_ms = start_ms;
+let var last_report_ms = last_ms;
+let var frame_count = 0;
+let var render_ms_total = 0;
+
+loop {
+    let now_ms = $time_current_ms();
+    let dt = ((now_ms - last_ms).to_f() * 0.001).min(0.1);
+    last_ms = now_ms;
+
+    // Handle pending events
+    let var quit = false;
+    loop {
+        // Those set aside while the last frame was rendering come first
+        let var msg = nil;
+        if (pending_events.len > 0) msg = pending_events.remove(0);
+        else msg = $actor_poll();
+        if (msg == nil) break;
+        if (!(msg instanceof UIEvent)) continue;
+
+        if (msg.kind == 'CLOSE_WINDOW') {
+            quit = true;
+        } else if (msg.kind == 'KEY_DOWN') {
+            if (msg.key == 'ESCAPE' || msg.key == 'Q') quit = true;
+            if (msg.key == 'R') reset_flight();
+            if (msg.key == 'M') music_on = !music_on;
+            set_key(msg.key, true);
+        } else if (msg.kind == 'KEY_UP') {
+            set_key(msg.key, false);
+        }
+    }
+    if (quit) break;
+
+    // Controls
+    in_pitch = key_axis(key_pitch_down, key_pitch_up);
+    in_yaw = key_axis(key_yaw_left, key_yaw_right);
+    in_roll = key_axis(key_roll_left, key_roll_right);
+    in_throttle = key_axis(key_slower, key_faster);
+    anim_time = (now_ms - start_ms).to_f() * 0.001;
+    update_sim(dt);
+    send_audio();
+
+    let render_start = $time_current_ms();
+    render_frame();
+    render_ms_total = render_ms_total + ($time_current_ms() - render_start);
+    frame_count = frame_count + 1;
+
+    // Report the frame time once a second
+    if (now_ms - last_report_ms >= 1000) {
+        let ms = render_ms_total.to_f() / frame_count;
+        $println("render: " + ms.format_decimals(1) + " ms, "
+            + (1000.0 / ms.max(0.001)).format_decimals(1) + " fps, "
+            + worker_ids.len.to_s() + " workers, speed " + (speed * 3.6).floor().to_s() + " km/h");
+        frame_count = 0;
+        render_ms_total = 0;
+        last_report_ms = now_ms;
+    }
+
+    $window_draw_frame(window, frame_buffer);
+}
+
+stop_workers();
+
+// Shut the audio actor down
+$actor_send(audio_id, AudioState(0.0, 0.0, false, crash_count, 0.0, false, true));
+$actor_join(audio_id);
