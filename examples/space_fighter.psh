@@ -79,8 +79,8 @@ let GUN_DECAY = 0.99905;
 let GUN_DRIVE = 3.2;
 
 // The wall warning is a tone that slides upwards, then a gap
-let WARN_PERIOD = 0.62;
-let WARN_TONE = 0.47;
+let WARN_PERIOD = 0.415;
+let WARN_TONE = 0.315;
 
 // What the main loop tells the audio actor
 class AudioState {
@@ -2898,6 +2898,20 @@ let var wall_warn = false;
 let MISSION_TIME = 300.0;
 let var time_left = MISSION_TIME;
 
+// What is left of the shield, from 0 to 1, and how long it has been since
+// it was last hit. It starts to mend once it has been left alone a while.
+let var shield = 1.0;
+let var shield_rest = 0.0;
+
+// Counts down from a hit on the shield, while the display flashes
+let var hit_flash = 0.0;
+
+// Enemies shot down, hits taken, and whether rounds fired now would strike
+// an enemy
+let var kills = 0;
+let var hits_taken = 0;
+let var aim_locked = false;
+
 let var music_on = true;
 
 // Put the fighter in the middle of the tunnel at a depth, flying level
@@ -2918,6 +2932,11 @@ fun place_fighter(z) {
     speed = lerp(MIN_SPEED, MAX_SPEED, throttle);
     boost_on = false;
     crash_timer = 0.0;
+
+    shield = 1.0;
+    shield_rest = 0.0;
+    hit_flash = 0.0;
+    clear_enemies();
 }
 
 // Start the run over
@@ -3398,7 +3417,31 @@ let HINT_TIME = 12.0;
 fun draw_hud() {
     draw_ladder();
     draw_heading();
-    draw_boresight(HUD_ORANGE);
+    draw_targets();
+    hud_text(font_small, "KILLS " + kills.to_s(), 24, 20);
+
+    // The boresight turns red, and thicker, when rounds fired now would hit
+    if (aim_locked) {
+        fill_rect(CX.floor() - 18, CY.floor() - 1, 13, 3, WARN_RED);
+        fill_rect(CX.floor() + 6, CY.floor() - 1, 13, 3, WARN_RED);
+        fill_rect(CX.floor() - 1, CY.floor() - 18, 3, 13, WARN_RED);
+        fill_rect(CX.floor() - 1, CY.floor() + 6, 3, 13, WARN_RED);
+    } else {
+        draw_boresight(HUD_ORANGE);
+    }
+
+    // A hit on the shield flashes a border round the display
+    if (hit_flash > 0.0) {
+        let edge = 10;
+        fill_rect(0, 0, FRAME_WIDTH, edge, WARN_RED);
+        fill_rect(0, FRAME_HEIGHT - edge, FRAME_WIDTH, edge, WARN_RED);
+        fill_rect(0, 0, edge, FRAME_HEIGHT, WARN_RED);
+        fill_rect(FRAME_WIDTH - edge, 0, edge, FRAME_HEIGHT, WARN_RED);
+    }
+
+    let var shield_color = HUD_ORANGE;
+    if (shield < 0.4) shield_color = WARN_RED;
+    draw_bar(24, FRAME_HEIGHT - 82, "SHD", shield, shield_color);
 
     let low_y = FRAME_HEIGHT - 46;
     draw_readout(CX.floor() - 210, low_y, 5, (speed * 3.6).floor().to_s(), "KM/H", HUD_ORANGE);
@@ -3420,7 +3463,7 @@ fun draw_hud() {
     }
 
     // The warning blinks under the boresight
-    if ((anim_time * 4.0).floor() % 2 == 0 && wall_warn) {
+    if ((anim_time * 6.0).floor() % 2 == 0 && wall_warn) {
         draw_text_centered(font_warn, "COLLISION", CX.floor(), CY.floor() + 90, WARN_RED);
     }
 }
@@ -3672,6 +3715,12 @@ fun update_cannons(dt) {
         rd_z[i] = z;
         rd_age[i] = age + dt;
 
+        // Sweep the path covered this step for enemies
+        if (hit_enemies(x - rd_vx[i] * dt, y - rd_vy[i] * dt, z - rd_vz[i] * dt, x, y, z)) {
+            rd_age[i] = -1.0;
+            continue;
+        }
+
         if (z >= RUN_LEN || hits_tunnel(x, y, z)) {
             // A round that struck inside the tunnel flashes on its wall
             if (z < 0.0) add_impact(x, y, z);
@@ -3811,10 +3860,612 @@ fun draw_tracers() {
     }
 }
 
+// --- Enemies ---
+//
+// Fighters come up the tunnel towards the player in waves. They are slow
+// to change course, with a fraction of the player's turn, so they cannot
+// follow a hard dodge. Each fires bolts of plasma at where the player will
+// be if it flies on as it is. A bolt takes a second or so to arrive, which
+// is the time there is to be somewhere else.
+
+let MAX_ENEMIES = 8;
+
+// How fast a fighter comes up the tunnel, and the hardest it can pull to
+// the side, in meters per second squared. The player pulls about 118.
+let ENEMY_SPEED = 170.0;
+let ENEMY_ACCEL = 22.0;
+
+// How far ahead of the player a wave appears, which is out in the fog, and
+// how long there is between one wave being dealt with and the next
+let WAVE_AHEAD = 2500.0;
+let WAVE_MIN = 3.0;
+let WAVE_MAX = 6.0;
+
+// The part of the tunnel the fighters keep to, clear of the walls
+let ENEMY_REACH_X = HALF_W - 34.0;
+let ENEMY_REACH_Y = HALF_H - 28.0;
+
+// How close a round has to pass to hit a fighter, how many hits one takes,
+// and how close one has to come to ram the player
+// Fighters light themselves, so they show from further off than the walls
+let ENEMY_FOG_START = 700.0;
+let ENEMY_FOG_END = 2400.0;
+let ENEMY_HALO = 0xFF7050FF;
+
+// How far apart in height and in depth the fighters of a wave are scattered
+let WAVE_SPREAD_Y = 20.0;
+let WAVE_SPREAD_Z = 320.0;
+
+let ENEMY_RADIUS = 7.0;
+let ENEMY_HITS = 3;
+let RAM_RADIUS = 9.0;
+
+// A fighter fires while it is between these distances ahead, with this
+// long between its shots, and this much scatter in its aim in radians
+let FIRE_FAR = 1400.0;
+let FIRE_NEAR = 260.0;
+let FIRE_MIN = 1.0;
+let FIRE_MAX = 2.0;
+let FIRE_SCATTER = 0.006;
+
+// For each fighter: where it is, how fast it is moving to the side, how
+// far it is banked, the place in the formation it tries to keep, how long
+// until it fires again and how many more hits it can take. One that is not
+// in play has none left.
+let en_x = Array.with_size(MAX_ENEMIES, 0.0);
+let en_y = Array.with_size(MAX_ENEMIES, 0.0);
+let en_z = Array.with_size(MAX_ENEMIES, 0.0);
+let en_vx = Array.with_size(MAX_ENEMIES, 0.0);
+let en_vy = Array.with_size(MAX_ENEMIES, 0.0);
+let en_bank = Array.with_size(MAX_ENEMIES, 0.0);
+let en_slot_x = Array.with_size(MAX_ENEMIES, 0.0);
+let en_slot_y = Array.with_size(MAX_ENEMIES, 0.0);
+let en_fire = Array.with_size(MAX_ENEMIES, 0.0);
+let en_hp = Array.with_size(MAX_ENEMIES, 0);
+
+let var wave_timer = WAVE_MIN;
+
+// Bolts of plasma in flight. A negative age marks a free slot.
+let MAX_BOLTS = 32;
+let BOLT_SPEED = 430.0;
+let BOLT_LIFE = 5.0;
+let BOLT_LENGTH = 26.0;
+let BOLT_HIT = 4.5;
+let BOLT_GLOW = 0xFF30FF50;
+let BOLT_CORE = 0xFFD8FFE0;
+let bo_x = Array.with_size(MAX_BOLTS, 0.0);
+let bo_y = Array.with_size(MAX_BOLTS, 0.0);
+let bo_z = Array.with_size(MAX_BOLTS, 0.0);
+let bo_vx = Array.with_size(MAX_BOLTS, 0.0);
+let bo_vy = Array.with_size(MAX_BOLTS, 0.0);
+let bo_vz = Array.with_size(MAX_BOLTS, 0.0);
+let bo_age = Array.with_size(MAX_BOLTS, -1.0);
+let var bo_next = 0;
+
+// What a hit from a bolt takes off the shield, and how the shield mends
+let BOLT_DAMAGE = 0.34;
+let SHIELD_REST = 3.0;
+let SHIELD_MEND = 0.12;
+let HIT_FLASH = 0.25;
+
+// How long a hit shakes the view, and how far, in radians and in meters
+let SHAKE_TIME = 1.1;
+let SHAKE_ANGLE = 0.02;
+let SHAKE_SHIFT = 0.6;
+let SHAKE_RATE = 1.8;
+let var shake = 0.0;
+let var shake_phase = 0.0;
+
+// Fireballs where fighters have blown up
+let MAX_BLASTS = 8;
+let BLAST_LIFE = 0.7;
+let bl_x = Array.with_size(MAX_BLASTS, 0.0);
+let bl_y = Array.with_size(MAX_BLASTS, 0.0);
+let bl_z = Array.with_size(MAX_BLASTS, 0.0);
+let bl_age = Array.with_size(MAX_BLASTS, -1.0);
+let var bl_next = 0;
+
+// The shape of a fighter: a pointed body with a wing swept forward to
+// either side, like a pair of claws. Its nose is along +z. The corners
+// come first, then the faces as three corners each, the body's eight and
+// then the two wings, which show from both sides.
+let SHIP_X = [0.0, 0.0, 0.0, 0.0, -2.6, 2.6, -9.0, -6.0, 9.0, 6.0];
+let SHIP_Y = [0.0, 0.2, 1.9, -1.4, 0.0, 0.0, 0.7, -0.2, 0.7, -0.2];
+let SHIP_Z = [8.0, -5.5, -1.0, -0.5, -1.0, -1.0, 4.5, -5.0, 4.5, -5.0];
+let SHIP_FACES = [
+    0, 2, 5,  0, 5, 3,  0, 3, 4,  0, 4, 2,
+    1, 5, 2,  1, 3, 5,  1, 4, 3,  1, 2, 4,
+    4, 6, 7,  5, 8, 9,
+];
+let SHIP_BODY_FACES = 8;
+let NUM_SHIP_VERTS = SHIP_X.len;
+let NUM_SHIP_FACES = SHIP_FACES.len.idiv(3);
+
+// The colors of the body and of the wings, as red, green and blue
+let SHIP_BODY = [196.0, 176.0, 255.0];
+let SHIP_WING = [150.0, 132.0, 214.0];
+
+// A fighter's corners in the world, and the order its faces are drawn in
+let sv_x = Array.with_size(NUM_SHIP_VERTS, 0.0);
+let sv_y = Array.with_size(NUM_SHIP_VERTS, 0.0);
+let sv_z = Array.with_size(NUM_SHIP_VERTS, 0.0);
+let face_order = Array.with_size(NUM_SHIP_FACES, 0);
+let face_depth = Array.with_size(NUM_SHIP_FACES, 0.0);
+
+// Take every fighter, bolt and fireball out of play
+fun clear_enemies() {
+    for (let var i = 0; i < MAX_ENEMIES; ++i) en_hp[i] = 0;
+    for (let var i = 0; i < MAX_BOLTS; ++i) bo_age[i] = -1.0;
+    for (let var i = 0; i < MAX_BLASTS; ++i) bl_age[i] = -1.0;
+    wave_timer = WAVE_MIN;
+    aim_locked = false;
+    shake = 0.0;
+}
+
+// Bring on a wave, in one of a few formations around a point
+fun spawn_wave() {
+    let count = rng.int(3, 6);
+    let shape = rng.int(0, 3);
+    let cx = rng.float(-0.4, 0.4) * ENEMY_REACH_X;
+    let cy = rng.float(-0.4, 0.4) * ENEMY_REACH_Y;
+
+    for (let var i = 0; i < count; ++i) {
+        // Its place across the formation, from -1 to 1
+        let across = (i - (count - 1) * 0.5) / ((count - 1) * 0.5);
+        let var sx = across * 44.0;
+        let var sy = 0.0;
+        let var back = 0.0;
+        if (shape == 1) {
+            // A V, the middle one leading
+            sy = across.abs() * 16.0;
+            back = across.abs() * 90.0;
+        } else if (shape == 2) {
+            // One behind the other, staggered up and down
+            sx = across * 14.0;
+            sy = (i % 2) * 22.0 - 11.0;
+            back = i * 70.0;
+        }
+
+        // No two come on at quite the same height or distance
+        sy = sy + rng.float(0.0 - WAVE_SPREAD_Y, WAVE_SPREAD_Y);
+        back = back + rng.float(0.0, WAVE_SPREAD_Z);
+
+        en_slot_x[i] = sx;
+        en_slot_y[i] = sy;
+        en_x[i] = (cx + sx).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
+        en_y[i] = (cy + sy).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
+        en_z[i] = cam_z + WAVE_AHEAD + back;
+        en_vx[i] = 0.0;
+        en_vy[i] = 0.0;
+        en_bank[i] = 0.0;
+        en_fire[i] = rng.float(0.2, FIRE_MAX);
+        en_hp[i] = ENEMY_HITS;
+    }
+}
+
+// Start a fireball
+fun add_blast(x, y, z) {
+    let i = bl_next;
+    bl_next = (bl_next + 1) % MAX_BLASTS;
+    bl_x[i] = x;
+    bl_y[i] = y;
+    bl_z[i] = z;
+    bl_age[i] = 0.0;
+}
+
+// Take a hit on the shield, which is the end of the fighter if there is
+// not enough of it left
+fun take_hit(damage) {
+    if (BENCH_MODE || crash_timer > 0.0) return;
+
+    shield = shield - damage;
+    shield_rest = 0.0;
+    hit_flash = HIT_FLASH;
+    shake = SHAKE_TIME;
+    hits_taken = hits_taken + 1;
+
+    if (shield <= 0.0) {
+        shield = 0.0;
+        crash_timer = CRASH_TIME;
+        crash_count = crash_count + 1;
+    }
+}
+
+// How near a point comes to the line from one point to another
+fun line_distance(px, py, pz, x0, y0, z0, x1, y1, z1) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let dz = z1 - z0;
+    let len2 = dx * dx + dy * dy + dz * dz;
+    let var t = 0.0;
+    if (len2 > 0.0) t = (((px - x0) * dx + (py - y0) * dy + (pz - z0) * dz) / len2).clip(0.0, 1.0);
+
+    let ex = x0 + dx * t - px;
+    let ey = y0 + dy * t - py;
+    let ez = z0 + dz * t - pz;
+    return (ex * ex + ey * ey + ez * ez).sqrt();
+}
+
+// See whether a round that went from one point to another struck a
+// fighter, and if so take the hit off it
+fun hit_enemies(x0, y0, z0, x1, y1, z1) {
+    for (let var i = 0; i < MAX_ENEMIES; ++i) {
+        if (en_hp[i] <= 0) continue;
+        if (line_distance(en_x[i], en_y[i], en_z[i], x0, y0, z0, x1, y1, z1) > ENEMY_RADIUS) continue;
+
+        en_hp[i] = en_hp[i] - 1;
+        add_impact(en_x[i], en_y[i], en_z[i]);
+        if (en_hp[i] <= 0) {
+            add_blast(en_x[i], en_y[i], en_z[i]);
+            kills = kills + 1;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+// Fire a bolt from a fighter at where the player will be when it gets
+// there, going by how the player is flying now
+fun fire_bolt(i) {
+    let dx = cam_x - en_x[i];
+    let dy = cam_y - en_y[i];
+    let dz = cam_z - en_z[i];
+    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+    let t = dist / (BOLT_SPEED + speed);
+
+    let var ax = dx + fwd_x * speed * t + rng.normal(0.0, FIRE_SCATTER) * dist;
+    let var ay = dy + fwd_y * speed * t + rng.normal(0.0, FIRE_SCATTER) * dist;
+    let var az = dz + fwd_z * speed * t;
+    let len = (ax * ax + ay * ay + az * az).sqrt().max(1.0);
+
+    let b = bo_next;
+    bo_next = (bo_next + 1) % MAX_BOLTS;
+    bo_x[b] = en_x[i];
+    bo_y[b] = en_y[i];
+    bo_z[b] = en_z[i];
+    bo_vx[b] = ax / len * BOLT_SPEED;
+    bo_vy[b] = ay / len * BOLT_SPEED;
+    bo_vz[b] = az / len * BOLT_SPEED;
+    bo_age[b] = 0.0;
+}
+
+// Advance the fighters, their bolts and the state of the shield by one
+// time step
+fun update_enemies(dt) {
+    // The next wave comes on once the last has gone, while there is
+    // tunnel ahead for it
+    let var in_play = 0;
+    for (let var i = 0; i < MAX_ENEMIES; ++i) {
+        if (en_hp[i] > 0) in_play = in_play + 1;
+    }
+    if (in_play == 0 && cam_z > 0.0 && cam_z < RUN_LEN - 3.0 * WAVE_AHEAD) {
+        wave_timer = wave_timer - dt;
+        if (wave_timer <= 0.0) {
+            spawn_wave();
+            wave_timer = rng.float(WAVE_MIN, WAVE_MAX);
+        }
+    }
+
+    aim_locked = false;
+    let ease = (4.0 * dt).min(1.0);
+
+    for (let var i = 0; i < MAX_ENEMIES; ++i) {
+        if (en_hp[i] <= 0) continue;
+
+        // Each steers for its place in a formation that drifts after the
+        // player, as hard as it can, which is not very
+        let want_x = (cam_x * 0.7 + en_slot_x[i]).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
+        let want_y = (cam_y * 0.7 + en_slot_y[i]).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
+        let ax = ((want_x - en_x[i]) * 1.2 - en_vx[i] * 1.8).clip(0.0 - ENEMY_ACCEL, ENEMY_ACCEL);
+        let ay = ((want_y - en_y[i]) * 1.2 - en_vy[i] * 1.8).clip(0.0 - ENEMY_ACCEL, ENEMY_ACCEL);
+        en_vx[i] = en_vx[i] + ax * dt;
+        en_vy[i] = en_vy[i] + ay * dt;
+        en_x[i] = (en_x[i] + en_vx[i] * dt).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
+        en_y[i] = (en_y[i] + en_vy[i] * dt).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
+        en_z[i] = en_z[i] - ENEMY_SPEED * dt;
+
+        // It banks into its turns
+        en_bank[i] = en_bank[i] + (ax * 0.028 - en_bank[i]) * ease;
+
+        // Gone once it is well behind
+        let ahead = en_z[i] - cam_z;
+        if (ahead < -80.0) {
+            en_hp[i] = 0;
+            continue;
+        }
+
+        // Ramming is the end of both
+        let dx = en_x[i] - cam_x;
+        let dy = en_y[i] - cam_y;
+        if (dx * dx + dy * dy + ahead * ahead < RAM_RADIUS * RAM_RADIUS && crash_timer <= 0.0 && !BENCH_MODE) {
+            en_hp[i] = 0;
+            add_blast(en_x[i], en_y[i], en_z[i]);
+            take_hit(1.0);
+            continue;
+        }
+
+        en_fire[i] = en_fire[i] - dt;
+        if (en_fire[i] <= 0.0 && ahead < FIRE_FAR && ahead > FIRE_NEAR && crash_timer <= 0.0) {
+            fire_bolt(i);
+            en_fire[i] = rng.float(FIRE_MIN, FIRE_MAX);
+        }
+
+        // The boresight is on it if it lies under the cross
+        view_point(en_x[i], en_y[i], en_z[i]);
+        if (pt_z > 20.0 && pt_z < ENEMY_FOG_END) {
+            let scale = FOCAL / pt_z;
+            let reach = (ENEMY_RADIUS * scale).max(7.0);
+            if ((pt_x * scale).abs() < reach && (pt_y * scale).abs() < reach) aim_locked = true;
+        }
+    }
+
+    for (let var b = 0; b < MAX_BOLTS; ++b) {
+        let age = bo_age[b];
+        if (age < 0.0) continue;
+
+        let x0 = bo_x[b];
+        let y0 = bo_y[b];
+        let z0 = bo_z[b];
+        let x = x0 + bo_vx[b] * dt;
+        let y = y0 + bo_vy[b] * dt;
+        let z = z0 + bo_vz[b] * dt;
+        bo_x[b] = x;
+        bo_y[b] = y;
+        bo_z[b] = z;
+        bo_age[b] = age + dt;
+
+        // The player moves this step as well, so the bolt's path is taken
+        // as the player sees it
+        let px = fwd_x * speed * dt;
+        let py = fwd_y * speed * dt;
+        let pz = fwd_z * speed * dt;
+        if (line_distance(cam_x, cam_y, cam_z, x0 + px, y0 + py, z0 + pz, x, y, z) < BOLT_HIT) {
+            bo_age[b] = -1.0;
+            take_hit(BOLT_DAMAGE);
+        } else if (age + dt > BOLT_LIFE || z < cam_z - 60.0 || hits_tunnel(x, y, z)) {
+            bo_age[b] = -1.0;
+        }
+    }
+
+    for (let var i = 0; i < MAX_BLASTS; ++i) {
+        let age = bl_age[i];
+        if (age < 0.0) continue;
+        bl_age[i] = age + dt;
+        if (age + dt > BLAST_LIFE) bl_age[i] = -1.0;
+    }
+
+    // The shield mends once it has been left alone for a while
+    hit_flash = (hit_flash - dt).max(0.0);
+    shake = (shake - dt).max(0.0);
+    shake_phase = shake_phase + dt;
+    shield_rest = shield_rest + dt;
+    if (shield_rest > SHIELD_REST && crash_timer <= 0.0) shield = (shield + SHIELD_MEND * dt).min(1.0);
+}
+
+// Draw one fighter. Its faces are sorted and drawn far to near, which is
+// enough for a shape this simple, and lit as if from the player's side.
+fun draw_enemy(i) {
+    let ex = en_x[i];
+    let ey = en_y[i];
+    let ez = en_z[i];
+    view_point(ex, ey, ez);
+    if (pt_z < 4.0) return;
+
+    let dist = pt_z;
+    let fog = 1.0 - smoothstep(ENEMY_FOG_START, ENEMY_FOG_END, dist);
+    if (fog <= 0.0) return;
+
+    // A haze of light around it, which is all there is to see far off
+    let halo = FOCAL / dist;
+    glow_disc(CX + pt_x * halo, CY - pt_y * halo, (11.0 * halo).clip(3.0, 90.0), color_scale(ENEMY_HALO, fog * 0.6));
+
+    // Its own three directions: the way it is going, its right and its up,
+    // tilted by its bank
+    let var fx = en_vx[i];
+    let var fy = en_vy[i];
+    let var fz = 0.0 - ENEMY_SPEED;
+    let f_len = (fx * fx + fy * fy + fz * fz).sqrt();
+    fx = fx / f_len; fy = fy / f_len; fz = fz / f_len;
+
+    let var rx = fz;
+    let var ry = 0.0;
+    let var rz = 0.0 - fx;
+    let r_len = (rx * rx + rz * rz).sqrt();
+    rx = rx / r_len; rz = rz / r_len;
+    let var ux = fy * rz - fz * ry;
+    let var uy = fz * rx - fx * rz;
+    let var uz = fx * ry - fy * rx;
+
+    let c = en_bank[i].cos();
+    let s = en_bank[i].sin();
+    let bx = rx * c - ux * s; let by = ry * c - uy * s; let bz = rz * c - uz * s;
+    ux = ux * c + rx * s; uy = uy * c + ry * s; uz = uz * c + rz * s;
+    rx = bx; ry = by; rz = bz;
+
+    for (let var v = 0; v < NUM_SHIP_VERTS; ++v) {
+        let lx = SHIP_X[v];
+        let ly = SHIP_Y[v];
+        let lz = SHIP_Z[v];
+        sv_x[v] = ex + rx * lx + ux * ly + fx * lz;
+        sv_y[v] = ey + ry * lx + uy * ly + fy * lz;
+        sv_z[v] = ez + rz * lx + uz * ly + fz * lz;
+    }
+
+    // Order the faces by how far off the middle of each is
+    for (let var f = 0; f < NUM_SHIP_FACES; ++f) {
+        let a = SHIP_FACES[f * 3];
+        let b = SHIP_FACES[f * 3 + 1];
+        let d = SHIP_FACES[f * 3 + 2];
+        let mx = (sv_x[a] + sv_x[b] + sv_x[d]) / 3.0 - cam_x;
+        let my = (sv_y[a] + sv_y[b] + sv_y[d]) / 3.0 - cam_y;
+        let mz = (sv_z[a] + sv_z[b] + sv_z[d]) / 3.0 - cam_z;
+        let depth = mx * fwd_x + my * fwd_y + mz * fwd_z;
+
+        let var j = f;
+        while (j > 0 && face_depth[j - 1] < depth) {
+            face_depth[j] = face_depth[j - 1];
+            face_order[j] = face_order[j - 1];
+            j = j - 1;
+        }
+        face_depth[j] = depth;
+        face_order[j] = f;
+    }
+
+    // The direction the light comes from, which is the player
+    let lx = (cam_x - ex) / dist;
+    let ly = (cam_y - ey) / dist;
+    let lz = (cam_z - ez) / dist;
+    fog_k = (fog * 256.0).floor();
+
+    for (let var k = 0; k < NUM_SHIP_FACES; ++k) {
+        let f = face_order[k];
+        let a = SHIP_FACES[f * 3];
+        let b = SHIP_FACES[f * 3 + 1];
+        let d = SHIP_FACES[f * 3 + 2];
+
+        // Which way the face is turned
+        let e1x = sv_x[b] - sv_x[a]; let e1y = sv_y[b] - sv_y[a]; let e1z = sv_z[b] - sv_z[a];
+        let e2x = sv_x[d] - sv_x[a]; let e2y = sv_y[d] - sv_y[a]; let e2z = sv_z[d] - sv_z[a];
+        let var nx = e1y * e2z - e1z * e2y;
+        let var ny = e1z * e2x - e1x * e2z;
+        let var nz = e1x * e2y - e1y * e2x;
+        let n_len = (nx * nx + ny * ny + nz * nz).sqrt().max(0.0001);
+        let lit = ((nx * lx + ny * ly + nz * lz) / n_len).abs();
+
+        let var tint = SHIP_WING;
+        if (f < SHIP_BODY_FACES) tint = SHIP_BODY;
+        let shade = 0.55 + 0.45 * lit;
+        let r = (tint[0] * shade).floor();
+        let g = (tint[1] * shade).floor();
+        let bl = (tint[2] * shade).floor();
+
+        view_corner(0, sv_x[a], sv_y[a], sv_z[a]);
+        view_corner(1, sv_x[b], sv_y[b], sv_z[b]);
+        view_corner(2, sv_x[d], sv_y[d], sv_z[d]);
+        cI[0] = 0; cI[1] = 1; cI[2] = 2;
+        fill_poly(3, 0xFF000000 | (r << 16) | (g << 8) | bl);
+    }
+
+    // Its guns glow at its wing tips, and flare as it is about to fire
+    let var flare = 0.8;
+    if (en_fire[i] < 0.3) flare = 1.3;
+    for (let var tip = 6; tip <= 8; tip += 2) {
+        view_point(sv_x[tip], sv_y[tip], sv_z[tip]);
+        if (pt_z < 2.0) continue;
+        let scale = FOCAL / pt_z;
+        glow_disc(CX + pt_x * scale, CY - pt_y * scale, (2.2 * scale * (0.6 + flare)).clip(2.0, 50.0),
+            color_scale(BOLT_GLOW, fog * flare.min(1.0)));
+    }
+}
+
+// Draw the fighters, the furthest first
+fun draw_enemies() {
+    let order = [];
+    for (let var i = 0; i < MAX_ENEMIES; ++i) {
+        if (en_hp[i] <= 0) continue;
+        let var j = order.len;
+        order.push(i);
+        while (j > 0 && en_z[order[j - 1]] < en_z[i]) {
+            order[j] = order[j - 1];
+            j = j - 1;
+        }
+        order[j] = i;
+    }
+
+    for (let var k = 0; k < order.len; ++k) draw_enemy(order[k]);
+}
+
+// Draw the fireballs, which swell and fade
+fun draw_blasts() {
+    for (let var i = 0; i < MAX_BLASTS; ++i) {
+        let age = bl_age[i];
+        if (age < 0.0) continue;
+
+        view_point(bl_x[i], bl_y[i], bl_z[i]);
+        if (pt_z < 3.0) continue;
+
+        let scale = FOCAL / pt_z;
+        let t = age / BLAST_LIFE;
+        let fade = (1.0 - t) * (1.0 - t) * fog_at(pt_z);
+        let radius = ((7.0 + 55.0 * t) * scale).clip(3.0, 150.0);
+        let x = CX + pt_x * scale;
+        let y = CY - pt_y * scale;
+        glow_disc(x, y, radius, color_scale(0xFFFF7A20, fade));
+        glow_disc(x, y, radius * 0.45, color_scale(0xFFFFE8A0, fade));
+    }
+}
+
+// Draw the bolts of plasma as glowing streaks, each with a bright head
+fun draw_bolts() {
+    for (let var b = 0; b < MAX_BOLTS; ++b) {
+        if (bo_age[b] < 0.0) continue;
+
+        let x = bo_x[b];
+        let y = bo_y[b];
+        let z = bo_z[b];
+        view_point(x, y, z);
+        let hx = pt_x;
+        let hy = pt_y;
+        let hz = pt_z;
+        if (hz < 1.0) continue;
+
+        // The streak trails back along the way it came
+        let back = BOLT_LENGTH / BOLT_SPEED;
+        view_point(x - bo_vx[b] * back, y - bo_vy[b] * back, z - bo_vz[b] * back);
+        if (pt_z < 1.0) continue;
+
+        let fade = fog_at(hz);
+        if (fade <= 0.0) continue;
+
+        let head_x = CX + hx * FOCAL / hz;
+        let head_y = CY - hy * FOCAL / hz;
+        let tail_x = CX + pt_x * FOCAL / pt_z;
+        let tail_y = CY - pt_y * FOCAL / pt_z;
+        let half = (FOCAL * 1.5 / hz).clip(2.0, 24.0);
+
+        glow_streak(tail_x, tail_y, head_x, head_y, half, color_scale(BOLT_GLOW, fade));
+        glow_streak(tail_x, tail_y, head_x, head_y, half * 0.35, color_scale(BOLT_CORE, fade));
+        glow_disc(head_x, head_y, half * 1.8, color_scale(BOLT_GLOW, fade));
+    }
+}
+
+// Mark each fighter on the display with a box of four corners, which is
+// red on the one under the boresight
+fun draw_targets() {
+    for (let var i = 0; i < MAX_ENEMIES; ++i) {
+        if (en_hp[i] <= 0) continue;
+
+        view_point(en_x[i], en_y[i], en_z[i]);
+        if (pt_z < 20.0 || pt_z > ENEMY_FOG_END) continue;
+
+        let scale = FOCAL / pt_z;
+        let x = CX + pt_x * scale;
+        let y = CY - pt_y * scale;
+        let half = (10.0 * scale).max(9.0);
+        let arm = (half * 0.4).max(4.0);
+
+        let var color = HUD_ORANGE;
+        if ((x - CX).abs() < (ENEMY_RADIUS * scale).max(7.0) && (y - CY).abs() < (ENEMY_RADIUS * scale).max(7.0)) {
+            color = WARN_RED;
+        }
+
+        for (let var sx = -1; sx <= 1; sx += 2) {
+            for (let var sy = -1; sy <= 1; sy += 2) {
+                let px = x + sx * half;
+                let py = y + sy * half;
+                draw_line(px, py, px - sx * arm, py, color);
+                draw_line(px, py, px, py - sy * arm, color);
+            }
+        }
+    }
+}
+
 // --- Frame ---
 
 fun update_sim(dt) {
     update_flight(dt);
+    update_enemies(dt);
     update_cannons(dt);
     wall_warn = crash_timer <= 0.0 && wall_ahead();
     time_left = (time_left - dt).max(0.0);
@@ -3833,14 +4484,40 @@ fun send_audio() {
     let var gain = 1.0;
     if (crashed) gain = 0.0;
 
-    $actor_send(audio_id, AudioState(power, gun, wall_warn, crash_count, gain, music_on, false));
+    // A crash, a kill and a hit on the shield each set off an explosion
+    let booms = crash_count + kills + hits_taken;
+    $actor_send(audio_id, AudioState(power, gun, wall_warn, booms, gain, music_on, false));
+}
+
+// Jolt the view, less and less as a hit wears off
+fun shake_view() {
+    let k = shake / SHAKE_TIME;
+    let amp = k * k;
+    let t = shake_phase * SHAKE_RATE;
+    cam_pitch((t * 71.0).sin() * SHAKE_ANGLE * amp);
+    cam_yaw((t * 53.0 + 1.3).sin() * SHAKE_ANGLE * amp);
+    cam_roll((t * 43.0 + 2.1).sin() * SHAKE_ANGLE * 1.5 * amp);
+    cam_x = cam_x + (t * 61.0).sin() * SHAKE_SHIFT * amp;
+    cam_y = cam_y + (t * 79.0 + 0.7).sin() * SHAKE_SHIFT * amp;
 }
 
 fun render_frame() {
+    // The shake is only in what is drawn, so the flight is left as it was
+    let saved = [cam_x, cam_y, right_x, right_y, right_z, up_x, up_y, up_z, fwd_x, fwd_y, fwd_z];
+    if (shake > 0.0) shake_view();
+
     render_world_parallel();
+    draw_enemies();
+    draw_blasts();
+    draw_bolts();
     draw_impacts();
     draw_tracers();
     if (crash_timer > 0.0) draw_crash(); else draw_hud();
+
+    cam_x = saved[0]; cam_y = saved[1];
+    right_x = saved[2]; right_y = saved[3]; right_z = saved[4];
+    up_x = saved[5]; up_y = saved[6]; up_z = saved[7];
+    fwd_x = saved[8]; fwd_y = saved[9]; fwd_z = saved[10];
 }
 
 // --- Benchmark ---
@@ -3872,6 +4549,7 @@ fun run_bench(num_frames, shot_dir) {
         speed = 350.0;
         anim_time = t;
         in_fire = frame % 60 >= 20 && frame % 60 < 50;
+        update_enemies(dt);
         update_cannons(dt);
 
         let start_ms = $time_current_ms();
