@@ -616,8 +616,8 @@ let CELL = 25.0;
 let SEC_ROWS = 2;
 let SEC_LEN = CELL * SEC_ROWS;
 
-// Two minutes at cruise speed
-let NUM_SECTIONS = 936;
+// Four minutes at cruise speed
+let NUM_SECTIONS = 1872;
 let NUM_ROWS = NUM_SECTIONS * SEC_ROWS;
 let RUN_LEN = NUM_SECTIONS.to_f() * SEC_LEN;
 
@@ -629,14 +629,22 @@ let NUM_WALLS = 4;
 let WALL_CELLS = [8, 8, 5, 5];
 let WALL_U0 = [0.0 - HALF_W, 0.0 - HALF_W, 0.0 - HALF_H, 0.0 - HALF_H];
 let WALL_FIRST = [0, 8, 16, 21];
-let ROW_CELLS = 26;
+
+// In places the tunnel opens out into a hangar, whose walls stand further
+// back on every side. A hangar may be up to this many cells wide and tall,
+// and the arrays above hold the numbers for whichever shape is in use.
+let HANGAR_COLS_MAX = 44;
+let HANGAR_TALL_MAX = 25;
+
+// Room for the cells of a row of the largest hangar
+let ROW_CELLS = (HANGAR_COLS_MAX + HANGAR_TALL_MAX) * 2;
 let SEC_CELLS = ROW_CELLS * SEC_ROWS;
 
 // Everything fades to black between these distances
 let FOG_START = 300.0;
 let FOG_END = 1600.0;
 let DRAW_AHEAD = 32;
-let DRAW_BEHIND = 1;
+let DRAW_BEHIND = 12;
 
 fun lerp(a, b, t) {
     return a + (b - a) * t;
@@ -775,6 +783,104 @@ fun wall_coords(w, x, y) {
     wc_h = (x - WALL_OX[w]) * WALL_HX[w] + (y - WALL_OY[w]) * WALL_HY[w];
 }
 
+// --- Hangars ---
+//
+// A hangar is a stretch where the walls stand further back on every side,
+// so that the tunnel comes in through the middle of one end wall and
+// leaves through the middle of the other. Each is a different size. The
+// largest is as big as it can be without there being room to turn round:
+// the fighter's tightest circle is 1300 meters across, and from corner to
+// corner the largest hangar is a little less than that once the blocks on
+// its walls are allowed for.
+
+// For each: the first of its rows of cells, how many it has, and how many
+// cells wide and tall it is
+let hg_row = [];
+let hg_rows = [];
+let hg_cols = [];
+let hg_tall = [];
+
+// Which hangar each row of cells is in, if any
+let row_hangar = Array.with_size(NUM_ROWS, -1);
+
+// How long a hangar may be and how much tunnel there may be between two,
+// in rows of cells. All of them are even, to keep to whole sections.
+let HANGAR_ROWS_MIN = 24;
+let HANGAR_ROWS_MAX = 48;
+let HANGAR_GAP_MIN = 320;
+let HANGAR_GAP_MAX = 560;
+let HANGAR_FIRST = 200;
+
+// Its walls are lit this much more brightly than the tunnel's, being seen
+// from further off
+let HANGAR_LIGHT = 1.5;
+let END_SEED = WORLD_SEED + 90;
+
+// The fewest cells a hangar may be wide and tall
+let HANGAR_COLS_MIN = 16;
+let HANGAR_TALL_MIN = 11;
+
+fun lay_hangars() {
+    let gen = Xoshiro128(WORLD_SEED + 80);
+    let var row = HANGAR_FIRST;
+
+    loop {
+        let rows = gen.int(HANGAR_ROWS_MIN.idiv(2), HANGAR_ROWS_MAX.idiv(2) + 1) * 2;
+        if (row + rows > NUM_ROWS - 80) break;
+
+        // It is wider than the tunnel by the same on both sides, and
+        // taller by the same above and below
+        let id = hg_row.len;
+        hg_row.push(row);
+        hg_rows.push(rows);
+        hg_cols.push(gen.int(HANGAR_COLS_MIN.idiv(2), HANGAR_COLS_MAX.idiv(2) + 1) * 2);
+        hg_tall.push(gen.int(HANGAR_TALL_MIN.idiv(2), HANGAR_TALL_MAX.idiv(2) + 1) * 2 + 1);
+        for (let var at = row; at < row + rows; ++at) row_hangar[at] = id;
+
+        row = row + rows + gen.int(HANGAR_GAP_MIN.idiv(2), HANGAR_GAP_MAX.idiv(2) + 1) * 2;
+    }
+}
+
+// The shape of the tunnel at a row of cells, which is nothing for the
+// tunnel itself and otherwise one more than the hangar the row is in
+fun row_shape(row) {
+    return row_hangar[row] + 1;
+}
+
+// Which shape the walls are set up for, and how far it reaches to either
+// side and up and down
+let var shape = 0;
+let var shape_w = HALF_W;
+let var shape_h = HALF_H;
+
+// Set the walls up for a shape
+fun use_shape(s) {
+    if (s == shape) return;
+    shape = s;
+
+    let var cols = 8;
+    let var tall = 5;
+    if (s > 0) {
+        cols = hg_cols[s - 1];
+        tall = hg_tall[s - 1];
+    }
+    shape_w = cols * CELL * 0.5;
+    shape_h = tall * CELL * 0.5;
+
+    WALL_CELLS[0] = cols; WALL_CELLS[1] = cols;
+    WALL_CELLS[2] = tall; WALL_CELLS[3] = tall;
+    WALL_U0[0] = 0.0 - shape_w; WALL_U0[1] = 0.0 - shape_w;
+    WALL_U0[2] = 0.0 - shape_h; WALL_U0[3] = 0.0 - shape_h;
+    WALL_FIRST[1] = cols;
+    WALL_FIRST[2] = cols * 2;
+    WALL_FIRST[3] = cols * 2 + tall;
+
+    WALL_OX[2] = 0.0 - shape_w;
+    WALL_OX[3] = shape_w;
+    WALL_OY[0] = 0.0 - shape_h;
+    WALL_OY[1] = shape_h;
+}
+
 // --- Pipes ---
 //
 // Glowing red pipes lie half sunk into the walls. Some run along the
@@ -816,6 +922,12 @@ fun add_pipe(kind, wall, r, at, lo, hi) {
     }
 }
 
+// The shape of the tunnel where a pipe is
+fun pipe_shape(id) {
+    if (pk_kind[id] == PIPE_ALONG) return row_shape(pk_lo[id]);
+    return row_shape((pk_at[id] / CELL).floor());
+}
+
 // How thick the pipes of a group are, which is thinner the more of them
 // there are side by side
 fun pipe_radius(gen, count) {
@@ -826,11 +938,16 @@ fun pipe_radius(gen, count) {
 
 // One to three pipes side by side along the tunnel, starting at a row
 fun lay_along(gen, row) {
+    use_shape(row_shape(row));
     let wall = gen.index(NUM_WALLS);
     let count = gen.int(1, 4);
     let r = pipe_radius(gen, count);
     let center = WALL_U0[wall] + (gen.index(WALL_CELLS[wall]) + 0.5) * CELL;
-    let last = (row + gen.int(3, 22)).min(NUM_ROWS - 2);
+
+    // It stops where the tunnel changes shape
+    let want = (row + gen.int(3, 22)).min(NUM_ROWS - 2);
+    let var last = row;
+    while (last < want && row_hangar[last + 1] == row_hangar[row]) ++last;
 
     for (let var j = 0; j < count; ++j) {
         add_pipe(PIPE_ALONG, wall, r, center + (j - (count - 1) * 0.5) * r * 2.8, row, last);
@@ -839,8 +956,16 @@ fun lay_along(gen, row) {
 
 // One to three pipes side by side across a wall, or across the wall
 // opposite as well, or all the way round the tunnel
-fun lay_across(gen, row, count) {
-    let r = pipe_radius(gen, count);
+fun lay_across(gen, row, want) {
+    use_shape(row_shape(row));
+
+    // A hangar is a long way round and seen from further off, so its
+    // pipes go singly and are thicker
+    let var count = want;
+    if (shape > 0) count = 1;
+
+    let var r = pipe_radius(gen, count);
+    if (shape > 0) r = r * 1.6;
     let reach = gen.int(0, 3);
     let wall = gen.index(NUM_WALLS);
 
@@ -881,8 +1006,11 @@ fun lay_pipes() {
             let rungs = gen.int(3, 8);
             let wall = gen.index(NUM_WALLS);
             let r = gen.choice([1.5, 2.2]);
+            use_shape(row_shape(row));
             for (let var j = 0; j < rungs; ++j) {
-                add_pipe(PIPE_ACROSS, wall, r, (row + j * 2 + 0.5) * CELL, 0, WALL_CELLS[wall] - 1);
+                let at = row + j * 2;
+                if (row_hangar[at] != row_hangar[row]) continue;
+                add_pipe(PIPE_ACROSS, wall, r, (at + 0.5) * CELL, 0, WALL_CELLS[wall] - 1);
             }
             row = row + rungs * 2;
         }
@@ -926,6 +1054,11 @@ let WALL_OPEN = -1.0;
 // Whether a stretch of a wall is free of pipes and of side tunnels, with a
 // row to spare at either end
 fun wall_clear(w, row, rows) {
+    // Nor may a hangar be anywhere near
+    for (let var at = row - 6; at <= row + rows + 5; ++at) {
+        if (row_hangar[at] >= 0) return false;
+    }
+
     for (let var at = row - 1; at <= row + rows; ++at) {
         if (row_side[at * NUM_WALLS + w] >= 0) return false;
         let ids = row_pipes[at];
@@ -939,6 +1072,7 @@ fun wall_clear(w, row, rows) {
 // These go in after the pipes, and only where no pipe is in the way
 fun lay_sides() {
     let gen = Xoshiro128(WORLD_SEED + 60);
+    use_shape(0);
 
     // The row the last pair ended at
     let var last_end = 0;
@@ -972,14 +1106,13 @@ fun lay_sides() {
 // blocks that stand on top of it, which may be split in turn. Since the
 // noise is smooth, busy patches and bare ones both come in clumps.
 //
-// A section's blocks are worked out when it first comes into view and kept
-// in a slot of a fixed pool, which the sections that follow reuse. This is
-// done by each render worker for itself, the result depending only on the
-// seed.
+// A section's blocks are worked out ahead of time by an actor of its own,
+// which sends each section it finishes to whoever draws it or flies through
+// it. Any of those can also work one out for itself if it is needed before
+// it has come, the result depending only on the seed.
 
-let NUM_SLOTS = 40;
-let MAX_NODES = 1600;
-let MAX_POLYS = 1200;
+let MAX_NODES = 3600;
+let MAX_POLYS = 2200;
 let POLY_VERTS = 8;
 
 // How many times a cell may be split, and the tallest a stack of blocks
@@ -1008,55 +1141,53 @@ let GLOW_G = 10.0;
 let GLOW_B = 8.0;
 
 // The outside of the ship is made of nodes too, which are kept after
-// those of the sections
+// those of the section being worked out
 let HULL_NODES = 48000;
-let HULL_NODE0 = NUM_SLOTS * MAX_NODES;
+let HULL_NODE0 = MAX_NODES;
 
-// So are the walls of the side tunnels, which come after those
-let SIDE_NODES = 6000;
+// So are the walls of the side tunnels and the end walls of the hangars,
+// which come after those
+let SIDE_NODES = 14000;
 let SIDE_NODE0 = HULL_NODE0 + HULL_NODES;
 let NODE_POOL = SIDE_NODE0 + SIDE_NODES;
-
-// The section each slot holds
-let slot_section = Array.with_size(NUM_SLOTS, -1);
 
 // For each node: its corner on the wall, its width, how far it stands out,
 // the first of its four children if it has any, and the color of its top
 // and of the sides that face up and down the tunnel and across the wall.
 // The top's color leaves out the glow of the pipes, which is kept for each
 // of its corners and blended across it, along with whether there is any.
-let nd_u = Array.with_size(NODE_POOL, 0.0);
-let nd_z = Array.with_size(NODE_POOL, 0.0);
-let nd_size = Array.with_size(NODE_POOL, 0.0);
-let nd_h = Array.with_size(NODE_POOL, 0.0);
-let nd_child = Array.with_size(NODE_POOL, -1);
-let nd_top = Array.with_size(NODE_POOL, 0);
-let nd_front = Array.with_size(NODE_POOL, 0);
-let nd_back = Array.with_size(NODE_POOL, 0);
-let nd_lo = Array.with_size(NODE_POOL, 0);
-let nd_hi = Array.with_size(NODE_POOL, 0);
-let nd_glow0 = Array.with_size(NODE_POOL, 0.0);
-let nd_glow1 = Array.with_size(NODE_POOL, 0.0);
-let nd_glow2 = Array.with_size(NODE_POOL, 0.0);
-let nd_glow3 = Array.with_size(NODE_POOL, 0.0);
-let nd_lit = Array.with_size(NODE_POOL, false);
+let var nd_u = Array.with_size(NODE_POOL, 0.0);
+let var nd_z = Array.with_size(NODE_POOL, 0.0);
+let var nd_size = Array.with_size(NODE_POOL, 0.0);
+let var nd_h = Array.with_size(NODE_POOL, 0.0);
+let var nd_child = Array.with_size(NODE_POOL, -1);
+let var nd_top = Array.with_size(NODE_POOL, 0);
+let var nd_front = Array.with_size(NODE_POOL, 0);
+let var nd_back = Array.with_size(NODE_POOL, 0);
+let var nd_lo = Array.with_size(NODE_POOL, 0);
+let var nd_hi = Array.with_size(NODE_POOL, 0);
+let var nd_glow0 = Array.with_size(NODE_POOL, 0.0);
+let var nd_glow1 = Array.with_size(NODE_POOL, 0.0);
+let var nd_glow2 = Array.with_size(NODE_POOL, 0.0);
+let var nd_glow3 = Array.with_size(NODE_POOL, 0.0);
+let var nd_lit = Array.with_size(NODE_POOL, false);
 
 // For each cell of a section: its root node, and its share of the faces
 // of the pipes
-let cell_node = Array.with_size(NUM_SLOTS * SEC_CELLS, 0);
-let cell_poly0 = Array.with_size(NUM_SLOTS * SEC_CELLS, 0);
-let cell_poly1 = Array.with_size(NUM_SLOTS * SEC_CELLS, 0);
+let var cell_node = Array.with_size(SEC_CELLS, 0);
+let var cell_poly0 = Array.with_size(SEC_CELLS, 0);
+let var cell_poly1 = Array.with_size(SEC_CELLS, 0);
 
 // The faces of the pipes: how many corners each has, its color, the way it
 // faces and where its corners are
-let pp_n = Array.with_size(NUM_SLOTS * MAX_POLYS, 0);
-let pp_color = Array.with_size(NUM_SLOTS * MAX_POLYS, 0);
-let pp_nx = Array.with_size(NUM_SLOTS * MAX_POLYS, 0.0);
-let pp_ny = Array.with_size(NUM_SLOTS * MAX_POLYS, 0.0);
-let pp_nz = Array.with_size(NUM_SLOTS * MAX_POLYS, 0.0);
-let pp_x = Array.with_size(NUM_SLOTS * MAX_POLYS * POLY_VERTS, 0.0);
-let pp_y = Array.with_size(NUM_SLOTS * MAX_POLYS * POLY_VERTS, 0.0);
-let pp_z = Array.with_size(NUM_SLOTS * MAX_POLYS * POLY_VERTS, 0.0);
+let var pp_n = Array.with_size(MAX_POLYS, 0);
+let var pp_color = Array.with_size(MAX_POLYS, 0);
+let var pp_nx = Array.with_size(MAX_POLYS, 0.0);
+let var pp_ny = Array.with_size(MAX_POLYS, 0.0);
+let var pp_nz = Array.with_size(MAX_POLYS, 0.0);
+let var pp_x = Array.with_size(MAX_POLYS * POLY_VERTS, 0.0);
+let var pp_y = Array.with_size(MAX_POLYS * POLY_VERTS, 0.0);
+let var pp_z = Array.with_size(MAX_POLYS * POLY_VERTS, 0.0);
 
 let light_noise = FractalNoise({ seed: WORLD_SEED, frequency: 1.0 / 90.0, octaves: 2 });
 let busy_noise = FractalNoise({ seed: WORLD_SEED + 1, frequency: 1.0 / 140.0, octaves: 2, min: 0.0, max: 1.0 });
@@ -1071,6 +1202,154 @@ let var gen_nodes = 0;
 let var gen_poly0 = 0;
 let var gen_polys = 0;
 let var gen_wall = 0;
+
+// How many times a cell of that section may be split
+let var gen_depth = MAX_DEPTH;
+
+// The arrays above as they were made, which hold the section being worked
+// out, the side of the ship and the walls of the side tunnels and hangars.
+// While a finished section is being drawn, the names above are pointed at
+// its own arrays instead.
+let st_u = nd_u;
+let st_z = nd_z;
+let st_size = nd_size;
+let st_h = nd_h;
+let st_child = nd_child;
+let st_top = nd_top;
+let st_front = nd_front;
+let st_back = nd_back;
+let st_lo = nd_lo;
+let st_hi = nd_hi;
+let st_glow0 = nd_glow0;
+let st_glow1 = nd_glow1;
+let st_glow2 = nd_glow2;
+let st_glow3 = nd_glow3;
+let st_lit = nd_lit;
+let st_cell_node = cell_node;
+let st_cell_poly0 = cell_poly0;
+let st_cell_poly1 = cell_poly1;
+let st_pp_n = pp_n;
+let st_pp_color = pp_color;
+let st_pp_nx = pp_nx;
+let st_pp_ny = pp_ny;
+let st_pp_nz = pp_nz;
+let st_pp_x = pp_x;
+let st_pp_y = pp_y;
+let st_pp_z = pp_z;
+
+// A finished section, with its own copy of each of those arrays that is
+// only as long as what the section has in it
+class Section {
+    init(self, k) {
+        let n = gen_nodes;
+        let p = gen_polys;
+        self.k = k;
+        self.u = nd_u.slice(0, n);
+        self.z = nd_z.slice(0, n);
+        self.size = nd_size.slice(0, n);
+        self.h = nd_h.slice(0, n);
+        self.child = nd_child.slice(0, n);
+        self.top = nd_top.slice(0, n);
+        self.front = nd_front.slice(0, n);
+        self.back = nd_back.slice(0, n);
+        self.lo = nd_lo.slice(0, n);
+        self.hi = nd_hi.slice(0, n);
+        self.glow0 = nd_glow0.slice(0, n);
+        self.glow1 = nd_glow1.slice(0, n);
+        self.glow2 = nd_glow2.slice(0, n);
+        self.glow3 = nd_glow3.slice(0, n);
+        self.lit = nd_lit.slice(0, n);
+        self.cell_node = cell_node.slice(0, SEC_CELLS);
+        self.cell_poly0 = cell_poly0.slice(0, SEC_CELLS);
+        self.cell_poly1 = cell_poly1.slice(0, SEC_CELLS);
+        self.pp_n = pp_n.slice(0, p);
+        self.pp_color = pp_color.slice(0, p);
+        self.pp_nx = pp_nx.slice(0, p);
+        self.pp_ny = pp_ny.slice(0, p);
+        self.pp_nz = pp_nz.slice(0, p);
+        self.pp_x = pp_x.slice(0, p * POLY_VERTS);
+        self.pp_y = pp_y.slice(0, p * POLY_VERTS);
+        self.pp_z = pp_z.slice(0, p * POLY_VERTS);
+    }
+}
+
+// Point the arrays at those of a finished section
+fun bind_section(sec) {
+    nd_u = sec.u;
+    nd_z = sec.z;
+    nd_size = sec.size;
+    nd_h = sec.h;
+    nd_child = sec.child;
+    nd_top = sec.top;
+    nd_front = sec.front;
+    nd_back = sec.back;
+    nd_lo = sec.lo;
+    nd_hi = sec.hi;
+    nd_glow0 = sec.glow0;
+    nd_glow1 = sec.glow1;
+    nd_glow2 = sec.glow2;
+    nd_glow3 = sec.glow3;
+    nd_lit = sec.lit;
+    cell_node = sec.cell_node;
+    cell_poly0 = sec.cell_poly0;
+    cell_poly1 = sec.cell_poly1;
+    pp_n = sec.pp_n;
+    pp_color = sec.pp_color;
+    pp_nx = sec.pp_nx;
+    pp_ny = sec.pp_ny;
+    pp_nz = sec.pp_nz;
+    pp_x = sec.pp_x;
+    pp_y = sec.pp_y;
+    pp_z = sec.pp_z;
+}
+
+// Point the arrays back at the ones they were made with
+fun bind_static() {
+    nd_u = st_u;
+    nd_z = st_z;
+    nd_size = st_size;
+    nd_h = st_h;
+    nd_child = st_child;
+    nd_top = st_top;
+    nd_front = st_front;
+    nd_back = st_back;
+    nd_lo = st_lo;
+    nd_hi = st_hi;
+    nd_glow0 = st_glow0;
+    nd_glow1 = st_glow1;
+    nd_glow2 = st_glow2;
+    nd_glow3 = st_glow3;
+    nd_lit = st_lit;
+    cell_node = st_cell_node;
+    cell_poly0 = st_cell_poly0;
+    cell_poly1 = st_cell_poly1;
+    pp_n = st_pp_n;
+    pp_color = st_pp_color;
+    pp_nx = st_pp_nx;
+    pp_ny = st_pp_ny;
+    pp_nz = st_pp_nz;
+    pp_x = st_pp_x;
+    pp_y = st_pp_y;
+    pp_z = st_pp_z;
+}
+
+// The finished sections that are being kept, by where they are in the run
+let sections = Array.with_size(NUM_SECTIONS, nil);
+
+// Sections this far behind the camera are let go of, and the first of
+// those still kept
+let KEEP_BEHIND = 20;
+let var kept_from = 0;
+
+// Let go of the sections that have been left behind
+fun drop_sections() {
+    let lo = ((cam_z / SEC_LEN).floor() - KEEP_BEHIND).clip(0, NUM_SECTIONS);
+    if (lo < kept_from) kept_from = lo;
+    while (kept_from < lo) {
+        sections[kept_from] = nil;
+        kept_from = kept_from + 1;
+    }
+}
 
 // The axes of the pipes near the section being built, each a line along
 // one of the world's axes from a low end to a high end, with its radius
@@ -1100,6 +1379,11 @@ fun note_pipe(id) {
     gl_n = gl_n + 1;
     gl_id[i] = id;
 
+    // It lies on the walls as they are where it is, which may not be as
+    // they are in the section being built
+    let keep = shape;
+    use_shape(pipe_shape(id));
+
     // A pipe rests on the wall, so its axis is its radius out from it
     if (pk_kind[id] == PIPE_ALONG) {
         wall_point(w, pk_at[id], r);
@@ -1120,6 +1404,7 @@ fun note_pipe(id) {
 
     gl_r[i] = r;
     gl_inv[i] = 1.0 / (GLOW_FALL + GLOW_FALL_R * r);
+    use_shape(keep);
 }
 
 // How much red light reaches a point on a surface that faces a given way,
@@ -1197,7 +1482,8 @@ fun build_node(n, u0, z0, size, depth, base_h, flat) {
     // one ends and the next begins when they are level
     let g = 1.0 / (size * 0.7);
     let tone = 0.86 + 0.34 * perlin3d(x * g + 9.1, y * g, zc * g, TONE_SEED + depth);
-    let white = 0.236 + 0.091 * light_noise.sample3d(x, y, zc);
+    let var white = 0.236 + 0.091 * light_noise.sample3d(x, y, zc);
+    if (shape > 0) white = white * HANGAR_LIGHT;
 
     // The glow at each corner of the top, in the order they are drawn in
     let nx = WALL_HX[w];
@@ -1225,7 +1511,7 @@ fun build_node(n, u0, z0, size, depth, base_h, flat) {
         nd_hi[n] = face_color(tone, white * 0.62, uc + half, mid, zc, 1.0, 0.0, 0.0);
     }
 
-    if (depth >= MAX_DEPTH || gen_nodes + 4 > MAX_NODES) return;
+    if (depth >= gen_depth || gen_nodes + 4 > MAX_NODES - SEC_CELLS) return;
 
     let var split = false;
     if (flat) {
@@ -1371,17 +1657,57 @@ fun pipe_over(id, w, cell) {
     return at == cell;
 }
 
-// Work out a section and put it in a slot
-fun build_section(k, slot) {
-    slot_section[slot] = k;
-    gen_node0 = slot * MAX_NODES;
+// Work out one cell of the wall being built, given the pipes in its row
+fun build_cell(row, w, cell, ids) {
+    let c = (row % SEC_ROWS) * ROW_CELLS + WALL_FIRST[w] + cell;
+
+    let var flat = false;
+    for (let var i = 0; i < ids.len; ++i) {
+        if (pipe_over(ids[i], w, cell)) flat = true;
+    }
+
+    let root = gen_node0 + gen_nodes;
+    gen_nodes = gen_nodes + 1;
+    cell_node[c] = root;
+
+    // Where a side tunnel opens there is no wall, and so nothing to draw
+    if (row_side[row * NUM_WALLS + w] >= 0) {
+        nd_u[root] = WALL_U0[w] + cell * CELL;
+        nd_z[root] = row * CELL;
+        nd_size[root] = CELL;
+        nd_h[root] = WALL_OPEN;
+        nd_child[root] = -1;
+        nd_lit[root] = false;
+    } else {
+        build_node(root, WALL_U0[w] + cell * CELL, row * CELL, CELL, 0, 0.0, flat);
+    }
+
+    cell_poly0[c] = gen_poly0 + gen_polys;
+    for (let var i = 0; i < ids.len; ++i) {
+        let id = ids[i];
+        if (!pipe_over(id, w, cell)) continue;
+        if (pk_kind[id] == PIPE_ALONG) add_along(id, row);
+        else add_across(id, cell);
+    }
+    cell_poly1[c] = gen_poly0 + gen_polys;
+}
+
+// Work out a section
+fun build_section(k) {
+    gen_node0 = 0;
     gen_nodes = 0;
-    gen_poly0 = slot * MAX_POLYS;
+    gen_poly0 = 0;
     gen_polys = 0;
+
+    let row0 = k * SEC_ROWS;
+    use_shape(row_shape(row0));
+
+    // The walls of a hangar are never seen from close to
+    gen_depth = MAX_DEPTH;
+    if (shape > 0) gen_depth = 2;
 
     // The pipes close enough to light it, which includes those in the rows
     // to either side
-    let row0 = k * SEC_ROWS;
     gl_n = 0;
     for (let var row = row0 - 1; row <= row0 + SEC_ROWS; ++row) {
         if (row < 0 || row >= NUM_ROWS) continue;
@@ -1389,52 +1715,31 @@ fun build_section(k, slot) {
         for (let var i = 0; i < ids.len; ++i) note_pipe(ids[i]);
     }
 
-    for (let var c = 0; c < SEC_CELLS; ++c) {
-        let row = row0 + c.idiv(ROW_CELLS);
-        let in_row = c % ROW_CELLS;
-        let var w = 0;
-        while (w < NUM_WALLS - 1 && in_row >= WALL_FIRST[w + 1]) ++w;
-        let cell = in_row - WALL_FIRST[w];
+    for (let var r = 0; r < SEC_ROWS; ++r) {
+        let row = row0 + r;
         let ids = row_pipes[row];
-        gen_wall = w;
 
-        let var flat = false;
-        for (let var i = 0; i < ids.len; ++i) {
-            if (pipe_over(ids[i], w, cell)) flat = true;
+        for (let var w = 0; w < NUM_WALLS; ++w) {
+            gen_wall = w;
+            for (let var cell = 0; cell < WALL_CELLS[w]; ++cell) build_cell(row, w, cell, ids);
         }
-
-        let root = gen_node0 + gen_nodes;
-        gen_nodes = gen_nodes + 1;
-        cell_node[slot * SEC_CELLS + c] = root;
-
-        // Where a side tunnel opens there is no wall, and so nothing to draw
-        if (row_side[row * NUM_WALLS + w] >= 0) {
-            nd_u[root] = WALL_U0[w] + cell * CELL;
-            nd_z[root] = row * CELL;
-            nd_size[root] = CELL;
-            nd_h[root] = WALL_OPEN;
-            nd_child[root] = -1;
-            nd_lit[root] = false;
-        } else {
-            build_node(root, WALL_U0[w] + cell * CELL, row * CELL, CELL, 0, 0.0, flat);
-        }
-
-        cell_poly0[slot * SEC_CELLS + c] = gen_poly0 + gen_polys;
-        for (let var i = 0; i < ids.len; ++i) {
-            let id = ids[i];
-            if (!pipe_over(id, w, cell)) continue;
-            if (pk_kind[id] == PIPE_ALONG) add_along(id, row);
-            else add_across(id, cell);
-        }
-        cell_poly1[slot * SEC_CELLS + c] = gen_poly0 + gen_polys;
     }
 }
 
-// The slot a section is in, working the section out first if need be
-fun section_slot(k) {
-    let slot = k % NUM_SLOTS;
-    if (slot_section[slot] != k) build_section(k, slot);
-    return slot;
+// Work out a section and make a copy of it to keep
+fun make_section(k) {
+    build_section(k);
+    return Section(k);
+}
+
+// A finished section, working it out first if it has not come
+fun get_section(k) {
+    let var sec = sections[k];
+    if (sec == nil) {
+        sec = make_section(k);
+        sections[k] = sec;
+    }
+    return sec;
 }
 
 // How far the blocks stand out from a wall at a place on it, as long as
@@ -1443,24 +1748,28 @@ fun block_height(w, u, z) {
     let row = (z / CELL).floor();
     let k = row.idiv(SEC_ROWS);
     let near = (cam_z / SEC_LEN).floor();
-    if (k < 0 || k >= NUM_SECTIONS || k < near - 2 || k > near + NUM_SLOTS - 4) return 0.0;
+    if (k < 0 || k >= NUM_SECTIONS || k < near - DRAW_BEHIND || k > near + DRAW_AHEAD + 1) return 0.0;
 
-    let slot = section_slot(k);
+    let sec = get_section(k);
     let cell = ((u - WALL_U0[w]) / CELL).floor().clip(0, WALL_CELLS[w] - 1);
-    let var n = cell_node[slot * SEC_CELLS + (row % SEC_ROWS) * ROW_CELLS + WALL_FIRST[w] + cell];
+    let var n = sec.cell_node[(row % SEC_ROWS) * ROW_CELLS + WALL_FIRST[w] + cell];
 
     // Down to the smallest block the place is on
+    let kids = sec.child;
+    let sizes = sec.size;
+    let us = sec.u;
+    let zs = sec.z;
     loop {
-        let child = nd_child[n];
+        let child = kids[n];
         if (child < 0) break;
-        let half = nd_size[n] * 0.5;
+        let half = sizes[n] * 0.5;
         let var pick = child;
-        if (u >= nd_u[n] + half) pick = pick + 1;
-        if (z >= nd_z[n] + half) pick = pick + 2;
+        if (u >= us[n] + half) pick = pick + 1;
+        if (z >= zs[n] + half) pick = pick + 2;
         n = pick;
     }
 
-    return nd_h[n];
+    return sec.h[n];
 }
 
 // --- The outside of the ship ---
@@ -2001,6 +2310,9 @@ let var draw_depth = 0;
 // The walls in the order they are drawn in, furthest from the camera first
 let wall_order = [0, 1, 2, 3];
 
+// The shape the walls were last put in order for
+let var sorted_shape = 0;
+
 fun set_wall(w) {
     wall_coords(w, cam_x, cam_y);
     wall_cam_u = wc_u;
@@ -2160,7 +2472,7 @@ let MAX_REACH = MAX_BLOCK + 1.0;
 
 // Draw one cell of the wall that has been set: its blocks, then whatever
 // pipes lie over it
-fun draw_cell(slot, row, w, cell) {
+fun draw_cell(row, w, cell) {
     let u0 = WALL_U0[w] + cell * CELL;
     let z0 = row * CELL;
 
@@ -2188,7 +2500,7 @@ fun draw_cell(slot, row, w, cell) {
     fog_k = (fog_at((z0 + CELL * 0.5 - cam_z).abs()) * 256.0).floor();
     if (fog_k <= 0) return;
 
-    let c = slot * SEC_CELLS + (row % SEC_ROWS) * ROW_CELLS + WALL_FIRST[w] + cell;
+    let c = (row % SEC_ROWS) * ROW_CELLS + WALL_FIRST[w] + cell;
     draw_node(cell_node[c], 0);
 
     let end = cell_poly1[c];
@@ -2243,7 +2555,8 @@ fun build_side_node(n, u0, v0, size, depth, base_h, seed) {
     // The same metal under the same light as the walls of the main tunnel
     let g = 1.0 / (size * 0.7);
     let tone = 0.86 + 0.34 * perlin3d(uc * g + 9.1, vc * g, 4.2, seed + 100 + depth);
-    let white = 0.236 + 0.091 * light_noise.sample3d(uc, vc, seed * 3.1);
+    let var white = 0.236 + 0.091 * light_noise.sample3d(uc, vc, seed * 3.1);
+    if (seed == END_SEED) white = white * HANGAR_LIGHT;
     nd_top[n] = metal_color(tone, white, 0.0);
     nd_front[n] = metal_color(tone, white * 0.80, 0.0);
     nd_back[n] = nd_front[n];
@@ -2330,6 +2643,129 @@ fun build_sides() {
             else build_side_node(root, u0, v0, CELL, 0, 0.0, seed);
         }
     }
+}
+
+// The two end walls of a hangar are covered in blocks as well, around the
+// mouth of the tunnel. There is one set of them, as big as the end wall of
+// the largest hangar, and every end wall is drawn from the middle of it.
+// Across it u is how far it is from the left and v how far up.
+let END_COLS = HANGAR_COLS_MAX;
+let END_ROWS = HANGAR_TALL_MAX;
+let END_W = END_COLS * CELL * 0.5;
+let END_H = END_ROWS * CELL * 0.5;
+let end_roots = [];
+
+// Where the mouth of the tunnel is in it
+let MOUTH_U0 = END_W - HALF_W;
+let MOUTH_U1 = END_W + HALF_W;
+let MOUTH_V0 = END_H - HALF_H;
+let MOUTH_V1 = END_H + HALF_H;
+
+// Pipes frame the mouth on all four sides, this far out from its edge and
+// this thick
+let FRAME_AT = [6.0, 12.5];
+let FRAME_R = 1.6;
+
+// How much of the glow of the pipes round the mouth reaches a place on the
+// wall they rest on
+fun frame_glow(u, v) {
+    let var sum = 0.0;
+    for (let var i = 0; i < FRAME_AT.len; ++i) {
+        let ua = MOUTH_U0 - FRAME_AT[i];
+        let ub = MOUTH_U1 + FRAME_AT[i];
+        let va = MOUTH_V0 - FRAME_AT[i];
+        let vb = MOUTH_V1 + FRAME_AT[i];
+
+        // How far it is from the path of the pipes, along the wall
+        let out_u = (ua - u).max(u - ub);
+        let out_v = (va - v).max(v - vb);
+        let var along = 0.0 - out_u.max(out_v);
+        if (out_u > 0.0 || out_v > 0.0) {
+            let du = out_u.max(0.0);
+            let dv = out_v.max(0.0);
+            along = (du * du + dv * dv).sqrt();
+        }
+
+        let dist = (along * along + FRAME_R * FRAME_R).sqrt();
+        let t = (1.0 - (dist - FRAME_R) / RIM_FALL).clip(0.0, 1.0);
+        sum = sum + GLOW_LEVEL * (0.45 + 0.55 * FRAME_R / dist) * t * t;
+    }
+    return sum.min(1.0);
+}
+
+// Fill in a node of the part of an end wall round the mouth, which is kept
+// bare for the pipes to rest on, and cut small enough to show their glow
+fun build_frame_node(n, u0, v0, size, depth) {
+    nd_u[n] = u0;
+    nd_z[n] = v0;
+    nd_size[n] = size;
+    nd_h[n] = 0.0;
+    nd_child[n] = -1;
+
+    let g = 1.0 / (size * 0.7);
+    let tone = 0.86 + 0.34 * perlin3d((u0 + size * 0.5) * g + 9.1, (v0 + size * 0.5) * g, 4.2, END_SEED + depth);
+    nd_top[n] = metal_color(tone, 0.236 * HANGAR_LIGHT, 0.0);
+
+    nd_glow0[n] = frame_glow(u0, v0);
+    nd_glow1[n] = frame_glow(u0 + size, v0);
+    nd_glow2[n] = frame_glow(u0 + size, v0 + size);
+    nd_glow3[n] = frame_glow(u0, v0 + size);
+    nd_lit[n] = nd_glow0[n] + nd_glow1[n] + nd_glow2[n] + nd_glow3[n] > 0.002;
+
+    if (depth >= 2 || side_nodes + 4 > SIDE_NODES) return;
+    let child = SIDE_NODE0 + side_nodes;
+    side_nodes = side_nodes + 4;
+    nd_child[n] = child;
+
+    let half = size * 0.5;
+    for (let var k = 0; k < 4; ++k) {
+        build_frame_node(child + k, u0 + (k & 1) * half, v0 + (k >> 1) * half, half, depth + 1);
+    }
+}
+
+fun build_ends() {
+    for (let var c = 0; c < END_COLS * END_ROWS; ++c) {
+        let root = SIDE_NODE0 + side_nodes;
+        side_nodes = side_nodes + 1;
+        end_roots.push(root);
+
+        let u0 = (c % END_COLS) * CELL;
+        let v0 = c.idiv(END_COLS) * CELL;
+        if (u0 >= MOUTH_U0 && u0 < MOUTH_U1 && v0 >= MOUTH_V0 && v0 < MOUTH_V1) {
+            nd_u[root] = u0;
+            nd_z[root] = v0;
+            nd_size[root] = CELL;
+            nd_h[root] = WALL_OPEN;
+            nd_child[root] = -1;
+            nd_lit[root] = false;
+        } else if (u0 >= MOUTH_U0 - CELL && u0 < MOUTH_U1 + CELL && v0 >= MOUTH_V0 - CELL && v0 < MOUTH_V1 + CELL) {
+            build_frame_node(root, u0, v0, CELL, 0);
+        } else {
+            build_side_node(root, u0, v0, CELL, 0, 0.0, END_SEED);
+        }
+    }
+}
+
+// How far the blocks stand out from an end wall of a hangar at a place in
+// the world, or nothing where the mouth is
+fun end_height(x, y) {
+    let u = x + END_W;
+    let v = y + END_H;
+    let col = (u / CELL).floor().clip(0, END_COLS - 1);
+    let row = (v / CELL).floor().clip(0, END_ROWS - 1);
+    let var n = end_roots[row * END_COLS + col];
+
+    loop {
+        let child = nd_child[n];
+        if (child < 0) break;
+        let half = nd_size[n] * 0.5;
+        let var pick = child;
+        if (u >= nd_u[n] + half) pick = pick + 1;
+        if (v >= nd_z[n] + half) pick = pick + 2;
+        n = pick;
+    }
+
+    return nd_h[n].max(0.0);
 }
 
 // Set up a wall to draw that lies anywhere, given a corner of it and
@@ -2447,6 +2883,106 @@ fun draw_side_wall(t, fog) {
     }
 }
 
+// Draw one of the pipes round the mouth on the end wall that has been set
+// up, which runs either across the wall or up it, from one place to another
+fun draw_frame_pipe(across, at, lo, hi) {
+    let var cam_d = wall_cam_u;
+    if (across) cam_d = wall_cam_v;
+
+    for (let var j = 0; j < PIPE_SIDES; ++j) {
+        let a0 = pipe_angle(j);
+        let a1 = pipe_angle(j + 1);
+        let am = (a0 + a1) * 0.5;
+        let d0 = at + FRAME_R * a0.cos();
+        let h0 = FRAME_R + FRAME_R * a0.sin();
+        if ((cam_d - d0) * am.cos() + (wall_cam_h - h0) * am.sin() <= 0.0) continue;
+
+        let d1 = at + FRAME_R * a1.cos();
+        let h1 = FRAME_R + FRAME_R * a1.sin();
+        if (across) {
+            wall_corner(0, lo, d0, h0);
+            wall_corner(1, lo, d1, h1);
+            wall_corner(2, hi, d1, h1);
+            wall_corner(3, hi, d0, h0);
+        } else {
+            wall_corner(0, d0, lo, h0);
+            wall_corner(1, d1, lo, h1);
+            wall_corner(2, d1, hi, h1);
+            wall_corner(3, d0, hi, h0);
+        }
+        fill_face(0, 1, 2, 3, PIPE_COLOR);
+    }
+}
+
+// Draw an end wall of a hangar, given how far down the tunnel it is and
+// which way along the tunnel it faces, if the camera is in front of it
+fun draw_hangar_end(id, z, facing) {
+    let fog = fog_at((z - cam_z).abs());
+    if (fog <= 0.0) return;
+
+    set_frame(0.0 - END_W, 0.0 - END_H, z, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, facing);
+    if (wall_cam_h <= 0.0) return;
+
+    draw_depth = SIDE_SPLITS;
+    if (wall_cam_h > 250.0) draw_depth = 1;
+    if (wall_cam_h > 600.0) draw_depth = 0;
+    let dim = (fog * 256.0).floor();
+
+    // The part of the set that this hangar's end wall takes up
+    let cols = hg_cols[id];
+    let tall = hg_tall[id];
+    let col0 = (END_COLS - cols).idiv(2);
+    let row0 = (END_ROWS - tall).idiv(2);
+
+    // Rows from the top and the bottom in towards the one the camera is
+    // level with, and each from both ends in towards the camera
+    let mid_u = (wall_cam_u / CELL).floor().clip(col0, col0 + cols - 1) - col0;
+    let mid_v = (wall_cam_v / CELL).floor().clip(row0, row0 + tall - 1) - row0;
+
+    for (let var i = 0; i < tall; ++i) {
+        let var row = i;
+        if (i >= mid_v) row = tall - 1 - (i - mid_v);
+        row = row + row0;
+
+        for (let var j = 0; j < cols; ++j) {
+            let var col = j;
+            if (j >= mid_u) col = cols - 1 - (j - mid_u);
+            col = col + col0;
+
+            if (!square_hidden(col * CELL, row * CELL, CELL, SIDE_BLOCK)) {
+                fog_k = dim;
+                draw_node(end_roots[row * END_COLS + col], 0);
+            }
+        }
+    }
+
+    // The pipes round the mouth glow, so only the fog dims them
+    fog_k = dim;
+    for (let var i = FRAME_AT.len - 1; i >= 0; --i) {
+        let ua = MOUTH_U0 - FRAME_AT[i];
+        let ub = MOUTH_U1 + FRAME_AT[i];
+        let va = MOUTH_V0 - FRAME_AT[i];
+        let vb = MOUTH_V1 + FRAME_AT[i];
+        draw_frame_pipe(false, ua, va - FRAME_R, vb + FRAME_R);
+        draw_frame_pipe(false, ub, va - FRAME_R, vb + FRAME_R);
+        draw_frame_pipe(true, va, ua - FRAME_R, ub + FRAME_R);
+        draw_frame_pipe(true, vb, ua - FRAME_R, ub + FRAME_R);
+    }
+}
+
+// Draw whichever end walls of a hangar belong to a section, which are the
+// one the tunnel comes in through at its first section and the one it
+// leaves through at its last. Either is further off than the section.
+fun draw_hangar_ends(k) {
+    let id = row_hangar[k * SEC_ROWS];
+    if (id < 0) return;
+
+    let first = hg_row[id];
+    let end = first + hg_rows[id];
+    if (k * SEC_ROWS == first && cam_z > first * CELL) draw_hangar_end(id, first * CELL, 1.0);
+    if ((k + 1) * SEC_ROWS == end && cam_z < end * CELL) draw_hangar_end(id, end * CELL, -1.0);
+}
+
 // Counts the frames drawn, and the frame each side tunnel was last drawn in
 let var draw_stamp = 0;
 let side_stamp = [];
@@ -2531,7 +3067,10 @@ fun draw_end_wall() {
 
 fun draw_section(k) {
     if (k < 0 || k >= NUM_SECTIONS) return;
-    let slot = section_slot(k);
+    let sec = get_section(k);
+    use_shape(row_shape(k * SEC_ROWS));
+    if (shape != sorted_shape) sort_walls();
+    draw_hangar_ends(k);
 
     // Less of the detail is drawn the further off the section is
     let dist = (k - (cam_z / SEC_LEN).floor()).abs();
@@ -2540,8 +3079,18 @@ fun draw_section(k) {
     if (dist > 10) draw_depth = 1;
     if (dist > 18) draw_depth = 0;
 
+    // The walls of a hangar are further off to begin with
+    if (shape > 0) {
+        if (dist > 2) draw_depth = 2;
+        if (dist > 6) draw_depth = 1;
+        if (dist > 12) draw_depth = 0;
+    }
+
     if (k == NUM_SECTIONS - 1) draw_end_wall();
     draw_sides(k);
+
+    // What is left to draw is the section's own
+    bind_section(sec);
 
     // The row further from the camera goes first
     let row0 = k * SEC_ROWS;
@@ -2562,14 +3111,17 @@ fun draw_section(k) {
             // In from both edges towards the cell the camera is over
             let count = WALL_CELLS[w];
             let mid = ((wall_cam_u - WALL_U0[w]) / CELL).floor().clip(0, count - 1);
-            for (let var cell = 0; cell < mid; ++cell) draw_cell(slot, row, w, cell);
-            for (let var cell = count - 1; cell >= mid; --cell) draw_cell(slot, row, w, cell);
+            for (let var cell = 0; cell < mid; ++cell) draw_cell(row, w, cell);
+            for (let var cell = count - 1; cell >= mid; --cell) draw_cell(row, w, cell);
         }
     }
+
+    bind_static();
 }
 
 // Put the walls in order, the one the camera is furthest from first
 fun sort_walls() {
+    sorted_shape = shape;
     let dist = [0.0, 0.0, 0.0, 0.0];
     for (let var w = 0; w < NUM_WALLS; ++w) {
         wall_coords(w, cam_x, cam_y);
@@ -2673,7 +3225,16 @@ fun draw_stars() {
     }
 }
 
+// Draw a section the camera has passed, given how many sections back it
+// is. Only in a hangar is there room to see more than the last of them.
+fun draw_behind(k, back) {
+    if (k < 0) return;
+    if (back > 1 && row_hangar[k * SEC_ROWS] < 0) return;
+    draw_section(k);
+}
+
 fun render_world() {
+    drop_sections();
     polys_drawn = 0;
     draw_stamp = draw_stamp + 1;
     frame_buffer.fill_u32(render_y0 * FRAME_WIDTH, (render_y1 - render_y0) * FRAME_WIDTH, 0xFF000000);
@@ -2685,7 +3246,7 @@ fun render_world() {
 
     let cam_k = (cam_z / SEC_LEN).floor();
     for (let var d = DRAW_AHEAD; d >= 0; --d) {
-        if (d > 0 && d <= DRAW_BEHIND) draw_section(cam_k - d);
+        if (d > 0 && d <= DRAW_BEHIND) draw_behind(cam_k - d, d);
         draw_section(cam_k + d);
     }
 
@@ -2737,6 +3298,13 @@ class BandRequest {
     }
 }
 
+// Tells a worker that there is nothing more to draw
+class WorkerStop {
+    init(self) {
+        self.done = true;
+    }
+}
+
 class BandResult {
     init(self, frame_id, y0, num_bytes, pixels, tris) {
         self.frame_id = frame_id;
@@ -2753,7 +3321,18 @@ fun worker_loop() {
 
     loop {
         let msg = $actor_recv();
-        if (msg == nil) return;
+        if (msg instanceof Section) {
+            sections[msg.k] = msg;
+            continue;
+        }
+        if (!(msg instanceof BandRequest)) return;
+
+        // Take in whatever other sections have come
+        loop {
+            let more = $actor_poll();
+            if (more == nil) break;
+            if (more instanceof Section) sections[more.k] = more;
+        }
 
         render_y0 = msg.y0;
         render_y1 = msg.y1;
@@ -2784,7 +3363,7 @@ fun start_workers() {
 }
 
 fun stop_workers() {
-    for (let var i = 0; i < worker_ids.len; ++i) $actor_send(worker_ids[i], nil);
+    for (let var i = 0; i < worker_ids.len; ++i) $actor_send(worker_ids[i], WorkerStop());
     for (let var i = 0; i < worker_ids.len; ++i) $actor_join(worker_ids[i]);
 }
 
@@ -2811,11 +3390,128 @@ fun render_world_parallel() {
             pending_events.push(msg);
             continue;
         }
+        if (msg instanceof Section) {
+            sections[msg.k] = msg;
+            continue;
+        }
         if (!(msg instanceof BandResult) || msg.frame_id != frame_id) continue;
 
         frame_buffer.memcpy(msg.y0 * FRAME_WIDTH * 4, msg.pixels, 0, msg.num_bytes);
         polys_drawn = polys_drawn + msg.tris;
         received = received + 1;
+    }
+}
+
+// --- Section generator ---
+//
+// One actor works the sections out ahead of the fighter, and sends each to
+// the main actor and to every render worker as soon as it is done. It is
+// told now and then how far the fighter has got, and keeps going until it
+// is a set distance ahead of that.
+
+// How far ahead of the fighter it works, in sections, which is 6 kilometers
+let GEN_AHEAD = 120;
+
+// How many sections the fighter covers between one report and the next
+let GEN_REPORT = 4;
+
+// How far back the fighter can be put without anyone having let go of a
+// section that is then needed again
+let GEN_SLACK = KEEP_BEHIND - DRAW_BEHIND;
+
+// Tells the generator who to send sections to besides the main actor
+class GenStart {
+    init(self, ids) {
+        self.ids = ids;
+    }
+}
+
+// Tells it which section the fighter is in
+class GenPos {
+    init(self, k) {
+        self.k = k;
+    }
+}
+
+class GenStop {
+    init(self) {
+        self.done = true;
+    }
+}
+
+fun generator_loop() {
+    let var ids = nil;
+    let var at = 0;
+    let var next = 0;
+
+    loop {
+        // Wait when there is nothing to do, and otherwise only look
+        let idle = ids == nil || next >= (at + GEN_AHEAD).min(NUM_SECTIONS);
+        let var msg = nil;
+        if (idle) msg = $actor_recv();
+        else msg = $actor_poll();
+
+        if (msg instanceof GenStop) return;
+        if (msg instanceof GenStart) {
+            ids = msg.ids;
+            continue;
+        }
+        if (msg instanceof GenPos) {
+            // The fighter was put back further than sections are kept for
+            if (msg.k < at - GEN_SLACK) next = msg.k - DRAW_BEHIND;
+            at = msg.k;
+            next = next.max(at - DRAW_BEHIND).max(0);
+            continue;
+        }
+        if (idle) continue;
+
+        let sec = make_section(next);
+        for (let var i = 0; i < ids.len; ++i) $actor_send(ids[i], sec);
+        $actor_send($actor_parent(), sec);
+        next = next + 1;
+    }
+}
+
+let var gen_id = nil;
+
+// The section the generator was last told the fighter was in
+let var gen_told = 0;
+
+// Wait for the generator to send a section and those before it
+fun await_sections(last) {
+    let want = last.min(NUM_SECTIONS - 1);
+    while (sections[want] == nil) {
+        let msg = $actor_recv();
+        if (msg instanceof Section) sections[msg.k] = msg;
+        else if (msg instanceof UIEvent) pending_events.push(msg);
+    }
+}
+
+fun start_generator() {
+    gen_id = $actor_spawn(generator_loop);
+    $actor_send(gen_id, GenStart(worker_ids));
+    await_sections(DRAW_AHEAD + 1);
+}
+
+fun stop_generator() {
+    $actor_send(gen_id, GenStop());
+    $actor_join(gen_id);
+}
+
+// Tell the generator where the fighter is, if it has moved on far enough
+// or been put back
+fun report_progress() {
+    let k = (cam_z / SEC_LEN).floor().clip(0, NUM_SECTIONS - 1);
+    if (k < gen_told + GEN_REPORT && k >= gen_told) return;
+
+    let back = k < gen_told - GEN_SLACK;
+    gen_told = k;
+    $actor_send(gen_id, GenPos(k));
+
+    // After a restart, hold on for what is in view to be worked out again
+    if (back) {
+        for (let var j = (k - DRAW_BEHIND).max(0); j <= (k + DRAW_AHEAD + 1).min(NUM_SECTIONS - 1); ++j) sections[j] = nil;
+        await_sections(k + DRAW_AHEAD + 1);
     }
 }
 
@@ -2964,6 +3660,17 @@ fun hits_tunnel(x, y, z) {
 
     let row = (z / CELL).floor();
     let ids = row_pipes[row];
+    use_shape(row_shape(row));
+
+    // In a hangar there are the end walls to hit, to either side of the
+    // mouth of the tunnel and above it
+    let hangar = row_hangar[row];
+    if (hangar >= 0 && (x.abs() > HALF_W - margin || y.abs() > HALF_H - margin)) {
+        let z0 = hg_row[hangar] * CELL;
+        let z1 = z0 + hg_rows[hangar] * CELL;
+        let gap = (z - z0).min(z1 - z);
+        if (gap < SIDE_BLOCK + margin && gap < end_height(x, y) + margin) return true;
+    }
 
     for (let var w = 0; w < NUM_WALLS; ++w) {
         wall_coords(w, x, y);
@@ -3077,8 +3784,9 @@ fun update_flight(dt) {
     if (hits_tunnel(cam_x, cam_y, cam_z)) {
         // Back inside the walls, to keep the wreck from looking through them
         if (cam_z >= 0.0) {
-            let limit_x = HALF_W - CRASH_CLEARANCE;
-            let limit_y = HALF_H - CRASH_CLEARANCE;
+            use_shape(row_shape((cam_z / CELL).floor().min(NUM_ROWS - 1)));
+            let limit_x = shape_w - CRASH_CLEARANCE;
+            let limit_y = shape_h - CRASH_CLEARANCE;
             cam_x = cam_x.clip(0.0 - limit_x, limit_x);
             cam_y = cam_y.clip(0.0 - limit_y, limit_y);
         }
@@ -3724,7 +4432,7 @@ fun update_cannons(dt) {
         if (z >= RUN_LEN || hits_tunnel(x, y, z)) {
             // A round that struck inside the tunnel flashes on its wall
             if (z < 0.0) add_impact(x, y, z);
-            else add_impact(x.clip(0.0 - HALF_W, HALF_W), y.clip(0.0 - HALF_H, HALF_H), z.min(RUN_LEN));
+            else add_impact(x.clip(0.0 - shape_w, shape_w), y.clip(0.0 - shape_h, shape_h), z.min(RUN_LEN));
             rd_age[i] = -1.0;
         } else if (age + dt > ROUND_LIFE) {
             rd_age[i] = -1.0;
@@ -4502,6 +5210,9 @@ fun shake_view() {
 }
 
 fun render_frame() {
+    report_progress();
+    drop_sections();
+
     // The shake is only in what is drawn, so the flight is left as it was
     let saved = [cam_x, cam_y, right_x, right_y, right_z, up_x, up_y, up_z, fwd_x, fwd_y, fwd_z];
     if (shake > 0.0) shake_view();
@@ -4570,13 +5281,16 @@ fun run_bench(num_frames, shot_dir) {
 
 // --- Main ---
 
+lay_hangars();
 lay_pipes();
 lay_sides();
 build_sides();
+build_ends();
 build_hull();
 build_stars();
 reset_flight();
 start_workers();
+start_generator();
 
 if (BENCH_MODE) {
     let num_frames = $cmd_get_arg_or(2, "120").parse_int(10);
@@ -4586,6 +5300,7 @@ if (BENCH_MODE) {
     }
 
     run_bench(num_frames, $cmd_get_arg_or(3, ""));
+    stop_generator();
     stop_workers();
     $exit(0);
 }
@@ -4643,6 +5358,7 @@ loop {
         if (pending_events.len > 0) msg = pending_events.remove(0);
         else msg = $actor_poll();
         if (msg == nil) break;
+        if (msg instanceof Section) sections[msg.k] = msg;
         if (!(msg instanceof UIEvent)) continue;
 
         if (msg.kind == 'CLOSE_WINDOW') {
@@ -4686,6 +5402,7 @@ loop {
     $window_draw_frame(window, frame_buffer);
 }
 
+stop_generator();
 stop_workers();
 
 // Shut the audio actor down
