@@ -1,0 +1,380 @@
+from mp3 import MP3Decoder;
+
+// Clips written by an encoder that is not this library, from the tones
+// that source() gives
+
+// Joint stereo at 44100 Hz, 4410 samples, with the delay and padding of
+// the encoder stored in a first frame of information
+let MP3_STEREO = #[\x
+    FF FB 60 44 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    00 00 00 00 00 00 00 00 00 00 00 00 49 6E 66 6F 00 00 00 0F 00 00 00 05
+    00 00 06 1F 00 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33
+    66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 99 99 99 99
+    99 99 99 99 99 99 99 99 99 99 99 99 99 99 99 99 CC CC CC CC CC CC CC CC
+    CC CC CC CC CC CC CC CC CC CC CC CC FF FF FF FF FF FF FF FF FF FF FF FF
+    FF FF FF FF FF FF FF FF 00 00 00 39 4C 41 4D 45 33 2E 31 30 30 01 87 00
+    00 00 00 2E 41 00 00 14 50 24 03 06 4E 00 00 50 00 00 06 1F 4F E8 AC 84
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 FF FB 60
+    44 00 00 01 5C 04 DB ED 0C 20 0C 2B C0 0B AD A0 8C 01 87 7C 61 6B B9 82
+    80 10 F6 0F A9 C3 37 40 00 00 00 4A 6E 3B 85 B2 40 EE E7 02 00 00 20 1C
+    1F 07 C1 F2 80 80 20 73 13 9F C4 00 80 21 83 E0 FB FF E9 F3 9C BF 9C E5
+    FD DD 3E EE 94 92 44 80 A3 97 5B 24 00 F8 3E 0F 87 CA 14 74 1F 04 0E 02
+    10 4C 1F 07 C3 F8 80 31 C1 F7 EA 77 E7 F9 4F 0F F0 23 B8 7F 94 F7 F4 7B
+    C0 00 09 23 01 81 00 80 40 20 00 00 00 01 F6 21 A6 88 59 C5 82 46 9C 88
+    91 E4 D8 D8 41 91 59 EE F9 EF 01 40 1F 00 44 83 DF 80 42 21 D0 EF F8 90
+    78 3C 0A FC 24 0D 09 7F 09 03 45 4E B4 A5 4D FF FE 5A A4 41 FF FF 0C 09
+    3A 04 CB 47 5A 67 4A 74 C8 40 25 68 62 90 00 48 E0 61 52 B0 65 91 CA 19
+    AF C6 58 99 22 A4 57 FC C8 BC 5E 44 BB FF 97 52 06 84 BF 84 81 A1 29 DF
+    E0 D2 01 80 01 80 80 14 98 0A 01 69 83 A0 3C 98 01 84 FF FB 62 44 08 09
+    11 AF 08 C9 2F 78 00 0E 39 41 C9 6A EF 6C 01 06 08 25 25 2D FF 42 60 E5
+    87 23 54 0D 7C 98 41 82 D8 98 1C 8E FB A9 C0 D2 08 99 08 0B 19 88 00 4E
+    98 2F 84 81 84 28 3C 18 44 83 C1 80 A8 0F 3C D3 CF ED 99 36 07 00 04 00
+    00 00 1F FF FF B7 25 AC CE 41 6B 0A 04 01 11 60 25 30 0B 02 03 06 50 F4
+    31 81 17 23 6D 54 D1 31 26 15 73 C3 6A 3B 38 A3 35 4E 33 10 A4 AE 7A DC
+    5B 33 56 43 B4 9C 04 01 28 19 82 0F 19 3A 69 AF 56 18 1E E1 1B 98 CF 88
+    F6 98 E1 61 27 98 21 00 5E 1F 9D 66 FD F9 BE 64 70 F3 99 D1 AA C1 2F 87
+    25 F4 81 9F FD E0 04 18 CA 9F D6 B2 B9 92 F4 1A 00 C2 17 34 74 8C 09 40
+    75 4D 26 84 73 0C 13 80 1A CA A0 26 18 5B 40 D1 98 0A C0 0E 80 80 1A 47
+    D6 5D 0E CB AF 68 37 4F FF FF FF FF FA 3F AA 33 E9 E0 D3 49 53 70 B7 8F
+    09 AF 30 DD C5 30 35 88 A9 98 35 FE 45 42 30 D8 FF FB 60 44 0C 8F F1 E6
+    09 45 03 9F E0 90 38 A1 C8 C0 6B FD 60 07 7C 25 18 0E 7F 82 40 DC 06 E3
+    00 0D FC 98 01 57 13 17 0C A7 4C FA D2 35 B6 74 CD 87 53 09 80 96 2B FD
+    4B 90 09 DF F6 7F FF FE FF 57 FF FF F7 FA FE 43 FF FF FF 29 6B FC C3 95
+    55 04 42 21 A0 95 46 4B D9 80 E2 13 81 9E AE B9 F9 81 DE 05 81 83 41 09
+    F8 EA A1 8E E0 B0 28 2D 2F D3 05 7E A4 37 F6 7A 47 FA 7F FF FF DB FF FD
+    61 51 91 87 CE 66 60 6C 1B 3F 7A 60 FA 0A A4 66 44 D4 0C 66 CD 0B 0C 61
+    0F 83 AA 71 48 61 AB 14 06 B7 3F 9B 11 BC 66 C1 A0 60 9D 92 43 F2 CA 70
+    73 DB F7 7F FF FF FF FF FF FF AB E4 39 3C FC B2 95 16 24 03 2A 09 15 4C
+    C6 62 0C 01 C0 A8 4C 7D A6 36 8C 04 60 35 4C 03 F0 01 4C 40 C0 26 4C 07
+    E0 00 C3 80 32 42 16 6C F2 C9 EC 04 6A FF FF FF FF 57 FB EA 32 41 0C CC
+    64 E3 4B 1D CE 1E EE 30 9D 82 F9 33 F9 FF FB 60 44 08 8B F1 C8 08 C6 83
+    9F E0 90 37 61 B8 C0 03 7F 26 07 20 23 22 B5 F0 00 38 D7 87 64 42 BD C0
+    07 58 39 34 4D 82 FF 30 9B 40 AA 36 70 50 C1 47 23 1A 24 4C BB 20 31 99
+    28 B5 AE 54 A6 B3 5D FF 4F FF FF FF FF FF FF FF EA CE 8A 1E 69 4A 26 38
+    08 21 15 04 1B 18 4C 79 80 58 15 51 89 18 C8 C9 80 F8 07 61 80 B4 02 31
+    88 36 03 29 40 1F C4 C0 18 A2 D3 51 83 E4 16 C2 D5 7F FF FF FF AB FF FD
+    84 30 0E 80 0E 18 00 5C C0 83 03 1C C0 81 00 5C C0 CD 04 DC C7 90 57 34
+    C5 77 11 6C C2 51 06 04 C1 41 02 7C C0 5F 02 EC C0 93 02 2C C0 97 01 2C
+    C0 2B 00 55 C4 98 87 38 83 5F FF FF 76 DE 49 50 0E 00 7A 61 80 10 30 32
+    02 62 10 0D 30 3D 11 33 27 33 8B 37 A9 CC 23 1C E1 40 34 88 C0 FF 49 A3
+    59 2B 8C B8 12 59 80 90 2A 5D DB 96 52 6C 7F 2A 00 00 05 02 A1 50 A0 50
+    28 14 0A 05 00 09 A6 08 93 83 FF FB 60 44 09 00 01 C9 1B 61 6E 1C 40 04
+    3B A2 DA A0 CD 50 00 06 54 35 27 9C 93 00 00 CB 87 E2 83 9E F0 01 E1 E6
+    3F 07 04 3C 59 25 EC 1C 0C BF 8B 00 00 11 FF 03 16 71 07 3E 66 5F F4 82
+    00 30 FF F8 20 03 FF F9 C0 7C 08 18 0F FF B9 0C E2 22 FE FF BA 88 9E D6
+    69 A6 0D C5 D3 02 1C E7 D2 4B 53 14 64 00 8A B8 52 70 80 65 11 99 E4 1C
+    70 17 0B A6 45 EF 34 37 CB C6 25 D2 EF 3E 08 03 41 53 BA 01 F0 20 23 F8
+    0C 02 41 4E 20 0C C0 0B 0A 85 4F 2A 29 70 58 12 70 58 12 0D 4C 84 95 20
+    B0 4B 12 25 5E 48 86 C4 A1 A5 03 4A 06 B8 95 DF 51 EE 0A C9 4B 1E 11 07
+    60 AA C3 4D C8 71 A4 69 1D 4E 4D A5 B4 B8 B1 90 52 12 C8 5B 88 52 BC 2A
+    40 59 3C 87 C8 6A 49 6B 81 CC 75 33 4A F9 F3 E7 CF E0 4F FF 41 5B 05 74
+    23 A1 0D E8 2F 41 6A 4C 41 4D 45 33 2E 31 30 30 AA AA AA AA AA AA AA AA
+    AA AA AA AA AA AA AA
+];
+
+// Mono at 16000 Hz, 8 frames with one granule each, and nothing that
+// tells the delay of the encoder
+let MP3_MONO = #[\x
+    FF F3 28 C4 00 0C B0 06 E5 1F 41 18 02 E1 39 6E FF FF C0 03 07 C1 F3 E5
+    01 F0 7C 1F 3E 88 20 08 47 83 E0 F8 3F 50 20 EC B8 7F 94 DD CB F4 86 38
+    0D FA 41 0E 03 3F A4 10 E0 33 FA 43 1C BF BB A5 52 A4 01 69 4E FE 01 31
+    FF F3 28 C4 08 0E C8 B6 A0 01 9B 50 00 B1 C0 25 AC 40 0C B8 8B 06 39 A4
+    6D A0 06 02 04 46 14 D0 0D 0C 09 F9 00 D0 19 01 5F C5 61 14 22 88 7F C7
+    A3 D2 21 F0 FB E5 41 51 11 EF AC 15 11 1E FE 0A AA E5 76 B2 EC AE 43 01
+    FF F3 28 C4 07 0D 90 5A 48 01 DE 00 00 90 30 0B 89 D1 82 B8 63 18 76 82
+    E1 85 F8 E1 19 25 8F 71 F5 B8 67 99 93 0E 89 83 40 1A 18 0D 80 D1 81 F8
+    1C 01 80 2C C0 18 01 CB 8C D7 DA 6F 2A D6 EE 47 D9 E0 E8 02 66 02 A8 65
+    FF F3 28 C4 0B 0D E9 46 2C 00 FF 04 68 E0 80 0C 04 00 07 87 00 B2 60 5A
+    80 C2 72 52 16 5A 7F D0 F8 43 40 58 96 34 14 44 75 34 70 22 75 3F FF DF
+    FF FF FF FF FF E0 BF FF FF 55 DE AB C7 19 F8 A0 02 46 04 50 63 06 00 58
+    FF F3 28 C4 0E 0F 81 4A 2C 00 FF 04 68 05 E5 50 02 83 80 4B 30 2B 80 A4
+    38 F0 D0 4C 3F 70 F0 CC A0 50 82 20 90 4D 0A 14 DD AD C3 15 FF FF D7 FF
+    FF FF FF FF E1 FF FF FF FF FF FF FF EA AF 24 77 26 C4 20 1E 60 62 06 A6
+    FF F3 28 C4 0B 0E 48 56 48 01 5E 00 00 07 E2 46 60 D6 1D E6 21 61 3E 62
+    08 3D 06 55 C4 EC 7C 2D 29 A6 6E A5 7E 62 DA 0B A9 F4 60 54 08 C6 05 40
+    08 5D 05 6C 4B C5 F9 FF FF FF F4 2A ED 84 14 46 77 49 E6 51 00 65 81 83
+    FF F3 28 C4 0C 0E D0 CA A8 01 9B 58 00 81 99 D9 82 36 B2 94 96 8F 98 C0
+    78 F0 1C 00 F1 FE 01 E2 20 80 29 26 95 7F 8E C3 12 F3 78 73 67 FF 50 E3
+    24 FB 58 3F 8B 04 04 FF AD 0C 7F FA 2A 45 0B 70 6A 85 C9 0A 86 5F 44 94
+    FF F3 28 C4 0B 0C 70 7D F0 01 CF 10 01 4C 4F 90 2E 81 85 00 1C 40 66 0E
+    A4 98 84 99 50 D5 AA D7 B1 70 F9 F3 06 02 02 1B 14 5C 50 5E 05 70 28 EE
+    9B D0 5F CA 4C 41 4D 45 33 2E 31 30 30 AA AA AA AA AA AA AA AA AA AA AA
+];
+
+let PI = 3.141592653589793;
+
+// Largest difference to accept between a sample and its source, as the
+// encoding is lossy
+let TOLERANCE = 0.05;
+
+// Samples at both ends that are left out of comparisons with the source,
+// where the encoder and the filters of the decoder ring
+let EDGE = 600;
+
+// Delay in samples of the mono clip, which isn't trimmed
+let MONO_DELAY = 1105;
+
+// Value at a time in seconds of a tone of the source clips: 441 and 1260
+// Hz for the two channels of the stereo one, and 320 Hz for the mono one
+fun source(freq, level, time)
+{
+    return level * (2 * PI * freq * time).sin();
+}
+
+// Reads all the samples of a decoder from its start, count at a time
+fun read_all(dec, count)
+{
+    let out = ByteArray.with_size(dec.num_samples * dec.num_channels * 4);
+    let var pos = 0;
+
+    dec.seek(0);
+    loop {
+        let num = dec.read(out, pos * dec.num_channels, count);
+        if (num == 0) {
+            break;
+        }
+
+        assert(num <= count);
+        pos += num;
+        assert(dec.pos == pos);
+    }
+
+    assert(pos == dec.num_samples);
+    return out;
+}
+
+// Tells whether two runs of f32 values are the same
+fun same(a, a_idx, b, b_idx, count)
+{
+    for (let var i = 0; i < count; ++i) {
+        if (a.get_f32(a_idx + i) != b.get_f32(b_idx + i)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Checks the samples of the stereo clip, in the format of a decoder,
+// against the source
+fun check_stereo(dec, samples)
+{
+    let num_channels = dec.num_channels;
+
+    for (let var i = EDGE; i < dec.num_samples - EDGE; ++i) {
+        let time = i / dec.sample_rate;
+        let left = source(441, 0.5, time);
+        let right = source(1260, 0.3, time);
+
+        if (num_channels == 2) {
+            assert((samples.get_f32(2 * i) - left).abs() < TOLERANCE);
+            assert((samples.get_f32(2 * i + 1) - right).abs() < TOLERANCE);
+        } else {
+            assert((samples.get_f32(i) - (left + right) / 2).abs() < TOLERANCE);
+        }
+    }
+}
+
+// Checks that seeking gives the same samples as reading through
+fun check_seeks(dec, samples)
+{
+    let num_channels = dec.num_channels;
+    let buf = ByteArray.with_size(1500 * num_channels * 4);
+
+    for (let var pos = 0; pos <= dec.num_samples; pos += 397) {
+        dec.seek(pos);
+        assert(dec.pos == pos);
+
+        let num = dec.read(buf, 0, 1500);
+        assert(num == (dec.num_samples - pos).min(1500));
+        assert(same(buf, 0, samples, pos * num_channels, num * num_channels));
+    }
+
+    // Positions past either end are brought back to it
+    dec.seek(-5);
+    assert(dec.pos == 0);
+    dec.seek(dec.num_samples + 5);
+    assert(dec.pos == dec.num_samples);
+    assert(dec.read(buf, 0, 1500) == 0);
+}
+
+// The stereo clip has the length of its source, and starts with it
+let stereo = MP3Decoder.from_bytes(MP3_STEREO);
+assert(stereo != nil);
+assert(stereo.sample_rate == 44100);
+assert(stereo.num_channels == 2);
+assert(stereo.num_samples == 4410);
+assert(stereo.pos == 0);
+assert(stereo.duration() == 0.1);
+
+let stereo_samples = read_all(stereo, 1152);
+check_stereo(stereo, stereo_samples);
+check_seeks(stereo, stereo_samples);
+
+// How many samples are read at a time makes no difference
+assert(same(stereo_samples, 0, read_all(stereo, 1), 0, 2 * 4410));
+assert(same(stereo_samples, 0, read_all(stereo, 777), 0, 2 * 4410));
+assert(same(stereo_samples, 0, read_all(stereo, 10000), 0, 2 * 4410));
+
+// Samples go where they are asked to, and nowhere else
+let part = ByteArray.with_size(100 * 4);
+stereo.seek(1000);
+assert(stereo.read(part, 20, 30) == 30);
+assert(same(part, 20, stereo_samples, 2000, 60));
+for (let var i = 0; i < 100; ++i) {
+    assert((i >= 20 && i < 80) || part.get_f32(i) == 0);
+}
+
+// Mono is the mean of the two channels
+stereo.set_out_format(44100, 1);
+assert(stereo.num_channels == 1);
+assert(stereo.num_samples == 4410);
+let mixed = read_all(stereo, 1000);
+for (let var i = 0; i < 4410; ++i) {
+    let mean = (stereo_samples.get_f32(2 * i) + stereo_samples.get_f32(2 * i + 1)) / 2;
+    assert((mixed.get_f32(i) - mean).abs() < 0.000001);
+}
+check_seeks(stereo, mixed);
+
+// Other sample rates, higher and lower, give the same tones
+stereo.set_out_format(48000, 2);
+assert(stereo.sample_rate == 48000);
+assert(stereo.num_samples == 4800);
+assert(stereo.duration() == 0.1);
+let faster = read_all(stereo, 1000);
+check_stereo(stereo, faster);
+check_seeks(stereo, faster);
+assert(same(faster, 0, read_all(stereo, 333), 0, 2 * 4800));
+
+stereo.set_out_format(22050, 1);
+assert(stereo.num_samples == 2205);
+let slower = read_all(stereo, 1000);
+check_stereo(stereo, slower);
+check_seeks(stereo, slower);
+
+// A change of format keeps the position in time
+stereo.seek(1100);
+stereo.set_out_format(44100, 2);
+assert(stereo.pos == 2200);
+stereo.seek(stereo.num_samples);
+stereo.set_out_format(8000, 1);
+assert(stereo.pos == stereo.num_samples);
+assert(stereo.num_samples == 800);
+
+// The mono clip has whole frames, and its source after the delay
+let mono = MP3Decoder.from_bytes(MP3_MONO);
+assert(mono != nil);
+assert(mono.sample_rate == 16000);
+assert(mono.num_channels == 1);
+assert(mono.num_samples == 8 * 576);
+
+let mono_samples = read_all(mono, 500);
+for (let var i = MONO_DELAY + EDGE; i < MONO_DELAY + 3200 - EDGE; ++i) {
+    let tone = source(320, 0.4, (i - MONO_DELAY) / 16000);
+    assert((mono_samples.get_f32(i) - tone).abs() < TOLERANCE);
+}
+check_seeks(mono, mono_samples);
+
+// Stereo from mono is the same samples twice
+mono.set_out_format(16000, 2);
+let doubled = read_all(mono, 500);
+for (let var i = 0; i < mono.num_samples; ++i) {
+    assert(doubled.get_f32(2 * i) == mono_samples.get_f32(i));
+    assert(doubled.get_f32(2 * i + 1) == mono_samples.get_f32(i));
+}
+
+// Returns a copy of the first count bytes of some data
+fun prefix(data, count)
+{
+    let out = ByteArray.with_size(count);
+    out.memcpy(0, data, 0, count);
+    return out;
+}
+
+// Returns some data with other data before and after it
+fun wrap(before, data, after)
+{
+    let out = ByteArray.with_size(before.len + data.len + after.len);
+    out.memcpy(0, before, 0, before.len);
+    out.memcpy(before.len, data, 0, data.len);
+    out.memcpy(before.len + data.len, after, 0, after.len);
+    return out;
+}
+
+// Tags before and after the audio are skipped: an ID3v2 tag of 300 bytes
+// that holds what looks like frames, and an ID3v1 tag
+let id3v2 = ByteArray.with_size(310);
+id3v2.memcpy(0, #[\x 49 44 33 04 00 00 00 00 02 2C], 0, 10);
+id3v2.memcpy(10, MP3_MONO, 0, 300);
+let id3v1 = ByteArray.with_size(128);
+id3v1.memcpy(0, #[\aTAG], 0, 3);
+
+let tagged = MP3Decoder.from_bytes(wrap(id3v2, MP3_STEREO, id3v1));
+assert(tagged != nil);
+assert(tagged.sample_rate == 44100);
+assert(tagged.num_samples == 4410);
+assert(same(read_all(tagged, 1152), 0, stereo_samples, 0, 2 * 4410));
+
+// Bytes that are not audio between two frames are skipped too
+let junk = ByteArray.with_size(57);
+for (let var i = 0; i < junk.len; ++i) {
+    junk[i] = (i * 37 + 11) & 0xFF;
+}
+let split = wrap(prefix(MP3_MONO, 216), junk, ByteArray.with_size(0));
+let damaged = MP3Decoder.from_bytes(wrap(split, prefix(MP3_MONO, 576), ByteArray.with_size(0)));
+assert(damaged != nil);
+assert(damaged.num_samples == 11 * 576);
+
+// Not MP3 data
+assert(MP3Decoder.from_bytes(ByteArray.with_size(0)) == nil);
+assert(MP3Decoder.from_bytes(ByteArray.with_size(1000)) == nil);
+assert(MP3Decoder.from_bytes(junk) == nil);
+assert(MP3Decoder.from_bytes(#[\x FF FB 60 44]) == nil);
+
+// Decodes whatever a decoder gives, which must not fail
+fun exercise(dec)
+{
+    if (dec == nil) {
+        return;
+    }
+
+    let buf = ByteArray.with_size(700 * dec.num_channels * 4);
+    let var total = 0;
+    loop {
+        let num = dec.read(buf, 0, 700);
+        if (num == 0) {
+            break;
+        }
+        total += num;
+    }
+    assert(total == dec.num_samples);
+
+    dec.seek(dec.num_samples.idiv(2));
+    dec.read(buf, 0, 700);
+}
+
+// Data cut short anywhere gives the frames that are whole
+for (let var count = 0; count < MP3_MONO.len; ++count) {
+    let dec = MP3Decoder.from_bytes(prefix(MP3_MONO, count));
+    assert(dec == nil || dec.num_samples == count.idiv(72) * 576);
+    exercise(dec);
+}
+for (let var count = 0; count < MP3_STEREO.len; count += 13) {
+    exercise(MP3Decoder.from_bytes(prefix(MP3_STEREO, count)));
+}
+
+// A wrong byte anywhere may or may not yield samples, but must not
+// make the decoder fail in some other way
+fun corrupt(data, step)
+{
+    for (let var pos = 0; pos < data.len; pos += step) {
+        let copy = prefix(data, data.len);
+        copy[pos] = copy[pos] ^ 0xFF;
+        exercise(MP3Decoder.from_bytes(copy));
+    }
+}
+
+corrupt(MP3_MONO, 1);
+corrupt(MP3_STEREO, 3);

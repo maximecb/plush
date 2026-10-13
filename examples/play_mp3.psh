@@ -1,0 +1,55 @@
+// Play an MP3 file, decoding it as it plays.
+// Run: plush examples/play_mp3.psh [path/to/file.mp3] [start time in seconds]
+// The default file is a short tune made of synthesized tones.
+
+from mp3 import MP3Decoder;
+
+// Decode a file from a start time and feed the audio device as it asks
+// for samples, until the end of the file.
+fun main()
+{
+    let path = $cmd_get_arg_or(1, "examples/data/sample_tune.mp3");
+    let dec = MP3Decoder.load_file(path);
+    if (dec == nil) {
+        $println("Could not read MP3: " + path);
+        return;
+    }
+
+    let start = $cmd_get_arg_or(2, "0").parse_float();
+    if (start == nil) {
+        $println("Invalid start time");
+        return;
+    }
+    dec.seek((start * dec.sample_rate).floor());
+
+    $println(
+        path + ": " + dec.sample_rate.to_s() + " Hz, " +
+        (dec.num_channels == 1 ? "mono" : "stereo") + ", " +
+        dec.duration().format_decimals(1) + " s"
+    );
+
+    let dev = $audio_open_output(dec.sample_rate, dec.num_channels);
+    if (dev == nil) {
+        $println("Error: could not open audio device");
+        return;
+    }
+
+    loop {
+        let msg = $actor_recv();
+        if (!(msg instanceof AudioNeeded)) {
+            continue;
+        }
+
+        // The device asks for a number of values that counts every
+        // channel. What the decoder doesn't fill stays silent.
+        let samples = ByteArray.with_size(msg.num_samples * 4);
+        let count = dec.read(samples, 0, msg.num_samples.idiv(dec.num_channels));
+        $audio_write_samples(dev, samples);
+
+        if (count == 0) {
+            break;
+        }
+    }
+}
+
+main();

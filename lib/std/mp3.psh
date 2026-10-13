@@ -1,0 +1,2206 @@
+// MP3 audio decoding
+//
+//   from mp3 import MP3Decoder;
+//
+//   let dec = MP3Decoder.load_file("music.mp3");
+//   let dev = $audio_open_output(dec.sample_rate, dec.num_channels);
+//   let buf = ByteArray.with_size(4096 * dec.num_channels * 4);
+//
+//   loop {
+//       let count = dec.read(buf, 0, 4096);
+//       if (count == 0) break;
+//       ...
+//   }
+//
+// Samples are f32 values between -1 and 1, with those of the channels
+// of a stereo stream interleaved. Positions and lengths count samples
+// per channel. set_out_format() asks for another sample rate or number
+// of channels than those of the file, and seek() moves to any sample.
+//
+// Handles MPEG-1, MPEG-2 and MPEG-2.5 Layer III, which is what files with
+// an .mp3 extension hold, at constant or variable bitrate. Layers I and II
+// and free-format streams are not supported.
+//
+// When the file has the encoder delay and padding written by LAME and
+// most other encoders, they are trimmed, so that sample zero is the first
+// sample of the original.
+//
+// The Huffman codes and the synthesis window, which the standard defines,
+// are from PDMP3 by Krister Lagerstrom, and the layout of the scalefactor
+// tables is that of minimp3 by lieff. Both are in the public domain.
+
+let PI = 3.141592653589793;
+
+// Bitrates of Layer III in kbps by header index, for MPEG-1 and for the
+// lower sampling frequencies of MPEG-2 and MPEG-2.5
+let BITRATES_V1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+let BITRATES_V2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+
+// Sample rates of MPEG-1 by header index. MPEG-2 halves them, and
+// MPEG-2.5 halves them again.
+let SAMPLE_RATES = [44100, 48000, 32000];
+
+// Delay in samples that a decoder adds to that of the encoder
+let DECODER_DELAY = 529;
+
+// Most bytes of earlier frames that a frame may use for its data
+let MAX_RESERVOIR = 511;
+
+// Zero bytes kept after the data of a frame, so that reading a few bits
+// past the end of a damaged frame stays in bounds
+let MAIN_PAD = 64;
+
+// Frames decoded ahead of the one that a seek lands in, whose samples
+// are dropped, to fill the state that carries from frame to frame
+let SEEK_FRAMES = 2;
+
+// Zeros to copy from, enough for the samples of a frame
+let ZEROS = ByteArray.with_size(1152 * 2 * 4);
+
+// Widths of the scalefactor bands of long blocks, the groups of frequency
+// lines that share a scale. The rows are for 11025 and 12000 Hz, 8000,
+// 22050, 24000, 16000, 44100, 48000 and 32000 Hz.
+let SFB_LONG_LOW = [6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 38, 46, 52, 60, 68, 58, 54];
+let SFB_LONG = [
+    SFB_LONG_LOW,
+    [12, 12, 12, 12, 12, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 76, 90, 2, 2, 2, 2, 2],
+    SFB_LONG_LOW,
+    [6, 6, 6, 6, 6, 6, 8, 10, 12, 14, 16, 18, 22, 26, 32, 38, 46, 54, 62, 70, 76, 36],
+    SFB_LONG_LOW,
+    [4, 4, 4, 4, 4, 4, 6, 6, 8, 8, 10, 12, 16, 20, 24, 28, 34, 42, 50, 54, 76, 158],
+    [4, 4, 4, 4, 4, 4, 6, 6, 6, 8, 10, 12, 16, 18, 22, 28, 34, 40, 46, 54, 54, 192],
+    [4, 4, 4, 4, 4, 4, 6, 6, 8, 10, 12, 16, 20, 24, 30, 38, 46, 56, 68, 84, 102, 26]
+];
+
+// Widths of the bands of each of the three windows of short blocks
+let SFB_WINDOW_LOW = [4, 4, 4, 6, 8, 10, 12, 14, 18, 24, 30, 40, 18];
+let SFB_WINDOW = [
+    SFB_WINDOW_LOW,
+    [8, 8, 8, 12, 16, 20, 24, 28, 36, 2, 2, 2, 26],
+    [4, 4, 4, 6, 6, 8, 10, 14, 18, 26, 32, 42, 18],
+    [4, 4, 4, 6, 8, 10, 12, 14, 18, 24, 32, 44, 12],
+    SFB_WINDOW_LOW,
+    [4, 4, 4, 4, 6, 8, 10, 12, 14, 18, 22, 30, 56],
+    [4, 4, 4, 4, 6, 6, 10, 12, 14, 16, 20, 26, 66],
+    [4, 4, 4, 4, 6, 8, 12, 16, 20, 26, 34, 42, 12]
+];
+
+// Builds the tables of band widths of short blocks, where every band
+// comes three times, once per window. Mixed blocks start with num_long
+// long bands, which stand for the first three short ones.
+fun make_short_bands(mixed)
+{
+    let tables = [];
+
+    for (let var idx = 0; idx < 8; ++idx) {
+        let bands = [];
+
+        // MPEG-1 has 8 long bands, and the lower rates have 6
+        if (mixed) {
+            let num_long = idx >= 5 ? 8 : 6;
+            for (let var i = 0; i < num_long; ++i) {
+                bands.push(SFB_LONG[idx][i]);
+            }
+        }
+
+        for (let var i = mixed ? 3 : 0; i < 13; ++i) {
+            for (let var w = 0; w < 3; ++w) {
+                bands.push(SFB_WINDOW[idx][i]);
+            }
+        }
+
+        tables.push(bands);
+    }
+
+    return tables;
+}
+
+let SFB_SHORT = make_short_bands(false);
+let SFB_MIXED = make_short_bands(true);
+
+// Number of scalefactors in each of the four groups that are stored with
+// the same number of bits, for long, mixed and short blocks. The first
+// four are for MPEG-1. The lower rates pick one of three sets, and one of
+// three more for the channel that holds intensity stereo positions.
+let SCF_GROUPS = [
+    [6, 5, 5, 5, 6, 5, 5, 5, 6, 5, 7, 3, 11, 10, 0, 0, 7, 7, 7, 0, 6, 6, 6, 3, 8, 8, 5, 0],
+    [8, 9, 6, 12, 6, 9, 9, 9, 6, 9, 12, 6, 15, 18, 0, 0, 6, 15, 12, 0, 6, 12, 9, 6, 6, 18, 9, 0],
+    [9, 9, 6, 12, 9, 9, 9, 9, 9, 9, 12, 6, 18, 18, 0, 0, 12, 12, 12, 0, 12, 9, 9, 6, 15, 12, 9, 0]
+];
+
+// Number of values of the size of each group, for each of the sets of
+// the lower rates
+let SCF_MODS = [5, 5, 4, 4, 5, 5, 4, 1, 4, 3, 1, 1, 5, 6, 6, 1, 4, 4, 4, 1, 4, 3, 1, 1];
+
+// Bits per scalefactor of the first and last two groups in MPEG-1
+let SCF_BITS_LOW = [0, 0, 0, 0, 3, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4];
+let SCF_BITS_HIGH = [0, 1, 2, 3, 0, 1, 2, 3, 1, 2, 3, 1, 2, 3, 2, 3];
+
+// What the preemphasis flag adds to the scalefactors of bands 11 to 20
+let PREEMPHASIS = [1, 1, 1, 1, 2, 2, 3, 3, 3, 2];
+
+// Number of extra bits that follow a value of 15, by Huffman table
+let LINBITS = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 2, 3, 4, 6, 8, 10, 13, 4, 5, 6, 7, 8, 9, 11, 13
+];
+
+// Number of bits of a code the first level of a Huffman table is
+// indexed with
+let ROOT_BITS = 8;
+
+// The Huffman codes of pairs of values, as a length in bits and the two
+// values in a byte for each code, from the smallest code to the largest
+// when they are aligned to the left
+let HUFF_1 = #[\x
+    03 11 03 01 02 10 01 00
+];
+
+let HUFF_2 = #[\x
+    06 22 06 02 05 12 05 21 05 20 03 11 03 01 03 10 01 00
+];
+
+let HUFF_3 = #[\x
+    06 22 06 02 05 12 05 21 05 20 03 10 02 11 02 01 02 00
+];
+
+let HUFF_5 = #[\x
+    08 33 08 23 07 32 06 31 07 13 07 03 07 30 07 22 06 12 06 21 06 02 06 20
+    03 11 03 01 03 10 01 00
+];
+
+let HUFF_6 = #[\x
+    07 33 07 03 06 23 06 32 06 30 05 13 05 31 05 22 05 02 04 12 04 21 04 20
+    03 01 02 11 03 10 03 00
+];
+
+let HUFF_7 = #[\x
+    0A 55 0A 45 0A 54 0A 53 09 35 09 44 09 25 09 52 08 15 08 51 09 05 09 34
+    08 50 09 43 09 33 08 24 08 42 07 14 07 41 07 40 08 04 08 23 08 32 08 03
+    07 13 07 31 07 30 07 22 06 12 05 21 06 02 06 20 04 11 03 01 03 10 01 00
+];
+
+let HUFF_8 = #[\x
+    0B 55 0B 54 0A 45 09 53 0A 35 0A 44 09 25 09 52 09 05 08 15 08 51 09 34
+    09 43 09 50 09 33 08 24 08 42 08 14 07 41 08 04 08 40 08 23 08 32 08 13
+    08 31 08 03 08 30 06 22 06 02 06 20 04 12 04 21 02 11 03 01 03 10 02 00
+];
+
+let HUFF_9 = #[\x
+    09 55 09 45 08 35 08 53 09 54 09 05 08 44 08 25 08 52 08 15 07 51 07 34
+    07 43 08 50 08 04 07 24 07 42 07 33 07 40 06 14 06 41 06 23 06 32 05 13
+    05 31 06 03 06 30 05 22 05 02 04 12 04 21 04 20 03 11 03 01 03 10 03 00
+];
+
+let HUFF_10 = #[\x
+    0B 77 0B 67 0B 76 0B 57 0B 75 0B 66 0A 47 0A 74 0A 56 0A 65 0A 37 0A 73
+    0A 46 0B 55 0B 54 0A 63 09 27 09 72 0A 64 0A 07 09 70 09 62 0A 45 0A 35
+    09 06 0A 53 0A 44 08 17 08 71 09 36 09 26 0A 25 0A 52 09 15 09 51 0A 34
+    0A 43 08 16 08 61 08 60 09 05 09 50 09 24 09 42 09 33 09 04 08 14 08 41
+    08 40 08 23 08 32 08 03 07 13 07 31 07 30 07 22 06 12 06 21 06 02 06 20
+    04 11 03 01 03 10 01 00
+];
+
+let HUFF_11 = #[\x
+    0A 77 0A 67 0A 76 0A 75 0A 66 0A 47 0A 74 0B 57 0B 55 0A 56 0A 65 09 37
+    09 73 09 46 0A 45 0A 54 0A 35 0A 53 08 27 08 72 09 64 09 07 07 71 08 17
+    08 70 08 36 08 63 08 60 09 44 09 25 09 52 09 05 08 15 07 62 08 26 08 06
+    07 16 07 61 08 51 08 34 08 50 09 43 09 33 08 24 08 42 08 14 08 41 08 04
+    08 40 07 23 07 32 06 13 06 31 07 03 07 30 06 22 05 21 04 12 05 02 05 20
+    03 11 03 01 03 10 02 00
+];
+
+let HUFF_12 = #[\x
+    0A 77 0A 67 09 76 09 57 09 75 09 66 09 47 09 74 09 65 08 56 08 37 09 73
+    09 55 08 27 08 72 08 46 08 64 08 17 08 71 09 07 09 70 08 36 08 63 08 45
+    08 54 08 44 09 06 09 05 07 26 07 62 07 61 08 16 08 60 08 35 08 53 08 25
+    08 52 07 15 07 51 07 34 07 43 08 50 08 04 07 24 07 42 07 14 06 33 06 41
+    06 23 06 32 07 40 07 03 06 30 05 13 05 31 05 22 04 12 04 21 05 02 05 20
+    04 00 03 11 03 01 03 10
+];
+
+let HUFF_13 = #[\x
+    13 FE 13 FC 12 FD 11 ED 10 FF 10 EF 10 DF 10 EE 10 CF 10 DE 10 BF 10 FB
+    10 CE 10 DC 11 AF 11 E9 0F EC 0F DD 10 FA 10 CD 0F BE 0F EB 0F 9F 0F F9
+    0F EA 0F BD 0F DB 0F 8F 0F F8 0F CC 10 AE 10 9E 0F 8E 10 7F 10 7E 0E F7
+    0E DA 0F AD 0F BC 0F CB 0F F6 0E 6F 0E E8 0E 5F 0E 9D 0E D9 0E F5 0E E7
+    0E AC 0E BB 0E 4F 0E F4 0F CA 0F E6 0E F3 0D 3F 0E 8D 0E D8 0D 2F 0D F2
+    0E 6E 0E 9C 0D 0F 0E C9 0E 5E 0D AB 0E 7D 0E D7 0D 4E 0E C8 0E D6 0D 3E
+    0D B9 0E 9B 0E AA 0C 1F 0C F1 0C F0 0D BA 0D E5 0D E4 0D 8C 0D 6D 0D E3
+    0C E2 0D 2E 0D 0E 0C 1E 0C E1 0D E0 0D 5D 0D D5 0D 7C 0D C7 0D 4D 0D 8B
+    0D B8 0D D4 0D 9A 0D A9 0D 6C 0C C6 0C 3D 0D D3 0D 7B 0C 2D 0C D2 0C 1D
+    0C B7 0D 5C 0D C5 0D 99 0D 7A 0C C3 0D A7 0D 97 0C 4B 0B D1 0C 0D 0C D0
+    0C 8A 0C A8 0C 4C 0C C4 0C 6B 0C B6 0B 3C 0B 2C 0B C2 0B 5B 0C B5 0C 89
+    0B 1C 0B C1 0C 98 0C 0C 0B C0 0C B4 0C 6A 0C A6 0C 79 0B 3B 0B B3 0C 88
+    0C 5A 0B 2B 0C A5 0C 69 0B A4 0C 78 0C 87 0B 94 0C 77 0C 76 0A B2 0A 1B
+    0A B1 0B 0B 0B B0 0B 96 0B 4A 0B 3A 0B A3 0B 59 0B 95 0A 2A 0A A2 0A 1A
+    0A A1 0B 0A 0B 68 0A A0 0B 86 0B 49 0A 93 0B 39 0B 58 0B 85 0B 67 0A 29
+    0A 92 0B 57 0B 75 0A 38 0A 83 0B 66 0B 47 0B 74 0B 56 0B 65 0B 73 09 19
+    09 91 0A 09 0A 90 0A 48 0A 84 0A 72 0B 46 0B 64 09 28 09 82 09 18 0A 37
+    0A 27 09 17 09 71 0A 55 0A 07 0A 70 0A 36 0A 63 0A 45 0A 54 0A 26 0A 62
+    0A 35 08 81 09 08 09 80 09 16 09 61 09 06 09 60 0A 53 0A 44 09 25 09 52
+    09 05 08 15 08 51 09 34 09 43 09 50 09 24 09 42 09 33 08 14 07 41 08 04
+    08 40 08 23 08 32 07 13 07 31 07 03 07 30 07 22 06 12 06 21 06 02 06 20
+    04 11 04 01 03 10 01 00
+];
+
+let HUFF_15 = #[\x
+    0D FF 0D EF 0D FE 0D DF 0C EE 0D FD 0D CF 0D FC 0D DE 0D ED 0D BF 0C FB
+    0D CE 0D EC 0C DD 0C AF 0C FA 0C BE 0C EB 0C CD 0C DC 0C 9F 0C F9 0C EA
+    0C BD 0C DB 0C 8F 0C F8 0C CC 0C 9E 0C E9 0C 7F 0C F7 0C AD 0C DA 0C BC
+    0C 6F 0D AE 0D 0F 0B CB 0B F6 0C 8E 0C E8 0C 5F 0C 9D 0B F5 0B 7E 0B E7
+    0B AC 0B CA 0B BB 0C D9 0C 8D 0B 4F 0B F4 0B 3F 0B F3 0B D8 0B E6 0B 2F
+    0B F2 0C 6E 0C F0 0B 1F 0B F1 0B 9C 0B C9 0B 5E 0B AB 0B BA 0B E5 0B 7D
+    0B D7 0B 4E 0B E4 0B 8C 0B C8 0B 3E 0B 6D 0B D6 0B E3 0B 9B 0B B9 0B 2E
+    0B AA 0B E2 0B 1E 0B E1 0C 0E 0C E0 0B 5D 0B D5 0B 7C 0B C7 0B 4D 0B 8B
+    0A D4 0B B8 0B 9A 0B A9 0B 6C 0B C6 0B 3D 0A D3 0A D2 0B 2D 0B 0D 0A 1D
+    0A 7B 0A B7 0A D1 0B 5C 0B D0 0A C5 0A 8A 0A A8 0A 4C 0A C4 0A 6B 0A B6
+    0B 99 0B 0C 0A 3C 0A C3 0A 7A 0A A7 0A A6 0B C0 0B 0B 09 C2 0A 2C 0A 5B
+    0A B5 0A 1C 0A 89 0A 98 0A C1 0A 4B 0A B4 0A 6A 0A 3B 0A 79 09 B3 0A 97
+    0A 88 0A 2B 0A 5A 09 B2 0A A5 0A 1B 09 B1 0A B0 0A 69 0A 96 0A 4A 0A A4
+    0A 78 0A 87 0A 3A 09 A3 09 59 09 95 09 2A 09 A2 09 1A 09 A1 0A 0A 0A A0
+    09 68 09 86 09 49 09 94 09 39 09 93 0A 77 0A 09 09 58 09 85 09 29 09 67
+    09 76 09 92 08 91 09 19 09 90 09 48 09 84 09 57 09 75 09 38 09 83 09 66
+    09 47 08 28 08 82 08 18 08 81 09 74 09 08 09 80 09 56 09 65 09 37 09 73
+    09 46 08 27 08 72 08 64 08 17 08 55 08 71 09 07 09 70 08 36 08 63 08 45
+    08 54 08 26 08 62 08 16 09 06 09 60 08 35 07 61 08 53 08 44 07 25 07 52
+    07 15 07 51 08 05 08 50 07 34 07 43 07 24 07 42 07 33 06 41 07 14 07 04
+    06 23 06 32 07 40 07 03 06 13 06 31 06 30 05 22 05 12 05 21 05 02 05 20
+    03 11 04 01 04 10 03 00
+];
+
+let HUFF_16 = #[\x
+    0B EF 0B FE 0B DF 0B FD 0B CF 0B FC 0B BF 0B FB 0A AF 0B FA 0B 9F 0B F9
+    0B F8 0A 8F 0A 7F 0A F7 0A 6F 0A F6 08 FF 0A 5F 0A F5 09 4F 09 F4 09 F3
+    09 F0 0A 3F 10 CE 11 EC 11 DD 0F DE 0F E9 10 EA 10 D9 0E EE 0F ED 0F EB
+    0E BE 0E CD 0F DC 0F DB 0E AE 0E CC 0F AD 0F DA 0F 7E 0F AC 0E CA 0F C9
+    0F 7D 0E 5E 0D BD 08 F2 09 2F 09 0F 08 1F 08 F1 0D 9E 0E BC 0E CB 0E 8E
+    0E E8 0E 9D 0E E7 0E BB 0E 8D 0E D8 0E 6E 0D E6 0D 9C 0E AB 0E BA 0E E5
+    0E D7 0D 4E 0E E4 0E 8C 0D C8 0D 3E 0D 6D 0E D6 0E 9B 0E B9 0E AA 0D E1
+    0D D4 0E B8 0E A9 0D 7B 0E B7 0E D0 0C E3 0D 0E 0D E0 0D 5D 0D D5 0D 7C
+    0D C7 0D 4D 0D 8B 0D 9A 0D 6C 0D C6 0D 3D 0D 5C 0D C5 0C 0D 0D 8A 0D A8
+    0D 99 0D 4C 0D B6 0D 7A 0C 3C 0D 5B 0D 89 0C 1C 0C C0 0D 98 0D 79 0B E2
+    0C 2E 0C 1E 0C D3 0C 2D 0C D2 0C D1 0C 3B 0D 97 0D 88 0B 1D 0C C4 0C 6B
+    0C C3 0C A7 0B 2C 0C C2 0C B5 0C C1 0C 0C 0C 4B 0C B4 0C 6A 0C A6 0B B3
+    0C 5A 0C A5 0B 2B 0B B2 0B 1B 0B B1 0C 0B 0C B0 0C 69 0C 96 0C 4A 0C A4
+    0C 78 0C 87 0B A3 0C 3A 0C 59 0B 2A 0C 95 0C 68 0B A1 0C 86 0C 77 0B 94
+    0C 49 0C 57 0B 67 0A A2 0A 1A 0B 0A 0B A0 0B 39 0B 93 0B 58 0B 85 0A 29
+    0A 92 0B 76 0B 09 0A 19 0A 91 0B 90 0B 48 0B 84 0B 75 0B 38 0B 83 0B 66
+    0B 28 0A 82 0B 47 0B 74 0A 18 0A 81 0A 80 0B 08 0B 56 0A 37 0A 73 0B 65
+    0B 46 0A 27 0A 72 0B 64 0B 55 0A 07 09 17 09 71 0A 70 0A 36 0A 63 0A 45
+    0A 54 0A 26 09 62 09 16 09 61 0A 06 0A 60 09 53 0A 35 0A 44 09 25 09 52
+    08 51 09 15 09 05 09 34 09 43 09 50 09 24 09 42 09 33 08 14 08 41 09 04
+    09 40 08 23 08 32 07 13 07 31 08 03 08 30 07 22 06 12 06 21 06 02 06 20
+    04 11 04 01 03 10 01 00
+];
+
+let HUFF_24 = #[\x
+    08 EF 08 FE 08 DF 08 FD 08 CF 08 FC 08 BF 08 FB 07 FA 08 AF 08 9F 07 F9
+    07 F8 08 8F 08 7F 07 F7 07 6F 07 F6 07 5F 07 F5 07 4F 07 F4 07 3F 07 F3
+    07 2F 07 F2 07 F1 08 1F 08 F0 09 0F 0B EE 0B DE 0B ED 0B CE 0B EC 0B DD
+    0B BE 0B EB 0B CD 0B DC 0B AE 0B EA 0B BD 0B DB 0B CC 0B 9E 0B E9 0B AD
+    0B DA 0B BC 0B CB 0B 8E 0B E8 0B 9D 0B D9 0B 7E 0B E7 0B AC 04 FF 0B CA
+    0B BB 0B 8D 0B D8 0C 0E 0C E0 0B 0D 0A E6 0B 6E 0B 9C 0A C9 0A 5E 0A BA
+    0A E5 0B AB 0B 7D 0A D7 0A E4 0A 8C 0A C8 0B 4E 0B 2E 0A 3E 0A 6D 0A D6
+    0A E3 0A 9B 0A B9 0A AA 0A E2 0A 1E 0A E1 0A 5D 0A D5 0A 7C 0A C7 0A 4D
+    0A 8B 0A B8 0A D4 0A 9A 0A A9 0A 6C 0A C6 0A 3D 0A D3 0A 2D 0A D2 0A 1D
+    0A 7B 0A B7 0A D1 0A 5C 0A C5 0A 8A 0A A8 0A 99 0A 4C 0A C4 0A 6B 0A B6
+    0B D0 0B 0C 0A 3C 0A C3 0A 7A 0A A7 0A 2C 0A C2 0A 5B 0A B5 0A 1C 0A 89
+    0A 98 0A C1 0A 4B 0B C0 0B 0B 0A 3B 0B B0 0B 0A 0A 1A 09 B4 0A 6A 0A A6
+    0A 79 0A 97 0B A0 0B 09 0A 90 09 B3 09 88 0A 2B 0A 5A 09 B2 0A A5 0A 1B
+    0A B1 0A 69 09 96 09 A4 0A 4A 0A 78 09 87 09 3A 09 A3 09 59 09 95 09 2A
+    09 A2 09 A1 09 68 09 86 09 77 09 49 09 94 09 39 09 93 09 58 09 85 09 29
+    09 67 09 76 09 92 09 19 09 91 09 48 09 84 09 57 09 75 09 38 09 83 09 66
+    09 28 09 82 09 18 09 47 09 74 09 81 0A 08 0A 80 09 56 09 65 09 17 0A 07
+    0A 70 08 73 09 37 09 27 08 72 08 46 08 64 08 55 08 71 08 36 08 63 08 45
+    08 54 08 26 08 62 08 16 08 61 09 06 09 60 08 35 08 53 08 44 08 25 08 52
+    08 15 09 05 09 50 07 51 08 34 08 43 07 24 07 42 07 33 07 14 07 41 08 04
+    08 40 07 23 07 32 06 13 06 31 07 03 07 30 06 22 05 12 05 21 06 02 06 20
+    04 11 04 01 04 10 04 00
+];
+
+// The codes of the first table of groups of four values that are -1, 0
+// or 1, with a bit per value that isn't zero. The codes of the second
+// table are the four bits, inverted.
+let HUFF_QUAD = #[\x
+    06 0B 06 0F 06 0D 06 0E 06 07 06 05 05 09 05 06 05 03 05 0A 05 0C 04 02
+    04 01 04 04 04 08 01 00
+];
+
+// First half of the window of the synthesis filterbank, times 65536.
+// The second half mirrors it, see make_synth_taps().
+let SYNTH_WINDOW = [
+    0, -1, -1, -1, -1, -1, -1, -2, -2, -2, -2, -3,
+    -3, -4, -4, -5, -5, -6, -7, -7, -8, -9, -10, -11,
+    -13, -14, -16, -17, -19, -21, -24, -26, -29, -31, -35, -38,
+    -41, -45, -49, -53, -58, -63, -68, -73, -79, -85, -91, -97,
+    -104, -111, -117, -125, -132, -139, -147, -154, -161, -169, -176, -183,
+    -190, -196, -202, -208, 213, 218, 222, 225, 227, 228, 228, 227,
+    224, 221, 215, 208, 200, 189, 177, 163, 146, 127, 106, 83,
+    57, 29, -2, -36, -72, -111, -153, -197, -244, -294, -347, -401,
+    -459, -519, -581, -645, -711, -779, -848, -919, -991, -1064, -1137, -1210,
+    -1283, -1356, -1428, -1498, -1567, -1634, -1698, -1759, -1817, -1870, -1919, -1962,
+    -2001, -2032, -2057, -2075, -2085, -2087, -2080, -2063, 2037, 2000, 1952, 1893,
+    1822, 1739, 1644, 1535, 1414, 1280, 1131, 970, 794, 605, 402, 185,
+    -45, -288, -545, -814, -1095, -1388, -1692, -2006, -2330, -2663, -3004, -3351,
+    -3705, -4063, -4425, -4788, -5153, -5517, -5879, -6237, -6589, -6935, -7271, -7597,
+    -7910, -8209, -8491, -8755, -8998, -9219, -9416, -9585, -9727, -9838, -9916, -9959,
+    -9966, -9935, -9863, -9750, -9592, -9389, -9139, -8840, -8492, -8092, -7640, -7134,
+    6574, 5959, 5288, 4561, 3776, 2935, 2037, 1082, 70, -998, -2122, -3300,
+    -4533, -5818, -7154, -8540, -9975, -11455, -12980, -14548, -16155, -17799, -19478, -21189,
+    -22929, -24694, -26482, -28289, -30112, -31947, -33791, -35640, -37489, -39336, -41176, -43006,
+    -44821, -46617, -48390, -50137, -51853, -53534, -55178, -56778, -58333, -59838, -61289, -62684,
+    -64019, -65290, -66494, -67629, -68692, -69679, -70590, -71420, -72169, -72835, -73415, -73908,
+    -74313, -74630, -74856, -74992, 75038
+];
+
+// A table to decode the Huffman codes of one of the lists above
+class MP3Huffman
+{
+    init(self, pairs)
+    {
+        let count = pairs.len.idiv(2);
+
+        // The codes, which follow from their lengths and their order
+        let codes = Array.with_size(count, 0);
+        let var max_len = pairs[0];
+        for (let var i = 1; i < count; ++i) {
+            let len = pairs[2 * i];
+            let prev = pairs[2 * i - 2];
+            let next = codes[i - 1] + 1;
+            codes[i] = len >= prev ? next << (len - prev) : next >> (prev - len);
+            max_len = max_len.max(len);
+        }
+
+        // Number of bits that the first level is indexed with
+        self.root = max_len.min(ROOT_BITS);
+        let root = self.root;
+
+        // Entries hold the length of a code in bits 8 and up, and its
+        // values below that. An entry of the first level for codes that
+        // are longer is negative, and holds the position of a second
+        // level in bits 4 and up and the number of bits it is indexed
+        // with below that.
+        self.lookup = Array.with_size(1 << root, 0);
+        let lookup = self.lookup;
+
+        // Longest code that starts with each index of the first level
+        let longest = Array.with_size(1 << root, 0);
+        for (let var i = 0; i < count; ++i) {
+            let len = pairs[2 * i];
+            if (len > root) {
+                let prefix = codes[i] >> (len - root);
+                longest[prefix] = longest[prefix].max(len);
+            }
+        }
+
+        // Add a second level where there are longer codes
+        for (let var prefix = 0; prefix < longest.len; ++prefix) {
+            if (longest[prefix] > 0) {
+                let sub_bits = longest[prefix] - root;
+                lookup[prefix] = 0 - ((lookup.len << 4) | sub_bits);
+                lookup.resize(lookup.len + (1 << sub_bits), 0);
+            }
+        }
+
+        // Every index that starts with a code leads to it
+        for (let var i = 0; i < count; ++i) {
+            let len = pairs[2 * i];
+            let entry = (len << 8) | pairs[2 * i + 1];
+            let var start = 0;
+            let var copies = 0;
+
+            if (len <= root) {
+                copies = 1 << (root - len);
+                start = codes[i] << (root - len);
+            } else {
+                let link = 0 - lookup[codes[i] >> (len - root)];
+                let spare = (link & 15) - (len - root);
+                let rest = codes[i] & ((1 << (len - root)) - 1);
+                copies = 1 << spare;
+                start = (link >> 4) + (rest << spare);
+            }
+
+            for (let var j = 0; j < copies; ++j) {
+                lookup[start + j] = entry;
+            }
+        }
+    }
+}
+
+// Builds the Huffman tables by number. Tables 0, 4 and 14 have no codes,
+// and tables from 16 up differ only by their number of extra bits.
+fun make_huffman_tables()
+{
+    let wide = MP3Huffman(HUFF_16);
+    let wider = MP3Huffman(HUFF_24);
+
+    let tables = [
+        nil, MP3Huffman(HUFF_1), MP3Huffman(HUFF_2), MP3Huffman(HUFF_3),
+        nil, MP3Huffman(HUFF_5), MP3Huffman(HUFF_6), MP3Huffman(HUFF_7),
+        MP3Huffman(HUFF_8), MP3Huffman(HUFF_9), MP3Huffman(HUFF_10), MP3Huffman(HUFF_11),
+        MP3Huffman(HUFF_12), MP3Huffman(HUFF_13), nil, MP3Huffman(HUFF_15)
+    ];
+
+    for (let var i = 16; i < 32; ++i) {
+        tables.push(i < 24 ? wide : wider);
+    }
+
+    return tables;
+}
+
+let HUFF_TABLES = make_huffman_tables();
+let QUAD_TABLE = MP3Huffman(HUFF_QUAD);
+
+// Builds the table of the values that quantized values stand for, which
+// is their 4/3 power. The largest is 15 plus 13 extra bits.
+fun make_pow43()
+{
+    let table = Array.with_size(15 + (1 << 13), 0.0);
+
+    for (let var i = 1; i < table.len; ++i) {
+        table[i] = i.to_f().pow(4.0 / 3.0);
+    }
+
+    return table;
+}
+
+let POW43 = make_pow43();
+
+// Builds the factors of the rotations that remove the aliasing between
+// neighboring subbands, as 8 cosines and then 8 sines
+fun make_antialias()
+{
+    let coefs = [-0.6, -0.535, -0.33, -0.185, -0.095, -0.041, -0.0142, -0.0037];
+    let table = Array.with_size(16, 0.0);
+
+    for (let var i = 0; i < 8; ++i) {
+        let norm = (1.0 + coefs[i] * coefs[i]).sqrt();
+        table[i] = 1.0 / norm;
+        table[8 + i] = coefs[i] / norm;
+    }
+
+    return table;
+}
+
+let ANTIALIAS = make_antialias();
+
+// Builds the shares of the left and right channels for each intensity
+// stereo position of MPEG-1, as 7 pairs
+fun make_pan()
+{
+    let table = Array.with_size(14, 0.0);
+
+    for (let var i = 0; i < 6; ++i) {
+        let ratio = (i * PI / 12).tan();
+        table[2 * i] = ratio / (1.0 + ratio);
+        table[2 * i + 1] = 1.0 / (1.0 + ratio);
+    }
+
+    // The last position is the left channel alone
+    table[12] = 1.0;
+
+    return table;
+}
+
+let PAN = make_pan();
+
+// Window that the output of the inverse MDCT is multiplied by, for
+// blocks that are normal, start a run of short blocks, or end one
+fun imdct_window(block_type, i)
+{
+    let long = (PI / 36 * (i + 0.5)).sin();
+
+    if (block_type == 1) {
+        if (i < 18) return long;
+        if (i < 24) return 1.0;
+        if (i < 30) return (PI / 12 * (i - 18 + 0.5)).sin();
+        return 0.0;
+    }
+
+    if (block_type == 3) {
+        if (i < 6) return 0.0;
+        if (i < 12) return (PI / 12 * (i - 6 + 0.5)).sin();
+        if (i < 18) return 1.0;
+    }
+
+    return long;
+}
+
+// Builds the 36 samples that each of the 18 frequency lines of a subband
+// stands for, as f32 values, for each block type and then for even and
+// odd subbands. The inverse MDCT of a subband is then the sum of these,
+// each one scaled by its line, which axpy_f32() computes. The first 18
+// samples add to the second 18 of the granule before.
+fun make_imdct_basis()
+{
+    let basis = ByteArray.with_size(4 * 2 * 18 * 36 * 4);
+    let vals = Array.with_size(36, 0.0);
+
+    for (let var block_type = 0; block_type < 4; ++block_type) {
+        for (let var k = 0; k < 18; ++k) {
+            for (let var i = 0; i < 36; ++i) {
+                vals[i] = 0.0;
+            }
+
+            if (block_type == 2) {
+                // Short blocks are three transforms of 6 lines, with
+                // their lines interleaved, that overlap one another
+                let win = k % 3;
+                let line = k.idiv(3);
+                for (let var i = 0; i < 12; ++i) {
+                    let angle = PI / 24 * (2 * i + 7) * (2 * line + 1);
+                    vals[6 + 6 * win + i] = angle.cos() * (PI / 12 * (i + 0.5)).sin();
+                }
+            } else {
+                for (let var i = 0; i < 36; ++i) {
+                    let angle = PI / 72 * (2 * i + 19) * (2 * k + 1);
+                    vals[i] = angle.cos() * imdct_window(block_type, i);
+                }
+            }
+
+            // Every other sample of odd subbands is negated, which
+            // undoes the inversion of their spectrum
+            for (let var odd = 0; odd < 2; ++odd) {
+                let start = ((block_type * 2 + odd) * 18 + k) * 36;
+                for (let var i = 0; i < 36; ++i) {
+                    let flip = odd == 1 && (i & 1) == 1;
+                    basis.set_f32(start + i, flip ? 0.0 - vals[i] : vals[i]);
+                }
+            }
+        }
+    }
+
+    return basis;
+}
+
+let IMDCT_BASIS = make_imdct_basis();
+
+// Builds the 64 values that a sample of each of the 32 subbands adds to
+// the input of the synthesis window, as f32 values. A second set has the
+// two halves of the 64 swapped, see synthesize().
+fun make_synth_matrix()
+{
+    let matrix = ByteArray.with_size(2 * 32 * 64 * 4);
+
+    for (let var swap = 0; swap < 2; ++swap) {
+        for (let var sb = 0; sb < 32; ++sb) {
+            for (let var i = 0; i < 64; ++i) {
+                let row = (i + 32 * swap) & 63;
+                let angle = (16 + row) * (2 * sb + 1) * PI / 64;
+                matrix.set_f32((swap * 32 + sb) * 64 + i, angle.cos());
+            }
+        }
+    }
+
+    return matrix;
+}
+
+let SYNTH_MATRIX = make_synth_matrix();
+
+// Builds the 16 values of the synthesis window that each of the 32
+// samples of a time slot is computed from, as f32 values
+fun make_synth_taps()
+{
+    // The second half of the window is the first one in reverse and
+    // negated, but for the values at multiples of 64
+    let window = Array.with_size(512, 0.0);
+    for (let var i = 0; i <= 256; ++i) {
+        window[i] = SYNTH_WINDOW[i] / 65536.0;
+    }
+    for (let var i = 257; i < 512; ++i) {
+        window[i] = (i & 63) == 0 ? window[512 - i] : 0.0 - window[512 - i];
+    }
+
+    let taps = ByteArray.with_size(32 * 16 * 4);
+    for (let var j = 0; j < 32; ++j) {
+        for (let var i = 0; i < 8; ++i) {
+            taps.set_f32(j * 16 + 2 * i, window[j + 64 * i]);
+            taps.set_f32(j * 16 + 2 * i + 1, window[j + 32 + 64 * i]);
+        }
+    }
+
+    return taps;
+}
+
+let SYNTH_TAPS = make_synth_taps();
+
+// Sets a run of f32 values to zero
+fun zero_f32(bytes, idx, count)
+{
+    let var pos = idx * 4;
+    let var left = count * 4;
+
+    while (left > 0) {
+        let size = left.min(ZEROS.len);
+        bytes.memcpy(pos, ZEROS, 0, size);
+        pos += size;
+        left -= size;
+    }
+}
+
+// The four bytes that start every frame
+class MP3Header
+{
+    init(self, b1, b2, b3)
+    {
+        // 3 is MPEG-1, 2 is MPEG-2 and 0 is MPEG-2.5
+        self.version = (b1 >> 3) & 3;
+        self.has_crc = (b1 & 1) == 0;
+
+        self.rate_idx = (b2 >> 2) & 3;
+        self.sample_rate = SAMPLE_RATES[self.rate_idx];
+        if (self.version != 3) {
+            self.sample_rate = self.sample_rate >> (self.version == 2 ? 1 : 2);
+        }
+
+        // Stereo, joint stereo, dual channel or mono
+        self.mode = b3 >> 6;
+        self.num_channels = self.mode == 3 ? 1 : 2;
+
+        // The two ways that joint stereo shares data between channels
+        self.mid_side = self.mode == 1 && (b3 & 0x20) != 0;
+        self.intensity = self.mode == 1 && (b3 & 0x10) != 0;
+
+        // The lower sampling frequencies have one granule per frame
+        self.num_granules = self.version == 3 ? 2 : 1;
+        self.num_samples = 576 * self.num_granules;
+
+        // Size of the whole frame in bytes
+        let bitrates = self.version == 3 ? BITRATES_V1 : BITRATES_V2;
+        let bits = 125 * self.num_samples * bitrates[b2 >> 4];
+        self.size = bits.idiv(self.sample_rate) + ((b2 >> 1) & 1);
+
+        // Size of the side information that follows the header
+        if (self.version == 3) {
+            self.side_size = self.num_channels == 1 ? 17 : 32;
+        } else {
+            self.side_size = self.num_channels == 1 ? 9 : 17;
+        }
+
+        // Row of the tables of scalefactor bands
+        if (self.version == 3) {
+            self.band_idx = 5 + self.rate_idx;
+        } else if (self.version == 2) {
+            self.band_idx = 2 + self.rate_idx;
+        } else {
+            self.band_idx = self.rate_idx == 2 ? 1 : 0;
+        }
+
+        // Number of subbands that the long bands of a mixed block cover
+        self.mixed_bands = self.band_idx == 1 ? 4 : 2;
+    }
+
+    // Position of the side information in a frame that starts at pos
+    side_pos(self, pos)
+    {
+        return pos + (self.has_crc ? 6 : 4);
+    }
+
+    // Whether another header belongs to the same stream as this one
+    matches(self, other)
+    {
+        return (
+            self.version == other.version &&
+            self.rate_idx == other.rate_idx &&
+            self.num_channels == other.num_channels
+        );
+    }
+}
+
+// Reads the frame header at pos. Returns nil if there isn't one, or if
+// it is for a format that is not supported.
+fun read_header(data, pos)
+{
+    if (pos + 4 > data.len || data[pos] != 0xFF) {
+        return nil;
+    }
+
+    let b1 = data[pos + 1];
+    let b2 = data[pos + 2];
+
+    // The rest of the sync word, a known version, and Layer III
+    if ((b1 & 0xE0) != 0xE0 || (b1 & 0x18) == 0x08 || (b1 & 0x06) != 0x02) {
+        return nil;
+    }
+
+    // Index 0 is free format, and 15 is not allowed
+    let bitrate_idx = b2 >> 4;
+    if (bitrate_idx == 0 || bitrate_idx == 15 || (b2 & 0x0C) == 0x0C) {
+        return nil;
+    }
+
+    return MP3Header(b1, b2, data[pos + 3]);
+}
+
+// Returns the size of the ID3v2 tag at pos, zero if there is none
+fun id3v2_size(data, pos)
+{
+    if (pos + 10 > data.len) {
+        return 0;
+    }
+
+    // The tag starts with "ID3"
+    if (data[pos] != 0x49 || data[pos + 1] != 0x44 || data[pos + 2] != 0x33) {
+        return 0;
+    }
+
+    // The size is four bytes of 7 bits, and leaves out the header
+    let var size = 0;
+    for (let var i = 6; i < 10; ++i) {
+        if (data[pos + i] > 127) {
+            return 0;
+        }
+        size = (size << 7) | data[pos + i];
+    }
+
+    // A flag tells that a footer of 10 bytes follows the tag
+    let footer = (data[pos + 5] & 0x10) != 0 ? 10 : 0;
+
+    return 10 + size + footer;
+}
+
+// Reads a big-endian 32-bit integer
+fun load_u32_be(data, pos)
+{
+    return (
+        (data[pos] << 24) |
+        (data[pos + 1] << 16) |
+        (data[pos + 2] << 8) |
+        data[pos + 3]
+    );
+}
+
+// Tells whether the bytes at pos are "Xing" or "Info" and end before end
+fun is_info_tag(data, pos, end)
+{
+    if (pos + 8 > end) {
+        return false;
+    }
+
+    let id = load_u32_be(data, pos);
+    return id == 0x58696E67 || id == 0x496E666F;
+}
+
+// Reads fields of a few bits, from the first bit of a byte to the last
+class MP3BitReader
+{
+    init(self, data, bit_pos)
+    {
+        self.data = data;
+        self.pos = bit_pos;
+    }
+
+    // Reads an integer of count bits
+    get(self, count)
+    {
+        let data = self.data;
+        let var pos = self.pos;
+        let var value = 0;
+
+        for (let var i = 0; i < count; ++i) {
+            value = (value << 1) | ((data[pos >> 3] >> (7 - (pos & 7))) & 1);
+            ++pos;
+        }
+
+        self.pos = pos;
+        return value;
+    }
+}
+
+// What the side information tells about one channel of a granule, the
+// 576 samples that are transformed together
+class MP3Granule
+{
+    init(self)
+    {
+        // Size in bits of the scalefactors and Huffman codes
+        self.data_bits = 0;
+
+        // Number of pairs of values that are coded as pairs
+        self.big_values = 0;
+
+        self.global_gain = 0;
+        self.scalefac_compress = 0;
+
+        // 0 is a normal block, 1 starts a run of short blocks, 2 is a
+        // short block and 3 ends the run
+        self.block_type = 0;
+
+        // Set if the first subbands of a short block are long ones
+        self.mixed = false;
+
+        // Huffman table of each of the three regions of pairs, and the
+        // number of bands less one of the first two
+        self.tables = [0, 0, 0];
+        self.region0 = 0;
+        self.region1 = 0;
+
+        // Gain of each window of a short block
+        self.subblock_gain = [0, 0, 0];
+
+        self.preflag = false;
+        self.scalefac_scale = 0;
+        self.quad_table = 0;
+
+        // Bit 3 to 0 are set for each group of scalefactors that is
+        // that of the granule before
+        self.scfsi = 0;
+
+        // Widths of the bands, and how many are long and short
+        self.bands = nil;
+        self.num_long = 0;
+        self.num_short = 0;
+    }
+}
+
+// Greatest common divisor
+fun gcd(a, b)
+{
+    let var x = a;
+    let var y = b;
+
+    while (y != 0) {
+        let rem = x % y;
+        x = y;
+        y = rem;
+    }
+
+    return x;
+}
+
+// Modified Bessel function of the first kind and order zero
+fun bessel_i0(x)
+{
+    let var sum = 1.0;
+    let var term = 1.0;
+
+    for (let var k = 1; k < 40; ++k) {
+        term = term * (x / (2 * k)) * (x / (2 * k));
+        sum += term;
+    }
+
+    return sum;
+}
+
+// Number of zero crossings of the filter of a resampler on each side
+let RESAMPLE_ZEROS = 16;
+
+// Shape of the Kaiser window of the filter, which sets how much of what
+// is past the cutoff is left: about -90 dB
+let RESAMPLE_BETA = 9.0;
+
+// Share of the lower of the two Nyquist frequencies that is kept
+let RESAMPLE_CUTOFF = 0.94;
+
+// Most positions between two input samples that a filter is stored for
+let RESAMPLE_PHASES = 1024;
+
+// Number of input samples read at a time
+let RESAMPLE_CHUNK = 2048;
+
+// Converts a stream of samples from one sample rate to another, with a
+// windowed sinc filter. The samples are f32 values, interleaved if there
+// are several channels. pull(dst, idx, count) is called for count input
+// samples per channel to be stored from f32 index idx of dst, and returns
+// how many it gave, which is fewer only at the end of the input.
+class Resampler
+{
+    init(self, src_rate, dst_rate, num_channels, pull)
+    {
+        self.num_channels = num_channels;
+        self.pull = pull;
+
+        // Output sample n is at input position n * step / unit
+        let common = gcd(src_rate, dst_rate);
+        self.step = src_rate.idiv(common);
+        self.unit = dst_rate.idiv(common);
+
+        // The filter is wider when lowering the rate, as its cutoff
+        // then has to be below what the output can hold
+        let scale = dst_rate < src_rate ? dst_rate / src_rate : 1.0;
+        self.half = (RESAMPLE_ZEROS / scale).ceil();
+        self.num_taps = 2 * self.half;
+
+        // Filter for each position of an output sample between two
+        // input samples, exact if there are few enough
+        self.num_phases = self.unit.min(RESAMPLE_PHASES);
+        self.filters = ByteArray.with_size(self.num_phases * self.num_taps * 4);
+        self.make_filters(scale * RESAMPLE_CUTOFF);
+
+        // Input samples, the position in the input of the first one,
+        // and how many there are
+        self.size = self.num_taps + RESAMPLE_CHUNK;
+        self.buf = ByteArray.with_size(self.size * num_channels * 4);
+        self.spare = ByteArray.with_size(self.size * num_channels * 4);
+        self.base = 0;
+        self.len = 0;
+
+        // Set once the input has ended, after which it is zeros
+        self.ended = false;
+
+        // Position of the next output sample
+        self.pos = 0;
+    }
+
+    // Computes the filters, a sinc that crosses zero every 1 / cutoff
+    // input samples under a Kaiser window
+    make_filters(self, cutoff)
+    {
+        let half = self.half;
+        let num_taps = self.num_taps;
+        let taps = Array.with_size(num_taps, 0.0);
+        let norm = bessel_i0(RESAMPLE_BETA);
+
+        for (let var phase = 0; phase < self.num_phases; ++phase) {
+            let frac = phase / self.num_phases;
+            let var sum = 0.0;
+
+            for (let var k = 0; k < num_taps; ++k) {
+                // Distance from the output sample to this input sample
+                let dist = k - half + 1 - frac;
+                let x = PI * dist * cutoff;
+                let sinc = x == 0 ? 1.0 : x.sin() / x;
+
+                let edge = dist / half;
+                let inside = (1.0 - edge * edge).max(0.0).sqrt();
+                taps[k] = sinc * bessel_i0(RESAMPLE_BETA * inside) / norm;
+                sum += taps[k];
+            }
+
+            // A constant input gives the same constant
+            for (let var k = 0; k < num_taps; ++k) {
+                self.filters.set_f32(phase * num_taps + k, taps[k] / sum);
+            }
+        }
+    }
+
+    // Moves to an output sample. Returns the position of the input
+    // sample that pull() has to give next.
+    reset(self, pos)
+    {
+        self.pos = pos;
+        self.ended = false;
+
+        // First input sample that the filter covers. Those from before
+        // the start of the input are zeros.
+        let first = (pos * self.step).idiv(self.unit) - self.half + 1;
+        self.base = first;
+        self.len = first < 0 ? 0 - first : 0;
+        zero_f32(self.buf, 0, self.len * self.num_channels);
+
+        return first.max(0);
+    }
+
+    // Drops the input samples before index start of the buffer, and
+    // fills what that leaves free
+    fill(self, start)
+    {
+        let num_channels = self.num_channels;
+        let keep = self.len - start;
+
+        let next = self.spare;
+        next.memcpy(0, self.buf, start * num_channels * 4, keep * num_channels * 4);
+        self.spare = self.buf;
+        self.buf = next;
+        self.base += start;
+        self.len = keep;
+
+        let want = self.size - keep;
+        let var count = 0;
+        if (!self.ended) {
+            let pull = self.pull;
+            count = pull(next, keep * num_channels, want);
+            self.ended = count < want;
+        }
+
+        zero_f32(next, (keep + count) * num_channels, (want - count) * num_channels);
+        self.len = self.size;
+    }
+
+    // Stores count output samples per channel from f32 index idx of dst
+    read(self, dst, idx, count)
+    {
+        let num_channels = self.num_channels;
+        let num_taps = self.num_taps;
+        let filters = self.filters;
+        let step = self.step;
+        let unit = self.unit;
+        let num_phases = self.num_phases;
+        let var out = idx;
+
+        for (let var i = 0; i < count; ++i) {
+            // Input sample at or before the output one, and how far
+            // past it the output one is
+            let scaled = self.pos * step;
+            let whole = scaled.idiv(unit);
+            let phase = ((scaled - whole * unit) * num_phases).idiv(unit);
+
+            let var start = whole - self.half + 1 - self.base;
+            if (start + num_taps > self.len) {
+                self.fill(start);
+                start = 0;
+            }
+
+            let buf = self.buf;
+            for (let var ch = 0; ch < num_channels; ++ch) {
+                let sample = buf.dot_f32(
+                    start * num_channels + ch, num_channels,
+                    filters, phase * num_taps, 1,
+                    num_taps
+                );
+                dst.set_f32(out, sample);
+                ++out;
+            }
+
+            self.pos += 1;
+        }
+    }
+}
+
+// Decodes MP3 data into samples
+class MP3Decoder
+{
+    init(self, data)
+    {
+        self.data = data;
+
+        // Format of the samples that read() produces
+        self.sample_rate = 0;
+        self.num_channels = 0;
+
+        // Length of the audio and position of the next sample to read
+        self.num_samples = 0;
+        self.pos = 0;
+
+        // Format and length of the stream, and position in it of the
+        // next sample that read_src() gives
+        self.src_rate = 0;
+        self.src_channels = 0;
+        self.src_samples = 0;
+        self.src_pos = 0;
+
+        // Changes the sample rate, nil if it is that of the stream
+        self.resampler = nil;
+
+        // Number of samples in every frame
+        self.frame_samples = 0;
+
+        // Position in the data of every frame of audio
+        self.frames = [];
+
+        // Samples to leave out at the start and at the end of the stream
+        self.skip_start = 0;
+        self.skip_end = 0;
+
+        // Next frame to decode, and how many of the samples decoded
+        // next are to be dropped
+        self.next_frame = 0;
+        self.discard = 0;
+
+        // Samples of the last frame decoded, how many there are, and
+        // how many of them were read
+        self.pcm = ByteArray.with_size(1152 * 2 * 4);
+        self.pcm_len = 0;
+        self.pcm_pos = 0;
+
+        // Scalefactors and Huffman codes of the frame being decoded,
+        // after those of earlier frames that it may still use
+        self.main = ByteArray.with_size(4096);
+        self.main_spare = ByteArray.with_size(4096);
+        self.main_len = 0;
+        self.bit_pos = 0;
+
+        // Side information of each channel of each granule
+        self.granules = [MP3Granule(), MP3Granule(), MP3Granule(), MP3Granule()];
+
+        // Scalefactors of each channel, and the same as intensity
+        // stereo positions, where 64 is for none
+        self.scalefacs = [Array.with_size(40, 0), Array.with_size(40, 0)];
+        self.positions = [Array.with_size(40, 0), Array.with_size(40, 0)];
+
+        // Scale of each band of the channel being decoded
+        self.gains = Array.with_size(40, 0.0);
+
+        // Quantized values of the channel being decoded
+        self.values = Array.with_size(576, 0);
+
+        // Frequency lines of each channel, and the number of them
+        // from the first one that may not be zero
+        self.lines = [Array.with_size(576, 0.0), Array.with_size(576, 0.0)];
+        self.num_lines = [0, 0];
+
+        // Output of the inverse MDCT of each channel as f32 values, 36
+        // per subband: the 18 samples of this granule and 18 to add to
+        // those of the next one. There are two of them, used in turn.
+        self.blocks = [
+            [ByteArray.with_size(32 * 36 * 4), ByteArray.with_size(32 * 36 * 4)],
+            [ByteArray.with_size(32 * 36 * 4), ByteArray.with_size(32 * 36 * 4)]
+        ];
+        self.cur_block = 0;
+
+        // Number of subbands of each channel that the granule before
+        // left samples for
+        self.num_subbands = [0, 0];
+
+        // Input of the synthesis window of each channel as f32 values:
+        // 64 for each of the last 16 time slots, from the newest one.
+        // It is stored twice in a row so that it never wraps around.
+        self.window = [ByteArray.with_size(2048 * 4), ByteArray.with_size(2048 * 4)];
+
+        // Number of time slots synthesized
+        self.num_slots = 0;
+    }
+
+    // Returns a decoder for MP3 data in a ByteArray, or nil if no frame
+    // of audio in a supported format is found in it
+    from_bytes(data)
+    {
+        assert(data instanceof ByteArray);
+
+        let dec = MP3Decoder(data);
+        if (!dec.scan()) {
+            return nil;
+        }
+
+        return dec;
+    }
+
+    // Returns a decoder for an MP3 file, or nil if the file can't be
+    // read or from_bytes() finds no audio in it
+    load_file(path)
+    {
+        let data = $read_file(path);
+
+        if (data == nil) {
+            return nil;
+        }
+
+        return MP3Decoder.from_bytes(data);
+    }
+
+    // Length of the audio in seconds
+    duration(self)
+    {
+        return self.num_samples / self.sample_rate;
+    }
+
+    // Sets the sample rate and the number of channels, 1 or 2, of the
+    // samples that read() produces. The position in time is kept.
+    set_out_format(self, sample_rate, num_channels)
+    {
+        assert(sample_rate > 0);
+        assert(num_channels == 1 || num_channels == 2);
+
+        // Rounded up, as lengths are, so that the end stays the end
+        let pos = (self.pos * sample_rate + self.sample_rate - 1).idiv(self.sample_rate);
+
+        self.sample_rate = sample_rate;
+        self.num_channels = num_channels;
+        self.num_samples = self.src_samples;
+        self.resampler = nil;
+
+        if (sample_rate != self.src_rate) {
+            let scaled = self.src_samples * sample_rate;
+            self.num_samples = (scaled + self.src_rate - 1).idiv(self.src_rate);
+            self.resampler = Resampler(
+                self.src_rate,
+                sample_rate,
+                num_channels,
+                |dst, idx, count| self.read_src(dst, idx, count)
+            );
+        }
+
+        self.seek(pos);
+    }
+
+    // Moves to a sample, so that read() gives it next
+    seek(self, pos)
+    {
+        self.pos = pos.max(0).min(self.num_samples);
+
+        if (self.resampler == nil) {
+            self.seek_src(self.pos);
+        } else {
+            self.seek_src(self.resampler.reset(self.pos));
+        }
+    }
+
+    // Decodes up to num_samples samples per channel into dst as f32
+    // values, from f32 index dst_idx, with the channels interleaved.
+    // Returns how many were decoded, which is zero at the end.
+    read(self, dst, dst_idx, num_samples)
+    {
+        assert(dst instanceof ByteArray);
+
+        let var count = num_samples.min(self.num_samples - self.pos);
+        if (count <= 0) {
+            return 0;
+        }
+
+        if (self.resampler == nil) {
+            count = self.read_src(dst, dst_idx, count);
+        } else {
+            self.resampler.read(dst, dst_idx, count);
+        }
+
+        self.pos += count;
+        return count;
+    }
+
+    // Moves to a sample of the stream, at its own sample rate
+    seek_src(self, pos)
+    {
+        let size = self.frame_samples;
+        let first = pos.min(self.src_samples) + self.skip_start;
+
+        // The frames before the one with the sample are decoded too
+        let target = first.idiv(size).min(self.frames.len);
+        let start = (target - SEEK_FRAMES).max(0);
+
+        // Frames before those give the data that later frames may use
+        let var prime = start;
+        let var bytes = 0;
+        while (prime > 0 && bytes < MAX_RESERVOIR) {
+            --prime;
+            let header = read_header(self.data, self.frames[prime]);
+            bytes += header.size - header.side_size - (header.has_crc ? 6 : 4);
+        }
+
+        // Forget what the frames decoded last have left
+        self.main_len = 0;
+        self.num_slots = 0;
+        self.cur_block = 0;
+        for (let var ch = 0; ch < 2; ++ch) {
+            self.blocks[ch][0].zero_fill();
+            self.blocks[ch][1].zero_fill();
+            self.window[ch].zero_fill();
+            self.num_subbands[ch] = 0;
+        }
+
+        for (let var i = prime; i < start; ++i) {
+            self.decode_frame(i, false);
+        }
+
+        self.next_frame = start;
+        self.discard = first - start * size;
+        self.pcm_len = 0;
+        self.pcm_pos = 0;
+        self.src_pos = pos.min(self.src_samples);
+    }
+
+    // Stores up to count samples of the stream per channel from f32
+    // index idx of dst, with the number of channels of the output.
+    // Returns how many were stored.
+    read_src(self, dst, idx, count)
+    {
+        let src_channels = self.src_channels;
+        let num_channels = self.num_channels;
+        let pcm = self.pcm;
+        let total = count.min(self.src_samples - self.src_pos);
+        let var done = 0;
+
+        while (done < total) {
+            if (self.pcm_pos == self.pcm_len) {
+                if (self.next_frame >= self.frames.len) {
+                    break;
+                }
+
+                self.decode_frame(self.next_frame, true);
+                self.next_frame += 1;
+            }
+
+            let avail = self.pcm_len - self.pcm_pos;
+            if (self.discard > 0) {
+                let skip = avail.min(self.discard);
+                self.pcm_pos += skip;
+                self.discard -= skip;
+                continue;
+            }
+
+            let num = avail.min(total - done);
+            let src = self.pcm_pos * src_channels;
+            let out = idx + done * num_channels;
+
+            if (num_channels == src_channels) {
+                dst.memcpy(out * 4, pcm, src * 4, num * num_channels * 4);
+            } else if (num_channels == 1) {
+                // Mono is the mean of the two channels
+                zero_f32(dst, out, num);
+                dst.axpy_f32(out, 1, pcm, src, 2, num, 0.5);
+                dst.axpy_f32(out, 1, pcm, src + 1, 2, num, 0.5);
+            } else {
+                zero_f32(dst, out, 2 * num);
+                dst.axpy_f32(out, 2, pcm, src, 1, num, 1.0);
+                dst.axpy_f32(out + 1, 2, pcm, src, 1, num, 1.0);
+            }
+
+            self.pcm_pos += num;
+            done += num;
+        }
+
+        self.src_pos += done;
+        return done;
+    }
+
+    // Returns the position of the first frame at or after pos that is
+    // followed by another frame of the same stream, or that ends the
+    // data. Frames have to match first, if it is not nil.
+    find_frame(self, start, first)
+    {
+        let data = self.data;
+
+        for (let var pos = start; pos + 4 <= data.len; ++pos) {
+            if (data[pos] != 0xFF) {
+                continue;
+            }
+
+            let header = read_header(data, pos);
+            if (header == nil || (first != nil && !first.matches(header))) {
+                continue;
+            }
+
+            let end = pos + header.size;
+            if (end == data.len) {
+                return pos;
+            }
+
+            // Bytes that look like a header are common in other data,
+            // two of them a frame apart are not
+            let next = read_header(data, end);
+            if (next != nil && header.matches(next)) {
+                return pos;
+            }
+        }
+
+        return nil;
+    }
+
+    // Finds every frame of the stream. Returns false if there are none.
+    scan(self)
+    {
+        let data = self.data;
+        let var pos = 0;
+
+        // Tags at the start, which may be large and hold anything
+        loop {
+            let size = id3v2_size(data, pos);
+            if (size == 0) {
+                break;
+            }
+            pos += size;
+        }
+
+        pos = self.find_frame(pos, nil);
+        if (pos == nil) {
+            return false;
+        }
+
+        let first = read_header(data, pos);
+        self.src_rate = first.sample_rate;
+        self.src_channels = first.num_channels;
+        self.frame_samples = first.num_samples;
+
+        // The first frame may hold information on the stream and no audio
+        let num_frames = self.read_info(pos, first);
+        if (num_frames != nil) {
+            pos += first.size;
+        }
+
+        // Frames follow one another, with at times a tag or some damage
+        // in between, after which the next frame has to be searched for
+        while (pos != nil) {
+            let header = read_header(data, pos);
+
+            if (header == nil || !first.matches(header)) {
+                pos = self.find_frame(pos + 1, first);
+                continue;
+            }
+
+            // The last frame may be cut short
+            if (pos + header.size > data.len) {
+                break;
+            }
+
+            self.frames.push(pos);
+            pos += header.size;
+        }
+
+        if (self.frames.len == 0) {
+            return false;
+        }
+
+        // Padding is counted from the end of the stream as it was
+        // written, so it is of no use if frames are missing
+        if (num_frames != nil && num_frames != self.frames.len) {
+            self.skip_end = 0;
+        }
+
+        let total = self.frames.len * self.frame_samples;
+        self.skip_start = self.skip_start.min(total);
+        self.skip_end = self.skip_end.min(total - self.skip_start);
+
+        self.src_samples = total - self.skip_start - self.skip_end;
+        self.sample_rate = self.src_rate;
+        self.num_channels = self.src_channels;
+        self.num_samples = self.src_samples;
+        self.seek(0);
+
+        return true;
+    }
+
+    // Reads the information that encoders store in a first frame of
+    // silence: the number of frames, and the delay and padding to trim.
+    // Returns the number of frames, zero if it is not given, or nil if
+    // the frame at pos is a frame of audio.
+    read_info(self, pos, header)
+    {
+        let data = self.data;
+        let end = (pos + header.size).min(data.len);
+
+        // The tag of Fraunhofer encoders, "VBRI", is at a fixed position
+        if (pos + 40 <= end && load_u32_be(data, pos + 36) == 0x56425249) {
+            return 0;
+        }
+
+        // The usual tag is "Xing", or "Info" at a constant bitrate. It
+        // follows the side information, and LAME leaves no room for the
+        // CRC of a frame that has one.
+        let var tag = pos + 4 + header.side_size;
+        if (!is_info_tag(data, tag, end)) {
+            tag = header.side_pos(pos) + header.side_size;
+            if (!is_info_tag(data, tag, end)) {
+                return nil;
+            }
+        }
+
+        // Flags tell which of the fields are present: the number of
+        // frames, the size in bytes, a seek table and a quality
+        let flags = load_u32_be(data, tag + 4);
+        tag += 8;
+
+        let var num_frames = 0;
+        if ((flags & 1) != 0 && tag + 4 <= end) {
+            num_frames = load_u32_be(data, tag);
+            tag += 4;
+        }
+        if ((flags & 2) != 0) {
+            tag += 4;
+        }
+        if ((flags & 4) != 0) {
+            tag += 100;
+        }
+        if ((flags & 8) != 0) {
+            tag += 4;
+        }
+
+        // The name of the encoder starts the extension that LAME defined.
+        // Delay and padding are 12 bits each, 21 bytes into it.
+        if (tag + 24 <= end && data[tag] != 0) {
+            let delay = (data[tag + 21] << 4) | (data[tag + 22] >> 4);
+            let padding = ((data[tag + 22] & 15) << 8) | data[tag + 23];
+
+            self.skip_start = delay + DECODER_DELAY;
+            self.skip_end = (padding - DECODER_DELAY).max(0);
+        }
+
+        return num_frames;
+    }
+
+    // Decodes a frame into pcm. If synth is false, only the data that
+    // later frames may use is kept.
+    decode_frame(self, idx, synth)
+    {
+        let data = self.data;
+        let pos = self.frames[idx];
+        let header = read_header(data, pos);
+        let num_channels = header.num_channels;
+
+        // What follows the side information is the main data
+        let start = header.side_pos(pos) + header.side_size;
+        let size = pos + header.size - start;
+
+        // Number of bytes of earlier frames where the data of this
+        // frame starts, -1 if the frame is not valid
+        let begin = size < 0 ? -1 : self.read_side_info(header, start - header.side_size);
+
+        // Keep the bytes that this frame uses, and add its own
+        let have = self.main_len;
+        let keep = have.min(begin < 0 ? MAX_RESERVOIR : begin);
+        let added = size.max(0);
+        let main = self.main_spare;
+        main.memcpy(0, self.main, have - keep, keep);
+        main.memcpy(keep, data, start, added);
+        main.memcpy(keep + added, ZEROS, 0, MAIN_PAD);
+        self.main_spare = self.main;
+        self.main = main;
+        self.main_len = keep + added;
+
+        if (!synth) {
+            return;
+        }
+
+        self.pcm_pos = 0;
+        self.pcm_len = header.num_samples;
+        self.bit_pos = 0;
+
+        // Bytes are missing after a seek or after a damaged frame, and
+        // the frame is then silent
+        let var gr = 0;
+        if (begin >= 0 && have >= begin) {
+            while (gr < header.num_granules && self.decode_granule(header, gr)) {
+                ++gr;
+            }
+        }
+
+        zero_f32(
+            self.pcm,
+            gr * 576 * num_channels,
+            (header.num_granules - gr) * 576 * num_channels
+        );
+    }
+
+    // Reads the side information of a frame, at byte pos. Returns the
+    // number of bytes of earlier frames where the main data of the
+    // frame starts, or -1 if the side information is not valid.
+    read_side_info(self, header, pos)
+    {
+        let bits = MP3BitReader(self.data, pos * 8);
+        let mpeg1 = header.version == 3;
+        let num_channels = header.num_channels;
+        let scfsi = [0, 0];
+        let var begin = 0;
+
+        if (mpeg1) {
+            begin = bits.get(9);
+            bits.get(num_channels == 1 ? 5 : 3);
+            for (let var ch = 0; ch < num_channels; ++ch) {
+                scfsi[ch] = bits.get(4);
+            }
+        } else {
+            begin = bits.get(8);
+            bits.get(num_channels);
+        }
+
+        for (let var gr = 0; gr < header.num_granules; ++gr) {
+            for (let var ch = 0; ch < num_channels; ++ch) {
+                let g = self.granules[gr * 2 + ch];
+
+                g.data_bits = bits.get(12);
+                g.big_values = bits.get(9);
+                if (g.big_values > 288) {
+                    return -1;
+                }
+
+                g.global_gain = bits.get(8);
+                g.scalefac_compress = bits.get(mpeg1 ? 4 : 9);
+
+                g.bands = SFB_LONG[header.band_idx];
+                g.num_long = 22;
+                g.num_short = 0;
+
+                if (bits.get(1) == 1) {
+                    // A block that is not normal has two regions
+                    g.block_type = bits.get(2);
+                    if (g.block_type == 0) {
+                        return -1;
+                    }
+
+                    g.mixed = bits.get(1) == 1;
+                    g.region0 = 7;
+                    g.region1 = 255;
+
+                    if (g.block_type == 2 && g.mixed) {
+                        g.bands = SFB_MIXED[header.band_idx];
+                        g.num_long = mpeg1 ? 8 : 6;
+                        g.num_short = 30;
+                    } else if (g.block_type == 2) {
+                        g.bands = SFB_SHORT[header.band_idx];
+                        g.num_long = 0;
+                        g.num_short = 39;
+                        g.region0 = 8;
+                    }
+
+                    g.tables[0] = bits.get(5);
+                    g.tables[1] = bits.get(5);
+                    g.tables[2] = 0;
+
+                    for (let var win = 0; win < 3; ++win) {
+                        g.subblock_gain[win] = bits.get(3);
+                    }
+                } else {
+                    g.block_type = 0;
+                    g.mixed = false;
+
+                    for (let var region = 0; region < 3; ++region) {
+                        g.tables[region] = bits.get(5);
+                    }
+
+                    g.region0 = bits.get(4);
+                    g.region1 = bits.get(3);
+                }
+
+                if (mpeg1) {
+                    g.preflag = bits.get(1) == 1;
+                } else {
+                    g.preflag = g.scalefac_compress >= 500;
+                }
+
+                g.scalefac_scale = bits.get(1);
+                g.quad_table = bits.get(1);
+
+                // Scalefactors are shared between the two granules of
+                // a frame, and not by short blocks
+                g.scfsi = gr == 1 && g.block_type != 2 ? scfsi[ch] : 0;
+            }
+        }
+
+        return begin;
+    }
+
+    // Decodes a granule of every channel into pcm. Returns false if
+    // its data goes past the end of that of the frame.
+    decode_granule(self, header, gr)
+    {
+        let num_channels = header.num_channels;
+
+        for (let var ch = 0; ch < num_channels; ++ch) {
+            let g = self.granules[gr * 2 + ch];
+
+            let end = self.bit_pos + g.data_bits;
+            if (end > self.main_len * 8) {
+                return false;
+            }
+
+            self.read_scalefactors(header, g, ch);
+            let count = self.read_huffman(g, end);
+            self.dequantize(g, ch, count);
+        }
+
+        if (num_channels == 2 && (header.mid_side || header.intensity)) {
+            self.joint_stereo(header, self.granules[gr * 2 + 1]);
+        }
+
+        for (let var ch = 0; ch < num_channels; ++ch) {
+            let g = self.granules[gr * 2 + ch];
+            let num_subbands = self.imdct(header, g, ch);
+            self.synthesize(ch, gr * 576, num_channels, num_subbands);
+        }
+
+        self.cur_block = 1 - self.cur_block;
+        self.num_slots += 18;
+
+        return true;
+    }
+
+    // Reads the scalefactors of a channel of a granule, and computes
+    // the scale of each of its bands
+    read_scalefactors(self, header, g, ch)
+    {
+        let bits = MP3BitReader(self.main, self.bit_pos);
+        let scalefacs = self.scalefacs[ch];
+        let positions = self.positions[ch];
+        let mpeg1 = header.version == 3;
+
+        // Number of scalefactors of each group and their size in bits
+        let kind = (g.num_short != 0 ? 1 : 0) + (g.num_long == 0 ? 1 : 0);
+        let groups = SCF_GROUPS[kind];
+        let sizes = [0, 0, 0, 0];
+        let var first = 0;
+
+        if (mpeg1) {
+            sizes[0] = SCF_BITS_LOW[g.scalefac_compress];
+            sizes[1] = sizes[0];
+            sizes[2] = SCF_BITS_HIGH[g.scalefac_compress];
+            sizes[3] = sizes[2];
+        } else {
+            // The sizes are the digits of a number in a mixed radix.
+            // Numbers past the range of a set are for the next one.
+            let positional = header.intensity && ch == 1;
+            let var code = g.scalefac_compress >> (positional ? 1 : 0);
+            let var set = positional ? 12 : 0;
+
+            loop {
+                let var range = 1;
+                for (let var i = 3; i >= 0; --i) {
+                    sizes[i] = code.idiv(range) % SCF_MODS[set + i];
+                    range *= SCF_MODS[set + i];
+                }
+
+                set += 4;
+                code -= range;
+                if (code < 0) {
+                    break;
+                }
+            }
+
+            first = set;
+        }
+
+        let var idx = 0;
+        for (let var group = 0; group < 4; ++group) {
+            let count = groups[first + group];
+            let size = sizes[group];
+
+            // The largest value that fits is for no position
+            let none = mpeg1 ? -1 : (1 << size) - 1;
+
+            // A group that is shared keeps the values it has
+            if ((g.scfsi & (8 >> group)) == 0) {
+                for (let var i = idx; i < idx + count; ++i) {
+                    let value = size == 0 ? 0 : bits.get(size);
+                    scalefacs[i] = value;
+                    positions[i] = size != 0 && value == none ? 64 : value;
+                }
+            }
+
+            idx += count;
+        }
+
+        // The last band of each window has no scalefactor
+        for (let var i = idx; i < idx + 3; ++i) {
+            scalefacs[i] = 0;
+        }
+
+        self.bit_pos = bits.pos;
+
+        // Scales are a power of two of a quarter of the gain. In
+        // mid/side stereo, a factor of the square root of two is
+        // left to the scale.
+        let shift = g.scalefac_scale + 1;
+        let base = g.global_gain - 210 - (header.mid_side ? 2 : 0);
+        let gains = self.gains;
+        let num_bands = g.num_long + g.num_short;
+
+        for (let var i = 0; i < 40; ++i) {
+            if (i >= num_bands) {
+                gains[i] = 0.0;
+                continue;
+            }
+
+            let var value = scalefacs[i];
+            if (i >= g.num_long) {
+                value += g.subblock_gain[(i - g.num_long) % 3] << (3 - shift);
+            } else if (g.num_short == 0 && g.preflag && i >= 11 && i < 21) {
+                value += PREEMPHASIS[i - 11];
+            }
+
+            gains[i] = 2.0.pow((base - (value << shift)) / 4.0);
+        }
+    }
+
+    // Decodes the Huffman codes of a channel of a granule, which end
+    // at end_bit, into values. Returns the number of values from the
+    // first one that may not be zero.
+    read_huffman(self, g, end_bit)
+    {
+        let data = self.main;
+        let values = self.values;
+
+        // Bits read and not used yet are the low bits of buf, and the
+        // bits above them are of no meaning
+        let var pos = self.bit_pos >> 3;
+        let var bits = 8 - (self.bit_pos & 7);
+        let var buf = data[pos];
+        ++pos;
+
+        // End of each of the three regions of pairs, which are a
+        // number of bands each
+        let bands = g.bands;
+        let num_pairs = g.big_values * 2;
+        let ends = [0, 0, num_pairs];
+        let var band = 0;
+        let var line = 0;
+        for (; band <= g.region0 && band < bands.len; ++band) {
+            line += bands[band];
+        }
+        ends[0] = line.min(num_pairs);
+        for (let var i = 0; i <= g.region1 && band < bands.len; ++i) {
+            line += bands[band];
+            ++band;
+        }
+        ends[1] = line.min(num_pairs);
+
+        let var idx = 0;
+        let var damaged = false;
+
+        for (let var region = 0; region < 3 && !damaged; ++region) {
+            let end = ends[region];
+            let table = HUFF_TABLES[g.tables[region]];
+
+            // A region without a table is all zeros
+            if (table == nil) {
+                for (; idx < end; ++idx) {
+                    values[idx] = 0;
+                }
+                continue;
+            }
+
+            let lookup = table.lookup;
+            let root = table.root;
+            let root_mask = (1 << root) - 1;
+            let linbits = LINBITS[g.tables[region]];
+            let lin_mask = (1 << linbits) - 1;
+
+            while (idx < end) {
+                if ((pos << 3) - bits >= end_bit) {
+                    damaged = true;
+                    break;
+                }
+
+                // A pair is at most 47 bits
+                while (bits < 48) {
+                    buf = (buf << 8) | data[pos];
+                    ++pos;
+                    bits += 8;
+                }
+
+                let var entry = lookup[(buf >> (bits - root)) & root_mask];
+                if (entry < 0) {
+                    let link = 0 - entry;
+                    let sub_bits = link & 15;
+                    let rest = (buf >> (bits - root - sub_bits)) & ((1 << sub_bits) - 1);
+                    entry = lookup[(link >> 4) + rest];
+                }
+                bits -= entry >> 8;
+
+                // A value of 15 may have more bits, and a value
+                // that isn't zero has a sign
+                let var x = (entry >> 4) & 15;
+                if (x == 15 && linbits > 0) {
+                    bits -= linbits;
+                    x += (buf >> bits) & lin_mask;
+                }
+                if (x != 0) {
+                    --bits;
+                    if (((buf >> bits) & 1) == 1) {
+                        x = 0 - x;
+                    }
+                }
+
+                let var y = entry & 15;
+                if (y == 15 && linbits > 0) {
+                    bits -= linbits;
+                    y += (buf >> bits) & lin_mask;
+                }
+                if (y != 0) {
+                    --bits;
+                    if (((buf >> bits) & 1) == 1) {
+                        y = 0 - y;
+                    }
+                }
+
+                values[idx] = x;
+                values[idx + 1] = y;
+                idx += 2;
+            }
+        }
+
+        // The rest of the codes are groups of four values
+        let quads = QUAD_TABLE.lookup;
+        let quad_bits = QUAD_TABLE.root;
+        let quad_mask = (1 << quad_bits) - 1;
+
+        while (idx <= 572 && !damaged) {
+            if ((pos << 3) - bits >= end_bit) {
+                break;
+            }
+
+            while (bits < 48) {
+                buf = (buf << 8) | data[pos];
+                ++pos;
+                bits += 8;
+            }
+
+            let var quad = 0;
+            if (g.quad_table == 0) {
+                let entry = quads[(buf >> (bits - quad_bits)) & quad_mask];
+                bits -= entry >> 8;
+                quad = entry & 15;
+            } else {
+                bits -= 4;
+                quad = 15 - ((buf >> bits) & 15);
+            }
+
+            for (let var i = 0; i < 4; ++i) {
+                let var value = 0;
+                if ((quad & (8 >> i)) != 0) {
+                    --bits;
+                    value = ((buf >> bits) & 1) == 1 ? -1 : 1;
+                }
+                values[idx + i] = value;
+            }
+
+            // Bits past the end are padding, not a group
+            if ((pos << 3) - bits > end_bit) {
+                break;
+            }
+
+            idx += 4;
+        }
+
+        self.bit_pos = end_bit;
+        return idx;
+    }
+
+    // Turns the first count values into the frequency lines of a
+    // channel, in the order they are stored
+    dequantize(self, g, ch, count)
+    {
+        let values = self.values;
+        let lines = self.lines[ch];
+        let gains = self.gains;
+        let bands = g.bands;
+        let var idx = 0;
+
+        for (let var band = 0; band < bands.len && idx < count; ++band) {
+            let gain = gains[band];
+            let end = (idx + bands[band]).min(count);
+
+            for (; idx < end; ++idx) {
+                let value = values[idx];
+                if (value > 0) {
+                    lines[idx] = POW43[value] * gain;
+                } else if (value < 0) {
+                    lines[idx] = 0.0 - POW43[0 - value] * gain;
+                } else {
+                    lines[idx] = 0.0;
+                }
+            }
+        }
+
+        for (; idx < 576; ++idx) {
+            lines[idx] = 0.0;
+        }
+
+        self.num_lines[ch] = count;
+    }
+
+    // Turns the lines of the two channels of a joint stereo granule
+    // into those of the left and right channels. g is the granule of
+    // the second channel.
+    joint_stereo(self, header, g)
+    {
+        let left = self.lines[0];
+        let right = self.lines[1];
+        let bands = g.bands;
+        let num_bands = g.num_long + g.num_short;
+        let mpeg1 = header.version == 3;
+
+        // Last band of each window where the second channel has lines.
+        // Bands above it hold a position between left and right.
+        let positions = self.positions[1];
+        let top = [576, 576, 576];
+        if (header.intensity) {
+            let var start = 0;
+            for (let var win = 0; win < 3; ++win) {
+                top[win] = -1;
+            }
+
+            for (let var band = 0; band < num_bands; ++band) {
+                for (let var i = 0; i < bands[band]; ++i) {
+                    if (right[start + i] != 0.0) {
+                        top[band % 3] = band;
+                        break;
+                    }
+                }
+                start += bands[band];
+            }
+
+            // Long bands have a single limit
+            let num_windows = g.num_short != 0 ? 3 : 1;
+            if (g.num_long != 0) {
+                let highest = top[0].max(top[1]).max(top[2]);
+                for (let var win = 0; win < 3; ++win) {
+                    top[win] = highest;
+                }
+            }
+
+            // The last band has the position of the one below it
+            for (let var win = 0; win < num_windows; ++win) {
+                let last = num_bands - num_windows + win;
+                let prev = last - num_windows;
+                positions[last] = top[win] >= prev ? (mpeg1 ? 3 : 0) : positions[prev];
+            }
+        }
+
+        let max_pos = mpeg1 ? 7 : 64;
+        let boost = header.mid_side ? 1.4142135623730951 : 1.0;
+        let var idx = 0;
+
+        for (let var band = 0; band < bands.len; ++band) {
+            let end = idx + bands[band];
+
+            if (band < num_bands && band > top[band % 3] && positions[band] < max_pos) {
+                // The first channel holds both, in the given shares
+                let pos = positions[band];
+                let var share_left = 1.0;
+                let var share_right = 1.0;
+
+                if (mpeg1) {
+                    share_left = PAN[2 * pos];
+                    share_right = PAN[2 * pos + 1];
+                } else {
+                    // One channel is lowered in steps of 1.5 or 3 dB
+                    let steps = ((pos + 1) >> 1) << (g.scalefac_compress & 1);
+                    let lowered = 2.0.pow(steps / -4.0);
+                    if ((pos & 1) == 1) {
+                        share_left = lowered;
+                    } else {
+                        share_right = lowered;
+                    }
+                }
+
+                share_left = share_left * boost;
+                share_right = share_right * boost;
+
+                for (; idx < end; ++idx) {
+                    let value = left[idx];
+                    left[idx] = value * share_left;
+                    right[idx] = value * share_right;
+                }
+            } else if (header.mid_side) {
+                // The channels hold the sum and the difference
+                for (; idx < end; ++idx) {
+                    let mid = left[idx];
+                    let side = right[idx];
+                    left[idx] = mid + side;
+                    right[idx] = mid - side;
+                }
+            }
+
+            idx = end;
+        }
+
+        let count = self.num_lines[0].max(self.num_lines[1]);
+        self.num_lines[0] = count;
+        self.num_lines[1] = count;
+    }
+
+    // Turns the lines of a channel into 18 samples of each of the 32
+    // subbands. Returns the number of subbands that may not be silent.
+    imdct(self, header, g, ch)
+    {
+        let lines = self.lines[ch];
+        let prev = self.blocks[ch][self.cur_block];
+        let out = self.blocks[ch][1 - self.cur_block];
+        let var count = self.num_lines[ch];
+
+        // Start from what the granule before left to add
+        out.zero_fill();
+        for (let var sb = 0; sb < 32; ++sb) {
+            out.memcpy(sb * 144, prev, sb * 144 + 72, 72);
+        }
+
+        // Subbands that are long ones: all, none, or the first ones
+        // of a mixed block
+        let short = g.block_type == 2;
+        let num_mixed = g.mixed ? header.mixed_bands : 0;
+        let num_long = short ? num_mixed : 32;
+
+        // Rotate the lines on both sides of the edges of long subbands
+        let var edge = 1;
+        for (; edge < num_long && (edge - 1) * 18 < count; ++edge) {
+            let mid = edge * 18;
+
+            for (let var i = 0; i < 8; ++i) {
+                let below = lines[mid - 1 - i];
+                let above = lines[mid + i];
+                let cs = ANTIALIAS[i];
+                let ca = ANTIALIAS[8 + i];
+                lines[mid - 1 - i] = below * cs - above * ca;
+                lines[mid + i] = above * cs + below * ca;
+            }
+        }
+        if (edge > 1) {
+            count = count.max((edge - 1) * 18 + 8);
+        }
+
+        // Add up what each line of the long subbands stands for
+        let var idx = 0;
+        for (let var sb = 0; sb < num_long && idx < count; ++sb) {
+            let block_type = sb < num_mixed ? 0 : g.block_type;
+            let basis = ((block_type * 2 + (sb & 1)) * 18) * 36;
+
+            for (let var k = 0; k < 18; ++k) {
+                let value = lines[idx];
+                if (value != 0.0) {
+                    out.axpy_f32(sb * 36, 1, IMDCT_BASIS, basis + k * 36, 1, 36, value);
+                }
+                ++idx;
+            }
+        }
+
+        // The lines of short bands are stored one window after the
+        // other, and are transformed with those of the three windows
+        // interleaved
+        if (short) {
+            let bands = g.bands;
+            let var start = num_long * 18;
+            idx = start;
+
+            for (let var band = g.num_long; band < bands.len && idx < count; band += 3) {
+                let width = bands[band];
+
+                for (let var win = 0; win < 3; ++win) {
+                    for (let var i = 0; i < width; ++i) {
+                        let value = lines[idx];
+                        ++idx;
+
+                        if (value != 0.0) {
+                            let line = start + 3 * i + win;
+                            let sb = line.idiv(18);
+                            let basis = ((4 + (sb & 1)) * 18 + line - sb * 18) * 36;
+                            out.axpy_f32(sb * 36, 1, IMDCT_BASIS, basis, 1, 36, value);
+                        }
+                    }
+                }
+
+                start += 3 * width;
+            }
+
+            count = count.max(start);
+        }
+
+        // Samples left by the granule before count too
+        let num_subbands = (count + 17).idiv(18).min(32);
+        let active = num_subbands.max(self.num_subbands[ch]);
+        self.num_subbands[ch] = num_subbands;
+
+        return active;
+    }
+
+    // Turns the samples of the first num_subbands subbands of a channel
+    // into 576 samples in pcm, from sample index base
+    synthesize(self, ch, base, num_channels, num_subbands)
+    {
+        let window = self.window[ch];
+        let block = self.blocks[ch][1 - self.cur_block];
+        let pcm = self.pcm;
+
+        for (let var slot = 0; slot < 18; ++slot) {
+            // Each time slot adds 64 values before those of the slot
+            // before. Every other slot has its halves swapped, so that
+            // the values that a sample is computed from are 64 apart.
+            let num = self.num_slots + slot;
+            let pos = ((0 - num) & 15) << 6;
+            let swap = num & 1;
+
+            window.memcpy(pos * 4, ZEROS, 0, 256);
+            for (let var sb = 0; sb < num_subbands; ++sb) {
+                let sample = block.get_f32(sb * 36 + slot);
+                if (sample != 0.0) {
+                    window.axpy_f32(pos, 1, SYNTH_MATRIX, (swap * 32 + sb) * 64, 1, 64, sample);
+                }
+            }
+            window.memcpy((pos + 1024) * 4, window, pos * 4, 256);
+
+            let first = pos + swap * 32;
+            let var out = (base + slot * 32) * num_channels + ch;
+            for (let var j = 0; j < 32; ++j) {
+                pcm.set_f32(out, window.dot_f32(first + j, 64, SYNTH_TAPS, j * 16, 1, 16));
+                out += num_channels;
+            }
+        }
+    }
+}
