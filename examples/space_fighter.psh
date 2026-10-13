@@ -1189,6 +1189,160 @@ fun lay_sides() {
 }
 
 
+// --- Gates ---
+//
+// Here and there a door stands open across the tunnel, drawn back into
+// one of its walls. It starts to close as the fighter comes up to it,
+// sliding slowly across towards the wall opposite, and what is left of the
+// opening is the only way through. The edge it leads with carries a strip
+// of yellow light that pulses.
+
+// For each: the section it stands at the start of, and the wall it comes
+// out of, which is the left, the right, the floor or the ceiling
+let gt_sec = [];
+let gt_from = [];
+
+// How long each has been closing for, or less than nothing if it has not
+// started
+let gt_time = [];
+
+// How far it is to the first gate at the least, how far it may be from
+// one to the next, and how far one has to be from a hangar, all in rows of
+// cells
+let GATE_FIRST = 800;
+let GATE_FIRST_SPREAD = 240;
+let GATE_GAP_MIN = 480;
+let GATE_GAP_MAX = 800;
+let GATE_CLEAR = 60;
+
+// A gate starts to close when the fighter is this far off, and takes this
+// long to shut. At its slowest the fighter gets there with about two
+// fifths of the way still open.
+let GATE_TRIGGER = 1500.0;
+let GATE_TIME = 9.0;
+
+// How thick a door is, how far apart the strips of light across it are,
+// how wide each is, and how far behind the one before it each pulses
+let GATE_THICK = 8.0;
+let GATE_RIB = 20.0;
+let GATE_STRIP = 4.0;
+let GATE_CHASE = 0.0;
+let GATE_DARK = 0xFF24262B;
+let GATE_LIGHT = 0xFF30333A;
+let GATE_YELLOW = 0xFFFFD21E;
+
+// The gate near enough to the camera to be seen, if there is one, and how
+// much of the way across it has closed, from 0 to 1
+let var gate_near = -1;
+let var gate_closed = 0.0;
+
+// Whether a gate could stand at the start of a row of cells
+fun gate_fits(row) {
+    for (let var at = row - GATE_CLEAR; at <= row + GATE_CLEAR; ++at) {
+        if (at < 0 || at >= NUM_ROWS || row_hangar[at] >= 0) return false;
+    }
+    for (let var at = row - 8; at <= row + 8; ++at) {
+        for (let var w = 0; w < NUM_WALLS; ++w) {
+            if (row_side[at * NUM_WALLS + w] >= 0) return false;
+        }
+    }
+    return true;
+}
+
+// These go in last, where there is neither a hangar nor a side tunnel
+fun lay_gates() {
+    let gen = Xoshiro128(WORLD_SEED + 100);
+    let var row = GATE_FIRST + gen.int(0, GATE_FIRST_SPREAD.idiv(2) + 1) * 2;
+
+    while (row < NUM_ROWS - 160) {
+        if (!gate_fits(row)) {
+            row = row + 2;
+            continue;
+        }
+
+        gt_sec.push(row.idiv(SEC_ROWS));
+        gt_from.push(gen.index(4));
+        gt_time.push(-1.0);
+        row = row + gen.int(GATE_GAP_MIN.idiv(2), GATE_GAP_MAX.idiv(2) + 1) * 2;
+    }
+}
+
+// Open every gate again
+fun reset_gates() {
+    for (let var g = 0; g < gt_time.len; ++g) gt_time[g] = -1.0;
+    gate_near = -1;
+    gate_closed = 0.0;
+}
+
+// Find the gate near the camera and move it on by a time step
+fun update_gates(dt) {
+    gate_near = -1;
+    gate_closed = 0.0;
+
+    for (let var g = 0; g < gt_sec.len; ++g) {
+        let ahead = gt_sec[g] * SEC_LEN - cam_z;
+        if (ahead.abs() > FOG_END + SEC_LEN) continue;
+
+        if (gt_time[g] < 0.0 && ahead > 0.0 && ahead < GATE_TRIGGER) gt_time[g] = 0.0;
+        else if (gt_time[g] >= 0.0) gt_time[g] = gt_time[g] + dt;
+
+        gate_near = g;
+        gate_closed = (gt_time[g] / GATE_TIME).clip(0.0, 1.0);
+    }
+}
+
+// Whether there is a gate between the camera and a distance ahead of it
+fun gate_within(reach) {
+    for (let var g = 0; g < gt_sec.len; ++g) {
+        let ahead = gt_sec[g] * SEC_LEN - cam_z;
+        if (ahead > -200.0 && ahead < reach) return true;
+    }
+    return false;
+}
+
+// The stretch along the way a gate slides that its door covers, from the
+// middle of the tunnel, and the same for the way across it
+let var gs_lo = 0.0;
+let var gs_hi = 0.0;
+let var gs_half = 0.0;
+
+// Work those out for a gate that has closed a part of the way
+fun gate_span(g, closed) {
+    let from = gt_from[g];
+    let var reach = HALF_W;
+    gs_half = HALF_H;
+    if (from >= 2) {
+        reach = HALF_H;
+        gs_half = HALF_W;
+    }
+
+    // From the left or the floor it grows upwards along its way, and from
+    // the right or the ceiling downwards
+    if ((from & 1) == 0) {
+        gs_lo = 0.0 - reach;
+        gs_hi = closed * 2.0 * reach - reach;
+    } else {
+        gs_lo = reach - closed * 2.0 * reach;
+        gs_hi = reach;
+    }
+}
+
+// Whether a place is inside the door of the gate near the camera, or
+// within a margin of it
+fun hits_gate(x, y, z, margin) {
+    let g = gate_near;
+    if (g < 0 || gate_closed <= 0.0) return false;
+
+    let gz = gt_sec[g] * SEC_LEN;
+    if (z < gz - margin || z > gz + GATE_THICK + margin) return false;
+
+    line_at(gz);
+    let var along = x - ln_x;
+    if (gt_from[g] >= 2) along = y - ln_y;
+    gate_span(g, gate_closed);
+    return along > gs_lo - margin && along < gs_hi + margin;
+}
+
 // --- Tunnel sections ---
 //
 // The walls are a field of square blocks standing out by different
@@ -3071,6 +3225,117 @@ fun draw_hangar_end(id, z, facing) {
     }
 }
 
+// Put a place on the gate being drawn into one of the view space
+// corners, given how far it is along the way the gate slides, how far
+// across that and how far down the tunnel
+let var gate_cx = 0.0;
+let var gate_cy = 0.0;
+let var gate_upright = false;
+
+fun gate_corner(j, along, across, z) {
+    if (gate_upright) view_corner(j, gate_cx + across, gate_cy + along, z);
+    else view_corner(j, gate_cx + along, gate_cy + across, z);
+}
+
+// The color of one of the strips of light on a gate, counting from the
+// edge it leads with. Each pulses a set time behind the one before it,
+// which is no time at all for them to pulse together.
+fun gate_light(strip, glow) {
+    let pulse = 0.5 + 0.5 * (anim_time * 9.0 + strip * GATE_CHASE).sin();
+    return color_scale(GATE_YELLOW, (0.30 + 0.70 * pulse * pulse) * glow);
+}
+
+// Draw one face of the door of a gate, which lies across the tunnel at a
+// depth: ribs of two shades, each with a strip of light along the side of
+// it nearer the edge the door leads with
+fun draw_gate_face(z, edge, back, dim, glow) {
+    let var dir = 1.0;
+    if (back < edge) dir = -1.0;
+
+    // The ribs are counted from the edge, so they move with the door and
+    // come out of the wall one by one as it closes
+    let var at = edge;
+    let var rib = 0;
+    while ((back - at) * dir > 0.01) {
+        let var next = at + dir * GATE_RIB;
+        if ((back - next) * dir < 0.0) next = back;
+
+        gate_corner(0, at, 0.0 - gs_half, z);
+        gate_corner(1, next, 0.0 - gs_half, z);
+        gate_corner(2, next, gs_half, z);
+        gate_corner(3, at, gs_half, z);
+        fog_k = dim;
+        let var color = GATE_DARK;
+        if ((rib & 1) == 1) color = GATE_LIGHT;
+        fill_face(0, 1, 2, 3, color);
+
+        let strip = at + dir * (next - at).abs().min(GATE_STRIP);
+        gate_corner(0, at, 0.0 - gs_half, z);
+        gate_corner(1, strip, 0.0 - gs_half, z);
+        gate_corner(2, strip, gs_half, z);
+        gate_corner(3, at, gs_half, z);
+        fog_k = 256;
+        fill_face(0, 1, 2, 3, gate_light(rib, glow));
+
+        at = next;
+        rib = rib + 1;
+    }
+}
+
+// Draw the door of a gate as far across as it has closed
+fun draw_gate(g) {
+    if (gate_closed <= 0.0) return;
+
+    let gz = gt_sec[g] * SEC_LEN;
+    let fog = fog_at((gz - cam_z).abs());
+    if (fog <= 0.0) return;
+
+    line_at(gz);
+    gate_cx = ln_x;
+    gate_cy = ln_y;
+    gate_upright = gt_from[g] >= 2;
+    gate_span(g, gate_closed);
+
+    // The edge it leads with, and the wall it comes out of
+    let var edge = gs_hi;
+    let var back = gs_lo;
+    if ((gt_from[g] & 1) == 1) {
+        edge = gs_lo;
+        back = gs_hi;
+    }
+
+    // The strips are a warning, so they show through the fog more than
+    // the door does
+    let glow = 0.5 + 0.5 * fog;
+    let dim = (fog * 256.0).floor();
+
+    if (cam_z < gz) draw_gate_face(gz, edge, back, dim, glow);
+    else if (cam_z > gz + GATE_THICK) draw_gate_face(gz + GATE_THICK, edge, back, dim, glow);
+
+    // The edge itself shows from the side that is still open
+    let var cam_along = cam_x - gate_cx;
+    if (gate_upright) cam_along = cam_y - gate_cy;
+    if ((cam_along - edge) * (edge - back) > 0.0) {
+        gate_corner(0, edge, 0.0 - gs_half, gz);
+        gate_corner(1, edge, gs_half, gz);
+        gate_corner(2, edge, gs_half, gz + GATE_THICK);
+        gate_corner(3, edge, 0.0 - gs_half, gz + GATE_THICK);
+        fog_k = 256;
+        fill_face(0, 1, 2, 3, gate_light(0, glow));
+    }
+}
+
+// Draw the gate near the camera when the section it stands beyond comes
+// up, or the one it stands at the start of once the camera is past it
+fun draw_gates(k) {
+    let g = gate_near;
+    if (g < 0) return;
+
+    let at = gt_sec[g];
+    let before = cam_z < at * SEC_LEN;
+    if ((before && k == at - 1) || (!before && k == at)) draw_gate(g);
+}
+
 // Draw whichever end walls of a hangar belong to a section, which are the
 // one the tunnel comes in through at its first section and the one it
 // leaves through at its last. Either is further off than the section.
@@ -3174,6 +3439,7 @@ fun draw_section(k) {
     use_shape(row_shape(k * SEC_ROWS));
     if (shape != sorted_shape) sort_walls();
     draw_hangar_ends(k);
+    draw_gates(k);
 
     // Less of the detail is drawn the further off the section is
     let dist = (k - (cam_z / SEC_LEN).floor()).abs();
@@ -3398,6 +3664,8 @@ class BandRequest {
         self.up_x = up_x; self.up_y = up_y; self.up_z = up_z;
         self.fwd_x = fwd_x; self.fwd_y = fwd_y; self.fwd_z = fwd_z;
         self.anim_time = anim_time;
+        self.gate_near = gate_near;
+        self.gate_closed = gate_closed;
     }
 }
 
@@ -3444,6 +3712,8 @@ fun worker_loop() {
         up_x = msg.up_x; up_y = msg.up_y; up_z = msg.up_z;
         fwd_x = msg.fwd_x; fwd_y = msg.fwd_y; fwd_z = msg.fwd_z;
         anim_time = msg.anim_time;
+        gate_near = msg.gate_near;
+        gate_closed = msg.gate_closed;
 
         render_world();
         let num_bytes = (render_y1 - render_y0) * FRAME_WIDTH * 4;
@@ -3737,6 +4007,7 @@ fun place_fighter(z) {
     shield_rest = 0.0;
     hit_flash = 0.0;
     clear_enemies();
+    reset_gates();
 }
 
 // Start the run over
@@ -3761,6 +4032,8 @@ fun hits_tunnel(x, y, z) {
     }
 
     if (z >= RUN_LEN) return false;
+
+    if (hits_gate(x, y, z, margin)) return true;
 
     let row = (z / CELL).floor();
     let ids = row_pipes[row];
@@ -4969,7 +5242,7 @@ fun update_enemies(dt) {
     for (let var i = 0; i < MAX_ENEMIES; ++i) {
         if (en_hp[i] > 0) in_play = in_play + 1;
     }
-    if (in_play == 0 && cam_z > 0.0 && cam_z < RUN_LEN - 3.0 * WAVE_AHEAD) {
+    if (in_play == 0 && cam_z > 0.0 && cam_z < RUN_LEN - 3.0 * WAVE_AHEAD && !gate_within(WAVE_AHEAD + 1000.0)) {
         wave_timer = wave_timer - dt;
         if (wave_timer <= 0.0) {
             spawn_wave();
@@ -5303,6 +5576,7 @@ fun draw_targets() {
 
 fun update_sim(dt) {
     update_flight(dt);
+    update_gates(dt);
     update_enemies(dt);
     update_cannons(dt);
     wall_warn = crash_timer <= 0.0 && wall_ahead();
@@ -5415,6 +5689,7 @@ fun run_bench(num_frames, shot_dir) {
 lay_hangars();
 lay_pipes();
 lay_sides();
+lay_gates();
 build_sides();
 build_ends();
 build_hull();
