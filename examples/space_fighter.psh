@@ -14,6 +14,8 @@
 //   plush examples/space_fighter.psh [workers]
 //   plush examples/space_fighter.psh --bench [num_frames] [shot_dir] [workers]
 //
+// Add --test-mode for a short run: a hangar, a gate, then the reactor.
+//
 // The world is drawn by eight render workers unless told otherwise.
 //
 //   up / down     pitch the nose up / down
@@ -46,7 +48,30 @@ let FOCAL = CX / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
 let INV_FOCAL = 1.0 / FOCAL;
 let NEAR_Z = 0.5;
 
-let BENCH_MODE = $cmd_get_arg_or(1, "") == "--bench";
+// The arguments, less the flags that may go anywhere among them
+let args = [];
+let var test_flag = false;
+for (let var i = 1; i < 8; ++i) {
+    let arg = $cmd_get_arg_or(i, "");
+    if (arg == "--test-mode") test_flag = true;
+    else if (arg != "") args.push(arg);
+}
+
+fun arg_or(i, default) {
+    if (i < args.len) return args[i];
+    return default;
+}
+
+let BENCH_MODE = arg_or(0, "") == "--bench";
+
+// A short run with one of everything on the way to the reactor
+let TEST_MODE = test_flag;
+
+// One number for the whole run and another for the short one
+fun by_mode(full, test) {
+    if (TEST_MODE) return test;
+    return full;
+}
 let TEX_DIR = "examples/data/textures/";
 let WORLD_SEED = 7741;
 
@@ -617,7 +642,7 @@ let SEC_ROWS = 2;
 let SEC_LEN = CELL * SEC_ROWS;
 
 // Four minutes at cruise speed
-let NUM_SECTIONS = 1872;
+let NUM_SECTIONS = by_mode(1872, 200);
 let NUM_ROWS = NUM_SECTIONS * SEC_ROWS;
 let RUN_LEN = NUM_SECTIONS.to_f() * SEC_LEN;
 
@@ -824,7 +849,7 @@ let HANGAR_ROWS_MIN = 24;
 let HANGAR_ROWS_MAX = 48;
 let HANGAR_GAP_MIN = 240;
 let HANGAR_GAP_MAX = 560;
-let HANGAR_FIRST = 200;
+let HANGAR_FIRST = by_mode(200, 50);
 
 // How brightly its walls are lit, as a multiple of the tunnel's
 let HANGAR_LIGHT = 1.0;
@@ -1209,8 +1234,8 @@ let gt_time = [];
 // How far it is to the first gate at the least, how far it may be from
 // one to the next, and how far one has to be from a hangar, all in rows of
 // cells
-let GATE_FIRST = 800;
-let GATE_FIRST_SPREAD = 240;
+let GATE_FIRST = by_mode(800, 160);
+let GATE_FIRST_SPREAD = by_mode(240, 0);
 let GATE_GAP_MIN = 480;
 let GATE_GAP_MAX = 800;
 let GATE_CLEAR = 60;
@@ -3419,16 +3444,424 @@ fun draw_sides(k) {
 }
 
 
-// Draw the wall that closes off the far end of the run
-fun draw_end_wall() {
-    let x = run_x[run_x.len - 1];
-    let y = run_y[run_y.len - 1];
-    view_corner(0, x - HALF_W, y - HALF_H, RUN_LEN);
-    view_corner(1, x + HALF_W, y - HALF_H, RUN_LEN);
-    view_corner(2, x + HALF_W, y + HALF_H, RUN_LEN);
-    view_corner(3, x - HALF_W, y + HALF_H, RUN_LEN);
-    fog_k = (fog_at((RUN_LEN - cam_z).abs()) * 256.0).floor();
-    fill_face(0, 1, 2, 3, 0xFF262830);
+// --- Reactor ---
+//
+// The tunnel ends at the reactor chamber, a hollow ball of flat facets of
+// polished metal. The core stands in the middle of it from bottom to top,
+// a column of white light. The tunnel comes in through one side, and
+// another leaves straight across from it.
+
+// How far the corners of the facets are from the middle, and how many
+// facets there are from bottom to top and round
+let REACTOR_R = 1500.0;
+let REACTOR_BANDS = 15;
+let REACTOR_AROUND = 30;
+
+// Half the width and height of the facet a mouth is in, and how far that
+// facet is from the middle, which is as near to it as any comes
+let FACET_W = REACTOR_R * (PI / (REACTOR_BANDS * 2)).cos() * (PI / REACTOR_AROUND).sin();
+let FACET_H = REACTOR_R * (PI / (REACTOR_BANDS * 2)).sin();
+let REACTOR_D = REACTOR_R * (PI / (REACTOR_BANDS * 2)).cos() * (PI / REACTOR_AROUND).cos();
+
+// How far down the run the middle of it and the way out of it are
+let REACTOR_Z = RUN_LEN + REACTOR_D;
+let REACTOR_END = RUN_LEN + REACTOR_D * 2.0;
+
+// The middle of it across the run, which is where the tunnel ends up
+let var rc_x = 0.0;
+let var rc_y = 0.0;
+
+// It has a fog of its own, thin enough to see across
+let REACTOR_FOG0 = 900.0;
+let REACTOR_FOG1 = 4400.0;
+
+// The core, which is seen from a way back down the tunnel
+let CORE_R = 120.0;
+let CORE_SIDES = 16;
+let CORE_RINGS = 24;
+let CORE_SEEN0 = 2400.0;
+let CORE_SEEN1 = 3500.0;
+let CORE_WHITE = 0xFFFFFFFF;
+let CORE_EDGE = 0xFF9CD4FF;
+let core_sin = [];
+let core_cos = [];
+
+// From inside, each mouth shows this much tunnel running off into the dark
+let STUB_LEN = 400.0;
+let STUB_STEPS = 5;
+let STUB_COLOR = 0xFF3A3D46;
+
+// The facets: the corners of each, how many it has, its middle, the way
+// it faces and how bright its metal is. A facet with a mouth in it is
+// marked with which mouth.
+let fc_x = [];
+let fc_y = [];
+let fc_z = [];
+let fc_count = [];
+let fc_cx = [];
+let fc_cy = [];
+let fc_cz = [];
+let fc_nx = [];
+let fc_ny = [];
+let fc_nz = [];
+let fc_tone = [];
+let fc_mouth = [];
+let FACET_R = 150.0;
+let FACET_G = 160.0;
+let FACET_B = 176.0;
+
+// Whether the fighter has come through into the chamber, and how many
+// rounds have struck the core
+let var in_reactor = false;
+let var core_hits = 0;
+let var core_struck = false;
+
+// A corner of the facets, given how far up and round it is
+let var rp_x = 0.0;
+let var rp_y = 0.0;
+let var rp_z = 0.0;
+
+fun reactor_point(i, j) {
+    let lat = (i.to_f() / REACTOR_BANDS - 0.5) * PI;
+    let lon = (j - 0.5) * 2.0 * PI / REACTOR_AROUND;
+    rp_x = rc_x + REACTOR_R * lat.cos() * lon.sin();
+    rp_y = rc_y + REACTOR_R * lat.sin();
+    rp_z = REACTOR_Z - REACTOR_R * lat.cos() * lon.cos();
+}
+
+fun add_facet_corner(i, j) {
+    reactor_point(i, j);
+    fc_x.push(rp_x);
+    fc_y.push(rp_y);
+    fc_z.push(rp_z);
+}
+
+fun build_reactor() {
+    rc_x = run_x[run_x.len - 1];
+    rc_y = run_y[run_y.len - 1];
+    let gen = Xoshiro128(WORLD_SEED + 120);
+
+    for (let var j = 0; j <= CORE_SIDES; ++j) {
+        core_sin.push(((j % CORE_SIDES) * 2.0 * PI / CORE_SIDES).sin());
+        core_cos.push(((j % CORE_SIDES) * 2.0 * PI / CORE_SIDES).cos());
+    }
+
+    for (let var i = 0; i < REACTOR_BANDS; ++i) {
+        for (let var j = 0; j < REACTOR_AROUND; ++j) {
+            let f = fc_count.len;
+            let v = f * 4;
+
+            // Those round the top and the bottom come to a point
+            let var count = 4;
+            if (i == 0 || i == REACTOR_BANDS - 1) count = 3;
+            if (i == 0) {
+                add_facet_corner(1, j + 1);
+                add_facet_corner(1, j);
+                add_facet_corner(0, j);
+                add_facet_corner(0, j);
+            } else {
+                add_facet_corner(i, j);
+                add_facet_corner(i, j + 1);
+                add_facet_corner(i + 1, j + 1);
+                add_facet_corner(i + 1, j);
+            }
+            fc_count.push(count);
+
+            let var cx = 0.0;
+            let var cy = 0.0;
+            let var cz = 0.0;
+            for (let var k = 0; k < count; ++k) {
+                cx = cx + fc_x[v + k] / count;
+                cy = cy + fc_y[v + k] / count;
+                cz = cz + fc_z[v + k] / count;
+            }
+            fc_cx.push(cx);
+            fc_cy.push(cy);
+            fc_cz.push(cz);
+
+            // It faces the way two of its edges are both square to,
+            // whichever of the two ways is inwards
+            let ax = fc_x[v + 1] - fc_x[v]; let ay = fc_y[v + 1] - fc_y[v]; let az = fc_z[v + 1] - fc_z[v];
+            let bx = fc_x[v + 2] - fc_x[v]; let by = fc_y[v + 2] - fc_y[v]; let bz = fc_z[v + 2] - fc_z[v];
+            let var nx = ay * bz - az * by;
+            let var ny = az * bx - ax * bz;
+            let var nz = ax * by - ay * bx;
+            let var len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if (nx * (rc_x - cx) + ny * (rc_y - cy) + nz * (REACTOR_Z - cz) < 0.0) len = 0.0 - len;
+            fc_nx.push(nx / len);
+            fc_ny.push(ny / len);
+            fc_nz.push(nz / len);
+            fc_tone.push(gen.float(0.78, 1.12));
+
+            let var mouth = 0;
+            if (i * 2 + 1 == REACTOR_BANDS) {
+                if (j == 0) mouth = 1;
+                if (j * 2 == REACTOR_AROUND) mouth = 2;
+            }
+            fc_mouth.push(mouth);
+        }
+    }
+}
+
+// How much of the light is left at a distance inside the chamber
+fun reactor_fog(dist) {
+    return 1.0 - smoothstep(REACTOR_FOG0, REACTOR_FOG1, dist);
+}
+
+// The same for wherever the fighter is
+fun view_fog(dist) {
+    if (in_reactor) return reactor_fog(dist);
+    return fog_at(dist);
+}
+
+// The facet being drawn: the way it faces and how bright its metal is
+let var fa_nx = 0.0;
+let var fa_ny = 0.0;
+let var fa_nz = 0.0;
+let var fa_tone = 1.0;
+
+// Set a facet up to be drawn. Returns false if it faces away from the
+// camera or is lost in the fog.
+fun set_facet(f) {
+    let dx = fc_cx[f] - cam_x;
+    let dy = fc_cy[f] - cam_y;
+    let dz = fc_cz[f] - cam_z;
+    fa_nx = fc_nx[f];
+    fa_ny = fc_ny[f];
+    fa_nz = fc_nz[f];
+    fa_tone = fc_tone[f];
+    if (dx * fa_nx + dy * fa_ny + dz * fa_nz >= 0.0) return false;
+    return (dx * dx + dy * dy + dz * dz).sqrt() < REACTOR_FOG1 + FACET_W * 2.0;
+}
+
+// Put a point of the facet being drawn into one of the view space corners
+// and give it its color. Metal shows what it reflects, so it is bright
+// where the line of sight bounces off it towards the core, and dark where
+// it bounces wide.
+fun facet_corner(j, x, y, z) {
+    view_corner(j, x, y, z);
+    let dx = x - cam_x;
+    let dy = y - cam_y;
+    let dz = z - cam_z;
+    let dist = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+
+    // The line of sight after it bounces, and how far wide of the core's
+    // axis that goes, seen from above
+    let k = 2.0 * (dx * fa_nx + dy * fa_ny + dz * fa_nz) / dist;
+    let rx = dx / dist - k * fa_nx;
+    let rz = dz / dist - k * fa_nz;
+    let ox = x - rc_x;
+    let oz = z - REACTOR_Z;
+    let rr = rx * rx + rz * rz;
+    let var miss = (ox * ox + oz * oz).sqrt();
+    if (rr > 0.000001 && ox * rx + oz * rz < 0.0) miss = (ox * rz - oz * rx).abs() / rr.sqrt();
+
+    let fog = reactor_fog(dist);
+    let sharp = 1.0 - smoothstep(CORE_R, CORE_R * 6.0, miss);
+    let soft = 1.0 - smoothstep(0.0, REACTOR_R * 1.6, miss);
+    let level = fa_tone * (0.24 + 0.46 * soft) * fog;
+    let white = 190.0 * sharp * sharp * fog;
+    tR[j] = (FACET_R * level + white).min(255.0);
+    tG[j] = (FACET_G * level + white).min(255.0);
+    tB[j] = (FACET_B * level + white).min(255.0);
+}
+
+// Draw a piece of a facet that lies across the run, given two corners
+fun blend_across(x0, y0, x1, y1, z) {
+    facet_corner(0, x0, y0, z);
+    facet_corner(1, x1, y0, z);
+    facet_corner(2, x1, y1, z);
+    facet_corner(3, x0, y1, z);
+    if (tZ[0] < NEAR_Z && tZ[1] < NEAR_Z && tZ[2] < NEAR_Z && tZ[3] < NEAR_Z) return;
+    blend_tri(0, 1, 2);
+    blend_tri(0, 2, 3);
+}
+
+// Draw a facet with a mouth in it, which is what is left of it around
+// the mouth
+fun draw_mouth_facet(z) {
+    blend_across(rc_x - FACET_W, rc_y - FACET_H, rc_x - HALF_W, rc_y + FACET_H, z);
+    blend_across(rc_x + HALF_W, rc_y - FACET_H, rc_x + FACET_W, rc_y + FACET_H, z);
+    blend_across(rc_x - HALF_W, rc_y - FACET_H, rc_x + HALF_W, rc_y - HALF_H, z);
+    blend_across(rc_x - HALF_W, rc_y + HALF_H, rc_x + HALF_W, rc_y + FACET_H, z);
+}
+
+fun draw_facets() {
+    for (let var f = 0; f < fc_count.len; ++f) {
+        if (!set_facet(f)) continue;
+
+        if (fc_mouth[f] == 1) {
+            draw_mouth_facet(RUN_LEN);
+            continue;
+        }
+        if (fc_mouth[f] == 2) {
+            draw_mouth_facet(REACTOR_END);
+            continue;
+        }
+
+        let v = f * 4;
+        let count = fc_count[f];
+        let var ahead = false;
+        for (let var j = 0; j < count; ++j) {
+            facet_corner(j, fc_x[v + j], fc_y[v + j], fc_z[v + j]);
+            if (tZ[j] >= NEAR_Z) ahead = true;
+        }
+        if (!ahead) continue;
+
+        blend_tri(0, 1, 2);
+        if (count == 4) blend_tri(0, 2, 3);
+    }
+}
+
+// Draw the tunnel that runs off from a mouth, given where the mouth is
+// and which way the tunnel goes from there. Its walls get darker the
+// further in they are.
+fun draw_stub(z, dir) {
+    let x0 = rc_x - HALF_W;
+    let x1 = rc_x + HALF_W;
+    let y0 = rc_y - HALF_H;
+    let y1 = rc_y + HALF_H;
+    let light = reactor_fog((z - cam_z).abs());
+    fog_k = 256;
+
+    for (let var s = STUB_STEPS - 1; s >= 0; --s) {
+        let za = z + dir * s * STUB_LEN / STUB_STEPS;
+        let zb = z + dir * (s + 1) * STUB_LEN / STUB_STEPS;
+        let left = 1.0 - (s + 0.5) / STUB_STEPS;
+        let color = color_scale(STUB_COLOR, light * left * left);
+
+        if (cam_x > x0) {
+            view_corner(0, x0, y0, za); view_corner(1, x0, y1, za);
+            view_corner(2, x0, y1, zb); view_corner(3, x0, y0, zb);
+            fill_face(0, 1, 2, 3, color);
+        }
+        if (cam_x < x1) {
+            view_corner(0, x1, y0, za); view_corner(1, x1, y1, za);
+            view_corner(2, x1, y1, zb); view_corner(3, x1, y0, zb);
+            fill_face(0, 1, 2, 3, color);
+        }
+        if (cam_y > y0) {
+            view_corner(0, x0, y0, za); view_corner(1, x1, y0, za);
+            view_corner(2, x1, y0, zb); view_corner(3, x0, y0, zb);
+            fill_face(0, 1, 2, 3, color);
+        }
+        if (cam_y < y1) {
+            view_corner(0, x0, y1, za); view_corner(1, x1, y1, za);
+            view_corner(2, x1, y1, zb); view_corner(3, x0, y1, zb);
+            fill_face(0, 1, 2, 3, color);
+        }
+    }
+}
+
+// Draw the pipes that frame a mouth, as round those of a hangar
+fun draw_mouth_frame(z, facing) {
+    set_frame(rc_x - END_W, rc_y - END_H, z, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, facing);
+    if (wall_cam_h <= 0.0) return;
+
+    fog_k = (reactor_fog((z - cam_z).abs()) * 256.0).floor();
+    for (let var i = FRAME_AT.len - 1; i >= 0; --i) {
+        let ua = MOUTH_U0 - FRAME_AT[i];
+        let ub = MOUTH_U1 + FRAME_AT[i];
+        let va = MOUTH_V0 - FRAME_AT[i];
+        let vb = MOUTH_V1 + FRAME_AT[i];
+        draw_frame_pipe(false, ua, va - FRAME_R, vb + FRAME_R);
+        draw_frame_pipe(false, ub, va - FRAME_R, vb + FRAME_R);
+        draw_frame_pipe(true, va, ua - FRAME_R, ub + FRAME_R);
+        draw_frame_pipe(true, vb, ua - FRAME_R, ub + FRAME_R);
+    }
+}
+
+// Draw the core, given how much of its light gets to the camera. A side
+// turned towards the camera is white and one seen edge on is blue, and
+// bands of brighter light run up it.
+fun draw_core(seen) {
+    fog_k = (seen * 256.0).floor();
+    let step = REACTOR_R * 2.0 / CORE_RINGS;
+    let sx = step * right_y;
+    let sy = step * up_y;
+    let sz = step * fwd_y;
+
+    for (let var j = 0; j < CORE_SIDES; ++j) {
+        let xa = rc_x + CORE_R * core_sin[j];
+        let za = REACTOR_Z - CORE_R * core_cos[j];
+        let xb = rc_x + CORE_R * core_sin[j + 1];
+        let zb = REACTOR_Z - CORE_R * core_cos[j + 1];
+
+        // The way it faces is square to its width, seen from above
+        let var nx = zb - za;
+        let var nz = xa - xb;
+        if (nx * (xa - rc_x) + nz * (za - REACTOR_Z) < 0.0) {
+            nx = 0.0 - nx;
+            nz = 0.0 - nz;
+        }
+        let tx = cam_x - xa;
+        let tz = cam_z - za;
+        let toward = (tx * nx + tz * nz) / ((nx * nx + nz * nz) * (tx * tx + tz * tz)).sqrt().max(0.001);
+        if (toward <= 0.0) continue;
+
+        let er = lerp(((CORE_EDGE >> 16) & 0xFF).to_f(), 255.0, toward);
+        let eg = lerp(((CORE_EDGE >> 8) & 0xFF).to_f(), 255.0, toward);
+        let eb = lerp((CORE_EDGE & 0xFF).to_f(), 255.0, toward);
+
+        // The bottom of this side, then each ring up from there
+        view_corner(0, xa, rc_y - REACTOR_R, za);
+        view_corner(1, xb, rc_y - REACTOR_R, zb);
+
+        for (let var ring = 0; ring < CORE_RINGS; ++ring) {
+            tX[3] = tX[0] + sx; tY[3] = tY[0] + sy; tZ[3] = tZ[0] + sz;
+            tX[2] = tX[1] + sx; tY[2] = tY[1] + sy; tZ[2] = tZ[1] + sz;
+
+            if (tZ[0] >= NEAR_Z || tZ[1] >= NEAR_Z || tZ[2] >= NEAR_Z || tZ[3] >= NEAR_Z) {
+                let pulse = 0.95 + 0.05 * (ring * 0.9 - anim_time * 5.0).sin();
+                let color = 0xFF000000 | ((er * pulse).floor() << 16) | ((eg * pulse).floor() << 8) | (eb * pulse).floor();
+                fill_face(0, 1, 2, 3, color);
+            }
+
+            tX[0] = tX[3]; tY[0] = tY[3]; tZ[0] = tZ[3];
+            tX[1] = tX[2]; tY[1] = tY[2]; tZ[1] = tZ[2];
+        }
+    }
+}
+
+// Draw the reactor, which is further off than any of the tunnel when seen
+// from the tunnel. The tunnels beyond its mouths go first, then the
+// facets, which hide all of them but what shows through a mouth, then the
+// core in front of both.
+fun draw_reactor() {
+    let dx = rc_x - cam_x;
+    let dz = REACTOR_Z - cam_z;
+    let seen = 1.0 - smoothstep(CORE_SEEN0, CORE_SEEN1, (dx * dx + dz * dz).sqrt());
+    if (seen <= 0.0) return;
+
+    // The facets come into view with the end of the tunnel
+    if (in_reactor || RUN_LEN - cam_z < FOG_END + SEC_LEN) {
+        if (in_reactor) draw_stub(RUN_LEN, -1.0);
+        draw_stub(REACTOR_END, 1.0);
+        draw_facets();
+        draw_mouth_frame(RUN_LEN, 1.0);
+        draw_mouth_frame(REACTOR_END, -1.0);
+    }
+
+    draw_core(seen);
+}
+
+// Whether a place in the chamber, or in the tunnel that leaves it, is too
+// close to its facets or to the core
+fun hits_reactor(x, y, z, margin) {
+    let dx = x - rc_x;
+    let dy = y - rc_y;
+    let dz = z - REACTOR_Z;
+    let in_mouth = dx.abs() <= HALF_W - margin && dy.abs() <= HALF_H - margin;
+    core_struck = false;
+    if (z > REACTOR_END) return !in_mouth;
+
+    let reach = CORE_R + margin;
+    core_struck = dx * dx + dz * dz < reach * reach;
+    if (core_struck) return true;
+
+    let room = REACTOR_D - margin;
+    if (dx * dx + dy * dy + dz * dz < room * room) return false;
+    return !in_mouth;
 }
 
 fun draw_section(k) {
@@ -3453,7 +3886,6 @@ fun draw_section(k) {
         if (dist > 12) draw_depth = 0;
     }
 
-    if (k == NUM_SECTIONS - 1) draw_end_wall();
     draw_sides(k);
 
     // What is left to draw is the section's own
@@ -3611,8 +4043,11 @@ fun render_world() {
     let outside = cam_z < 0.0;
     if (outside) draw_stars();
 
+    draw_reactor();
+
+    // Once in the chamber there is no more of the tunnel to see
     let cam_k = (cam_z / SEC_LEN).floor();
-    for (let var d = DRAW_AHEAD; d >= 0; --d) {
+    for (let var d = DRAW_AHEAD; d >= 0 && !in_reactor; --d) {
         if (d > 0 && d <= DRAW_BEHIND) draw_behind(cam_k - d, d);
         draw_section(cam_k + d);
     }
@@ -3639,8 +4074,8 @@ fun render_world() {
 // How many, which the last argument can change. Fewer than two and the
 // main actor draws the world itself.
 fun worker_count() {
-    let var arg = $cmd_get_arg_or(1, "8");
-    if (BENCH_MODE) arg = $cmd_get_arg_or(4, "8");
+    let var arg = arg_or(0, "8");
+    if (BENCH_MODE) arg = arg_or(3, "8");
 
     let n = arg.parse_int(10);
     if (n == nil || n < 0 || n > 64) {
@@ -3664,6 +4099,7 @@ class BandRequest {
         self.anim_time = anim_time;
         self.gate_near = gate_near;
         self.gate_closed = gate_closed;
+        self.in_reactor = in_reactor;
     }
 }
 
@@ -3712,6 +4148,7 @@ fun worker_loop() {
         anim_time = msg.anim_time;
         gate_near = msg.gate_near;
         gate_closed = msg.gate_closed;
+        in_reactor = msg.in_reactor;
 
         render_world();
         let num_bytes = (render_y1 - render_y0) * FRAME_WIDTH * 4;
@@ -3987,6 +4424,7 @@ fun place_fighter(z) {
     cam_x = ln_x;
     cam_y = ln_y;
     cam_z = z;
+    in_reactor = z >= RUN_LEN;
 
     right_x = 1.0; right_y = 0.0; right_z = 0.0;
     up_x = 0.0; up_y = 1.0; up_z = 0.0;
@@ -4014,6 +4452,7 @@ fun reset_flight() {
     time_left = MISSION_TIME;
     boost_charge = 1.0;
     boost_spent = false;
+    core_hits = 0;
     clear_cannons();
 }
 
@@ -4029,7 +4468,7 @@ fun hits_tunnel(x, y, z) {
         return 0.0 - z < hull_height(x, y).max(0.0) + margin;
     }
 
-    if (z >= RUN_LEN) return false;
+    if (z >= RUN_LEN) return hits_reactor(x, y, z, margin);
 
     if (hits_gate(x, y, z, margin)) return true;
 
@@ -4108,7 +4547,11 @@ fun update_flight(dt) {
     // Sit in the wreckage for a moment, then pick up a little way back
     if (crash_timer > 0.0) {
         crash_timer = crash_timer - dt;
-        if (crash_timer <= 0.0) place_fighter((cam_z - RESPAWN_BACK).max(START_Z));
+        if (crash_timer <= 0.0) {
+            // In the chamber that is just inside the way in
+            if (in_reactor) place_fighter(RUN_LEN + 10.0);
+            else place_fighter((cam_z - RESPAWN_BACK).max(START_Z));
+        }
         return;
     }
 
@@ -4160,15 +4603,21 @@ fun update_flight(dt) {
     cam_y = cam_y + fwd_y * speed * dt;
     cam_z = cam_z + fwd_z * speed * dt;
 
-    // The run ends at the far wall for now, and starts over
-    if (cam_z > RUN_LEN - 400.0) {
+    if (cam_z >= RUN_LEN) in_reactor = true;
+
+    // The way out of the chamber leads nowhere for now, and taking it
+    // starts the run over
+    if (cam_z > REACTOR_END + STUB_LEN * 0.6) {
         reset_flight();
         return;
     }
 
-    if (hits_tunnel(cam_x, cam_y, cam_z)) {
+    // The way back in is a dead end
+    let dead_end = in_reactor && cam_z < RUN_LEN - STUB_LEN * 0.6;
+
+    if (dead_end || hits_tunnel(cam_x, cam_y, cam_z)) {
         // Back inside the walls, to keep the wreck from looking through them
-        if (cam_z >= 0.0) {
+        if (cam_z >= 0.0 && cam_z < RUN_LEN) {
             use_shape(row_shape((cam_z / CELL).floor().min(NUM_ROWS - 1)));
             let limit_x = shape_w - CRASH_CLEARANCE;
             let limit_y = shape_h - CRASH_CLEARANCE;
@@ -4538,7 +4987,10 @@ fun draw_hud() {
 
     let low_y = FRAME_HEIGHT - 46;
     draw_readout(CX.floor() - 210, low_y, 5, (speed * 3.6).floor().to_s(), "KM/H", HUD_ORANGE);
-    let target_km = (RUN_LEN - cam_z).max(0.0) * 0.001;
+    // The target is the core, however far round it the fighter is
+    let core_x = rc_x - cam_x;
+    let core_z = REACTOR_Z - cam_z;
+    let target_km = ((core_x * core_x + core_z * core_z).sqrt() - CORE_R).max(0.0) * 0.001;
     draw_readout(CX.floor() + 100, low_y, 5, target_km.format_decimals(2), "TARGET KM", WARN_RED);
     draw_timer(low_y);
 
@@ -4814,9 +5266,12 @@ fun update_cannons(dt) {
             continue;
         }
 
-        if (z >= RUN_LEN || hits_tunnel(x, y, z)) {
+        if (hits_tunnel(x, y, z)) {
             // A round that struck inside the tunnel flashes on its wall
-            if (z < 0.0) add_impact(x, y, z);
+            if (z >= RUN_LEN) {
+                if (core_struck) core_hits = core_hits + 1;
+                add_impact(x, y, z);
+            } else if (z < 0.0) add_impact(x, y, z);
             else add_impact(x.clip(shape_cx - shape_w, shape_cx + shape_w), y.clip(shape_cy - shape_h, shape_cy + shape_h), z.min(RUN_LEN));
             rd_age[i] = -1.0;
         } else if (age + dt > ROUND_LIFE) {
@@ -4885,7 +5340,7 @@ fun draw_impacts() {
         if (pt_z < 2.0) continue;
 
         let scale = FOCAL / pt_z;
-        let fade = (1.0 - age / IMPACT_LIFE) * fog_at(pt_z);
+        let fade = (1.0 - age / IMPACT_LIFE) * view_fog(pt_z);
         let radius = ((1.5 + age * 14.0) * scale).clip(2.0, 48.0);
         glow_disc(CX + pt_x * scale, CY - pt_y * scale, radius, color_scale(FLASH_COLOR, fade));
     }
@@ -4945,7 +5400,7 @@ fun draw_tracers() {
         let tail_y = CY - ty * FOCAL / tz;
 
         // A wide halo with a hot core, wider up close and dimmer in the fog
-        let fade = fog_at(hz);
+        let fade = view_fog(hz);
         let half = (FOCAL * 0.5 / hz).clip(1.6, 7.0) * rd_size[i];
         glow_streak(tail_x, tail_y, head_x, head_y, half, color_scale(rd_color[i], fade));
         glow_streak(lerp(tail_x, head_x, 0.4), lerp(tail_y, head_y, 0.4), head_x, head_y,
@@ -5240,7 +5695,7 @@ fun update_enemies(dt) {
     for (let var i = 0; i < MAX_ENEMIES; ++i) {
         if (en_hp[i] > 0) in_play = in_play + 1;
     }
-    if (in_play == 0 && cam_z > 0.0 && cam_z < RUN_LEN - 3.0 * WAVE_AHEAD && !gate_within(WAVE_AHEAD + 1000.0)) {
+    if (in_play == 0 && cam_z > 0.0 && cam_z < RUN_LEN - WAVE_AHEAD - 1000.0 &&!gate_within(WAVE_AHEAD + 1000.0)) {
         wave_timer = wave_timer - dt;
         if (wave_timer <= 0.0) {
             spawn_wave();
@@ -5688,6 +6143,7 @@ lay_hangars();
 lay_pipes();
 lay_sides();
 lay_gates();
+build_reactor();
 build_sides();
 build_ends();
 build_hull();
@@ -5697,13 +6153,13 @@ start_workers();
 start_generator();
 
 if (BENCH_MODE) {
-    let num_frames = $cmd_get_arg_or(2, "120").parse_int(10);
+    let num_frames = arg_or(1, "120").parse_int(10);
     if (num_frames == nil || num_frames < 1) {
         $println("expected a number of frames");
         $exit(1);
     }
 
-    run_bench(num_frames, $cmd_get_arg_or(3, ""));
+    run_bench(num_frames, arg_or(2, ""));
     stop_generator();
     stop_workers();
     $exit(0);
