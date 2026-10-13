@@ -779,46 +779,70 @@ let var wc_h = 0.0;
 
 // How far across a wall a point in the world is, and how far out from it
 fun wall_coords(w, x, y) {
-    wc_u = x * WALL_UX[w] + y * WALL_UY[w];
+    wc_u = (x - WALL_OX[w]) * WALL_UX[w] + (y - WALL_OY[w]) * WALL_UY[w];
     wc_h = (x - WALL_OX[w]) * WALL_HX[w] + (y - WALL_OY[w]) * WALL_HY[w];
 }
 
 // --- Hangars ---
 //
-// A hangar is a stretch where the walls stand further back on every side,
-// so that the tunnel comes in through the middle of one end wall and
-// leaves through the middle of the other. Each is a different size. The
-// largest is as big as it can be without there being room to turn round:
-// the fighter's tightest circle is 1300 meters across, and from corner to
-// corner the largest hangar is a little less than that once the blocks on
-// its walls are allowed for.
+// A hangar is a stretch where the walls stand further back on every side.
+// The tunnel comes in through one end wall and leaves through the other,
+// but not in line: the way out is off to one side of the way in, and
+// higher or lower, so the fighter has to cross over to it. From there the
+// tunnel carries on along its new line.
+//
+// Each hangar is a different size. The largest is as big as it can be
+// without there being room to turn round: the fighter's tightest circle is
+// 1300 meters across, and from corner to corner the largest hangar is a
+// little less than that once the blocks on its walls are allowed for.
 
-// For each: the first of its rows of cells, how many it has, and how many
-// cells wide and tall it is
+// For each: the first of its rows of cells, how many it has, how many
+// cells wide and tall it is, and where the middle of it is
 let hg_row = [];
 let hg_rows = [];
 let hg_cols = [];
 let hg_tall = [];
+let hg_cx = [];
+let hg_cy = [];
+
+// The middle of each stretch of tunnel, the first being the one that
+// leads to the first hangar
+let run_x = [0.0];
+let run_y = [0.0];
 
 // Which hangar each row of cells is in, if any
 let row_hangar = Array.with_size(NUM_ROWS, -1);
+
+// The shape of the tunnel at each row of cells. Each stretch of tunnel and
+// each hangar is a shape of its own: twice the number of a stretch, or one
+// more than twice the number of a hangar.
+let row_shape_of = Array.with_size(NUM_ROWS, 0);
 
 // How long a hangar may be and how much tunnel there may be between two,
 // in rows of cells. All of them are even, to keep to whole sections.
 let HANGAR_ROWS_MIN = 24;
 let HANGAR_ROWS_MAX = 48;
-let HANGAR_GAP_MIN = 320;
+let HANGAR_GAP_MIN = 240;
 let HANGAR_GAP_MAX = 560;
 let HANGAR_FIRST = 200;
 
-// Its walls are lit this much more brightly than the tunnel's, being seen
-// from further off
-let HANGAR_LIGHT = 1.5;
+// How brightly its walls are lit, as a multiple of the tunnel's
+let HANGAR_LIGHT = 1.0;
 let END_SEED = WORLD_SEED + 90;
 
 // The fewest cells a hangar may be wide and tall
 let HANGAR_COLS_MIN = 16;
 let HANGAR_TALL_MIN = 11;
+
+// How far the way out may be from the way in, as a fraction of the length
+// of the hangar, to the side and up or down. That keeps it within what
+// the fighter can cross at cruising speed.
+let SHIFT_SIDE = 1.0 / 6.0;
+let SHIFT_UP = 1.0 / 12.0;
+
+// The furthest either way may be from the middle of a hangar, in cells
+let SHIFT_COLS = 4;
+let SHIFT_ROWS = 2;
 
 fun lay_hangars() {
     let gen = Xoshiro128(WORLD_SEED + 80);
@@ -828,28 +852,64 @@ fun lay_hangars() {
         let rows = gen.int(HANGAR_ROWS_MIN.idiv(2), HANGAR_ROWS_MAX.idiv(2) + 1) * 2;
         if (row + rows > NUM_ROWS - 80) break;
 
-        // It is wider than the tunnel by the same on both sides, and
-        // taller by the same above and below
         let id = hg_row.len;
+        let cols = gen.int(HANGAR_COLS_MIN.idiv(2), HANGAR_COLS_MAX.idiv(2) + 1) * 2;
+        let tall = gen.int(HANGAR_TALL_MIN.idiv(2), HANGAR_TALL_MAX.idiv(2) + 1) * 2 + 1;
         hg_row.push(row);
         hg_rows.push(rows);
-        hg_cols.push(gen.int(HANGAR_COLS_MIN.idiv(2), HANGAR_COLS_MAX.idiv(2) + 1) * 2);
-        hg_tall.push(gen.int(HANGAR_TALL_MIN.idiv(2), HANGAR_TALL_MAX.idiv(2) + 1) * 2 + 1);
+        hg_cols.push(cols);
+        hg_tall.push(tall);
         for (let var at = row; at < row + rows; ++at) row_hangar[at] = id;
+
+        // How far over the way out is, in cells. It is always a good way
+        // to one side, and leaves a cell of wall around both mouths.
+        let max_x = (rows * SHIFT_SIDE).floor().min(SHIFT_COLS * 2).min(cols - 10);
+        let max_y = (rows * SHIFT_UP).floor().min(SHIFT_ROWS * 2).min(tall - 7);
+        let var dx = gen.int((max_x + 1).idiv(2), max_x + 1);
+        let var dy = gen.int(0, max_y + 1);
+        let var sign_x = 1;
+        let var sign_y = 1;
+        if (gen.bool()) sign_x = -1;
+        if (gen.bool()) sign_y = -1;
+
+        // The way in is about as far from the middle on one side as the
+        // way out is on the other
+        let in_x = 0 - sign_x * dx.idiv(2);
+        let in_y = 0 - sign_y * dy.idiv(2);
+        let cx = run_x[id] - in_x * CELL;
+        let cy = run_y[id] - in_y * CELL;
+        hg_cx.push(cx);
+        hg_cy.push(cy);
+        run_x.push(cx + (in_x + sign_x * dx) * CELL);
+        run_y.push(cy + (in_y + sign_y * dy) * CELL);
 
         row = row + rows + gen.int(HANGAR_GAP_MIN.idiv(2), HANGAR_GAP_MAX.idiv(2) + 1) * 2;
     }
+
+    // A row past the last hangar it has come to is in the next stretch
+    let var passed = 0;
+    for (let var at = 0; at < NUM_ROWS; ++at) {
+        let id = row_hangar[at];
+        if (id >= 0) {
+            row_shape_of[at] = id * 2 + 1;
+            passed = id + 1;
+        } else {
+            row_shape_of[at] = passed * 2;
+        }
+    }
 }
 
-// The shape of the tunnel at a row of cells, which is nothing for the
-// tunnel itself and otherwise one more than the hangar the row is in
+// The shape of the tunnel at a row of cells
 fun row_shape(row) {
-    return row_hangar[row] + 1;
+    return row_shape_of[row];
 }
 
-// Which shape the walls are set up for, and how far it reaches to either
-// side and up and down
+// Which shape the walls are set up for, whether it is a hangar, where the
+// middle of it is and how far it reaches to either side and up and down
 let var shape = 0;
+let var in_hangar = false;
+let var shape_cx = 0.0;
+let var shape_cy = 0.0;
 let var shape_w = HALF_W;
 let var shape_h = HALF_H;
 
@@ -858,11 +918,18 @@ fun use_shape(s) {
     if (s == shape) return;
     shape = s;
 
+    let id = s >> 1;
     let var cols = 8;
     let var tall = 5;
-    if (s > 0) {
-        cols = hg_cols[s - 1];
-        tall = hg_tall[s - 1];
+    in_hangar = (s & 1) == 1;
+    if (in_hangar) {
+        cols = hg_cols[id];
+        tall = hg_tall[id];
+        shape_cx = hg_cx[id];
+        shape_cy = hg_cy[id];
+    } else {
+        shape_cx = run_x[id];
+        shape_cy = run_y[id];
     }
     shape_w = cols * CELL * 0.5;
     shape_h = tall * CELL * 0.5;
@@ -875,10 +942,34 @@ fun use_shape(s) {
     WALL_FIRST[2] = cols * 2;
     WALL_FIRST[3] = cols * 2 + tall;
 
-    WALL_OX[2] = 0.0 - shape_w;
-    WALL_OX[3] = shape_w;
-    WALL_OY[0] = 0.0 - shape_h;
-    WALL_OY[1] = shape_h;
+    WALL_OX[0] = shape_cx; WALL_OX[1] = shape_cx;
+    WALL_OX[2] = shape_cx - shape_w;
+    WALL_OX[3] = shape_cx + shape_w;
+    WALL_OY[0] = shape_cy - shape_h;
+    WALL_OY[1] = shape_cy + shape_h;
+    WALL_OY[2] = shape_cy; WALL_OY[3] = shape_cy;
+}
+
+// The point last given to `line_at`
+let var ln_x = 0.0;
+let var ln_y = 0.0;
+
+// Where the line through the tunnel is at a depth, which is the middle of
+// the tunnel and, in a hangar, eases across from the way in to the way out
+fun line_at(z) {
+    let row = (z / CELL).floor().clip(0, NUM_ROWS - 1);
+    let id = row_hangar[row];
+    if (id < 0) {
+        let run = row_shape_of[row] >> 1;
+        ln_x = run_x[run];
+        ln_y = run_y[run];
+        return;
+    }
+
+    let z0 = hg_row[id] * CELL;
+    let t = smoothstep(z0, z0 + hg_rows[id] * CELL, z);
+    ln_x = lerp(run_x[id], run_x[id + 1], t);
+    ln_y = lerp(run_y[id], run_y[id + 1], t);
 }
 
 // --- Pipes ---
@@ -962,10 +1053,10 @@ fun lay_across(gen, row, want) {
     // A hangar is a long way round and seen from further off, so its
     // pipes go singly and are thicker
     let var count = want;
-    if (shape > 0) count = 1;
+    if (in_hangar) count = 1;
 
     let var r = pipe_radius(gen, count);
-    if (shape > 0) r = r * 1.6;
+    if (in_hangar) r = r * 1.6;
     let reach = gen.int(0, 3);
     let wall = gen.index(NUM_WALLS);
 
@@ -1072,7 +1163,6 @@ fun wall_clear(w, row, rows) {
 // These go in after the pipes, and only where no pipe is in the way
 fun lay_sides() {
     let gen = Xoshiro128(WORLD_SEED + 60);
-    use_shape(0);
 
     // The row the last pair ended at
     let var last_end = 0;
@@ -1080,6 +1170,7 @@ fun lay_sides() {
     for (let var row = 8; row < NUM_ROWS - 40; ++row) {
         if (gen.int(0, 1000) >= SIDE_CHANCE) continue;
         if (row < last_end + SIDE_GAP) continue;
+        use_shape(row_shape(row));
 
         // Either the floor and the ceiling, or the two sides
         let first = gen.index(2) * 2;
@@ -1483,7 +1574,7 @@ fun build_node(n, u0, z0, size, depth, base_h, flat) {
     let g = 1.0 / (size * 0.7);
     let tone = 0.86 + 0.34 * perlin3d(x * g + 9.1, y * g, zc * g, TONE_SEED + depth);
     let var white = 0.236 + 0.091 * light_noise.sample3d(x, y, zc);
-    if (shape > 0) white = white * HANGAR_LIGHT;
+    if (in_hangar) white = white * HANGAR_LIGHT;
 
     // The glow at each corner of the top, in the order they are drawn in
     let nx = WALL_HX[w];
@@ -1704,7 +1795,7 @@ fun build_section(k) {
 
     // The walls of a hangar are never seen from close to
     gen_depth = MAX_DEPTH;
-    if (shape > 0) gen_depth = 2;
+    if (in_hangar) gen_depth = 2;
 
     // The pipes close enough to light it, which includes those in the rows
     // to either side
@@ -2646,11 +2737,13 @@ fun build_sides() {
 }
 
 // The two end walls of a hangar are covered in blocks as well, around the
-// mouth of the tunnel. There is one set of them, as big as the end wall of
-// the largest hangar, and every end wall is drawn from the middle of it.
-// Across it u is how far it is from the left and v how far up.
-let END_COLS = HANGAR_COLS_MAX;
-let END_ROWS = HANGAR_TALL_MAX;
+// mouth of the tunnel. There is one set of them with the mouth in the
+// middle, big enough for the largest end wall with its mouth as far off
+// to one side as it can be, and every end wall is drawn from the part of
+// it that lies around its own mouth. Across it u is how far it is from
+// the left and v how far up.
+let END_COLS = HANGAR_COLS_MAX + SHIFT_COLS * 2;
+let END_ROWS = HANGAR_TALL_MAX + SHIFT_ROWS * 2;
 let END_W = END_COLS * CELL * 0.5;
 let END_H = END_ROWS * CELL * 0.5;
 let end_roots = [];
@@ -2746,8 +2839,8 @@ fun build_ends() {
     }
 }
 
-// How far the blocks stand out from an end wall of a hangar at a place in
-// the world, or nothing where the mouth is
+// How far the blocks stand out from an end wall of a hangar at a place
+// given from the middle of its mouth, or nothing where the mouth is
 fun end_height(x, y) {
     let u = x + END_W;
     let v = y + END_H;
@@ -2920,7 +3013,14 @@ fun draw_hangar_end(id, z, facing) {
     let fog = fog_at((z - cam_z).abs());
     if (fog <= 0.0) return;
 
-    set_frame(0.0 - END_W, 0.0 - END_H, z, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, facing);
+    // The middle of its mouth, which is the way in if it faces down the
+    // tunnel and the way out if it faces back up it
+    let var run = id;
+    if (facing < 0.0) run = id + 1;
+    let mx = run_x[run];
+    let my = run_y[run];
+
+    set_frame(mx - END_W, my - END_H, z, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, facing);
     if (wall_cam_h <= 0.0) return;
 
     draw_depth = SIDE_SPLITS;
@@ -2931,8 +3031,8 @@ fun draw_hangar_end(id, z, facing) {
     // The part of the set that this hangar's end wall takes up
     let cols = hg_cols[id];
     let tall = hg_tall[id];
-    let col0 = (END_COLS - cols).idiv(2);
-    let row0 = (END_ROWS - tall).idiv(2);
+    let col0 = (END_COLS - cols).idiv(2) + ((hg_cx[id] - mx) / CELL).floor();
+    let row0 = (END_ROWS - tall).idiv(2) + ((hg_cy[id] - my) / CELL).floor();
 
     // Rows from the top and the bottom in towards the one the camera is
     // level with, and each from both ends in towards the camera
@@ -2956,8 +3056,9 @@ fun draw_hangar_end(id, z, facing) {
         }
     }
 
-    // The pipes round the mouth glow, so only the fog dims them
-    fog_k = dim;
+    // The pipes round the mouth mark where to steer for, so they show
+    // through the fog more than anything else does
+    fog_k = ((0.5 + 0.5 * fog) * 256.0).floor();
     for (let var i = FRAME_AT.len - 1; i >= 0; --i) {
         let ua = MOUTH_U0 - FRAME_AT[i];
         let ub = MOUTH_U1 + FRAME_AT[i];
@@ -3057,10 +3158,12 @@ fun draw_sides(k) {
 
 // Draw the wall that closes off the far end of the run
 fun draw_end_wall() {
-    view_corner(0, 0.0 - HALF_W, 0.0 - HALF_H, RUN_LEN);
-    view_corner(1, HALF_W, 0.0 - HALF_H, RUN_LEN);
-    view_corner(2, HALF_W, HALF_H, RUN_LEN);
-    view_corner(3, 0.0 - HALF_W, HALF_H, RUN_LEN);
+    let x = run_x[run_x.len - 1];
+    let y = run_y[run_y.len - 1];
+    view_corner(0, x - HALF_W, y - HALF_H, RUN_LEN);
+    view_corner(1, x + HALF_W, y - HALF_H, RUN_LEN);
+    view_corner(2, x + HALF_W, y + HALF_H, RUN_LEN);
+    view_corner(3, x - HALF_W, y + HALF_H, RUN_LEN);
     fog_k = (fog_at((RUN_LEN - cam_z).abs()) * 256.0).floor();
     fill_face(0, 1, 2, 3, 0xFF262830);
 }
@@ -3080,7 +3183,7 @@ fun draw_section(k) {
     if (dist > 18) draw_depth = 0;
 
     // The walls of a hangar are further off to begin with
-    if (shape > 0) {
+    if (in_hangar) {
         if (dist > 2) draw_depth = 2;
         if (dist > 6) draw_depth = 1;
         if (dist > 12) draw_depth = 0;
@@ -3612,8 +3715,9 @@ let var music_on = true;
 
 // Put the fighter in the middle of the tunnel at a depth, flying level
 fun place_fighter(z) {
-    cam_x = 0.0;
-    cam_y = 0.0;
+    line_at(z);
+    cam_x = ln_x;
+    cam_y = ln_y;
     cam_z = z;
 
     right_x = 1.0; right_y = 0.0; right_z = 0.0;
@@ -3662,14 +3766,24 @@ fun hits_tunnel(x, y, z) {
     let ids = row_pipes[row];
     use_shape(row_shape(row));
 
-    // In a hangar there are the end walls to hit, to either side of the
-    // mouth of the tunnel and above it
+    // In a hangar there are the end walls to hit, all round the mouth of
+    // the tunnel. The nearer of the two is the one that matters.
     let hangar = row_hangar[row];
-    if (hangar >= 0 && (x.abs() > HALF_W - margin || y.abs() > HALF_H - margin)) {
+    if (hangar >= 0) {
         let z0 = hg_row[hangar] * CELL;
         let z1 = z0 + hg_rows[hangar] * CELL;
-        let gap = (z - z0).min(z1 - z);
-        if (gap < SIDE_BLOCK + margin && gap < end_height(x, y) + margin) return true;
+        let var gap = z - z0;
+        let var run = hangar;
+        if (z1 - z < gap) {
+            gap = z1 - z;
+            run = hangar + 1;
+        }
+
+        let mx = x - run_x[run];
+        let my = y - run_y[run];
+        if (gap < SIDE_BLOCK + margin && (mx.abs() > HALF_W - margin || my.abs() > HALF_H - margin)) {
+            if (gap < end_height(mx, my) + margin) return true;
+        }
     }
 
     for (let var w = 0; w < NUM_WALLS; ++w) {
@@ -3787,8 +3901,8 @@ fun update_flight(dt) {
             use_shape(row_shape((cam_z / CELL).floor().min(NUM_ROWS - 1)));
             let limit_x = shape_w - CRASH_CLEARANCE;
             let limit_y = shape_h - CRASH_CLEARANCE;
-            cam_x = cam_x.clip(0.0 - limit_x, limit_x);
-            cam_y = cam_y.clip(0.0 - limit_y, limit_y);
+            cam_x = cam_x.clip(shape_cx - limit_x, shape_cx + limit_x);
+            cam_y = cam_y.clip(shape_cy - limit_y, shape_cy + limit_y);
         }
         crash_timer = CRASH_TIME;
         crash_count = crash_count + 1;
@@ -4432,7 +4546,7 @@ fun update_cannons(dt) {
         if (z >= RUN_LEN || hits_tunnel(x, y, z)) {
             // A round that struck inside the tunnel flashes on its wall
             if (z < 0.0) add_impact(x, y, z);
-            else add_impact(x.clip(0.0 - shape_w, shape_w), y.clip(0.0 - shape_h, shape_h), z.min(RUN_LEN));
+            else add_impact(x.clip(shape_cx - shape_w, shape_cx + shape_w), y.clip(shape_cy - shape_h, shape_cy + shape_h), z.min(RUN_LEN));
             rd_age[i] = -1.0;
         } else if (age + dt > ROUND_LIFE) {
             rd_age[i] = -1.0;
@@ -4622,6 +4736,11 @@ let FIRE_SCATTER = 0.006;
 // in play has none left.
 let en_x = Array.with_size(MAX_ENEMIES, 0.0);
 let en_y = Array.with_size(MAX_ENEMIES, 0.0);
+
+// Where each is from the line through the tunnel, which is what it steers
+// by, so that it follows the tunnel where that moves over in a hangar
+let en_off_x = Array.with_size(MAX_ENEMIES, 0.0);
+let en_off_y = Array.with_size(MAX_ENEMIES, 0.0);
 let en_z = Array.with_size(MAX_ENEMIES, 0.0);
 let en_vx = Array.with_size(MAX_ENEMIES, 0.0);
 let en_vy = Array.with_size(MAX_ENEMIES, 0.0);
@@ -4740,9 +4859,12 @@ fun spawn_wave() {
 
         en_slot_x[i] = sx;
         en_slot_y[i] = sy;
-        en_x[i] = (cx + sx).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
-        en_y[i] = (cy + sy).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
+        en_off_x[i] = (cx + sx).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
+        en_off_y[i] = (cy + sy).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
         en_z[i] = cam_z + WAVE_AHEAD + back;
+        line_at(en_z[i]);
+        en_x[i] = ln_x + en_off_x[i];
+        en_y[i] = ln_y + en_off_y[i];
         en_vx[i] = 0.0;
         en_vy[i] = 0.0;
         en_bank[i] = 0.0;
@@ -4858,20 +4980,28 @@ fun update_enemies(dt) {
     aim_locked = false;
     let ease = (4.0 * dt).min(1.0);
 
+    // Where the player is from the line through the tunnel
+    line_at(cam_z);
+    let off_x = cam_x - ln_x;
+    let off_y = cam_y - ln_y;
+
     for (let var i = 0; i < MAX_ENEMIES; ++i) {
         if (en_hp[i] <= 0) continue;
 
         // Each steers for its place in a formation that drifts after the
         // player, as hard as it can, which is not very
-        let want_x = (cam_x * 0.7 + en_slot_x[i]).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
-        let want_y = (cam_y * 0.7 + en_slot_y[i]).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
-        let ax = ((want_x - en_x[i]) * 1.2 - en_vx[i] * 1.8).clip(0.0 - ENEMY_ACCEL, ENEMY_ACCEL);
-        let ay = ((want_y - en_y[i]) * 1.2 - en_vy[i] * 1.8).clip(0.0 - ENEMY_ACCEL, ENEMY_ACCEL);
+        let want_x = (off_x * 0.7 + en_slot_x[i]).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
+        let want_y = (off_y * 0.7 + en_slot_y[i]).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
+        let ax = ((want_x - en_off_x[i]) * 1.2 - en_vx[i] * 1.8).clip(0.0 - ENEMY_ACCEL, ENEMY_ACCEL);
+        let ay = ((want_y - en_off_y[i]) * 1.2 - en_vy[i] * 1.8).clip(0.0 - ENEMY_ACCEL, ENEMY_ACCEL);
         en_vx[i] = en_vx[i] + ax * dt;
         en_vy[i] = en_vy[i] + ay * dt;
-        en_x[i] = (en_x[i] + en_vx[i] * dt).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
-        en_y[i] = (en_y[i] + en_vy[i] * dt).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
+        en_off_x[i] = (en_off_x[i] + en_vx[i] * dt).clip(0.0 - ENEMY_REACH_X, ENEMY_REACH_X);
+        en_off_y[i] = (en_off_y[i] + en_vy[i] * dt).clip(0.0 - ENEMY_REACH_Y, ENEMY_REACH_Y);
         en_z[i] = en_z[i] - ENEMY_SPEED * dt;
+        line_at(en_z[i]);
+        en_x[i] = ln_x + en_off_x[i];
+        en_y[i] = ln_y + en_off_y[i];
 
         // It banks into its turns
         en_bank[i] = en_bank[i] + (ax * 0.028 - en_bank[i]) * ease;
@@ -5252,8 +5382,9 @@ fun run_bench(num_frames, shot_dir) {
         // Weave along a set path, rolling from side to side
         let t = frame.to_f() * dt;
         let z = START_Z + 350.0 * t;
-        cam_x = 70.0 * (z / 800.0).sin();
-        cam_y = 40.0 * (z / 530.0 + 1.0).sin();
+        line_at(z);
+        cam_x = ln_x + 70.0 * (z / 800.0).sin();
+        cam_y = ln_y + 40.0 * (z / 530.0 + 1.0).sin();
         cam_z = z;
         look_along(70.0 / 800.0 * (z / 800.0).cos(), 40.0 / 530.0 * (z / 530.0 + 1.0).cos(), 1.0);
         cam_roll(0.6 * (z / 1100.0).sin());
