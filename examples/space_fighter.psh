@@ -3453,9 +3453,16 @@ fun draw_sides(k) {
 
 // How far the corners of the facets are from the middle, and how many
 // facets there are from bottom to top and round
-let REACTOR_R = 1500.0;
-let REACTOR_BANDS = 15;
-let REACTOR_AROUND = 30;
+let REACTOR_R = 2500.0;
+let REACTOR_BANDS = 25;
+let REACTOR_AROUND = 48;
+
+// Each of those is split into this many facets each way, but for the two
+// with a mouth in them
+let FACET_SPLIT = 2;
+let FACET_ROWS = REACTOR_BANDS * FACET_SPLIT;
+let FACET_COLS = REACTOR_AROUND * FACET_SPLIT;
+let MOUTH_ROW = (REACTOR_BANDS - 1).idiv(2) * FACET_SPLIT;
 
 // Half the width and height of the facet a mouth is in, and how far that
 // facet is from the middle, which is as near to it as any comes
@@ -3472,15 +3479,18 @@ let var rc_x = 0.0;
 let var rc_y = 0.0;
 
 // It has a fog of its own, thin enough to see across
-let REACTOR_FOG0 = 900.0;
-let REACTOR_FOG1 = 4400.0;
+let REACTOR_FOG0 = REACTOR_R * 0.6;
+let REACTOR_FOG1 = REACTOR_R * 2.9;
+
+// How much of the light that fog takes at most
+let REACTOR_HAZE = 0.0;
 
 // The core, which is seen from a way back down the tunnel
 let CORE_R = 120.0;
 let CORE_SIDES = 16;
-let CORE_RINGS = 24;
-let CORE_SEEN0 = 2400.0;
-let CORE_SEEN1 = 3500.0;
+let CORE_RINGS = 40;
+let CORE_SEEN0 = REACTOR_R + 900.0;
+let CORE_SEEN1 = REACTOR_R + 2000.0;
 let CORE_WHITE = 0xFFFFFFFF;
 let CORE_EDGE = 0xFF9CD4FF;
 let core_sin = [];
@@ -3506,9 +3516,19 @@ let fc_ny = [];
 let fc_nz = [];
 let fc_tone = [];
 let fc_mouth = [];
-let FACET_R = 150.0;
-let FACET_G = 160.0;
-let FACET_B = 176.0;
+let fc_rad = [];
+
+// The way each facet reflects, which is not quite the way it faces, as
+// the panels are not true. Were they, the core would only ever be seen
+// reflected straight behind itself.
+let fc_mx = [];
+let fc_my = [];
+let fc_mz = [];
+let MIRROR_TURN = 0.45;
+let MIRROR_TIP = 0.1;
+let FACET_R = 222.0;
+let FACET_G = 232.0;
+let FACET_B = 250.0;
 
 // Whether the fighter has come through into the chamber, and how many
 // rounds have struck the core
@@ -3522,15 +3542,39 @@ let var rp_y = 0.0;
 let var rp_z = 0.0;
 
 fun reactor_point(i, j) {
-    let lat = (i.to_f() / REACTOR_BANDS - 0.5) * PI;
-    let lon = (j - 0.5) * 2.0 * PI / REACTOR_AROUND;
+    let lat = (i.to_f() / FACET_ROWS - 0.5) * PI;
+    let lon = (j.to_f() / FACET_SPLIT - 0.5) * 2.0 * PI / REACTOR_AROUND;
     rp_x = rc_x + REACTOR_R * lat.cos() * lon.sin();
     rp_y = rc_y + REACTOR_R * lat.sin();
     rp_z = REACTOR_Z - REACTOR_R * lat.cos() * lon.cos();
 }
 
+// Put a corner on the straight edge of a facet with a mouth in it, if it
+// is along one, so that no gap is left there. Takes the column the facet
+// starts at.
+fun flatten_corner(i, j, col) {
+    let di = i - MOUTH_ROW;
+    let dj = (j - col + FACET_COLS) % FACET_COLS;
+    if (di < 0 || di > FACET_SPLIT || dj > FACET_SPLIT) return;
+    let ti = di.to_f() / FACET_SPLIT;
+    let tj = dj.to_f() / FACET_SPLIT;
+
+    reactor_point(MOUTH_ROW, col);
+    let x0 = rp_x; let y0 = rp_y; let z0 = rp_z;
+    reactor_point(MOUTH_ROW, col + FACET_SPLIT);
+    let x1 = rp_x; let y1 = rp_y; let z1 = rp_z;
+    reactor_point(MOUTH_ROW + FACET_SPLIT, col);
+    let x2 = rp_x; let y2 = rp_y; let z2 = rp_z;
+    reactor_point(MOUTH_ROW + FACET_SPLIT, col + FACET_SPLIT);
+    rp_x = lerp(lerp(x0, x1, tj), lerp(x2, rp_x, tj), ti);
+    rp_y = lerp(lerp(y0, y1, tj), lerp(y2, rp_y, tj), ti);
+    rp_z = lerp(lerp(z0, z1, tj), lerp(z2, rp_z, tj), ti);
+}
+
 fun add_facet_corner(i, j) {
     reactor_point(i, j);
+    flatten_corner(i, j, 0);
+    flatten_corner(i, j, FACET_COLS.idiv(2));
     fc_x.push(rp_x);
     fc_y.push(rp_y);
     fc_z.push(rp_z);
@@ -3546,14 +3590,24 @@ fun build_reactor() {
         core_cos.push(((j % CORE_SIDES) * 2.0 * PI / CORE_SIDES).cos());
     }
 
-    for (let var i = 0; i < REACTOR_BANDS; ++i) {
-        for (let var j = 0; j < REACTOR_AROUND; ++j) {
+    for (let var i = 0; i < FACET_ROWS; ++i) {
+        for (let var j = 0; j < FACET_COLS; ++j) {
             let f = fc_count.len;
             let v = f * 4;
 
+            // One with a mouth in it is left whole
+            let var mouth = 0;
+            if (i >= MOUTH_ROW && i < MOUTH_ROW + FACET_SPLIT) {
+                if (j < FACET_SPLIT) mouth = 1;
+                if (j.idiv(FACET_SPLIT) * 2 == REACTOR_AROUND) mouth = 2;
+            }
+            if (mouth != 0 && (i != MOUTH_ROW || j % FACET_SPLIT != 0)) continue;
+            let var size = 1;
+            if (mouth != 0) size = FACET_SPLIT;
+
             // Those round the top and the bottom come to a point
             let var count = 4;
-            if (i == 0 || i == REACTOR_BANDS - 1) count = 3;
+            if (i == 0 || i == FACET_ROWS - 1) count = 3;
             if (i == 0) {
                 add_facet_corner(1, j + 1);
                 add_facet_corner(1, j);
@@ -3561,9 +3615,9 @@ fun build_reactor() {
                 add_facet_corner(0, j);
             } else {
                 add_facet_corner(i, j);
-                add_facet_corner(i, j + 1);
-                add_facet_corner(i + 1, j + 1);
-                add_facet_corner(i + 1, j);
+                add_facet_corner(i, j + size);
+                add_facet_corner(i + size, j + size);
+                add_facet_corner(i + size, j);
             }
             fc_count.push(count);
 
@@ -3579,6 +3633,13 @@ fun build_reactor() {
             fc_cy.push(cy);
             fc_cz.push(cz);
 
+            let var rad = 0.0;
+            for (let var k = 0; k < count; ++k) {
+                let ex = fc_x[v + k] - cx; let ey = fc_y[v + k] - cy; let ez = fc_z[v + k] - cz;
+                rad = rad.max((ex * ex + ey * ey + ez * ez).sqrt());
+            }
+            fc_rad.push(rad);
+
             // It faces the way two of its edges are both square to,
             // whichever of the two ways is inwards
             let ax = fc_x[v + 1] - fc_x[v]; let ay = fc_y[v + 1] - fc_y[v]; let az = fc_z[v + 1] - fc_z[v];
@@ -3593,11 +3654,21 @@ fun build_reactor() {
             fc_nz.push(nz / len);
             fc_tone.push(gen.float(0.78, 1.12));
 
-            let var mouth = 0;
-            if (i * 2 + 1 == REACTOR_BANDS) {
-                if (j == 0) mouth = 1;
-                if (j * 2 == REACTOR_AROUND) mouth = 2;
-            }
+            // Lean that to one side and up or down for the way it reflects
+            nx = nx / len; ny = ny / len; nz = nz / len;
+            let flat = (nx * nx + nz * nz).sqrt().max(0.001);
+            let sx = 0.0 - nz / flat;
+            let sz = nx / flat;
+            let turn = gen.float(0.0 - MIRROR_TURN, MIRROR_TURN);
+            let tip = gen.float(0.0 - MIRROR_TIP, MIRROR_TIP);
+            let mx = nx + turn * sx - tip * ny * sz;
+            let my = ny + tip * (nz * sx - nx * sz);
+            let mz = nz + turn * sz + tip * ny * sx;
+            let ml = (mx * mx + my * my + mz * mz).sqrt();
+            fc_mx.push(mx / ml);
+            fc_my.push(my / ml);
+            fc_mz.push(mz / ml);
+
             fc_mouth.push(mouth);
         }
     }
@@ -3605,7 +3676,7 @@ fun build_reactor() {
 
 // How much of the light is left at a distance inside the chamber
 fun reactor_fog(dist) {
-    return 1.0 - smoothstep(REACTOR_FOG0, REACTOR_FOG1, dist);
+    return 1.0 - REACTOR_HAZE * smoothstep(REACTOR_FOG0, REACTOR_FOG1, dist);
 }
 
 // The same for wherever the fighter is
@@ -3620,8 +3691,25 @@ let var fa_ny = 0.0;
 let var fa_nz = 0.0;
 let var fa_tone = 1.0;
 
+// The way it reflects
+let var fa_mx = 0.0;
+let var fa_my = 0.0;
+let var fa_mz = 0.0;
+
+// How bright the facets are where they reflect the dark of the chamber,
+// and how much the lit wall round its middle and the air round the core
+// each add to that
+let METAL_DARK = 0.3;
+let METAL_WALL = 0.32;
+let METAL_AIR = 0.24;
+let AIR_REACH = REACTOR_R * 0.8;
+
+// How far off to the side of the view a facet can be seen, for each meter
+// it is ahead
+let FACET_VIEW = CX * INV_FOCAL;
+
 // Set a facet up to be drawn. Returns false if it faces away from the
-// camera or is lost in the fog.
+// camera, is behind it or is lost in the fog.
 fun set_facet(f) {
     let dx = fc_cx[f] - cam_x;
     let dy = fc_cy[f] - cam_y;
@@ -3630,14 +3718,25 @@ fun set_facet(f) {
     fa_ny = fc_ny[f];
     fa_nz = fc_nz[f];
     fa_tone = fc_tone[f];
+    fa_mx = fc_mx[f];
+    fa_my = fc_my[f];
+    fa_mz = fc_mz[f];
     if (dx * fa_nx + dy * fa_ny + dz * fa_nz >= 0.0) return false;
+
+    // Or is off to one side of the view
+    let rad = fc_rad[f];
+    let ahead = dx * fwd_x + dy * fwd_y + dz * fwd_z + rad;
+    if (ahead < 0.0) return false;
+    let reach = ahead * FACET_VIEW + rad * 2.0;
+    if ((dx * right_x + dy * right_y + dz * right_z).abs() > reach) return false;
+    if ((dx * up_x + dy * up_y + dz * up_z).abs() > reach) return false;
     return (dx * dx + dy * dy + dz * dz).sqrt() < REACTOR_FOG1 + FACET_W * 2.0;
 }
 
 // Put a point of the facet being drawn into one of the view space corners
-// and give it its color. Metal shows what it reflects, so it is bright
-// where the line of sight bounces off it towards the core, and dark where
-// it bounces wide.
+// and give it its color. The metal shows what the line of sight comes to
+// after it bounces: the air round the core, which is bright, or the far
+// wall, which the core lights most round its middle.
 fun facet_corner(j, x, y, z) {
     view_corner(j, x, y, z);
     let dx = x - cam_x;
@@ -3647,23 +3746,171 @@ fun facet_corner(j, x, y, z) {
 
     // The line of sight after it bounces, and how far wide of the core's
     // axis that goes, seen from above
-    let k = 2.0 * (dx * fa_nx + dy * fa_ny + dz * fa_nz) / dist;
-    let rx = dx / dist - k * fa_nx;
-    let rz = dz / dist - k * fa_nz;
+    let k = 2.0 * (dx * fa_mx + dy * fa_my + dz * fa_mz) / dist;
+    let rx = dx / dist - k * fa_mx;
+    let ry = dy / dist - k * fa_my;
+    let rz = dz / dist - k * fa_mz;
     let ox = x - rc_x;
+    let oy = y - rc_y;
     let oz = z - REACTOR_Z;
     let rr = rx * rx + rz * rz;
     let var miss = (ox * ox + oz * oz).sqrt();
     if (rr > 0.000001 && ox * rx + oz * rz < 0.0) miss = (ox * rz - oz * rx).abs() / rr.sqrt();
 
+    // How far up or down the far wall it lands
+    let across = (0.0 - 2.0 * (ox * rx + oy * ry + oz * rz)).max(0.0);
+    let high = ((oy + across * ry) / REACTOR_R).clip(-1.0, 1.0);
+    let wall = 1.0 - high * high;
+    let air = 1.0 - smoothstep(CORE_R, AIR_REACH, miss);
+
     let fog = reactor_fog(dist);
-    let sharp = 1.0 - smoothstep(CORE_R, CORE_R * 6.0, miss);
-    let soft = 1.0 - smoothstep(0.0, REACTOR_R * 1.6, miss);
-    let level = fa_tone * (0.24 + 0.46 * soft) * fog;
-    let white = 190.0 * sharp * sharp * fog;
-    tR[j] = (FACET_R * level + white).min(255.0);
-    tG[j] = (FACET_G * level + white).min(255.0);
-    tB[j] = (FACET_B * level + white).min(255.0);
+    let level = fa_tone * (METAL_DARK + METAL_WALL * wall * wall + METAL_AIR * air * air) * fog;
+    tR[j] = FACET_R * level;
+    tG[j] = FACET_G * level;
+    tB[j] = FACET_B * level;
+}
+
+// The outline of the core's reflection in a facet, and what is left of it
+// once it is cut to the facet
+let mr_x = Array.with_size(4, 0.0);
+let mr_y = Array.with_size(4, 0.0);
+let mr_z = Array.with_size(4, 0.0);
+let ca_x = Array.with_size(12, 0.0);
+let ca_y = Array.with_size(12, 0.0);
+let ca_z = Array.with_size(12, 0.0);
+let cb_x = Array.with_size(12, 0.0);
+let cb_y = Array.with_size(12, 0.0);
+let cb_z = Array.with_size(12, 0.0);
+
+// How much of the core's light its reflection keeps, and how much of the
+// width of the reflection is white rather than blue
+let MIRROR_KEEP = 1.0;
+let MIRROR_WHITE = 0.55;
+
+// The glow round the reflection: how wide and how bright
+let MIRROR_GLOW = 1.15;
+let MIRROR_GLOW_COLOR = color_scale(CORE_EDGE, 0.7);
+
+// Cut the first n points in ca to the facet being drawn, one edge at a
+// time. Returns how many points are left, which end up in ca again.
+fun cut_to_facet(f, n) {
+    let v = f * 4;
+    let count = fc_count[f];
+    let var m = n;
+
+    for (let var k = 0; k < count && m >= 3; ++k) {
+        let a = v + k;
+        let b = v + (k + 1) % count;
+        let ax = fc_x[a]; let ay = fc_y[a]; let az = fc_z[a];
+        let bx = fc_x[b] - ax; let by = fc_y[b] - ay; let bz = fc_z[b] - az;
+
+        // Square to the edge and in the facet, towards its middle
+        let var ex = fa_ny * bz - fa_nz * by;
+        let var ey = fa_nz * bx - fa_nx * bz;
+        let var ez = fa_nx * by - fa_ny * bx;
+        if ((fc_cx[f] - ax) * ex + (fc_cy[f] - ay) * ey + (fc_cz[f] - az) * ez < 0.0) {
+            ex = 0.0 - ex; ey = 0.0 - ey; ez = 0.0 - ez;
+        }
+
+        let var out = 0;
+        for (let var i = 0; i < m; ++i) {
+            let j = (i + 1) % m;
+            let da = (ca_x[i] - ax) * ex + (ca_y[i] - ay) * ey + (ca_z[i] - az) * ez;
+            let db = (ca_x[j] - ax) * ex + (ca_y[j] - ay) * ey + (ca_z[j] - az) * ez;
+            if (da >= 0.0) {
+                cb_x[out] = ca_x[i]; cb_y[out] = ca_y[i]; cb_z[out] = ca_z[i];
+                out = out + 1;
+            }
+            if ((da >= 0.0) != (db >= 0.0)) {
+                let t = da / (da - db);
+                cb_x[out] = ca_x[i] + (ca_x[j] - ca_x[i]) * t;
+                cb_y[out] = ca_y[i] + (ca_y[j] - ca_y[i]) * t;
+                cb_z[out] = ca_z[i] + (ca_z[j] - ca_z[i]) * t;
+                out = out + 1;
+            }
+        }
+
+        m = out;
+        for (let var i = 0; i < m; ++i) {
+            ca_x[i] = cb_x[i]; ca_y[i] = cb_y[i]; ca_z[i] = cb_z[i];
+        }
+    }
+
+    return m;
+}
+
+// Draw part of the width of the reflection outlined in mr, cut to a facet
+fun draw_mirror_strip(f, part, color) {
+    let ka = 0.5 + 0.5 * part;
+    let kb = 0.5 - 0.5 * part;
+    for (let var i = 0; i < 4; ++i) {
+        let o = i ^ 1;
+        ca_x[i] = mr_x[i] * ka + mr_x[o] * kb;
+        ca_y[i] = mr_y[i] * ka + mr_y[o] * kb;
+        ca_z[i] = mr_z[i] * ka + mr_z[o] * kb;
+    }
+
+    let m = cut_to_facet(f, 4).min(MAX_CORNERS);
+    if (m < 3) return;
+    for (let var i = 0; i < m; ++i) {
+        view_corner(i, ca_x[i], ca_y[i], ca_z[i]);
+        cI[i] = i;
+    }
+    fill_poly(m, color);
+}
+
+// Draw the reflection of the core in the facet being drawn. A flat mirror
+// shows what a camera as far behind it would see through it, so the core
+// is drawn on the facet as it lines up from there.
+fun draw_mirror(f) {
+    let cx = fc_cx[f]; let cy = fc_cy[f]; let cz = fc_cz[f];
+    let nx = fc_mx[f]; let ny = fc_my[f]; let nz = fc_mz[f];
+    let behind = (cam_x - cx) * nx + (cam_y - cy) * ny + (cam_z - cz) * nz;
+    if (behind <= 0.0) return;
+    let mx = cam_x - 2.0 * behind * nx;
+    let my = cam_y - 2.0 * behind * ny;
+    let mz = cam_z - 2.0 * behind * nz;
+    let d = (cx - mx) * fa_nx + (cy - my) * fa_ny + (cz - mz) * fa_nz;
+    if (d <= 1.0) return;
+
+    // The core is as wide as it looks from there, seen from above
+    let vx = mx - rc_x;
+    let vz = mz - REACTOR_Z;
+    let len = (vx * vx + vz * vz).sqrt().max(1.0);
+    let px = 0.0 - vz / len * CORE_R;
+    let pz = vx / len * CORE_R;
+
+    // Its four corners, each moved along the line to it onto the facet
+    for (let var i = 0; i < 4; ++i) {
+        let var side = 1.0;
+        if (i == 0 || i == 3) side = -1.0;
+        let var qy = rc_y - REACTOR_R;
+        if (i >= 2) qy = rc_y + REACTOR_R;
+        let qx = rc_x + side * px;
+        let qz = REACTOR_Z + side * pz;
+        let s = (qx - cx) * fa_nx + (qy - cy) * fa_ny + (qz - cz) * fa_nz;
+        let t = d / (d + s).max(1.0);
+        mr_x[i] = mx + (qx - mx) * t;
+        mr_y[i] = my + (qy - my) * t;
+        mr_z[i] = mz + (qz - mz) * t;
+    }
+
+    // Nothing to draw if the line down the middle of it passes wide
+    let ax = (mr_x[0] + mr_x[1]) * 0.5; let ay = (mr_y[0] + mr_y[1]) * 0.5; let az = (mr_z[0] + mr_z[1]) * 0.5;
+    let bx = (mr_x[2] + mr_x[3]) * 0.5 - ax; let by = (mr_y[2] + mr_y[3]) * 0.5 - ay; let bz = (mr_z[2] + mr_z[3]) * 0.5 - az;
+    let ox = cx - ax; let oy = cy - ay; let oz = cz - az;
+    let kx = oy * bz - oz * by;
+    let ky = oz * bx - ox * bz;
+    let kz = ox * by - oy * bx;
+    let wide = (kx * kx + ky * ky + kz * kz).sqrt() / (bx * bx + by * by + bz * bz).sqrt().max(1.0);
+    if (wide > fc_rad[f] + CORE_R * MIRROR_GLOW) return;
+
+    let dx = cx - cam_x; let dy = cy - cam_y; let dz = cz - cam_z;
+    let fog = reactor_fog((dx * dx + dy * dy + dz * dz).sqrt());
+    fog_k = (fog * MIRROR_KEEP * 256.0).floor().min(256);
+    draw_mirror_strip(f, MIRROR_GLOW, MIRROR_GLOW_COLOR);
+    draw_mirror_strip(f, 1.0, CORE_EDGE);
+    draw_mirror_strip(f, MIRROR_WHITE, CORE_WHITE);
 }
 
 // Draw a piece of a facet that lies across the run, given two corners
@@ -3710,6 +3957,7 @@ fun draw_facets() {
 
         blend_tri(0, 1, 2);
         if (count == 4) blend_tri(0, 2, 3);
+        draw_mirror(f);
     }
 }
 
