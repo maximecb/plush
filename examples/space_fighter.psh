@@ -26,7 +26,7 @@
 //   space         fire the cannons
 //   M             music on / off
 //   R             start over
-//   escape / Q    quit
+//   escape        quit
 //
 // With --bench, a set flight is rendered without opening a window and the
 // time per frame is reported. Given a directory as well, a TGA screenshot
@@ -1261,6 +1261,9 @@ let GATE_YELLOW = 0xFFFFD21E;
 let var gate_near = -1;
 let var gate_closed = 0.0;
 
+// The gate at the way into the reactor
+let var gate_last = -1;
+
 // Whether a gate could stand at the start of a row of cells
 fun gate_fits(row) {
     for (let var at = row - GATE_CLEAR; at <= row + GATE_CLEAR; ++at) {
@@ -1290,6 +1293,25 @@ fun lay_gates() {
         gt_time.push(-1.0);
         row = row + gen.int(GATE_GAP_MIN.idiv(2), GATE_GAP_MAX.idiv(2) + 1) * 2;
     }
+
+    // The last shuts the way into the reactor behind the fighter, and
+    // comes out of the right wall
+    gate_last = gt_sec.len;
+    gt_sec.push(NUM_SECTIONS);
+    gt_from.push(1);
+    gt_time.push(-1.0);
+}
+
+// How far down the run a gate is. The last has its far face level with
+// the wall of the reactor.
+fun gate_z(g) {
+    if (g == gate_last) return RUN_LEN - GATE_THICK;
+    return gt_sec[g] * SEC_LEN;
+}
+
+// Shut the last gate, for when the fighter is put back inside the reactor
+fun shut_last_gate() {
+    gt_time[gate_last] = GATE_TIME;
 }
 
 // Open every gate again
@@ -1305,8 +1327,11 @@ fun update_gates(dt) {
     gate_closed = 0.0;
 
     for (let var g = 0; g < gt_sec.len; ++g) {
-        let ahead = gt_sec[g] * SEC_LEN - cam_z;
-        if (ahead.abs() > FOG_END + SEC_LEN) continue;
+        let ahead = gate_z(g) - cam_z;
+
+        // The last is seen from anywhere inside the reactor
+        let inside = g == gate_last && ahead < 0.0;
+        if (ahead.abs() > FOG_END + SEC_LEN && !inside) continue;
 
         if (gt_time[g] < 0.0 && ahead > 0.0 && ahead < GATE_TRIGGER) gt_time[g] = 0.0;
         else if (gt_time[g] >= 0.0) gt_time[g] = gt_time[g] + dt;
@@ -1358,7 +1383,7 @@ fun hits_gate(x, y, z, margin) {
     let g = gate_near;
     if (g < 0 || gate_closed <= 0.0) return false;
 
-    let gz = gt_sec[g] * SEC_LEN;
+    let gz = gate_z(g);
     if (z < gz - margin || z > gz + GATE_THICK + margin) return false;
 
     line_at(gz);
@@ -3309,11 +3334,13 @@ fun draw_gate_face(z, edge, back, dim, glow) {
 
 // Draw the door of a gate as far across as it has closed
 fun draw_gate(g) {
-    if (gate_closed <= 0.0) return;
+    draw_gate_lit(g, fog_at((gate_z(g) - cam_z).abs()));
+}
 
-    let gz = gt_sec[g] * SEC_LEN;
-    let fog = fog_at((gz - cam_z).abs());
-    if (fog <= 0.0) return;
+// The same, given how much of its light is left after the fog
+fun draw_gate_lit(g, fog) {
+    if (gate_closed <= 0.0 || fog <= 0.0) return;
+    let gz = gate_z(g);
 
     line_at(gz);
     gate_cx = ln_x;
@@ -3487,12 +3514,17 @@ let REACTOR_HAZE = 0.0;
 
 // The core, which is seen from a way back down the tunnel
 let CORE_R = 120.0;
-let CORE_SIDES = 16;
+let CORE_SIDES = 64;
 let CORE_RINGS = 40;
 let CORE_SEEN0 = REACTOR_R + 900.0;
 let CORE_SEEN1 = REACTOR_R + 2000.0;
 let CORE_WHITE = 0xFFFFFFFF;
 let CORE_EDGE = 0xFF9CD4FF;
+
+// How far round towards the camera a side has to face to be pure white,
+// and how much the bands that run up the core dim it
+let CORE_WHITE_AT = 0.6;
+let CORE_PULSE = 0.04;
 let core_sin = [];
 let core_cos = [];
 
@@ -4047,9 +4079,11 @@ fun draw_core(seen) {
         let toward = (tx * nx + tz * nz) / ((nx * nx + nz * nz) * (tx * tx + tz * tz)).sqrt().max(0.001);
         if (toward <= 0.0) continue;
 
-        let er = lerp(((CORE_EDGE >> 16) & 0xFF).to_f(), 255.0, toward);
-        let eg = lerp(((CORE_EDGE >> 8) & 0xFF).to_f(), 255.0, toward);
-        let eb = lerp((CORE_EDGE & 0xFF).to_f(), 255.0, toward);
+        // Most of the width is pure white, and only the edges go blue
+        let white = (toward / CORE_WHITE_AT).min(1.0);
+        let er = lerp(((CORE_EDGE >> 16) & 0xFF).to_f(), 255.0, white);
+        let eg = lerp(((CORE_EDGE >> 8) & 0xFF).to_f(), 255.0, white);
+        let eb = lerp((CORE_EDGE & 0xFF).to_f(), 255.0, white);
 
         // The bottom of this side, then each ring up from there
         view_corner(0, xa, rc_y - REACTOR_R, za);
@@ -4060,7 +4094,7 @@ fun draw_core(seen) {
             tX[2] = tX[1] + sx; tY[2] = tY[1] + sy; tZ[2] = tZ[1] + sz;
 
             if (tZ[0] >= NEAR_Z || tZ[1] >= NEAR_Z || tZ[2] >= NEAR_Z || tZ[3] >= NEAR_Z) {
-                let pulse = 0.95 + 0.05 * (ring * 0.9 - anim_time * 5.0).sin();
+                let pulse = 1.0 - CORE_PULSE * (0.5 + 0.5 * (ring * 0.9 - anim_time * 5.0).sin());
                 let color = 0xFF000000 | ((er * pulse).floor() << 16) | ((eg * pulse).floor() << 8) | (eb * pulse).floor();
                 fill_face(0, 1, 2, 3, color);
             }
@@ -4086,6 +4120,7 @@ fun draw_reactor() {
         if (in_reactor) draw_stub(RUN_LEN, -1.0);
         draw_stub(REACTOR_END, 1.0);
         draw_facets();
+        if (in_reactor && gate_near == gate_last) draw_gate_lit(gate_last, reactor_fog((RUN_LEN - cam_z).abs()));
         draw_mouth_frame(RUN_LEN, 1.0);
         draw_mouth_frame(REACTOR_END, -1.0);
     }
@@ -4716,9 +4751,8 @@ fun hits_tunnel(x, y, z) {
         return 0.0 - z < hull_height(x, y).max(0.0) + margin;
     }
 
-    if (z >= RUN_LEN) return hits_reactor(x, y, z, margin);
-
     if (hits_gate(x, y, z, margin)) return true;
+    if (z >= RUN_LEN) return hits_reactor(x, y, z, margin);
 
     let row = (z / CELL).floor();
     let ids = row_pipes[row];
@@ -4796,9 +4830,11 @@ fun update_flight(dt) {
     if (crash_timer > 0.0) {
         crash_timer = crash_timer - dt;
         if (crash_timer <= 0.0) {
-            // In the chamber that is just inside the way in
-            if (in_reactor) place_fighter(RUN_LEN + 10.0);
-            else place_fighter((cam_z - RESPAWN_BACK).max(START_Z));
+            // In the chamber that is just inside the way in, which is shut
+            if (in_reactor) {
+                place_fighter(RUN_LEN + 60.0);
+                shut_last_gate();
+            } else place_fighter((cam_z - RESPAWN_BACK).max(START_Z));
         }
         return;
     }
@@ -6472,7 +6508,7 @@ loop {
         if (msg.kind == 'CLOSE_WINDOW') {
             quit = true;
         } else if (msg.kind == 'KEY_DOWN') {
-            if (msg.key == 'ESCAPE' || msg.key == 'Q') quit = true;
+            if (msg.key == 'ESCAPE') quit = true;
             if (msg.key == 'R') reset_flight();
             if (msg.key == 'M') music_on = !music_on;
             set_key(msg.key, true);
