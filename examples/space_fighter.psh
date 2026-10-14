@@ -3673,7 +3673,7 @@ let var core_struck = false;
 // The core cracks as it is hit, until after this many hits its
 // containment fails, and then there is this long before it goes
 let CORE_STRENGTH = 1000;
-let CORE_FAIL_TIME = 30.0;
+let CORE_FAIL_TIME = 25.0;
 
 // How long ago the containment failed, or less than nothing if it holds
 let var core_fail = -1.0;
@@ -5235,9 +5235,6 @@ let SPIN_PUFF = 0.5 * PI / 180.0;
 let SPIN_PUFF_TIME = 0.06;
 let SPIN_PUFF_LEVEL = 0.4;
 
-// The run starts with the fighter tumbling by up to so much about each axis
-let SPIN_START = 1.0 * PI / 180.0;
-
 let spin_rng = Xoshiro128(WORLD_SEED + 160);
 let var puff_timer = 0.0;
 
@@ -5318,11 +5315,8 @@ fun place_fighter(z) {
 fun reset_flight() {
     place_fighter(START_Z);
 
-    // Tumbling a little, until steadied
-    for (let var a = 0; a < 3; ++a) {
-        spin[a] = spin_rng.float(0.0 - SPIN_START, SPIN_START);
-        spin_free[a] = true;
-    }
+    // Already held, wandering a little
+    for (let var a = 0; a < 3; ++a) spin[a] = spin_rng.float(0.0 - SPIN_DEADBAND, SPIN_DEADBAND);
 
     time_left = MISSION_TIME;
     engine_heat = 0.0;
@@ -7182,7 +7176,8 @@ fun update_sim(dt) {
     update_enemies(dt);
     update_cannons(dt);
     wall_warn = crash_timer <= 0.0 && wall_ahead();
-    time_left = (time_left - dt).max(0.0);
+    // The mission clock stops once the core's containment has failed
+    if (core_fail < 0.0) time_left = (time_left - dt).max(0.0);
 
     // Once the core has taken enough, its containment starts to fail
     if (core_fail >= 0.0) core_fail = core_fail + dt;
