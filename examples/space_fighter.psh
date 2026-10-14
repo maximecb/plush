@@ -102,8 +102,16 @@ let GUN_MID_DAMP = 1.0;
 let GUN_DECAY = 0.99905;
 let GUN_DRIVE = 3.2;
 
-// How loud the thrusters that spin the fighter are at full
-let THRUSTER_LEVEL = 0.2;
+// How loud the engine is
+let ENGINE_LEVEL = 1.8;
+
+// How loud the thrusters are at full, the cutoff of the filter their hiss
+// goes through in Hz, and how much it is damped. At sqrt(2) it does not
+// ring at all.
+let THRUSTER_LEVEL = 0.34;
+let THRUSTER_CUTOFF = 1500.0;
+let THRUSTER_DAMP = 1.2;
+let th_f = 2.0 * (PI * THRUSTER_CUTOFF / SAMPLE_RATE).sin();
 
 // The wall warning is a tone that slides upwards, then a gap
 let WARN_PERIOD = 0.415;
@@ -173,9 +181,10 @@ let var wr_phase = 0.0;
 let var ex_env = 0.0;
 let var ex_lp = 0.0;
 let var ex_body = 0.0;
-let var th_lp = 0.0;
-let var th_lp2 = 0.0;
-let var th_band = 0.0;
+let var th_lo1 = 0.0;
+let var th_bp1 = 0.0;
+let var th_lo2 = 0.0;
+let var th_bp2 = 0.0;
 let var th_flutter = 0.0;
 
 // --- Music ---
@@ -186,7 +195,7 @@ let var th_flutter = 0.0;
 // chord, which is drawn afresh for every section.
 
 let MUSIC_BPM = 150;
-let MUSIC_LEVEL = 0.42;
+let MUSIC_LEVEL = 0.38;
 
 // Samples in a sixteenth note, which is one step of the sequencer
 let MU_STEP = (SAMPLE_RATE * 60).idiv(MUSIC_BPM * 4);
@@ -505,21 +514,22 @@ fun audio_fill(buf, n) {
         let c = en_phase * tau;
         let whine = (c.sin() * 0.030 + (c * 2.0).sin() * 0.012) * (0.4 + 0.6 * power);
 
-        let var v = (roar * 0.345 + whine) * 0.8 * au_gain;
+        let var v = (roar * 0.345 + whine) * ENGINE_LEVEL * au_gain;
 
-        // Thrusters: a hiss of gas, noise with the very top and the bottom
-        // filtered away. They open almost at once and shut a little more
-        // slowly, and the pressure flutters a touch.
+        // Thrusters: a hiss of gas, noise through two state variable low
+        // pass filters in a row, which cut the highs off steeply. They open
+        // almost at once and shut a little more slowly, and the pressure
+        // flutters a touch.
         let var th_rate = 0.004;
         if (au_thrust_tgt < au_thrust) th_rate = 0.0012;
         au_thrust = au_thrust + (au_thrust_tgt - au_thrust) * th_rate;
         if (au_thrust > 0.002) {
-            th_lp = th_lp + (white - th_lp) * 0.3;
-            th_lp2 = th_lp2 + (th_lp - th_lp2) * 0.3;
-            th_band = th_band + (th_lp2 - th_band) * 0.06;
+            th_lo1 = th_lo1 + th_f * th_bp1;
+            th_bp1 = th_bp1 + th_f * (white - th_lo1 - THRUSTER_DAMP * th_bp1);
+            th_lo2 = th_lo2 + th_f * th_bp2;
+            th_bp2 = th_bp2 + th_f * (th_lo1 - th_lo2 - THRUSTER_DAMP * th_bp2);
             th_flutter = th_flutter + (white - th_flutter) * 0.0015;
-            let hiss = (th_lp2 - th_band) * 2.3;
-            v = v + hiss * au_thrust * (0.85 + 2.0 * th_flutter) * THRUSTER_LEVEL * au_gain;
+            v = v + th_lo2 * au_thrust * (0.85 + 2.0 * th_flutter) * THRUSTER_LEVEL * au_gain;
         }
 
         // Cannons: a report is a burst of noise and nothing else, since
@@ -4643,12 +4653,12 @@ fun report_progress() {
 // for side thrusters that slowly wear away any drift across the nose.
 
 // How fast the fighter is going when the run starts and after a crash
-let START_SPEED = 1400.0 / 3.6;
+let START_SPEED = 50.0 / 3.6;
 
 // How quickly the thrusters change a spin about the pitch and turn axes,
 // and about the roll axis, in radians per second each second
-let SPIN_ACCEL = 0.6;
-let SPIN_ROLL_ACCEL = 0.9;
+let SPIN_ACCEL = 0.45;
+let SPIN_ROLL_ACCEL = 0.45;
 
 // How hard the main engine pushes, normally and with the boost, and how
 // hard the side thrusters work against drift, in meters per second each
@@ -4931,10 +4941,15 @@ fun damp_drift(dt) {
     let drift = (sx * sx + sy * sy + sz * sz).sqrt();
     if (drift <= 0.001) return;
 
-    let keep = (drift - DRIFT_ACCEL * dt).max(0.0) / drift;
+    let step = DRIFT_ACCEL * dt;
+    let change = drift.min(step);
+    let keep = (drift - change) / drift;
     vel_x = fwd_x * along + sx * keep;
     vel_y = fwd_y * along + sy * keep;
     vel_z = fwd_z * along + sz * keep;
+
+    // These are heard with the ones that spin the fighter
+    thrusters = (thrusters + 0.6 * change / step).min(1.0);
 }
 
 // Advance the flight by one time step
@@ -5373,7 +5388,11 @@ fun draw_hud() {
     draw_bar(24, FRAME_HEIGHT - 82, "SHD", shield, shield_color);
 
     let low_y = FRAME_HEIGHT - 46;
-    draw_readout(CX.floor() - 210, low_y, 5, (speed * 3.6).floor().to_s(), "KM/H", HUD_ORANGE);
+
+    // The speed is shown as less than nothing when going backwards
+    let var speed_text = (speed * 3.6).floor().to_s();
+    if (vel_x * fwd_x + vel_y * fwd_y + vel_z * fwd_z < 0.0 && speed * 3.6 >= 1.0) speed_text = "-" + speed_text;
+    draw_readout(CX.floor() - 210, low_y, 6, speed_text, "KM/H", HUD_ORANGE);
     // The target is the core, however far round it the fighter is
     let core_x = rc_x - cam_x;
     let core_z = REACTOR_Z - cam_z;
