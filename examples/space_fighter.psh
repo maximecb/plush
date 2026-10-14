@@ -5217,10 +5217,29 @@ let var vel_x = 0.0;
 let var vel_y = 0.0;
 let var vel_z = 0.0;
 
-// How fast the fighter spins about each of its axes, in radians a second
-let var spin_pitch = 0.0;
-let var spin_yaw = 0.0;
-let var spin_roll = 0.0;
+// How fast the fighter spins about its pitch, turn and roll axes, in
+// radians a second. An axis is left free to spin, as it is at the start,
+// until its key is first pressed, and is held once the computer has
+// brought it to a stop.
+let spin = Array.with_size(3, 0.0);
+let spin_free = Array.with_size(3, false);
+let spin_held = Array.with_size(3, true);
+
+// The thrusters cannot stop a spin dead, nor hold one at nothing. A held
+// spin wanders, so much in a second at random, and once it gets past so
+// much either way the thrusters give it a puff back the other way, of so
+// much, which is heard for so long and at so much of full.
+let SPIN_WANDER = 0.002;
+let SPIN_DEADBAND = 0.3 * PI / 180.0;
+let SPIN_PUFF = 0.5 * PI / 180.0;
+let SPIN_PUFF_TIME = 0.06;
+let SPIN_PUFF_LEVEL = 0.4;
+
+// The run starts with the fighter tumbling by up to so much about each axis
+let SPIN_START = 1.0 * PI / 180.0;
+
+let spin_rng = Xoshiro128(WORLD_SEED + 160);
+let var puff_timer = 0.0;
 
 // How hard the thrusters are working on the spin, from 0 to 1, for the
 // sound of them
@@ -5277,9 +5296,12 @@ fun place_fighter(z) {
     vel_x = 0.0;
     vel_y = 0.0;
     vel_z = speed;
-    spin_pitch = 0.0;
-    spin_yaw = 0.0;
-    spin_roll = 0.0;
+    for (let var a = 0; a < 3; ++a) {
+        spin[a] = 0.0;
+        spin_free[a] = false;
+        spin_held[a] = true;
+    }
+    puff_timer = 0.0;
     thrusters = 0.0;
     engine_on = false;
     boost_on = false;
@@ -5295,6 +5317,13 @@ fun place_fighter(z) {
 // Start the run over
 fun reset_flight() {
     place_fighter(START_Z);
+
+    // Tumbling a little, until steadied
+    for (let var a = 0; a < 3; ++a) {
+        spin[a] = spin_rng.float(0.0 - SPIN_START, SPIN_START);
+        spin_free[a] = true;
+    }
+
     time_left = MISSION_TIME;
     engine_heat = 0.0;
     engine_hot = false;
@@ -5390,19 +5419,41 @@ fun hits_tunnel(x, y, z) {
 
 
 
-// Change a spin about one axis by a step: by the input if its key is
-// held, and otherwise back towards nothing. Returns how hard the
-// thrusters for that axis are working, from 0 to 1.
-let var spin_out = 0.0;
-
-fun fire_spin(spin, input, step) {
+// Change the spin about one axis over a time step, by a step at most: by
+// the input if its key is held, and otherwise back towards nothing, and
+// then held near it. Returns how hard the thrusters for that axis are
+// working, from 0 to 1.
+fun fire_spin(a, input, step, dt) {
+    let s = spin[a];
     if (input != 0.0) {
-        spin_out = spin + input * step;
+        spin[a] = s + input * step;
+        spin_free[a] = false;
+        spin_held[a] = false;
         return 1.0;
     }
-    let change = spin.clip(0.0 - step, step);
-    spin_out = spin - change;
-    return change.abs() / step;
+    if (spin_free[a]) return 0.0;
+
+    if (!spin_held[a]) {
+        let change = s.clip(0.0 - step, step);
+        spin[a] = s - change;
+        if (change.abs() < step) {
+            spin_held[a] = true;
+            spin[a] = spin_rng.float(0.0 - SPIN_DEADBAND, SPIN_DEADBAND);
+        }
+        return change.abs() / step;
+    }
+
+    // Held, the spin wanders until it is puffed back
+    let var held = s + spin_rng.normal(0.0, SPIN_WANDER * dt.sqrt());
+    if (held > SPIN_DEADBAND) {
+        held = held - SPIN_PUFF;
+        puff_timer = SPIN_PUFF_TIME;
+    } else if (held < 0.0 - SPIN_DEADBAND) {
+        held = held + SPIN_PUFF;
+        puff_timer = SPIN_PUFF_TIME;
+    }
+    spin[a] = held;
+    return 0.0;
 }
 
 // Spin the fighter about its axes, with the thrusters
@@ -5410,17 +5461,17 @@ fun update_spin(dt) {
     let step = SPIN_ACCEL * dt;
     let roll_step = SPIN_ROLL_ACCEL * dt;
 
-    let var firing = fire_spin(spin_pitch, in_pitch, step);
-    spin_pitch = spin_out;
-    firing = firing + fire_spin(spin_yaw, in_yaw, step);
-    spin_yaw = spin_out;
-    firing = firing + fire_spin(spin_roll, in_roll, roll_step);
-    spin_roll = spin_out;
+    let var firing = fire_spin(0, in_pitch, step, dt);
+    firing = firing + fire_spin(1, in_yaw, step, dt);
+    firing = firing + fire_spin(2, in_roll, roll_step, dt);
     thrusters = (firing * 0.6).min(1.0);
 
-    cam_pitch(spin_pitch * dt);
-    cam_yaw(spin_yaw * dt);
-    cam_roll(spin_roll * dt);
+    puff_timer = puff_timer - dt;
+    if (puff_timer > 0.0) thrusters = thrusters.max(SPIN_PUFF_LEVEL);
+
+    cam_pitch(spin[0] * dt);
+    cam_yaw(spin[1] * dt);
+    cam_roll(spin[2] * dt);
     cam_normalize();
 }
 
