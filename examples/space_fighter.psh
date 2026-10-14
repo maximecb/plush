@@ -2280,11 +2280,14 @@ fun hull_height(x, y) {
 }
 
 // The stars, as directions from the camera, and how bright each is
-let NUM_STARS = 600;
+let NUM_STARS = 2000;
 let star_x = Array.with_size(NUM_STARS, 0.0);
 let star_y = Array.with_size(NUM_STARS, 0.0);
 let star_z = Array.with_size(NUM_STARS, 0.0);
 let star_color = Array.with_size(NUM_STARS, 0);
+
+// The brightest are a pixel wider each way
+let star_big = Array.with_size(NUM_STARS, false);
 
 fun build_stars() {
     let gen = Xoshiro128(WORLD_SEED + 50);
@@ -2301,13 +2304,14 @@ fun build_stars() {
 
         // Most are faint, and some lean blue or yellow
         let level = gen.float(0.0, 1.0);
-        let b = (60.0 + 195.0 * level * level * level).floor();
+        let b = (110.0 + 145.0 * level * level).floor();
         let tint = gen.int(0, 3);
         let var r = b;
         let var bl = b;
         if (tint == 1) r = (b * 4).idiv(5);
         if (tint == 2) bl = (b * 4).idiv(5);
         star_color[i] = 0xFF000000 | (r << 16) | (b << 8) | bl;
+        star_big[i] = level > 0.93;
     }
 }
 
@@ -3615,6 +3619,22 @@ let STUB_LEN = 400.0;
 let STUB_STEPS = 5;
 let STUB_COLOR = 0xFF3A3D46;
 
+// The way out runs this far from the chamber to open space, drawn in so
+// many lengths, which are alternately lighter and darker so that the
+// speed shows. Its light falls off with distance from the camera. Round
+// its far mouth is the outside of the ship.
+let EXIT_LEN = 2400.0;
+let EXIT_END = REACTOR_END + EXIT_LEN;
+let EXIT_STEPS = 48;
+let EXIT_COLOR = 0xFF4A4E58;
+let EXIT_DARK = 0xFF40434C;
+let EXIT_DIM = 1800.0;
+let HULL_COLOR = 0xFF22242A;
+let HULL_REACH = 30000.0;
+
+// Whether the fighter has made it out of the ship through the way out
+let var escaped = false;
+
 // The facets: the corners of each, how many it has, its middle, the way
 // it faces and how bright its metal is. A facet with a mouth in it is
 // marked with which mouth.
@@ -3932,8 +3952,16 @@ fun set_facet(f) {
     fa_mz = fc_mz[f];
     if (dx * fa_nx + dy * fa_ny + dz * fa_nz >= 0.0) return false;
 
-    // Or is off to one side of the view
+    // From the way out only what lines up with its mouth can be seen
     let rad = fc_rad[f];
+    if (cam_z > REACTOR_END) {
+        let k = (cam_z - REACTOR_END) / (0.0 - dz).max(1.0);
+        let margin = rad * k;
+        if ((cam_x + dx * k - rc_x).abs() > HALF_W + margin) return false;
+        if ((cam_y + dy * k - rc_y).abs() > HALF_H + margin) return false;
+    }
+
+    // Or is off to one side of the view
     let ahead = dx * fwd_x + dy * fwd_y + dz * fwd_z + rad;
     if (ahead < 0.0) return false;
     let reach = ahead * FACET_VIEW + rad * 2.0;
@@ -4208,6 +4236,91 @@ fun draw_stub(z, dir) {
             fill_face(0, 1, 2, 3, color);
         }
     }
+}
+
+// Draw a length of the way out, between two depths, with whichever of its
+// walls face the camera
+fun draw_exit_length(za, zb, color) {
+    let x0 = rc_x - HALF_W;
+    let x1 = rc_x + HALF_W;
+    let y0 = rc_y - HALF_H;
+    let y1 = rc_y + HALF_H;
+    let mid = (za + zb) * 0.5;
+    let light = 1.0 - 0.82 * smoothstep(0.0, EXIT_DIM, (mid - cam_z).abs());
+    let c = color_scale(color, light);
+    fog_k = 256;
+
+    if (cam_x > x0) {
+        view_corner(0, x0, y0, za); view_corner(1, x0, y1, za);
+        view_corner(2, x0, y1, zb); view_corner(3, x0, y0, zb);
+        fill_face(0, 1, 2, 3, c);
+    }
+    if (cam_x < x1) {
+        view_corner(0, x1, y0, za); view_corner(1, x1, y1, za);
+        view_corner(2, x1, y1, zb); view_corner(3, x1, y0, zb);
+        fill_face(0, 1, 2, 3, c);
+    }
+    if (cam_y > y0) {
+        view_corner(0, x0, y0, za); view_corner(1, x1, y0, za);
+        view_corner(2, x1, y0, zb); view_corner(3, x0, y0, zb);
+        fill_face(0, 1, 2, 3, c);
+    }
+    if (cam_y < y1) {
+        view_corner(0, x0, y1, za); view_corner(1, x1, y1, za);
+        view_corner(2, x1, y1, zb); view_corner(3, x0, y1, zb);
+        fill_face(0, 1, 2, 3, c);
+    }
+}
+
+// Draw the lengths of the way out that lie beyond the camera, furthest
+// first, or those between the chamber and the camera, again furthest
+// first
+fun draw_exit(beyond) {
+    let step = EXIT_LEN / EXIT_STEPS;
+    if (beyond) {
+        for (let var s = EXIT_STEPS - 1; s >= 0; --s) {
+            let za = REACTOR_END + s * step;
+            if (za + step <= cam_z) break;
+            let var color = EXIT_COLOR;
+            if (s % 2 == 1) color = EXIT_DARK;
+            draw_exit_length(za.max(cam_z), za + step, color);
+        }
+    } else {
+        for (let var s = 0; s < EXIT_STEPS; ++s) {
+            let za = REACTOR_END + s * step;
+            if (za >= cam_z) break;
+            let var color = EXIT_COLOR;
+            if (s % 2 == 1) color = EXIT_DARK;
+            draw_exit_length(za, (za + step).min(cam_z), color);
+        }
+    }
+}
+
+// Draw the outside of the ship round the far mouth of the way out, which
+// is only seen once out of it
+fun draw_exit_hull() {
+    if (cam_z <= EXIT_END) return;
+    let z = EXIT_END;
+    let x0 = rc_x - HALF_W;
+    let x1 = rc_x + HALF_W;
+    let y0 = rc_y - HALF_H;
+    let y1 = rc_y + HALF_H;
+    let far = HULL_REACH;
+    fog_k = 256;
+
+    view_corner(0, rc_x - far, rc_y - far, z); view_corner(1, rc_x + far, rc_y - far, z);
+    view_corner(2, rc_x + far, y0, z); view_corner(3, rc_x - far, y0, z);
+    fill_face(0, 1, 2, 3, HULL_COLOR);
+    view_corner(0, rc_x - far, y1, z); view_corner(1, rc_x + far, y1, z);
+    view_corner(2, rc_x + far, rc_y + far, z); view_corner(3, rc_x - far, rc_y + far, z);
+    fill_face(0, 1, 2, 3, HULL_COLOR);
+    view_corner(0, rc_x - far, y0, z); view_corner(1, x0, y0, z);
+    view_corner(2, x0, y1, z); view_corner(3, rc_x - far, y1, z);
+    fill_face(0, 1, 2, 3, HULL_COLOR);
+    view_corner(0, x1, y0, z); view_corner(1, rc_x + far, y0, z);
+    view_corner(2, rc_x + far, y1, z); view_corner(3, x1, y1, z);
+    fill_face(0, 1, 2, 3, HULL_COLOR);
+    draw_mouth_frame(EXIT_END, 1.0);
 }
 
 // Draw the pipes that frame a mouth, as round those of a hangar
@@ -4502,21 +4615,31 @@ fun draw_reactor() {
     let dx = rc_x - cam_x;
     let dz = REACTOR_Z - cam_z;
     let seen = 1.0 - smoothstep(CORE_SEEN0, CORE_SEEN1, (dx * dx + dz * dz).sqrt());
-    if (seen <= 0.0) return;
+    if (seen <= 0.0 && !in_reactor) return;
     core_look();
 
-    // The facets come into view with the end of the tunnel
+    // The facets come into view with the end of the tunnel. The way out
+    // beyond the camera goes first, and what of it lies between the
+    // chamber and the camera goes last, as it is nearer than anything in
+    // the chamber.
     if (in_reactor || RUN_LEN - cam_z < FOG_END + SEC_LEN) {
         if (in_reactor) draw_stub(RUN_LEN, -1.0);
-        draw_stub(REACTOR_END, 1.0);
+        draw_exit(true);
         draw_facets();
         if (in_reactor && gate_near == gate_last) draw_gate_lit(gate_last, reactor_fog((RUN_LEN - cam_z).abs()));
         draw_mouth_frame(RUN_LEN, 1.0);
-        draw_mouth_frame(REACTOR_END, -1.0);
+        if (cam_z < REACTOR_END) draw_mouth_frame(REACTOR_END, -1.0);
     }
 
-    draw_core(seen);
-    draw_cracks(seen);
+    if (seen > 0.0) {
+        draw_core(seen);
+        draw_cracks(seen);
+    }
+
+    if (cam_z > REACTOR_END) {
+        draw_exit(false);
+        draw_exit_hull();
+    }
 }
 
 // Whether a place in the chamber, or in the tunnel that leaves it, is too
@@ -4527,6 +4650,7 @@ fun hits_reactor(x, y, z, margin) {
     let dz = z - REACTOR_Z;
     let in_mouth = dx.abs() <= HALF_W - margin && dy.abs() <= HALF_H - margin;
     core_struck = false;
+    if (z > EXIT_END) return false;
     if (z > REACTOR_END) return !in_mouth;
 
     let reach = CORE_R + margin;
@@ -4681,8 +4805,14 @@ fun draw_hull_node(n) {
 }
 
 // Draw the stars that fall on the part of the screen being drawn
+//
+// Where the far end of a tunnel is not drawn, nothing stands in front of
+// the stars there, so those that would show through it are left out. From
+// outside that is the mouth of the tunnel, and from inside the ship it is
+// everything but the far end of the way out.
 fun draw_stars() {
     let fb = frame_buffer;
+    let inside = in_reactor && cam_z < EXIT_END;
 
     for (let var i = 0; i < NUM_STARS; ++i) {
         let dx = star_x[i];
@@ -4691,10 +4821,28 @@ fun draw_stars() {
         let z = dx * fwd_x + dy * fwd_y + dz * fwd_z;
         if (z < 0.05) continue;
 
+        if (inside) {
+            if (dz <= 0.0) continue;
+            let t = (EXIT_END - cam_z) / dz;
+            if ((cam_x + dx * t - rc_x).abs() > HALF_W || (cam_y + dy * t - rc_y).abs() > HALF_H) continue;
+        } else if (cam_z < 0.0 && dz > 0.0) {
+            let t = (0.0 - cam_z) / dz;
+            if ((cam_x + dx * t).abs() < HALF_W && (cam_y + dy * t).abs() < HALF_H) continue;
+        }
+
         let x = (CX + FOCAL * (dx * right_x + dy * right_y + dz * right_z) / z).floor();
         let y = (CY - FOCAL * (dx * up_x + dy * up_y + dz * up_z) / z).floor();
-        if (x < 0 || x >= FRAME_WIDTH || y < render_y0 || y >= render_y1) continue;
-        fb.set_u32(y * FRAME_WIDTH + x, star_color[i]);
+        if (x < 1 || x >= FRAME_WIDTH - 1 || y < render_y0 || y >= render_y1) continue;
+        let at = y * FRAME_WIDTH + x;
+        fb.set_u32(at, star_color[i]);
+
+        if (star_big[i]) {
+            let dim = color_scale(star_color[i], 0.55);
+            fb.set_u32(at - 1, dim);
+            fb.set_u32(at + 1, dim);
+            if (y > render_y0) fb.set_u32(at - FRAME_WIDTH, dim);
+            if (y < render_y1 - 1) fb.set_u32(at + FRAME_WIDTH, dim);
+        }
     }
 }
 
@@ -4713,9 +4861,10 @@ fun render_world() {
     frame_buffer.fill_u32(render_y0 * FRAME_WIDTH, (render_y1 - render_y0) * FRAME_WIDTH, 0xFF000000);
     sort_walls();
 
-    // From outside, the stars are behind everything
+    // From outside, the stars are behind everything. From the chamber on
+    // they show through the far end of the way out.
     let outside = cam_z < 0.0;
-    if (outside) draw_stars();
+    if (outside || in_reactor) draw_stars();
 
     draw_reactor();
 
@@ -5152,6 +5301,7 @@ fun reset_flight() {
     core_hits = 0;
     core_fail = -1.0;
     clear_cracks();
+    escaped = false;
     clear_cannons();
 }
 
@@ -5345,12 +5495,8 @@ fun update_flight(dt) {
 
     if (cam_z >= RUN_LEN) in_reactor = true;
 
-    // The way out of the chamber leads nowhere for now, and taking it
-    // starts the run over
-    if (cam_z > REACTOR_END + STUB_LEN * 0.6) {
-        reset_flight();
-        return;
-    }
+    // Out of the far end of the way out is open space
+    if (cam_z > EXIT_END) escaped = true;
 
     // The way back in is a dead end
     let dead_end = in_reactor && cam_z < RUN_LEN - STUB_LEN * 0.6;
@@ -5802,7 +5948,12 @@ fun draw_hud() {
         draw_text_centered(font_warn, "COLLISION", CX.floor(), CY.floor() + 90, WARN_RED);
     }
 
-    if (core_fail >= 0.0) draw_core_warning();
+    // Out of the ship with the core going, the run is won
+    if (escaped && core_fail >= 0.0) {
+        draw_text_centered(font_title, "YOU HAVE SAVED THE EARTH!", CX.floor(), CY.floor() - 70, HUD_ORANGE);
+    } else if (core_fail >= 0.0) {
+        draw_core_warning();
+    }
 }
 
 fun draw_crash() {
@@ -7005,7 +7156,7 @@ fun send_audio() {
     // A crash and a hit on the shield each set off an explosion. Enemies
     // blow up in silence, there being no air to carry the sound.
     let booms = crash_count + hits_taken;
-    let alarm = core_fail >= 0.0 && core_fail < CORE_FAIL_TIME;
+    let alarm = core_fail >= 0.0 && core_fail < CORE_FAIL_TIME && !escaped;
     $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, alarm, booms, gain, music_on, false));
 }
 
