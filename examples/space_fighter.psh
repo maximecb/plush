@@ -4624,6 +4624,7 @@ let CONTROL_LAG = 7.0;
 
 // The engines never throttle down below the lowest of these speeds
 let MIN_SPEED = 1000.0 / 3.6;
+let REACTOR_MIN_SPEED = MIN_SPEED * 0.5;
 let MAX_SPEED = 1800.0 / 3.6;
 let BOOST_SPEED = 3000.0 / 3.6;
 let START_THROTTLE = 0.5;
@@ -4853,15 +4854,22 @@ fun update_flight(dt) {
     cam_pitch(ctl_pitch * turn);
     cam_yaw(ctl_yaw * turn);
 
-    // The wings are set level with the tunnel floor and then banked again,
-    // so that the bank is only ever what the roll controls made it
-    roll = roll + ctl_roll * ROLL_RATE * dt;
-    if (roll > PI) roll = roll - 2.0 * PI;
-    else if (roll < 0.0 - PI) roll = roll + 2.0 * PI;
-    fwd_y = fwd_y.clip(0.0 - MAX_PITCH, MAX_PITCH);
-    up_x = 0.0; up_y = 1.0; up_z = 0.0;
-    cam_normalize();
-    cam_roll(roll);
+    // In the reactor there is no up or down, and the fighter turns freely
+    // about its own axes, right over the top if need be
+    if (in_reactor) {
+        cam_roll(ctl_roll * ROLL_RATE * dt);
+        cam_normalize();
+    } else {
+        // The wings are set level with the tunnel floor and then banked
+        // again, so that the bank is only ever what the roll controls made it
+        roll = roll + ctl_roll * ROLL_RATE * dt;
+        if (roll > PI) roll = roll - 2.0 * PI;
+        else if (roll < 0.0 - PI) roll = roll + 2.0 * PI;
+        fwd_y = fwd_y.clip(0.0 - MAX_PITCH, MAX_PITCH);
+        up_x = 0.0; up_y = 1.0; up_z = 0.0;
+        cam_normalize();
+        cam_roll(roll);
+    }
 
     throttle = (throttle + in_throttle * 0.6 * dt).clip(0.0, 1.0);
 
@@ -4878,7 +4886,9 @@ fun update_flight(dt) {
         boost_charge = (boost_charge + dt / BOOST_RECHARGE).min(1.0);
     }
 
-    let var target = lerp(MIN_SPEED, MAX_SPEED, throttle);
+    let var slowest = MIN_SPEED;
+    if (in_reactor) slowest = REACTOR_MIN_SPEED;
+    let var target = lerp(slowest, MAX_SPEED, throttle);
     if (boost_on) target = BOOST_SPEED;
     let step = ACCEL * dt;
     speed = speed + (target - speed).clip(0.0 - step, step);
