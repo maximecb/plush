@@ -117,9 +117,20 @@ let th_f = 2.0 * (PI * THRUSTER_CUTOFF / SAMPLE_RATE).sin();
 let WARN_PERIOD = 0.415;
 let WARN_TONE = 0.315;
 
+// The alarm for the core is a run of short beeps, driven into distortion:
+// how far apart they start, how long each lasts, its pitch and how loud
+let ALARM_PERIOD = 0.22;
+let ALARM_TONE = 0.14;
+let ALARM_HZ = 1050.0;
+let ALARM_DRIVE = 4.0;
+let ALARM_LEVEL = 0.3;
+
 // What the main loop tells the audio actor
 class AudioState {
-    init(self, power, thrusters, gun, warn, crashes, gain, music, stop) {
+    init(self, power, thrusters, gun, warn, alarm, crashes, gain, music, stop) {
+        // Whether the alarm for the core's containment failing is sounding
+        self.alarm = alarm;
+
         // Whether the music is playing
         self.music = music;
 
@@ -152,6 +163,7 @@ let var au_gain_tgt = 0.0;
 let var au_thrust_tgt = 0.0;
 let var au_gun = 0.0;
 let var au_warn = false;
+let var au_alarm = false;
 let var au_crashes = 0;
 
 // Smoothed values, so that nothing steps from one buffer to the next
@@ -178,6 +190,10 @@ let var gn_hp = 0.0;
 let var wr_level = 0.0;
 let var wr_time = 0.0;
 let var wr_phase = 0.0;
+let var al_level = 0.0;
+let var al_time = 0.0;
+let var al_phase = 0.0;
+let var al_lp = 0.0;
 let var ex_env = 0.0;
 let var ex_lp = 0.0;
 let var ex_body = 0.0;
@@ -195,7 +211,7 @@ let var th_flutter = 0.0;
 // chord, which is drawn afresh for every section.
 
 let MUSIC_BPM = 150;
-let MUSIC_LEVEL = 0.38;
+let MUSIC_LEVEL = 0.35;
 
 // Samples in a sixteenth note, which is one step of the sequencer
 let MU_STEP = (SAMPLE_RATE * 60).idiv(MUSIC_BPM * 4);
@@ -598,6 +614,34 @@ fun audio_fill(buf, n) {
             wr_phase = 0.0;
         }
 
+        // Core alarm. Each beep jumps up a little in pitch as it starts,
+        // which is the "m" of it, and is a square wave with some of its
+        // fundamental, overdriven and then taken off the top a little.
+        let var alarm_tgt = 0.0;
+        if (au_alarm) alarm_tgt = 1.0;
+        al_level = al_level + (alarm_tgt - al_level) * 0.002;
+        if (al_level > 0.001) {
+            al_time = al_time + step;
+            if (al_time >= ALARM_PERIOD) al_time = al_time - ALARM_PERIOD;
+
+            let var beep = 0.0;
+            if (al_time < ALARM_TONE) {
+                let rise = (al_time * 40.0).min(1.0);
+                al_phase = al_phase + ALARM_HZ * (0.82 + 0.18 * rise) * step;
+                if (al_phase >= 1.0) al_phase = al_phase - 1.0;
+                let env = (al_time * 400.0).min((ALARM_TONE - al_time) * 200.0).min(1.0);
+                let var sq = 1.0;
+                if (al_phase >= 0.5) sq = -1.0;
+                beep = (sq * 0.6 + (al_phase * tau).sin() * 0.4) * env * ALARM_DRIVE;
+                beep = beep / (1.0 + beep.abs());
+            }
+            al_lp = al_lp + (beep - al_lp) * 0.35;
+            v = v + al_lp * al_level * ALARM_LEVEL;
+        } else {
+            al_time = 0.0;
+            al_phase = 0.0;
+        }
+
         // Explosion: a burst of noise that dulls as it dies away
         if (ex_env > 0.0005) {
             ex_env = ex_env * 0.99996;
@@ -625,6 +669,7 @@ fun audio_set(state) {
     au_gain_tgt = state.gain;
     au_gun = state.gun;
     au_warn = state.warn;
+    au_alarm = state.alarm;
     mu_on = state.music;
 
     if (state.crashes != au_crashes) {
@@ -3605,6 +3650,95 @@ let var in_reactor = false;
 let var core_hits = 0;
 let var core_struck = false;
 
+// The core cracks as it is hit, until after this many hits its
+// containment fails, and then there is this long before it goes
+let CORE_STRENGTH = 1000;
+let CORE_FAIL_TIME = 45.0;
+
+// How long ago the containment failed, or less than nothing if it holds
+let var core_fail = -1.0;
+
+// The core cracks like glass. A crack opens where a round strikes every
+// so many hits, and more open by themselves every so often once the
+// containment is failing, up to a most. Each runs out both ways from where
+// it opened almost at once, and from points along it smaller cracks branch
+// off a moment later, and from those smaller ones still.
+let CRACK_MOST = 24;
+let CRACK_EVERY = 60;
+let CRACK_FAIL_EVERY = 2.0;
+
+// How far each of the first two runs and how wide it is, how fast cracks
+// run, in meters a second, and how long each step of one is
+let CRACK_LEN = 320.0;
+let CRACK_WIDTH = 3.0;
+let CRACK_SPEED = 20_000_000.0;
+let CRACK_STEP = 25.0;
+
+// How many times over cracks branch, the most branches off one, how much
+// shorter and narrower each is than the one it comes off, and how long
+// after the crack reaches the point it branches from it sets off
+let CRACK_DEPTH = 3;
+let CRACK_BRANCHES = 3;
+let CRACK_SHRINK = 0.55;
+let CRACK_THIN = 0.65;
+let CRACK_DELAY_MIN = 0.5;
+let CRACK_DELAY_MAX = 2.0;
+
+let CRACK_COLOR = 0xFF08080A;
+
+// Once the containment fails the core turns red, over so many seconds:
+// its color in the middle and at its edges, and the tint its light gives
+// the facets
+let CORE_FAIL_FADE = 0.5;
+let CORE_RED_R = 255.0;
+let CORE_RED_G = 40.0;
+let CORE_RED_B = 30.0;
+let CORE_RED_EDGE_R = 175.0;
+let CORE_RED_EDGE_G = 10.0;
+let CORE_RED_EDGE_B = 8.0;
+let FACET_RED_R = 250.0;
+let FACET_RED_G = 120.0;
+let FACET_RED_B = 110.0;
+
+// The core's colors and the facets' tint as they are this frame
+let var cw_r = 255.0;
+let var cw_g = 255.0;
+let var cw_b = 255.0;
+let var ce_r = 156.0;
+let var ce_g = 212.0;
+let var ce_b = 255.0;
+let var tint_r = 222.0;
+let var tint_g = 232.0;
+let var tint_b = 250.0;
+let var mirror_white = 0xFFFFFFFF;
+let var mirror_edge = 0xFF9CD4FF;
+let var mirror_glow = 0xFF9CD4FF;
+
+// The shape of the cracks in each of the ways the core can crack, laid out
+// ahead of time. Each way is a run of branches, and each branch a run of
+// points relative to where the crack opened, round the core and up it.
+// For each branch: its first point and how many it has, when it sets off
+// after the crack opens and how long it takes to run its length, and how
+// wide it is.
+let cp_angle = [];
+let cp_y = [];
+let cb_first = [];
+let cb_count = [];
+let cb_start = [];
+let cb_time = [];
+let cb_width = [];
+
+// For each way: its first branch and how many it has
+let ct_first = [];
+let ct_count = [];
+
+// Where each crack opened, round the core and up it, and when
+let var ck_angle = [];
+let var ck_y = [];
+let var ck_born = [];
+let var ck_last = 0.0;
+let crack_rng = Xoshiro128(WORLD_SEED + 141);
+
 // A corner of the facets, given how far up and round it is
 let var rp_x = 0.0;
 let var rp_y = 0.0;
@@ -3834,9 +3968,9 @@ fun facet_corner(j, x, y, z) {
 
     let fog = reactor_fog(dist);
     let level = fa_tone * (METAL_DARK + METAL_WALL * wall * wall + METAL_AIR * air * air) * fog;
-    tR[j] = FACET_R * level;
-    tG[j] = FACET_G * level;
-    tB[j] = FACET_B * level;
+    tR[j] = tint_r * level;
+    tG[j] = tint_g * level;
+    tB[j] = tint_b * level;
 }
 
 // The outline of the core's reflection in a facet, and what is left of it
@@ -3858,7 +3992,7 @@ let MIRROR_WHITE = 0.55;
 
 // The glow round the reflection: how wide and how bright
 let MIRROR_GLOW = 1.15;
-let MIRROR_GLOW_COLOR = color_scale(CORE_EDGE, 0.7);
+let MIRROR_GLOW_DIM = 0.7;
 
 // Cut the first n points in ca to the facet being drawn, one edge at a
 // time. Returns how many points are left, which end up in ca again.
@@ -3977,9 +4111,9 @@ fun draw_mirror(f) {
     let dx = cx - cam_x; let dy = cy - cam_y; let dz = cz - cam_z;
     let fog = reactor_fog((dx * dx + dy * dy + dz * dz).sqrt());
     fog_k = (fog * MIRROR_KEEP * 256.0).floor().min(256);
-    draw_mirror_strip(f, MIRROR_GLOW, MIRROR_GLOW_COLOR);
-    draw_mirror_strip(f, 1.0, CORE_EDGE);
-    draw_mirror_strip(f, MIRROR_WHITE, CORE_WHITE);
+    draw_mirror_strip(f, MIRROR_GLOW, mirror_glow);
+    draw_mirror_strip(f, 1.0, mirror_edge);
+    draw_mirror_strip(f, MIRROR_WHITE, mirror_white);
 }
 
 // Draw a piece of a facet that lies across the run, given two corners
@@ -4118,9 +4252,9 @@ fun draw_core(seen) {
 
         // Most of the width is pure white, and only the edges go blue
         let white = (toward / CORE_WHITE_AT).min(1.0);
-        let er = lerp(((CORE_EDGE >> 16) & 0xFF).to_f(), 255.0, white);
-        let eg = lerp(((CORE_EDGE >> 8) & 0xFF).to_f(), 255.0, white);
-        let eb = lerp((CORE_EDGE & 0xFF).to_f(), 255.0, white);
+        let er = lerp(ce_r, cw_r, white);
+        let eg = lerp(ce_g, cw_g, white);
+        let eb = lerp(ce_b, cw_b, white);
 
         // The bottom of this side, then each ring up from there
         view_corner(0, xa, rc_y - REACTOR_R, za);
@@ -4142,6 +4276,181 @@ fun draw_core(seen) {
     }
 }
 
+// Lay out a branch of a crack, given where it sets off from relative to
+// where the crack opened, which way it heads, how long it is, when it sets
+// off, how wide it is and how many times over it has branched. It turns a
+// little at every step and now and then kinks, and a random number of
+// shorter branches set off from points along it.
+fun lay_branch(gen, a0, y0, heading, length, start, width, depth) {
+    let steps = (length / CRACK_STEP).ceil().max(2);
+    let step = length / steps;
+    let first = cp_angle.len;
+    let headings = [];
+
+    let var a = a0;
+    let var y = y0;
+    let var dir = heading;
+    cp_angle.push(a);
+    cp_y.push(y);
+    for (let var s = 0; s < steps; ++s) {
+        headings.push(dir);
+        a = a + dir.sin() * step / CORE_R;
+        y = y + dir.cos() * step;
+        cp_angle.push(a);
+        cp_y.push(y);
+        dir = dir + gen.normal(0.0, 0.18);
+        if (gen.float(0.0, 1.0) < 0.15) dir = dir + gen.float(-0.7, 0.7);
+    }
+
+    let time = length / CRACK_SPEED;
+    cb_first.push(first);
+    cb_count.push(steps + 1);
+    cb_start.push(start);
+    cb_time.push(time);
+    cb_width.push(width);
+    if (depth >= CRACK_DEPTH) return;
+
+    let branches = gen.int(0, CRACK_BRANCHES + 1);
+    for (let var i = 0; i < branches; ++i) {
+        let k = gen.int(1, steps + 1);
+        let var side = 1.0;
+        if (gen.float(0.0, 1.0) < 0.5) side = -1.0;
+        let off = start + time * k / steps + gen.float(CRACK_DELAY_MIN, CRACK_DELAY_MAX);
+        let turn = headings[k - 1] + side * gen.float(0.4, 1.2);
+        let len = length * CRACK_SHRINK * gen.float(0.7, 1.3);
+        lay_branch(gen, cp_angle[first + k], cp_y[first + k], turn, len, off, width * CRACK_THIN, depth + 1);
+    }
+}
+
+// Lay out each of the ways the core can crack. Each runs out both ways
+// from where it opens, at an angle to the core's axis.
+fun lay_cracks() {
+    let gen = Xoshiro128(WORLD_SEED + 140);
+    for (let var c = 0; c < CRACK_MOST; ++c) {
+        let first = cb_first.len;
+        let heading = gen.float(-0.9, 0.9);
+        for (let var arm = 0; arm < 2; ++arm) {
+            lay_branch(gen, 0.0, 0.0, heading + arm * PI, CRACK_LEN * gen.float(0.8, 1.2), 0.0, CRACK_WIDTH, 0);
+        }
+        ct_first.push(first);
+        ct_count.push(cb_first.len - first);
+    }
+}
+
+// Open a crack at a place on the core, given how far round it and how far
+// up, if there is room for another
+fun add_crack(angle, y) {
+    if (ck_angle.len >= CRACK_MOST) return;
+    ck_angle.push(angle);
+    ck_y.push(y);
+    ck_born.push(anim_time);
+    ck_last = anim_time;
+}
+
+// Open a crack where a round struck the core, if it is time for another
+fun open_crack(x, y, z) {
+    if ((core_hits - 1) % CRACK_EVERY != 0) return;
+    add_crack(atan2(x - rc_x, REACTOR_Z - z), y);
+}
+
+// Once the containment is failing, cracks open by themselves now and then,
+// somewhere on the side of the core the fighter can see
+fun more_cracks() {
+    if (core_fail < 0.0 || anim_time - ck_last < CRACK_FAIL_EVERY) return;
+    let facing = atan2(cam_x - rc_x, REACTOR_Z - cam_z);
+    let y = (cam_y + crack_rng.float(-400.0, 400.0)).clip(rc_y - REACTOR_R * 0.8, rc_y + REACTOR_R * 0.8);
+    add_crack(facing + crack_rng.float(-1.0, 1.0), y);
+}
+
+// Close every crack again
+fun clear_cracks() {
+    ck_angle = [];
+    ck_y = [];
+    ck_born = [];
+    ck_last = 0.0;
+}
+
+// Draw a strip of a crack between two places on the core, given as how far
+// round it and how far up, as wide as given. It stands just off the
+// surface, and is only drawn on the side facing the camera.
+fun draw_crack_strip(a0, y0, a1, y1, width, color) {
+    let mid = (a0 + a1) * 0.5;
+    let nx = mid.sin();
+    let nz = 0.0 - mid.cos();
+    if ((cam_x - rc_x - CORE_R * nx) * nx + (cam_z - REACTOR_Z - CORE_R * nz) * nz <= 0.0) return;
+
+    // Across the strip, along the surface
+    let ux = (a1 - a0) * CORE_R;
+    let uy = y1 - y0;
+    let len = (ux * ux + uy * uy).sqrt().max(0.001);
+    let half = width * 0.5;
+    let da = 0.0 - uy / len * half / CORE_R;
+    let dy = ux / len * half;
+
+    let r = CORE_R + 1.5;
+    view_corner(0, rc_x + r * (a0 - da).sin(), y0 - dy, REACTOR_Z - r * (a0 - da).cos());
+    view_corner(1, rc_x + r * (a1 - da).sin(), y1 - dy, REACTOR_Z - r * (a1 - da).cos());
+    view_corner(2, rc_x + r * (a1 + da).sin(), y1 + dy, REACTOR_Z - r * (a1 + da).cos());
+    view_corner(3, rc_x + r * (a0 + da).sin(), y0 + dy, REACTOR_Z - r * (a0 + da).cos());
+    fill_face(0, 1, 2, 3, color);
+}
+
+// Draw the cracks in the core, given how much of its light gets to the
+// camera. Each branch has run as far as the time since it set off allows,
+// and narrows towards its end.
+fun draw_cracks(seen) {
+    fog_k = (seen * 256.0).floor();
+
+    for (let var c = 0; c < ck_angle.len; ++c) {
+        let age = anim_time - ck_born[c];
+        let base_a = ck_angle[c];
+        let base_y = ck_y[c];
+
+        let end_b = ct_first[c] + ct_count[c];
+        for (let var b = ct_first[c]; b < end_b; ++b) {
+            if (age <= cb_start[b]) continue;
+            let segs = cb_count[b] - 1;
+            let reach = ((age - cb_start[b]) / cb_time[b]).min(1.0) * segs;
+            let first = cb_first[b];
+            let width = cb_width[b];
+
+            for (let var s = 0; s < reach; ++s) {
+                let p = first + s;
+                let part = (reach - s).min(1.0);
+                let a0 = base_a + cp_angle[p];
+                let y0 = base_y + cp_y[p];
+                let a1 = a0 + (cp_angle[p + 1] - cp_angle[p]) * part;
+                let y1 = y0 + (cp_y[p + 1] - cp_y[p]) * part;
+                if ((y0 - rc_y).abs() > REACTOR_R || (y1 - rc_y).abs() > REACTOR_R) continue;
+
+                let w = width * (1.0 - 0.6 * (s + part) / segs);
+                draw_crack_strip(a0, y0, a1, y1, w, CRACK_COLOR);
+            }
+        }
+    }
+}
+
+// Work out the core's colors and the tint its light gives the facets this
+// frame, which turn from white to red once the containment fails
+fun core_look() {
+    let var red = 0.0;
+    if (core_fail >= 0.0) red = smoothstep(0.0, CORE_FAIL_FADE, core_fail);
+
+    cw_r = lerp(255.0, CORE_RED_R, red);
+    cw_g = lerp(255.0, CORE_RED_G, red);
+    cw_b = lerp(255.0, CORE_RED_B, red);
+    ce_r = lerp(((CORE_EDGE >> 16) & 0xFF).to_f(), CORE_RED_EDGE_R, red);
+    ce_g = lerp(((CORE_EDGE >> 8) & 0xFF).to_f(), CORE_RED_EDGE_G, red);
+    ce_b = lerp((CORE_EDGE & 0xFF).to_f(), CORE_RED_EDGE_B, red);
+    tint_r = lerp(FACET_R, FACET_RED_R, red);
+    tint_g = lerp(FACET_G, FACET_RED_G, red);
+    tint_b = lerp(FACET_B, FACET_RED_B, red);
+
+    mirror_white = 0xFF000000 | (cw_r.floor() << 16) | (cw_g.floor() << 8) | cw_b.floor();
+    mirror_edge = 0xFF000000 | (ce_r.floor() << 16) | (ce_g.floor() << 8) | ce_b.floor();
+    mirror_glow = color_scale(mirror_edge, MIRROR_GLOW_DIM);
+}
+
 // Draw the reactor, which is further off than any of the tunnel when seen
 // from the tunnel. The tunnels beyond its mouths go first, then the
 // facets, which hide all of them but what shows through a mouth, then the
@@ -4151,6 +4460,7 @@ fun draw_reactor() {
     let dz = REACTOR_Z - cam_z;
     let seen = 1.0 - smoothstep(CORE_SEEN0, CORE_SEEN1, (dx * dx + dz * dz).sqrt());
     if (seen <= 0.0) return;
+    core_look();
 
     // The facets come into view with the end of the tunnel
     if (in_reactor || RUN_LEN - cam_z < FOG_END + SEC_LEN) {
@@ -4163,6 +4473,7 @@ fun draw_reactor() {
     }
 
     draw_core(seen);
+    draw_cracks(seen);
 }
 
 // Whether a place in the chamber, or in the tunnel that leaves it, is too
@@ -4420,6 +4731,11 @@ class BandRequest {
         self.gate_near = gate_near;
         self.gate_closed = gate_closed;
         self.in_reactor = in_reactor;
+        self.core_hits = core_hits;
+        self.core_fail = core_fail;
+        self.ck_angle = ck_angle;
+        self.ck_y = ck_y;
+        self.ck_born = ck_born;
     }
 }
 
@@ -4469,6 +4785,11 @@ fun worker_loop() {
         gate_near = msg.gate_near;
         gate_closed = msg.gate_closed;
         in_reactor = msg.in_reactor;
+        core_hits = msg.core_hits;
+        core_fail = msg.core_fail;
+        ck_angle = msg.ck_angle;
+        ck_y = msg.ck_y;
+        ck_born = msg.ck_born;
 
         render_world();
         let num_bytes = (render_y1 - render_y0) * FRAME_WIDTH * 4;
@@ -4785,6 +5106,8 @@ fun reset_flight() {
     engine_heat = 0.0;
     engine_hot = false;
     core_hits = 0;
+    core_fail = -1.0;
+    clear_cracks();
     clear_cannons();
 }
 
@@ -5324,11 +5647,29 @@ fun tint_frame(r, g, b, amount) {
 
 // The time left as minutes, seconds and hundredths of a second, boxed and
 // captioned like the other readouts but in red, at the bottom right
-fun draw_timer(y) {
-    let hundredths = (time_left * 100.0).floor();
-    let text = hundredths.idiv(6000).to_s().lpad(2, "0") + ":"
+// A time in seconds as minutes, seconds and hundredths
+fun clock_text(seconds) {
+    let hundredths = (seconds * 100.0).floor();
+    return hundredths.idiv(6000).to_s().lpad(2, "0") + ":"
         + (hundredths.idiv(100) % 60).to_s().lpad(2, "0") + "."
         + (hundredths % 100).to_s().lpad(2, "0");
+}
+
+// The warning that the core's containment is failing, which flashes in
+// time with the alarm, with the time left before it goes in a box under it
+fun draw_core_warning() {
+    let y = FRAME_HEIGHT - 132;
+    if (core_fail % ALARM_PERIOD < ALARM_TONE) {
+        draw_text_centered(font_warn, "CORE CONTAINMENT FAILING", CX.floor(), y, WARN_RED);
+    }
+
+    let text = clock_text((CORE_FAIL_TIME - core_fail).max(0.0));
+    let w = text.len * font_large.char_w + 12;
+    draw_readout(CX.floor() - w.idiv(2), y + font_warn.char_h.idiv(2) + 18, text.len, text, "", WARN_RED);
+}
+
+fun draw_timer(y) {
+    let text = clock_text(time_left);
     let caption = "COUNTDOWN";
 
     let w = text.len * font_large.char_w + 12;
@@ -5416,6 +5757,8 @@ fun draw_hud() {
     if ((anim_time * 6.0).floor() % 2 == 0 && wall_warn) {
         draw_text_centered(font_warn, "COLLISION", CX.floor(), CY.floor() + 90, WARN_RED);
     }
+
+    if (core_fail >= 0.0) draw_core_warning();
 }
 
 fun draw_crash() {
@@ -5674,7 +6017,10 @@ fun update_cannons(dt) {
         if (hits_tunnel(x, y, z)) {
             // A round that struck inside the tunnel flashes on its wall
             if (z >= RUN_LEN) {
-                if (core_struck) core_hits = core_hits + 1;
+                if (core_struck) {
+                    core_hits = core_hits + 1;
+                    open_crack(x, y, z);
+                }
                 add_impact(x, y, z);
             } else if (z < 0.0) add_impact(x, y, z);
             else add_impact(x.clip(shape_cx - shape_w, shape_cx + shape_w), y.clip(shape_cy - shape_h, shape_cy + shape_h), z.min(RUN_LEN));
@@ -6439,6 +6785,11 @@ fun update_sim(dt) {
     update_cannons(dt);
     wall_warn = crash_timer <= 0.0 && wall_ahead();
     time_left = (time_left - dt).max(0.0);
+
+    // Once the core has taken enough, its containment starts to fail
+    if (core_fail >= 0.0) core_fail = core_fail + dt;
+    else if (core_hits >= CORE_STRENGTH) core_fail = 0.0;
+    more_cracks();
 }
 
 // Tell the audio actor what it should be playing
@@ -6457,7 +6808,8 @@ fun send_audio() {
 
     // A crash, a kill and a hit on the shield each set off an explosion
     let booms = crash_count + kills + hits_taken;
-    $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, booms, gain, music_on, false));
+    let alarm = core_fail >= 0.0 && core_fail < CORE_FAIL_TIME;
+    $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, alarm, booms, gain, music_on, false));
 }
 
 // Jolt the view, less and less as a hit wears off
@@ -6553,6 +6905,7 @@ lay_pipes();
 lay_sides();
 lay_gates();
 build_reactor();
+lay_cracks();
 build_sides();
 build_ends();
 build_hull();
@@ -6675,5 +7028,5 @@ stop_generator();
 stop_workers();
 
 // Shut the audio actor down
-$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, crash_count, 0.0, false, true));
+$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, false, crash_count, 0.0, false, true));
 $actor_join(audio_id);
