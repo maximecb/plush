@@ -123,7 +123,7 @@ let ALARM_PERIOD = 0.22;
 let ALARM_TONE = 0.14;
 let ALARM_HZ = 1050.0;
 let ALARM_DRIVE = 4.0;
-let ALARM_LEVEL = 0.3;
+let ALARM_LEVEL = 0.24;
 
 // What the main loop tells the audio actor
 class AudioState {
@@ -3681,24 +3681,30 @@ let CRACK_DEPTH = 3;
 let CRACK_BRANCHES = 3;
 let CRACK_SHRINK = 0.55;
 let CRACK_THIN = 0.65;
-let CRACK_DELAY_MIN = 0.5;
-let CRACK_DELAY_MAX = 2.0;
+let CRACK_DELAY_MIN = 0.05;
+let CRACK_DELAY_MAX = 0.2;
 
 let CRACK_COLOR = 0xFF08080A;
 
-// Once the containment fails the core turns red, over so many seconds:
-// its color in the middle and at its edges, and the tint its light gives
-// the facets
-let CORE_FAIL_FADE = 0.5;
+// Once the containment fails the core stays white, but pulses red, more
+// and more often: how many pulses a second at first and by the time it
+// goes, how much of the way through its turn each may come late, and how
+// many seconds a pulse takes to die away to about a third. Then its color
+// in the middle and at its edges when red, and the tint its light gives
+// the facets.
+let CORE_PULSE_START = 1.5;
+let CORE_PULSE_END = 10.0;
+let CORE_PULSE_JITTER = 0.5;
+let CORE_PULSE_DECAY = 0.6;
 let CORE_RED_R = 255.0;
-let CORE_RED_G = 40.0;
-let CORE_RED_B = 30.0;
+let CORE_RED_G = 0.0;
+let CORE_RED_B = 0.0;
 let CORE_RED_EDGE_R = 175.0;
 let CORE_RED_EDGE_G = 10.0;
 let CORE_RED_EDGE_B = 8.0;
 let FACET_RED_R = 250.0;
-let FACET_RED_G = 120.0;
-let FACET_RED_B = 110.0;
+let FACET_RED_G = 100.0;
+let FACET_RED_B = 100.0;
 
 // The core's colors and the facets' tint as they are this frame
 let var cw_r = 255.0;
@@ -4430,11 +4436,48 @@ fun draw_cracks(seen) {
     }
 }
 
+// A random number from 0 to 1 for a whole number and a channel, the same
+// wherever it is worked out
+fun hash01(n, channel) {
+    let var h = (n * 374761393 + channel * 668265263) & 0x7FFFFFFF;
+    h = ((h ^ (h >> 13)) * 1274126177) & 0x7FFFFFFF;
+    h = h ^ (h >> 16);
+    return (h & 0xFFFFFF) / 16777216.0;
+}
+
+// Noise from 0 to 1 that wanders smoothly but at random as a number goes
+// up, which is the same in every actor given the same number
+fun time_noise(x, channel) {
+    let i = x.floor();
+    let f = x - i;
+    return lerp(hash01(i, channel), hash01(i + 1, channel), f * f * (3.0 - 2.0 * f));
+}
+
 // Work out the core's colors and the tint its light gives the facets this
-// frame, which turn from white to red once the containment fails
+// frame, which turn from white to red once the containment fails. From
+// then on its light wobbles, unevenly and by more and more, and the light
+// in the room with it.
 fun core_look() {
     let var red = 0.0;
-    if (core_fail >= 0.0) red = smoothstep(0.0, CORE_FAIL_FADE, core_fail);
+    if (core_fail >= 0.0) {
+        // The pulses come faster and faster, so they are counted at a rate
+        // that climbs as the time runs out. Each comes a random part of
+        // the way into its turn, snaps to red, and dies away.
+        let c = core_fail.min(CORE_FAIL_TIME);
+        let climb = (CORE_PULSE_END - CORE_PULSE_START) / CORE_FAIL_TIME;
+        let rate = CORE_PULSE_START + climb * c;
+        let x = CORE_PULSE_START * c + climb * c * c * 0.5;
+        let var n = x.floor();
+        let var at = n + CORE_PULSE_JITTER * hash01(n, 2);
+        if (at > x) {
+            n = n - 1;
+            at = n + CORE_PULSE_JITTER * hash01(n, 2);
+        }
+        if (n >= 0) {
+            let age = (x - at) / rate;
+            red = (0.0 - age / CORE_PULSE_DECAY).exp();
+        }
+    }
 
     cw_r = lerp(255.0, CORE_RED_R, red);
     cw_g = lerp(255.0, CORE_RED_G, red);
@@ -5066,7 +5109,8 @@ let var kills = 0;
 let var hits_taken = 0;
 let var aim_locked = false;
 
-let var music_on = true;
+// The music starts off in the short run
+let var music_on = !TEST_MODE;
 
 // Put the fighter in the middle of the tunnel at a depth, flying level
 fun place_fighter(z) {
@@ -6262,7 +6306,15 @@ let var shake_phase = 0.0;
 
 // Fireballs where fighters have blown up
 let MAX_BLASTS = 8;
-let BLAST_LIFE = 0.7;
+let BLAST_LIFE = 0.55;
+let BLAST_BURST = 0.05;
+let BLAST_SIZE = 260.0;
+
+// How bright the light of a blast is when it covers what is behind it by
+// about two thirds
+let BLAST_SOFT = 160.0;
+let BLAST_BLUE = 0xFF8CC4FF;
+let BLAST_LIGHT = 0xFFE4F2FF;
 let bl_x = Array.with_size(MAX_BLASTS, 0.0);
 let bl_y = Array.with_size(MAX_BLASTS, 0.0);
 let bl_z = Array.with_size(MAX_BLASTS, 0.0);
@@ -6700,14 +6752,158 @@ fun draw_blasts() {
         view_point(bl_x[i], bl_y[i], bl_z[i]);
         if (pt_z < 3.0) continue;
 
+        // A white flash at the start, then a ball of blue light that
+        // bursts out all but at once, swells a little more and fades, with
+        // a white heart. It is seen through more of the fog than the
+        // tunnel is.
         let scale = FOCAL / pt_z;
         let t = age / BLAST_LIFE;
-        let fade = (1.0 - t) * (1.0 - t) * fog_at(pt_z);
-        let radius = ((7.0 + 55.0 * t) * scale).clip(3.0, 150.0);
+        let fog = fog_at(pt_z).sqrt();
+        let fade = (1.0 - t).pow(1.2) * fog;
+        let burst = (age / BLAST_BURST).min(1.0);
+        let size = BLAST_SIZE * (0.15 + 0.85 * burst * (2.0 - burst)) * (1.0 + 0.3 * t);
+        let radius = (size * scale).clip(6.0, 420.0);
         let x = CX + pt_x * scale;
         let y = CY - pt_y * scale;
-        glow_disc(x, y, radius, color_scale(0xFFFF7A20, fade));
-        glow_disc(x, y, radius * 0.45, color_scale(0xFFFFE8A0, fade));
+
+        // The flash is the white heart spread wide for a moment
+        let flash = (1.0 - t / 0.25).max(0.0);
+        let white_r = lerp(radius * 0.5, (radius * 1.6).min(480.0), flash);
+        let white_k = fade.max(flash * fog);
+        glow_blast(x, y, radius, fade, white_r, white_k);
+    }
+}
+
+// A blast is blended over the frame as a color with an alpha, both of
+// which depend only on how far a pixel is from its middle. They are laid
+// out in a table for each blast, by the squared distance as a share of the
+// blast's reach, so that a pixel costs a lookup and one packed blend. Each
+// entry holds the color already multiplied by its alpha, with its three
+// channels sixteen bits apart, and what is left of the alpha for the pixel
+// under it.
+let GLOW_STEPS = 512;
+let glow_src = Array.with_size(GLOW_STEPS + 1, 0);
+let glow_keep = Array.with_size(GLOW_STEPS + 1, 255);
+
+// How far out a layer of light still adds at least one step to a channel,
+// given how far it reaches and how much it adds at its middle
+fun glow_reach(radius, peak) {
+    if (peak <= 1.0) return 0.0;
+    return radius * (1.0 - (1.0 / peak).sqrt()).sqrt();
+}
+
+// Blend the blast whose table is laid out over a run of pixels, given the
+// first, how many there are, how far across the first is from the middle,
+// the row's squared distance from it, and the step through the table for
+// each unit of squared distance, in 16.16 fixed point. The squared distance
+// steps from one pixel to the next by adding odd numbers.
+fun glow_run(i0, count, dx0, dy2, scale) {
+    let fb = frame_buffer;
+    let src = glow_src;
+    let keep = glow_keep;
+    let end_i = i0 + count;
+    let var d2 = dx0 * dx0 + dy2;
+    let var step = 2 * dx0 + 1;
+    let var i = i0;
+    while (i < end_i) {
+        let k = (d2 * scale) >> 16;
+        let d = fb.get_u32(i);
+        let acc = src[k] + ((d & 0xFF00FF) | ((d & 0xFF00) << 24)) * keep[k];
+        fb.set_u32(i, 0xFF000000 | ((acc >> 8) & 0xFF00FF) | ((acc >> 32) & 0xFF00));
+        d2 = d2 + step;
+        step = step + 2;
+        i = i + 1;
+    }
+}
+
+// Blend in a blast: a pale blue glow out to one radius and a white one out
+// to another, each with a brightness. What the two would add over black is
+// turned into a color and an alpha. Where the alpha is whole, the pixels
+// are simply filled.
+fun glow_blast(cx, cy, r1, k1, r2, k2) {
+    let rr1 = r1.max(1.0);
+    let rr2 = r2.max(1.0);
+    let br = ((BLAST_BLUE >> 16) & 0xFF) * k1;
+    let bg = ((BLAST_BLUE >> 8) & 0xFF) * k1;
+    let bb = (BLAST_BLUE & 0xFF) * k1;
+    let w = 255.0 * k2;
+
+    // Nothing is drawn where it would add too little to show
+    let outer = glow_reach(rr1, bb).max(glow_reach(rr2, w)).min(FRAME_WIDTH.to_f());
+    if (outer < 1.0) return;
+    let outer2 = outer * outer;
+    let inv1 = outer2 / (rr1 * rr1);
+    let inv2 = outer2 / (rr2 * rr2);
+
+    let var solid = 0;
+    for (let var j = 0; j <= GLOW_STEPS; ++j) {
+        let s = j.to_f() / GLOW_STEPS;
+        let var r = 0.0;
+        let var g = 0.0;
+        let var b = 0.0;
+        let f1 = 1.0 - s * inv1;
+        if (f1 > 0.0) {
+            r = br * f1 * f1; g = bg * f1 * f1; b = bb * f1 * f1;
+        }
+        let f2 = 1.0 - s * inv2;
+        if (f2 > 0.0) {
+            let v = w * f2 * f2;
+            r = r + v; g = g + v; b = b + v;
+        }
+
+        // The alpha follows how bright it is overall, rolled off softly
+        // rather than cut at full, so the glow eases into white instead of
+        // ending in a hard edge. The color is the light's hue at full.
+        let lum = (r + g + b) / 3.0;
+        let alpha = (255.0 * (1.0 - (0.0 - lum / BLAST_SOFT).exp())).floor();
+        let top = r.max(g).max(b);
+        if (alpha < 1 || top <= 0.0 || j == GLOW_STEPS) {
+            glow_src[j] = 0;
+            glow_keep[j] = 255;
+            continue;
+        }
+        // Where it is brightest it burns white
+        let k = 255.0 / top;
+        let white = smoothstep(BLAST_SOFT, BLAST_SOFT * 3.0, lum);
+        let cr = lerp(r * k, 255.0, white).floor();
+        let cg = lerp(g * k, 255.0, white).floor();
+        let cb = lerp(b * k, 255.0, white).floor();
+        glow_src[j] = ((cr << 16) | cb | (cg << 32)) * alpha;
+        glow_keep[j] = 255 - alpha;
+        if (alpha == 255 && solid == j) solid = j + 1;
+    }
+
+    // Where every pixel turns the same solid color
+    let solid2 = solid.to_f() / GLOW_STEPS * outer2;
+    let solid_color = 0xFF000000 | ((glow_src[0] >> 8) & 0xFF00FF) | ((glow_src[0] >> 32) & 0xFF00);
+    let scale = (GLOW_STEPS * 65536.0 / outer2).floor();
+
+    let fb = frame_buffer;
+    let cxi = cx.floor();
+    let cyi = cy.floor();
+    let oi = outer.floor();
+    let y0 = (cyi - oi).max(0);
+    let y1 = (cyi + oi).min(FRAME_HEIGHT - 1);
+    for (let var y = y0; y <= y1; ++y) {
+        let dy = y - cyi;
+        let dy2 = dy * dy;
+        let half = (outer2 - dy2).max(0.0).sqrt().floor();
+        let x0 = (cxi - half).max(0);
+        let x1 = (cxi + half).min(FRAME_WIDTH - 1);
+        if (x0 > x1) continue;
+        let row = y * FRAME_WIDTH;
+
+        if (dy2 >= solid2) {
+            glow_run(row + x0, x1 - x0 + 1, x0 - cxi, dy2, scale);
+            continue;
+        }
+
+        let inner = (solid2 - dy2).sqrt().floor();
+        let xa = (cxi - inner).max(x0);
+        let xb = (cxi + inner).min(x1);
+        if (xa > x0) glow_run(row + x0, xa - x0, x0 - cxi, dy2, scale);
+        if (xb >= xa) fb.fill_u32(row + xa, xb - xa + 1, solid_color);
+        if (xb < x1) glow_run(row + xb + 1, x1 - xb, xb + 1 - cxi, dy2, scale);
     }
 }
 
@@ -6806,8 +7002,9 @@ fun send_audio() {
     let var gain = 1.0;
     if (crashed) gain = 0.0;
 
-    // A crash, a kill and a hit on the shield each set off an explosion
-    let booms = crash_count + kills + hits_taken;
+    // A crash and a hit on the shield each set off an explosion. Enemies
+    // blow up in silence, there being no air to carry the sound.
+    let booms = crash_count + hits_taken;
     let alarm = core_fail >= 0.0 && core_fail < CORE_FAIL_TIME;
     $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, alarm, booms, gain, music_on, false));
 }
