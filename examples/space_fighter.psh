@@ -18,11 +18,11 @@
 //
 // The world is drawn by eight render workers unless told otherwise.
 //
-//   up / down     pitch the nose up / down
-//   left / right  turn left / right
-//   A / D         roll left / right
-//   W / S        throttle up / down
-//   shift         boost, while the charge lasts
+//   up / down     spin the nose up / down
+//   left / right  spin left / right
+//   A / D         spin into a roll left / right
+//   W / S         accelerate forwards / backwards
+//   shift         forward acceleration boost, heats the engine up quickly
 //   space         fire the cannons
 //   M             music on / off
 //   R             start over
@@ -66,7 +66,6 @@ let BENCH_MODE = arg_or(0, "") == "--bench";
 
 // A short run with one of everything on the way to the reactor
 let TEST_MODE = test_flag;
-
 // One number for the whole run and another for the short one
 fun by_mode(full, test) {
     if (TEST_MODE) return test;
@@ -103,18 +102,24 @@ let GUN_MID_DAMP = 1.0;
 let GUN_DECAY = 0.99905;
 let GUN_DRIVE = 3.2;
 
+// How loud the thrusters that spin the fighter are at full
+let THRUSTER_LEVEL = 0.2;
+
 // The wall warning is a tone that slides upwards, then a gap
 let WARN_PERIOD = 0.415;
 let WARN_TONE = 0.315;
 
 // What the main loop tells the audio actor
 class AudioState {
-    init(self, power, gun, warn, crashes, gain, music, stop) {
+    init(self, power, thrusters, gun, warn, crashes, gain, music, stop) {
         // Whether the music is playing
         self.music = music;
 
         // Engine power, from idle at 0 to 1, and beyond with the boost
         self.power = power;
+
+        // How hard the thrusters that spin the fighter are firing, from 0 to 1
+        self.thrusters = thrusters;
 
         // How fast the cannons are firing, from 0 to 1
         self.gun = gun;
@@ -136,6 +141,7 @@ class AudioState {
 // What was last asked for
 let var au_power_tgt = 0.0;
 let var au_gain_tgt = 0.0;
+let var au_thrust_tgt = 0.0;
 let var au_gun = 0.0;
 let var au_warn = false;
 let var au_crashes = 0;
@@ -143,6 +149,7 @@ let var au_crashes = 0;
 // Smoothed values, so that nothing steps from one buffer to the next
 let var au_power = 0.0;
 let var au_gain = 0.0;
+let var au_thrust = 0.0;
 
 let var au_seed = 12345;
 let var en_lp1 = 0.0;
@@ -166,6 +173,10 @@ let var wr_phase = 0.0;
 let var ex_env = 0.0;
 let var ex_lp = 0.0;
 let var ex_body = 0.0;
+let var th_lp = 0.0;
+let var th_lp2 = 0.0;
+let var th_band = 0.0;
+let var th_flutter = 0.0;
 
 // --- Music ---
 //
@@ -457,7 +468,7 @@ fun audio_fill(buf, n) {
     let var warn_tgt = 0.0;
     if (au_warn) warn_tgt = 1.0;
 
-    // The boost builds more slowly than the throttle
+    // The boost builds more slowly than the engine
     let var spool = 0.00004;
     if (au_power_tgt > 1.0) spool = spool / 3.0;
 
@@ -495,6 +506,21 @@ fun audio_fill(buf, n) {
         let whine = (c.sin() * 0.030 + (c * 2.0).sin() * 0.012) * (0.4 + 0.6 * power);
 
         let var v = (roar * 0.345 + whine) * 0.8 * au_gain;
+
+        // Thrusters: a hiss of gas, noise with the very top and the bottom
+        // filtered away. They open almost at once and shut a little more
+        // slowly, and the pressure flutters a touch.
+        let var th_rate = 0.004;
+        if (au_thrust_tgt < au_thrust) th_rate = 0.0012;
+        au_thrust = au_thrust + (au_thrust_tgt - au_thrust) * th_rate;
+        if (au_thrust > 0.002) {
+            th_lp = th_lp + (white - th_lp) * 0.3;
+            th_lp2 = th_lp2 + (th_lp - th_lp2) * 0.3;
+            th_band = th_band + (th_lp2 - th_band) * 0.06;
+            th_flutter = th_flutter + (white - th_flutter) * 0.0015;
+            let hiss = (th_lp2 - th_band) * 2.3;
+            v = v + hiss * au_thrust * (0.85 + 2.0 * th_flutter) * THRUSTER_LEVEL * au_gain;
+        }
 
         // Cannons: a report is a burst of noise and nothing else, since
         // anything with a pitch makes it sound hollow. The burst starts at
@@ -585,6 +611,7 @@ fun audio_fill(buf, n) {
 // Take in the latest state from the main loop
 fun audio_set(state) {
     au_power_tgt = state.power;
+    au_thrust_tgt = state.thrusters;
     au_gain_tgt = state.gain;
     au_gun = state.gun;
     au_warn = state.warn;
@@ -4608,31 +4635,35 @@ fun report_progress() {
 
 // --- Flight model ---
 
-let GRAVITY = 9.81;
+//
+// The fighter flies like a spacecraft. Cold gas thrusters spin it up about
+// its axes, and the computer fires them the other way to stop a spin once
+// its key is let go. The main engine pushes along the nose, forwards or in
+// reverse, and the fighter keeps going whichever way it was going, but
+// for side thrusters that slowly wear away any drift across the nose.
 
-// The hardest the fighter can turn, in g. At these speeds that is a
-// circle far wider than the tunnel, so there is no turning back.
-let TURN_G = 12.0;
+// How fast the fighter is going when the run starts and after a crash
+let START_SPEED = 1400.0 / 3.6;
 
-// The nose stops short of straight up or down, where turning left and
-// right would lose its meaning
-let MAX_PITCH = 0.9;
-let ROLL_RATE = 1.47;
+// How quickly the thrusters change a spin about the pitch and turn axes,
+// and about the roll axis, in radians per second each second
+let SPIN_ACCEL = 0.6;
+let SPIN_ROLL_ACCEL = 0.9;
 
-// How quickly the controls follow the inputs
-let CONTROL_LAG = 7.0;
+// How hard the main engine pushes, normally and with the boost, and how
+// hard the side thrusters work against drift, in meters per second each
+// second
+let THRUST = 40.0;
+let BOOST_THRUST = 120.0;
+let DRIFT_ACCEL = 30.0;
 
-// The engines never throttle down below the lowest of these speeds
-let MIN_SPEED = 1000.0 / 3.6;
-let REACTOR_MIN_SPEED = MIN_SPEED * 0.5;
-let MAX_SPEED = 1800.0 / 3.6;
-let BOOST_SPEED = 3000.0 / 3.6;
-let START_THROTTLE = 0.5;
-let ACCEL = 70.0;
-
-let BOOST_TIME = 6.0;
-let BOOST_RECHARGE = 18.0;
-let BOOST_RESTART = 0.25;
+// How much the engine heats up each second it is pushing, normally and
+// with the boost, and how much it cools each second it rests. Once it
+// overheats it gives nothing until it has cooled to ENGINE_RESTART.
+let ENGINE_HEAT = 0.08;
+let ENGINE_BOOST_HEAT = 0.17;
+let ENGINE_COOL = 0.07;
+let ENGINE_RESTART = 0.4;
 
 // How near the hull may come to a surface, and how long the wreck sits
 // there before the flight resumes
@@ -4641,27 +4672,15 @@ let CRASH_TIME = 2.0;
 let RESPAWN_BACK = 300.0;
 
 // The run starts this far outside the ship, facing the mouth of the tunnel.
-// It is as far back as it can be with no way of turning aside: even with
-// the engines throttled right back to tighten the turn, the fighter gets
-// about three quarters of the way round to flying along the side of the
-// ship before it hits. From 900 meters it can get clear.
 let START_Z = -850.0;
 
 // Control inputs, each from -1 to 1
 let var in_pitch = 0.0;
 let var in_yaw = 0.0;
 let var in_roll = 0.0;
-let var in_throttle = 0.0;
+let var in_thrust = 0.0;
 let var in_boost = false;
 let var in_fire = false;
-
-// Where the controls are, which trails the inputs
-let var ctl_pitch = 0.0;
-let var ctl_yaw = 0.0;
-let var ctl_roll = 0.0;
-
-// How far the fighter is banked to the right, in radians
-let var roll = 0.0;
 
 // Barrel temperature of the cannons from 0 to 1, whether they have
 // overheated, and whether rounds are leaving them
@@ -4669,11 +4688,27 @@ let var gun_heat = 0.0;
 let var gun_hot = false;
 let var gun_firing = false;
 
+// Which way and how fast the fighter is going
 let var speed = 0.0;
-let var throttle = 0.0;
-let var boost_charge = 1.0;
+let var vel_x = 0.0;
+let var vel_y = 0.0;
+let var vel_z = 0.0;
+
+// How fast the fighter spins about each of its axes, in radians a second
+let var spin_pitch = 0.0;
+let var spin_yaw = 0.0;
+let var spin_roll = 0.0;
+
+// How hard the thrusters are working on the spin, from 0 to 1, for the
+// sound of them
+let var thrusters = 0.0;
+
+// Temperature of the engine from 0 to 1, whether it has overheated, and
+// whether it is pushing, and with the boost
+let var engine_heat = 0.0;
+let var engine_hot = false;
+let var engine_on = false;
 let var boost_on = false;
-let var boost_spent = false;
 
 // Counts down after a crash, until the flight resumes
 let var crash_timer = 0.0;
@@ -4714,12 +4749,15 @@ fun place_fighter(z) {
     up_x = 0.0; up_y = 1.0; up_z = 0.0;
     fwd_x = 0.0; fwd_y = 0.0; fwd_z = 1.0;
 
-    ctl_pitch = 0.0;
-    ctl_yaw = 0.0;
-    ctl_roll = 0.0;
-    roll = 0.0;
-    throttle = START_THROTTLE;
-    speed = lerp(MIN_SPEED, MAX_SPEED, throttle);
+    speed = START_SPEED;
+    vel_x = 0.0;
+    vel_y = 0.0;
+    vel_z = speed;
+    spin_pitch = 0.0;
+    spin_yaw = 0.0;
+    spin_roll = 0.0;
+    thrusters = 0.0;
+    engine_on = false;
     boost_on = false;
     crash_timer = 0.0;
 
@@ -4734,8 +4772,8 @@ fun place_fighter(z) {
 fun reset_flight() {
     place_fighter(START_Z);
     time_left = MISSION_TIME;
-    boost_charge = 1.0;
-    boost_spent = false;
+    engine_heat = 0.0;
+    engine_hot = false;
     core_hits = 0;
     clear_cannons();
 }
@@ -4825,6 +4863,80 @@ fun hits_tunnel(x, y, z) {
 
 
 
+// Change a spin about one axis by a step: by the input if its key is
+// held, and otherwise back towards nothing. Returns how hard the
+// thrusters for that axis are working, from 0 to 1.
+let var spin_out = 0.0;
+
+fun fire_spin(spin, input, step) {
+    if (input != 0.0) {
+        spin_out = spin + input * step;
+        return 1.0;
+    }
+    let change = spin.clip(0.0 - step, step);
+    spin_out = spin - change;
+    return change.abs() / step;
+}
+
+// Spin the fighter about its axes, with the thrusters
+fun update_spin(dt) {
+    let step = SPIN_ACCEL * dt;
+    let roll_step = SPIN_ROLL_ACCEL * dt;
+
+    let var firing = fire_spin(spin_pitch, in_pitch, step);
+    spin_pitch = spin_out;
+    firing = firing + fire_spin(spin_yaw, in_yaw, step);
+    spin_yaw = spin_out;
+    firing = firing + fire_spin(spin_roll, in_roll, roll_step);
+    spin_roll = spin_out;
+    thrusters = (firing * 0.6).min(1.0);
+
+    cam_pitch(spin_pitch * dt);
+    cam_yaw(spin_yaw * dt);
+    cam_roll(spin_roll * dt);
+    cam_normalize();
+}
+
+// Heat or cool the engine, and work out how hard it pushes along the nose
+fun update_engine(dt) {
+    if (engine_hot && engine_heat <= ENGINE_RESTART) engine_hot = false;
+    engine_on = in_thrust != 0.0 && !engine_hot;
+    boost_on = in_boost && in_thrust >= 0.0 && !engine_hot;
+
+    let var push = 0.0;
+    if (boost_on) {
+        push = BOOST_THRUST;
+        engine_heat = engine_heat + ENGINE_BOOST_HEAT * dt;
+    } else if (engine_on) {
+        push = in_thrust * THRUST;
+        engine_heat = engine_heat + ENGINE_HEAT * dt;
+    } else {
+        engine_heat = engine_heat - ENGINE_COOL * dt;
+    }
+    engine_heat = engine_heat.clip(0.0, 1.0);
+    if (engine_heat >= 1.0) engine_hot = true;
+
+    vel_x = vel_x + fwd_x * push * dt;
+    vel_y = vel_y + fwd_y * push * dt;
+    vel_z = vel_z + fwd_z * push * dt;
+}
+
+// Wear away any drift across the way the nose points, with the side
+// thrusters
+fun damp_drift(dt) {
+    let along = vel_x * fwd_x + vel_y * fwd_y + vel_z * fwd_z;
+    let sx = vel_x - fwd_x * along;
+    let sy = vel_y - fwd_y * along;
+    let sz = vel_z - fwd_z * along;
+    let drift = (sx * sx + sy * sy + sz * sz).sqrt();
+    if (drift <= 0.001) return;
+
+    let keep = (drift - DRIFT_ACCEL * dt).max(0.0) / drift;
+    vel_x = fwd_x * along + sx * keep;
+    vel_y = fwd_y * along + sy * keep;
+    vel_z = fwd_z * along + sz * keep;
+}
+
 // Advance the flight by one time step
 fun update_flight(dt) {
     // Sit in the wreckage for a moment, then pick up a little way back
@@ -4840,62 +4952,14 @@ fun update_flight(dt) {
         return;
     }
 
-    // Ease the controls towards the inputs
-    let ease = (CONTROL_LAG * dt).min(1.0);
-    ctl_pitch = ctl_pitch + (in_pitch - ctl_pitch) * ease;
-    ctl_yaw = ctl_yaw + (in_yaw - ctl_yaw) * ease;
-    ctl_roll = ctl_roll + (in_roll - ctl_roll) * ease;
+    update_spin(dt);
+    update_engine(dt);
+    damp_drift(dt);
+    speed = (vel_x * vel_x + vel_y * vel_y + vel_z * vel_z).sqrt();
 
-    // The faster the fighter, the wider it turns at the same g. Pitching
-    // and turning at once share that g between them.
-    let var turn = TURN_G * GRAVITY / speed * dt;
-    let pull = (ctl_pitch * ctl_pitch + ctl_yaw * ctl_yaw).sqrt();
-    if (pull > 1.0) turn = turn / pull;
-    cam_pitch(ctl_pitch * turn);
-    cam_yaw(ctl_yaw * turn);
-
-    // In the reactor there is no up or down, and the fighter turns freely
-    // about its own axes, right over the top if need be
-    if (in_reactor) {
-        cam_roll(ctl_roll * ROLL_RATE * dt);
-        cam_normalize();
-    } else {
-        // The wings are set level with the tunnel floor and then banked
-        // again, so that the bank is only ever what the roll controls made it
-        roll = roll + ctl_roll * ROLL_RATE * dt;
-        if (roll > PI) roll = roll - 2.0 * PI;
-        else if (roll < 0.0 - PI) roll = roll + 2.0 * PI;
-        fwd_y = fwd_y.clip(0.0 - MAX_PITCH, MAX_PITCH);
-        up_x = 0.0; up_y = 1.0; up_z = 0.0;
-        cam_normalize();
-        cam_roll(roll);
-    }
-
-    throttle = (throttle + in_throttle * 0.6 * dt).clip(0.0, 1.0);
-
-    // Boost burns its charge while held and recovers when released
-    if (boost_spent && boost_charge >= BOOST_RESTART) boost_spent = false;
-    boost_on = in_boost && !boost_spent && boost_charge > 0.0;
-    if (boost_on) {
-        boost_charge = boost_charge - dt / BOOST_TIME;
-        if (boost_charge <= 0.0) {
-            boost_charge = 0.0;
-            boost_spent = true;
-        }
-    } else {
-        boost_charge = (boost_charge + dt / BOOST_RECHARGE).min(1.0);
-    }
-
-    let var slowest = MIN_SPEED;
-    if (in_reactor) slowest = REACTOR_MIN_SPEED;
-    let var target = lerp(slowest, MAX_SPEED, throttle);
-    if (boost_on) target = BOOST_SPEED;
-    let step = ACCEL * dt;
-    speed = speed + (target - speed).clip(0.0 - step, step);
-
-    cam_x = cam_x + fwd_x * speed * dt;
-    cam_y = cam_y + fwd_y * speed * dt;
-    cam_z = cam_z + fwd_z * speed * dt;
+    cam_x = cam_x + vel_x * dt;
+    cam_y = cam_y + vel_y * dt;
+    cam_z = cam_z + vel_z * dt;
 
     if (cam_z >= RUN_LEN) in_reactor = true;
 
@@ -5206,12 +5270,23 @@ fun heat_color(heat) {
     return 0xFFFF0000 | (g << 8) | 0x1E;
 }
 
+// Color for the engine's temperature from 0 to 1, going from green
+// through yellow to red
+fun engine_color(heat) {
+    let t = heat.clip(0.0, 1.0);
+    let var r = 255.0;
+    let var g = 210.0;
+    if (t < 0.5) r = lerp(60.0, 255.0, t * 2.0);
+    else g = lerp(210.0, 42.0, t * 2.0 - 1.0);
+    return 0xFF000000 | (r.floor() << 16) | (g.floor() << 8) | 0x1E;
+}
+
 // Would the fighter hit something within a second or so on its present
 // course?
 fun wall_ahead() {
     for (let var k = 1; k <= 3; ++k) {
-        let d = speed * k * 0.35;
-        if (hits_tunnel(cam_x + fwd_x * d, cam_y + fwd_y * d, cam_z + fwd_z * d)) return true;
+        let t = k * 0.35;
+        if (hits_tunnel(cam_x + vel_x * t, cam_y + vel_y * t, cam_z + vel_z * t)) return true;
     }
     return false;
 }
@@ -5250,11 +5325,29 @@ fun draw_timer(y) {
 let HINT_TIME = 12.0;
 
 // Draw the head-up display over the finished frame
+// A marker where the fighter is actually headed, which is not always
+// where the nose points
+fun draw_heading_marker() {
+    let ahead = vel_x * fwd_x + vel_y * fwd_y + vel_z * fwd_z;
+    if (ahead < speed * 0.2 || speed < 1.0) return;
+    let x = CX + FOCAL * (vel_x * right_x + vel_y * right_y + vel_z * right_z) / ahead;
+    let y = CY - FOCAL * (vel_x * up_x + vel_y * up_y + vel_z * up_z) / ahead;
+    let r = 8.0;
+    hud_line(x - r, y, x, y - r);
+    hud_line(x, y - r, x + r, y);
+    hud_line(x + r, y, x, y + r);
+    hud_line(x, y + r, x - r, y);
+    hud_line(x - r - 6.0, y, x - r, y);
+    hud_line(x + r, y, x + r + 6.0, y);
+    hud_line(x, y - r - 6.0, x, y - r);
+}
+
 fun draw_hud() {
     draw_ladder();
     draw_heading();
     draw_targets();
     hud_text(font_small, "KILLS " + kills.to_s(), 24, 20);
+    draw_heading_marker();
 
     // The boresight turns red, and thicker, when rounds fired now would hit
     if (aim_locked) {
@@ -5290,14 +5383,13 @@ fun draw_hud() {
 
     draw_bar(24, FRAME_HEIGHT - 64, "GUN", gun_heat, heat_color(gun_heat));
     if (gun_hot) draw_text(font_small, "OVERHEAT", 164, FRAME_HEIGHT - 66, WARN_RED);
-    draw_bar(24, FRAME_HEIGHT - 46, "THR", throttle, HUD_ORANGE);
-    draw_bar(24, FRAME_HEIGHT - 28, "BST", boost_charge, HUD_ORANGE);
-    if (boost_on) hud_text(font_small, "BOOST", 164, FRAME_HEIGHT - 30);
-    else if (boost_spent) hud_text(font_small, "CHARGING", 164, FRAME_HEIGHT - 30);
+    draw_bar(24, FRAME_HEIGHT - 46, "ENG", engine_heat, engine_color(engine_heat));
+    if (engine_hot) draw_text(font_small, "OVERHEAT", 164, FRAME_HEIGHT - 48, WARN_RED);
+    else if (boost_on) hud_text(font_small, "BOOST", 164, FRAME_HEIGHT - 48);
 
     if (anim_time < HINT_TIME) {
         hud_text_centered(font_small,
-            "ARROWS STEER   A/D ROLL   W/S THROTTLE   SHIFT BOOST   SPACE FIRE   R RESTART",
+            "ARROWS PITCH/TURN   A/D ROLL   W/S THRUST   SHIFT BOOST   SPACE FIRE   R RESTART",
             CX.floor(), CY.floor() + 180);
     }
 
@@ -5507,9 +5599,9 @@ fun fire_round(lead) {
     let dz = fwd_z + right_z * side + up_z * rise;
 
     // The round keeps the speed the fighter gave it
-    let vx = dx * MUZZLE_SPEED + fwd_x * speed;
-    let vy = dy * MUZZLE_SPEED + fwd_y * speed;
-    let vz = dz * MUZZLE_SPEED + fwd_z * speed;
+    let vx = dx * MUZZLE_SPEED + vel_x;
+    let vy = dy * MUZZLE_SPEED + vel_y;
+    let vz = dz * MUZZLE_SPEED + vel_z;
 
     let i = rd_next;
     rd_next = (rd_next + 1) % MAX_ROUNDS;
@@ -5964,9 +6056,9 @@ fun fire_bolt(i) {
     let dist = (dx * dx + dy * dy + dz * dz).sqrt();
     let t = dist / (BOLT_SPEED + speed);
 
-    let var ax = dx + fwd_x * speed * t + rng.normal(0.0, FIRE_SCATTER) * dist;
-    let var ay = dy + fwd_y * speed * t + rng.normal(0.0, FIRE_SCATTER) * dist;
-    let var az = dz + fwd_z * speed * t;
+    let var ax = dx + vel_x * t + rng.normal(0.0, FIRE_SCATTER) * dist;
+    let var ay = dy + vel_y * t + rng.normal(0.0, FIRE_SCATTER) * dist;
+    let var az = dz + vel_z * t;
     let len = (ax * ax + ay * ay + az * az).sqrt().max(1.0);
 
     let b = bo_next;
@@ -6075,9 +6167,9 @@ fun update_enemies(dt) {
 
         // The player moves this step as well, so the bolt's path is taken
         // as the player sees it
-        let px = fwd_x * speed * dt;
-        let py = fwd_y * speed * dt;
-        let pz = fwd_z * speed * dt;
+        let px = vel_x * dt;
+        let py = vel_y * dt;
+        let pz = vel_z * dt;
         if (line_distance(cam_x, cam_y, cam_z, x0 + px, y0 + py, z0 + pz, x, y, z) < BOLT_HIT) {
             bo_age[b] = -1.0;
             take_hit(BOLT_DAMAGE);
@@ -6334,8 +6426,9 @@ fun update_sim(dt) {
 fun send_audio() {
     let crashed = crash_timer > 0.0;
 
-    let var power = 0.15 + 0.85 * throttle;
+    let var power = 0.15;
     if (boost_on) power = 1.6;
+    else if (engine_on) power = 1.0;
 
     let var gun = 0.0;
     if (gun_firing) gun = gun_spin;
@@ -6345,7 +6438,7 @@ fun send_audio() {
 
     // A crash, a kill and a hit on the shield each set off an explosion
     let booms = crash_count + kills + hits_taken;
-    $actor_send(audio_id, AudioState(power, gun, wall_warn, booms, gain, music_on, false));
+    $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, booms, gain, music_on, false));
 }
 
 // Jolt the view, less and less as a hit wears off
@@ -6410,6 +6503,9 @@ fun run_bench(num_frames, shot_dir) {
         look_along(70.0 / 800.0 * (z / 800.0).cos(), 40.0 / 530.0 * (z / 530.0 + 1.0).cos(), 1.0);
         cam_roll(0.6 * (z / 1100.0).sin());
         speed = 350.0;
+        vel_x = fwd_x * speed;
+        vel_y = fwd_y * speed;
+        vel_z = fwd_z * speed;
         anim_time = t;
         in_fire = frame % 60 >= 20 && frame % 60 < 50;
         update_enemies(dt);
@@ -6460,7 +6556,7 @@ if (BENCH_MODE) {
 }
 
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Space Fighter", 0);
-$println("up/down: nose up/down, left/right: turn, A/D: roll, W/S: throttle, shift: boost, space: fire, M: music");
+$println("up/down: pitch, left/right: turn, A/D: roll, W/S: thrust, shift: boost, space: fire, M: music");
 
 let var key_pitch_up = false;
 let var key_pitch_down = false;
@@ -6532,7 +6628,7 @@ loop {
     in_pitch = key_axis(key_pitch_down, key_pitch_up);
     in_yaw = key_axis(key_yaw_left, key_yaw_right);
     in_roll = key_axis(key_roll_left, key_roll_right);
-    in_throttle = key_axis(key_slower, key_faster);
+    in_thrust = key_axis(key_slower, key_faster);
     anim_time = (now_ms - start_ms).to_f() * 0.001;
     update_sim(dt);
     send_audio();
@@ -6560,5 +6656,5 @@ stop_generator();
 stop_workers();
 
 // Shut the audio actor down
-$actor_send(audio_id, AudioState(0.0, 0.0, false, crash_count, 0.0, false, true));
+$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, crash_count, 0.0, false, true));
 $actor_join(audio_id);
