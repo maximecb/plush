@@ -6424,17 +6424,29 @@ let WAVE_MAX = 6.0;
 let ENEMY_REACH_X = HALF_W - 34.0;
 let ENEMY_REACH_Y = HALF_H - 28.0;
 
-// How close a round has to pass to hit a fighter, how many hits one takes,
-// and how close one has to come to ram the player
 // Fighters light themselves, so they show from further off than the walls
 let ENEMY_FOG_START = 700.0;
 let ENEMY_FOG_END = 2400.0;
 let ENEMY_HALO = 0xFF7050FF;
 
-// How far apart in height and in depth the fighters of a wave are scattered
-let WAVE_SPREAD_Y = 20.0;
-let WAVE_SPREAD_Z = 320.0;
+// How far the fighters of a wave are scattered across and in height, and
+// the least and most they are scattered in depth, which differs from one
+// wave to the next
+let WAVE_SPREAD_X = 50.0;
+let WAVE_SPREAD_Y = 50.0;
+let WAVE_SPREAD_Z_MIN = 50.0;
+let WAVE_SPREAD_Z_MAX = 300.0;
 
+// How many fighters a wave has at the start of the run and at its end,
+// give or take one, how the number grows in between, slowly at first and
+// faster towards the end, and the most there can be
+let WAVE_FIRST = 1.0;
+let WAVE_LAST = 6.0;
+let WAVE_GROWTH = 1.6;
+let WAVE_MOST = 7;
+
+// How close a round has to pass to hit a fighter, how many hits one takes,
+// and how close one has to come to ram the player
 let ENEMY_RADIUS = 7.0;
 let ENEMY_HITS = 3;
 let RAM_RADIUS = 9.0;
@@ -6556,14 +6568,25 @@ fun clear_enemies() {
 
 // Bring on a wave, in one of a few formations around a point
 fun spawn_wave() {
-    let count = rng.int(3, 6);
+    // Waves grow from one fighter to several over the run, slowly at
+    // first and then faster, give or take one
+    let progress = (cam_z / RUN_LEN).clip(0.0, 1.0);
+    let size = WAVE_FIRST + (WAVE_LAST - WAVE_FIRST) * progress.pow(WAVE_GROWTH);
+    let count = ((size + 0.5).floor() + rng.int(-1, 2)).clip(1, WAVE_MOST);
+    let spread_z = rng.float(WAVE_SPREAD_Z_MIN, WAVE_SPREAD_Z_MAX);
+    if (!BENCH_MODE) {
+        $println("wave of " + count.to_s() + " at " + (cam_z * 0.001).format_decimals(1)
+            + " km, spread " + spread_z.floor().to_s() + " m");
+    }
+
     let shape = rng.int(0, 3);
-    let cx = rng.float(-0.4, 0.4) * ENEMY_REACH_X;
-    let cy = rng.float(-0.4, 0.4) * ENEMY_REACH_Y;
+    let cx = rng.float(-0.6, 0.6) * ENEMY_REACH_X;
+    let cy = rng.float(-0.6, 0.6) * ENEMY_REACH_Y;
 
     for (let var i = 0; i < count; ++i) {
         // Its place across the formation, from -1 to 1
-        let across = (i - (count - 1) * 0.5) / ((count - 1) * 0.5);
+        let var across = 0.0;
+        if (count > 1) across = (i - (count - 1) * 0.5) / ((count - 1) * 0.5);
         let var sx = across * 44.0;
         let var sy = 0.0;
         let var back = 0.0;
@@ -6578,9 +6601,11 @@ fun spawn_wave() {
             back = i * 70.0;
         }
 
-        // No two come on at quite the same height or distance
+        // No two come on at quite the same place, nor at the same distance,
+        // so that they come out of the fog one by one
+        sx = sx + rng.float(0.0 - WAVE_SPREAD_X, WAVE_SPREAD_X);
         sy = sy + rng.float(0.0 - WAVE_SPREAD_Y, WAVE_SPREAD_Y);
-        back = back + rng.float(0.0, WAVE_SPREAD_Z);
+        back = back + rng.float(0.0, spread_z);
 
         en_slot_x[i] = sx;
         en_slot_y[i] = sy;
