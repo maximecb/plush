@@ -10,12 +10,13 @@
 //   curl -LO https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Base/resolve/main/model.safetensors
 //   curl -LO https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Base/resolve/main/tokenizer.json
 //
-// Then run it with a prompt, the number of tokens to generate, and a
-// sampling temperature (0 always picks the most likely token, which tends
-// to get stuck repeating itself):
+// Then run it with a prompt, and optionally the number of tokens to generate
+// and a sampling temperature (0 always picks the most likely token, which
+// tends to get stuck repeating itself):
 //
-//   cargo run --release examples/falcon_h1.psh "The capital of France is" 50 0.8
+//   cargo run --release examples/falcon_h1.psh "The capital of France is" --tokens 50 --temperature 0.8
 
+from args import ArgParser;
 from random import Xoshiro128;
 
 let MODEL_PATH = "model.safetensors";
@@ -29,9 +30,9 @@ fun missing_file(path)
     $println("  curl -LO https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Base/resolve/main/model.safetensors");
     $println("  curl -LO https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Base/resolve/main/tokenizer.json");
     $println("");
-    $println("Then run it with a prompt, the number of tokens to generate, and a sampling temperature:");
+    $println("Then run it with a prompt, and optionally the number of tokens to generate and a sampling temperature:");
     $println("");
-    $println("  cargo run --release examples/falcon_h1.psh \"The capital of France is\" 50 0.8");
+    $println("  cargo run --release examples/falcon_h1.psh \"The capital of France is\" --tokens 50 --temperature 0.8");
     $exit(1);
 }
 
@@ -921,9 +922,15 @@ fun sample(logits, temperature, rng)
 // Main
 //============================================================================
 
-let prompt = $cmd_get_arg_or(1, "The capital of France is");
-let num_tokens = $cmd_get_arg_or(2, "100").parse_int(10);
-let temperature = $cmd_get_arg_or(3, "0.8").parse_float();
+let args = ArgParser("Text generation with the Falcon-H1-Tiny-90M language model")
+    .opt_int("tokens", 100, "Number of tokens to generate")
+    .opt_float("temperature", 0.8, "Sampling temperature, 0 to always pick the most likely token")
+    .pos_str("prompt", "The capital of France is", "Text to continue")
+    .parse_args();
+
+let prompt = args.prompt;
+let num_tokens = args.tokens;
+let temperature = args.temperature;
 
 let load_start = $time_current_ms();
 let tokenizer = Tokenizer(TOKENIZER_PATH);

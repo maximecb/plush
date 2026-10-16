@@ -1,7 +1,9 @@
 // An F40-inspired sports car, built from colored polygons with no external assets.
-// Usage: plush examples/sports_car.psh
-// Screenshot without a window: plush examples/sports_car.psh car.tga [yaw_radians]
+// Usage: plush examples/sports_car.psh [--yaw radians]
+// Screenshot without a window: plush examples/sports_car.psh --screenshot car.tga [--yaw radians]
 // Escape or Q closes the window; Space pauses the turntable.
+
+from args import ArgParser;
 
 let WIDTH = 800;
 let HEIGHT = 600;
@@ -499,19 +501,21 @@ fun save_tga(path) {
     if (!$write_file(path, out)) { $println("Could not write " + path); $exit(1); }
 }
 
-let screenshot = $cmd_get_arg(1);
-if (screenshot != nil) {
-    let yaw = $cmd_get_arg_or(2, "0.65").parse_float();
-    if (yaw == nil) { $println("Expected a yaw angle in radians"); $exit(1); }
-    render(yaw);
-    save_tga(screenshot);
+let args = ArgParser("An F40-inspired sports car, built from colored polygons")
+    .opt_str("screenshot", nil, "Save one view to this TGA image, without a window")
+    .opt_float("yaw", 0.65, "Starting angle of the turntable in radians")
+    .parse_args();
+
+if (args.screenshot != nil) {
+    render(args.yaw);
+    save_tga(args.screenshot);
     $println(triangles.len.to_s() + " triangles, " + span_count.to_s() + " spans");
     $exit(0);
 }
 
 let window = $window_create(WIDTH, HEIGHT, "1980s sports car", 0);
 let var last_ms = $time_current_ms();
-let var yaw = 0.65;
+let var yaw = args.yaw;
 let var paused = false;
 let var running = true;
 while (running) {

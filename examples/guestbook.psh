@@ -1,9 +1,9 @@
 // Plush guestbook client
 //
-//   plush guestbook.psh [--local | --localhost | server_address]
+//   plush guestbook.psh [--local | server_address]
 //
 // Connects to the guestbook at plushlang.org by default, to a server on
-// this machine with --local or --localhost, or to the given address, e.g.
+// this machine with --local, or to the given address, e.g.
 // example.com:1337.
 //
 // Connects to a Plush guestbook server and shows the latest messages, which
@@ -30,6 +30,7 @@
 // The canvas and the circuit are fetched as tiles, each a TGA file sent as
 // raw bytes after the response that announces it.
 
+from args import ArgParser;
 from image import Image, rgb, RAINBOW12, decode_tga;
 from json import parse_json, format_json;
 from sha256 import sha256;
@@ -3811,12 +3812,16 @@ class App
     }
 }
 
-// Server address from the command line: --local or --localhost for a
-// server on this machine, an address, or the default server
+// Server address from the command line: --local for a server on this
+// machine, an address, or the default server
 fun server_addr()
 {
-    let arg = $cmd_get_arg_or(1, DEFAULT_SERVER);
-    return arg == "--local" || arg == "--localhost" ? LOCAL_SERVER : arg;
+    let args = ArgParser("Plush guestbook client")
+        .flag("local", "Connect to a server on this machine, at " + LOCAL_SERVER)
+        .pos_str("server", DEFAULT_SERVER, "Address of the server to connect to")
+        .parse_args();
+
+    return args.local ? LOCAL_SERVER : args.server;
 }
 
 // Opens the window and runs the client until the window is closed

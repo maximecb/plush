@@ -1,12 +1,13 @@
 // Textured triangle rasterization with a bilinearly sampled 8-bit lightmap
-// Usage: plush benchmarks/raster_lightmap.psh [num_frames] [mode]
+// Usage: plush benchmarks/raster_lightmap.psh [num_frames] [--angled] [--validate]
 //
 // This matches the frame, texture, grid, lamps, and color multiply in raster_vertlight.psh.
 // Light comes from one byte every ten texture texels, sampled bilinearly.
-// Mode may be "angled", "validate", or "angled_validate".
-// Angled modes exercise both lightmap coordinates varying along a span.
+// The --angled option exercises both lightmap coordinates varying along a span.
 // A perspective renderer places these runs inside each corrected subspan.
 // Tremor.psh already advances u and v affinely inside such subspans.
+
+from args import ArgParser;
 
 let FRAME_WIDTH = 1024;
 let FRAME_HEIGHT = 1024;
@@ -52,14 +53,14 @@ let LM_U_CELL_SHIFT = LM_FRAC_BITS;
 let LM_V_FRAC_SHIFT = 32;
 let LM_V_CELL_SHIFT = 32 + LM_FRAC_BITS;
 
-let num_frames = $cmd_get_arg_or(1, "50").parse_int(10);
-if (num_frames == nil) {
-    $println("expected an integer number of frames");
-    $exit(1);
-}
-let mode = $cmd_get_arg_or(2, "");
-let angled = mode == "angled" || mode == "angled_validate";
-let validate = mode == "validate" || mode == "angled_validate";
+let args = ArgParser("Textured triangle rasterization with a bilinear lightmap")
+    .flag("angled", "Make both lightmap coordinates vary along each span")
+    .flag("validate", "Check the rendered frame against a reference")
+    .pos_int("num_frames", 50, "Number of frames to render")
+    .parse_args();
+let num_frames = args.num_frames;
+let angled = args.angled;
+let validate = args.validate;
 
 class Vertex {
     init(self, x, y, u, v) {

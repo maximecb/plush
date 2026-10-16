@@ -1,3 +1,5 @@
+from args import ArgParser;
+
 let TILE_SIZE = 75; // Size of each tile for parallel rendering
 
 fun tan(a) {
@@ -94,16 +96,17 @@ class Vec3 {
     }
 }
 
-// Set the number of actors
-let var num_actors = 1;
-if ($cmd_get_arg(1) != nil) num_actors = $cmd_get_arg(1).parse_int(10);
+let args = ArgParser("A spinning 3D cube, optionally rendered by parallel actors")
+    .opt_int("actors", 1, "Number of actors rendering tiles, 1 to render on one thread")
+    .opt_int("width", 600, "Frame width in pixels")
+    .opt_int("height", 600, "Frame height in pixels")
+    .parse_args();
+
+let num_actors = args.actors;
 let var use_parallel = num_actors > 1;
 
-// Screen setup
-let var frame_width = 600;
-let var frame_height = 600;
-if ($cmd_get_arg(2) != nil) frame_width = $cmd_get_arg(2).parse_int(10);
-if ($cmd_get_arg(3) != nil) frame_height = $cmd_get_arg(3).parse_int(10);
+let frame_width = args.width;
+let frame_height = args.height;
 
 // Queue for UI events that arrive while renderer is waiting for TileResult
 let pending_ui_events = [];
@@ -561,7 +564,8 @@ fun render_cube_parallel(fTheta, num_actors) {
 
     let render_time = $time_current_ms() - start_time;
     avg_render_time = (0.94 * avg_render_time) + (0.06 * render_time);
-    let fps = (1000 / avg_render_time).floor();
+    // A frame can take under a millisecond, which would divide by zero
+    let fps = (1000 / avg_render_time.max(1.0)).floor();
     $println("Parallel render time: " + avg_render_time.format_decimals(2) + "ms (" + fps.to_s() + " fps)");
 
     // Tell actors to terminate
@@ -581,7 +585,8 @@ fun render_cube_single(fTheta) {
 
     let render_time = $time_current_ms() - start_time;
     avg_render_time = (0.94 * avg_render_time) + (0.06 * render_time);
-    let fps = (1000 / avg_render_time).floor();
+    // A frame can take under a millisecond, which would divide by zero
+    let fps = (1000 / avg_render_time.max(1.0)).floor();
     $println("Single actor render time: " + avg_render_time.format_decimals(2) + "ms (" + fps.to_s() + " fps)");
 
     return image;

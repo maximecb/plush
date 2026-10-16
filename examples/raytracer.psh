@@ -1,3 +1,5 @@
+from args import ArgParser;
+
 let TILE_SIZE = 50;
 
 // Convert RGB/RGBA values in the range [0, 255] to a u32 encoding
@@ -353,15 +355,15 @@ fun render_no_tile(width, height)
     return img;
 }
 
-// Set the number of actors
-let var num_actors = 16;
-if ($cmd_get_arg(1) != nil) num_actors = $cmd_get_arg(1).parse_int(10);
+let args = ArgParser("Render a scene by raytracing, in parallel tiles")
+    .opt_int("actors", 16, "Number of actors rendering tiles, 1 to render on one thread")
+    .opt_int("width", 640, "Frame width in pixels")
+    .opt_int("height", 480, "Frame height in pixels")
+    .parse_args();
 
-// Screen setup
-let var frame_width = 640;
-let var frame_height = 480;
-if ($cmd_get_arg(2) != nil) frame_width = $cmd_get_arg(2).parse_int(10);
-if ($cmd_get_arg(3) != nil) frame_height = $cmd_get_arg(3).parse_int(10);
+let num_actors = args.actors;
+let frame_width = args.width;
+let frame_height = args.height;
 
 // Run the renderer
 let var image = nil;
