@@ -342,6 +342,7 @@ def_host_fns! {
 
         from_codepoint: string_from_codepoint(2),
         from_utf8: string_from_utf8(4),
+        join: string_join(2),
         byte_at: string_byte_at(2),
         char_at: string_char_at(2),
         slice: string_slice(3),

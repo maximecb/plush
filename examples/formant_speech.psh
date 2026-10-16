@@ -395,14 +395,6 @@ fun is_vowel(c)
     return c == "a" || c == "e" || c == "i" || c == "o" || c == "u";
 }
 
-fun join_chars(chars, start, count)
-{
-    let var s = "";
-    for (let var i = 0; i < count; ++i)
-        s = s + chars[start + i];
-    return s;
-}
-
 fun ends_with(s, suffix)
 {
     if (suffix.len > s.len)
@@ -500,7 +492,7 @@ fun spell(word)
             if (i + k > limit)
                 continue;
 
-            let key = join_chars(chars, i, k);
+            let key = "".join(chars.slice(i, i + k));
             if (LETTER_RULES.has(key)) {
                 if (LETTER_RULES[key] != "")
                     out.push(LETTER_RULES[key]);
@@ -515,13 +507,7 @@ fun spell(word)
             ++i;
     }
 
-    let var s = "";
-    for (let var j = 0; j < out.len; ++j) {
-        if (j > 0)
-            s = s + " ";
-        s = s + out[j];
-    }
-    return s;
+    return " ".join(out);
 }
 
 // Add a plural or possessive ending, which takes its voicing from the
@@ -548,16 +534,14 @@ fun word_phonemes(word)
 
     // Numbers are read out digit by digit
     if (DIGITS.has(word.char_at(0))) {
-        let var s = "";
+        let digits = [];
         for (let var i = 0; i < word.len; ++i) {
             let c = word.char_at(i);
             if (!DIGITS.has(c))
                 continue;
-            if (s != "")
-                s = s + " ";
-            s = s + DIGITS[c];
+            digits.push(DIGITS[c]);
         }
-        return s;
+        return " ".join(digits);
     }
 
     // Possessives and plurals of known words
@@ -660,13 +644,7 @@ fun text_to_phonemes(text)
         parts.push(ph);
     }
 
-    let var s = "";
-    for (let var i = 0; i < parts.len; ++i) {
-        if (i > 0)
-            s = s + " ";
-        s = s + parts[i];
-    }
-    return s;
+    return " ".join(parts);
 }
 
 // --- Utterance building ---

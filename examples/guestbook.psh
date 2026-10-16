@@ -947,17 +947,6 @@ fun chars(s)
     return out;
 }
 
-// Joins an array of strings into one
-fun join(parts)
-{
-    let out = ByteArray.with_size(0);
-
-    for (let var i = 0; i < parts.len; ++i)
-        out.push_string(parts[i]);
-
-    return String.from_utf8(out, 0, out.len);
-}
-
 // Number of characters in a string
 fun num_chars(s)
 {
@@ -989,11 +978,11 @@ fun wrap(text, cols)
             line.append(word);
         } else {
             if (line.len > 0)
-                lines.push(join(line));
+                lines.push("".join(line));
 
             // Words longer than a line are split
             while (word.len > cols) {
-                lines.push(join(word.slice(0, cols)));
+                lines.push("".join(word.slice(0, cols)));
                 word = word.slice(cols, word.len);
             }
 
@@ -1004,7 +993,7 @@ fun wrap(text, cols)
     }
 
     if (line.len > 0 || lines.len == 0)
-        lines.push(join(line));
+        lines.push("".join(line));
 
     return lines;
 }
@@ -2548,8 +2537,8 @@ class App
     // Validates the form and sends the requested login or register request
     submit_login(self, type)
     {
-        let username = join(self.fields[0]);
-        let password = join(self.fields[1]);
+        let username = "".join(self.fields[0]);
+        let password = "".join(self.fields[1]);
 
         if (!valid_username(username)) {
             self.set_modal_status("Usernames are 2 to 16 letters, digits or _", ERROR);
@@ -2567,7 +2556,7 @@ class App
                 return;
             }
 
-            if (join(self.fields[2]) != password) {
+            if ("".join(self.fields[2]) != password) {
                 self.set_modal_status("The passwords don't match", ERROR);
                 return;
             }
@@ -2585,7 +2574,7 @@ class App
     // in first, and the message is sent once they have.
     submit_post(self)
     {
-        let text = join(self.compose).trim();
+        let text = "".join(self.compose).trim();
 
         if (num_chars(text) < 3) {
             self.set_status("Your message is a bit short", ERROR);
@@ -2990,7 +2979,7 @@ class App
         // Show the end of the value if it doesn't fit
         let max_chars = (w - 2 * TEXT_PAD).idiv(CHAR_W) - 1;
         let start = (value.len - max_chars).max(0);
-        let shown = join(value.slice(start, value.len));
+        let shown = "".join(value.slice(start, value.len));
         let text_y = box_y + (h - CHAR_H).idiv(2);
 
         let placeholder = index == 0 && value.len == 0;
@@ -3696,7 +3685,7 @@ class App
             if (cursor_on)
                 self.frame.fill_rect(tx, ty + CHAR_H - 4, CHAR_W, 2, FOCUS);
         } else {
-            let lines = wrap(join(self.compose), COMPOSE_COLS);
+            let lines = wrap("".join(self.compose), COMPOSE_COLS);
             let first = (lines.len - COMPOSE_LINES).max(0);
 
             for (let var i = first; i < lines.len; ++i)

@@ -416,6 +416,7 @@ $println(rng.int(0, 100));
     -   `lpad(width, ch)`: Pad the left side with the single character `ch` until the string is at least `width` characters long.
     -   `rpad(width, ch)`: Pad the right side with the single character `ch` until the string is at least `width` characters long.
     -   `split(sep)`: Given a separator string, split a string into an array of parts.
+    -   `join(arr)`: Join an array of strings into one string, using this string as the separator, e.g. `", ".join(["a", "b"])`. It is an error if any element is not a string.
 -   **Array**
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
     -   `push(value)`: Adds a value to the end of the array.

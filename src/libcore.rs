@@ -510,6 +510,32 @@ pub(crate) fn string_split(actor: &mut Actor, input: Value, sep: Value) -> HostR
     array.into()
 }
 
+/// Join an array of strings, using the receiver string as the separator
+pub(crate) fn string_join(actor: &mut Actor, sep: Value, arr: Value) -> HostResult
+{
+    let sep = unwrap_str!(sep);
+    let arr = unwrap_arr!(arr);
+
+    // Build the result in a Rust string before allocating, so that
+    // no heap pointers are held across a potential GC
+    let mut out = String::new();
+    for i in 0..arr.len() {
+        let elem = arr.get(i);
+        match elem.to_str() {
+            Some(s) => {
+                if i > 0 {
+                    out.push_str(sep);
+                }
+                out.push_str(s);
+            }
+            None => error!("join expected a string at index {} of the array", i),
+        }
+    }
+
+    actor.gc_check(Str::alloc_size(out.len()), &mut []);
+    Str::new(&out, &mut actor.alloc).into()
+}
+
 pub fn init_runtime(prog: &mut Program)
 {
     /*
@@ -653,6 +679,7 @@ pub fn get_method(val: Value, method_name: &str) -> Option<HostFnId>
         (Type::String, "lpad") => string_lpad,
         (Type::String, "rpad") => string_rpad,
         (Type::String, "split") => string_split,
+        (Type::String, "join") => string_join,
         (Type::String, "to_s") => string_to_s,
 
         (Type::Array, "push") => array_push,
