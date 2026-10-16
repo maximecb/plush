@@ -1,9 +1,9 @@
 // Night Drive: a first-person drive down a neon-lit city highway at night.
 //
 // Usage:
-//   plush examples/night_drive.psh
-//   plush examples/night_drive.psh --bench [num_frames]
-//   plush examples/night_drive.psh --capture <num_frames> <out_prefix> [z_step]
+//   plush examples/night_ride.psh
+//   plush examples/night_ride.psh --bench [--frames 120]
+//   plush examples/night_ride.psh --capture [--frames 1] [--prefix frame] [--step 1.6]
 //
 // --capture writes raw BGRA frames, one file each. To view one:
 //   ffmpeg -f rawvideo -pixel_format bgra -video_size 1280x720 -i f.raw f.png
@@ -14,7 +14,18 @@
 // rectangle, so its windows are plain fill_u32 rect fills instead of triangle
 // pairs. Only faces that span a range of Z need the triangle rasterizer.
 
+from args import ArgParser;
 from random import Xoshiro128;
+
+let args = ArgParser("A first-person ride down a neon-lit city highway at night")
+    .flag("bench", "Render frames without a window and report the time per frame")
+    .flag("capture", "Write raw BGRA frames to files instead of opening a window")
+    .opt_int("frames", nil, "Number of frames to render, 120 with --bench and 1 with --capture")
+    .opt_str("prefix", "frame", "Start of the file names written by --capture")
+    .opt_float("step", 1.6, "Distance travelled between frames with --capture")
+    .opt_float("lean", 0.0, "Lean angle in degrees held with --capture")
+    .opt_float("pitch", 0.0, "Look angle in degrees held with --capture")
+    .parse_args();
 
 let rng = Xoshiro128(12345);
 
@@ -2862,17 +2873,10 @@ fun audio_actor() {
 
 // --- Main ---
 
-let mode_arg = $cmd_get_arg_or(1, "");
-let var capture_frames = 0;
-let var capture_prefix = "";
-let var capture_step = 1.6;
-if (mode_arg == "--capture") {
-    capture_frames = $cmd_get_arg_or(2, "1").parse_int(10);
-    capture_prefix = $cmd_get_arg_or(3, "frame");
-    capture_step = $cmd_get_arg_or(4, "1.6").parse_float();
+if (args.capture) {
     // A lean and look angle the rider holds, on top of which the sway runs
-    lean_base = $cmd_get_arg_or(5, "0.0").parse_float() * PI / 180.0;
-    pitch_base = $cmd_get_arg_or(6, "0.0").parse_float() * PI / 180.0;
+    lean_base = args.lean * PI / 180.0;
+    pitch_base = args.pitch * PI / 180.0;
 }
 
 build_background();
@@ -3250,8 +3254,8 @@ fun render_frame(fb) {
 // reproducible and a benchmark still pays for the motion
 let OFFLINE_DT = 1.0 / 60.0;
 
-if (mode_arg == "--bench") {
-    let n = $cmd_get_arg_or(2, "120").parse_int(10);
+if (args.bench) {
+    let n = args.frames == nil ? 120 : args.frames;
     let t0 = $time_current_ms();
     for (let var i = 0; i < n; ++i) {
         cam_z = i.to_f() * 1.6;
@@ -3266,13 +3270,14 @@ if (mode_arg == "--bench") {
     return;
 }
 
-if (capture_frames > 0) {
+if (args.capture) {
+    let capture_frames = args.frames == nil ? 1 : args.frames;
     for (let var i = 0; i < capture_frames; ++i) {
-        cam_z = i.to_f() * capture_step;
+        cam_z = i.to_f() * args.step;
         frame_dt = OFFLINE_DT;
         update_ride(OFFLINE_DT, 1.0);
         render_frame(frame_buffer);
-        $write_file(capture_prefix + "_" + i.to_s() + ".raw", frame_buffer);
+        $write_file(args.prefix + "_" + i.to_s() + ".raw", frame_buffer);
     }
     $println("wrote " + capture_frames.to_s() + " frames");
     return;

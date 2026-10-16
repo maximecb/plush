@@ -11,8 +11,8 @@
 // is in front last, so there is no depth test either.
 //
 // Usage:
-//   plush examples/space_fighter.psh [workers]
-//   plush examples/space_fighter.psh --bench [num_frames] [shot_dir] [workers]
+//   plush examples/space_fighter.psh [--workers 8]
+//   plush examples/space_fighter.psh --bench [--frames 120] [--shots directory] [--workers 8]
 //
 // Add --test-mode for a quick short run: a hangar, a gate, then the reactor.
 //
@@ -29,9 +29,10 @@
 //   escape        quit
 //
 // With --bench, a set flight is rendered without opening a window and the
-// time per frame is reported. Given a directory as well, a TGA screenshot
-// is written there every so often.
+// time per frame is reported. Given --shots as well, a TGA screenshot is
+// written to that directory every so often.
 
+from args import ArgParser;
 from noise import FractalNoise, perlin3d;
 from image import Image, save_tga;
 from random import Xoshiro128;
@@ -48,24 +49,18 @@ let FOCAL = CX / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
 let INV_FOCAL = 1.0 / FOCAL;
 let NEAR_Z = 0.5;
 
-// The arguments, less the flags that may go anywhere among them
-let args = [];
-let var test_flag = false;
-for (let var i = 1; i < 8; ++i) {
-    let arg = $cmd_get_arg_or(i, "");
-    if (arg == "--test-mode") test_flag = true;
-    else if (arg != "") args.push(arg);
-}
+let args = ArgParser("Space fighter run through the tunnels of an alien ship")
+    .opt_int("workers", 8, "Number of render workers, fewer than 2 to draw on the main actor")
+    .flag("test-mode", "Quick short run: a hangar, a gate, then the reactor")
+    .flag("bench", "Render a set flight without a window and report the time per frame")
+    .opt_int("frames", 120, "Number of frames to render with --bench")
+    .opt_str("shots", nil, "Write a TGA screenshot to this directory every so often with --bench")
+    .parse_args();
 
-fun arg_or(i, default) {
-    if (i < args.len) return args[i];
-    return default;
-}
-
-let BENCH_MODE = arg_or(0, "") == "--bench";
+let BENCH_MODE = args.bench;
 
 // A short run with one of everything on the way to the reactor
-let TEST_MODE = test_flag;
+let TEST_MODE = args.test_mode;
 // One number for the whole run and another for the short one
 fun by_mode(full, test) {
     if (TEST_MODE) return test;
@@ -4992,15 +4987,12 @@ fun render_world() {
 // frame is where the camera is. What moves is drawn over the finished
 // frame by the main actor.
 
-// How many, which the last argument can change. Fewer than two and the
-// main actor draws the world itself.
+// How many, which --workers can change. Fewer than two and the main actor
+// draws the world itself.
 fun worker_count() {
-    let var arg = arg_or(0, "8");
-    if (BENCH_MODE) arg = arg_or(3, "8");
-
-    let n = arg.parse_int(10);
-    if (n == nil || n < 0 || n > 64) {
-        $println("expected a number of render workers");
+    let n = args.workers;
+    if (n < 0 || n > 64) {
+        $println("expected from 0 to 64 render workers");
         $exit(1);
     }
     return n;
@@ -7447,7 +7439,7 @@ fun run_bench(num_frames, shot_dir) {
     let var render_ms = 0;
     let var tri_total = 0;
 
-    if (shot_dir != "") $make_dir(shot_dir);
+    if (shot_dir != nil) $make_dir(shot_dir);
 
     for (let var frame = 0; frame < num_frames; ++frame) {
         // Weave along a set path, rolling from side to side
@@ -7473,7 +7465,7 @@ fun run_bench(num_frames, shot_dir) {
         render_ms = render_ms + ($time_current_ms() - start_ms);
         tri_total = tri_total + polys_drawn;
 
-        if (shot_dir != "" && frame % 30 == 29) {
+        if (shot_dir != nil && frame % 30 == 29) {
             save_tga(shot_dir + "/frame" + frame.to_s().lpad(4, "0") + ".tga", frame_image);
         }
     }
@@ -7501,13 +7493,12 @@ start_workers();
 start_generator();
 
 if (BENCH_MODE) {
-    let num_frames = arg_or(1, "120").parse_int(10);
-    if (num_frames == nil || num_frames < 1) {
-        $println("expected a number of frames");
+    if (args.frames < 1) {
+        $println("expected at least one frame");
         $exit(1);
     }
 
-    run_bench(num_frames, arg_or(2, ""));
+    run_bench(args.frames, args.shots);
     stop_generator();
     stop_workers();
     $exit(0);

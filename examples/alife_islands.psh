@@ -28,41 +28,35 @@
 //   --width / --height window size in pixels
 //   --seed N           repeat a particular world
 //   --headless --ticks N   evolve without a window, for long runs
-//   --plants N, --seed-hatch N, --gate-period N, --gate-crossings N
+//   --seed-hatch N, --gate-period N, --gate-crossings N
 //
 // For long evolution runs, skip the window entirely:
 //   plush examples/alife_islands.psh --headless --ticks 1000000
 
+from args import ArgParser;
 from random import Xoshiro128;
 
 // --- Command line ---
 
-fun has_flag(name) {
-    for (let var i = 0; i < $cmd_num_args(); ++i) {
-        if ($cmd_get_arg(i) == name)
-            return true;
-    }
-    return false;
-}
+let args = ArgParser("A-Life Islands, an artificial life experiment")
+    .opt_int("islands", 4, "Islands in the ring, laid out as a grid")
+    .opt_int("width", 1024, "Window width in pixels")
+    .opt_int("height", 768, "Window height in pixels")
+    .opt_int("seed", nil, "Repeat a particular world, a new one each run by default")
+    .flag("headless", "Evolve without a window, for long runs")
+    .opt_int("ticks", 0, "Ticks to run headless, 0 for 1000000")
+    .opt_int("seed-hatch", 2400, "Ticks for a seed to grow back into a plant")
+    .opt_int("gate-period", 300_000, "Ticks a gate between islands stays shut")
+    .opt_int("gate-crossings", 20, "Agents that may cross a gate before it shuts again")
+    .parse_args();
 
-fun flag_int(name, default) {
-    for (let var i = 0; i < $cmd_num_args() - 1; ++i) {
-        if ($cmd_get_arg(i) == name) {
-            let v = $cmd_get_arg(i + 1).parse_int(10);
-            if (v != nil)
-                return v;
-        }
-    }
-    return default;
-}
-
-let HEADLESS = has_flag("--headless");
-let MAX_TICKS = flag_int("--ticks", 0);
+let HEADLESS = args.headless;
+let MAX_TICKS = args.ticks;
 
 // A fresh world every run, since a fixed seed makes every run the same run:
 // the same founder wins and the population comes out the same colour. The
 // seed is printed so that a run worth keeping can be repeated with --seed
-let WORLD_SEED = flag_int("--seed", $time_current_ms());
+let WORLD_SEED = args.seed == nil ? $time_current_ms() : args.seed;
 
 // --- Islands ---
 //
@@ -76,13 +70,13 @@ let WORLD_SEED = flag_int("--seed", $time_current_ms());
 // across the whole ring as if it were a single world. Each island already
 // carries a two-cell wall border, so neighbours in the layout are separated
 // by four cells of wall without anything extra being drawn
-let NUM_ISLANDS = flag_int("--islands", 4);
+let NUM_ISLANDS = args.islands;
 
 // Ticks a gate stays shut, and how many may cross before it shuts again.
 // The gate is an opening in the wall that reads as ordinary ground, so
 // somebody wanders through it sooner or later without needing to be lured
-let GATE_PERIOD = flag_int("--gate-period", 300_000);
-let GATE_CROSSINGS = flag_int("--gate-crossings", 20);
+let GATE_PERIOD = args.gate_period;
+let GATE_CROSSINGS = args.gate_crossings;
 let GATE_WIDTH = 3;
 
 // --- Display ---
@@ -91,8 +85,8 @@ let PANEL_W = 190;
 
 // Floors chosen so the stats panel still has a view left beside it, rather
 // than the world being squeezed out of existence by a stray argument
-let FRAME_WIDTH = flag_int("--width", 1024).max(PANEL_W + 200);
-let FRAME_HEIGHT = flag_int("--height", 768).max(240);
+let FRAME_WIDTH = args.width.max(PANEL_W + 200);
+let FRAME_HEIGHT = args.height.max(240);
 let VIEW_W = FRAME_WIDTH - PANEL_W;
 
 // Zoom is in pixels per cell. The floor is not 1 because a whole screen of
@@ -200,7 +194,7 @@ let RIDGE_MIN_LEN = 5;
 // This is the knob that sets how much food the world can supply: with the
 // plant count fixed, at most one plant per seed per hatch time can ever be
 // eaten, so the whole population lives inside that rate
-let SEED_HATCH = flag_int("--seed-hatch", 2400);
+let SEED_HATCH = args.seed_hatch;
 
 // The seed list is walked in full rather than in hatching order, so it is
 // walked every few ticks instead of every tick. Measured, the walk costs

@@ -36,7 +36,8 @@
 // Light is baked per face at load time from the point lights in the map, into
 // darkened copies of each texture, so the span loop stays a plain texel copy.
 //
-// Usage: plush examples/tremor.psh [map file] [width] [height] [workers] [frames] [shot directory]
+// Usage: plush examples/tremor.psh [map file] [--width 1280] [--height 720] [--actors 8]
+//        plush examples/tremor.psh [map file] --bench [--frames 120] [--shots directory]
 //
 //   W A S D     move
 //   arrows      turn and look
@@ -45,27 +46,42 @@
 //   n           toggle noclip
 //   escape / q  quit
 //
-// Given a frame count, it renders that many frames of a set tour of the level
+// With --bench, it renders a number of frames of a set tour of the level
 // without opening a window, and reports the time per frame and how many pixels
-// were written. Given a directory as well, it writes each viewpoint of the
-// tour there as a TGA screenshot.
+// were written. Given --shots as well, it writes each viewpoint of the tour to
+// that directory as a TGA screenshot.
 
+from args import ArgParser;
 from image import Image, load_tga, save_tga;
 from ./monogram_font import Font;
 from random import Xoshiro128;
 
-let FRAME_WIDTH = $cmd_get_arg_or(2, "1280").parse_int(10);
-let FRAME_HEIGHT = $cmd_get_arg_or(3, "720").parse_int(10);
+let args = ArgParser("Walk around a texture-mapped level, Quake style")
+    .opt_int("width", 1280, "Frame width in pixels")
+    .opt_int("height", 720, "Frame height in pixels")
+    .opt_int("actors", 8, "Number of actors rendering bands of the frame")
+    .flag("bench", "Render a set tour of the level without a window and report the time per frame")
+    .opt_int("frames", 120, "Number of frames to render with --bench")
+    .opt_str("shots", nil, "Write each viewpoint of the tour to this directory with --bench")
+    .pos_str("map", "examples/data/level1.map", "Level file to load")
+    .parse_args();
+
+let FRAME_WIDTH = args.width;
+let FRAME_HEIGHT = args.height;
 
 let TEX_DIR = "examples/data/textures/";
-let MAP_PATH = $cmd_get_arg_or(1, "examples/data/level1.map");
-let NUM_RENDER_ACTORS = $cmd_get_arg_or(4, "8").parse_int(10);
+let MAP_PATH = args.map;
+let NUM_RENDER_ACTORS = args.actors;
 
-if (FRAME_WIDTH == nil || FRAME_HEIGHT == nil || FRAME_WIDTH < 1 || FRAME_HEIGHT < 1) {
+if (FRAME_WIDTH < 1 || FRAME_HEIGHT < 1) {
     $println("width and height must be positive integers");
     $exit(1);
 }
-if (NUM_RENDER_ACTORS == nil || NUM_RENDER_ACTORS < 1 || NUM_RENDER_ACTORS > FRAME_HEIGHT) {
+if (args.bench && args.frames < 1) {
+    $println("expected at least one frame");
+    $exit(1);
+}
+if (NUM_RENDER_ACTORS < 1 || NUM_RENDER_ACTORS > FRAME_HEIGHT) {
     $println("worker count must be between 1 and " + FRAME_HEIGHT.to_s());
     $exit(1);
 }
@@ -3546,10 +3562,10 @@ $println("render workers: " + NUM_RENDER_ACTORS.to_s() + " actors forked in "
     + ($time_current_ms() - actor_start_ms).to_s() + " ms, dynamic "
     + BAND_HEIGHT.to_s() + "-row bands");
 
-let BENCH_FRAMES = $cmd_get_arg_or(5, "0").parse_int(10);
-let SHOT_DIR = $cmd_get_arg_or(6, "");
+let BENCH_FRAMES = args.frames;
+let SHOT_DIR = args.shots;
 
-if (BENCH_FRAMES > 0) {
+if (args.bench) {
     let var total_ms = 0;
     let var worst_ms = 0;
     let var total_pixels = 0;
@@ -3580,7 +3596,7 @@ if (BENCH_FRAMES > 0) {
         total_nodes_skipped = total_nodes_skipped + rect_nodes_skipped;
         if (ms > worst_ms) worst_ms = ms;
 
-        if (SHOT_DIR.len > 0 && i < TOUR.len) {
+        if (SHOT_DIR != nil && i < TOUR.len) {
             let path = SHOT_DIR + "/view" + i.to_s() + ".tga";
             if (!save_tga(path, frame_image)) $println("could not write " + path);
         }

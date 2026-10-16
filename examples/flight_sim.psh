@@ -14,7 +14,7 @@
 //
 // Usage:
 //   plush examples/flight_sim.psh
-//   plush examples/flight_sim.psh --bench [num_frames] [shot_dir]
+//   plush examples/flight_sim.psh --bench [--frames 120] [--shots directory]
 //
 //   up / down     pitch the nose down / up
 //   left / right  roll
@@ -27,9 +27,10 @@
 //   escape / Q    quit
 //
 // With --bench, a set flight is rendered without opening a window and the
-// time per frame is reported. Given a directory as well, a TGA screenshot
-// is written there every so often.
+// time per frame is reported. Given --shots as well, a TGA screenshot is
+// written to that directory every so often.
 
+from args import ArgParser;
 from noise import FractalNoise;
 from image import Image, save_tga;
 from random import Xoshiro128;
@@ -121,7 +122,13 @@ fun smoothstep(lo, hi, x) {
 // terrain exists, since an actor starts with a copy of its parent's heap.
 
 let SAMPLE_RATE = 44100;
-let BENCH_MODE = $cmd_get_arg_or(1, "") == "--bench";
+let args = ArgParser("Flight sim over procedural terrain")
+    .flag("bench", "Render a set flight without a window and report the time per frame")
+    .opt_int("frames", 120, "Number of frames to render with --bench")
+    .opt_str("shots", nil, "Write a TGA screenshot to this directory every so often with --bench")
+    .parse_args();
+
+let BENCH_MODE = args.bench;
 
 // Bursts per second of the cannon's buzz with the barrels at full speed
 let GUN_SOUND_HZ = 100.0;
@@ -3415,7 +3422,7 @@ fun run_bench(num_frames, shot_dir) {
     let var render_ms = 0;
     let var tri_total = 0;
 
-    if (shot_dir != "") $make_dir(shot_dir);
+    if (shot_dir != nil) $make_dir(shot_dir);
 
     for (let var frame = 0; frame < num_frames; ++frame) {
         // Weave and porpoise, so that the view rolls and the horizon moves
@@ -3432,7 +3439,7 @@ fun run_bench(num_frames, shot_dir) {
         render_ms = render_ms + ($time_current_ms() - start_ms);
         tri_total = tri_total + tris_drawn;
 
-        if (shot_dir != "" && frame % 30 == 29) {
+        if (shot_dir != nil && frame % 30 == 29) {
             // The rasterizer leaves the alpha channel unset
             for (let var i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; ++i) {
                 frame_buffer.set_u32(i, frame_buffer.get_u32(i) | 0xFF000000);
@@ -3455,13 +3462,12 @@ reset_flight();
 spawn_enemies();
 
 if (BENCH_MODE) {
-    let num_frames = $cmd_get_arg_or(2, "120").parse_int(10);
-    if (num_frames == nil || num_frames < 1) {
-        $println("expected a number of frames");
+    if (args.frames < 1) {
+        $println("expected at least one frame");
         $exit(1);
     }
 
-    run_bench(num_frames, $cmd_get_arg_or(3, ""));
+    run_bench(args.frames, args.shots);
     $exit(0);
 }
 
