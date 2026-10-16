@@ -3,7 +3,7 @@
 // Screen coordinates and the focal length are pixels.
 //
 // Usage: plush examples/boxsim_3d.psh [box_count]
-// Headless: plush examples/boxsim_3d.psh --headless [steps [image.tga|- [box_count]]]
+// Headless: plush examples/boxsim_3d.psh --headless [--steps 480] [--out image.tga] [box_count]
 // Controls: Left click to poke (hold to keep pushing), ENTER drops a box, arrows orbit, W/S zoom,
 // T throws a box, SPACE pause, N step, R reset, ESC or Q quit.
 //
@@ -23,6 +23,7 @@
 // - Sleep settled contact islands and skip physics when every box sleeps.
 // - Use a conservative S-buffer and reuse frames when nothing moves.
 
+from args import ArgParser;
 from image import Image, save_tga, COLOR_BLACK, COLOR_WHITE;
 from random import Xoshiro128;
 from ./monogram_font import Font;
@@ -1467,11 +1468,16 @@ class Renderer {
     }
 }
 
-let mode = $cmd_get_arg_or(1, "");
-let count_text = mode == "--headless" ? $cmd_get_arg_or(4, "31") : $cmd_get_arg_or(1, "31");
-let box_count = count_text.parse_int(10);
+let args = ArgParser("A small 3D rigid box simulation")
+    .flag("headless", "Run without a window and print statistics")
+    .opt_int("steps", 480, "Physics steps to run when headless")
+    .opt_str("out", nil, "Save the last frame to this TGA image when headless")
+    .pos_int("box_count", 31, "Number of boxes, from 1 to 101")
+    .parse_args();
 
-if (box_count == nil || box_count < 1 || box_count > 101) {
+let box_count = args.box_count;
+
+if (box_count < 1 || box_count > 101) {
     $println("box_count must be from 1 to 101");
     $exit(1);
 }
@@ -1479,17 +1485,17 @@ if (box_count == nil || box_count < 1 || box_count > 101) {
 let world = World(box_count);
 let renderer = Renderer();
 
-if (mode == "--headless") {
-    let steps = $cmd_get_arg_or(2, "480").parse_int(10);
-    if (steps == nil || steps < 0) {
+if (args.headless) {
+    let steps = args.steps;
+    if (steps < 0) {
         $println("steps must be a nonnegative integer");
         $exit(1);
     }
 
     for (let var i = 0; i < steps; ++i) world.step();
 
-    let path = $cmd_get_arg_or(3, "");
-    if (path.len > 0 && path != "-") {
+    let path = args.out;
+    if (path != nil) {
         renderer.render(world);
         if (!save_tga(path, renderer.image)) {
             $println("could not save " + path);

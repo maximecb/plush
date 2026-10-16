@@ -1,0 +1,147 @@
+from args import ArgParser, REQUIRED;
+
+fun make_parser()
+{
+    let p = ArgParser("Test program");
+    p.prog = "prog";
+    p.flag("bench", "Run the benchmark");
+    p.short_form("bench", "b");
+    p.flag("test-mode", "Short run");
+    p.opt_int("frames", 120, "Number of frames");
+    p.short_form("frames", "n");
+    p.opt_float("scale", 1.5, "Scale factor");
+    p.opt_str("out", nil, "Output path");
+    p.opt_choice("mode", ["fast", "slow"], "fast", "Speed");
+    p.pos_str("input", "in.txt", "Input file");
+    p.pos_int("count", 3, "Count");
+    return p;
+}
+
+fun parse_ok(arr)
+{
+    let p = make_parser();
+    let res = p.parse_list(arr);
+    if (res == nil) {
+        $println("unexpected error: " + p.error);
+    }
+    assert(res != nil);
+    return res;
+}
+
+fun parse_err(arr, expected)
+{
+    let p = make_parser();
+    let res = p.parse_list(arr);
+    assert(res == nil);
+    if (p.error != expected) {
+        $println("got:      " + p.error);
+        $println("expected: " + expected);
+    }
+    assert(p.error == expected);
+}
+
+// Defaults
+let d = parse_ok([]);
+assert(d.bench == false);
+assert(d.test_mode == false);
+assert(d.frames == 120);
+assert(d.scale == 1.5);
+assert(d.out == nil);
+assert(d.mode == "fast");
+assert(d.input == "in.txt");
+assert(d.count == 3);
+
+// Long and short forms, and flags mixed in with positionals
+let r = parse_ok(["a.txt", "--bench", "--frames", "10", "--scale", "2", "-n", "7", "--out", "x=y", "--test-mode", "5"]);
+assert(r.bench == true);
+assert(r.test_mode == true);
+assert(r.frames == 7);
+assert(r.scale == 2.0);
+assert(r.out == "x=y");
+assert(r.input == "a.txt");
+assert(r.count == 5);
+assert(parse_ok(["-b"]).bench == true);
+assert(parse_ok(["--mode", "slow"]).mode == "slow");
+assert(parse_ok(["--out", ""]).out == "");
+
+// Negative numbers, a lone dash, and option values that look like options
+let n = parse_ok(["-", "-4", "--frames", "-2", "--out", "--bench"]);
+assert(n.input == "-");
+assert(n.count == -4);
+assert(n.frames == -2);
+assert(n.out == "--bench");
+assert(n.bench == false);
+assert(parse_ok(["--scale", "-.5"]).scale == -0.5);
+
+// Everything after -- is positional
+let t = parse_ok(["--", "--bench", "8"]);
+assert(t.input == "--bench");
+assert(t.count == 8);
+assert(t.bench == false);
+
+// Errors
+parse_err(["--nope"], "unknown option '--nope'");
+parse_err(["-x"], "unknown option '-x'");
+parse_err(["-bn"], "unknown option '-bn'");
+parse_err(["--frames=10"], "write --frames followed by its value, --name=value is not supported");
+parse_err(["--bench=1"], "write --bench followed by its value, --name=value is not supported");
+parse_err(["--frames"], "option --frames expects a value");
+parse_err(["--frames", "ten"], "invalid integer 'ten' for --frames");
+parse_err(["-n", "1.5"], "invalid integer '1.5' for -n");
+parse_err(["--scale", "abc"], "invalid number 'abc' for --scale");
+parse_err(["--mode", "medium"], "invalid value 'medium' for --mode, expected one of fast, slow");
+parse_err(["a", "b"], "invalid integer 'b' for count");
+parse_err(["a", "1", "c"], "unexpected argument 'c'");
+
+// Help
+let h = make_parser();
+assert(h.parse_list(["a", "--help", "--nope"]) == nil);
+assert(h.help_requested);
+assert(h.error == nil);
+assert(h.parse_list(["-h"]) == nil);
+assert(h.help_requested);
+
+let expected_help =
+    "usage: prog [options] [input] [count]\n" +
+    "\n" +
+    "Test program\n" +
+    "\n" +
+    "arguments:\n" +
+    "  input             Input file (default: in.txt)\n" +
+    "  count             Count (default: 3)\n" +
+    "\n" +
+    "options:\n" +
+    "  -h, --help        Show this help and exit\n" +
+    "  -b, --bench       Run the benchmark\n" +
+    "  --test-mode       Short run\n" +
+    "  -n, --frames INT  Number of frames (default: 120)\n" +
+    "  --scale FLOAT     Scale factor (default: 1.5)\n" +
+    "  --out STR         Output path\n" +
+    "  --mode fast|slow  Speed (default: fast)\n";
+let help = h.help_text();
+if (help != expected_help) {
+    $println(help);
+}
+assert(help == expected_help);
+
+// Required arguments
+let q = ArgParser("");
+q.prog = "prog";
+q.opt_str("name", REQUIRED, "Name");
+q.pos_str("src", REQUIRED, "Source");
+q.pos_str("dst", nil, "Destination");
+assert(q.parse_list(["a"]) == nil);
+assert(q.error == "missing required option --name");
+assert(q.parse_list(["--name", "x"]) == nil);
+assert(q.error == "missing required argument src");
+let qr = q.parse_list(["--name", "x", "a"]);
+assert(qr.name == "x");
+assert(qr.src == "a");
+assert(qr.dst == nil);
+assert(q.usage_text() == "usage: prog [options] src [dst]");
+assert(q.help_text().find("Source (required)") != nil);
+
+// Floats accept integer text
+let f = ArgParser("");
+f.pos_float("x", 0.0, "X");
+assert(f.parse_list(["3"]).x == 3.0);

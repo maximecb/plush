@@ -25,7 +25,7 @@
 // time, which costs next to nothing per frame. Everything about a model is
 // in the Model class, so that it can be moved to another program as it is.
 //
-// Usage: plush examples/model_viewer.psh [model.glb] [--tex-256] [--shots directory]
+// Usage: plush examples/model_viewer.psh [model.glb] [--tex-size 256] [--shots directory]
 //
 //   drag, arrows   turn the model
 //   W S            move closer and further
@@ -33,12 +33,13 @@
 //   N              next animation, and after the last one, none
 //   escape / q     quit
 //
-// With --tex-256, textures larger than 256 pixels along either axis are
-// scaled down to that size. With --shots, no window is opened: the model is
-// drawn from eight sides, each one showing another animation, each view is
-// written to the directory as a TGA image, and the time taken per frame is
-// reported.
+// With --tex-size, textures larger than that many pixels along either axis
+// are scaled down to that size. With --shots, no window is opened: the model
+// is drawn from eight sides, each one showing another animation, each view
+// is written to the directory as a TGA image, and the time taken per frame
+// is reported.
 
+from args import ArgParser;
 from image import Image, rgb, save_tga;
 from jpeg import decode_jpeg;
 from json import parse_json, Error;
@@ -50,25 +51,15 @@ let FRAME_HEIGHT = 720;
 
 // --- Command line ---
 
-let var model_path = "examples/data/models/anime_girl.glb";
-let var max_tex_size = 0;
-let var shots_dir = nil;
+let args = ArgParser("Look at a textured 3D model from all sides")
+    .opt_int("tex-size", 0, "Scale textures down to at most this size, 0 for no limit")
+    .opt_str("shots", nil, "Write views from eight sides to this directory, without a window")
+    .pos_str("model", "examples/data/models/anime_girl.glb", "Binary glTF file to view")
+    .parse_args();
 
-for (let var i = 1; i < $cmd_num_args(); ++i) {
-    let arg = $cmd_get_arg(i);
-
-    if (arg == "--tex-256") {
-        max_tex_size = 256;
-    } else if (arg == "--shots" && i + 1 < $cmd_num_args()) {
-        ++i;
-        shots_dir = $cmd_get_arg(i);
-    } else if (arg.byte_at(0) == 45) {
-        $println("unknown option " + arg);
-        $exit(1);
-    } else {
-        model_path = arg;
-    }
-}
+let model_path = args.model;
+let max_tex_size = args.tex_size;
+let shots_dir = args.shots;
 
 // --- View ---
 

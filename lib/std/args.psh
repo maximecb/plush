@@ -1,0 +1,509 @@
+// Command-line argument parsing
+//
+//   from args import ArgParser, REQUIRED;
+//
+//   let p = ArgParser("View a glTF model in a window");
+//   p.flag("bench", "Render a fixed number of frames and exit");
+//   p.short_form("bench", "b");
+//   p.opt_int("tex-size", 0, "Downscale textures to at most this size");
+//   p.pos_str("model", REQUIRED, "Path to a .glb file");
+//   let args = p.parse_args();
+//   $println(args.model + " " + args.tex_size.to_s());
+//
+// Options are written --name value, and short forms as -x value. The
+// --name=value form is not supported, since it hides paths given as values
+// from the sandbox. Options and positionals may be given in any order, and after
+// -- every argument is taken as a positional. An argument such as -5 is a
+// value rather than an option, so negative numbers can be positionals.
+//
+// The result is a dictionary with an entry for every declared argument,
+// with dashes in names turned into underscores: --tex-size is read as
+// args.tex_size. Absent arguments get their default, flags get false, and
+// a default of nil leaves the entry nil, so it can be told apart from any
+// value given. A default of REQUIRED makes leaving the argument out an
+// error.
+//
+// -h and --help are always defined and print a generated help text.
+
+class Required
+{
+    init(self)
+    {
+    }
+}
+
+// Default for an argument that must be given
+let REQUIRED = Required();
+
+let DASH = 45;     // -
+let DOT = 46;      // .
+let ZERO = 48;     // 0
+let NINE = 57;     // 9
+
+// Turns an argument name into its result key, e.g. tex-size to tex_size
+fun name_to_key(name)
+{
+    let parts = name.split("-");
+    let var key = parts[0];
+    for (let var i = 1; i < parts.len; ++i) {
+        key = key + "_" + parts[i];
+    }
+    return key;
+}
+
+fun is_digit(b)
+{
+    return b >= ZERO && b <= NINE;
+}
+
+fun is_letter(b)
+{
+    return (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
+}
+
+// Whether an argument names an option rather than being a value. A lone
+// dash is a value, conventionally standing for stdin or stdout.
+fun is_option(arg)
+{
+    if (arg.len < 2 || arg.byte_at(0) != DASH) {
+        return false;
+    }
+
+    // Negative numbers such as -5 and -.5
+    let b = arg.byte_at(1);
+    return !is_digit(b) && b != DOT;
+}
+
+// Text for a default value in the help, nil when there is none to show
+fun default_text(spec)
+{
+    let d = spec.default;
+    if (d == nil || d instanceof Required || spec.type == "flag") {
+        return nil;
+    }
+    if (d instanceof String) {
+        return d == "" ? nil : d;
+    }
+    return d.to_s();
+}
+
+class ArgParser
+{
+    init(self, desc)
+    {
+        assert(desc instanceof String);
+
+        // Program name shown in the usage line, the script path by default
+        self.prog = $cmd_get_arg_or(0, "prog");
+        self.desc = desc;
+
+        // Options and positionals, in declaration order
+        self.options = [];
+        self.positionals = [];
+
+        // Options by long name and by short form letter
+        self.by_name = {};
+        self.by_short = {};
+
+        // Result keys already taken
+        self.keys = {};
+
+        // Set by parse_list() when parsing fails or help is asked for
+        self.error = nil;
+        self.help_requested = false;
+    }
+
+    // Declares a spec after checking that its name is usable
+    add_spec(self, name, type, default, help, positional)
+    {
+        assert(name instanceof String && name.len > 0);
+        assert(name.byte_at(0) != DASH);
+        assert(name != "help");
+        assert(help instanceof String);
+
+        let key = name_to_key(name);
+        assert(!self.keys.has(key));
+        self.keys[key] = true;
+
+        let spec = {
+            name: name,
+            key: key,
+            type: type,
+            default: default,
+            help: help,
+            short: nil,
+            values: nil,
+        };
+
+        if (positional) {
+            // Required positionals can't follow optional ones, since they
+            // are filled in order
+            let n = self.positionals.len;
+            if (default instanceof Required && n > 0) {
+                assert(self.positionals[n - 1].default instanceof Required);
+            }
+            self.positionals.push(spec);
+        } else {
+            self.options.push(spec);
+            self.by_name[name] = spec;
+        }
+
+        return spec;
+    }
+
+    // Declares a boolean option, false unless given
+    flag(self, name, help)
+    {
+        self.add_spec(name, "flag", false, help, false);
+        return self;
+    }
+
+    // Declares an option taking a string value
+    opt_str(self, name, default, help)
+    {
+        assert(default == nil || default instanceof String || default instanceof Required);
+        self.add_spec(name, "str", default, help, false);
+        return self;
+    }
+
+    // Declares an option taking an integer value
+    opt_int(self, name, default, help)
+    {
+        assert(default == nil || default instanceof Int64 || default instanceof Required);
+        self.add_spec(name, "int", default, help, false);
+        return self;
+    }
+
+    // Declares an option taking a float value. Integers are also accepted.
+    opt_float(self, name, default, help)
+    {
+        assert(default == nil || default instanceof Float64 || default instanceof Required);
+        self.add_spec(name, "float", default, help, false);
+        return self;
+    }
+
+    // Declares an option taking one of an array of string values
+    opt_choice(self, name, values, default, help)
+    {
+        assert(values instanceof Array && values.len > 0);
+        assert(default == nil || default instanceof Required || values_has(values, default));
+        let spec = self.add_spec(name, "choice", default, help, false);
+        spec.values = values;
+        return self;
+    }
+
+    // Declares a positional taking a string value
+    pos_str(self, name, default, help)
+    {
+        assert(default == nil || default instanceof String || default instanceof Required);
+        self.add_spec(name, "str", default, help, true);
+        return self;
+    }
+
+    // Declares a positional taking an integer value
+    pos_int(self, name, default, help)
+    {
+        assert(default == nil || default instanceof Int64 || default instanceof Required);
+        self.add_spec(name, "int", default, help, true);
+        return self;
+    }
+
+    // Declares a positional taking a float value. Integers are also accepted.
+    pos_float(self, name, default, help)
+    {
+        assert(default == nil || default instanceof Float64 || default instanceof Required);
+        self.add_spec(name, "float", default, help, true);
+        return self;
+    }
+
+    // Adds a one-letter short form for a declared option, e.g. -b for --bench
+    short_form(self, name, letter)
+    {
+        assert(self.by_name.has(name));
+        assert(letter instanceof String && letter.len == 1);
+        assert(is_letter(letter.byte_at(0)));
+        assert(letter != "h");
+        assert(!self.by_short.has(letter));
+
+        let spec = self.by_name[name];
+        assert(spec.short == nil);
+        spec.short = letter;
+        self.by_short[letter] = spec;
+        return self;
+    }
+
+    // Sets the error message and returns nil, to fail a parse
+    fail(self, msg)
+    {
+        self.error = msg;
+        return nil;
+    }
+
+    // Converts the string given for an argument to its type, or fails
+    convert(self, spec, s, what)
+    {
+        if (spec.type == "int") {
+            let v = s.parse_int(10);
+            if (v == nil) {
+                return self.fail("invalid integer '" + s + "' for " + what);
+            }
+            return v;
+        }
+
+        if (spec.type == "float") {
+            let v = s.parse_float();
+            if (v == nil) {
+                return self.fail("invalid number '" + s + "' for " + what);
+            }
+            return v;
+        }
+
+        if (spec.type == "choice" && !values_has(spec.values, s)) {
+            return self.fail("invalid value '" + s + "' for " + what + ", expected one of " + join(spec.values, ", "));
+        }
+
+        return s;
+    }
+
+    // Parses an array of argument strings, not including the program name.
+    // Returns the result dictionary, or nil if parsing failed, in which case
+    // self.error holds the reason, or if help was asked for, in which case
+    // self.help_requested is set.
+    parse_list(self, arr)
+    {
+        self.error = nil;
+        self.help_requested = false;
+
+        let res = {};
+        let given = {};
+
+        for (let var i = 0; i < self.options.len; ++i) {
+            let spec = self.options[i];
+            res[spec.key] = spec.default instanceof Required ? nil : spec.default;
+        }
+        for (let var i = 0; i < self.positionals.len; ++i) {
+            let spec = self.positionals[i];
+            res[spec.key] = spec.default instanceof Required ? nil : spec.default;
+        }
+
+        let var num_pos = 0;
+        let var only_pos = false;
+        let var i = 0;
+
+        while (i < arr.len) {
+            let arg = arr[i];
+            ++i;
+
+            if (!only_pos && arg == "--") {
+                only_pos = true;
+                continue;
+            }
+
+            if (only_pos || !is_option(arg)) {
+                if (num_pos >= self.positionals.len) {
+                    return self.fail("unexpected argument '" + arg + "'");
+                }
+
+                let spec = self.positionals[num_pos];
+                ++num_pos;
+
+                let v = self.convert(spec, arg, spec.name);
+                if (self.error != nil) {
+                    return nil;
+                }
+                res[spec.key] = v;
+                given[spec.key] = true;
+                continue;
+            }
+
+            if (arg == "-h" || arg == "--help") {
+                self.help_requested = true;
+                return nil;
+            }
+
+            let what = arg;
+            let var spec = nil;
+
+            if (arg.byte_at(1) == DASH) {
+                let name = arg.slice(2, arg.len);
+                let eq = name.find("=");
+                if (eq != nil) {
+                    return self.fail("write --" + name.slice(0, eq) + " followed by its value, --name=value is not supported");
+                }
+                if (self.by_name.has(name)) {
+                    spec = self.by_name[name];
+                }
+            } else if (arg.len == 2) {
+                let letter = arg.slice(1, 2);
+                if (self.by_short.has(letter)) {
+                    spec = self.by_short[letter];
+                }
+            }
+
+            if (spec == nil) {
+                return self.fail("unknown option '" + what + "'");
+            }
+
+            if (spec.type == "flag") {
+                res[spec.key] = true;
+                continue;
+            }
+
+            if (i >= arr.len) {
+                return self.fail("option " + what + " expects a value");
+            }
+            let value = arr[i];
+            ++i;
+
+            let v = self.convert(spec, value, what);
+            if (self.error != nil) {
+                return nil;
+            }
+            res[spec.key] = v;
+            given[spec.key] = true;
+        }
+
+        for (let var j = 0; j < self.options.len; ++j) {
+            let spec = self.options[j];
+            if (spec.default instanceof Required && !given.has(spec.key)) {
+                return self.fail("missing required option --" + spec.name);
+            }
+        }
+        for (let var j = 0; j < self.positionals.len; ++j) {
+            let spec = self.positionals[j];
+            if (spec.default instanceof Required && !given.has(spec.key)) {
+                return self.fail("missing required argument " + spec.name);
+            }
+        }
+
+        return res;
+    }
+
+    // Parses the program's command-line arguments. Prints the help and
+    // exits if it was asked for, and prints an error and exits with code 1
+    // if the arguments are invalid.
+    parse_args(self)
+    {
+        let arr = [];
+        for (let var i = 1; i < $cmd_num_args(); ++i) {
+            arr.push($cmd_get_arg(i));
+        }
+
+        let res = self.parse_list(arr);
+
+        if (self.help_requested) {
+            $print(self.help_text());
+            $exit(0);
+        }
+
+        if (res == nil) {
+            $println("error: " + self.error);
+            $println(self.usage_text());
+            $println("Run with --help for more information");
+            $exit(1);
+        }
+
+        return res;
+    }
+
+    // Returns the one-line usage summary
+    usage_text(self)
+    {
+        let var s = "usage: " + self.prog + " [options]";
+        for (let var i = 0; i < self.positionals.len; ++i) {
+            let spec = self.positionals[i];
+            if (spec.default instanceof Required) {
+                s = s + " " + spec.name;
+            } else {
+                s = s + " [" + spec.name + "]";
+            }
+        }
+        return s;
+    }
+
+    // Returns the full help text, ending with a newline
+    help_text(self)
+    {
+        // Left column and help text for each line, by section
+        let pos_rows = [];
+        for (let var i = 0; i < self.positionals.len; ++i) {
+            let spec = self.positionals[i];
+            pos_rows.push([spec.name, spec_help(spec)]);
+        }
+
+        let opt_rows = [["-h, --help", "Show this help and exit"]];
+        for (let var i = 0; i < self.options.len; ++i) {
+            let spec = self.options[i];
+            let var left = "--" + spec.name;
+            if (spec.short != nil) {
+                left = "-" + spec.short + ", " + left;
+            }
+            if (spec.type == "choice") {
+                left = left + " " + join(spec.values, "|");
+            } else if (spec.type != "flag") {
+                left = left + " " + spec.type.upper();
+            }
+            opt_rows.push([left, spec_help(spec)]);
+        }
+
+        let var width = 0;
+        for (let var i = 0; i < pos_rows.len; ++i) {
+            width = width.max(pos_rows[i][0].len);
+        }
+        for (let var i = 0; i < opt_rows.len; ++i) {
+            width = width.max(opt_rows[i][0].len);
+        }
+
+        let var s = self.usage_text() + "\n";
+        if (self.desc != "") {
+            s = s + "\n" + self.desc + "\n";
+        }
+        if (pos_rows.len > 0) {
+            s = s + "\narguments:\n" + format_rows(pos_rows, width);
+        }
+        s = s + "\noptions:\n" + format_rows(opt_rows, width);
+        return s;
+    }
+}
+
+// Help text for an argument, with its default or whether it is required
+fun spec_help(spec)
+{
+    if (spec.default instanceof Required) {
+        return spec.help + " (required)";
+    }
+    let d = default_text(spec);
+    if (d != nil) {
+        return spec.help + " (default: " + d + ")";
+    }
+    return spec.help;
+}
+
+fun format_rows(rows, width)
+{
+    let var s = "";
+    for (let var i = 0; i < rows.len; ++i) {
+        s = s + "  " + rows[i][0].rpad(width + 2, " ") + rows[i][1] + "\n";
+    }
+    return s;
+}
+
+fun values_has(values, s)
+{
+    for (let var i = 0; i < values.len; ++i) {
+        if (values[i] == s) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fun join(strs, sep)
+{
+    let var s = "";
+    for (let var i = 0; i < strs.len; ++i) {
+        if (i > 0) s = s + sep;
+        s = s + strs[i];
+    }
+    return s;
+}
