@@ -14,9 +14,9 @@
 //   plush examples/space_fighter.psh [workers]
 //   plush examples/space_fighter.psh --bench [num_frames] [shot_dir] [workers]
 //
-// Add --test-mode for a short run: a hangar, a gate, then the reactor.
+// Add --test-mode for a quick short run: a hangar, a gate, then the reactor.
 //
-// The world is drawn by eight render workers unless told otherwise.
+// The world is drawn by eight parallel render workers unless told otherwise.
 //
 //   up / down     spin the nose up / down
 //   left / right  spin left / right
@@ -127,9 +127,13 @@ let ALARM_LEVEL = 0.24;
 
 // What the main loop tells the audio actor
 class AudioState {
-    init(self, power, thrusters, gun, warn, alarm, crashes, gain, music, stop) {
+    init(self, power, thrusters, gun, warn, alarm, crashes, dooms, gain, music, stop) {
         // Whether the alarm for the core's containment failing is sounding
         self.alarm = alarm;
+
+        // Number of times the ship has fired on the Earth, each new one
+        // setting off the long, deep blast of it
+        self.dooms = dooms;
 
         // Whether the music is playing
         self.music = music;
@@ -165,6 +169,7 @@ let var au_gun = 0.0;
 let var au_warn = false;
 let var au_alarm = false;
 let var au_crashes = 0;
+let var au_dooms = 0;
 
 // Smoothed values, so that nothing steps from one buffer to the next
 let var au_power = 0.0;
@@ -197,6 +202,21 @@ let var al_lp = 0.0;
 let var ex_env = 0.0;
 let var ex_lp = 0.0;
 let var ex_body = 0.0;
+let var dm_env = 0.0;
+let var dm_rise = 0.0;
+let var dm_drop = 0.0;
+let var dm_lp1 = 0.0;
+let var dm_lp2 = 0.0;
+let var dm_lp3 = 0.0;
+let var dm_phase = 0.0;
+
+// The blast of the shot at the Earth: how many seconds it takes to die
+// away to about a third, how long it takes to swell, and how loud it is
+let DOOM_DECAY = 2.2;
+let DOOM_SWELL = 0.25;
+let DOOM_LEVEL = 9.0;
+let dm_keep = (-1.0 / (DOOM_DECAY * SAMPLE_RATE)).exp();
+let dm_swell = 1.0 / (DOOM_SWELL * SAMPLE_RATE);
 let var th_lo1 = 0.0;
 let var th_bp1 = 0.0;
 let var th_lo2 = 0.0;
@@ -650,6 +670,24 @@ fun audio_fill(buf, n) {
             v = v + ex_lp * 2.2 + ex_body * 7.0;
         }
 
+        // The shot at the Earth: noise through three low passes, which
+        // close further as it dies away, over a sub bass that sinks in
+        // pitch. It swells for a moment, then rolls on for seconds.
+        if (dm_env > 0.0005) {
+            dm_env = dm_env * dm_keep;
+            dm_rise = (dm_rise + dm_swell).min(1.0);
+            dm_drop = dm_drop * 0.99999;
+            let level = dm_env * dm_rise;
+            let cut = 0.002 + 0.01 * dm_env;
+            dm_lp1 = dm_lp1 + (white - dm_lp1) * cut;
+            dm_lp2 = dm_lp2 + (dm_lp1 - dm_lp2) * cut;
+            dm_lp3 = dm_lp3 + (dm_lp2 - dm_lp3) * cut;
+            dm_phase = dm_phase + (24.0 + 26.0 * dm_drop) * step;
+            if (dm_phase >= 1.0) dm_phase = dm_phase - 1.0;
+            let sub = (dm_phase * tau).sin();
+            v = v + (dm_lp3 * 40.0 + sub * 0.5) * level * DOOM_LEVEL * 0.1;
+        }
+
         // The music fades in and out, and the sequencer holds its place
         // while it is silent
         if (mu_on) mu_gain = mu_gain + (1.0 - mu_gain) * 0.0002;
@@ -675,6 +713,12 @@ fun audio_set(state) {
     if (state.crashes != au_crashes) {
         au_crashes = state.crashes;
         ex_env = 1.0;
+    }
+    if (state.dooms != au_dooms) {
+        au_dooms = state.dooms;
+        dm_env = 1.0;
+        dm_rise = 0.0;
+        dm_drop = 1.0;
     }
 }
 
@@ -3678,6 +3722,33 @@ let CORE_FAIL_TIME = 25.0;
 // How long ago the containment failed, or less than nothing if it holds
 let var core_fail = -1.0;
 
+// If the mission clock runs out with the core whole, the ship fires on the
+// Earth. It shakes as pulses of red run down the core, faster and faster,
+// for so long, and then the shot goes. The pulses come so many a second
+// at first and at the end, and so many fit along the core at once.
+let CANNON_TIME = 8.0;
+let CANNON_PULSE_START = 0.8;
+let CANNON_PULSE_END = 9.0;
+let CANNON_PULSE_SPAN = 2.0;
+
+// How long ago the ship started to fire, or less than nothing if it has
+// not, and how many pulses have run down the core since
+let var cannon_time = -1.0;
+let var cannon_phase = 0.0;
+
+// How hard the ship shakes as it fires, at most, as a share of the jolt
+// of a hit, and how hard it is shaking now. With each pulse a red border
+// flashes round the display, up to so wide.
+let QUAKE_MOST = 2.5;
+let QUAKE_BORDER = 24.0;
+let var quake = 0.0;
+
+// Whether the shot has gone, and the Earth with it, and how long the view
+// takes to fade to black after
+let var earth_lost = false;
+let var cannon_booms = 0;
+let LOST_FADE = 4.0;
+
 // The core cracks like glass. A crack opens where a round strikes every
 // so many hits, and more open by themselves every so often once the
 // containment is failing, up to a most. Each runs out both ways from where
@@ -4385,7 +4456,22 @@ fun draw_core(seen) {
 
             if (tZ[0] >= NEAR_Z || tZ[1] >= NEAR_Z || tZ[2] >= NEAR_Z || tZ[3] >= NEAR_Z) {
                 let pulse = 1.0 - CORE_PULSE * (0.5 + 0.5 * (ring * 0.9 - anim_time * 5.0).sin());
-                let color = 0xFF000000 | ((er * pulse).floor() << 16) | ((eg * pulse).floor() << 8) | (eb * pulse).floor();
+                let var r = er * pulse;
+                let var g = eg * pulse;
+                let var b = eb * pulse;
+
+                // As the ship fires, pulses of red run down it from the top,
+                // each sharp at its front and trailing off behind
+                if (cannon_time >= 0.0 && cannon_time < CANNON_TIME) {
+                    let down = (CORE_RINGS - 1 - ring).to_f() / CORE_RINGS;
+                    let f = cannon_phase - down * CANNON_PULSE_SPAN;
+                    let back = f - f.floor();
+                    let red = (1.0 - back) * (1.0 - back) * (1.0 - back);
+                    r = lerp(r, 255.0, red);
+                    g = lerp(g, 20.0, red);
+                    b = lerp(b, 10.0, red);
+                }
+                let color = 0xFF000000 | (r.floor() << 16) | (g.floor() << 8) | b.floor();
                 fill_face(0, 1, 2, 3, color);
             }
 
@@ -4598,11 +4684,23 @@ fun core_look() {
     ce_r = lerp(((CORE_EDGE >> 16) & 0xFF).to_f(), CORE_RED_EDGE_R, red);
     ce_g = lerp(((CORE_EDGE >> 8) & 0xFF).to_f(), CORE_RED_EDGE_G, red);
     ce_b = lerp((CORE_EDGE & 0xFF).to_f(), CORE_RED_EDGE_B, red);
-    tint_r = lerp(FACET_R, FACET_RED_R, red);
-    tint_g = lerp(FACET_G, FACET_RED_G, red);
-    tint_b = lerp(FACET_B, FACET_RED_B, red);
+    // As the ship fires, the room flashes red with each pulse down the
+    // core, and the core's reflections with it
+    let var room = red;
+    let var mr = cw_r; let var mg = cw_g; let var mb = cw_b;
+    if (cannon_time >= 0.0 && cannon_time < CANNON_TIME) {
+        let back = cannon_phase - cannon_phase.floor();
+        let flash = (1.0 - back) * (1.0 - back) * (1.0 - back);
+        room = room.max(flash);
+        mr = lerp(mr, 255.0, flash);
+        mg = lerp(mg, 20.0, flash);
+        mb = lerp(mb, 10.0, flash);
+    }
+    tint_r = lerp(FACET_R, FACET_RED_R, room);
+    tint_g = lerp(FACET_G, FACET_RED_G, room);
+    tint_b = lerp(FACET_B, FACET_RED_B, room);
 
-    mirror_white = 0xFF000000 | (cw_r.floor() << 16) | (cw_g.floor() << 8) | cw_b.floor();
+    mirror_white = 0xFF000000 | (mr.floor() << 16) | (mg.floor() << 8) | mb.floor();
     mirror_edge = 0xFF000000 | (ce_r.floor() << 16) | (ce_g.floor() << 8) | ce_b.floor();
     mirror_glow = color_scale(mirror_edge, MIRROR_GLOW_DIM);
 }
@@ -4925,6 +5023,8 @@ class BandRequest {
         self.in_reactor = in_reactor;
         self.core_hits = core_hits;
         self.core_fail = core_fail;
+        self.cannon_time = cannon_time;
+        self.cannon_phase = cannon_phase;
         self.ck_angle = ck_angle;
         self.ck_y = ck_y;
         self.ck_born = ck_born;
@@ -4979,6 +5079,8 @@ fun worker_loop() {
         in_reactor = msg.in_reactor;
         core_hits = msg.core_hits;
         core_fail = msg.core_fail;
+        cannon_time = msg.cannon_time;
+        cannon_phase = msg.cannon_phase;
         ck_angle = msg.ck_angle;
         ck_y = msg.ck_y;
         ck_born = msg.ck_born;
@@ -5257,7 +5359,7 @@ let var crash_count = 0;
 let var wall_warn = false;
 
 // Seconds the mission is given, and how many of them are left
-let MISSION_TIME = 300.0;
+let MISSION_TIME = by_mode(300.0, 70.0);
 let var time_left = MISSION_TIME;
 
 // What is left of the shield, from 0 to 1, and how long it has been since
@@ -5325,6 +5427,10 @@ fun reset_flight() {
     core_fail = -1.0;
     clear_cracks();
     escaped = false;
+    cannon_time = -1.0;
+    cannon_phase = 0.0;
+    quake = 0.0;
+    earth_lost = false;
     clear_cannons();
 }
 
@@ -5527,6 +5633,16 @@ fun update_flight(dt) {
             } else place_fighter((cam_z - RESPAWN_BACK).max(START_Z));
         }
         return;
+    }
+
+    // Once out of the ship the run is won, and the fighter flies on as it
+    // is, its controls no longer answering
+    if (escaped) {
+        in_pitch = 0.0;
+        in_yaw = 0.0;
+        in_roll = 0.0;
+        in_thrust = 0.0;
+        in_boost = false;
     }
 
     update_spin(dt);
@@ -5999,6 +6115,33 @@ fun draw_hud() {
     } else if (core_fail >= 0.0) {
         draw_core_warning();
     }
+
+    if (cannon_time >= 0.0) draw_cannon_fire();
+}
+
+// While the ship fires, a red border flashes with each pulse down the
+// core, wider as they come faster. Once the shot has gone, the view fades
+// to black under the words that the run is lost.
+fun draw_cannon_fire() {
+    if (!earth_lost) {
+        let back = cannon_phase - cannon_phase.floor();
+        let charge = (cannon_time / CANNON_TIME).min(1.0);
+        let edge = (QUAKE_BORDER * (0.3 + 0.7 * charge) * (1.0 - back) * (1.0 - back)).floor();
+        if (edge > 0) {
+            fill_rect(0, 0, FRAME_WIDTH, edge, WARN_RED);
+            fill_rect(0, FRAME_HEIGHT - edge, FRAME_WIDTH, edge, WARN_RED);
+            fill_rect(0, 0, edge, FRAME_HEIGHT, WARN_RED);
+            fill_rect(FRAME_WIDTH - edge, 0, edge, FRAME_HEIGHT, WARN_RED);
+        }
+        return;
+    }
+
+    // The view fades slowly to black as the blast rolls on, and stays so
+    let dark = smoothstep(0.0, LOST_FADE, cannon_time - CANNON_TIME);
+    if (dark >= 1.0) frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, 0xFF000000);
+    else tint_frame(0, 0, 0, dark);
+    draw_text_centered(font_title, "THE EARTH IS DESTROYED.", CX.floor(), CY.floor() - 90, WARN_RED);
+    draw_text_centered(font_title, "YOU HAVE FAILED HUMANITY.", CX.floor(), CY.floor() - 40, WARN_RED);
 }
 
 fun draw_crash() {
@@ -7208,6 +7351,30 @@ fun update_sim(dt) {
     if (core_fail >= 0.0) core_fail = core_fail + dt;
     else if (core_hits >= CORE_STRENGTH) core_fail = 0.0;
     more_cracks();
+    update_cannon(dt);
+}
+
+// Once the mission clock runs out with the core still whole, the ship
+// fires. It shakes harder and harder as the pulses come faster, until the
+// shot goes and the shaking dies away.
+fun update_cannon(dt) {
+    if (cannon_time < 0.0) {
+        if (time_left > 0.0 || core_fail >= 0.0 || escaped) return;
+        cannon_time = 0.0;
+    }
+
+    cannon_time = cannon_time + dt;
+    let charge = (cannon_time / CANNON_TIME).min(1.0);
+    if (cannon_time < CANNON_TIME) {
+        cannon_phase = cannon_phase + lerp(CANNON_PULSE_START, CANNON_PULSE_END, charge * charge) * dt;
+        quake = QUAKE_MOST * charge.pow(1.5);
+    } else {
+        if (!earth_lost) {
+            earth_lost = true;
+            cannon_booms = cannon_booms + 1;
+        }
+        quake = (quake - dt).max(0.0);
+    }
 }
 
 // Tell the audio actor what it should be playing
@@ -7228,13 +7395,13 @@ fun send_audio() {
     // blow up in silence, there being no air to carry the sound.
     let booms = crash_count + hits_taken;
     let alarm = core_fail >= 0.0 && core_fail < CORE_FAIL_TIME && !escaped;
-    $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, alarm, booms, gain, music_on, false));
+    $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, alarm, booms, cannon_booms, gain, music_on, false));
 }
 
 // Jolt the view, less and less as a hit wears off
 fun shake_view() {
     let k = shake / SHAKE_TIME;
-    let amp = k * k;
+    let amp = (k * k).max(quake);
     let t = shake_phase * SHAKE_RATE;
     cam_pitch((t * 71.0).sin() * SHAKE_ANGLE * amp);
     cam_yaw((t * 53.0 + 1.3).sin() * SHAKE_ANGLE * amp);
@@ -7249,7 +7416,7 @@ fun render_frame() {
 
     // The shake is only in what is drawn, so the flight is left as it was
     let saved = [cam_x, cam_y, right_x, right_y, right_z, up_x, up_y, up_z, fwd_x, fwd_y, fwd_z];
-    if (shake > 0.0) shake_view();
+    if (shake > 0.0 || quake > 0.0) shake_view();
 
     render_world_parallel();
     draw_enemies();
@@ -7447,5 +7614,5 @@ stop_generator();
 stop_workers();
 
 // Shut the audio actor down
-$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, false, crash_count, 0.0, false, true));
+$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, false, crash_count, cannon_booms, 0.0, false, true));
 $actor_join(audio_id);
