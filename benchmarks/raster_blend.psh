@@ -17,6 +17,8 @@
 // pay for it.
 // Usage: plush benchmarks/raster_blend.psh [num_frames]
 
+from args import ArgParser;
+
 let FRAME_WIDTH = 512;
 let FRAME_HEIGHT = 512;
 
@@ -109,12 +111,10 @@ let L_MAX_FX = 16711680;
 // skip, the same way the texture gradients are limited below
 let L_LIMIT = 64.0;
 
-// Command-line argument for the number of frames to render
-let num_frames = $cmd_get_arg_or(1, "50").parse_int(10);
-if (num_frames == nil) {
-    $println("expected an integer number of frames");
-    $exit(1);
-}
+let args = ArgParser("Uniform-alpha blending of lit textured layers")
+    .pos_int("num_frames", 50, "Number of frames to render")
+    .parse_args();
+let num_frames = args.num_frames;
 // Screen position, texture coordinates and light of one vertex. The texture
 // coordinates are in texels, not normalized, and the light is the 0..255 scale
 // the texel is multiplied by, as a float so that it interpolates.

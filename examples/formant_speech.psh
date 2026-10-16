@@ -6,6 +6,7 @@
 // falling back to letter-to-sound rules for anything else.
 // Usage: plush examples/formant_speech.psh ["text to speak"] [out.wav]
 
+from args import ArgParser;
 from random import Xoshiro128;
 
 let rng = Xoshiro128(22222);
@@ -840,8 +841,12 @@ let DEFAULT_TEXT =
 
 fun main()
 {
-    let text = $cmd_get_arg_or(1, DEFAULT_TEXT);
-    let out_path = $cmd_get_arg_or(2, nil);
+    let args = ArgParser("Speak text with a formant synthesizer")
+        .pos_str("text", DEFAULT_TEXT, "Text to speak")
+        .pos_str("out", nil, "Write the audio to this WAV file instead of playing it")
+        .parse_args();
+    let text = args.text;
+    let out_path = args.out;
 
     let phonemes = text_to_phonemes(text);
     $println("Text: " + text);

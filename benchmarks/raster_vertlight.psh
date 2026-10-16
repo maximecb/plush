@@ -16,7 +16,9 @@
 // face until its lighting is even enough to get away with that. Per-vertex
 // lighting is what removes the subdivision, so this is the loop that has to
 // pay for it.
-// Usage: plush benchmarks/raster_light.psh [num_frames]
+// Usage: plush benchmarks/raster_vertlight.psh [num_frames]
+
+from args import ArgParser;
 
 let FRAME_WIDTH = 1024;
 let FRAME_HEIGHT = 1024;
@@ -104,12 +106,10 @@ let L_MAX_FX = 16711680;
 // skip, the same way the texture gradients are limited below
 let L_LIMIT = 64.0;
 
-// Command-line argument for the number of frames to render
-let num_frames = $cmd_get_arg_or(1, "50").parse_int(10);
-if (num_frames == nil) {
-    $println("expected an integer number of frames");
-    $exit(1);
-}
+let args = ArgParser("Textured triangle rasterization with per-vertex lighting")
+    .pos_int("num_frames", 50, "Number of frames to render")
+    .parse_args();
+let num_frames = args.num_frames;
 
 // Screen position, texture coordinates and light of one vertex. The texture
 // coordinates are in texels, not normalized, and the light is the 0..255 scale

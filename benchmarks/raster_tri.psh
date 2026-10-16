@@ -2,7 +2,9 @@
 //
 // Splits a 1024x1024 frame buffer into 8192 equal-area triangles and
 // rasterizes all of them, once per frame.
-// Usage: plush benchmarks/rasterize.psh [num_frames]
+// Usage: plush benchmarks/raster_tri.psh [num_frames]
+
+from args import ArgParser;
 
 let FRAME_WIDTH = 1024;
 let FRAME_HEIGHT = 1024;
@@ -11,12 +13,10 @@ let FRAME_HEIGHT = 1024;
 let GRID_COLS = 64;
 let GRID_ROWS = 64;
 
-// Command-line argument for the number of frames to render
-let num_frames = $cmd_get_arg_or(1, "300").parse_int(10);
-if (num_frames == nil) {
-    $println("expected an integer number of frames");
-    $exit(1);
-}
+let args = ArgParser("Triangle rasterization benchmark")
+    .pos_int("num_frames", 300, "Number of frames to render")
+    .parse_args();
+let num_frames = args.num_frames;
 
 class Vec2 {
     init(self, x, y) {

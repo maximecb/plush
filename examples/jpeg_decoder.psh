@@ -3,6 +3,7 @@
 // The default image is an 800-pixel-high copy of Hokusai's Great Wave.
 // Source: https://commons.wikimedia.org/wiki/File:Katsushika_Hokusai_-_Thirty-Six_Views_of_Mount_Fuji-_The_Great_Wave_Off_the_Coast_of_Kanagawa_-_Google_Art_Project.jpg
 
+from args import ArgParser;
 from jpeg import decode_jpeg;
 
 // Number of times the image is decoded to measure the decoding time
@@ -10,7 +11,10 @@ let NUM_RUNS = 5;
 
 // Load, time, and display one JPEG, keeping the window alive until closed.
 fun main() {
-    let path = $cmd_get_arg_or(1, "examples/data/great_wave_800.jpg");
+    let args = ArgParser("Decode a JPEG file, time it and show it in a window")
+        .pos_str("path", "examples/data/great_wave_800.jpg", "JPEG file to decode")
+        .parse_args();
+    let path = args.path;
     let data = $read_file(path);
     if (data == nil) {
         $println("Could not read JPEG: " + path);

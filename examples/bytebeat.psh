@@ -1,14 +1,16 @@
 // Partial ByteBeat imp: http://viznut.fi/texts-en/bytebeat_deep_analysis.html
 //
+// Usage: plush examples/bytebeat.psh ["bytebeat expr"] [seconds]
+//
 // at the moment, literals must be decimal
 //
 // thus far, only the following operators are supported; precedences taken
 // from https://en.wikipedia.org/wiki/Operators_in_C_and_C%2B%2B#Expression_evaluation_order
 
-let ops = ["*","&","|",">>","<<", "^", "-", "+", "/", "%"];
-let prc = [5, 11, 13, 7, 7, 12, 6, 6, 5, 5];
+from args import ArgParser;
 
-// cargo run examples/bytebeat.psh ["bytebeat expr"] [seconds]
+let ops =["*","&","|",">>","<<", "^", "-", "+", "/", "%"];
+let prc = [5, 11, 13, 7, 7, 12, 6, 6, 5, 5];
 
 //------------------------------------------------------------------------------
 // AST
@@ -169,14 +171,16 @@ fun texpr(pc) {
 // Playback
 
 fun main() {
+    let args = ArgParser("Play a bytebeat expression")
+        .pos_str("expr", "t*(t>>9|t>>13)&16", "Expression of the time t giving each sample")
+        .pos_int("seconds", 5, "How long to play")
+        .parse_args();
+
     let SAMPLE_RATE = 8000;
     let dev = $audio_open_output(SAMPLE_RATE, 1);
 
-    let s = $cmd_get_arg_or(1, "t*(t>>9|t>>13)&16");
-    let d = $cmd_get_arg_or(2, "x").parse_int(10);
-
-    let bb = texpr(ParseCtx(s));
-    let end_time = $time_current_ms() + (d==nil ? 5 : d)*1000;
+    let bb = texpr(ParseCtx(args.expr));
+    let end_time = $time_current_ms() + args.seconds * 1000;
 
     let var t = 0;
 
