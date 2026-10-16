@@ -246,9 +246,10 @@ if ($RunExample) {
 
 Say ''
 Say 'Try an example program:'
-Say '    plush --run-example guestbook'
 Say '    plush --run-example tremor'
+Say '    plush --run-example space_fighter'
 Say '    plush --run-example night_ride'
+Say '    plush --run-example guestbook'
 Say ''
 Say 'To list all available examples:'
 Say '    plush --list-examples'

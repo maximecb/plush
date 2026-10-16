@@ -31,12 +31,13 @@ irm https://maximecb.github.io/plush/install.ps1 | iex
 This downloads a prebuilt binary into `~/.plush` and adds it to your `PATH`. You
 don't need Rust or SDL2 to run it. Once installed, open
 a new terminal (or run `source ~/.plush/env` on macOS and Linux) and try one of
-the bundled examples:
+the many bundled example programs:
 
 ```sh
-plush --run-example guestbook
 plush --run-example tremor
+plush --run-example space_fighter
 plush --run-example night_ride
+plush --run-example guestbook
 plush --list-examples
 ```
 
@@ -120,9 +121,10 @@ cargo test
 
 To run a plush script:
 ```sh
-# See example programs under /examples, /benchmarks and /tests
+# See the many example programs under /examples, /benchmarks and /tests
 cargo run examples/helloworld.psh
 cargo run examples/plasma.psh
+cargo run --release examples/tremor.psh
 ```
 
 To start the REPL:
