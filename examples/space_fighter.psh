@@ -14,9 +14,9 @@
 //   plush examples/space_fighter.psh [workers]
 //   plush examples/space_fighter.psh --bench [num_frames] [shot_dir] [workers]
 //
-// Add --test-mode for a short run: a hangar, a gate, then the reactor.
+// Add --test-mode for a quick short run: a hangar, a gate, then the reactor.
 //
-// The world is drawn by eight render workers unless told otherwise.
+// The world is drawn by eight parallel render workers unless told otherwise.
 //
 //   up / down     spin the nose up / down
 //   left / right  spin left / right
@@ -123,13 +123,17 @@ let ALARM_PERIOD = 0.22;
 let ALARM_TONE = 0.14;
 let ALARM_HZ = 1050.0;
 let ALARM_DRIVE = 4.0;
-let ALARM_LEVEL = 0.3;
+let ALARM_LEVEL = 0.24;
 
 // What the main loop tells the audio actor
 class AudioState {
-    init(self, power, thrusters, gun, warn, alarm, crashes, gain, music, stop) {
+    init(self, power, thrusters, gun, warn, alarm, crashes, dooms, gain, music, stop) {
         // Whether the alarm for the core's containment failing is sounding
         self.alarm = alarm;
+
+        // Number of times the ship has fired on the Earth, each new one
+        // setting off the long, deep blast of it
+        self.dooms = dooms;
 
         // Whether the music is playing
         self.music = music;
@@ -165,6 +169,7 @@ let var au_gun = 0.0;
 let var au_warn = false;
 let var au_alarm = false;
 let var au_crashes = 0;
+let var au_dooms = 0;
 
 // Smoothed values, so that nothing steps from one buffer to the next
 let var au_power = 0.0;
@@ -197,6 +202,21 @@ let var al_lp = 0.0;
 let var ex_env = 0.0;
 let var ex_lp = 0.0;
 let var ex_body = 0.0;
+let var dm_env = 0.0;
+let var dm_rise = 0.0;
+let var dm_drop = 0.0;
+let var dm_lp1 = 0.0;
+let var dm_lp2 = 0.0;
+let var dm_lp3 = 0.0;
+let var dm_phase = 0.0;
+
+// The blast of the shot at the Earth: how many seconds it takes to die
+// away to about a third, how long it takes to swell, and how loud it is
+let DOOM_DECAY = 2.2;
+let DOOM_SWELL = 0.25;
+let DOOM_LEVEL = 9.0;
+let dm_keep = (-1.0 / (DOOM_DECAY * SAMPLE_RATE)).exp();
+let dm_swell = 1.0 / (DOOM_SWELL * SAMPLE_RATE);
 let var th_lo1 = 0.0;
 let var th_bp1 = 0.0;
 let var th_lo2 = 0.0;
@@ -650,6 +670,24 @@ fun audio_fill(buf, n) {
             v = v + ex_lp * 2.2 + ex_body * 7.0;
         }
 
+        // The shot at the Earth: noise through three low passes, which
+        // close further as it dies away, over a sub bass that sinks in
+        // pitch. It swells for a moment, then rolls on for seconds.
+        if (dm_env > 0.0005) {
+            dm_env = dm_env * dm_keep;
+            dm_rise = (dm_rise + dm_swell).min(1.0);
+            dm_drop = dm_drop * 0.99999;
+            let level = dm_env * dm_rise;
+            let cut = 0.002 + 0.01 * dm_env;
+            dm_lp1 = dm_lp1 + (white - dm_lp1) * cut;
+            dm_lp2 = dm_lp2 + (dm_lp1 - dm_lp2) * cut;
+            dm_lp3 = dm_lp3 + (dm_lp2 - dm_lp3) * cut;
+            dm_phase = dm_phase + (24.0 + 26.0 * dm_drop) * step;
+            if (dm_phase >= 1.0) dm_phase = dm_phase - 1.0;
+            let sub = (dm_phase * tau).sin();
+            v = v + (dm_lp3 * 40.0 + sub * 0.5) * level * DOOM_LEVEL * 0.1;
+        }
+
         // The music fades in and out, and the sequencer holds its place
         // while it is silent
         if (mu_on) mu_gain = mu_gain + (1.0 - mu_gain) * 0.0002;
@@ -675,6 +713,12 @@ fun audio_set(state) {
     if (state.crashes != au_crashes) {
         au_crashes = state.crashes;
         ex_env = 1.0;
+    }
+    if (state.dooms != au_dooms) {
+        au_dooms = state.dooms;
+        dm_env = 1.0;
+        dm_rise = 0.0;
+        dm_drop = 1.0;
     }
 }
 
@@ -2280,11 +2324,14 @@ fun hull_height(x, y) {
 }
 
 // The stars, as directions from the camera, and how bright each is
-let NUM_STARS = 600;
+let NUM_STARS = 2000;
 let star_x = Array.with_size(NUM_STARS, 0.0);
 let star_y = Array.with_size(NUM_STARS, 0.0);
 let star_z = Array.with_size(NUM_STARS, 0.0);
 let star_color = Array.with_size(NUM_STARS, 0);
+
+// The brightest are a pixel wider each way
+let star_big = Array.with_size(NUM_STARS, false);
 
 fun build_stars() {
     let gen = Xoshiro128(WORLD_SEED + 50);
@@ -2301,13 +2348,14 @@ fun build_stars() {
 
         // Most are faint, and some lean blue or yellow
         let level = gen.float(0.0, 1.0);
-        let b = (60.0 + 195.0 * level * level * level).floor();
+        let b = (110.0 + 145.0 * level * level).floor();
         let tint = gen.int(0, 3);
         let var r = b;
         let var bl = b;
         if (tint == 1) r = (b * 4).idiv(5);
         if (tint == 2) bl = (b * 4).idiv(5);
         star_color[i] = 0xFF000000 | (r << 16) | (b << 8) | bl;
+        star_big[i] = level > 0.93;
     }
 }
 
@@ -3615,6 +3663,22 @@ let STUB_LEN = 400.0;
 let STUB_STEPS = 5;
 let STUB_COLOR = 0xFF3A3D46;
 
+// The way out runs this far from the chamber to open space, drawn in so
+// many lengths, which are alternately lighter and darker so that the
+// speed shows. Its light falls off with distance from the camera. Round
+// its far mouth is the outside of the ship.
+let EXIT_LEN = 2400.0;
+let EXIT_END = REACTOR_END + EXIT_LEN;
+let EXIT_STEPS = 48;
+let EXIT_COLOR = 0xFF4A4E58;
+let EXIT_DARK = 0xFF40434C;
+let EXIT_DIM = 1800.0;
+let HULL_COLOR = 0xFF22242A;
+let HULL_REACH = 30000.0;
+
+// Whether the fighter has made it out of the ship through the way out
+let var escaped = false;
+
 // The facets: the corners of each, how many it has, its middle, the way
 // it faces and how bright its metal is. A facet with a mouth in it is
 // marked with which mouth.
@@ -3653,10 +3717,37 @@ let var core_struck = false;
 // The core cracks as it is hit, until after this many hits its
 // containment fails, and then there is this long before it goes
 let CORE_STRENGTH = 1000;
-let CORE_FAIL_TIME = 45.0;
+let CORE_FAIL_TIME = 25.0;
 
 // How long ago the containment failed, or less than nothing if it holds
 let var core_fail = -1.0;
+
+// If the mission clock runs out with the core whole, the ship fires on the
+// Earth. It shakes as pulses of red run down the core, faster and faster,
+// for so long, and then the shot goes. The pulses come so many a second
+// at first and at the end, and so many fit along the core at once.
+let CANNON_TIME = 8.0;
+let CANNON_PULSE_START = 0.8;
+let CANNON_PULSE_END = 9.0;
+let CANNON_PULSE_SPAN = 2.0;
+
+// How long ago the ship started to fire, or less than nothing if it has
+// not, and how many pulses have run down the core since
+let var cannon_time = -1.0;
+let var cannon_phase = 0.0;
+
+// How hard the ship shakes as it fires, at most, as a share of the jolt
+// of a hit, and how hard it is shaking now. With each pulse a red border
+// flashes round the display, up to so wide.
+let QUAKE_MOST = 2.5;
+let QUAKE_BORDER = 24.0;
+let var quake = 0.0;
+
+// Whether the shot has gone, and the Earth with it, and how long the view
+// takes to fade to black after
+let var earth_lost = false;
+let var cannon_booms = 0;
+let LOST_FADE = 4.0;
 
 // The core cracks like glass. A crack opens where a round strikes every
 // so many hits, and more open by themselves every so often once the
@@ -3681,24 +3772,30 @@ let CRACK_DEPTH = 3;
 let CRACK_BRANCHES = 3;
 let CRACK_SHRINK = 0.55;
 let CRACK_THIN = 0.65;
-let CRACK_DELAY_MIN = 0.5;
-let CRACK_DELAY_MAX = 2.0;
+let CRACK_DELAY_MIN = 0.05;
+let CRACK_DELAY_MAX = 0.2;
 
 let CRACK_COLOR = 0xFF08080A;
 
-// Once the containment fails the core turns red, over so many seconds:
-// its color in the middle and at its edges, and the tint its light gives
-// the facets
-let CORE_FAIL_FADE = 0.5;
+// Once the containment fails the core stays white, but pulses red, more
+// and more often: how many pulses a second at first and by the time it
+// goes, how much of the way through its turn each may come late, and how
+// many seconds a pulse takes to die away to about a third. Then its color
+// in the middle and at its edges when red, and the tint its light gives
+// the facets.
+let CORE_PULSE_START = 1.5;
+let CORE_PULSE_END = 10.0;
+let CORE_PULSE_JITTER = 0.5;
+let CORE_PULSE_DECAY = 0.6;
 let CORE_RED_R = 255.0;
-let CORE_RED_G = 40.0;
-let CORE_RED_B = 30.0;
+let CORE_RED_G = 0.0;
+let CORE_RED_B = 0.0;
 let CORE_RED_EDGE_R = 175.0;
 let CORE_RED_EDGE_G = 10.0;
 let CORE_RED_EDGE_B = 8.0;
 let FACET_RED_R = 250.0;
-let FACET_RED_G = 120.0;
-let FACET_RED_B = 110.0;
+let FACET_RED_G = 100.0;
+let FACET_RED_B = 100.0;
 
 // The core's colors and the facets' tint as they are this frame
 let var cw_r = 255.0;
@@ -3926,8 +4023,16 @@ fun set_facet(f) {
     fa_mz = fc_mz[f];
     if (dx * fa_nx + dy * fa_ny + dz * fa_nz >= 0.0) return false;
 
-    // Or is off to one side of the view
+    // From the way out only what lines up with its mouth can be seen
     let rad = fc_rad[f];
+    if (cam_z > REACTOR_END) {
+        let k = (cam_z - REACTOR_END) / (0.0 - dz).max(1.0);
+        let margin = rad * k;
+        if ((cam_x + dx * k - rc_x).abs() > HALF_W + margin) return false;
+        if ((cam_y + dy * k - rc_y).abs() > HALF_H + margin) return false;
+    }
+
+    // Or is off to one side of the view
     let ahead = dx * fwd_x + dy * fwd_y + dz * fwd_z + rad;
     if (ahead < 0.0) return false;
     let reach = ahead * FACET_VIEW + rad * 2.0;
@@ -4204,6 +4309,91 @@ fun draw_stub(z, dir) {
     }
 }
 
+// Draw a length of the way out, between two depths, with whichever of its
+// walls face the camera
+fun draw_exit_length(za, zb, color) {
+    let x0 = rc_x - HALF_W;
+    let x1 = rc_x + HALF_W;
+    let y0 = rc_y - HALF_H;
+    let y1 = rc_y + HALF_H;
+    let mid = (za + zb) * 0.5;
+    let light = 1.0 - 0.82 * smoothstep(0.0, EXIT_DIM, (mid - cam_z).abs());
+    let c = color_scale(color, light);
+    fog_k = 256;
+
+    if (cam_x > x0) {
+        view_corner(0, x0, y0, za); view_corner(1, x0, y1, za);
+        view_corner(2, x0, y1, zb); view_corner(3, x0, y0, zb);
+        fill_face(0, 1, 2, 3, c);
+    }
+    if (cam_x < x1) {
+        view_corner(0, x1, y0, za); view_corner(1, x1, y1, za);
+        view_corner(2, x1, y1, zb); view_corner(3, x1, y0, zb);
+        fill_face(0, 1, 2, 3, c);
+    }
+    if (cam_y > y0) {
+        view_corner(0, x0, y0, za); view_corner(1, x1, y0, za);
+        view_corner(2, x1, y0, zb); view_corner(3, x0, y0, zb);
+        fill_face(0, 1, 2, 3, c);
+    }
+    if (cam_y < y1) {
+        view_corner(0, x0, y1, za); view_corner(1, x1, y1, za);
+        view_corner(2, x1, y1, zb); view_corner(3, x0, y1, zb);
+        fill_face(0, 1, 2, 3, c);
+    }
+}
+
+// Draw the lengths of the way out that lie beyond the camera, furthest
+// first, or those between the chamber and the camera, again furthest
+// first
+fun draw_exit(beyond) {
+    let step = EXIT_LEN / EXIT_STEPS;
+    if (beyond) {
+        for (let var s = EXIT_STEPS - 1; s >= 0; --s) {
+            let za = REACTOR_END + s * step;
+            if (za + step <= cam_z) break;
+            let var color = EXIT_COLOR;
+            if (s % 2 == 1) color = EXIT_DARK;
+            draw_exit_length(za.max(cam_z), za + step, color);
+        }
+    } else {
+        for (let var s = 0; s < EXIT_STEPS; ++s) {
+            let za = REACTOR_END + s * step;
+            if (za >= cam_z) break;
+            let var color = EXIT_COLOR;
+            if (s % 2 == 1) color = EXIT_DARK;
+            draw_exit_length(za, (za + step).min(cam_z), color);
+        }
+    }
+}
+
+// Draw the outside of the ship round the far mouth of the way out, which
+// is only seen once out of it
+fun draw_exit_hull() {
+    if (cam_z <= EXIT_END) return;
+    let z = EXIT_END;
+    let x0 = rc_x - HALF_W;
+    let x1 = rc_x + HALF_W;
+    let y0 = rc_y - HALF_H;
+    let y1 = rc_y + HALF_H;
+    let far = HULL_REACH;
+    fog_k = 256;
+
+    view_corner(0, rc_x - far, rc_y - far, z); view_corner(1, rc_x + far, rc_y - far, z);
+    view_corner(2, rc_x + far, y0, z); view_corner(3, rc_x - far, y0, z);
+    fill_face(0, 1, 2, 3, HULL_COLOR);
+    view_corner(0, rc_x - far, y1, z); view_corner(1, rc_x + far, y1, z);
+    view_corner(2, rc_x + far, rc_y + far, z); view_corner(3, rc_x - far, rc_y + far, z);
+    fill_face(0, 1, 2, 3, HULL_COLOR);
+    view_corner(0, rc_x - far, y0, z); view_corner(1, x0, y0, z);
+    view_corner(2, x0, y1, z); view_corner(3, rc_x - far, y1, z);
+    fill_face(0, 1, 2, 3, HULL_COLOR);
+    view_corner(0, x1, y0, z); view_corner(1, rc_x + far, y0, z);
+    view_corner(2, rc_x + far, y1, z); view_corner(3, x1, y1, z);
+    fill_face(0, 1, 2, 3, HULL_COLOR);
+    draw_mouth_frame(EXIT_END, 1.0);
+}
+
 // Draw the pipes that frame a mouth, as round those of a hangar
 fun draw_mouth_frame(z, facing) {
     set_frame(rc_x - END_W, rc_y - END_H, z, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, facing);
@@ -4266,7 +4456,22 @@ fun draw_core(seen) {
 
             if (tZ[0] >= NEAR_Z || tZ[1] >= NEAR_Z || tZ[2] >= NEAR_Z || tZ[3] >= NEAR_Z) {
                 let pulse = 1.0 - CORE_PULSE * (0.5 + 0.5 * (ring * 0.9 - anim_time * 5.0).sin());
-                let color = 0xFF000000 | ((er * pulse).floor() << 16) | ((eg * pulse).floor() << 8) | (eb * pulse).floor();
+                let var r = er * pulse;
+                let var g = eg * pulse;
+                let var b = eb * pulse;
+
+                // As the ship fires, pulses of red run down it from the top,
+                // each sharp at its front and trailing off behind
+                if (cannon_time >= 0.0 && cannon_time < CANNON_TIME) {
+                    let down = (CORE_RINGS - 1 - ring).to_f() / CORE_RINGS;
+                    let f = cannon_phase - down * CANNON_PULSE_SPAN;
+                    let back = f - f.floor();
+                    let red = (1.0 - back) * (1.0 - back) * (1.0 - back);
+                    r = lerp(r, 255.0, red);
+                    g = lerp(g, 20.0, red);
+                    b = lerp(b, 10.0, red);
+                }
+                let color = 0xFF000000 | (r.floor() << 16) | (g.floor() << 8) | b.floor();
                 fill_face(0, 1, 2, 3, color);
             }
 
@@ -4430,11 +4635,48 @@ fun draw_cracks(seen) {
     }
 }
 
+// A random number from 0 to 1 for a whole number and a channel, the same
+// wherever it is worked out
+fun hash01(n, channel) {
+    let var h = (n * 374761393 + channel * 668265263) & 0x7FFFFFFF;
+    h = ((h ^ (h >> 13)) * 1274126177) & 0x7FFFFFFF;
+    h = h ^ (h >> 16);
+    return (h & 0xFFFFFF) / 16777216.0;
+}
+
+// Noise from 0 to 1 that wanders smoothly but at random as a number goes
+// up, which is the same in every actor given the same number
+fun time_noise(x, channel) {
+    let i = x.floor();
+    let f = x - i;
+    return lerp(hash01(i, channel), hash01(i + 1, channel), f * f * (3.0 - 2.0 * f));
+}
+
 // Work out the core's colors and the tint its light gives the facets this
-// frame, which turn from white to red once the containment fails
+// frame, which turn from white to red once the containment fails. From
+// then on its light wobbles, unevenly and by more and more, and the light
+// in the room with it.
 fun core_look() {
     let var red = 0.0;
-    if (core_fail >= 0.0) red = smoothstep(0.0, CORE_FAIL_FADE, core_fail);
+    if (core_fail >= 0.0) {
+        // The pulses come faster and faster, so they are counted at a rate
+        // that climbs as the time runs out. Each comes a random part of
+        // the way into its turn, snaps to red, and dies away.
+        let c = core_fail.min(CORE_FAIL_TIME);
+        let climb = (CORE_PULSE_END - CORE_PULSE_START) / CORE_FAIL_TIME;
+        let rate = CORE_PULSE_START + climb * c;
+        let x = CORE_PULSE_START * c + climb * c * c * 0.5;
+        let var n = x.floor();
+        let var at = n + CORE_PULSE_JITTER * hash01(n, 2);
+        if (at > x) {
+            n = n - 1;
+            at = n + CORE_PULSE_JITTER * hash01(n, 2);
+        }
+        if (n >= 0) {
+            let age = (x - at) / rate;
+            red = (0.0 - age / CORE_PULSE_DECAY).exp();
+        }
+    }
 
     cw_r = lerp(255.0, CORE_RED_R, red);
     cw_g = lerp(255.0, CORE_RED_G, red);
@@ -4442,11 +4684,23 @@ fun core_look() {
     ce_r = lerp(((CORE_EDGE >> 16) & 0xFF).to_f(), CORE_RED_EDGE_R, red);
     ce_g = lerp(((CORE_EDGE >> 8) & 0xFF).to_f(), CORE_RED_EDGE_G, red);
     ce_b = lerp((CORE_EDGE & 0xFF).to_f(), CORE_RED_EDGE_B, red);
-    tint_r = lerp(FACET_R, FACET_RED_R, red);
-    tint_g = lerp(FACET_G, FACET_RED_G, red);
-    tint_b = lerp(FACET_B, FACET_RED_B, red);
+    // As the ship fires, the room flashes red with each pulse down the
+    // core, and the core's reflections with it
+    let var room = red;
+    let var mr = cw_r; let var mg = cw_g; let var mb = cw_b;
+    if (cannon_time >= 0.0 && cannon_time < CANNON_TIME) {
+        let back = cannon_phase - cannon_phase.floor();
+        let flash = (1.0 - back) * (1.0 - back) * (1.0 - back);
+        room = room.max(flash);
+        mr = lerp(mr, 255.0, flash);
+        mg = lerp(mg, 20.0, flash);
+        mb = lerp(mb, 10.0, flash);
+    }
+    tint_r = lerp(FACET_R, FACET_RED_R, room);
+    tint_g = lerp(FACET_G, FACET_RED_G, room);
+    tint_b = lerp(FACET_B, FACET_RED_B, room);
 
-    mirror_white = 0xFF000000 | (cw_r.floor() << 16) | (cw_g.floor() << 8) | cw_b.floor();
+    mirror_white = 0xFF000000 | (mr.floor() << 16) | (mg.floor() << 8) | mb.floor();
     mirror_edge = 0xFF000000 | (ce_r.floor() << 16) | (ce_g.floor() << 8) | ce_b.floor();
     mirror_glow = color_scale(mirror_edge, MIRROR_GLOW_DIM);
 }
@@ -4459,21 +4713,31 @@ fun draw_reactor() {
     let dx = rc_x - cam_x;
     let dz = REACTOR_Z - cam_z;
     let seen = 1.0 - smoothstep(CORE_SEEN0, CORE_SEEN1, (dx * dx + dz * dz).sqrt());
-    if (seen <= 0.0) return;
+    if (seen <= 0.0 && !in_reactor) return;
     core_look();
 
-    // The facets come into view with the end of the tunnel
+    // The facets come into view with the end of the tunnel. The way out
+    // beyond the camera goes first, and what of it lies between the
+    // chamber and the camera goes last, as it is nearer than anything in
+    // the chamber.
     if (in_reactor || RUN_LEN - cam_z < FOG_END + SEC_LEN) {
         if (in_reactor) draw_stub(RUN_LEN, -1.0);
-        draw_stub(REACTOR_END, 1.0);
+        draw_exit(true);
         draw_facets();
         if (in_reactor && gate_near == gate_last) draw_gate_lit(gate_last, reactor_fog((RUN_LEN - cam_z).abs()));
         draw_mouth_frame(RUN_LEN, 1.0);
-        draw_mouth_frame(REACTOR_END, -1.0);
+        if (cam_z < REACTOR_END) draw_mouth_frame(REACTOR_END, -1.0);
     }
 
-    draw_core(seen);
-    draw_cracks(seen);
+    if (seen > 0.0) {
+        draw_core(seen);
+        draw_cracks(seen);
+    }
+
+    if (cam_z > REACTOR_END) {
+        draw_exit(false);
+        draw_exit_hull();
+    }
 }
 
 // Whether a place in the chamber, or in the tunnel that leaves it, is too
@@ -4484,6 +4748,7 @@ fun hits_reactor(x, y, z, margin) {
     let dz = z - REACTOR_Z;
     let in_mouth = dx.abs() <= HALF_W - margin && dy.abs() <= HALF_H - margin;
     core_struck = false;
+    if (z > EXIT_END) return false;
     if (z > REACTOR_END) return !in_mouth;
 
     let reach = CORE_R + margin;
@@ -4638,8 +4903,14 @@ fun draw_hull_node(n) {
 }
 
 // Draw the stars that fall on the part of the screen being drawn
+//
+// Where the far end of a tunnel is not drawn, nothing stands in front of
+// the stars there, so those that would show through it are left out. From
+// outside that is the mouth of the tunnel, and from inside the ship it is
+// everything but the far end of the way out.
 fun draw_stars() {
     let fb = frame_buffer;
+    let inside = in_reactor && cam_z < EXIT_END;
 
     for (let var i = 0; i < NUM_STARS; ++i) {
         let dx = star_x[i];
@@ -4648,10 +4919,28 @@ fun draw_stars() {
         let z = dx * fwd_x + dy * fwd_y + dz * fwd_z;
         if (z < 0.05) continue;
 
+        if (inside) {
+            if (dz <= 0.0) continue;
+            let t = (EXIT_END - cam_z) / dz;
+            if ((cam_x + dx * t - rc_x).abs() > HALF_W || (cam_y + dy * t - rc_y).abs() > HALF_H) continue;
+        } else if (cam_z < 0.0 && dz > 0.0) {
+            let t = (0.0 - cam_z) / dz;
+            if ((cam_x + dx * t).abs() < HALF_W && (cam_y + dy * t).abs() < HALF_H) continue;
+        }
+
         let x = (CX + FOCAL * (dx * right_x + dy * right_y + dz * right_z) / z).floor();
         let y = (CY - FOCAL * (dx * up_x + dy * up_y + dz * up_z) / z).floor();
-        if (x < 0 || x >= FRAME_WIDTH || y < render_y0 || y >= render_y1) continue;
-        fb.set_u32(y * FRAME_WIDTH + x, star_color[i]);
+        if (x < 1 || x >= FRAME_WIDTH - 1 || y < render_y0 || y >= render_y1) continue;
+        let at = y * FRAME_WIDTH + x;
+        fb.set_u32(at, star_color[i]);
+
+        if (star_big[i]) {
+            let dim = color_scale(star_color[i], 0.55);
+            fb.set_u32(at - 1, dim);
+            fb.set_u32(at + 1, dim);
+            if (y > render_y0) fb.set_u32(at - FRAME_WIDTH, dim);
+            if (y < render_y1 - 1) fb.set_u32(at + FRAME_WIDTH, dim);
+        }
     }
 }
 
@@ -4670,9 +4959,10 @@ fun render_world() {
     frame_buffer.fill_u32(render_y0 * FRAME_WIDTH, (render_y1 - render_y0) * FRAME_WIDTH, 0xFF000000);
     sort_walls();
 
-    // From outside, the stars are behind everything
+    // From outside, the stars are behind everything. From the chamber on
+    // they show through the far end of the way out.
     let outside = cam_z < 0.0;
-    if (outside) draw_stars();
+    if (outside || in_reactor) draw_stars();
 
     draw_reactor();
 
@@ -4733,6 +5023,8 @@ class BandRequest {
         self.in_reactor = in_reactor;
         self.core_hits = core_hits;
         self.core_fail = core_fail;
+        self.cannon_time = cannon_time;
+        self.cannon_phase = cannon_phase;
         self.ck_angle = ck_angle;
         self.ck_y = ck_y;
         self.ck_born = ck_born;
@@ -4787,6 +5079,8 @@ fun worker_loop() {
         in_reactor = msg.in_reactor;
         core_hits = msg.core_hits;
         core_fail = msg.core_fail;
+        cannon_time = msg.cannon_time;
+        cannon_phase = msg.cannon_phase;
         ck_angle = msg.ck_angle;
         ck_y = msg.ck_y;
         ck_born = msg.ck_born;
@@ -5025,10 +5319,26 @@ let var vel_x = 0.0;
 let var vel_y = 0.0;
 let var vel_z = 0.0;
 
-// How fast the fighter spins about each of its axes, in radians a second
-let var spin_pitch = 0.0;
-let var spin_yaw = 0.0;
-let var spin_roll = 0.0;
+// How fast the fighter spins about its pitch, turn and roll axes, in
+// radians a second. An axis is left free to spin, as it is at the start,
+// until its key is first pressed, and is held once the computer has
+// brought it to a stop.
+let spin = Array.with_size(3, 0.0);
+let spin_free = Array.with_size(3, false);
+let spin_held = Array.with_size(3, true);
+
+// The thrusters cannot stop a spin dead, nor hold one at nothing. A held
+// spin wanders, so much in a second at random, and once it gets past so
+// much either way the thrusters give it a puff back the other way, of so
+// much, which is heard for so long and at so much of full.
+let SPIN_WANDER = 0.002;
+let SPIN_DEADBAND = 0.3 * PI / 180.0;
+let SPIN_PUFF = 0.5 * PI / 180.0;
+let SPIN_PUFF_TIME = 0.06;
+let SPIN_PUFF_LEVEL = 0.4;
+
+let spin_rng = Xoshiro128(WORLD_SEED + 160);
+let var puff_timer = 0.0;
 
 // How hard the thrusters are working on the spin, from 0 to 1, for the
 // sound of them
@@ -5049,7 +5359,7 @@ let var crash_count = 0;
 let var wall_warn = false;
 
 // Seconds the mission is given, and how many of them are left
-let MISSION_TIME = 300.0;
+let MISSION_TIME = by_mode(300.0, 70.0);
 let var time_left = MISSION_TIME;
 
 // What is left of the shield, from 0 to 1, and how long it has been since
@@ -5066,7 +5376,8 @@ let var kills = 0;
 let var hits_taken = 0;
 let var aim_locked = false;
 
-let var music_on = true;
+// The music starts off in the short run
+let var music_on = !TEST_MODE;
 
 // Put the fighter in the middle of the tunnel at a depth, flying level
 fun place_fighter(z) {
@@ -5084,9 +5395,12 @@ fun place_fighter(z) {
     vel_x = 0.0;
     vel_y = 0.0;
     vel_z = speed;
-    spin_pitch = 0.0;
-    spin_yaw = 0.0;
-    spin_roll = 0.0;
+    for (let var a = 0; a < 3; ++a) {
+        spin[a] = 0.0;
+        spin_free[a] = false;
+        spin_held[a] = true;
+    }
+    puff_timer = 0.0;
     thrusters = 0.0;
     engine_on = false;
     boost_on = false;
@@ -5102,12 +5416,21 @@ fun place_fighter(z) {
 // Start the run over
 fun reset_flight() {
     place_fighter(START_Z);
+
+    // Already held, wandering a little
+    for (let var a = 0; a < 3; ++a) spin[a] = spin_rng.float(0.0 - SPIN_DEADBAND, SPIN_DEADBAND);
+
     time_left = MISSION_TIME;
     engine_heat = 0.0;
     engine_hot = false;
     core_hits = 0;
     core_fail = -1.0;
     clear_cracks();
+    escaped = false;
+    cannon_time = -1.0;
+    cannon_phase = 0.0;
+    quake = 0.0;
+    earth_lost = false;
     clear_cannons();
 }
 
@@ -5196,19 +5519,41 @@ fun hits_tunnel(x, y, z) {
 
 
 
-// Change a spin about one axis by a step: by the input if its key is
-// held, and otherwise back towards nothing. Returns how hard the
-// thrusters for that axis are working, from 0 to 1.
-let var spin_out = 0.0;
-
-fun fire_spin(spin, input, step) {
+// Change the spin about one axis over a time step, by a step at most: by
+// the input if its key is held, and otherwise back towards nothing, and
+// then held near it. Returns how hard the thrusters for that axis are
+// working, from 0 to 1.
+fun fire_spin(a, input, step, dt) {
+    let s = spin[a];
     if (input != 0.0) {
-        spin_out = spin + input * step;
+        spin[a] = s + input * step;
+        spin_free[a] = false;
+        spin_held[a] = false;
         return 1.0;
     }
-    let change = spin.clip(0.0 - step, step);
-    spin_out = spin - change;
-    return change.abs() / step;
+    if (spin_free[a]) return 0.0;
+
+    if (!spin_held[a]) {
+        let change = s.clip(0.0 - step, step);
+        spin[a] = s - change;
+        if (change.abs() < step) {
+            spin_held[a] = true;
+            spin[a] = spin_rng.float(0.0 - SPIN_DEADBAND, SPIN_DEADBAND);
+        }
+        return change.abs() / step;
+    }
+
+    // Held, the spin wanders until it is puffed back
+    let var held = s + spin_rng.normal(0.0, SPIN_WANDER * dt.sqrt());
+    if (held > SPIN_DEADBAND) {
+        held = held - SPIN_PUFF;
+        puff_timer = SPIN_PUFF_TIME;
+    } else if (held < 0.0 - SPIN_DEADBAND) {
+        held = held + SPIN_PUFF;
+        puff_timer = SPIN_PUFF_TIME;
+    }
+    spin[a] = held;
+    return 0.0;
 }
 
 // Spin the fighter about its axes, with the thrusters
@@ -5216,17 +5561,17 @@ fun update_spin(dt) {
     let step = SPIN_ACCEL * dt;
     let roll_step = SPIN_ROLL_ACCEL * dt;
 
-    let var firing = fire_spin(spin_pitch, in_pitch, step);
-    spin_pitch = spin_out;
-    firing = firing + fire_spin(spin_yaw, in_yaw, step);
-    spin_yaw = spin_out;
-    firing = firing + fire_spin(spin_roll, in_roll, roll_step);
-    spin_roll = spin_out;
+    let var firing = fire_spin(0, in_pitch, step, dt);
+    firing = firing + fire_spin(1, in_yaw, step, dt);
+    firing = firing + fire_spin(2, in_roll, roll_step, dt);
     thrusters = (firing * 0.6).min(1.0);
 
-    cam_pitch(spin_pitch * dt);
-    cam_yaw(spin_yaw * dt);
-    cam_roll(spin_roll * dt);
+    puff_timer = puff_timer - dt;
+    if (puff_timer > 0.0) thrusters = thrusters.max(SPIN_PUFF_LEVEL);
+
+    cam_pitch(spin[0] * dt);
+    cam_yaw(spin[1] * dt);
+    cam_roll(spin[2] * dt);
     cam_normalize();
 }
 
@@ -5290,6 +5635,16 @@ fun update_flight(dt) {
         return;
     }
 
+    // Once out of the ship the run is won, and the fighter flies on as it
+    // is, its controls no longer answering
+    if (escaped) {
+        in_pitch = 0.0;
+        in_yaw = 0.0;
+        in_roll = 0.0;
+        in_thrust = 0.0;
+        in_boost = false;
+    }
+
     update_spin(dt);
     update_engine(dt);
     damp_drift(dt);
@@ -5301,12 +5656,8 @@ fun update_flight(dt) {
 
     if (cam_z >= RUN_LEN) in_reactor = true;
 
-    // The way out of the chamber leads nowhere for now, and taking it
-    // starts the run over
-    if (cam_z > REACTOR_END + STUB_LEN * 0.6) {
-        reset_flight();
-        return;
-    }
+    // Out of the far end of the way out is open space
+    if (cam_z > EXIT_END) escaped = true;
 
     // The way back in is a dead end
     let dead_end = in_reactor && cam_z < RUN_LEN - STUB_LEN * 0.6;
@@ -5758,7 +6109,39 @@ fun draw_hud() {
         draw_text_centered(font_warn, "COLLISION", CX.floor(), CY.floor() + 90, WARN_RED);
     }
 
-    if (core_fail >= 0.0) draw_core_warning();
+    // Out of the ship with the core going, the run is won
+    if (escaped && core_fail >= 0.0) {
+        draw_text_centered(font_title, "YOU HAVE SAVED THE EARTH!", CX.floor(), CY.floor() - 70, HUD_ORANGE);
+    } else if (core_fail >= 0.0) {
+        draw_core_warning();
+    }
+
+    if (cannon_time >= 0.0) draw_cannon_fire();
+}
+
+// While the ship fires, a red border flashes with each pulse down the
+// core, wider as they come faster. Once the shot has gone, the view fades
+// to black under the words that the run is lost.
+fun draw_cannon_fire() {
+    if (!earth_lost) {
+        let back = cannon_phase - cannon_phase.floor();
+        let charge = (cannon_time / CANNON_TIME).min(1.0);
+        let edge = (QUAKE_BORDER * (0.3 + 0.7 * charge) * (1.0 - back) * (1.0 - back)).floor();
+        if (edge > 0) {
+            fill_rect(0, 0, FRAME_WIDTH, edge, WARN_RED);
+            fill_rect(0, FRAME_HEIGHT - edge, FRAME_WIDTH, edge, WARN_RED);
+            fill_rect(0, 0, edge, FRAME_HEIGHT, WARN_RED);
+            fill_rect(FRAME_WIDTH - edge, 0, edge, FRAME_HEIGHT, WARN_RED);
+        }
+        return;
+    }
+
+    // The view fades slowly to black as the blast rolls on, and stays so
+    let dark = smoothstep(0.0, LOST_FADE, cannon_time - CANNON_TIME);
+    if (dark >= 1.0) frame_buffer.fill_u32(0, FRAME_WIDTH * FRAME_HEIGHT, 0xFF000000);
+    else tint_frame(0, 0, 0, dark);
+    draw_text_centered(font_title, "THE EARTH IS DESTROYED.", CX.floor(), CY.floor() - 90, WARN_RED);
+    draw_text_centered(font_title, "YOU HAVE FAILED HUMANITY.", CX.floor(), CY.floor() - 40, WARN_RED);
 }
 
 fun draw_crash() {
@@ -6184,17 +6567,29 @@ let WAVE_MAX = 6.0;
 let ENEMY_REACH_X = HALF_W - 34.0;
 let ENEMY_REACH_Y = HALF_H - 28.0;
 
-// How close a round has to pass to hit a fighter, how many hits one takes,
-// and how close one has to come to ram the player
 // Fighters light themselves, so they show from further off than the walls
 let ENEMY_FOG_START = 700.0;
 let ENEMY_FOG_END = 2400.0;
 let ENEMY_HALO = 0xFF7050FF;
 
-// How far apart in height and in depth the fighters of a wave are scattered
-let WAVE_SPREAD_Y = 20.0;
-let WAVE_SPREAD_Z = 320.0;
+// How far the fighters of a wave are scattered across and in height, and
+// the least and most they are scattered in depth, which differs from one
+// wave to the next
+let WAVE_SPREAD_X = 50.0;
+let WAVE_SPREAD_Y = 50.0;
+let WAVE_SPREAD_Z_MIN = 50.0;
+let WAVE_SPREAD_Z_MAX = 300.0;
 
+// How many fighters a wave has at the start of the run and at its end,
+// give or take one, how the number grows in between, slowly at first and
+// faster towards the end, and the most there can be
+let WAVE_FIRST = 1.0;
+let WAVE_LAST = 6.0;
+let WAVE_GROWTH = 1.6;
+let WAVE_MOST = 7;
+
+// How close a round has to pass to hit a fighter, how many hits one takes,
+// and how close one has to come to ram the player
 let ENEMY_RADIUS = 7.0;
 let ENEMY_HITS = 3;
 let RAM_RADIUS = 9.0;
@@ -6231,7 +6626,7 @@ let var wave_timer = WAVE_MIN;
 
 // Bolts of plasma in flight. A negative age marks a free slot.
 let MAX_BOLTS = 32;
-let BOLT_SPEED = 430.0;
+let BOLT_SPEED = 500.0;
 let BOLT_LIFE = 5.0;
 let BOLT_LENGTH = 26.0;
 let BOLT_HIT = 4.5;
@@ -6262,7 +6657,15 @@ let var shake_phase = 0.0;
 
 // Fireballs where fighters have blown up
 let MAX_BLASTS = 8;
-let BLAST_LIFE = 0.7;
+let BLAST_LIFE = 0.55;
+let BLAST_BURST = 0.05;
+let BLAST_SIZE = 260.0;
+
+// How bright the light of a blast is when it covers what is behind it by
+// about two thirds
+let BLAST_SOFT = 160.0;
+let BLAST_BLUE = 0xFF8CC4FF;
+let BLAST_LIGHT = 0xFFE4F2FF;
 let bl_x = Array.with_size(MAX_BLASTS, 0.0);
 let bl_y = Array.with_size(MAX_BLASTS, 0.0);
 let bl_z = Array.with_size(MAX_BLASTS, 0.0);
@@ -6308,14 +6711,25 @@ fun clear_enemies() {
 
 // Bring on a wave, in one of a few formations around a point
 fun spawn_wave() {
-    let count = rng.int(3, 6);
+    // Waves grow from one fighter to several over the run, slowly at
+    // first and then faster, give or take one
+    let progress = (cam_z / RUN_LEN).clip(0.0, 1.0);
+    let size = WAVE_FIRST + (WAVE_LAST - WAVE_FIRST) * progress.pow(WAVE_GROWTH);
+    let count = ((size + 0.5).floor() + rng.int(-1, 2)).clip(1, WAVE_MOST);
+    let spread_z = rng.float(WAVE_SPREAD_Z_MIN, WAVE_SPREAD_Z_MAX);
+    if (!BENCH_MODE) {
+        $println("wave of " + count.to_s() + " at " + (cam_z * 0.001).format_decimals(1)
+            + " km, spread " + spread_z.floor().to_s() + " m");
+    }
+
     let shape = rng.int(0, 3);
-    let cx = rng.float(-0.4, 0.4) * ENEMY_REACH_X;
-    let cy = rng.float(-0.4, 0.4) * ENEMY_REACH_Y;
+    let cx = rng.float(-0.6, 0.6) * ENEMY_REACH_X;
+    let cy = rng.float(-0.6, 0.6) * ENEMY_REACH_Y;
 
     for (let var i = 0; i < count; ++i) {
         // Its place across the formation, from -1 to 1
-        let across = (i - (count - 1) * 0.5) / ((count - 1) * 0.5);
+        let var across = 0.0;
+        if (count > 1) across = (i - (count - 1) * 0.5) / ((count - 1) * 0.5);
         let var sx = across * 44.0;
         let var sy = 0.0;
         let var back = 0.0;
@@ -6330,9 +6744,11 @@ fun spawn_wave() {
             back = i * 70.0;
         }
 
-        // No two come on at quite the same height or distance
+        // No two come on at quite the same place, nor at the same distance,
+        // so that they come out of the fog one by one
+        sx = sx + rng.float(0.0 - WAVE_SPREAD_X, WAVE_SPREAD_X);
         sy = sy + rng.float(0.0 - WAVE_SPREAD_Y, WAVE_SPREAD_Y);
-        back = back + rng.float(0.0, WAVE_SPREAD_Z);
+        back = back + rng.float(0.0, spread_z);
 
         en_slot_x[i] = sx;
         en_slot_y[i] = sy;
@@ -6700,14 +7116,158 @@ fun draw_blasts() {
         view_point(bl_x[i], bl_y[i], bl_z[i]);
         if (pt_z < 3.0) continue;
 
+        // A white flash at the start, then a ball of blue light that
+        // bursts out all but at once, swells a little more and fades, with
+        // a white heart. It is seen through more of the fog than the
+        // tunnel is.
         let scale = FOCAL / pt_z;
         let t = age / BLAST_LIFE;
-        let fade = (1.0 - t) * (1.0 - t) * fog_at(pt_z);
-        let radius = ((7.0 + 55.0 * t) * scale).clip(3.0, 150.0);
+        let fog = fog_at(pt_z).sqrt();
+        let fade = (1.0 - t).pow(1.2) * fog;
+        let burst = (age / BLAST_BURST).min(1.0);
+        let size = BLAST_SIZE * (0.15 + 0.85 * burst * (2.0 - burst)) * (1.0 + 0.3 * t);
+        let radius = (size * scale).clip(6.0, 420.0);
         let x = CX + pt_x * scale;
         let y = CY - pt_y * scale;
-        glow_disc(x, y, radius, color_scale(0xFFFF7A20, fade));
-        glow_disc(x, y, radius * 0.45, color_scale(0xFFFFE8A0, fade));
+
+        // The flash is the white heart spread wide for a moment
+        let flash = (1.0 - t / 0.25).max(0.0);
+        let white_r = lerp(radius * 0.5, (radius * 1.6).min(480.0), flash);
+        let white_k = fade.max(flash * fog);
+        glow_blast(x, y, radius, fade, white_r, white_k);
+    }
+}
+
+// A blast is blended over the frame as a color with an alpha, both of
+// which depend only on how far a pixel is from its middle. They are laid
+// out in a table for each blast, by the squared distance as a share of the
+// blast's reach, so that a pixel costs a lookup and one packed blend. Each
+// entry holds the color already multiplied by its alpha, with its three
+// channels sixteen bits apart, and what is left of the alpha for the pixel
+// under it.
+let GLOW_STEPS = 512;
+let glow_src = Array.with_size(GLOW_STEPS + 1, 0);
+let glow_keep = Array.with_size(GLOW_STEPS + 1, 255);
+
+// How far out a layer of light still adds at least one step to a channel,
+// given how far it reaches and how much it adds at its middle
+fun glow_reach(radius, peak) {
+    if (peak <= 1.0) return 0.0;
+    return radius * (1.0 - (1.0 / peak).sqrt()).sqrt();
+}
+
+// Blend the blast whose table is laid out over a run of pixels, given the
+// first, how many there are, how far across the first is from the middle,
+// the row's squared distance from it, and the step through the table for
+// each unit of squared distance, in 16.16 fixed point. The squared distance
+// steps from one pixel to the next by adding odd numbers.
+fun glow_run(i0, count, dx0, dy2, scale) {
+    let fb = frame_buffer;
+    let src = glow_src;
+    let keep = glow_keep;
+    let end_i = i0 + count;
+    let var d2 = dx0 * dx0 + dy2;
+    let var step = 2 * dx0 + 1;
+    let var i = i0;
+    while (i < end_i) {
+        let k = (d2 * scale) >> 16;
+        let d = fb.get_u32(i);
+        let acc = src[k] + ((d & 0xFF00FF) | ((d & 0xFF00) << 24)) * keep[k];
+        fb.set_u32(i, 0xFF000000 | ((acc >> 8) & 0xFF00FF) | ((acc >> 32) & 0xFF00));
+        d2 = d2 + step;
+        step = step + 2;
+        i = i + 1;
+    }
+}
+
+// Blend in a blast: a pale blue glow out to one radius and a white one out
+// to another, each with a brightness. What the two would add over black is
+// turned into a color and an alpha. Where the alpha is whole, the pixels
+// are simply filled.
+fun glow_blast(cx, cy, r1, k1, r2, k2) {
+    let rr1 = r1.max(1.0);
+    let rr2 = r2.max(1.0);
+    let br = ((BLAST_BLUE >> 16) & 0xFF) * k1;
+    let bg = ((BLAST_BLUE >> 8) & 0xFF) * k1;
+    let bb = (BLAST_BLUE & 0xFF) * k1;
+    let w = 255.0 * k2;
+
+    // Nothing is drawn where it would add too little to show
+    let outer = glow_reach(rr1, bb).max(glow_reach(rr2, w)).min(FRAME_WIDTH.to_f());
+    if (outer < 1.0) return;
+    let outer2 = outer * outer;
+    let inv1 = outer2 / (rr1 * rr1);
+    let inv2 = outer2 / (rr2 * rr2);
+
+    let var solid = 0;
+    for (let var j = 0; j <= GLOW_STEPS; ++j) {
+        let s = j.to_f() / GLOW_STEPS;
+        let var r = 0.0;
+        let var g = 0.0;
+        let var b = 0.0;
+        let f1 = 1.0 - s * inv1;
+        if (f1 > 0.0) {
+            r = br * f1 * f1; g = bg * f1 * f1; b = bb * f1 * f1;
+        }
+        let f2 = 1.0 - s * inv2;
+        if (f2 > 0.0) {
+            let v = w * f2 * f2;
+            r = r + v; g = g + v; b = b + v;
+        }
+
+        // The alpha follows how bright it is overall, rolled off softly
+        // rather than cut at full, so the glow eases into white instead of
+        // ending in a hard edge. The color is the light's hue at full.
+        let lum = (r + g + b) / 3.0;
+        let alpha = (255.0 * (1.0 - (0.0 - lum / BLAST_SOFT).exp())).floor();
+        let top = r.max(g).max(b);
+        if (alpha < 1 || top <= 0.0 || j == GLOW_STEPS) {
+            glow_src[j] = 0;
+            glow_keep[j] = 255;
+            continue;
+        }
+        // Where it is brightest it burns white
+        let k = 255.0 / top;
+        let white = smoothstep(BLAST_SOFT, BLAST_SOFT * 3.0, lum);
+        let cr = lerp(r * k, 255.0, white).floor();
+        let cg = lerp(g * k, 255.0, white).floor();
+        let cb = lerp(b * k, 255.0, white).floor();
+        glow_src[j] = ((cr << 16) | cb | (cg << 32)) * alpha;
+        glow_keep[j] = 255 - alpha;
+        if (alpha == 255 && solid == j) solid = j + 1;
+    }
+
+    // Where every pixel turns the same solid color
+    let solid2 = solid.to_f() / GLOW_STEPS * outer2;
+    let solid_color = 0xFF000000 | ((glow_src[0] >> 8) & 0xFF00FF) | ((glow_src[0] >> 32) & 0xFF00);
+    let scale = (GLOW_STEPS * 65536.0 / outer2).floor();
+
+    let fb = frame_buffer;
+    let cxi = cx.floor();
+    let cyi = cy.floor();
+    let oi = outer.floor();
+    let y0 = (cyi - oi).max(0);
+    let y1 = (cyi + oi).min(FRAME_HEIGHT - 1);
+    for (let var y = y0; y <= y1; ++y) {
+        let dy = y - cyi;
+        let dy2 = dy * dy;
+        let half = (outer2 - dy2).max(0.0).sqrt().floor();
+        let x0 = (cxi - half).max(0);
+        let x1 = (cxi + half).min(FRAME_WIDTH - 1);
+        if (x0 > x1) continue;
+        let row = y * FRAME_WIDTH;
+
+        if (dy2 >= solid2) {
+            glow_run(row + x0, x1 - x0 + 1, x0 - cxi, dy2, scale);
+            continue;
+        }
+
+        let inner = (solid2 - dy2).sqrt().floor();
+        let xa = (cxi - inner).max(x0);
+        let xb = (cxi + inner).min(x1);
+        if (xa > x0) glow_run(row + x0, xa - x0, x0 - cxi, dy2, scale);
+        if (xb >= xa) fb.fill_u32(row + xa, xb - xa + 1, solid_color);
+        if (xb < x1) glow_run(row + xb + 1, x1 - xb, xb + 1 - cxi, dy2, scale);
     }
 }
 
@@ -6784,12 +7344,37 @@ fun update_sim(dt) {
     update_enemies(dt);
     update_cannons(dt);
     wall_warn = crash_timer <= 0.0 && wall_ahead();
-    time_left = (time_left - dt).max(0.0);
+    // The mission clock stops once the core's containment has failed
+    if (core_fail < 0.0) time_left = (time_left - dt).max(0.0);
 
     // Once the core has taken enough, its containment starts to fail
     if (core_fail >= 0.0) core_fail = core_fail + dt;
     else if (core_hits >= CORE_STRENGTH) core_fail = 0.0;
     more_cracks();
+    update_cannon(dt);
+}
+
+// Once the mission clock runs out with the core still whole, the ship
+// fires. It shakes harder and harder as the pulses come faster, until the
+// shot goes and the shaking dies away.
+fun update_cannon(dt) {
+    if (cannon_time < 0.0) {
+        if (time_left > 0.0 || core_fail >= 0.0 || escaped) return;
+        cannon_time = 0.0;
+    }
+
+    cannon_time = cannon_time + dt;
+    let charge = (cannon_time / CANNON_TIME).min(1.0);
+    if (cannon_time < CANNON_TIME) {
+        cannon_phase = cannon_phase + lerp(CANNON_PULSE_START, CANNON_PULSE_END, charge * charge) * dt;
+        quake = QUAKE_MOST * charge.pow(1.5);
+    } else {
+        if (!earth_lost) {
+            earth_lost = true;
+            cannon_booms = cannon_booms + 1;
+        }
+        quake = (quake - dt).max(0.0);
+    }
 }
 
 // Tell the audio actor what it should be playing
@@ -6806,16 +7391,17 @@ fun send_audio() {
     let var gain = 1.0;
     if (crashed) gain = 0.0;
 
-    // A crash, a kill and a hit on the shield each set off an explosion
-    let booms = crash_count + kills + hits_taken;
-    let alarm = core_fail >= 0.0 && core_fail < CORE_FAIL_TIME;
-    $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, alarm, booms, gain, music_on, false));
+    // A crash and a hit on the shield each set off an explosion. Enemies
+    // blow up in silence, there being no air to carry the sound.
+    let booms = crash_count + hits_taken;
+    let alarm = core_fail >= 0.0 && core_fail < CORE_FAIL_TIME && !escaped;
+    $actor_send(audio_id, AudioState(power, thrusters, gun, wall_warn, alarm, booms, cannon_booms, gain, music_on, false));
 }
 
 // Jolt the view, less and less as a hit wears off
 fun shake_view() {
     let k = shake / SHAKE_TIME;
-    let amp = k * k;
+    let amp = (k * k).max(quake);
     let t = shake_phase * SHAKE_RATE;
     cam_pitch((t * 71.0).sin() * SHAKE_ANGLE * amp);
     cam_yaw((t * 53.0 + 1.3).sin() * SHAKE_ANGLE * amp);
@@ -6830,7 +7416,7 @@ fun render_frame() {
 
     // The shake is only in what is drawn, so the flight is left as it was
     let saved = [cam_x, cam_y, right_x, right_y, right_z, up_x, up_y, up_z, fwd_x, fwd_y, fwd_z];
-    if (shake > 0.0) shake_view();
+    if (shake > 0.0 || quake > 0.0) shake_view();
 
     render_world_parallel();
     draw_enemies();
@@ -7028,5 +7614,5 @@ stop_generator();
 stop_workers();
 
 // Shut the audio actor down
-$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, false, crash_count, 0.0, false, true));
+$actor_send(audio_id, AudioState(0.0, 0.0, 0.0, false, false, crash_count, cannon_booms, 0.0, false, true));
 $actor_join(audio_id);
