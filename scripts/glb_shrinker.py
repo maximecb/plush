@@ -17,6 +17,7 @@ BIN_CHUNK = 0x004E4942
 
 COMP_SIZE = {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
 NUM_COMPS = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4, 'MAT2': 4, 'MAT3': 9, 'MAT4': 16}
+COMP_FORMAT = {5120: 'b', 5121: 'B', 5122: 'h', 5123: 'H', 5125: 'I', 5126: 'f'}
 
 # Keep the odd keys: with keys at (k + 1) / 24 s, the kept ones land on
 # multiples of 1/12 s, so the clips start and end on the 12fps grid
@@ -58,6 +59,38 @@ def is_full_rate(name, substrings):
     name = (name or '').lower()
     return any(s.lower() in name for s in substrings)
 
+def animation_frame_count(js, animation):
+    """Count frames on the most densely sampled track, rather than summing tracks."""
+    return max((js['accessors'][s['input']]['count'] for s in animation['samplers']), default=0)
+
+def animation_frame_rate(js, bin_chunk, animation):
+    """Infer sampling rates; two-key tracks do not establish a frame rate."""
+    rates = set()
+    variable = False
+    for ai in {s['input'] for s in animation['samplers']}:
+        a = js['accessors'][ai]
+        if a['count'] < 3:
+            continue
+        if a['componentType'] != 5126 or 'sparse' in a or 'bufferView' not in a:
+            return 'unknown fps'
+        bv = js['bufferViews'][a['bufferView']]
+        offset = bv.get('byteOffset', 0) + a.get('byteOffset', 0)
+        stride = bv.get('byteStride', 4)
+        times = [struct.unpack_from('<f', bin_chunk, offset + i * stride)[0]
+                 for i in range(a['count'])]
+        step = (times[-1] - times[0]) / (len(times) - 1)
+        # Allow for float32 rounding of exported timestamps.
+        tolerance = max(abs(step) * 1e-4, max(abs(t) for t in times) * 2e-7)
+        if step <= 0 or any(abs((b - a) - step) > tolerance
+                            for a, b in zip(times, times[1:])):
+            variable = True
+        else:
+            rates.add(round(1 / step, 3))
+    labels = [f'{rate:g} fps' for rate in sorted(rates)]
+    if variable:
+        labels.append('variable rate')
+    return ', '.join(labels) if labels else 'unknown fps (fewer than 3 keys)'
+
 def optimize_jpeg(data):
     """Re-encodes the Huffman tables of a JPEG without touching the pixels.
 
@@ -71,6 +104,68 @@ def optimize_jpeg(data):
         return None
     return r.stdout
 
+def image_dimensions(data):
+    """Read PNG/JPEG dimensions from headers without decoding the pixels."""
+    if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) >= 24 and data[12:16] == b'IHDR':
+        return struct.unpack_from('>II', data, 16)
+    if data.startswith(b'\xff\xd8'):
+        offset = 2
+        while offset < len(data):
+            if data[offset] != 0xff:
+                break
+            while offset < len(data) and data[offset] == 0xff:
+                offset += 1
+            if offset >= len(data):
+                break
+            marker = data[offset]
+            offset += 1
+            if marker in (0xd9, 0xda):  # End of image or start of pixel data
+                break
+            if marker in (0x01, 0xd8) or 0xd0 <= marker <= 0xd7:
+                continue
+            if offset + 2 > len(data):
+                break
+            size = struct.unpack_from('>H', data, offset)[0]
+            if size < 2 or offset + size > len(data):
+                break
+            if marker in (0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+                          0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf) and size >= 8:
+                height, width = struct.unpack_from('>HH', data, offset + 3)
+                return width, height
+            offset += size
+    return None
+
+def list_texture_resolutions(js, bin_chunk):
+    for i, im in enumerate(js.get('images', []), 1):
+        dimensions = None
+        if 'bufferView' in im:
+            bv = js['bufferViews'][im['bufferView']]
+            offset = bv.get('byteOffset', 0)
+            dimensions = image_dimensions(bin_chunk[offset:offset + bv['byteLength']])
+        resolution = f'{dimensions[0]}x{dimensions[1]}' if dimensions else 'unknown resolution'
+        name = im.get('name') or im.get('uri') or f'image {i}'
+        print(f"texture {i:02d} {name!r} ({resolution})")
+
+def should_halve_animation(js, bin_chunk, animation, full_rate_substrings):
+    if is_full_rate(animation.get('name'), full_rate_substrings):
+        return False
+    has_sampled_track = False
+    for ai in {s['input'] for s in animation['samplers']}:
+        a = js['accessors'][ai]
+        if a['count'] < 3:
+            continue
+        bv = js['bufferViews'][a['bufferView']]
+        offset = bv.get('byteOffset', 0) + a.get('byteOffset', 0)
+        stride = bv.get('byteStride', 4)
+        times = [struct.unpack_from('<f', bin_chunk, offset + i * stride)[0]
+                 for i in range(a['count'])]
+        # Preserve low-rate tracks, including those shared with other clips.
+        # A small tolerance accounts for float32 timestamp rounding at 12 fps.
+        if any(b - a >= 1 / 12 - 1e-5 for a, b in zip(times, times[1:])):
+            return False
+        has_sampled_track = True
+    return has_sampled_track
+
 def shrink(js, bin_chunk, remove_names, full_rate_substrings, quantize_rotations):
     accs = js['accessors']
     bvs = js['bufferViews']
@@ -83,8 +178,21 @@ def shrink(js, bin_chunk, remove_names, full_rate_substrings, quantize_rotations
         o = bv.get('byteOffset', 0) + a.get('byteOffset', 0)
         return bin_chunk[o:o + esz * a['count']], esz
 
+    def acc_values(a):
+        raw, _ = acc_bytes(a)
+        ct = a['componentType']
+        vals = struct.unpack('<%d%s' % (len(raw) // COMP_SIZE[ct], COMP_FORMAT[ct]), raw)
+        if a.get('normalized') and ct != 5126:
+            bits = 8 * COMP_SIZE[ct]
+            signed = ct in (5120, 5122)
+            scale = (1 << (bits - int(signed))) - 1
+            return tuple(max(-1.0, v / scale) for v in vals)
+        return vals
+
     all_anims = js.get('animations', [])
     anims = [an for an in all_anims if an.get('name') not in remove_names]
+    halve = {id(an): should_halve_animation(js, bin_chunk, an, full_rate_substrings)
+             for an in anims}
 
     def last_key(ai):
         raw, _ = acc_bytes(accs[ai])
@@ -98,14 +206,13 @@ def shrink(js, bin_chunk, remove_names, full_rate_substrings, quantize_rotations
             return False
         node = js['nodes'][target['node']]
         out = accs[sampler['output']]
-        if 'matrix' in node or out['componentType'] != 5126:
+        if 'matrix' in node:
             return False
         if sampler.get('interpolation', 'LINEAR') == 'CUBICSPLINE':
             return False
         rest = node.get(path, REST_TRS[path])
         nc = NUM_COMPS[out['type']]
-        raw, _ = acc_bytes(out)
-        vals = struct.unpack('<%df' % (len(raw) // 4), raw)
+        vals = acc_values(out)
         if len(rest) != nc or not vals:
             return False
         return all(abs(v - rest[i % nc]) < NOOP_EPS for i, v in enumerate(vals))
@@ -155,7 +262,7 @@ def shrink(js, bin_chunk, remove_names, full_rate_substrings, quantize_rotations
     # Accessors of animations that keep their keyframe rate
     full_accs = set()
     for an in anims:
-        if is_full_rate(an.get('name'), full_rate_substrings):
+        if not halve[id(an)]:
             for s in an['samplers']:
                 full_accs.update((s['input'], s['output']))
 
@@ -176,7 +283,7 @@ def shrink(js, bin_chunk, remove_names, full_rate_substrings, quantize_rotations
         dec[ai] = (out, len(keep) * per, n, per)
 
     for an in anims:
-        if is_full_rate(an.get('name'), full_rate_substrings):
+        if not halve[id(an)]:
             continue
         samplers = an['samplers']
         for s in samplers:
@@ -211,9 +318,7 @@ def shrink(js, bin_chunk, remove_names, full_rate_substrings, quantize_rotations
                 continue
             assert n == 2 and s['input'] not in other_accs
             out = accs[s['output']]
-            raw, _ = acc_bytes(out)
-            assert out['componentType'] == 5126
-            fv = struct.unpack('<%df' % (len(raw) // 4), raw)
+            fv = acc_values(out)
             half = len(fv) // 2
             assert all(abs(fv[i] - fv[half + i]) < 1e-5 for i in range(half)), \
                 'animated track with few keys'
@@ -370,9 +475,13 @@ def shrink(js, bin_chunk, remove_names, full_rate_substrings, quantize_rotations
 def main():
     parser = argparse.ArgumentParser(description="Shrink a GLB model")
     parser.add_argument("input", help="input .glb file")
-    parser.add_argument("output", help="output .glb file")
-    parser.add_argument("--remove-anim", action="append", default=[], metavar="NAME",
-                        help="remove the animation with this exact name (can be repeated)")
+    parser.add_argument("output", nargs='?', help="output .glb file (defaults to input)")
+    parser.add_argument("--list-anims", action="store_true",
+                        help="list animation numbers, names and inferred frame rates "
+                             "without modifying the file")
+    parser.add_argument("--remove-anim", action="append", default=[], metavar="NAME_OR_NUMBER",
+                        help="remove by exact name or 1-based number from the input listing "
+                             "(can be repeated; numbers may have leading zeros)")
     parser.add_argument("--keep-full-rate", action="append", metavar="TEXT",
                         help="keep the keyframe rate of animations with TEXT in their name, "
                              "ignoring case (can be repeated, replaces the default: "
@@ -390,26 +499,50 @@ def main():
     js, bin_chunk = read_glb(data)
 
     names = [an.get('name') for an in js.get('animations', [])]
-    for name in args.remove_anim:
-        if name not in names:
-            listing = "\n".join(f"  {n!r}" for n in names)
-            sys.exit(f"error: no animation named {name!r}, available:\n{listing}")
+    listing = "\n".join(
+        f"  {i:02d} {an.get('name')!r} "
+        f"({animation_frame_rate(js, bin_chunk, an).replace(' fps', 'fps')}, "
+        f"{animation_frame_count(js, an)} frames)"
+        for i, an in enumerate(js.get('animations', []), 1))
+    if args.list_anims:
+        print(listing or 'No animations.')
+        list_texture_resolutions(js, bin_chunk)
+        return
+    removed = set()
+    for selector in args.remove_anim:
+        if selector.isascii() and selector.isdecimal():
+            number = int(selector)
+            if not 1 <= number <= len(names):
+                sys.exit(f"error: animation number {selector} is out of range, available:\n{listing}")
+            removed.add(number - 1)
+        elif selector in names:
+            removed.update(i for i, name in enumerate(names) if name == selector)
+        else:
+            sys.exit(f"error: no animation named {selector!r}, available:\n{listing}")
+    js['animations'] = [an for i, an in enumerate(js.get('animations', [])) if i not in removed]
 
     if shutil.which('jpegtran') is None:
         print("note: jpegtran not found, JPEG images are left as they are")
 
-    new_bin, stats = shrink(js, bin_chunk, set(args.remove_anim), args.keep_full_rate,
+    halved = {id(an): should_halve_animation(js, bin_chunk, an, args.keep_full_rate)
+              for an in js['animations']}
+    new_bin, stats = shrink(js, bin_chunk, set(), args.keep_full_rate,
                             args.quantize_rotations)
-    total = write_glb(args.output, js, new_bin)
+    total = write_glb(args.output or args.input, js, new_bin)
 
+    for i in sorted(removed):
+        print(f"Removed {i + 1:02d} {names[i]}")
     print(f"{len(data)} -> {total} bytes")
     print(f"dropped {stats['dropped']} of {stats['channels']} channels that hold their node's transform")
     print(f"JPEG optimization saved {stats['jpeg_saved']} bytes")
+    list_texture_resolutions(js, new_bin)
     if args.quantize_rotations:
         print(f"rotations quantized, largest error {stats['quant_err']:.2e}")
-    for an in js.get('animations', []):
-        rate = "full rate" if is_full_rate(an.get('name'), args.keep_full_rate) else "halved"
-        print(f"kept {an.get('name')!r} ({rate})")
+    for i, an in enumerate(js.get('animations', []), 1):
+        rate = "halved" if halved[id(an)] else "full rate"
+        fps = animation_frame_rate(js, new_bin, an).replace(' fps', 'fps')
+        print(f"kept {i:02d} {an.get('name')!r} "
+              f"({rate}, {fps}, {animation_frame_count(js, an)} frames)")
 
 if __name__ == "__main__":
     main()
