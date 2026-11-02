@@ -1,0 +1,71 @@
+// Shows every character defined by the pixel font
+
+from image import Image, COLOR_BLACK, COLOR_WHITE, COLOR_RED, COLOR_GREEN, COLOR_BLUE;
+from pixelfont import PixelFont, GLYPHS;
+
+let SCALE = 2;
+let CHARS_PER_LINE = 40;
+let MARGIN = 20;
+
+// Collect the characters in codepoint order. The font covers Latin,
+// Latin-1, Cyrillic and a few symbols, so the whole BMP is scanned.
+let chars = [];
+for (let var cp = 0x20; cp <= 0xFF3F; ++cp) {
+    // Surrogates are not characters, and constructing one is an error
+    if (cp >= 0xD800 && cp <= 0xDFFF) {
+        continue;
+    }
+
+    let ch = String.from_codepoint(cp);
+    if (GLYPHS.has(ch)) {
+        chars.push(ch);
+    }
+}
+
+// One font per row color, all drawn on a black background
+let fonts = [
+    PixelFont(SCALE, COLOR_RED, COLOR_BLACK),
+    PixelFont(SCALE, COLOR_GREEN, COLOR_BLACK),
+    PixelFont(SCALE, COLOR_BLUE, COLOR_BLACK),
+    PixelFont(SCALE, COLOR_WHITE, COLOR_BLACK)
+];
+
+let char_w = fonts[0].char_w;
+let line_h = fonts[0].char_h + 8;
+let num_lines = (chars.len + CHARS_PER_LINE - 1).idiv(CHARS_PER_LINE);
+let width = 2 * MARGIN + CHARS_PER_LINE * char_w;
+let height = 2 * MARGIN + num_lines * line_h;
+
+$println("Pixel font: " + chars.len.to_s() + " characters");
+
+let frame_buffer = Image(width, height);
+frame_buffer.clear(COLOR_BLACK);
+
+for (let var i = 0; i < chars.len; ++i) {
+    let line = i.idiv(CHARS_PER_LINE);
+    let col = i % CHARS_PER_LINE;
+    let font = fonts[line % fonts.len];
+
+    font.draw_text(
+        frame_buffer,
+        MARGIN + col * char_w,
+        MARGIN + line * line_h,
+        chars[i]
+    );
+}
+
+let window = $window_create(width, height, "Pixel Font", 0);
+
+loop {
+    $window_draw_frame(window, frame_buffer.bytes);
+    $actor_sleep(50);
+
+    let msg = $actor_poll();
+
+    if (!(msg instanceof UIEvent)) {
+        continue;
+    }
+    if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
+        break;
+    }
+}

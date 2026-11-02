@@ -19,7 +19,7 @@
 
 from random import Xoshiro128;
 from image import Image, rgb, COLOR_BLACK, COLOR_WHITE, COLOR_RED, COLOR_GREY;
-from ./monogram_font import Font;
+from pixelfont import PixelFont;
 
 let rng = Xoshiro128(1);
 
@@ -929,16 +929,14 @@ fun beep_actor() {
 // --- Drawing helpers ---
 
 fun draw_text(img, font, x, y, text) {
-    for (let var i = 0; i < text.len; ++i) {
-        font.draw_char(img, x + i * font.char_w, y, text.char_at(i));
-    }
+    font.draw_text(img, x, y, text);
 }
 
 // The label being typed is kept as an array of one-character strings,
 // because a string has no way to drop its last character
 fun draw_chars(img, font, x, y, chars) {
     for (let var i = 0; i < chars.len; ++i) {
-        font.draw_char(img, x + i * font.char_w, y, chars[i]);
+        font.draw_text(img, x + i * font.char_w, y, chars[i]);
     }
 }
 
@@ -980,12 +978,12 @@ fun main() {
 
     // Characters are blitted opaquely, so each font carries the background it
     // will be drawn on
-    let font = Font(TEXT_SCALE, COLOR_WHITE, COLOR_BLACK);
-    let font_dim = Font(TEXT_SCALE, COLOR_GREY, COLOR_BLACK);
-    let font_box = Font(BOX_SCALE, COLOR_WHITE, COLOR_BOX);
-    let font_btn = Font(BOX_SCALE, COLOR_WHITE, COLOR_XBTN);
-    let font_lit = Font(TEXT_SCALE, COLOR_BLACK, COLOR_HILITE);
-    let font_noise_lit = Font(TEXT_SCALE, COLOR_WHITE, COLOR_NOISE_HILITE);
+    let font = PixelFont(TEXT_SCALE, COLOR_WHITE, COLOR_BLACK);
+    let font_dim = PixelFont(TEXT_SCALE, COLOR_GREY, COLOR_BLACK);
+    let font_box = PixelFont(BOX_SCALE, COLOR_WHITE, COLOR_BOX);
+    let font_btn = PixelFont(BOX_SCALE, COLOR_WHITE, COLOR_XBTN);
+    let font_lit = PixelFont(TEXT_SCALE, COLOR_BLACK, COLOR_HILITE);
+    let font_noise_lit = PixelFont(TEXT_SCALE, COLOR_WHITE, COLOR_NOISE_HILITE);
 
     let var running = true;
     let var recording = false;
@@ -1067,7 +1065,7 @@ fun main() {
                 );
 
                 screen.fill_rect(XBTN_X, BOX_Y, XBTN_W, BOX_H, COLOR_XBTN);
-                font_btn.draw_char(screen, XBTN_X + 12, BOX_Y + 5, "X");
+                font_btn.draw_text(screen, XBTN_X + 12, BOX_Y + 5, "X");
             }
 
             // The words that have samples, lit up while one is being heard

@@ -1,0 +1,110 @@
+from image import Image;
+from pixelfont import PixelFont;
+
+let FG = 0xFF_FF_FF_FF;
+let BG = 0xFF_00_00_FF;
+let PAPER = 0xFF_11_22_33;
+
+// Returns an image of a given size filled with the paper color
+fun paper(w, h) {
+    let img = Image(w, h);
+    img.clear(PAPER);
+    return img;
+}
+
+// Counts the pixels of an image that have a given color
+fun count_pixels(img, color) {
+    let var count = 0;
+    for (let var i = 0; i < img.width * img.height; ++i) {
+        if (img.bytes.get_u32(i) == color) ++count;
+    }
+    return count;
+}
+
+// Cell size follows the scale, rounded up for fractional scales
+let font1 = PixelFont(1, FG, BG);
+assert(font1.char_w == 7 && font1.char_h == 12);
+let font3 = PixelFont(3, FG, BG);
+assert(font3.char_w == 21 && font3.char_h == 36);
+let frac = PixelFont(1.57, FG, BG);
+assert(frac.char_w == 11 && frac.char_h == 19);
+
+// Width counts characters rather than bytes
+assert(font1.text_width("") == 0);
+assert(font1.text_width("abc") == 21);
+assert(font1.text_width("é—€") == 21);
+
+// "L" at scale 1 is a column of 7 pixels and a bottom row of 5, sharing a
+// corner. With a background, the rest of the cell is filled.
+let opaque = paper(10, 14);
+font1.draw_text(opaque, 1, 1, "L");
+assert(count_pixels(opaque, FG) == 11);
+assert(count_pixels(opaque, BG) == 7 * 12 - 11);
+assert(opaque.get_pixel(1, 4) == FG);
+assert(opaque.get_pixel(0, 0) == PAPER);
+
+// With a nil background, the same pixels are lit and the rest is untouched
+let clear_font = PixelFont(1, FG, nil);
+let clear = paper(10, 14);
+clear_font.draw_text(clear, 1, 1, "L");
+assert(count_pixels(clear, FG) == 11);
+assert(count_pixels(clear, PAPER) == 10 * 14 - 11);
+assert(clear.get_pixel(1, 4) == FG);
+
+// Both modes light the same pixels at integer scales
+let scaled_opaque = paper(20, 30);
+PixelFont(2, FG, BG).draw_text(scaled_opaque, 0, 0, "Q");
+let scaled_clear = paper(20, 30);
+PixelFont(2, FG, nil).draw_text(scaled_clear, 0, 0, "Q");
+assert(count_pixels(scaled_opaque, FG) == count_pixels(scaled_clear, FG));
+assert(count_pixels(scaled_opaque, FG) > 0);
+
+// Characters advance by one cell, and multi-byte ones by a single cell
+let line = paper(40, 12);
+font1.draw_text(line, 0, 0, "éL");
+let expected = paper(40, 12);
+font1.draw_text(expected, 0, 0, "é");
+font1.draw_text(expected, 7, 0, "L");
+for (let var i = 0; i < 40 * 12; ++i) {
+    assert(line.bytes.get_u32(i) == expected.bytes.get_u32(i));
+}
+
+// Undefined characters are drawn as the fallback and share a cache entry
+let unknown = paper(10, 12);
+font1.draw_text(unknown, 0, 0, "猫");
+let fallback = paper(10, 12);
+font1.draw_text(fallback, 0, 0, "▯");
+assert(count_pixels(unknown, FG) == count_pixels(fallback, FG));
+assert(count_pixels(unknown, FG) > 0);
+font1.draw_text(unknown, 0, 0, "犬");
+assert(!font1.glyphs.has("猫") && !font1.glyphs.has("犬"));
+
+// Text is clipped at every edge in both modes, without errors
+let fonts = [font3, PixelFont(3, FG, nil), frac, PixelFont(1.57, FG, nil)];
+for (let var i = 0; i < fonts.len; ++i) {
+    let small = paper(16, 16);
+    fonts[i].draw_text(small, -8, -8, "WM");
+    fonts[i].draw_text(small, 8, 8, "WM");
+    fonts[i].draw_text(small, -500, 0, "WM");
+    fonts[i].draw_text(small, 500, 500, "WM");
+    assert(count_pixels(small, FG) > 0);
+}
+
+// Clipping keeps only the visible part of a run
+let edge = paper(4, 12);
+clear_font.draw_text(edge, -1, 0, "_");
+assert(count_pixels(edge, FG) == 4);
+
+// Fractional scales blend edges against the background, opaquely
+let soft = paper(11, 19);
+frac.draw_text(soft, 0, 0, "A");
+assert(count_pixels(soft, PAPER) == 0);
+for (let var i = 0; i < 11 * 19; ++i) {
+    assert(soft.bytes.get_u32(i) >> 24 == 0xFF);
+}
+
+// A nil background draws crisp pixels at fractional scales
+let crisp = paper(11, 19);
+PixelFont(1.57, FG, nil).draw_text(crisp, 0, 0, "A");
+assert(count_pixels(crisp, FG) + count_pixels(crisp, PAPER) == 11 * 19);
+assert(count_pixels(crisp, FG) > 0);

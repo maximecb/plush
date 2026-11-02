@@ -1,19 +1,30 @@
+// Monospaced pixel font for drawing text into images
 //
-// Derived from:
-// Monogram 12x7 pixel font
-// by Vinícius Menézio (@vmenezio)
+//   from pixelfont import PixelFont;
+//
+//   let font = PixelFont(2, COLOR_WHITE, COLOR_BLACK);
+//   font.draw_text(img, 10, 10, "Hello");
+//   let width = font.text_width("Hello");
+//
+// Glyph data derived from Monogram by Vinícius Menézio (CC0)
 // https://datagoblin.itch.io/monogram
-//
 
-from image import *;
+from image import Image;
 
-// Character width and height
-let CHAR_W = 7;
-let CHAR_H = 12;
+// Width and height of a glyph in the source bitmaps
+let GLYPH_W = 7;
+let GLYPH_H = 12;
 
-// Map from unicode characters to bitmap data
-// There are 392 characters in total
-let char_map = {
+// Drawn in place of characters that the font doesn't define
+let FALLBACK_CHAR = "▯";
+
+// How much partially covered pixels are pushed away from half coverage,
+// which sharpens the edges of resampled glyphs
+let EDGE_CONTRAST = 1.55;
+
+// Map from unicode characters to bitmaps, one integer per row, with the
+// lowest bit as the leftmost pixel. There are 392 characters in total.
+let GLYPHS = {
     "0":[0,0,0,14,17,25,21,19,17,14,0,0],
     "1":[0,0,0,4,6,4,4,4,4,31,0,0],
     "2":[0,0,0,14,17,16,8,4,2,31,0,0],
@@ -121,7 +132,7 @@ let char_map = {
     "«":[0,0,0,0,0,18,9,18,0,0,0,0],
     "¬":[0,0,0,0,0,0,31,16,0,0,0,0],
     "®":[0,0,0,14,25,21,21,25,21,14,0,0],
-    "¯":[0,0,0,0,0,0,31,0,0,0,0,0],
+    "¯":[0,0,0,31,0,0,0,0,0,0,0,0],
     "°":[0,0,0,6,9,9,6,0,0,0,0,0],
     "±":[0,0,0,4,4,31,4,4,0,31,0,0],
     "²":[0,0,0,3,4,2,1,7,0,0,0,0],
@@ -220,16 +231,16 @@ let char_map = {
     "ď":[0,0,80,80,16,30,17,17,17,30,0,0],
     "Đ":[0,0,0,15,17,17,19,17,17,15,0,0],
     "đ":[0,0,16,60,16,30,17,17,17,30,0,0],
-    "Ē":[0,14,0,31,1,1,7,1,1,31,0,0],
+    "Ē":[0,14,0,31,1,1,15,1,1,31,0,0],
     "ē":[0,0,0,14,0,14,17,31,1,14,0,0],
-    "Ĕ":[10,4,0,31,1,1,7,1,1,31,0,0],
+    "Ĕ":[10,4,0,31,1,1,15,1,1,31,0,0],
     "ĕ":[0,0,10,4,0,14,17,31,1,14,0,0],
-    "Ė":[0,4,0,31,1,1,7,1,1,31,0,0],
+    "Ė":[0,4,0,31,1,1,15,1,1,31,0,0],
     "ė":[0,0,0,4,0,14,17,31,1,14,0,0],
-    "Ę":[0,0,0,31,1,1,7,1,1,31,4,24],
+    "Ę":[0,0,0,31,1,1,15,1,1,31,4,24],
     "ę":[0,0,0,0,0,14,17,31,1,30,4,24],
-    "Ě":[0,14,0,31,1,1,7,1,1,31,0,0],
-    "ě":[0,0,0,10,0,14,17,31,1,14,0,0],
+    "Ě":[10,4,0,31,1,1,15,1,1,31,0,0],
+    "ě":[0,0,10,4,0,14,17,31,1,14,0,0],
     "Ĝ":[4,10,0,14,17,1,29,17,17,14,0,0],
     "ĝ":[0,0,4,10,0,30,17,17,17,30,16,14],
     "Ğ":[10,4,0,14,17,1,29,17,17,14,0,0],
@@ -250,7 +261,7 @@ let char_map = {
     "ĭ":[0,0,10,4,0,6,4,4,4,31,0,0],
     "Į":[0,0,0,31,4,4,4,4,4,31,4,24],
     "į":[0,0,0,4,0,6,4,4,4,31,4,24],
-    "İ":[22,9,0,31,4,4,4,4,4,31,0,0],
+    "İ":[0,4,0,31,4,4,4,4,4,31,0,0],
     "ı":[0,0,0,0,0,6,4,4,4,31,0,0],
     "Ĳ":[0,0,0,23,18,18,18,18,18,15,0,0],
     "ĳ":[0,0,0,18,0,27,18,18,18,31,16,14],
@@ -260,9 +271,9 @@ let char_map = {
     "ķ":[0,0,0,1,1,17,9,7,9,17,4,4],
     "ĸ":[0,0,0,0,0,17,9,7,9,17,0,0],
     "Ĺ":[8,4,0,1,1,1,1,1,1,31,0,0],
-    "ĺ":[8,4,0,31,4,4,4,4,4,31,0,0],
+    "ĺ":[8,4,0,3,2,2,2,2,2,28,0,0],
     "Ļ":[0,0,0,1,1,1,1,1,1,31,8,6],
-    "ļ":[0,0,0,31,4,4,4,4,4,31,8,6],
+    "ļ":[0,0,0,3,2,2,2,2,2,28,8,6],
     "Ľ":[0,0,0,17,17,9,1,1,1,31,0,0],
     "ľ":[0,0,0,19,18,10,2,2,2,28,0,0],
     "Ŀ":[0,0,0,1,1,1,9,1,1,31,0,0],
@@ -275,7 +286,7 @@ let char_map = {
     "ņ":[0,0,0,0,0,15,17,17,17,17,4,3],
     "Ň":[10,4,0,17,17,19,21,25,17,17,0,0],
     "ň":[0,0,10,4,0,15,17,17,17,17,0,0],
-    "ŉ":[0,0,0,0,0,15,17,17,17,17,0,0],
+    "ŉ":[0,0,2,1,0,15,17,17,17,17,0,0],
     "Ŋ":[0,0,0,17,17,19,21,25,17,17,16,12],
     "ŋ":[0,0,0,0,0,15,17,17,17,17,16,12],
     "Ō":[0,14,0,14,17,17,17,17,17,14,0,0],
@@ -312,7 +323,7 @@ let char_map = {
     "ū":[0,0,0,14,0,17,17,17,17,30,0,0],
     "Ŭ":[10,4,0,17,17,17,17,17,17,14,0,0],
     "ŭ":[0,0,10,4,0,17,17,17,17,30,0,0],
-    "Ů":[10,4,0,17,17,17,17,17,17,14,0,0],
+    "Ů":[4,10,4,17,17,17,17,17,17,14,0,0],
     "ů":[0,4,10,4,0,17,17,17,17,30,0,0],
     "Ű":[20,10,0,17,17,17,17,17,17,14,0,0],
     "ű":[0,0,20,10,0,17,17,17,17,30,0,0],
@@ -395,7 +406,7 @@ let char_map = {
     "ю":[0,0,0,0,0,9,21,23,21,9,0,0],
     "я":[0,0,0,0,0,30,17,17,30,17,0,0],
     "ё":[0,0,0,10,0,14,17,31,1,14,0,0],
-    "—":[0,0,0,0,0,0,31,0,0,0,0,0],
+    "—":[0,0,0,0,0,0,127,0,0,0,0,0],
     "’":[0,0,0,8,4,0,0,0,0,0,0,0],
     "…":[0,0,0,0,0,0,0,0,21,21,0,0],
     "€":[0,0,0,12,18,7,2,7,18,12,0,0],
@@ -439,178 +450,192 @@ fun axis_weights(n_out, n_src)
     return [starts, weights];
 }
 
-class Font
+class PixelFont
 {
     // The scale can be fractional. The character cell is rounded up to whole
     // pixels and glyphs are resampled to fill it.
-    // Characters are blitted opaquely, so bg_color should match the
-    // background the text is drawn on
-    init(self, scale, color, bg_color)
+    //
+    // With a background color, each character cell is filled opaquely and
+    // edges are antialiased against that color. With a nil background, only
+    // lit pixels are drawn, so the image shows through around the letters.
+    // Edges are then not antialiased, because blending is slow.
+    init(self, scale, color, bg)
     {
         assert(scale instanceof Int64 || scale instanceof Float64);
+        assert(scale > 0);
         assert(color instanceof Int64);
-        assert(bg_color instanceof Int64);
+        assert(bg == nil || bg instanceof Int64);
 
         self.scale = scale;
         self.color = color;
-        self.bg_color = bg_color;
-        self.char_w = (CHAR_W.to_f() * scale.to_f()).ceil();
-        self.char_h = (CHAR_H.to_f() * scale.to_f()).ceil();
+        self.bg = bg;
+        self.char_w = (GLYPH_W.to_f() * scale.to_f()).ceil();
+        self.char_h = (GLYPH_H.to_f() * scale.to_f()).ceil();
 
-        let cols = axis_weights(self.char_w, CHAR_W);
-        let rows = axis_weights(self.char_h, CHAR_H);
+        let cols = axis_weights(self.char_w, GLYPH_W);
+        let rows = axis_weights(self.char_h, GLYPH_H);
         self.col_start = cols[0];
         self.col_weights = cols[1];
         self.row_start = rows[0];
         self.row_weights = rows[1];
 
-        // Cache of rendered characters
-        self.cache = {};
+        // Cache of rendered glyphs, created when a character is first drawn
+        self.glyphs = {};
+    }
+
+    // Width in pixels of a string. Multi-byte characters count as one.
+    text_width(self, str)
+    {
+        let var count = 0;
+
+        for (let var i = 0; i < str.len; ++i) {
+            if (str.char_at(i) != nil) ++count;
+        }
+
+        return count * self.char_w;
+    }
+
+    // Draw a string with its top left corner at (x, y), clipped to the image
+    draw_text(self, img, x, y, str)
+    {
+        let var cx = x;
+
+        for (let var i = 0; i < str.len; ++i) {
+            // Reading inside a multi-byte character gives nil
+            let ch = str.char_at(i);
+            if (ch == nil) continue;
+
+            if (self.bg == nil) {
+                self.fill_runs(img, cx, y, self.glyph(ch));
+            } else {
+                img.blit(self.glyph(ch), cx, y);
+            }
+
+            cx += self.char_w;
+        }
+    }
+
+    // Fill the runs of lit pixels of a glyph, clipped to the image
+    // This is used to render glyphs when the background is transparent
+    fill_runs(self, img, x, y, runs)
+    {
+        let bytes = img.bytes;
+        let width = img.width;
+        let height = img.height;
+        let color = self.color;
+
+        // Each run is stored as a row, a starting column and a length
+        for (let var i = 0; i < runs.len; i += 3) {
+            let py = y + runs[i];
+            if (py < 0 || py >= height) continue;
+
+            let start = x + runs[i + 1];
+            let x0 = start.max(0);
+            let x1 = (start + runs[i + 2]).min(width);
+
+            if (x1 > x0) {
+                bytes.fill_u32(py * width + x0, x1 - x0, color);
+            }
+        }
+    }
+
+    // Get the rendered form of a character, rendering it if needed
+    glyph(self, ch)
+    {
+        let cached = self.glyphs.get_or(ch, nil);
+        if (cached != nil) return cached;
+
+        // Undefined characters share one entry, so the cache stays bounded
+        let key = GLYPHS.has(ch) ? ch : FALLBACK_CHAR;
+
+        if (!self.glyphs.has(key)) {
+            let bitmap = GLYPHS[key];
+            self.glyphs[key] = self.bg == nil ? self.render_runs(bitmap) : self.render_image(bitmap);
+        }
+
+        return self.glyphs[key];
+    }
+
+    // Fraction of an output pixel covered by lit source pixels, by area
+    coverage(self, bitmap, ox, oy)
+    {
+        let wy = self.row_weights[oy];
+        let sy = self.row_start[oy];
+        let wx = self.col_weights[ox];
+        let sx = self.col_start[ox];
+        let var cov = 0.0;
+
+        for (let var j = 0; j < wy.len; ++j) {
+            let row = bitmap[sy + j];
+
+            for (let var i = 0; i < wx.len; ++i) {
+                if (((row >> (sx + i)) & 1) != 0) {
+                    cov += wy[j] * wx[i];
+                }
+            }
+        }
+
+        return cov;
     }
 
     // Blend the text color over the background by a coverage in [0, 1]
     mix(self, cov)
     {
-        // Steepen edges by pushing coverage away from 0.5. Fully covered
-        // and empty pixels are unchanged, so integer scales are unaffected.
-        let cov = (cov - 0.5) * 1.55 + 0.5;
-        if (cov <= 0.0) return self.bg_color;
-        if (cov >= 0.999999) return self.color;
+        // Fully covered and empty pixels are unchanged by the contrast,
+        // so integer scales are unaffected
+        let sharp = (cov - 0.5) * EDGE_CONTRAST + 0.5;
+        if (sharp <= 0.0) return self.bg;
+        if (sharp >= 0.999999) return self.color;
 
-        let fg = self.color;
-        let bg = self.bg_color;
-        let var out = 0xFF000000;
+        let var out = 0;
 
-        for (let var shift = 0; shift < 24; shift += 8) {
-            let b = (bg >> shift) & 0xFF;
-            let f = (fg >> shift) & 0xFF;
-            let c = b + ((f - b).to_f() * cov + 0.5).floor();
+        for (let var shift = 0; shift < 32; shift += 8) {
+            let b = (self.bg >> shift) & 0xFF;
+            let f = (self.color >> shift) & 0xFF;
+            let c = b + ((f - b).to_f() * sharp + 0.5).floor();
             out = out | (c << shift);
         }
 
         return out;
     }
 
-    // Render a single character into a bitmap image
-    render_char(self, ch)
+    // Render a bitmap into an opaque image, to be copied row by row
+    render_image(self, bitmap)
     {
-        if (self.cache.has(ch)) {
-            return self.cache[ch];
-        }
-
-        // Find the bitmap for this character
-        let bitmap = char_map.get_or(ch, char_map["▯"]);
-
         let img = Image(self.char_w, self.char_h);
 
-        // Each output pixel gets the area-weighted share of lit source pixels
         for (let var oy = 0; oy < self.char_h; ++oy) {
-            let wy = self.row_weights[oy];
-            let sy = self.row_start[oy];
-
             for (let var ox = 0; ox < self.char_w; ++ox) {
-                let wx = self.col_weights[ox];
-                let sx = self.col_start[ox];
-                let var cov = 0.0;
-
-                for (let var j = 0; j < wy.len; ++j) {
-                    let row = bitmap[sy + j];
-
-                    for (let var i = 0; i < wx.len; ++i) {
-                        if (((row >> (sx + i)) & 1) != 0) {
-                            cov += wy[j] * wx[i];
-                        }
-                    }
-                }
-
-                img.set_pixel(ox, oy, self.mix(cov));
+                img.set_pixel(ox, oy, self.mix(self.coverage(bitmap, ox, oy)));
             }
         }
 
-        self.cache[ch] = img;
         return img;
     }
 
-    // Blit a character into a frame buffer
-    draw_char(self, dst, x, y, ch)
+    // Render a bitmap into a flat array of runs of lit pixels, for fill_runs()
+    render_runs(self, bitmap)
     {
-        let ch = self.render_char(ch);
-        dst.blit(ch, x, y);
-    }
-}
+        let runs = [];
 
-// Demo showing every character the font defines. Everything lives inside
-// main() so that units importing this one only pick up the font code.
-fun main()
-{
-    let SCALE = 2;
-    let CHARS_PER_LINE = 40;
-    let MARGIN = 20;
+        for (let var oy = 0; oy < self.char_h; ++oy) {
+            let var start = -1;
 
-    // Collect the characters in codepoint order. The font covers Latin,
-    // Latin-1, Cyrillic and a few symbols, so the whole BMP is scanned.
-    let chars = [];
-    for (let var cp = 0x20; cp <= 0xFF3F; ++cp) {
-        // Surrogates are not characters, and constructing one is an error
-        if (cp >= 0xD800 && cp <= 0xDFFF) {
-            continue;
+            for (let var ox = 0; ox <= self.char_w; ++ox) {
+                // The position past the row's end closes any open run
+                let lit = ox < self.char_w && self.coverage(bitmap, ox, oy) >= 0.5;
+
+                if (lit && start < 0) {
+                    start = ox;
+                } else if (!lit && start >= 0) {
+                    runs.push(oy);
+                    runs.push(start);
+                    runs.push(ox - start);
+                    start = -1;
+                }
+            }
         }
 
-        let ch = String.from_codepoint(cp);
-        if (char_map.has(ch)) {
-            chars.push(ch);
-        }
+        return runs;
     }
-
-    let num_lines = (chars.len + CHARS_PER_LINE - 1).idiv(CHARS_PER_LINE);
-    let line_h = CHAR_H * SCALE + 8;
-    let width = 2 * MARGIN + CHARS_PER_LINE * CHAR_W * SCALE;
-    let height = 2 * MARGIN + num_lines * line_h;
-
-    // One font per row color, all drawn on a black background
-    let fonts = [
-        Font(SCALE, COLOR_RED, COLOR_BLACK),
-        Font(SCALE, COLOR_GREEN, COLOR_BLACK),
-        Font(SCALE, COLOR_BLUE, COLOR_BLACK),
-        Font(SCALE, COLOR_WHITE, COLOR_BLACK)
-    ];
-
-    $println("Monogram font: " + chars.len.to_s() + " characters");
-
-    let frame_buffer = Image(width, height);
-    frame_buffer.clear(COLOR_BLACK);
-
-    for (let var i = 0; i < chars.len; ++i) {
-        let line = i.idiv(CHARS_PER_LINE);
-        let col = i % CHARS_PER_LINE;
-        let font = fonts[line % fonts.len];
-
-        font.draw_char(
-            frame_buffer,
-            MARGIN + col * font.char_w,
-            MARGIN + line * line_h,
-            chars[i]
-        );
-    }
-
-    let window = $window_create(width, height, "Monogram Font", 0);
-
-    loop {
-        $window_draw_frame(window, frame_buffer.bytes);
-        $actor_sleep(50);
-
-        let msg = $actor_poll();
-
-        if (!(msg instanceof UIEvent)) {
-            continue;
-        }
-        if (msg.kind == 'CLOSE_WINDOW' || (msg.kind == 'KEY_DOWN' && msg.key == 'ESCAPE')) {
-            break;
-        }
-    }
-}
-
-// Only run the demo if this is the main unit, not when this unit is imported
-if ($MAIN_UNIT) {
-    main();
 }

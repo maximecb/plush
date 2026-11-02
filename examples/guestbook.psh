@@ -34,7 +34,7 @@ from args import ArgParser;
 from image import Image, rgb, RAINBOW12, decode_tga;
 from json import parse_json, format_json;
 from sha256 import sha256;
-from ./monogram_font import Font;
+from pixelfont import PixelFont;
 
 let DEFAULT_SERVER = "plushlang.org:1337";
 let LOCAL_SERVER = "127.0.0.1:1337";
@@ -1883,7 +1883,7 @@ class App
         let key = scale.to_s() + ":" + color.to_s() + ":" + bg.to_s();
 
         if (!self.fonts.has(key))
-            self.fonts[key] = Font(scale, color, bg);
+            self.fonts[key] = PixelFont(scale, color, bg);
 
         return self.fonts[key];
     }
@@ -1891,11 +1891,7 @@ class App
     // Draws a line of text into an image
     text(self, img, x, y, str, color, bg)
     {
-        let font = self.font(2, color, bg);
-        let cs = chars(str);
-
-        for (let var i = 0; i < cs.len; ++i)
-            font.draw_char(img, x + i * CHAR_W, y, cs[i]);
+        self.font(2, color, bg).draw_text(img, x, y, str);
     }
 
     // Draws a line of text centered horizontally in the frame
@@ -3315,16 +3311,7 @@ class App
     // Draws text into an image, leaving what is around its letters as it is
     stamp(self, img, x, y, str, scale, color)
     {
-        let font = self.font(scale, color, 0);
-
-        for (let var i = 0; i < str.len; ++i) {
-            let ch = font.render_char(str.char_at(i));
-
-            for (let var j = 0; j < ch.width * ch.height; ++j) {
-                if (ch.bytes.get_u32(j) != 0)
-                    img.set_pixel(x + i * ch.width + j % ch.width, y + j.idiv(ch.width), color);
-            }
-        }
+        self.font(scale, color, nil).draw_text(img, x, y, str);
     }
 
     // Picture of a circuit node other than a wire, in a cell of c pixels:

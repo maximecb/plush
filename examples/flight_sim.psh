@@ -34,7 +34,7 @@ from args import ArgParser;
 from noise import FractalNoise;
 from image import Image, save_tga;
 from random import Xoshiro128;
-from ./monogram_font import Font;
+from pixelfont import PixelFont;
 
 let rng = Xoshiro128(2025);
 
@@ -1914,11 +1914,14 @@ let HUD_SHADOW = 0xFF000000;
 let WARN_RED = 0xFFFF2A1E;
 let CRASH_RED = 0xFFFF1A10;
 
-// Glyphs are rendered on a background of zero and used as masks
-let font_small = Font(1, HUD_GREEN, 0);
-let font_large = Font(2, HUD_GREEN, 0);
-let font_warn = Font(4, HUD_GREEN, 0);
-let font_title = Font(5, HUD_GREEN, 0);
+// A nil background draws text directly over the scene
+let font_small = PixelFont(1, HUD_GREEN, nil);
+let font_large = PixelFont(2, HUD_GREEN, nil);
+let font_warn = PixelFont(4, HUD_GREEN, nil);
+let font_title = PixelFont(5, HUD_GREEN, nil);
+
+// Fonts in colors other than that of the display
+let recolored_fonts = {};
 
 // Lines are clipped to this rectangle
 let var clip_x0 = 0;
@@ -1988,33 +1991,23 @@ fun hud_frame(x, y, w, h) {
     hud_rect(x + w - 1, y, 1, h);
 }
 
-// Paint the lit pixels of a glyph in one color
-fun draw_glyph(glyph, x, y, color) {
-    let fb = frame_buffer;
-    let bits = glyph.bytes;
-    let w = glyph.width;
+// Get a font of the same scale as a given one, in another color
+fun in_color(font, color) {
+    if (color == font.color) return font;
 
-    for (let var gy = 0; gy < glyph.height; ++gy) {
-        let py = y + gy;
-        if (py < 0 || py >= FRAME_HEIGHT) continue;
-
-        for (let var gx = 0; gx < w; ++gx) {
-            let px = x + gx;
-            if (px < 0 || px >= FRAME_WIDTH) continue;
-            if (bits.get_u32(gy * w + gx) != 0) fb.set_u32(py * FRAME_WIDTH + px, color);
-        }
+    let key = font.scale.to_s() + ":" + color.to_s();
+    if (!recolored_fonts.has(key)) {
+        recolored_fonts[key] = PixelFont(font.scale, color, nil);
     }
+
+    return recolored_fonts[key];
 }
 
 // Draw a string with its top left corner at (x, y), over a drop shadow
 // that keeps it readable against snow and sky
 fun draw_text(font, text, x, y, color) {
-    for (let var i = 0; i < text.len; ++i) {
-        let glyph = font.render_char(text.char_at(i));
-        let gx = x + i * font.char_w;
-        draw_glyph(glyph, gx + 1, y + 1, HUD_SHADOW);
-        draw_glyph(glyph, gx, y, color);
-    }
+    in_color(font, HUD_SHADOW).draw_text(frame_image, x + 1, y + 1, text);
+    in_color(font, color).draw_text(frame_image, x, y, text);
 }
 
 // Draw a string in the color of the display
@@ -2024,7 +2017,7 @@ fun hud_text(font, text, x, y) {
 
 // Draw a string centered on a point
 fun hud_text_centered(font, text, cx, cy) {
-    hud_text(font, text, cx - (text.len * font.char_w).idiv(2), cy - font.char_h.idiv(2));
+    hud_text(font, text, cx - font.text_width(text).idiv(2), cy - font.char_h.idiv(2));
 }
 
 // Angle of the point (x, y) from the x axis, in radians

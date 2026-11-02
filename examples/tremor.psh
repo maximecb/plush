@@ -53,7 +53,7 @@
 
 from args import ArgParser;
 from image import Image, load_tga, save_tga;
-from ./monogram_font import Font;
+from pixelfont import PixelFont;
 from random import Xoshiro128;
 
 let args = ArgParser("Walk around a texture-mapped level, Quake style")
@@ -3618,15 +3618,12 @@ if (args.bench) {
 }
 
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Tremor", 0);
-let fps_font = Font(2, 0xFFFFFFFF, 0xFF000000);
+let fps_font = PixelFont(2, 0xFFFFFFFF, 0xFF000000);
 let FPS_FIELD_WIDTH = 5;
 let var fps_text = "FPS: " + "--".lpad(FPS_FIELD_WIDTH, " ");
 
 fun draw_fps_counter() {
-    let x0 = FRAME_WIDTH - fps_text.len * fps_font.char_w - 8;
-    for (let var i = 0; i < fps_text.len; ++i) {
-        fps_font.draw_char(frame_image, x0 + i * fps_font.char_w, 8, fps_text.char_at(i));
-    }
+    fps_font.draw_text(frame_image, FRAME_WIDTH - fps_font.text_width(fps_text) - 8, 8, fps_text);
 }
 
 // Hide the cursor and aim with raw mouse motion. SDL suspends this while the

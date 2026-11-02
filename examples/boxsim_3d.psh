@@ -26,7 +26,7 @@
 from args import ArgParser;
 from image import Image, save_tga, COLOR_BLACK, COLOR_WHITE;
 from random import Xoshiro128;
-from ./monogram_font import Font;
+from pixelfont import PixelFont;
 
 // Physics runs at 240 steps per second. Penetration tolerances are metres.
 let STEP = 1.0 / 240.0;
@@ -1183,19 +1183,17 @@ fun shade(color, light) {
 // Draw lines of help text in white on black and return them as an image.
 fun make_hud(lines) {
     // Largest scale whose character cell is still 11 pixels wide
-    let font = Font(1.57, COLOR_WHITE, COLOR_BLACK);
+    let font = PixelFont(1.57, COLOR_WHITE, COLOR_BLACK);
     let pad = 6;
     let var text_w = 0;
-    for (let var i = 0; i < lines.len; ++i) text_w = text_w.max(lines[i].len * font.char_w);
+    for (let var i = 0; i < lines.len; ++i) text_w = text_w.max(font.text_width(lines[i]));
 
     // The bar spans the window and the text is centered in it
     let x0 = (WIDTH - text_w).idiv(2);
     let img = Image(WIDTH, lines.len * (font.char_h + pad) + pad);
     img.clear(COLOR_BLACK);
     for (let var i = 0; i < lines.len; ++i) {
-        let y = pad + i * (font.char_h + pad);
-        for (let var j = 0; j < lines[i].len; ++j)
-            font.draw_char(img, x0 + j * font.char_w, y, lines[i].char_at(j));
+        font.draw_text(img, x0, pad + i * (font.char_h + pad), lines[i]);
     }
 
     return img;
