@@ -143,8 +143,8 @@ fun random_f32(size, lo, hi) {
 //
 // Every weight and activation lives in a ByteArray of float32 rather than an
 // array of boxed floats. That is what lets the layers be written as calls to
-// `dot_f32`, which sums a run of float32 products on the host instead of one
-// bytecode multiply and add at a time.
+// `dot_f32` and `axpy_f32`, which run over float32 values on the host instead
+// of one bytecode multiply and add at a time.
 //
 // Both weight matrices are stored row-major in one flat run, so row `r` of W1
 // is the `input_size` floats starting at `r * input_size`.
@@ -283,10 +283,7 @@ class MLP {
             // ReLU leaves most rows with no gradient at all, and the row is
             // the expensive part
             if (g != 0.0) {
-                let row = r * n;
-                for (let var c = 0; c < n; ++c) {
-                    W1.set_f32(row + c, W1.get_f32(row + c) - g * x.get_f32(c));
-                }
+                W1.axpy_f32(r * n, 1, x, 0, 1, n, -g);
             }
 
             b1.set_f32(r, b1.get_f32(r) - g);
@@ -294,10 +291,7 @@ class MLP {
 
         for (let var o = 0; o < self.output_size; ++o) {
             let g = learning_rate * self.d_loss.get_f32(o);
-            let row = o * h;
-            for (let var c = 0; c < h; ++c) {
-                self.W2.set_f32(row + c, self.W2.get_f32(row + c) - g * self.a1.get_f32(c));
-            }
+            self.W2.axpy_f32(o * h, 1, self.a1, 0, 1, h, -g);
             self.b2.set_f32(o, self.b2.get_f32(o) - g);
         }
     }
