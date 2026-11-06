@@ -513,6 +513,8 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 
 Plush supports actor-based concurrency, which allows you to write parallel programs that are safe and easy to reason about. Actors are independent processes that communicate by sending and receiving messages. A parent actor can spawn a child actor using the `$actor_spawn(f)` host function. This function takes a function as argument to be executed in the new actor. Actors work like isolated process and can only communicate through message passing. When an actor spawns a child, the child gets a copy of the parent's global variables.
 
+Any Plush object or value can be sent to another actor, including class instances and closures. Objects sent over are deepcopied and the process is relatively fast. Throughput is in the hundreds of thousands of messages per second, or tens of gigabytes per second.
+
 ```plush
 fun worker() {
     let msg = $actor_recv();
@@ -524,7 +526,7 @@ $actor_send(worker_id, "Hello from the main actor!");
 $actor_join(worker_id);
 ```
 
-This example spawns a new worker actor, sends it a message, and then waits for it to complete. The worker receives the message and prints it to the console.
+The example above spawns a new worker actor, sends it a message, and then waits for it to complete. The worker receives the message and prints it to the console.
 
 ## TCP Networking
 
