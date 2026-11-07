@@ -1,0 +1,3688 @@
+// Night Ride 2: a ride along an endless network of elevated highways through
+// a night city that streams in as you go.
+//
+// Usage:
+//   plush examples/night_ride2.psh [--gens 3]
+//   plush examples/night_ride2.psh --bench [--frames 300]
+//   plush examples/night_ride2.psh --capture [--frames 1] [--prefix frame]
+//   plush examples/night_ride2.psh --capture --view x,y,z,yaw,pitch
+//
+// --capture writes raw BGRA frames, one file each. To view one:
+//   ffmpeg -f rawvideo -pixel_format bgra -video_size 1280x720 -i f.raw f.png
+//
+//   space        throttle
+//   left/right   lean, which carries the bike across the lanes
+//   c            toggle a free-flying camera
+//   w a s d      fly, with the arrows to look and r/f to rise and sink
+//   escape       quit
+//
+// The world is a grid of square cells at two levels of detail. A fine cell
+// holds its buildings and the full road deck. A coarse cell covers 4x4 fine
+// cells with the same buildings but a simpler deck, and stands in for them at
+// a distance, where the extra detail is too small to see. A cell's contents
+// depend only on its coordinates, so background actors build cells in any
+// order.
+//
+// Each cell has its own BSP tree. Cells never overlap, so the grid lines are
+// splitting planes too, and walking the grid as an implicit kd-tree, near side
+// first, extends the BSP order across the whole world. Faces are drawn front
+// to back into an s-buffer, as in examples/tremor.psh, so each pixel is
+// written once and a node whose box is already covered is skipped whole.
+//
+// Roads are a graph over a coarse grid of regions, one node per region. Every
+// row of nodes is joined by an east-west highway, and some pairs of rows by a
+// ramp that leaves one highway alongside it, swings round and merges into the
+// next. The network is a function of the region coordinates, like the cells.
+
+from args import ArgParser;
+from image import Image;
+from pixelfont import PixelFont;
+from random import Xoshiro128;
+
+let args = ArgParser("Ride an endless network of elevated highways through a night city")
+    .flag("bench", "Ride a set path without a window and report the time per frame")
+    .flag("capture", "Write raw BGRA frames of the set path to files")
+    .opt_int("frames", nil, "Number of frames, 300 with --bench and 1 with --capture")
+    .opt_str("prefix", "frame", "Start of the file names written by --capture")
+    .opt_str("view", nil, "Fixed camera for --bench and --capture, as x,y,z,yaw,pitch in degrees")
+    .opt_int("gens", 3, "Number of actors generating cells")
+    .opt_int("width", 1280, "Frame width in pixels")
+    .opt_int("height", 720, "Frame height in pixels")
+    .parse_args();
+
+let FRAME_WIDTH = args.width;
+let FRAME_HEIGHT = args.height;
+let NUM_GENS = args.gens.max(1);
+
+let PI = 3.14159265358979;
+
+// Principal point, below the middle for a lower, road-hugging view
+let CX = FRAME_WIDTH.to_f() * 0.5;
+let CY = FRAME_HEIGHT.to_f() * 0.55;
+let FOV_X_DEG = 75.0;
+let FOCAL = CX / ((FOV_X_DEG * PI / 180.0) * 0.5).tan();
+let NEAR = 0.05;
+
+// --- Fog and colors ---
+//
+// Colors are packed 0xRRGGBB with the alpha byte left clear, which the
+// window ignores and which keeps the packed channel arithmetic simple.
+
+let FOG_START = 150.0;
+let FOG_END = 1900.0;
+let FOG_INV = 1.0 / (FOG_END - FOG_START);
+let FOG_K = FOG_INV * 0.94;
+
+// The haze stops short of the fog color at FOG_END, which keeps distant
+// towers massing up into a skyline, then closes over them by FADE_END,
+// fading into the sky behind them, so nothing pops in at the edge of the
+// draw distance
+let FOG_MAX = 0.94;
+let FADE_END = 2500.0;
+let FOG_R = 58;
+let FOG_G = 30;
+let FOG_B = 76;
+let FOG_COLOR = (FOG_R << 16) | (FOG_G << 8) | FOG_B;
+
+let SKY_ZENITH = 0x0A0614;
+let SKY_NADIR = 0x08040E;
+
+let ASPHALT = 0x101116;
+let LANE_COLOR = 0xE4E8F2;
+let EDGE_COLOR = 0xF0CE84;
+let DECK_BOTTOM = 0x15161B;
+let FASCIA_COLOR = 0x23252C;
+let BARRIER_COLOR = 0x25272E;
+let PILLAR_COLOR = 0x2A2C33;
+let ROOF_COLOR = 0x1E1F25;
+
+fun fog_factor(z) {
+    if (z <= FOG_START) return 0.0;
+    if (z <= FOG_END) return (z - FOG_START) * FOG_INV * FOG_MAX;
+    let t = ((z - FOG_END) / (FADE_END - FOG_END)).min(1.0);
+    return FOG_MAX + (1.0 - FOG_MAX) * t;
+}
+
+// How far the haze color has turned towards the sky behind, past FOG_END
+fun sky_blend(z) {
+    return smooth01((z - FOG_END) / (FADE_END - FOG_END));
+}
+
+fun color_lerp(a, b, t) {
+    let it = 1.0 - t;
+    let r = (((a >> 16) & 0xFF).to_f() * it + ((b >> 16) & 0xFF).to_f() * t).floor();
+    let g = (((a >> 8) & 0xFF).to_f() * it + ((b >> 8) & 0xFF).to_f() * t).floor();
+    let bl = ((a & 0xFF).to_f() * it + (b & 0xFF).to_f() * t).floor();
+    return (r << 16) | (g << 8) | bl;
+}
+
+fun color_scale(c, t) {
+    let r = (((c >> 16) & 0xFF).to_f() * t).floor().clip(0, 255);
+    let g = (((c >> 8) & 0xFF).to_f() * t).floor().clip(0, 255);
+    let b = ((c & 0xFF).to_f() * t).floor().clip(0, 255);
+    return (r << 16) | (g << 8) | b;
+}
+
+
+// --- Hashing ---
+
+// Scrambles integer coordinates into 30 bits. Everything generated derives
+// from this, which is what makes the world the same in every actor.
+fun hash3(a, b, salt) {
+    let var h = (a * 374761393 + b * 668265263 + salt * 1442695041) & 0x3FFFFFFF;
+    h = ((h ^ (h >> 15)) * 1274126177) & 0x3FFFFFFF;
+    h = ((h ^ (h >> 13)) * 76531729) & 0x3FFFFFFF;
+    return h ^ (h >> 16);
+}
+
+fun hashf(a, b, salt) {
+    return (hash3(a, b, salt) & 0xFFFFFF).to_f() / 16777216.0;
+}
+
+fun smooth01(t) {
+    let c = t.clip(0.0, 1.0);
+    return c * c * (3.0 - 2.0 * c);
+}
+
+fun value_noise(x, z, scale, salt) {
+    let fx = x / scale;
+    let fz = z / scale;
+    let ix = fx.floor();
+    let iz = fz.floor();
+    let tx = smooth01(fx - ix.to_f());
+    let tz = smooth01(fz - iz.to_f());
+    let a = hashf(ix, iz, salt);
+    let b = hashf(ix + 1, iz, salt);
+    let c = hashf(ix, iz + 1, salt);
+    let d = hashf(ix + 1, iz + 1, salt);
+    let ab = a + (b - a) * tx;
+    let cd = c + (d - c) * tx;
+    return ab + (cd - ab) * tz;
+}
+
+// How built up the city is around a point, from 0 to 1. Downtown is where two
+// octaves of noise pile up.
+fun density(x, z) {
+    let n0 = value_noise(x, z, 3000.0, 11) * 0.7 + value_noise(x, z, 900.0, 12) * 0.3;
+    return smooth01((n0 - 0.3) * 1.8);
+}
+
+fun atan2(y, x) {
+    if (x > 0.0) return (y / x).atan();
+    if (x < 0.0) {
+        if (y >= 0.0) return (y / x).atan() + PI;
+        return (y / x).atan() - PI;
+    }
+    if (y > 0.0) return PI * 0.5;
+    if (y < 0.0) return -PI * 0.5;
+    return 0.0;
+}
+
+// --- Road network ---
+//
+// World axes: x east, y up, z north, in meters. Lateral offsets on a road are
+// measured to the left of its direction of travel from end A to end B, so on
+// an east-west highway positive is north.
+
+let REGION = 1536.0;
+let JIT_X = 0.28;
+let JIT_Z = 0.16;
+
+// Odd, as in Night Ride, so the middle lane sits on the centerline and the
+// ride can start in it
+let NUM_LANES = 5;
+let LANE_W = 3.7;
+let ROAD_W = LANE_W * NUM_LANES.to_f();
+let ROAD_HALF = ROAD_W * 0.5;
+
+let DECK_MIN = 16.0;
+let DECK_MAX = 48.0;
+let DECK_T = 1.8;
+let BARRIER_H = 1.1;
+
+let RAMP_PROB = 0.5;
+
+// Ramps are two lanes, the usual for a highway to highway connector
+let RAMP_LANES = 2;
+let RAMP_W = LANE_W * RAMP_LANES.to_f();
+let RAMP_HALF = RAMP_W * 0.5;
+
+// How far the middle of a ramp sits from the middle of the highway it runs
+// beside, which puts the two decks edge to edge
+let RAMP_OFF = ROAD_HALF + RAMP_HALF;
+
+// A ramp runs alongside the highway it leaves for MERGE_LEN, its lanes
+// opening up over the first TAPER_LEN of that, then eases onto its own curve
+// over BLEND_LEN
+let MERGE_LEN = 380.0;
+let TAPER_LEN = 280.0;
+let BLEND_LEN = 420.0;
+
+// Where the decks part, the gap between them is decked over until it is this
+// wide, and closed off there by the barriers meeting in a nose
+let GORE_MAX = 5.0;
+
+// Roads are kept as polylines resampled to this spacing
+let SAMPLE_DS = 4.0;
+let HERMITE_STEPS = 1024;
+
+// Samples per deck segment, in fine and coarse cells
+let TESS_STEP = 3;
+let COARSE_TESS = 8;
+
+// Strips across the deck. One is enough for flat shading, more give
+// per-vertex lighting something to work with later.
+let ROAD_STRIPS = 1;
+
+let PILLAR_EVERY = 12;
+let PILLAR_W = 2.4;
+
+// Texels per meter across and along the road texture
+let ROAD_TEX_W = 256;
+let ROAD_TEX_H = 128;
+let ROAD_KU = ROAD_TEX_W.to_f() / ROAD_W;
+let ROAD_KV = ROAD_TEX_H.to_f() / 12.0;
+let RAMP_TEX_W = 128;
+let RAMP_KU = RAMP_TEX_W.to_f() / RAMP_W;
+
+// Texture columns of plain asphalt and of a dashed lane line in both lane
+// textures, for strips mapped with a fixed u, clear of the edge lines even
+// a few mip levels down
+let ASPHALT_U = 20.5;
+let DASH_U = 10.5;
+
+// Where lanes stop short of a boundary without an edge line: the width of
+// the strip left between, and of the dashed line along its outside
+let MARK_STRIP = 0.6;
+let DASH_W = 0.18;
+
+// Texture ids. The facades follow these two.
+let TEX_ROAD = 0;
+let TEX_RAMP = 1;
+
+// Texels per window cell, and the size of the window maps facades draw
+// from, in windows
+let TEX_CELL = 16.0;
+let WIN_COLS = 32;
+let WIN_ROWS = 128;
+
+// How far a facade's texture coordinates run before its pattern repeats
+fun tex_w(tex) {
+    if (tex == TEX_ROAD) return ROAD_TEX_W;
+    if (tex == TEX_RAMP) return RAMP_TEX_W;
+    return WIN_COLS * TEX_CELL.floor();
+}
+
+fun tex_h(tex) {
+    if (tex <= TEX_RAMP) return ROAD_TEX_H;
+    return WIN_ROWS * TEX_CELL.floor();
+}
+
+fun node_x(i, j) { return (i.to_f() + 0.5 + (hashf(i, j, 1) - 0.5) * 2.0 * JIT_X) * REGION; }
+fun node_z(i, j) { return (j.to_f() + 0.5 + (hashf(i, j, 2) - 0.5) * 2.0 * JIT_Z) * REGION; }
+fun node_h(i, j) { return DECK_MIN + hashf(i, j, 3) * (DECK_MAX - DECK_MIN); }
+
+// Whether a ramp joins node (i, j) to node (i, j + 1)
+fun ramp_exists(i, j) { return hashf(i, j, 4) < RAMP_PROB; }
+
+// Which way the ramps between rows j and j + 1 leave, east or west. Every
+// ramp in a band agrees, so two can never meet head on alongside a highway.
+fun band_dir(j) {
+    if (hashf(0, j, 5) < 0.5) return 1;
+    return -1;
+}
+
+let var tan_x = 0.0;
+let var tan_z = 0.0;
+
+// Direction of the through highway at a node, east-going
+fun through_tangent(i, j) {
+    let dx = node_x(i + 1, j) - node_x(i - 1, j);
+    let dz = node_z(i + 1, j) - node_z(i - 1, j);
+    let l = (dx * dx + dz * dz).sqrt();
+    tan_x = dx / l;
+    tan_z = dz / l;
+}
+
+// A road between two nodes, as a polyline of evenly spaced samples. For each
+// sample: the deck centerline, the unit tangent, the lateral bounds of the
+// deck and of its painted lanes, and whether a barrier stands on its left and
+// right edge. The deck is wider than the lanes only where it fills a gore.
+class Edge {
+    init(self, kind, ai, aj, bi, bj) {
+        self.kind = kind;
+        self.ai = ai; self.aj = aj;
+        self.bi = bi; self.bj = bj;
+        self.n = 0;
+        self.ds = SAMPLE_DS;
+        self.len = 0.0;
+        self.xs = nil; self.ys = nil; self.zs = nil;
+        self.txs = nil; self.tzs = nil;
+        self.los = nil; self.his = nil;
+        self.ulo = nil; self.uhi = nil;
+        self.barl = nil; self.barr = nil;
+        self.bx0 = 0.0; self.bz0 = 0.0; self.bx1 = 0.0; self.bz1 = 0.0;
+
+        // How the lanes map onto a texture at each sample:
+        // u = (lateral - urefs[k]) * ku + uoff
+        self.tex = TEX_ROAD;
+        self.urefs = nil;
+        self.uoff = 0.0;
+        self.ku = ROAD_KU;
+
+        // How each edge of the lanes is marked: 0 a solid edge line, 1 a
+        // dashed lane line where a ramp's lanes run alongside, 2 nothing,
+        // on the ramp's side of that same boundary
+        self.markl = nil;
+        self.markr = nil;
+
+        // Distance from each end along which a ramp's gore is decked over
+        self.nose_a = 0.0;
+        self.nose_b = 0.0;
+
+        // Whether a highway's barriers have been fitted around its ramps yet
+        self.final = false;
+    }
+}
+
+let EDGE_THROUGH = 0;
+let EDGE_RAMP = 1;
+
+// Cubic Hermite in x and z, with the deck height eased between its ends
+// and a hump over the middle
+fun sample_hermite(x0, z0, x1, z1, mx0, mz0, mx1, mz1, h0, h1, hump) {
+    let n = HERMITE_STEPS + 1;
+    let hx = Array.with_size(n, 0.0);
+    let hy = Array.with_size(n, 0.0);
+    let hz = Array.with_size(n, 0.0);
+    for (let var k = 0; k < n; ++k) {
+        let t = k.to_f() / HERMITE_STEPS.to_f();
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+        let h10 = t3 - 2.0 * t2 + t;
+        let h01 = 3.0 * t2 - 2.0 * t3;
+        let h11 = t3 - t2;
+        hx[k] = h00 * x0 + h10 * mx0 + h01 * x1 + h11 * mx1;
+        hz[k] = h00 * z0 + h10 * mz0 + h01 * z1 + h11 * mz1;
+        // The hump is level at both ends, like the ease, so the grade carries
+        // on unbroken into the next edge
+        let sp = (PI * t).sin();
+        hy[k] = h0 + (h1 - h0) * smooth01(t) + hump * sp * sp;
+    }
+    return [hx, hy, hz];
+}
+
+fun arc_lengths(hx, hz) {
+    let n = hx.len;
+    let s = Array.with_size(n, 0.0);
+    for (let var k = 1; k < n; ++k) {
+        let dx = hx[k] - hx[k - 1];
+        let dz = hz[k] - hz[k - 1];
+        s[k] = s[k - 1] + (dx * dx + dz * dz).sqrt();
+    }
+    return s;
+}
+
+// Resample a dense curve into the edge's evenly spaced samples
+fun finish_edge(e, hx, hy, hz) {
+    let s = arc_lengths(hx, hz);
+    let total = s[s.len - 1];
+    let segs = (total / SAMPLE_DS).floor().max(1);
+    let ds = total / segs.to_f();
+    let n = segs + 1;
+
+    let xs = Array.with_size(n, 0.0);
+    let ys = Array.with_size(n, 0.0);
+    let zs = Array.with_size(n, 0.0);
+    let var j = 0;
+    for (let var k = 0; k < n; ++k) {
+        let target = k.to_f() * ds;
+        while (j < s.len - 2 && s[j + 1] < target) ++j;
+        let span = s[j + 1] - s[j];
+        let var t = 0.0;
+        if (span > 0.0) t = ((target - s[j]) / span).clip(0.0, 1.0);
+        xs[k] = hx[j] + (hx[j + 1] - hx[j]) * t;
+        ys[k] = hy[j] + (hy[j + 1] - hy[j]) * t;
+        zs[k] = hz[j] + (hz[j + 1] - hz[j]) * t;
+    }
+
+    let txs = Array.with_size(n, 0.0);
+    let tzs = Array.with_size(n, 0.0);
+    for (let var k = 0; k < n; ++k) {
+        let k0 = (k - 1).max(0);
+        let k1 = (k + 1).min(n - 1);
+        let dx = xs[k1] - xs[k0];
+        let dz = zs[k1] - zs[k0];
+        let l = (dx * dx + dz * dz).sqrt();
+        txs[k] = dx / l;
+        tzs[k] = dz / l;
+    }
+
+    e.n = n;
+    e.ds = ds;
+    e.len = total;
+    e.xs = xs; e.ys = ys; e.zs = zs;
+    e.txs = txs; e.tzs = tzs;
+    e.los = Array.with_size(n, 0.0 - ROAD_HALF);
+    e.his = Array.with_size(n, ROAD_HALF);
+    e.ulo = Array.with_size(n, 0.0 - ROAD_HALF);
+    e.uhi = Array.with_size(n, ROAD_HALF);
+    e.urefs = Array.with_size(n, 0.0 - ROAD_HALF);
+    e.markl = Array.with_size(n, 0);
+    e.markr = Array.with_size(n, 0);
+    e.barl = Array.with_size(n, 1);
+    e.barr = Array.with_size(n, 1);
+
+    let var x0 = xs[0]; let var x1 = xs[0];
+    let var z0 = zs[0]; let var z1 = zs[0];
+    for (let var k = 1; k < n; ++k) {
+        x0 = x0.min(xs[k]); x1 = x1.max(xs[k]);
+        z0 = z0.min(zs[k]); z1 = z1.max(zs[k]);
+    }
+    e.bx0 = x0 - ROAD_W; e.bx1 = x1 + ROAD_W;
+    e.bz0 = z0 - ROAD_W; e.bz1 = z1 + ROAD_W;
+}
+
+// The highway from node (i, j) east to node (i + 1, j). Its tangents are
+// shared with the neighbouring edges, so the road is smooth through nodes.
+fun build_through(i, j) {
+    let x0 = node_x(i, j); let z0 = node_z(i, j);
+    let x1 = node_x(i + 1, j); let z1 = node_z(i + 1, j);
+    let dx = x1 - x0; let dz = z1 - z0;
+    let l = (dx * dx + dz * dz).sqrt();
+    through_tangent(i, j);
+    let t0x = tan_x; let t0z = tan_z;
+    through_tangent(i + 1, j);
+    let hump = (hashf(i, j, 6) - 0.5) * 18.0;
+    let c = sample_hermite(x0, z0, x1, z1, t0x * l, t0z * l, tan_x * l, tan_z * l,
+                           node_h(i, j), node_h(i + 1, j), hump);
+    let e = Edge(EDGE_THROUGH, i, j, i + 1, j);
+    finish_edge(e, c[0], c[1], c[2]);
+    return e;
+}
+
+// Take the barrier down along each stretch a ramp runs beside, up to the nose
+// of its gore. North of node (i, j), the ramps of band j leave towards
+// band_dir(j); south of it, those of band j - 1 arrive from band_dir(j - 1).
+// The barrier comes back a segment early, so it overlaps the end of the gore
+// rather than leaving a gap.
+fun fit_barriers(e) {
+    let i = e.ai;
+    let j = e.aj;
+    let back = TESS_STEP.to_f() * e.ds;
+    let var na = 0.0 - 1.0; let var nb = 0.0 - 1.0;
+    let var sa = 0.0 - 1.0; let var sb = 0.0 - 1.0;
+    if (band_dir(j) == 1) {
+        let r = get_ramp(i, j);
+        if (r != nil) na = (r.nose_a - back).max(0.0);
+    } else {
+        let r = get_ramp(i + 1, j);
+        if (r != nil) nb = (r.nose_a - back).max(0.0);
+    }
+    if (band_dir(j - 1) == 1) {
+        let r = get_ramp(i, j - 1);
+        if (r != nil) sa = (r.nose_b - back).max(0.0);
+    } else {
+        let r = get_ramp(i + 1, j - 1);
+        if (r != nil) sb = (r.nose_b - back).max(0.0);
+    }
+    for (let var k = 0; k < e.n; ++k) {
+        let s = k.to_f() * e.ds;
+        let to_b = e.len - s;
+        if (s < na || to_b < nb) e.barl[k] = 0;
+        if (s < sa || to_b < sb) e.barr[k] = 0;
+
+        // Where the ramp's lanes are joined on, the edge line gives way to a
+        // dashed lane line, as on a real exit
+        if ((na >= 0.0 && s < MERGE_LEN) || (nb >= 0.0 && to_b < MERGE_LEN)) e.markl[k] = 1;
+        if ((sa >= 0.0 && s < MERGE_LEN) || (sb >= 0.0 && to_b < MERGE_LEN)) e.markr[k] = 1;
+    }
+}
+
+let var ev_x = 0.0; let var ev_y = 0.0; let var ev_z = 0.0;
+let var ev_tx = 1.0; let var ev_tz = 0.0;
+let var ev_lo = 0.0; let var ev_hi = 0.0;
+let var ev_bl = 1; let var ev_br = 1;
+
+// Evaluate an edge at arc length s, extrapolating past either end
+fun edge_eval(e, s) {
+    let fk = s / e.ds;
+    let var k = fk.floor();
+    if (k < 0) k = 0;
+    if (k > e.n - 2) k = e.n - 2;
+    let t = fk - k.to_f();
+    ev_x = e.xs[k] + (e.xs[k + 1] - e.xs[k]) * t;
+    ev_y = e.ys[k] + (e.ys[k + 1] - e.ys[k]) * t;
+    ev_z = e.zs[k] + (e.zs[k + 1] - e.zs[k]) * t;
+    let tc = t.clip(0.0, 1.0);
+    let tx = e.txs[k] + (e.txs[k + 1] - e.txs[k]) * tc;
+    let tz = e.tzs[k] + (e.tzs[k + 1] - e.tzs[k]) * tc;
+    let l = (tx * tx + tz * tz).sqrt();
+    ev_tx = tx / l;
+    ev_tz = tz / l;
+    ev_lo = e.los[k] + (e.los[k + 1] - e.los[k]) * tc;
+    ev_hi = e.his[k] + (e.his[k + 1] - e.his[k]) * tc;
+    let kn = (k + (tc + 0.5).floor()).min(e.n - 1);
+    ev_bl = e.barl[kn];
+    ev_br = e.barr[kn];
+}
+
+// A point on the highway through node (i, j), dist meters from the node
+// heading east (d = 1) or west (d = -1). The tangent comes out east-going.
+fun through_point(i, j, d, dist) {
+    if (d == 1) {
+        let e = get_geom(i, j);
+        edge_eval(e, dist.min(e.len));
+    } else {
+        let e = get_geom(i - 1, j);
+        edge_eval(e, (e.len - dist).max(0.0));
+    }
+}
+
+// How far a ramp's inner lane edge at sample k stands off the edge of the
+// highway it runs beside, which is on the north side of the highway at the
+// ramp's start and on the south side at its end
+fun gore_gap(e, k, i, j, d, at_start, inner_lat) {
+    let sk = k.to_f() * e.ds;
+    let var side = 1.0;
+    if (at_start) {
+        through_point(i, j, d, sk);
+    } else {
+        through_point(i, j + 1, d, e.len - sk);
+        side = -1.0;
+    }
+    let hx = ev_x - ev_tz * ROAD_HALF * side;
+    let hz = ev_z + ev_tx * ROAD_HALF * side;
+
+    // Measured across the ramp, towards its inner side
+    let lx = 0.0 - e.tzs[k];
+    let lz = e.txs[k];
+    let rx = e.xs[k] + lx * inner_lat;
+    let rz = e.zs[k] + lz * inner_lat;
+    let var sgn = 1.0;
+    if (inner_lat < 0.0) sgn = -1.0;
+    return ((hx - rx) * lx + (hz - rz) * lz) * sgn;
+}
+
+// The ramp from node (i, j) north to node (i, j + 1). It starts alongside
+// the highway on its north side heading band_dir(j), swings round, and comes
+// in alongside the next highway on its south side heading the other way.
+fun build_ramp(i, j) {
+    let d = band_dir(j);
+    let df = d.to_f();
+
+    through_tangent(i, j);
+    let tax = tan_x; let taz = tan_z;
+    let qax = node_x(i, j) - taz * RAMP_OFF;
+    let qaz = node_z(i, j) + tax * RAMP_OFF;
+    through_tangent(i, j + 1);
+    let tbx = tan_x; let tbz = tan_z;
+    let qbx = node_x(i, j + 1) + tbz * RAMP_OFF;
+    let qbz = node_z(i, j + 1) - tbx * RAMP_OFF;
+
+    let dx = qbx - qax; let dz = qbz - qaz;
+    let l = (dx * dx + dz * dz).sqrt() * 1.1;
+    let hump = (hashf(i, j, 7) - 0.3) * 24.0;
+    let c = sample_hermite(qax, qaz, qbx, qbz,
+                           df * tax * l, df * taz * l, 0.0 - df * tbx * l, 0.0 - df * tbz * l,
+                           node_h(i, j), node_h(i, j + 1), hump);
+    let hx = c[0]; let hy = c[1]; let hz = c[2];
+    let s = arc_lengths(hx, hz);
+    let total = s[s.len - 1];
+
+    // Pull each end onto the offset of the highway it runs beside
+    for (let var k = 0; k < hx.len; ++k) {
+        let wa = 1.0 - smooth01((s[k] - MERGE_LEN) / BLEND_LEN);
+        if (wa > 0.0) {
+            through_point(i, j, d, s[k]);
+            let ox = ev_x - ev_tz * RAMP_OFF;
+            let oz = ev_z + ev_tx * RAMP_OFF;
+            hx[k] = hx[k] + (ox - hx[k]) * wa;
+            hy[k] = hy[k] + (ev_y - hy[k]) * wa;
+            hz[k] = hz[k] + (oz - hz[k]) * wa;
+        }
+        let wb = 1.0 - smooth01((total - s[k] - MERGE_LEN) / BLEND_LEN);
+        if (wb > 0.0) {
+            through_point(i, j + 1, d, total - s[k]);
+            let ox = ev_x + ev_tz * RAMP_OFF;
+            let oz = ev_z - ev_tx * RAMP_OFF;
+            hx[k] = hx[k] + (ox - hx[k]) * wb;
+            hy[k] = hy[k] + (ev_y - hy[k]) * wb;
+            hz[k] = hz[k] + (oz - hz[k]) * wb;
+        }
+    }
+
+    let e = Edge(EDGE_RAMP, i, j, i, j + 1);
+    finish_edge(e, hx, hy, hz);
+    e.tex = TEX_RAMP;
+    e.ku = RAMP_KU;
+
+    // The highway is on the ramp's right when it leaves east and on its left
+    // when it leaves west. The lanes open out from that side at the start,
+    // and narrow back into it at the far end. Their markings are pinned to
+    // the outer edge, so the new lane slides out from under the highway's
+    // edge rather than its lines being cut off. On the inner side, where the
+    // lanes are joined on, the highway's dashed line is the only marking.
+    let var inner_lat = 0.0 - RAMP_HALF;
+    if (d == -1) inner_lat = RAMP_HALF;
+    if (d == 1) e.uoff = RAMP_TEX_W.to_f();
+    for (let var k = 0; k < e.n; ++k) {
+        let sk = k.to_f() * e.ds;
+        let m = sk.min(e.len - sk);
+        let w = (RAMP_W * smooth01(m / TAPER_LEN)).max(0.05);
+        let var mark = 0;
+        if (m < MERGE_LEN) mark = 2;
+        if (d == 1) {
+            e.ulo[k] = 0.0 - RAMP_HALF;
+            e.uhi[k] = w - RAMP_HALF;
+            e.urefs[k] = e.uhi[k];
+            e.markr[k] = mark;
+        } else {
+            e.ulo[k] = RAMP_HALF - w;
+            e.uhi[k] = RAMP_HALF;
+            e.urefs[k] = e.ulo[k];
+            e.markl[k] = mark;
+        }
+        e.los[k] = e.ulo[k];
+        e.his[k] = e.uhi[k];
+    }
+
+    // Deck over the gap between the ramp and the highway as they part, out to
+    // the deck segment where it grows past GORE_MAX. Searched over the
+    // segment ends a fine cell tessellates at, so the nose lands on one.
+    let kmax = ((MERGE_LEN + BLEND_LEN) / e.ds).floor().min(e.n.idiv(2));
+    let var ka = 0;
+    for (let var k = 0; k <= kmax; k = k + TESS_STEP) {
+        if (gore_gap(e, k, i, j, d, true, inner_lat) > GORE_MAX) break;
+        ka = k;
+    }
+    let last = e.n - 1;
+    let var kb = last;
+    let var kq = (last - 1).idiv(TESS_STEP) * TESS_STEP;
+    while (kq >= last - kmax) {
+        if (gore_gap(e, kq, i, j, d, false, inner_lat) > GORE_MAX) break;
+        kb = kq;
+        kq = kq - TESS_STEP;
+    }
+    e.nose_a = ka.to_f() * e.ds;
+    e.nose_b = (last - kb).to_f() * e.ds;
+
+    for (let var k = 0; k < e.n; ++k) {
+        let var gap = 0.0;
+        if (k <= ka) gap = gore_gap(e, k, i, j, d, true, inner_lat).max(0.0);
+        if (k >= kb) gap = gore_gap(e, k, i, j, d, false, inner_lat).max(0.0);
+        if (d == 1) e.los[k] = e.ulo[k] - gap;
+        else e.his[k] = e.uhi[k] + gap;
+
+        // The inner barrier runs between the noses. The segment starting at a
+        // nose is the one whose inner edge cuts across the end of the gore,
+        // so its barrier closes it off.
+        let var inner = 1;
+        if (k < ka || k >= kb) inner = 0;
+        if (d == 1) e.barr[k] = inner; else e.barl[k] = inner;
+    }
+    return e;
+}
+
+// Edges are rebuilt from scratch when needed, so the cache is simply
+// emptied when it gets large
+let var edge_cache = {};
+let var edge_cache_n = 0;
+
+fun cache_put(key, e) {
+    if (edge_cache_n >= 400) {
+        edge_cache = {};
+        edge_cache_n = 0;
+    }
+    edge_cache[key] = e;
+    edge_cache_n = edge_cache_n + 1;
+}
+
+// A highway's curve alone, which is all a ramp needs of it
+fun get_geom(i, j) {
+    let key = "t" + i.to_s() + "," + j.to_s();
+    if (edge_cache.has(key)) return edge_cache[key];
+    let e = build_through(i, j);
+    cache_put(key, e);
+    return e;
+}
+
+// A highway with its barriers fitted around the ramps that meet it
+fun get_through(i, j) {
+    let e = get_geom(i, j);
+    if (!e.final) {
+        e.final = true;
+        fit_barriers(e);
+    }
+    return e;
+}
+
+fun get_ramp(i, j) {
+    if (!ramp_exists(i, j)) return nil;
+    let key = "r" + i.to_s() + "," + j.to_s();
+    if (edge_cache.has(key)) return edge_cache[key];
+    let e = build_ramp(i, j);
+    cache_put(key, e);
+    return e;
+}
+
+// Every edge whose deck might come within margin of a box
+fun edges_near(x0, z0, x1, z1, margin) {
+    let list = [];
+    let i0 = ((x0 - margin) / REGION).floor() - 1;
+    let i1 = ((x1 + margin) / REGION).floor() + 1;
+    let j0 = ((z0 - margin) / REGION).floor() - 1;
+    let j1 = ((z1 + margin) / REGION).floor() + 1;
+    for (let var i = i0; i <= i1; ++i) {
+        for (let var j = j0; j <= j1; ++j) {
+            let e = get_through(i, j);
+            if (e.bx1 >= x0 - margin && e.bx0 <= x1 + margin && e.bz1 >= z0 - margin && e.bz0 <= z1 + margin) {
+                list.push(e);
+            }
+            let r = get_ramp(i, j);
+            if (r != nil && r.bx1 >= x0 - margin && r.bx0 <= x1 + margin && r.bz1 >= z0 - margin && r.bz0 <= z1 + margin) {
+                list.push(r);
+            }
+        }
+    }
+    return list;
+}
+
+// The edges meeting at node (i, j)
+fun node_edges(i, j) {
+    let list = [get_through(i - 1, j), get_through(i, j)];
+    let a = get_ramp(i, j);
+    if (a != nil) list.push(a);
+    let b = get_ramp(i, j - 1);
+    if (b != nil) list.push(b);
+    return list;
+}
+
+// --- Faces ---
+
+// A convex polygon: vertices as x, y, z triples, texture coordinates as u, v
+// pairs (nil for an untextured face), a shade per vertex, its texture or -1,
+// and its flat color. The plane is the side it is seen from.
+class Face {
+    init(self, v, uv, sh, tex, color) {
+        self.v = v;
+        self.uv = uv;
+        self.sh = sh;
+        self.tex = tex;
+        self.color = color;
+        self.nx = 0.0; self.ny = 0.0; self.nz = 0.0; self.d = 0.0;
+        self.shade = 1.0;
+        self.cx = 0.0; self.cy = 0.0; self.cz = 0.0;
+    }
+}
+
+
+// Newell's method, turned to face along the hint
+fun set_plane(f, hx, hy, hz) {
+    let v = f.v;
+    let n = v.len.idiv(3);
+    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+    let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+        let xi = v[i * 3]; let yi = v[i * 3 + 1]; let zi = v[i * 3 + 2];
+        let xj = v[j * 3]; let yj = v[j * 3 + 1]; let zj = v[j * 3 + 2];
+        nx = nx + (yi - yj) * (zi + zj);
+        ny = ny + (zi - zj) * (xi + xj);
+        nz = nz + (xi - xj) * (yi + yj);
+        cx = cx + xi; cy = cy + yi; cz = cz + zi;
+    }
+    let l = (nx * nx + ny * ny + nz * nz).sqrt();
+    if (l < 0.000001) return false;
+    nx = nx / l; ny = ny / l; nz = nz / l;
+    if (nx * hx + ny * hy + nz * hz < 0.0) {
+        nx = 0.0 - nx; ny = 0.0 - ny; nz = 0.0 - nz;
+    }
+    f.nx = nx; f.ny = ny; f.nz = nz;
+    let inv = 1.0 / n.to_f();
+    f.d = (nx * cx + ny * cy + nz * cz) * inv;
+    f.cx = cx * inv; f.cy = cy * inv; f.cz = cz * inv;
+
+    let var s = 0.0;
+    for (let var i = 0; i < n; ++i) s = s + f.sh[i];
+    f.shade = s * inv;
+    return true;
+}
+
+// Shift texture coordinates by whole texture repeats so they start near
+// zero, which is where the span loop's fixed point wants them
+fun normalize_uv(uv, tex) {
+    let tw = tex_w(tex).to_f();
+    let th = tex_h(tex).to_f();
+    let var mu = uv[0]; let var mv = uv[1];
+    for (let var i = 1; i < uv.len.idiv(2); ++i) {
+        mu = mu.min(uv[i * 2]);
+        mv = mv.min(uv[i * 2 + 1]);
+    }
+    let su = (mu / tw).floor().to_f() * tw;
+    let sv = (mv / th).floor().to_f() * th;
+    for (let var i = 0; i < uv.len.idiv(2); ++i) {
+        uv[i * 2] = uv[i * 2] - su;
+        uv[i * 2 + 1] = uv[i * 2 + 1] - sv;
+    }
+}
+
+fun make_face(v, uv, sh, tex, color, hx, hy, hz) {
+    if (uv != nil) normalize_uv(uv, tex);
+    let f = Face(v, uv, sh, tex, color);
+    if (!set_plane(f, hx, hy, hz)) return nil;
+    return f;
+}
+
+// The part of a face where nx*x + ny*y + nz*z - d >= 0, or nil
+fun split_keep(f, nx, ny, nz, d) {
+    let v = f.v;
+    let n = v.len.idiv(3);
+    let uv = f.uv;
+    let sh = f.sh;
+
+    let var all_in = true;
+    let var any_in = false;
+    for (let var i = 0; i < n; ++i) {
+        let s = nx * v[i * 3] + ny * v[i * 3 + 1] + nz * v[i * 3 + 2] - d;
+        if (s < 0.0) all_in = false; else any_in = true;
+    }
+    if (all_in) return f;
+    if (!any_in) return nil;
+
+    let ov = [];
+    let ouv = [];
+    let osh = [];
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+        let di = nx * v[i * 3] + ny * v[i * 3 + 1] + nz * v[i * 3 + 2] - d;
+        let dj = nx * v[j * 3] + ny * v[j * 3 + 1] + nz * v[j * 3 + 2] - d;
+        if (di >= 0.0) {
+            ov.push(v[i * 3]); ov.push(v[i * 3 + 1]); ov.push(v[i * 3 + 2]);
+            if (uv != nil) { ouv.push(uv[i * 2]); ouv.push(uv[i * 2 + 1]); }
+            osh.push(sh[i]);
+        }
+        if ((di >= 0.0) != (dj >= 0.0)) {
+            let t = di / (di - dj);
+            for (let var c = 0; c < 3; ++c) ov.push(v[i * 3 + c] + (v[j * 3 + c] - v[i * 3 + c]) * t);
+            if (uv != nil) {
+                ouv.push(uv[i * 2] + (uv[j * 2] - uv[i * 2]) * t);
+                ouv.push(uv[i * 2 + 1] + (uv[j * 2 + 1] - uv[i * 2 + 1]) * t);
+            }
+            osh.push(sh[i] + (sh[j] - sh[i]) * t);
+        }
+    }
+    if (ov.len < 9) return nil;
+
+    let var g_uv = nil;
+    if (uv != nil) g_uv = ouv;
+    let g = Face(ov, g_uv, osh, f.tex, f.color);
+    g.nx = f.nx; g.ny = f.ny; g.nz = f.nz; g.d = f.d;
+    g.shade = f.shade;
+    g.cx = f.cx; g.cy = f.cy; g.cz = f.cz;
+    return g;
+}
+
+// Clip a face to the box [x0, x1] x [z0, z1], which keeps every face of a
+// cell inside it and so leaves the grid lines free to order the cells
+fun clip_to_box(f, x0, z0, x1, z1) {
+    let var g = split_keep(f, 1.0, 0.0, 0.0, x0);
+    if (g != nil) g = split_keep(g, -1.0, 0.0, 0.0, 0.0 - x1);
+    if (g != nil) g = split_keep(g, 0.0, 0.0, 1.0, z0);
+    if (g != nil) g = split_keep(g, 0.0, 0.0, -1.0, 0.0 - z1);
+    return g;
+}
+
+fun add_face(faces, v, uv, sh, tex, color, hx, hy, hz, box) {
+    let var f = make_face(v, uv, sh, tex, color, hx, hy, hz);
+    if (f == nil) return;
+    if (box != nil) f = clip_to_box(f, box[0], box[1], box[2], box[3]);
+    if (f != nil) faces.push(f);
+}
+
+// --- BSP tree ---
+
+let PLANE_EPS = 0.002;
+
+class BspNode {
+    init(self, nx, ny, nz, d) {
+        self.nx = nx; self.ny = ny; self.nz = nz; self.d = d;
+        self.on = [];
+        self.front = nil;
+        self.back = nil;
+        self.cx = 0.0; self.cy = 0.0; self.cz = 0.0;
+        self.hx = 0.0; self.hy = 0.0; self.hz = 0.0;
+        self.empty = true;
+    }
+}
+
+// Where a face sits relative to a plane: 0 on it, 1 in front, 2 behind, 3
+// across it
+fun classify(f, nx, ny, nz, d) {
+    let v = f.v;
+    let n = v.len.idiv(3);
+    let var lo = 0.0;
+    let var hi = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let s = nx * v[i * 3] + ny * v[i * 3 + 1] + nz * v[i * 3 + 2] - d;
+        if (i == 0) { lo = s; hi = s; }
+        if (s < lo) lo = s;
+        if (s > hi) hi = s;
+    }
+    if (hi <= PLANE_EPS && lo >= 0.0 - PLANE_EPS) return 0;
+    if (lo >= 0.0 - PLANE_EPS) return 1;
+    if (hi <= PLANE_EPS) return 2;
+    return 3;
+}
+
+fun score_plane(faces, nx, ny, nz, d) {
+    let var front = 0;
+    let var back = 0;
+    let var cut = 0;
+    for (let var i = 0; i < faces.len; ++i) {
+        let c = classify(faces[i], nx, ny, nz, d);
+        if (c == 1) front = front + 1;
+        else if (c == 2) back = back + 1;
+        else if (c == 3) cut = cut + 1;
+    }
+    let var diff = front - back;
+    if (diff < 0) diff = 0 - diff;
+
+    // Boxes split cleanly along axis-aligned planes, so those get a head start
+    let var bonus = 0;
+    if (nx.abs() < 0.99 && ny.abs() < 0.99 && nz.abs() < 0.99) bonus = 6;
+    return diff + 8 * cut + bonus;
+}
+
+fun partition(node, faces, front, back) {
+    for (let var k = 0; k < faces.len; ++k) {
+        let f = faces[k];
+        let c = classify(f, node.nx, node.ny, node.nz, node.d);
+        if (c == 0) node.on.push(f);
+        else if (c == 1) front.push(f);
+        else if (c == 2) back.push(f);
+        else {
+            let a = split_keep(f, node.nx, node.ny, node.nz, node.d);
+            let b = split_keep(f, 0.0 - node.nx, 0.0 - node.ny, 0.0 - node.nz, 0.0 - node.d);
+            if (a != nil) front.push(a);
+            if (b != nil) back.push(b);
+        }
+    }
+}
+
+fun bsp_build(faces) {
+    if (faces.len == 0) return nil;
+
+    // Trying every face plane is quadratic, so a long list is sampled
+    let var step = 1;
+    if (faces.len > 24) step = faces.len.idiv(24);
+    let var best = faces[0];
+    let var best_score = score_plane(faces, best.nx, best.ny, best.nz, best.d);
+    for (let var i = step; i < faces.len; i = i + step) {
+        let f = faces[i];
+        let s = score_plane(faces, f.nx, f.ny, f.nz, f.d);
+        if (s < best_score) {
+            best_score = s;
+            best = f;
+        }
+    }
+
+    let node = BspNode(best.nx, best.ny, best.nz, best.d);
+    let front = [];
+    let back = [];
+    partition(node, faces, front, back);
+    node.front = bsp_build(front);
+    node.back = bsp_build(back);
+    return node;
+}
+
+// Split by the grid down to cells of the leaf size before falling back on
+// face planes. The grid planes cost nothing to choose and keep the tree
+// balanced however much is in it.
+fun bsp_build_seeded(faces, x0, z0, x1, z1, leaf) {
+    if (faces.len == 0) return nil;
+    let wx = x1 - x0;
+    let wz = z1 - z0;
+    if (wx <= leaf * 1.01 && wz <= leaf * 1.01) return bsp_build(faces);
+
+    let front = [];
+    let back = [];
+    if (wx >= wz) {
+        let xm = (x0 + x1) * 0.5;
+        let node = BspNode(1.0, 0.0, 0.0, xm);
+        partition(node, faces, front, back);
+        node.front = bsp_build_seeded(front, xm, z0, x1, z1, leaf);
+        node.back = bsp_build_seeded(back, x0, z0, xm, z1, leaf);
+        return node;
+    }
+    let zm = (z0 + z1) * 0.5;
+    let node = BspNode(0.0, 0.0, 1.0, zm);
+    partition(node, faces, front, back);
+    node.front = bsp_build_seeded(front, x0, zm, x1, z1, leaf);
+    node.back = bsp_build_seeded(back, x0, z0, x1, zm, leaf);
+    return node;
+}
+
+// The box around everything in a subtree
+fun compute_bounds(node) {
+    if (node == nil) return;
+    compute_bounds(node.front);
+    compute_bounds(node.back);
+
+    let var lx = 0.0; let var ly = 0.0; let var lz = 0.0;
+    let var ux = 0.0; let var uy = 0.0; let var uz = 0.0;
+    let var any = false;
+    for (let var i = 0; i < node.on.len; ++i) {
+        let v = node.on[i].v;
+        for (let var k = 0; k < v.len; k = k + 3) {
+            let x = v[k]; let y = v[k + 1]; let z = v[k + 2];
+            if (!any) { lx = x; ux = x; ly = y; uy = y; lz = z; uz = z; any = true; }
+            lx = lx.min(x); ux = ux.max(x);
+            ly = ly.min(y); uy = uy.max(y);
+            lz = lz.min(z); uz = uz.max(z);
+        }
+    }
+    for (let var c = 0; c < 2; ++c) {
+        let var ch = node.front;
+        if (c == 1) ch = node.back;
+        if (ch == nil || ch.empty) continue;
+        let cx0 = ch.cx - ch.hx; let cx1 = ch.cx + ch.hx;
+        let cy0 = ch.cy - ch.hy; let cy1 = ch.cy + ch.hy;
+        let cz0 = ch.cz - ch.hz; let cz1 = ch.cz + ch.hz;
+        if (!any) { lx = cx0; ux = cx1; ly = cy0; uy = cy1; lz = cz0; uz = cz1; any = true; }
+        lx = lx.min(cx0); ux = ux.max(cx1);
+        ly = ly.min(cy0); uy = uy.max(cy1);
+        lz = lz.min(cz0); uz = uz.max(cz1);
+    }
+    node.empty = !any;
+    if (!any) return;
+    node.cx = (lx + ux) * 0.5; node.hx = (ux - lx) * 0.5;
+    node.cy = (ly + uy) * 0.5; node.hy = (uy - ly) * 0.5;
+    node.cz = (lz + uz) * 0.5; node.hz = (uz - lz) * 0.5;
+}
+
+// --- Buildings ---
+
+let FINE_SIZE = 128.0;
+let COARSE_DIV = 4;
+let COARSE_SIZE = FINE_SIZE * COARSE_DIV.to_f();
+
+// Room kept between a building and the deck of any road
+let ROAD_CLEAR = 10.0;
+
+// Window archetypes: [column pitch, floor height, glass width, glass height,
+// banded]. A banded facade has continuous strips of glass, one per floor.
+// Banded must stay last.
+let ARCHES = [
+    [2.4, 3.2, 0.45, 0.42, 0],
+    [2.0, 3.4, 0.32, 0.70, 0],
+    [3.0, 3.4, 0.64, 0.60, 0],
+    [1.7, 2.6, 0.46, 0.50, 0],
+    [6.4, 3.5, 0.88, 0.46, 0],
+    [3.2, 6.8, 0.56, 0.84, 0],
+    [3.0, 3.6, 1.00, 0.36, 1],
+];
+
+// Lit window colors, warm first, and the neon of banded facades. Every
+// window of a building is one of these.
+let WIN_TINTS = [
+    0xFFB030, 0xFF8418, 0xFFC824, 0xFFF040, 0xFFF888, 0xF8F8F8,
+    0x30E8FF, 0x58C0FF, 0x7860FF, 0xB050FF, 0xFF58D0, 0xE030F0,
+];
+let TINT_WARM_END = 6;
+let NEON = [
+    0xFF3CC8, 0xE838F0, 0xC040FF, 0x8850FF, 0x28F8F8,
+    0x08C8F8, 0x40E0B0, 0x3898F8, 0xFF6098, 0xFFB030,
+];
+
+fun arch_banded(arch) { return ARCHES[arch][4] == 1; }
+
+fun arch_colors(arch) {
+    if (arch_banded(arch)) return NEON.len;
+    return WIN_TINTS.len;
+}
+
+// One facade texture per archetype and color, in archetype order
+fun facade_tex(arch, color) {
+    return 2 + arch * WIN_TINTS.len + color;
+}
+
+// A building's footprint, height and looks, decided before any geometry so
+// the coarse and fine versions of a cell agree on it
+class Spec {
+    init(self, x0, z0, x1, z1, h) {
+        self.x0 = x0; self.z0 = z0; self.x1 = x1; self.z1 = z1;
+        self.h = h;
+        self.arch = 0; self.color = 0;
+        self.uoff = 0.0; self.voff = 0.0;
+        self.crown = false;
+        self.cx0 = 0.0; self.cz0 = 0.0; self.cx1 = 0.0; self.cz1 = 0.0;
+        self.ch = 0.0;
+    }
+}
+
+let rng = Xoshiro128(1);
+
+// Points along the roads near a box, with the clearance each needs: the
+// middle of the deck and its half width plus the gap kept from it
+fun road_points(edges, x0, z0, x1, z1) {
+    let pts = [];
+    let margin = ROAD_W + ROAD_CLEAR + 60.0;
+    for (let var a = 0; a < edges.len; ++a) {
+        let e = edges[a];
+        for (let var k = 0; k < e.n; k = k + 2) {
+            let mid = (e.los[k] + e.his[k]) * 0.5;
+            let px = e.xs[k] - e.tzs[k] * mid;
+            let pz = e.zs[k] + e.txs[k] * mid;
+            if (px < x0 - margin || px > x1 + margin || pz < z0 - margin || pz > z1 + margin) continue;
+            pts.push(px);
+            pts.push(pz);
+            pts.push((e.his[k] - e.los[k]) * 0.5 + ROAD_CLEAR);
+        }
+    }
+    return pts;
+}
+
+fun gen_specs(ci, cj, pts) {
+    let x0 = ci.to_f() * FINE_SIZE;
+    let z0 = cj.to_f() * FINE_SIZE;
+    let x1 = x0 + FINE_SIZE;
+    let z1 = z0 + FINE_SIZE;
+    rng.seed(hash3(ci, cj, 101));
+
+    let dn = density(x0 + FINE_SIZE * 0.5, z0 + FINE_SIZE * 0.5);
+
+    let specs = [];
+    let tries = 36 + (dn * 30.0).floor();
+    for (let var t = 0; t < tries; ++t) {
+        let w = rng.float(14.0, 28.0 + 24.0 * dn);
+        let dd = rng.float(14.0, 28.0 + 24.0 * dn);
+        if (w > FINE_SIZE - 8.0 || dd > FINE_SIZE - 8.0) continue;
+        let bx0 = rng.float(x0 + 3.0, x1 - 3.0 - w);
+        let bz0 = rng.float(z0 + 3.0, z1 - 3.0 - dd);
+        let bx1 = bx0 + w;
+        let bz1 = bz0 + dd;
+        let u = rng.float(0.0, 1.0);
+        let arch = rng.int(0, ARCHES.len);
+        // Warm windows outnumber the rest, as they did in Night Ride
+        let warm = rng.float(0.0, 1.0) < 0.6;
+        let var color = rng.int(0, arch_colors(arch));
+        if (!arch_banded(arch)) {
+            if (warm) color = color % TINT_WARM_END;
+            else color = TINT_WARM_END + color % (WIN_TINTS.len - TINT_WARM_END);
+        }
+        let cell = TEX_CELL.floor();
+        let uoff = rng.int(0, WIN_COLS) * cell;
+        let voff = rng.int(0, WIN_ROWS) * cell;
+        let crown_roll = rng.float(0.0, 1.0);
+        let ci0 = rng.float(0.12, 0.3);
+        let ci1 = rng.float(0.12, 0.3);
+        let crown_h = rng.float(0.1, 0.25);
+
+        let var ok = true;
+        for (let var s = 0; s < specs.len && ok; ++s) {
+            let o = specs[s];
+            if (bx0 < o.x1 + 4.0 && bx1 > o.x0 - 4.0 && bz0 < o.z1 + 4.0 && bz1 > o.z0 - 4.0) ok = false;
+        }
+        for (let var p = 0; p < pts.len && ok; p = p + 3) {
+            let px = pts[p];
+            let pz = pts[p + 1];
+            let dx = (bx0 - px).max(px - bx1).max(0.0);
+            let dz = (bz0 - pz).max(pz - bz1).max(0.0);
+            let c = pts[p + 2];
+            if (dx * dx + dz * dz < c * c) ok = false;
+        }
+        if (!ok) continue;
+
+        let h = (10.0 + 30.0 * u + dn * 60.0 * u * u + dn * dn * 380.0 * u.pow(6.0)).min(400.0);
+        let sp = Spec(bx0, bz0, bx1, bz1, h);
+        sp.arch = arch;
+        sp.color = color;
+        sp.uoff = uoff.to_f();
+        sp.voff = voff.to_f();
+        if (h > 110.0 && crown_roll < 0.5) {
+            sp.crown = true;
+            sp.cx0 = bx0 + w * ci0; sp.cx1 = bx1 - w * ci1;
+            sp.cz0 = bz0 + dd * ci1; sp.cz1 = bz1 - dd * ci0;
+            sp.ch = h * crown_h;
+        }
+        specs.push(sp);
+    }
+    return specs;
+}
+
+// Fake moonlight: each compass face of a box gets its own level
+let SHADE_S = 0.80;
+let SHADE_E = 0.95;
+let SHADE_N = 0.62;
+let SHADE_W = 0.72;
+
+// Facades only take a hint of that. Their windows are lit from inside, and
+// shading the whole texture would dim them along with the wall.
+let FACADE_SHADES = [0.94, 1.0, 0.86, 0.9];
+
+// How much darker the foot of a facade is than its top
+let FOOT_SHADE = 0.8;
+
+// The walls of a box, window-mapped from its top down when textured
+fun emit_walls(faces, x0, z0, x1, z1, y0, y1, sp, textured) {
+    let tex = facade_tex(sp.arch, sp.color);
+    let a = ARCHES[sp.arch];
+    let ku = TEX_CELL / a[0];
+    let kv = TEX_CELL / a[1];
+    let va = sp.voff;
+    let vb = va + (y1 - y0) * kv;
+
+    // Corners in order round the box, each wall running left to right as
+    // seen from outside, with its outward normal and shade
+    let wx = [x0, x1, x1, x0];
+    let wz = [z0, z0, z1, z1];
+    let nxs = [0.0, 1.0, 0.0, -1.0];
+    let nzs = [-1.0, 0.0, 1.0, 0.0];
+    let shs = FACADE_SHADES;
+
+    // Each wall takes the next run of window columns along the map, with its
+    // windows centered on it so none is cut off at a corner
+    let var col = sp.uoff;
+    for (let var k = 0; k < 4; ++k) {
+        let ax = wx[k]; let az = wz[k];
+        let bx = wx[(k + 1) % 4]; let bz = wz[(k + 1) % 4];
+        let l = (bx - ax).abs() + (bz - az).abs();
+        let s = shs[k];
+        let v = [ax, y0, az, bx, y0, bz, bx, y1, bz, ax, y1, az];
+        let var uv = nil;
+        if (textured) {
+            let n = l / a[0];
+            let u0 = col + (n.floor().to_f() - n) * 0.5 * TEX_CELL;
+            let u1 = u0 + l * ku;
+            uv = [u0, vb, u1, vb, u1, va, u0, va];
+            col = col + (n.floor() + 1).to_f() * TEX_CELL;
+        }
+        let sh = [s * FOOT_SHADE, s * FOOT_SHADE, s, s];
+        add_face(faces, v, uv, sh, tex, 0, nxs[k], 0.0, nzs[k], nil);
+    }
+}
+
+fun emit_roof(faces, x0, z0, x1, z1, y) {
+    let v = [x0, y, z0, x1, y, z0, x1, y, z1, x0, y, z1];
+    add_face(faces, v, nil, [0.8, 0.8, 0.8, 0.8], -1, ROOF_COLOR, 0.0, 1.0, 0.0, nil);
+}
+
+fun emit_building(faces, sp, textured) {
+    emit_walls(faces, sp.x0, sp.z0, sp.x1, sp.z1, 0.0, sp.h, sp, textured);
+    emit_roof(faces, sp.x0, sp.z0, sp.x1, sp.z1, sp.h);
+    if (sp.crown) {
+        emit_walls(faces, sp.cx0, sp.cz0, sp.cx1, sp.cz1, sp.h, sp.h + sp.ch, sp, textured);
+        emit_roof(faces, sp.cx0, sp.cz0, sp.cx1, sp.cz1, sp.h + sp.ch);
+    }
+}
+
+// --- Road geometry ---
+
+// Lateral offset to a point on the deck at sample k
+fun deck_x(e, k, lat) { return e.xs[k] - e.tzs[k] * lat; }
+fun deck_z(e, k, lat) { return e.zs[k] + e.txs[k] * lat; }
+
+// A strip of deck top between lateral offsets la0..la1 at sample k and
+// lb0..lb1 at sample k2, as two triangles since a curving segment is not
+// flat. The texture u comes from the offset, or is held at fixed_u.
+fun deck_strip(faces, e, k, k2, la0, la1, lb0, lb1, fixed_u, textured, box) {
+    let ya = e.ys[k];
+    let yb = e.ys[k2];
+    let p1x = deck_x(e, k, la0); let p1z = deck_z(e, k, la0);
+    let p2x = deck_x(e, k, la1); let p2z = deck_z(e, k, la1);
+    let p3x = deck_x(e, k2, lb1); let p3z = deck_z(e, k2, lb1);
+    let p4x = deck_x(e, k2, lb0); let p4z = deck_z(e, k2, lb0);
+    let var uv1 = nil;
+    let var uv2 = nil;
+    if (textured) {
+        let va = k.to_f() * e.ds * ROAD_KV;
+        let vb = k2.to_f() * e.ds * ROAD_KV;
+        let var u1 = fixed_u; let var u2 = fixed_u;
+        let var u3 = fixed_u; let var u4 = fixed_u;
+        if (fixed_u < 0.0) {
+            let ra = e.urefs[k];
+            let rb = e.urefs[k2];
+            u1 = (la0 - ra) * e.ku + e.uoff; u2 = (la1 - ra) * e.ku + e.uoff;
+            u3 = (lb1 - rb) * e.ku + e.uoff; u4 = (lb0 - rb) * e.ku + e.uoff;
+        }
+        uv1 = [u1, va, u2, va, u3, vb];
+        uv2 = [u1, va, u3, vb, u4, vb];
+    }
+    add_face(faces, [p1x, ya, p1z, p2x, ya, p2z, p3x, yb, p3z], uv1, [1.0, 1.0, 1.0],
+             e.tex, ASPHALT, 0.0, 1.0, 0.0, box);
+    add_face(faces, [p1x, ya, p1z, p3x, yb, p3z, p4x, yb, p4z], uv2, [1.0, 1.0, 1.0],
+             e.tex, ASPHALT, 0.0, 1.0, 0.0, box);
+}
+
+fun emit_deck_segment(faces, e, k, k2, textured, box) {
+    let ya = e.ys[k];
+    let yb = e.ys[k2];
+    let loa = e.los[k]; let hia = e.his[k];
+    let lob = e.los[k2]; let hib = e.his[k2];
+    let var ula = e.ulo[k]; let var uha = e.uhi[k];
+    let var ulb = e.ulo[k2]; let var uhb = e.uhi[k2];
+
+    // Along a boundary that is not a solid edge line, the lanes stop short of
+    // it, and the strip left over is plain asphalt, with a dashed line along
+    // its outside where that is the marking
+    let ml = e.markl[k];
+    if (ml != 0) {
+        let ca = MARK_STRIP.min((uha - ula) * 0.5);
+        let cb = MARK_STRIP.min((uhb - ulb) * 0.5);
+        if (ml == 1) {
+            deck_strip(faces, e, k, k2, uha - ca, uha - DASH_W, uhb - cb, uhb - DASH_W, ASPHALT_U, textured, box);
+            deck_strip(faces, e, k, k2, uha - DASH_W, uha, uhb - DASH_W, uhb, DASH_U, textured, box);
+        } else {
+            deck_strip(faces, e, k, k2, uha - ca, uha, uhb - cb, uhb, ASPHALT_U, textured, box);
+        }
+        uha = uha - ca;
+        uhb = uhb - cb;
+    }
+    let mr = e.markr[k];
+    if (mr != 0) {
+        let ca = MARK_STRIP.min((uha - ula) * 0.5);
+        let cb = MARK_STRIP.min((uhb - ulb) * 0.5);
+        if (mr == 1) {
+            deck_strip(faces, e, k, k2, ula, ula + DASH_W, ulb, ulb + DASH_W, DASH_U, textured, box);
+            deck_strip(faces, e, k, k2, ula + DASH_W, ula + ca, ulb + DASH_W, ulb + cb, ASPHALT_U, textured, box);
+        } else {
+            deck_strip(faces, e, k, k2, ula, ula + ca, ulb, ulb + cb, ASPHALT_U, textured, box);
+        }
+        ula = ula + ca;
+        ulb = ulb + cb;
+    }
+
+    // The lanes, in strips across
+    for (let var st = 0; st < ROAD_STRIPS; ++st) {
+        let f0 = st.to_f() / ROAD_STRIPS.to_f();
+        let f1 = (st + 1).to_f() / ROAD_STRIPS.to_f();
+        deck_strip(faces, e, k, k2,
+                   ula + (uha - ula) * f0, ula + (uha - ula) * f1,
+                   ulb + (uhb - ulb) * f0, ulb + (uhb - ulb) * f1,
+                   -1.0, textured, box);
+    }
+
+    // Any gore decked over beside them, in plain asphalt from just outside
+    // the edge line
+    if (e.ulo[k] - loa > 0.01 || e.ulo[k2] - lob > 0.01) {
+        deck_strip(faces, e, k, k2, loa, e.ulo[k], lob, e.ulo[k2], ASPHALT_U, textured, box);
+    }
+    if (hia - e.uhi[k] > 0.01 || hib - e.uhi[k2] > 0.01) {
+        deck_strip(faces, e, k, k2, e.uhi[k], hia, e.uhi[k2], hib, ASPHALT_U, textured, box);
+    }
+
+    let alx = deck_x(e, k, hia); let alz = deck_z(e, k, hia);
+    let blx = deck_x(e, k2, hib); let blz = deck_z(e, k2, hib);
+    let arx = deck_x(e, k, loa); let arz = deck_z(e, k, loa);
+    let brx = deck_x(e, k2, lob); let brz = deck_z(e, k2, lob);
+    let ta = ya - DECK_T;
+    let tb = yb - DECK_T;
+
+    // Underside
+    let sh3 = [0.7, 0.7, 0.7];
+    add_face(faces, [alx, ta, alz, arx, ta, arz, brx, tb, brz], nil, sh3, -1, DECK_BOTTOM, 0.0, -1.0, 0.0, box);
+    add_face(faces, [alx, ta, alz, brx, tb, brz, blx, tb, blz], nil, sh3, -1, DECK_BOTTOM, 0.0, -1.0, 0.0, box);
+
+    // The outer faces of the deck, carried up to the top of the barrier
+    let lx = -(e.tzs[k] + e.tzs[k2]) * 0.5;
+    let lz = (e.txs[k] + e.txs[k2]) * 0.5;
+    let sh4 = [0.8, 0.8, 0.8, 0.8];
+    let bar_l = e.barl[k] == 1;
+    let bar_r = e.barr[k] == 1;
+    let var top_l = 0.0;
+    let var top_r = 0.0;
+    if (bar_l) top_l = BARRIER_H;
+    if (bar_r) top_r = BARRIER_H;
+    add_face(faces, [alx, ta, alz, blx, tb, blz, blx, yb + top_l, blz, alx, ya + top_l, alz],
+             nil, sh4, -1, FASCIA_COLOR, lx, 0.0, lz, box);
+    add_face(faces, [arx, ta, arz, brx, tb, brz, brx, yb + top_r, brz, arx, ya + top_r, arz],
+             nil, sh4, -1, FASCIA_COLOR, 0.0 - lx, 0.0, 0.0 - lz, box);
+
+    // The inner faces of the barriers, back to back with the outer ones
+    if (!textured) return;
+    let shb = [0.9, 0.9, 0.9, 0.9];
+    if (bar_l) {
+        add_face(faces, [alx, ya, alz, blx, yb, blz, blx, yb + BARRIER_H, blz, alx, ya + BARRIER_H, alz],
+                 nil, shb, -1, BARRIER_COLOR, 0.0 - lx, 0.0, 0.0 - lz, box);
+    }
+    if (bar_r) {
+        add_face(faces, [arx, ya, arz, brx, yb, brz, brx, yb + BARRIER_H, brz, arx, ya + BARRIER_H, arz],
+                 nil, shb, -1, BARRIER_COLOR, lx, 0.0, lz, box);
+    }
+}
+
+fun emit_pillar(faces, e, k, box) {
+    let mid = (e.los[k] + e.his[k]) * 0.5;
+    let px = deck_x(e, k, mid);
+    let pz = deck_z(e, k, mid);
+    let r = PILLAR_W * 0.5;
+    let x0 = px - r; let x1 = px + r;
+    let z0 = pz - r; let z1 = pz + r;
+    let y1 = e.ys[k] - DECK_T;
+    let wx = [x0, x1, x1, x0];
+    let wz = [z0, z0, z1, z1];
+    let nxs = [0.0, 1.0, 0.0, -1.0];
+    let nzs = [-1.0, 0.0, 1.0, 0.0];
+    let shs = [SHADE_S, SHADE_E, SHADE_N, SHADE_W];
+    for (let var q = 0; q < 4; ++q) {
+        let ax = wx[q]; let az = wz[q];
+        let bx = wx[(q + 1) % 4]; let bz = wz[(q + 1) % 4];
+        let s = shs[q];
+        add_face(faces, [ax, 0.0, az, bx, 0.0, bz, bx, y1, bz, ax, y1, az], nil,
+                 [s, s, s, s], -1, PILLAR_COLOR, nxs[q], 0.0, nzs[q], box);
+    }
+}
+
+// The deck segments and pillars of an edge that fall in a box, clipped to it
+fun emit_road(faces, e, x0, z0, x1, z1, step, fine) {
+    let box = [x0, z0, x1, z1];
+    let pad = ROAD_W;
+    let var k = 0;
+    while (k < e.n - 1) {
+        let k2 = (k + step).min(e.n - 1);
+        let sx0 = e.xs[k].min(e.xs[k2]) - pad;
+        let sx1 = e.xs[k].max(e.xs[k2]) + pad;
+        let sz0 = e.zs[k].min(e.zs[k2]) - pad;
+        let sz1 = e.zs[k].max(e.zs[k2]) + pad;
+        if (sx1 >= x0 && sx0 <= x1 && sz1 >= z0 && sz0 <= z1) {
+            emit_deck_segment(faces, e, k, k2, fine, box);
+            if (fine && k % PILLAR_EVERY == 0) emit_pillar(faces, e, k, box);
+        }
+        k = k2;
+    }
+}
+
+// --- Cells ---
+
+class Cell {
+    init(self, level, i, j, root, max_y, num_faces) {
+        self.level = level;
+        self.i = i;
+        self.j = j;
+        self.root = root;
+        self.max_y = max_y;
+        self.num_faces = num_faces;
+    }
+}
+
+fun faces_max_y(faces) {
+    let var m = 0.0;
+    for (let var i = 0; i < faces.len; ++i) {
+        let v = faces[i].v;
+        for (let var k = 1; k < v.len; k = k + 3) m = m.max(v[k]);
+    }
+    return m;
+}
+
+fun build_fine(i, j) {
+    let x0 = i.to_f() * FINE_SIZE;
+    let z0 = j.to_f() * FINE_SIZE;
+    let x1 = x0 + FINE_SIZE;
+    let z1 = z0 + FINE_SIZE;
+    let edges = edges_near(x0, z0, x1, z1, ROAD_W + ROAD_CLEAR + 60.0);
+    let specs = gen_specs(i, j, road_points(edges, x0, z0, x1, z1));
+
+    let faces = [];
+    for (let var s = 0; s < specs.len; ++s) emit_building(faces, specs[s], true);
+    for (let var a = 0; a < edges.len; ++a) emit_road(faces, edges[a], x0, z0, x1, z1, TESS_STEP, true);
+
+    let root = bsp_build(faces);
+    compute_bounds(root);
+    return Cell(0, i, j, root, faces_max_y(faces), faces.len);
+}
+
+fun build_coarse(i, j) {
+    let x0 = i.to_f() * COARSE_SIZE;
+    let z0 = j.to_f() * COARSE_SIZE;
+    let x1 = x0 + COARSE_SIZE;
+    let z1 = z0 + COARSE_SIZE;
+    let edges = edges_near(x0, z0, x1, z1, ROAD_W + ROAD_CLEAR + 60.0);
+
+    let faces = [];
+    for (let var a = 0; a < COARSE_DIV; ++a) {
+        for (let var b = 0; b < COARSE_DIV; ++b) {
+            let fi = i * COARSE_DIV + a;
+            let fj = j * COARSE_DIV + b;
+            let fx0 = fi.to_f() * FINE_SIZE;
+            let fz0 = fj.to_f() * FINE_SIZE;
+            let pts = road_points(edges, fx0, fz0, fx0 + FINE_SIZE, fz0 + FINE_SIZE);
+            let specs = gen_specs(fi, fj, pts);
+            for (let var s = 0; s < specs.len; ++s) emit_building(faces, specs[s], true);
+        }
+    }
+    for (let var a = 0; a < edges.len; ++a) emit_road(faces, edges[a], x0, z0, x1, z1, COARSE_TESS, false);
+
+    let root = bsp_build_seeded(faces, x0, z0, x1, z1, FINE_SIZE);
+    compute_bounds(root);
+    return Cell(1, i, j, root, faces_max_y(faces), faces.len);
+}
+
+// --- Cell generator actors ---
+
+// What the main actor wants built, nearest first, as level, i, j triples
+class GenWant {
+    init(self, cam_x, cam_z, keys) {
+        self.cam_x = cam_x;
+        self.cam_z = cam_z;
+        self.keys = keys;
+    }
+}
+
+class GenStop {
+    init(self) {
+        self.done = true;
+    }
+}
+
+class CellMsg {
+    init(self, cell) {
+        self.cell = cell;
+    }
+}
+
+fun cell_center(level, i, j) {
+    let var size = FINE_SIZE;
+    if (level == 1) size = COARSE_SIZE;
+    return [(i.to_f() + 0.5) * size, (j.to_f() + 0.5) * size];
+}
+
+// Fine cells matter more: a coarse one near the camera is only a stand-in
+fun want_priority(level, i, j, cx, cz) {
+    let c = cell_center(level, i, j);
+    let dx = c[0] - cx;
+    let dz = c[1] - cz;
+    let var d = (dx * dx + dz * dz).sqrt();
+    if (level == 1) d = d + 400.0;
+    return d;
+}
+
+fun gen_loop() {
+    let var queue = [];
+    let var qx = 0.0;
+    let var qz = 0.0;
+
+    // The last few cells sent, so a want that crossed one in flight does not
+    // have it built twice
+    let RECENT = 64;
+    let recent = Array.with_size(RECENT * 3, -999999);
+    let var recent_at = 0;
+
+    loop {
+        let var msg = nil;
+        if (queue.len == 0) msg = $actor_recv();
+        else msg = $actor_poll();
+
+        if (msg instanceof GenStop) return;
+        if (msg instanceof GenWant) {
+            queue = msg.keys;
+            qx = msg.cam_x;
+            qz = msg.cam_z;
+            continue;
+        }
+        if (queue.len == 0) continue;
+
+        let var best = 0;
+        let var best_p = 1.0e30;
+        for (let var q = 0; q < queue.len; q = q + 3) {
+            let p = want_priority(queue[q], queue[q + 1], queue[q + 2], qx, qz);
+            if (p < best_p) { best_p = p; best = q; }
+        }
+        let level = queue[best];
+        let i = queue[best + 1];
+        let j = queue[best + 2];
+        let last = queue.len - 3;
+        queue[best] = queue[last];
+        queue[best + 1] = queue[last + 1];
+        queue[best + 2] = queue[last + 2];
+        queue.pop(); queue.pop(); queue.pop();
+
+        let var seen = false;
+        for (let var r = 0; r < RECENT * 3; r = r + 3) {
+            if (recent[r] == level && recent[r + 1] == i && recent[r + 2] == j) { seen = true; break; }
+        }
+        if (seen) continue;
+
+        let var cell = nil;
+        if (level == 0) cell = build_fine(i, j);
+        else cell = build_coarse(i, j);
+        $actor_send($actor_parent(), CellMsg(cell));
+
+        recent[recent_at * 3] = level;
+        recent[recent_at * 3 + 1] = i;
+        recent[recent_at * 3 + 2] = j;
+        recent_at = (recent_at + 1) % RECENT;
+    }
+}
+
+// --- Engine audio ---
+//
+// From Night Ride. Synthesised in an actor of its own: the audio driver asks
+// for samples on its own schedule and will not wait for a frame to finish,
+// so generating them on the main actor would tie the sound to the frame rate
+// and break up whenever a frame ran long. The main actor posts the engine
+// state each frame and the synth glides toward it.
+
+let SAMPLE_RATE = 44100;
+
+// Firing frequency, not crankshaft speed: a four-stroke twin fires once per
+// revolution, so this is roughly 2000 to 12000 rpm
+let ENG_F_IDLE = 32.0;
+let ENG_F_MAX = 195.0;
+
+let ENG_A_IDLE = 0.10;
+let ENG_A_MAX = 0.78;
+
+// Rev limiter. Held against the stop, the ignition cuts in and out and the
+// engine stutters. Generated here rather than taken from the main actor,
+// because at eight a second it would alias against the frame rate.
+let LIMIT_FROM = 0.95;
+let LIMIT_HZ = 8.0;
+let LIMIT_DUTY = 0.42;     // Share of each cycle the ignition eases off
+let LIMIT_DEPTH = 0.26;    // How far the level drops at the bottom of a dip
+let LIMIT_SAG = 0.035;     // And how far the note sags with it
+
+// Pre-gain into a lopsided clipper. The asymmetry adds even harmonics as
+// well as odd ones, which is what reads as grit rather than fuzz.
+let ENG_DRIVE = 3.1;
+let ENG_ASYM = 0.68;
+
+// How fast the synth chases the state it was last told about, per sample.
+// The throttle steps when the key goes down, so it gets the slowest glide.
+let ENG_RPM_GLIDE = 0.00055;    // About 40ms
+let ENG_LOAD_GLIDE = 0.000060;  // About 380ms, a throttle body opening
+let ENG_GAIN_GLIDE = 0.0004;    // About 55ms
+
+class EngineState {
+    init(self, rpm, load, top, stop, gain) {
+        self.rpm = rpm;
+        self.load = load;
+        self.gain = gain;
+        // In top gear the limiter is suppressed: it is the one gear the
+        // engine can sit against the stop indefinitely, and a warble that
+        // never ends is far more noticeable than one in passing
+        self.top = top;
+        self.stop = stop;
+    }
+}
+
+let var eng_phase = 0.0;
+let var eng_noise = 0.0;
+let var eng_noise2 = 0.0;
+let var eng_lim_ph = 0.0;
+let var eng_dc = 0.0;
+let var eng_rpm_cur = 0.0;  let var eng_rpm_tgt = 0.0;
+let var eng_load_cur = 0.0; let var eng_load_tgt = 0.0;
+let var eng_top = false;
+let var eng_gain_cur = 1.0; let var eng_gain_tgt = 1.0;
+
+fun engine_set(rpm, load, top, gain) {
+    eng_rpm_tgt = rpm;
+    eng_load_tgt = load;
+    eng_top = top;
+    eng_gain_tgt = gain;
+}
+
+fun engine_fill(buf, n) {
+    let step = 1.0 / SAMPLE_RATE.to_f();
+    let tau = 2.0 * PI;
+    for (let var i = 0; i < n; ++i) {
+        eng_rpm_cur = eng_rpm_cur + (eng_rpm_tgt - eng_rpm_cur) * ENG_RPM_GLIDE;
+        eng_load_cur = eng_load_cur + (eng_load_tgt - eng_load_cur) * ENG_LOAD_GLIDE;
+
+        let f_base = ENG_F_IDLE + (ENG_F_MAX - ENG_F_IDLE) * eng_rpm_cur;
+
+        // Loudness follows the revs far more than the throttle, so the level
+        // dips on every upshift along with the tacho
+        let drive = 0.22 * eng_load_cur + 0.78 * eng_rpm_cur;
+        let var amp = (ENG_A_IDLE + (ENG_A_MAX - ENG_A_IDLE) * drive)
+                      * (eng_rpm_cur * 6.0).min(1.0);
+
+        // Bouncing off the limiter at the top of a gear, as a smooth dip in
+        // level with the note sagging along with it
+        let var f_lim = 1.0;
+        if (!eng_top && eng_rpm_cur > LIMIT_FROM) {
+            eng_lim_ph = eng_lim_ph + LIMIT_HZ * step;
+            if (eng_lim_ph >= 1.0) eng_lim_ph = eng_lim_ph - 1.0;
+            if (eng_lim_ph < LIMIT_DUTY) {
+                let over = ((eng_rpm_cur - LIMIT_FROM) / (1.0 - LIMIT_FROM)).min(1.0);
+                let dip = (0.5 - 0.5 * (eng_lim_ph / LIMIT_DUTY * tau).cos()) * over;
+                amp = amp * (1.0 - LIMIT_DEPTH * dip);
+                f_lim = 1.0 - LIMIT_SAG * dip;
+            }
+        }
+
+        eng_phase = eng_phase + f_base * f_lim * step;
+        if (eng_phase >= 1.0) eng_phase = eng_phase - 1.0;
+        let c = eng_phase * tau;
+
+        // A stack of harmonics running well up the series: the top of it is
+        // the rasp
+        let hard = 0.45 + 0.55 * eng_load_cur;
+        let var v = c.sin() * 0.46
+                  + (c * 2.0).sin() * 0.30
+                  + (c * 3.0).sin() * (0.15 + 0.13 * hard)
+                  + (c * 4.0).sin() * (0.10 + 0.13 * hard)
+                  + (c * 6.0).sin() * (0.06 + 0.13 * hard)
+                  + (c * 8.0).sin() * (0.04 + 0.12 * hard)
+                  + (c * 10.0).sin() * (0.03 + 0.10 * hard)
+                  + (c * 12.0).sin() * (0.02 + 0.08 * hard)
+                  + (c * 16.0).sin() * (0.01 + 0.06 * hard);
+
+        // Half-order: a four-stroke fires on alternate revolutions, and that
+        // lopsidedness is most of what makes it sound like a twin
+        v = v * (0.70 + 0.30 * (c * 0.5).sin().abs());
+
+        // Intake and exhaust rush, two poles so it rumbles rather than hisses
+        eng_noise = eng_noise * 0.92 + rng.float(-1.0, 1.0) * 0.08;
+        eng_noise2 = eng_noise2 * 0.92 + eng_noise * 0.08;
+        v = v + eng_noise2 * (0.9 + 0.7 * eng_load_cur);
+
+        let var d = v * ENG_DRIVE * (0.72 + 0.55 * eng_load_cur);
+        if (d < 0.0) d = d * ENG_ASYM;
+        d = d / (1.0 + d.abs());
+
+        // The asymmetry leaves an offset behind, so take it back out
+        eng_dc = eng_dc * 0.9995 + d * 0.0005;
+        d = d - eng_dc;
+
+        eng_gain_cur = eng_gain_cur + (eng_gain_tgt - eng_gain_cur) * ENG_GAIN_GLIDE;
+        buf.set_f32(i, d * amp * eng_gain_cur);
+    }
+}
+
+fun audio_actor() {
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+    if (dev == nil) {
+        $println("no audio device, running silent");
+        return 0;
+    }
+    rng.seed(20461);
+
+    loop {
+        let msg = $actor_recv();
+        if (msg == nil) break;
+        if (msg instanceof EngineState) {
+            if (msg.stop) break;
+            engine_set(msg.rpm, msg.load, msg.top, msg.gain);
+            continue;
+        }
+        if (!(msg instanceof AudioNeeded)) continue;
+        let n = msg.num_samples;
+        let buf = ByteArray.with_size(n * 4);
+        engine_fill(buf, n);
+        $audio_write_samples(dev, buf);
+    }
+    return 0;
+}
+
+// Spawned before textures and frame buffers exist, so the copy of the
+// globals each one starts with stays small
+let gen_ids = [];
+for (let var g = 0; g < NUM_GENS; ++g) gen_ids.push($actor_spawn(gen_loop));
+
+let var audio_id = nil;
+if (!args.bench && !args.capture) audio_id = $actor_spawn(audio_actor);
+
+// --- Textures ---
+//
+// A texture keeps its whole mip chain, with the masks and shifts the span
+// loop needs for each level. The span loop picks a level per sub-span from
+// how fast the texture coordinates are moving.
+
+let FP_BITS = 16;
+let FP_ONE = 65536.0;
+let U_SHIFT = FP_BITS;
+let BIAS_TEXELS = 8192.0;
+let SUB_MAX = 32;
+let GRAD_LIMIT_FX = 64;
+let GRAD_LIMIT = 64.0;
+let EXC_FX = (SUB_MAX * GRAD_LIMIT_FX) << FP_BITS;
+let PERSP_TOL = 0.04;
+let MASK_RB = 0x00FF00FF;
+let MASK_G = 0x0000FF00;
+
+// Wrapping a facade's texel coordinates to its window map, and finding a
+// window in it. Assumes TEX_CELL is 16.
+let FAC_UMASK = WIN_COLS * 16 - 1;
+let FAC_VMASK = WIN_ROWS * 16 - 1;
+let WIN_COL_SHIFT = 5;
+
+class Texture {
+    init(self, w, h, base) {
+        self.pix = [];
+        self.umask = [];
+        self.vshift = [];
+        self.vmask = [];
+        self.uwrap = [];
+        self.vwrap = [];
+        self.scale = [];
+        self.bias = [];
+
+        let var lw = w;
+        let var lh = h;
+        let var bytes = base;
+        let var sc = 1.0;
+        loop {
+            let var shift = 0;
+            while ((1 << shift) < lw) shift = shift + 1;
+            self.pix.push(bytes);
+            self.umask.push(lw - 1);
+            self.vshift.push(32 + FP_BITS - shift);
+            self.vmask.push((lh - 1) << shift);
+            self.uwrap.push((lw << FP_BITS) - 1);
+            self.vwrap.push((lh << FP_BITS) - 1);
+            self.scale.push(sc);
+            self.bias.push(BIAS_TEXELS * sc);
+            if (lw == 1 && lh == 1) break;
+
+            let nw = (lw.idiv(2)).max(1);
+            let nh = (lh.idiv(2)).max(1);
+            let next = ByteArray.with_size(nw * nh * 4);
+            for (let var y = 0; y < nh; ++y) {
+                for (let var x = 0; x < nw; ++x) {
+                    let xa = (x * 2).min(lw - 1); let xb = (x * 2 + 1).min(lw - 1);
+                    let ya = (y * 2).min(lh - 1); let yb = (y * 2 + 1).min(lh - 1);
+                    let c0 = bytes.get_u32(ya * lw + xa);
+                    let c1 = bytes.get_u32(ya * lw + xb);
+                    let c2 = bytes.get_u32(yb * lw + xa);
+                    let c3 = bytes.get_u32(yb * lw + xb);
+                    let r = (((c0 >> 16) & 0xFF) + ((c1 >> 16) & 0xFF) + ((c2 >> 16) & 0xFF) + ((c3 >> 16) & 0xFF)) >> 2;
+                    let g = (((c0 >> 8) & 0xFF) + ((c1 >> 8) & 0xFF) + ((c2 >> 8) & 0xFF) + ((c3 >> 8) & 0xFF)) >> 2;
+                    let b = ((c0 & 0xFF) + (c1 & 0xFF) + (c2 & 0xFF) + (c3 & 0xFF)) >> 2;
+                    next.set_u32(y * nw + x, (r << 16) | (g << 8) | b);
+                }
+            }
+            bytes = next;
+            lw = nw;
+            lh = nh;
+            sc = sc * 0.5;
+        }
+
+        self.levels = self.pix.len;
+        self.avg = bytes.get_u32(0);
+
+        // Facades sample their first few levels from a window map and a
+        // glass mask instead, see make_facade
+        self.first = 0;
+        self.win = nil;
+        self.glow = nil;
+        self.mask = nil;
+        self.wall = 0;
+    }
+}
+
+let WALL_COLORS = [0x15171C, 0x1C1A22, 0x111418, 0x1E1A1C, 0x181B20, 0x17161B, 0x131619];
+let GLASS_OFF = 0x2C313A;
+let RUN_STICK = 0.62;
+
+// What the glow round an unlit window falls back to: about any of the walls
+let GLOW_WALL = 0x17181D;
+
+// The windows of every building in one tint, a texel each. A building
+// takes its windows from a region of the map at its own offset, so no two
+// share a pattern, and the map is large enough for its wrap not to show.
+// How many rooms are lit drifts across the map, so some buildings are
+// mostly dark and others mostly lit. The glow map holds the color each
+// window spills onto the wall round it.
+fun make_win_maps(color, banded, seed) {
+    let tr = Xoshiro128(seed);
+    let n = WIN_COLS * WIN_ROWS;
+    let win = ByteArray.with_size(n * 4);
+    let glow = ByteArray.with_size(n * 4);
+    if (banded) {
+        fill_band_rows(tr, win, glow, color);
+        return [win, glow];
+    }
+
+    for (let var row = 0; row < WIN_ROWS; ++row) {
+        // Floors differ: some are still busy, some have mostly gone home
+        let floor_k = tr.float(0.35, 1.4);
+        let var on = false;
+        for (let var col = 0; col < WIN_COLS; ++col) {
+            let base = 0.12 + 0.6 * value_noise(col.to_f(), row.to_f(), 9.0, seed);
+            let floor_lit = (base * floor_k).min(0.95);
+
+            // A two-state chain along the floor rather than a coin per window,
+            // so the lights group into runs the way occupied office bays do.
+            // Its stationary probability is still floor_lit.
+            if (col == 0) {
+                on = tr.float(0.0, 1.0) < floor_lit;
+            } else if (on) {
+                if (tr.float(0.0, 1.0) < (1.0 - RUN_STICK) * (1.0 - floor_lit)) on = false;
+            } else {
+                if (tr.float(0.0, 1.0) < (1.0 - RUN_STICK) * floor_lit) on = true;
+            }
+
+            let var c = window_off(tr);
+            let var g = GLOW_WALL;
+            if (on) {
+                let k = window_level(tr);
+                c = color_scale(color, k);
+
+                // Only the brighter rooms throw a glow onto the wall
+                if (k > 0.55) g = color_lerp(GLOW_WALL, c, 0.3);
+            }
+            win.set_u32(row * WIN_COLS + col, c);
+            glow.set_u32(row * WIN_COLS + col, g);
+        }
+    }
+    return [win, glow];
+}
+
+// Brightness of one lit window, as in Night Ride. Rooms differ in which
+// lights are on and what is in them, so this spreads wide but leans bright,
+// in discrete steps that suit the flat shading. The floor is well above zero:
+// a warm tint scaled down too far reads as beige rather than a dim light.
+fun window_level(tr) {
+    let t = tr.float(0.0, 1.0);
+    if (t < 0.32) return 1.0;
+    if (t < 0.56) return 0.84;
+    if (t < 0.75) return 0.70;
+    if (t < 0.90) return 0.56;
+    return 0.44;
+}
+
+// Grey glass, varied a little so a dark floor is not a flat slab
+fun window_off(tr) {
+    return color_scale(GLASS_OFF, tr.float(0.70, 1.30));
+}
+
+// Neon bands change every one to three floors. A lit run is one brightness
+// right across, and an unlit one is grey glass like an unlit window.
+fun fill_band_rows(tr, win, glow, color) {
+    let var row = 0;
+    while (row < WIN_ROWS) {
+        let thick = tr.int(1, 4).min(WIN_ROWS - row);
+        let lit = tr.float(0.0, 1.0) < 0.65;
+        let var c = window_off(tr);
+        let var g = GLOW_WALL;
+        if (lit) {
+            c = color_scale(color, tr.float(0.62, 1.0));
+            g = color_lerp(GLOW_WALL, c, 0.3);
+        }
+        for (let var r = row; r < row + thick; ++r) {
+            win.fill_u32(r * WIN_COLS, WIN_COLS, c);
+            glow.fill_u32(r * WIN_COLS, WIN_COLS, g);
+        }
+        row = row + thick;
+    }
+}
+
+// One window cell of a facade, TEX_CELL texels square: 0 for wall, 1 for
+// glass, 2 for the ring of glow round the glass
+fun make_mask(arch) {
+    let a = ARCHES[arch];
+    let cell = TEX_CELL.floor();
+    let gw = (a[2] * TEX_CELL).floor().clip(1, cell);
+    let gh = (a[3] * TEX_CELL).floor().clip(1, cell);
+    let gx = (cell - gw).idiv(2);
+    let gy = (cell - gh).idiv(2);
+    let mask = Array.with_size(cell * cell, 0);
+    for (let var y = gy - 1; y <= gy + gh; ++y) {
+        for (let var x = gx - 1; x <= gx + gw; ++x) {
+            if (x < 0 || y < 0 || x >= cell || y >= cell) continue;
+            let glass = x >= gx && x < gx + gw && y >= gy && y < gy + gh;
+            if (glass) mask[y * cell + x] = 1; else mask[y * cell + x] = 2;
+        }
+    }
+    return mask;
+}
+
+// Mip levels of a facade below one texel per window cell come from its
+// window map and mask, and those above from a map of each window cell
+// averaged, so there are FACADE_FIRST levels with no image of their own
+let FACADE_FIRST = 4;
+
+fun make_facade(arch, maps, mask) {
+    let wall = WALL_COLORS[arch % WALL_COLORS.len];
+    let cell = TEX_CELL.floor();
+    let var ng = 0;
+    let var nr = 0;
+    for (let var i = 0; i < mask.len; ++i) {
+        if (mask[i] == 1) ng = ng + 1;
+        if (mask[i] == 2) nr = nr + 1;
+    }
+    let total = (cell * cell).to_f();
+    let fg = ng.to_f() / total;
+    let fr = nr.to_f() / total;
+
+    let n = WIN_COLS * WIN_ROWS;
+    let avg = ByteArray.with_size(n * 4);
+    for (let var i = 0; i < n; ++i) {
+        let c = color_lerp(wall, maps[0].get_u32(i), fg / (1.0 - fr).max(0.01));
+        avg.set_u32(i, color_lerp(c, maps[1].get_u32(i), fr));
+    }
+
+    let t = Texture(WIN_COLS, WIN_ROWS, avg);
+    let ksc = 1.0 / TEX_CELL;
+    for (let var l = 0; l < t.levels; ++l) {
+        t.scale[l] = t.scale[l] * ksc;
+        t.bias[l] = BIAS_TEXELS * t.scale[l];
+    }
+    let fw = WIN_COLS * cell;
+    let fh = WIN_ROWS * cell;
+    for (let var l = 0; l < FACADE_FIRST; ++l) {
+        t.pix.insert(0, nil);
+        t.umask.insert(0, 0);
+        t.vshift.insert(0, 0);
+        t.vmask.insert(0, 0);
+        t.uwrap.insert(0, (fw << FP_BITS) - 1);
+        t.vwrap.insert(0, (fh << FP_BITS) - 1);
+        t.scale.insert(0, 1.0);
+        t.bias.insert(0, BIAS_TEXELS);
+    }
+    t.levels = t.pix.len;
+    t.first = FACADE_FIRST;
+    t.win = maps[0];
+    t.glow = maps[1];
+    t.mask = mask;
+    t.wall = wall;
+    return t;
+}
+
+// Asphalt with solid edge lines and dashed lines between the lanes, 3m of
+// dash in every 12m, for a deck of some number of lanes across w texels
+fun make_lane_tex(w, lanes, ku) {
+    let h = ROAD_TEX_H;
+    let tr = Xoshiro128(4242 + lanes);
+    let bytes = ByteArray.with_size(w * h * 4);
+    for (let var i = 0; i < w * h; ++i) {
+        let n = tr.int(0, 3);
+        bytes.set_u32(i, ASPHALT + n * 0x010101);
+    }
+
+    let edge_w = (0.18 * ku).ceil();
+    let dash = (3.0 * ROAD_KV).floor();
+    for (let var y = 0; y < h; ++y) {
+        let row = y * w;
+        bytes.fill_u32(row + 3, edge_w, EDGE_COLOR);
+        bytes.fill_u32(row + w - 3 - edge_w, edge_w, EDGE_COLOR);
+        if (y < dash) {
+            for (let var l = 1; l < lanes; ++l) {
+                let x = (l.to_f() * LANE_W * ku).floor() - 1;
+                bytes.fill_u32(row + x, 2, LANE_COLOR);
+            }
+        }
+
+        // The dashed line where a ramp's lanes join on, sampled at DASH_U:
+        // short dashes close together, twice to every 12m
+        if (y % 64 < 22) bytes.fill_u32(row + DASH_U.floor(), 2, LANE_COLOR);
+    }
+    return Texture(w, h, bytes);
+}
+
+let textures = [make_lane_tex(ROAD_TEX_W, NUM_LANES, ROAD_KU),
+                make_lane_tex(RAMP_TEX_W, RAMP_LANES, RAMP_KU)];
+let tint_maps = [];
+for (let var c = 0; c < WIN_TINTS.len; ++c) tint_maps.push(make_win_maps(WIN_TINTS[c], false, 300 + c));
+let neon_maps = [];
+for (let var c = 0; c < NEON.len; ++c) neon_maps.push(make_win_maps(NEON[c], true, 400 + c));
+for (let var a = 0; a < ARCHES.len; ++a) {
+    let mask = make_mask(a);
+    let banded = ARCHES[a][4] == 1;
+    let n = arch_colors(a);
+    for (let var c = 0; c < n; ++c) {
+        if (banded) textures.push(make_facade(a, neon_maps[c], mask));
+        else textures.push(make_facade(a, tint_maps[c], mask));
+    }
+}
+
+// --- Frame and camera ---
+
+let frame_image = Image(FRAME_WIDTH, FRAME_HEIGHT);
+let frame_buffer = frame_image.bytes;
+
+let var cam_x = 0.0;
+let var cam_y = 30.0;
+let var cam_z = 0.0;
+let var cam_yaw = 0.0;
+let var cam_pitch = 0.0;
+let var cam_roll = 0.0;
+
+// Rows of the world-to-eye rotation: the camera's right, up and forward
+let var r00 = 1.0; let var r01 = 0.0; let var r02 = 0.0;
+let var r10 = 0.0; let var r11 = 1.0; let var r12 = 0.0;
+let var r20 = 0.0; let var r21 = 0.0; let var r22 = 1.0;
+
+fun update_camera() {
+    let cy = cam_yaw.cos();   let sy = cam_yaw.sin();
+    let cp = cam_pitch.cos(); let sp = cam_pitch.sin();
+    let cr = cam_roll.cos();  let sr = cam_roll.sin();
+
+    let fx = sy * cp;  let fy = sp;  let fz = cy * cp;
+    let ax = cy;       let ay = 0.0; let az = 0.0 - sy;
+    let ux = 0.0 - sp * sy; let uy = cp; let uz = 0.0 - sp * cy;
+
+    r00 = ax * cr - ux * sr; r01 = ay * cr - uy * sr; r02 = az * cr - uz * sr;
+    r10 = ux * cr + ax * sr; r11 = uy * cr + ay * sr; r12 = uz * cr + az * sr;
+    r20 = fx; r21 = fy; r22 = fz;
+    update_frustum();
+}
+
+// Frustum planes in world space. A point is inside when n.p - d >= 0.
+let fr_nx = Array.with_size(5, 0.0);
+let fr_ny = Array.with_size(5, 0.0);
+let fr_nz = Array.with_size(5, 0.0);
+let fr_d = Array.with_size(5, 0.0);
+
+fun set_plane_i(i, nx, ny, nz, d) {
+    fr_nx[i] = nx; fr_ny[i] = ny; fr_nz[i] = nz; fr_d[i] = d;
+}
+
+fun frustum_side(i, nx, ny, nz) {
+    set_plane_i(i, nx, ny, nz, nx * cam_x + ny * cam_y + nz * cam_z);
+}
+
+fun update_frustum() {
+    let tl = CX / FOCAL;
+    let tr = (FRAME_WIDTH.to_f() - CX) / FOCAL;
+    let tt = CY / FOCAL;
+    let tb = (FRAME_HEIGHT.to_f() - CY) / FOCAL;
+    set_plane_i(0, r20, r21, r22, r20 * cam_x + r21 * cam_y + r22 * cam_z + NEAR);
+    frustum_side(1, r00 + tl * r20, r01 + tl * r21, r02 + tl * r22);
+    frustum_side(2, tr * r20 - r00, tr * r21 - r01, tr * r22 - r02);
+    frustum_side(3, tt * r20 - r10, tt * r21 - r11, tt * r22 - r12);
+    frustum_side(4, r10 + tb * r20, r11 + tb * r21, r12 + tb * r22);
+}
+
+// Is a box, given by center and half extents, wholly outside the frustum?
+fun box_hidden(cx, cy, cz, hx, hy, hz) {
+    for (let var i = 0; i < 5; ++i) {
+        let nx = fr_nx[i];
+        let ny = fr_ny[i];
+        let nz = fr_nz[i];
+        let reach = nx.abs() * hx + ny.abs() * hy + nz.abs() * hz;
+        if (nx * cx + ny * cy + nz * cz - fr_d[i] + reach < 0.0) return true;
+    }
+    return false;
+}
+
+// --- The s-buffer ---
+//
+// The covered intervals of each scanline, sorted, disjoint and coalesced,
+// in a pool of parallel arrays that is reset every frame. This is the one
+// from examples/tremor.psh.
+
+let MAX_SPANS = 32768;
+let NO_SPAN = 0 - 1;
+
+let sp_x0 = Array.with_size(MAX_SPANS, 0);
+let sp_x1 = Array.with_size(MAX_SPANS, 0);
+let sp_next = Array.with_size(MAX_SPANS, NO_SPAN);
+let var sp_top = 0;
+
+let sb_head = Array.with_size(FRAME_HEIGHT, NO_SPAN);
+let sb_full = ByteArray.with_size(FRAME_HEIGHT * 4);
+let var sb_num_full = 0;
+let var screen_done = false;
+
+let MAX_VIS = 128;
+let vis_x0 = Array.with_size(MAX_VIS, 0);
+let vis_x1 = Array.with_size(MAX_VIS, 0);
+
+fun sbuf_reset() {
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) sb_head[y] = NO_SPAN;
+    sb_full.zero_fill();
+    sb_num_full = 0;
+    sp_top = 0;
+    screen_done = false;
+}
+
+fun mark_full(y) {
+    sb_full.set_u32(y, 1);
+    sb_num_full = sb_num_full + 1;
+    if (sb_num_full >= FRAME_HEIGHT) screen_done = true;
+}
+
+// Insert [x0, x1) into scanline y, leaving the parts of it that were not
+// already covered in vis_x0/vis_x1
+fun sbuf_insert(y, x0, x1) {
+    if (sb_full.get_u32(y) != 0) return 0;
+
+    let var n_vis = 0;
+    let var prev = NO_SPAN;
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN && sp_x1[cur] < x0) {
+        prev = cur;
+        cur = sp_next[cur];
+    }
+
+    let var mx0 = x0;
+    let var mx1 = x1;
+    let var cx = x0;
+    let var scan = cur;
+    while (scan != NO_SPAN) {
+        let sx0 = sp_x0[scan];
+        if (sx0 > x1) break;
+        let sx1 = sp_x1[scan];
+        if (sx0 > cx && n_vis < MAX_VIS) {
+            vis_x0[n_vis] = cx;
+            vis_x1[n_vis] = sx0;
+            n_vis = n_vis + 1;
+        }
+        if (sx1 > cx) cx = sx1;
+        if (sx0 < mx0) mx0 = sx0;
+        if (sx1 > mx1) mx1 = sx1;
+        scan = sp_next[scan];
+    }
+    if (cx < x1 && n_vis < MAX_VIS) {
+        vis_x0[n_vis] = cx;
+        vis_x1[n_vis] = x1;
+        n_vis = n_vis + 1;
+    }
+    if (n_vis == 0) return 0;
+
+    if (cur == scan) {
+        if (sp_top >= MAX_SPANS) {
+            // Out of intervals: what is on the line is the nearest geometry,
+            // so retiring it keeps anything behind from being let through
+            mark_full(y);
+            return 0;
+        }
+        let s = sp_top;
+        sp_top = sp_top + 1;
+        sp_x0[s] = mx0;
+        sp_x1[s] = mx1;
+        sp_next[s] = scan;
+        if (prev == NO_SPAN) sb_head[y] = s; else sp_next[prev] = s;
+    } else {
+        sp_x0[cur] = mx0;
+        sp_x1[cur] = mx1;
+        sp_next[cur] = scan;
+    }
+
+    if (mx0 <= 0 && mx1 >= FRAME_WIDTH) mark_full(y);
+    return n_vis;
+}
+
+// Is every pixel of this rectangle already covered?
+fun sbuf_covers_rect(x0, y0, x1, y1) {
+    let ry0 = y0.max(0);
+    let ry1 = y1.min(FRAME_HEIGHT);
+    if (ry0 >= ry1) return true;
+    for (let var y = ry0; y < ry1; ++y) {
+        if (sb_full.get_u32(y) != 0) continue;
+        let var cur = sb_head[y];
+        while (cur != NO_SPAN && sp_x1[cur] <= x0) cur = sp_next[cur];
+        if (cur == NO_SPAN || sp_x0[cur] > x0 || sp_x1[cur] < x1) return false;
+    }
+    return true;
+}
+
+// Project a box and report whether the s-buffer already covers it. A box
+// reaching behind the near plane has no useful projection, so it is drawn.
+fun box_occluded(cx, cy, cz, hx, hy, hz) {
+    let var bx0 = 0.0; let var by0 = 0.0;
+    let var bx1 = 0.0; let var by1 = 0.0;
+    for (let var i = 0; i < 8; ++i) {
+        let var dx = cx - hx - cam_x;
+        let var dy = cy - hy - cam_y;
+        let var dz = cz - hz - cam_z;
+        if ((i & 1) != 0) dx = dx + 2.0 * hx;
+        if ((i & 2) != 0) dy = dy + 2.0 * hy;
+        if ((i & 4) != 0) dz = dz + 2.0 * hz;
+        let ez = r20 * dx + r21 * dy + r22 * dz;
+        if (ez <= NEAR) return false;
+        let inv = FOCAL / ez;
+        let sx = CX + (r00 * dx + r01 * dy + r02 * dz) * inv;
+        let sy = CY - (r10 * dx + r11 * dy + r12 * dz) * inv;
+        if (i == 0) {
+            bx0 = sx; bx1 = sx; by0 = sy; by1 = sy;
+        } else {
+            bx0 = bx0.min(sx); bx1 = bx1.max(sx);
+            by0 = by0.min(sy); by1 = by1.max(sy);
+        }
+    }
+    let rx0 = bx0.floor().max(0);
+    let ry0 = by0.floor().max(0);
+    let rx1 = bx1.floor().min(FRAME_WIDTH);
+    let ry1 = by1.floor().min(FRAME_HEIGHT);
+    if (rx0 >= rx1 || ry0 >= ry1) return true;
+    return sbuf_covers_rect(rx0, ry0, rx1, ry1);
+}
+
+// --- Rasterization ---
+
+let MAX_VERTS = 32;
+
+let var aX = Array.with_size(MAX_VERTS, 0.0);
+let var aY = Array.with_size(MAX_VERTS, 0.0);
+let var aZ = Array.with_size(MAX_VERTS, 0.0);
+let var aU = Array.with_size(MAX_VERTS, 0.0);
+let var aV = Array.with_size(MAX_VERTS, 0.0);
+let var aS = Array.with_size(MAX_VERTS, 0.0);
+let var bX = Array.with_size(MAX_VERTS, 0.0);
+let var bY = Array.with_size(MAX_VERTS, 0.0);
+let var bZ = Array.with_size(MAX_VERTS, 0.0);
+let var bU = Array.with_size(MAX_VERTS, 0.0);
+let var bV = Array.with_size(MAX_VERTS, 0.0);
+let var bS = Array.with_size(MAX_VERTS, 0.0);
+
+// Projected vertices, with u/z, v/z, shade/z and 1/z, which are linear on
+// screen
+let pX = Array.with_size(MAX_VERTS, 0.0);
+let pY = Array.with_size(MAX_VERTS, 0.0);
+let pUZ = Array.with_size(MAX_VERTS, 0.0);
+let pVZ = Array.with_size(MAX_VERTS, 0.0);
+let pSZ = Array.with_size(MAX_VERTS, 0.0);
+let pW = Array.with_size(MAX_VERTS, 0.0);
+
+let INV_N = Array.with_size(SUB_MAX + 1, 0.0);
+for (let var i = 1; i <= SUB_MAX; ++i) INV_N[i] = 1.0 / i.to_f();
+
+// What fog adds to a pixel at each of 256 levels, packed
+let FOG_ADD = Array.with_size(256, 0);
+for (let var i = 0; i < 256; ++i) {
+    let f = i.to_f() / 255.0;
+    let r = (FOG_R.to_f() * f).floor();
+    let g = (FOG_G.to_f() * f).floor();
+    let b = (FOG_B.to_f() * f).floor();
+    FOG_ADD[i] = (r << 16) | (g << 8) | b;
+}
+
+// Gradients of the face being drawn
+let var g_duzdx = 0.0; let var g_duzdy = 0.0;
+let var g_dvzdx = 0.0; let var g_dvzdy = 0.0;
+let var g_dszdx = 0.0; let var g_dszdy = 0.0;
+let var g_dwdx = 0.0;  let var g_dwdy = 0.0;
+let var g_uz0 = 0.0; let var g_vz0 = 0.0; let var g_sz0 = 0.0; let var g_w0 = 0.0;
+let var g_ref_x = 0.0; let var g_ref_y = 0.0;
+
+// Depth range of the face being drawn
+let var g_zmin = 0.0;
+let var g_zmean = 0.0;
+
+let var pixels_drawn = 0;
+let var faces_drawn = 0;
+let var nodes_skipped = 0;
+
+// Clip the polygon in the a buffers to z >= NEAR
+fun clip_near(n, textured) {
+    let var m = 0;
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+        let di = aZ[i] - NEAR;
+        let dj = aZ[j] - NEAR;
+        if (di >= 0.0) {
+            bX[m] = aX[i]; bY[m] = aY[i]; bZ[m] = aZ[i];
+            if (textured) { bU[m] = aU[i]; bV[m] = aV[i]; bS[m] = aS[i]; }
+            m = m + 1;
+        }
+        if ((di >= 0.0) != (dj >= 0.0)) {
+            let t = di / (di - dj);
+            bX[m] = aX[i] + (aX[j] - aX[i]) * t;
+            bY[m] = aY[i] + (aY[j] - aY[i]) * t;
+            bZ[m] = aZ[i] + (aZ[j] - aZ[i]) * t;
+            if (textured) {
+                bU[m] = aU[i] + (aU[j] - aU[i]) * t;
+                bV[m] = aV[i] + (aV[j] - aV[i]) * t;
+                bS[m] = aS[i] + (aS[j] - aS[i]) * t;
+            }
+            m = m + 1;
+        }
+    }
+    let tx = aX; aX = bX; bX = tx;
+    let ty = aY; aY = bY; bY = ty;
+    let tz = aZ; aZ = bZ; bZ = tz;
+    let tu = aU; aU = bU; bU = tu;
+    let tv = aV; aV = bV; bV = tv;
+    let ts = aS; aS = bS; bS = ts;
+    return m;
+}
+
+// Transform, clip and project a face, and reject it if it faces away or is
+// already hidden. Returns the vertex count left, or 0.
+fun face_setup(f, textured) {
+    if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return 0;
+
+    let v = f.v;
+    let n = v.len.idiv(3);
+    if (n > MAX_VERTS - 8) return 0;
+    let uv = f.uv;
+    let sh = f.sh;
+
+    let var zsum = 0.0;
+    let var any_front = false;
+    for (let var i = 0; i < n; ++i) {
+        let dx = v[i * 3] - cam_x;
+        let dy = v[i * 3 + 1] - cam_y;
+        let dz = v[i * 3 + 2] - cam_z;
+        aX[i] = r00 * dx + r01 * dy + r02 * dz;
+        aY[i] = r10 * dx + r11 * dy + r12 * dz;
+        let ez = r20 * dx + r21 * dy + r22 * dz;
+        aZ[i] = ez;
+        if (ez > NEAR) any_front = true;
+        zsum = zsum + ez;
+        if (textured) {
+            aU[i] = uv[i * 2];
+            aV[i] = uv[i * 2 + 1];
+            aS[i] = sh[i];
+        }
+    }
+    if (!any_front) return 0;
+    g_zmean = (zsum / n.to_f()).max(NEAR);
+
+    let m = clip_near(n, textured);
+    if (m < 3) return 0;
+
+    let var bx0 = 0.0; let var by0 = 0.0;
+    let var bx1 = 0.0; let var by1 = 0.0;
+    let var zmin = aZ[0];
+    for (let var i = 0; i < m; ++i) {
+        let w = 1.0 / aZ[i];
+        let sx = CX + FOCAL * aX[i] * w;
+        let sy = CY - FOCAL * aY[i] * w;
+        pX[i] = sx;
+        pY[i] = sy;
+        pW[i] = w;
+        if (textured) {
+            pUZ[i] = aU[i] * w;
+            pVZ[i] = aV[i] * w;
+            pSZ[i] = aS[i] * w;
+        }
+        if (aZ[i] < zmin) zmin = aZ[i];
+        if (i == 0) {
+            bx0 = sx; bx1 = sx; by0 = sy; by1 = sy;
+        } else {
+            bx0 = bx0.min(sx); bx1 = bx1.max(sx);
+            by0 = by0.min(sy); by1 = by1.max(sy);
+        }
+    }
+    g_zmin = zmin;
+
+    let rx0 = bx0.floor().max(0);
+    let ry0 = by0.floor().max(0);
+    let rx1 = bx1.floor().min(FRAME_WIDTH);
+    let ry1 = by1.floor().min(FRAME_HEIGHT);
+    if (rx0 >= rx1 || ry0 >= ry1) return 0;
+    if (sbuf_covers_rect(rx0, ry0, rx1, ry1)) return 0;
+
+    if (!textured) return m;
+
+    // Gradients from the best conditioned triple of vertices
+    let var bi = 1;
+    let var bj = 2;
+    let var best = 0.0;
+    for (let var i = 1; i + 1 < m; ++i) {
+        let e1x = pX[i] - pX[0];
+        let e1y = pY[i] - pY[0];
+        let e2x = pX[i + 1] - pX[0];
+        let e2y = pY[i + 1] - pY[0];
+        let det = (e1x * e2y - e2x * e1y).abs();
+        if (det > best) { best = det; bi = i; bj = i + 1; }
+    }
+    if (best < 0.000001) return 0;
+
+    let x0 = pX[0]; let y0 = pY[0];
+    let e1x = pX[bi] - x0; let e1y = pY[bi] - y0;
+    let e2x = pX[bj] - x0; let e2y = pY[bj] - y0;
+    let inv_det = 1.0 / (e1x * e2y - e2x * e1y);
+
+    let d1u = pUZ[bi] - pUZ[0]; let d2u = pUZ[bj] - pUZ[0];
+    g_duzdx = (d1u * e2y - d2u * e1y) * inv_det;
+    g_duzdy = (d2u * e1x - d1u * e2x) * inv_det;
+    let d1v = pVZ[bi] - pVZ[0]; let d2v = pVZ[bj] - pVZ[0];
+    g_dvzdx = (d1v * e2y - d2v * e1y) * inv_det;
+    g_dvzdy = (d2v * e1x - d1v * e2x) * inv_det;
+    let d1s = pSZ[bi] - pSZ[0]; let d2s = pSZ[bj] - pSZ[0];
+    g_dszdx = (d1s * e2y - d2s * e1y) * inv_det;
+    g_dszdy = (d2s * e1x - d1s * e2x) * inv_det;
+    let d1w = pW[bi] - pW[0]; let d2w = pW[bj] - pW[0];
+    g_dwdx = (d1w * e2y - d2w * e1y) * inv_det;
+    g_dwdy = (d2w * e1x - d1w * e2x) * inv_det;
+
+    g_uz0 = pUZ[0]; g_vz0 = pVZ[0]; g_sz0 = pSZ[0]; g_w0 = pW[0];
+    g_ref_x = x0; g_ref_y = y0;
+    return m;
+}
+
+// Walk the polygon scanline by scanline, hand each span to the s-buffer, and
+// fill whatever comes back visible: with a flat color, or textured with
+// perspective correction, mip mapping, shading and fog per sub-span
+fun raster_poly(m, tex, color) {
+    let var top = 0;
+    let var y_min = pY[0];
+    let var bot = 0;
+    let var y_max = pY[0];
+    for (let var i = 1; i < m; ++i) {
+        if (pY[i] < y_min) { y_min = pY[i]; top = i; }
+        if (pY[i] > y_max) { y_max = pY[i]; bot = i; }
+    }
+
+    let var scan_y = y_min.floor();
+    if (scan_y < 0) scan_y = 0;
+    let var end_y = y_max.floor();
+    if (end_y > FRAME_HEIGHT) end_y = FRAME_HEIGHT;
+    if (scan_y >= end_y) return;
+
+    let var area = 0.0;
+    for (let var i = 0; i < m; ++i) {
+        let var j = i + 1;
+        if (j == m) j = 0;
+        area = area + pX[i] * pY[j] - pX[j] * pY[i];
+    }
+    let var step_l = 1;
+    if (area > 0.0) step_l = m - 1;
+    let step_r = m - step_l;
+
+    let textured = tex != nil;
+    let y_off = scan_y + 0.5 - g_ref_y;
+    let x_off = 0.5 - g_ref_x;
+    let var uz_row = g_uz0 + x_off * g_duzdx + y_off * g_duzdy;
+    let var vz_row = g_vz0 + x_off * g_dvzdx + y_off * g_dvzdy;
+    let var sz_row = g_sz0 + x_off * g_dszdx + y_off * g_dszdy;
+    let var w_row = g_w0 + x_off * g_dwdx + y_off * g_dwdy;
+    let duzdx = g_duzdx; let dvzdx = g_dvzdx; let dszdx = g_dszdx; let dwdx = g_dwdx;
+
+    let var t_pix = nil; let var t_umask = nil; let var t_vshift = nil; let var t_vmask = nil;
+    let var t_uwrap = nil; let var t_vwrap = nil; let var t_scale = nil; let var t_bias = nil;
+    let var max_lvl = 0;
+    let var t_first = 0;
+    let var f_mask = nil; let var f_win = nil; let var f_glow = nil; let var f_wall = 0;
+    if (textured) {
+        t_pix = tex.pix; t_umask = tex.umask; t_vshift = tex.vshift; t_vmask = tex.vmask;
+        t_uwrap = tex.uwrap; t_vwrap = tex.vwrap; t_scale = tex.scale; t_bias = tex.bias;
+        max_lvl = tex.levels - 1;
+        t_first = tex.first;
+        f_mask = tex.mask; f_win = tex.win; f_glow = tex.glow; f_wall = tex.wall;
+    }
+    let mask_rb = MASK_RB;
+    let fb = frame_buffer;
+
+    let var cl = top; let var xl = 0.0; let var dxl = 0.0; let var end_l = scan_y;
+    let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = scan_y;
+    let var row = scan_y * FRAME_WIDTH;
+    let var span_px = 0;
+
+    while (scan_y < end_y) {
+        while (scan_y >= end_l && cl != bot) {
+            let ya = pY[cl];
+            let xa = pX[cl];
+            cl = (cl + step_l) % m;
+            let yb = pY[cl];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_l = e;
+            if (end_l > scan_y && yb > ya) {
+                dxl = (pX[cl] - xa) / (yb - ya);
+                xl = xa + (scan_y + 1 - ya) * dxl;
+            }
+        }
+        while (scan_y >= end_r && cr != bot) {
+            let ya = pY[cr];
+            let xa = pX[cr];
+            cr = (cr + step_r) % m;
+            let yb = pY[cr];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_r = e;
+            if (end_r > scan_y && yb > ya) {
+                dxr = (pX[cr] - xa) / (yb - ya);
+                xr = xa + (scan_y + 1 - ya) * dxr;
+            }
+        }
+
+        let var band_end = end_l;
+        if (end_r < band_end) band_end = end_r;
+        if (band_end <= scan_y) break;
+
+        if (!textured) {
+            while (scan_y < band_end) {
+                let var xa = xl.floor();
+                if (xa < 0) xa = 0;
+                let var xb = xr.floor();
+                if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+                if (xa < xb) {
+                    let n_vis = sbuf_insert(scan_y, xa, xb);
+                    for (let var k = 0; k < n_vis; ++k) {
+                        let len = vis_x1[k] - vis_x0[k];
+                        fb.fill_u32(row + vis_x0[k], len, color);
+                        span_px = span_px + len;
+                    }
+                }
+                xl = xl + dxl;
+                xr = xr + dxr;
+                row = row + FRAME_WIDTH;
+                scan_y = scan_y + 1;
+            }
+            continue;
+        }
+
+        while (scan_y < band_end) {
+            let var xa = xl.floor();
+            if (xa < 0) xa = 0;
+            let var xb = xr.floor();
+            if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+
+            if (xa < xb) {
+                let n_vis = sbuf_insert(scan_y, xa, xb);
+                for (let var k = 0; k < n_vis; ++k) {
+                    let var x = vis_x0[k];
+                    let piece_end = vis_x1[k];
+                    let var uz = uz_row + x * duzdx;
+                    let var vz = vz_row + x * dvzdx;
+                    let var sz = sz_row + x * dszdx;
+                    let var w = w_row + x * dwdx;
+                    let var z = 1.0 / w;
+                    let var u = uz * z;
+                    let var v = vz * z;
+                    let var sh = sz * z;
+
+                    // Sub-spans are as long as 1/z allows the affine step to
+                    // stay true
+                    let var wscale = 0.0;
+                    let adw = dwdx.abs();
+                    if (adw > 0.0) wscale = PERSP_TOL / adw;
+
+                    while (x < piece_end) {
+                        let var run = SUB_MAX;
+                        if (wscale > 0.0) {
+                            let nf = w * wscale;
+                            if (nf < SUB_MAX.to_f()) {
+                                run = nf.floor();
+                                if (run < 1) run = 1;
+                            }
+                        }
+                        let var xe = x + run;
+                        if (xe > piece_end) xe = piece_end;
+                        let len = xe - x;
+
+                        let uz_e = uz + len * duzdx;
+                        let vz_e = vz + len * dvzdx;
+                        let sz_e = sz + len * dszdx;
+                        let w_e = w + len * dwdx;
+                        let z_e = 1.0 / w_e;
+                        let u_e = uz_e * z_e;
+                        let v_e = vz_e * z_e;
+                        let sh_e = sz_e * z_e;
+
+                        let inv_len = INV_N[len];
+                        let du0 = (u_e - u) * inv_len;
+                        let dv0 = (v_e - v) * inv_len;
+
+                        // The mip level whose texels are about a pixel apart
+                        let var rho = du0.abs();
+                        let adv = dv0.abs();
+                        if (adv > rho) rho = adv;
+                        let var lvl = 0;
+                        while (rho > 1.0 && lvl < max_lvl) {
+                            rho = rho * 0.5;
+                            lvl = lvl + 1;
+                        }
+                        let sc = t_scale[lvl];
+                        let var du = du0 * sc;
+                        let var dv = dv0 * sc;
+                        if (du > GRAD_LIMIT) du = GRAD_LIMIT;
+                        else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
+                        if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
+                        else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
+
+                        let bias = t_bias[lvl];
+                        let ufx = ((((u * sc + bias) * FP_ONE).floor()) & t_uwrap[lvl]) + EXC_FX;
+                        let vfx = ((((v * sc + bias) * FP_ONE).floor()) & t_vwrap[lvl]) + EXC_FX;
+                        let var t = (vfx << 32) + ufx;
+                        let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
+
+                        // Shade and haze, held for the sub-span
+                        let zm = 2.0 / (w + w_e);
+                        let var f = 0.0;
+                        if (zm > FOG_START) {
+                            f = (zm - FOG_START) * FOG_K;
+                            if (f > FOG_MAX) f = FOG_MAX;
+                        }
+                        let var kk = ((sh + sh_e) * 0.5 * (1.0 - f) * 255.0).floor();
+                        if (kk < 0) kk = 0;
+                        else if (kk > 255) kk = 255;
+                        let fadd = FOG_ADD[(f * 255.0).floor()];
+
+                        let var i = row + x;
+                        let end_i = row + xe;
+                        span_px = span_px + len;
+
+                        // Close up, a facade is its window map and glass
+                        // mask: the whole texel picks a window cell, which
+                        // picks the window, and the fraction a spot in the
+                        // cell, which picks glass, glow or wall
+                        if (lvl < t_first) {
+                            while (i < end_i) {
+                                let ui = (t >> U_SHIFT) & FAC_UMASK;
+                                let vi = (t >> 48) & FAC_VMASK;
+                                let m = f_mask[((vi & 15) << 4) | (ui & 15)];
+                                let var c = f_wall;
+                                if (m == 1) c = f_win.get_u32(((vi >> 4) << WIN_COL_SHIFT) | (ui >> 4));
+                                else if (m == 2) c = f_glow.get_u32(((vi >> 4) << WIN_COL_SHIFT) | (ui >> 4));
+                                let p = ((c & mask_rb) | ((c & MASK_G) << 24)) * kk;
+                                fb.set_u32(i, (((p >> 8) & mask_rb) | ((p >> 32) & 0xFF00)) + fadd);
+                                t = t + dt;
+                                i = i + 1;
+                            }
+                            uz = uz_e; vz = vz_e; sz = sz_e; w = w_e;
+                            u = u_e; v = v_e; sh = sh_e;
+                            x = xe;
+                            continue;
+                        }
+
+                        let pix = t_pix[lvl];
+                        let umask = t_umask[lvl];
+                        let vshift = t_vshift[lvl];
+                        let vmask = t_vmask[lvl];
+                        while (i < end_i) {
+                            let c = pix.get_u32(((t >> vshift) & vmask) | ((t >> U_SHIFT) & umask));
+                            // Three channels sixteen bits apart, scaled by one
+                            // multiply, then the haze added on top
+                            let p = ((c & mask_rb) | ((c & MASK_G) << 24)) * kk;
+                            fb.set_u32(i, (((p >> 8) & mask_rb) | ((p >> 32) & 0xFF00)) + fadd);
+                            t = t + dt;
+                            i = i + 1;
+                        }
+
+                        uz = uz_e; vz = vz_e; sz = sz_e; w = w_e;
+                        u = u_e; v = v_e; sh = sh_e;
+                        x = xe;
+                    }
+                }
+            }
+
+            xl = xl + dxl;
+            xr = xr + dxr;
+            uz_row = uz_row + g_duzdy;
+            vz_row = vz_row + g_dvzdy;
+            sz_row = sz_row + g_dszdy;
+            w_row = w_row + g_dwdy;
+            row = row + FRAME_WIDTH;
+            scan_y = scan_y + 1;
+        }
+    }
+
+    pixels_drawn = pixels_drawn + span_px;
+}
+
+// Facades go flat past this distance, where a window is well under a pixel
+// and the mip chain has all but averaged them out anyway
+let TEX_FAR = 1500.0;
+
+fun draw_face(f) {
+    let dx = f.cx - cam_x;
+    let dy = f.cy - cam_y;
+    let dz = f.cz - cam_z;
+    let d2 = dx * dx + dy * dy + dz * dz;
+    let textured = f.uv != nil && d2 < TEX_FAR * TEX_FAR;
+    let m = face_setup(f, textured);
+    if (m == 0) return;
+    faces_drawn = faces_drawn + 1;
+
+    if (textured) {
+        raster_poly(m, textures[f.tex], 0);
+        return;
+    }
+
+    // Far off, the haze turns towards the sky behind the face, so that by
+    // the edge of the draw distance it has faded out against it
+    let var base = f.color;
+    if (f.tex >= 0) base = textures[f.tex].avg;
+    let z = g_zmean;
+    let var haze = FOG_COLOR;
+    if (z > FOG_END) haze = color_lerp(FOG_COLOR, sky_color(dy / d2.sqrt()), sky_blend(z));
+    raster_poly(m, nil, color_lerp(color_scale(base, f.shade), haze, fog_factor(z)));
+}
+
+// Front to back: the near side of each plane, the faces in it, then the far
+// side, skipping any subtree whose box is out of view or already covered
+fun bsp_draw(node) {
+    if (node == nil || screen_done) return;
+    if (node.empty) return;
+    if (box_hidden(node.cx, node.cy, node.cz, node.hx, node.hy, node.hz)) return;
+    if (box_occluded(node.cx, node.cy, node.cz, node.hx, node.hy, node.hz)) {
+        nodes_skipped = nodes_skipped + 1;
+        return;
+    }
+
+    let side = node.nx * cam_x + node.ny * cam_y + node.nz * cam_z - node.d;
+    let var near = node.back;
+    let var far = node.front;
+    if (side >= 0.0) { near = node.front; far = node.back; }
+
+    bsp_draw(near);
+    let on = node.on;
+    for (let var i = 0; i < on.len; ++i) {
+        if (screen_done) return;
+        draw_face(on[i]);
+    }
+    bsp_draw(far);
+}
+
+// --- Sky ---
+
+// Night Ride's gradient: near-black at the zenith warming into the haze at
+// the horizon, then dropping off into the dark below it, where there is no
+// ground under the elevated deck. It was laid out down the rows of a level
+// view, so the table is built by working out the row each elevation falls
+// on in such a view. Indexed by the sine of the elevation.
+let SKY_N = 1024;
+let sky_tab = Array.with_size(SKY_N, 0);
+for (let var i = 0; i < SKY_N; ++i) {
+    let e = ((i.to_f() / (SKY_N - 1).to_f()) * 2.0 - 1.0).clip(-0.999, 0.999);
+    let rise = FOCAL * e / (1.0 - e * e).sqrt();
+    if (e >= 0.0) {
+        let t = ((CY - rise) / CY).clip(0.0, 1.0);
+        sky_tab[i] = color_lerp(SKY_ZENITH, FOG_COLOR, t * t * t);
+    } else {
+        let t = ((0.0 - rise) / (FRAME_HEIGHT.to_f() - CY) * 4.0).min(1.0);
+        sky_tab[i] = color_lerp(FOG_COLOR, SKY_NADIR, t);
+    }
+}
+
+// The sky's color at a given sine of elevation
+fun sky_color(e) {
+    return sky_tab[((e + 1.0) * 0.5 * (SKY_N - 1).to_f()).floor().clip(0, SKY_N - 1)];
+}
+
+// Paint a gap no face claimed, in runs short enough to follow the gradient
+// when the camera is rolled
+fun sky_fill(y, x0, x1) {
+    let fb = frame_buffer;
+    let row = y * FRAME_WIDTH;
+    let ey = (CY - y.to_f() - 0.5) / FOCAL;
+    let base = r11 * ey + r21;
+    let ey2 = ey * ey + 1.0;
+    let var x = x0;
+    while (x < x1) {
+        let xe = (x + 32).min(x1);
+        let ex = ((x + xe).to_f() * 0.5 - CX) / FOCAL;
+        let e = (r01 * ex + base) / (ex * ex + ey2).sqrt();
+        let idx = ((e + 1.0) * 0.5 * (SKY_N - 1).to_f()).floor().clip(0, SKY_N - 1);
+        fb.fill_u32(row + x, xe - x, sky_tab[idx]);
+        x = xe;
+    }
+}
+
+// Everything is either covered by a face or is sky, so the frame never
+// needs clearing
+fun draw_sky() {
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+        if (sb_full.get_u32(y) != 0) continue;
+        let var cx = 0;
+        let var cur = sb_head[y];
+        while (cur != NO_SPAN) {
+            let sx0 = sp_x0[cur];
+            if (sx0 > cx) sky_fill(y, cx, sx0);
+            let sx1 = sp_x1[cur];
+            if (sx1 > cx) cx = sx1;
+            cur = sp_next[cur];
+        }
+        if (cx < FRAME_WIDTH) sky_fill(y, cx, FRAME_WIDTH);
+    }
+}
+
+// The sky's color at a pixel
+fun sky_px(x, y) {
+    let ex = (x.to_f() + 0.5 - CX) / FOCAL;
+    let ey = (CY - y.to_f() - 0.5) / FOCAL;
+    return sky_color((r01 * ex + r11 * ey + r21) / (ex * ex + ey * ey + 1.0).sqrt());
+}
+
+fun color_add_sat(a, b) {
+    let x = a & 0x00FFFFFF;
+    let y = b & 0x00FFFFFF;
+    let s = x + y;
+    let m = ((x & y) | ((x | y) & (s ^ -1))) & 0x00808080;
+    return (s | ((m << 1) - (m >> 7))) & 0x00FFFFFF;
+}
+
+// Fill the parts of [x0, x1) on scanline y that no face claimed, which is
+// what lets a building eclipse the moon and stars. The color is given, or
+// with add set, the sky's own plus that.
+fun sky_span(y, x0, x1, color, add) {
+    let fb = frame_buffer;
+    let row = y * FRAME_WIDTH;
+    let var c = color;
+    if (add) c = color_add_sat(sky_px((x0 + x1).idiv(2), y), color);
+    let var cx = x0;
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN && sp_x1[cur] <= x0) cur = sp_next[cur];
+    while (cur != NO_SPAN) {
+        let sx0 = sp_x0[cur];
+        if (sx0 >= x1) break;
+        if (sx0 > cx) fb.fill_u32(row + cx, sx0 - cx, c);
+        let sx1 = sp_x1[cur];
+        if (sx1 > cx) cx = sx1;
+        cur = sp_next[cur];
+    }
+    if (cx < x1) fb.fill_u32(row + cx, x1 - cx, c);
+}
+
+fun sky_at(y, x) {
+    let var cur = sb_head[y];
+    while (cur != NO_SPAN) {
+        if (sp_x0[cur] > x) return true;
+        if (sp_x1[cur] > x) return false;
+        cur = sp_next[cur];
+    }
+    return true;
+}
+
+// --- Moon and stars ---
+//
+// From Night Ride, at fixed world directions since the sky is effectively at
+// infinity, so they swing across the frame as the road turns.
+
+let var psx = 0.0;
+let var psy = 0.0;
+
+// A direction at infinity, rotated like a point but not moved or divided by
+// distance. False when it is behind us.
+fun project_dir(dx, dy, dz) {
+    let ez = r20 * dx + r21 * dy + r22 * dz;
+    if (ez <= 0.01) return false;
+    let s = FOCAL / ez;
+    psx = CX + (r00 * dx + r01 * dy + r02 * dz) * s;
+    psy = CY - (r10 * dx + r11 * dy + r12 * dz) * s;
+    return true;
+}
+
+// Low over the road ahead at the start, a little to the right of east
+let MOON_AZ = 0.107;
+let MOON_EL = 0.4054;
+let MOON_R = (FRAME_HEIGHT.idiv(29)).max(6);
+let MOON_HALO_R = MOON_R * 4;
+// One step every couple of pixels, otherwise the falloff shows as rings
+let MOON_HALO_STEPS = (MOON_HALO_R.idiv(2)).max(8);
+let MOON_COLOR = 0xF2F5FF;
+let MOON_GLOW = 0xA8C4FF;
+
+fun moon_disc(cx, cy, r, color, add) {
+    let y0 = (cy - r).max(0);
+    let y1 = (cy + r + 1).min(FRAME_HEIGHT);
+    let rr = (r * r).to_f();
+    for (let var y = y0; y < y1; ++y) {
+        let dy = (y - cy).to_f();
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+        let h = h2.sqrt().floor();
+        let xa = (cx - h).max(0);
+        let xb = (cx + h + 1).min(FRAME_WIDTH);
+        if (xa < xb) sky_span(y, xa, xb, color, add);
+    }
+}
+
+fun draw_moon() {
+    let ce = MOON_EL.cos();
+    if (!project_dir(ce * MOON_AZ.cos(), MOON_EL.sin(), 0.0 - ce * MOON_AZ.sin())) return;
+    let mx = psx.floor();
+    let my = psy.floor();
+    if (mx < 0 - MOON_HALO_R || mx > FRAME_WIDTH + MOON_HALO_R) return;
+    if (my < 0 - MOON_HALO_R || my > FRAME_HEIGHT + MOON_HALO_R) return;
+
+    // Halo, drawn outside in so each smaller disc steps the falloff up
+    for (let var i = MOON_HALO_STEPS; i >= 1; --i) {
+        let t = i.to_f() / MOON_HALO_STEPS.to_f();
+        let k = 1.0 - t;
+        moon_disc(mx, my, MOON_R + (MOON_HALO_R.to_f() * t).floor(),
+                  color_scale(MOON_GLOW, k * k * 0.5), true);
+    }
+
+    moon_disc(mx, my, MOON_R, MOON_COLOR, false);
+
+    // A couple of maria, just enough that it reads as a moon and not a lamp.
+    // They lean with the camera, so the disc turns rather than sliding.
+    let cr = cam_roll.cos(); let sr = cam_roll.sin();
+    let m = color_scale(MOON_COLOR, 0.90);
+    let ax = -(MOON_R.idiv(3)).to_f(); let ay = -(MOON_R.idiv(4)).to_f();
+    let bx = (MOON_R.idiv(4)).to_f();  let by = (MOON_R.idiv(3)).to_f();
+    moon_disc(mx + (ax * cr - ay * sr).floor(), my + (ax * sr + ay * cr).floor(),
+              MOON_R.idiv(3), m, false);
+    moon_disc(mx + (bx * cr - by * sr).floor(), my + (bx * sr + by * cr).floor(),
+              MOON_R.idiv(4), m, false);
+}
+
+// Spread over the whole dome, since the road can turn to face any of it. Haze
+// thins with height, so one low down is washed out and one well up is at
+// full strength.
+let NUM_STARS = 600;
+let STAR_EL_TOP = (CY / FOCAL).atan();
+let star_dx = Array.with_size(NUM_STARS, 0.0);
+let star_dy = Array.with_size(NUM_STARS, 0.0);
+let star_dz = Array.with_size(NUM_STARS, 0.0);
+let star_c = Array.with_size(NUM_STARS, 0);
+let star_rng = Xoshiro128(12345);
+for (let var i = 0; i < NUM_STARS; ++i) {
+    let az = star_rng.float(0.0, 2.0 * PI);
+    let el = star_rng.float(0.02, 1.4);
+    let ce = el.cos();
+    star_dx[i] = ce * az.sin();
+    star_dy[i] = el.sin();
+    star_dz[i] = ce * az.cos();
+    star_c[i] = color_scale(0xFFFFFF, star_rng.float(0.25, 0.85) * (el / STAR_EL_TOP).min(1.0));
+}
+
+fun draw_stars() {
+    for (let var i = 0; i < NUM_STARS; ++i) {
+        if (!project_dir(star_dx[i], star_dy[i], star_dz[i])) continue;
+        let sx = psx.floor();
+        if (sx < 0 || sx >= FRAME_WIDTH) continue;
+        let sy = psy.floor();
+        if (sy < 0 || sy >= FRAME_HEIGHT) continue;
+        if (sky_at(sy, sx)) frame_buffer.set_u32(sy * FRAME_WIDTH + sx, star_c[i]);
+    }
+}
+
+// --- Streaming ---
+//
+// Cells live in ring buffers indexed by their coordinates modulo the ring
+// size. Each slot remembers which cell it holds, and a newer cell landing
+// on the same slot simply replaces it. The rings are wider than the area
+// ever wanted at once, so two wanted cells never share a slot.
+
+let DRAW_R = 2600.0;
+let REFINE_IN = 900.0;
+let REFINE_OUT = 1100.0;
+let PREFETCH_R = REFINE_OUT + 250.0;
+let N_FINE = 32;
+let N_COARSE = 16;
+let TOP_Y = 520.0;
+
+let fine_ring = Array.with_size(N_FINE * N_FINE, nil);
+let coarse_ring = Array.with_size(N_COARSE * N_COARSE, nil);
+
+// Whether each coarse cell is currently shown as its fine cells, with
+// hysteresis so that one on the boundary does not flip back and forth
+let ref_on = Array.with_size(N_COARSE * N_COARSE, false);
+let ref_i = Array.with_size(N_COARSE * N_COARSE, -999999);
+let ref_j = Array.with_size(N_COARSE * N_COARSE, -999999);
+
+fun ring_slot(i, j, n) {
+    return (((i % n) + n) % n) * n + (((j % n) + n) % n);
+}
+
+fun get_fine(i, j) {
+    let c = fine_ring[ring_slot(i, j, N_FINE)];
+    if (c != nil && c.i == i && c.j == j) return c;
+    return nil;
+}
+
+fun get_coarse(i, j) {
+    let c = coarse_ring[ring_slot(i, j, N_COARSE)];
+    if (c != nil && c.i == i && c.j == j) return c;
+    return nil;
+}
+
+let var cells_received = 0;
+
+fun store_cell(c) {
+    if (c.level == 0) fine_ring[ring_slot(c.i, c.j, N_FINE)] = c;
+    else coarse_ring[ring_slot(c.i, c.j, N_COARSE)] = c;
+    cells_received = cells_received + 1;
+}
+
+fun refined(i, j) {
+    let s = ring_slot(i, j, N_COARSE);
+    return ref_i[s] == i && ref_j[s] == j && ref_on[s];
+}
+
+let var last_want_sum = -1;
+let var last_want_len = -1;
+let var num_missing = 0;
+
+// Work out which cells are wanted and missing, update the refinement state
+// of each coarse cell, and tell the generators if the set has changed
+fun update_wants(force) {
+    let per_gen = [];
+    for (let var g = 0; g < NUM_GENS; ++g) per_gen.push([]);
+    let var sum = 0;
+    let var count = 0;
+
+    let ci0 = ((cam_x - DRAW_R) / COARSE_SIZE).floor();
+    let ci1 = ((cam_x + DRAW_R) / COARSE_SIZE).floor();
+    let cj0 = ((cam_z - DRAW_R) / COARSE_SIZE).floor();
+    let cj1 = ((cam_z + DRAW_R) / COARSE_SIZE).floor();
+    for (let var ci = ci0; ci <= ci1; ++ci) {
+        for (let var cj = cj0; cj <= cj1; ++cj) {
+            let bx0 = ci.to_f() * COARSE_SIZE;
+            let bz0 = cj.to_f() * COARSE_SIZE;
+            let ndx = (bx0 - cam_x).max(cam_x - bx0 - COARSE_SIZE).max(0.0);
+            let ndz = (bz0 - cam_z).max(cam_z - bz0 - COARSE_SIZE).max(0.0);
+            if (ndx * ndx + ndz * ndz > DRAW_R * DRAW_R) continue;
+
+            let cdx = bx0 + COARSE_SIZE * 0.5 - cam_x;
+            let cdz = bz0 + COARSE_SIZE * 0.5 - cam_z;
+            let cd = (cdx * cdx + cdz * cdz).sqrt();
+
+            let s = ring_slot(ci, cj, N_COARSE);
+            if (ref_i[s] != ci || ref_j[s] != cj) {
+                ref_i[s] = ci; ref_j[s] = cj; ref_on[s] = false;
+            }
+            if (cd < REFINE_IN) ref_on[s] = true;
+            else if (cd > REFINE_OUT) ref_on[s] = false;
+
+            if (get_coarse(ci, cj) == nil) {
+                let g = per_gen[hash3(ci, cj, 1) % NUM_GENS];
+                g.push(1); g.push(ci); g.push(cj);
+                sum = sum + hash3(ci, cj, 9);
+                count = count + 1;
+            }
+            if (cd < PREFETCH_R) {
+                for (let var a = 0; a < COARSE_DIV; ++a) {
+                    for (let var b = 0; b < COARSE_DIV; ++b) {
+                        let fi = ci * COARSE_DIV + a;
+                        let fj = cj * COARSE_DIV + b;
+                        if (get_fine(fi, fj) == nil) {
+                            let g = per_gen[hash3(fi, fj, 0) % NUM_GENS];
+                            g.push(0); g.push(fi); g.push(fj);
+                            sum = sum + hash3(fi, fj, 8);
+                            count = count + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    num_missing = count;
+    if (!force && sum == last_want_sum && count == last_want_len) return;
+    last_want_sum = sum;
+    last_want_len = count;
+    for (let var g = 0; g < NUM_GENS; ++g) {
+        $actor_send(gen_ids[g], GenWant(cam_x, cam_z, per_gen[g]));
+    }
+}
+
+// --- Drawing the world ---
+
+fun draw_cell(level, i, j) {
+    if (level == 0) {
+        let c = get_fine(i, j);
+        if (c != nil) bsp_draw(c.root);
+        return;
+    }
+
+    // A coarse cell is shown as its fine cells once they have all arrived
+    let fi = i * COARSE_DIV;
+    let fj = j * COARSE_DIV;
+    let c = get_coarse(i, j);
+    if (refined(i, j) || c == nil) {
+        let var all = true;
+        for (let var a = 0; a < COARSE_DIV && all; ++a) {
+            for (let var b = 0; b < COARSE_DIV && all; ++b) {
+                if (get_fine(fi + a, fj + b) == nil) all = false;
+            }
+        }
+        if (all || c == nil) {
+            draw_range(0, fi, fj, fi + COARSE_DIV, fj + COARSE_DIV);
+            return;
+        }
+    }
+    bsp_draw(c.root);
+}
+
+// The grid as an implicit kd-tree: split the range of cells in two at a grid
+// line, and draw the half the camera is in before the other
+fun draw_range(level, i0, j0, i1, j1) {
+    if (screen_done) return;
+    let var size = FINE_SIZE;
+    if (level == 1) size = COARSE_SIZE;
+    let hx = (i1 - i0).to_f() * size * 0.5;
+    let hz = (j1 - j0).to_f() * size * 0.5;
+    let cx = i0.to_f() * size + hx;
+    let cz = j0.to_f() * size + hz;
+    if (box_hidden(cx, TOP_Y * 0.5, cz, hx, TOP_Y * 0.5, hz)) return;
+
+    if (i1 - i0 == 1 && j1 - j0 == 1) {
+        draw_cell(level, i0, j0);
+        return;
+    }
+
+    if (i1 - i0 >= j1 - j0) {
+        let mid = (i0 + i1).idiv(2);
+        if (cam_x < mid.to_f() * size) {
+            draw_range(level, i0, j0, mid, j1);
+            draw_range(level, mid, j0, i1, j1);
+        } else {
+            draw_range(level, mid, j0, i1, j1);
+            draw_range(level, i0, j0, mid, j1);
+        }
+        return;
+    }
+    let mid = (j0 + j1).idiv(2);
+    if (cam_z < mid.to_f() * size) {
+        draw_range(level, i0, j0, i1, mid);
+        draw_range(level, i0, mid, i1, j1);
+    } else {
+        draw_range(level, i0, mid, i1, j1);
+        draw_range(level, i0, j0, i1, mid);
+    }
+}
+
+fun render_frame() {
+    pixels_drawn = 0;
+    faces_drawn = 0;
+    nodes_skipped = 0;
+    update_camera();
+    sbuf_reset();
+    let ci0 = ((cam_x - DRAW_R) / COARSE_SIZE).floor();
+    let ci1 = ((cam_x + DRAW_R) / COARSE_SIZE).floor() + 1;
+    let cj0 = ((cam_z - DRAW_R) / COARSE_SIZE).floor();
+    let cj1 = ((cam_z + DRAW_R) / COARSE_SIZE).floor() + 1;
+    draw_range(1, ci0, cj0, ci1, cj1);
+    draw_sky();
+    draw_stars();
+
+    // After the stars, so the halo washes out the ones near it
+    draw_moon();
+}
+
+// --- Riding ---
+//
+// The bike is held in road coordinates: an edge, the distance along it, the
+// lateral offset, and which way along it we are going. Crossing onto another
+// edge happens where two decks touch, which is where a ramp runs alongside a
+// highway, or at the end of an edge.
+
+let EYE_H = 1.55;
+let SPEED_MAX = 92.0;
+let THROTTLE_ACC = 11.0;
+let COAST_DEC = 2.2;
+let DRAG_K = THROTTLE_ACC / (SPEED_MAX * SPEED_MAX);
+let MAX_LEAN = 26.0 * PI / 180.0;
+let LEAN_RATE = 2.6;
+let LEAN_SLIDE = 18.0;
+
+let var rd_edge = nil;
+let var rd_s = 0.0;
+let var rd_lat = 0.0;
+let var rd_dir = 1;
+let var ride_speed = 40.0;
+let var lean = 0.0;
+
+let var key_accel = false;
+let var key_left = false;
+let var key_right = false;
+
+// Where each gear runs out, as in Night Ride. The tacho climbing and dropping
+// back is most of what makes the engine note feel like it belongs to one.
+let GEAR_TOP = [13.0, 25.0, 38.0, 53.0, 71.0, 92.0];
+let RPM_IDLE = 0.14;
+
+// How far below a gear's bottom the speed falls before dropping down one.
+// Well below, so letting off the throttle lets the revs fall away rather
+// than the needle jumping back up at every gear boundary.
+let GEAR_DOWN = 0.42;
+
+let var cur_gear = 0;
+
+fun update_gear() {
+    while (cur_gear < GEAR_TOP.len - 1 && ride_speed > GEAR_TOP[cur_gear]) {
+        cur_gear = cur_gear + 1;
+    }
+    while (cur_gear > 0 && ride_speed < GEAR_TOP[cur_gear - 1] * GEAR_DOWN) {
+        cur_gear = cur_gear - 1;
+    }
+}
+
+fun engine_rpm() {
+    update_gear();
+    let g = cur_gear;
+    let var lo = 0.0;
+    if (g > 0) lo = GEAR_TOP[g - 1] * 0.74;
+    let hi = GEAR_TOP[g];
+    let t = ((ride_speed - lo) / (hi - lo)).clip(0.0, 1.0);
+    return RPM_IDLE + t * (1.0 - RPM_IDLE);
+}
+
+// Tell the synth what the engine is doing
+fun send_engine() {
+    if (audio_id == nil) return;
+    let var load = 0.0;
+    if (key_accel) load = 1.0;
+    $actor_send(audio_id, EngineState(engine_rpm(), load, cur_gear == GEAR_TOP.len - 1, false, 1.0));
+}
+
+// Start a highway's length out from the densest node near the origin,
+// heading towards it, so the ride opens on the way into downtown
+fun rider_start() {
+    let var bi = 0;
+    let var bj = 0;
+    let var best = -1.0;
+    for (let var i = -6; i <= 6; ++i) {
+        for (let var j = -6; j <= 6; ++j) {
+            let d = density(node_x(i + 1, j), node_z(i + 1, j));
+            if (d > best) { best = d; bi = i; bj = j; }
+        }
+    }
+    rd_edge = get_through(bi, bj);
+    rd_s = 60.0;
+    rd_dir = 1;
+    rd_lat = 0.0;
+}
+
+let var pj_s = 0.0;
+let var pj_lat = 0.0;
+
+// Nearest point of an edge to (px, pz), searching samples k0 to k1
+fun project_edge(e, px, pz, k0, k1) {
+    let var best = k0;
+    let var best_d = 1.0e30;
+    for (let var k = k0; k < k1; ++k) {
+        let dx = px - e.xs[k];
+        let dz = pz - e.zs[k];
+        let d = dx * dx + dz * dz;
+        if (d < best_d) { best_d = d; best = k; }
+    }
+    let dx = px - e.xs[best];
+    let dz = pz - e.zs[best];
+    pj_s = best.to_f() * e.ds + dx * e.txs[best] + dz * e.tzs[best];
+    pj_lat = dz * e.txs[best] - dx * e.tzs[best];
+}
+
+fun same_edge(a, b) {
+    return a.kind == b.kind && a.ai == b.ai && a.aj == b.aj;
+}
+
+fun dist_to_end(end, e) {
+    if (end == 0) return rd_s;
+    return e.len - rd_s;
+}
+
+// Move onto whichever edge meeting at the ends of the current one holds the
+// point within tol, if any
+fun try_switch(px, py, pz, tol, ends_only) {
+    let e = rd_edge;
+    edge_eval(e, rd_s.clip(0.0, e.len));
+    let head_x = ev_tx * rd_dir.to_f();
+    let head_z = ev_tz * rd_dir.to_f();
+    let reach = (MERGE_LEN + BLEND_LEN) * 1.2;
+    let kr = (reach / SAMPLE_DS).floor();
+
+    for (let var end = 0; end < 2; ++end) {
+        let var ni = e.ai; let var nj = e.aj;
+        if (end == 1) { ni = e.bi; nj = e.bj; }
+        let dist_end = dist_to_end(end, e);
+        if (ends_only && dist_end > reach) continue;
+
+        let cands = node_edges(ni, nj);
+        for (let var c = 0; c < cands.len; ++c) {
+            let o = cands[c];
+            if (same_edge(o, e)) continue;
+            let var k0 = 0;
+            let var k1 = kr.min(o.n);
+            if (o.bi == ni && o.bj == nj) { k0 = (o.n - kr).max(0); k1 = o.n; }
+            project_edge(o, px, pz, k0, k1);
+            if (pj_s < -1.0 || pj_s > o.len + 1.0) continue;
+            edge_eval(o, pj_s.clip(0.0, o.len));
+            if (pj_lat < ev_lo - tol || pj_lat > ev_hi + tol) continue;
+            if ((ev_y - py).abs() > 2.5) continue;
+
+            let var dir = 1;
+            if (ev_tx * head_x + ev_tz * head_z < 0.0) dir = -1;
+            rd_edge = o;
+            rd_s = pj_s.clip(0.0, o.len);
+            rd_lat = pj_lat.clip(ev_lo, ev_hi);
+            rd_dir = dir;
+            return true;
+        }
+    }
+    return false;
+}
+
+fun update_ride(dt) {
+    let drag = DRAG_K * ride_speed * ride_speed;
+    if (key_accel) ride_speed = ride_speed + (THROTTLE_ACC - drag) * dt;
+    else ride_speed = ride_speed - (COAST_DEC + drag) * dt;
+    ride_speed = ride_speed.clip(0.0, SPEED_MAX);
+
+    let var target = 0.0;
+    if (key_left) target = target - MAX_LEAN;
+    if (key_right) target = target + MAX_LEAN;
+    let step = LEAN_RATE * dt;
+    if (target > lean) lean = (lean + step).min(target);
+    else lean = (lean - step).max(target);
+
+    // Leaning right carries the bike to the right of its travel, which is
+    // negative lateral going forward along the edge and positive going back
+    rd_lat = rd_lat - rd_dir.to_f() * lean * LEAN_SLIDE * (ride_speed / 48.0) * dt;
+    rd_s = rd_s + rd_dir.to_f() * ride_speed * dt;
+
+    // Off the end of the edge: carry on along whichever edge holds the point
+    let e = rd_edge;
+    if (rd_s < 0.0 || rd_s > e.len) {
+        edge_eval(e, rd_s);
+        let px = ev_x - ev_tz * rd_lat;
+        let pz = ev_z + ev_tx * rd_lat;
+        if (!try_switch(px, ev_y, pz, ROAD_W, true)) {
+            rd_s = rd_s.clip(0.0, e.len);
+            ride_speed = 0.0;
+        }
+    }
+
+    // Over the edge of the deck, or squeezed where a ramp narrows into the
+    // highway: cross onto the other deck where they touch, else keep to this
+    // one, scraping along a barrier
+    // Squeezed means narrower than a lane and narrowing further ahead. A ramp
+    // that is still opening out is narrow too, and must not hand the bike
+    // straight back to the highway it just left.
+    edge_eval(rd_edge, rd_s + rd_dir.to_f() * 10.0);
+    let width_ahead = ev_hi - ev_lo;
+    edge_eval(rd_edge, rd_s);
+    let width = ev_hi - ev_lo;
+    let squeezed = width < LANE_W && width_ahead < width;
+    if (rd_lat < ev_lo || rd_lat > ev_hi || squeezed) {
+        let blocked = (rd_lat > ev_hi && ev_bl == 1) || (rd_lat < ev_lo && ev_br == 1);
+        let px = ev_x - ev_tz * rd_lat;
+        let pz = ev_z + ev_tx * rd_lat;
+        let py = ev_y;
+        let lo = ev_lo;
+        let hi = ev_hi;
+        if (blocked || !try_switch(px, py, pz, 1.0, true)) {
+            // Only leaning into a barrier scrapes speed off, not being
+            // squeezed by a ramp narrowing into the highway
+            let lat_vel = 0.0 - rd_dir.to_f() * lean;
+            let into = (rd_lat > hi && lat_vel > 0.0) || (rd_lat < lo && lat_vel < 0.0);
+            if (rd_lat < lo || rd_lat > hi) {
+                rd_lat = rd_lat.clip(lo, hi);
+                if (blocked && into) ride_speed = ride_speed * (1.0 - 0.8 * dt);
+            }
+        }
+    }
+}
+
+// Put the camera on the bike
+fun ride_camera() {
+    edge_eval(rd_edge, rd_s);
+    let dirf = rd_dir.to_f();
+    let hx = ev_tx * dirf;
+    let hz = ev_tz * dirf;
+    let px = ev_x - ev_tz * rd_lat;
+    let pz = ev_z + ev_tx * rd_lat;
+    let py = ev_y;
+    // Grade taken over a wheelbase-and-then-some, which smooths out the
+    // corners of the polyline the height is kept on
+    edge_eval(rd_edge, rd_s + 10.0 * dirf);
+    let ya = ev_y;
+    edge_eval(rd_edge, rd_s - 10.0 * dirf);
+    let slope = (ya - ev_y) / 20.0;
+
+    // The bike pivots on its tyres, so a lean swings the eye out sideways
+    let rx = hz;
+    let rz = 0.0 - hx;
+    cam_x = px + rx * EYE_H * lean.sin();
+    cam_z = pz + rz * EYE_H * lean.sin();
+    cam_y = py + EYE_H * lean.cos();
+    cam_yaw = atan2(hx, hz);
+    cam_pitch = slope.atan();
+    cam_roll = lean;
+}
+
+// --- Free camera ---
+
+let FLY_SPEED = 80.0;
+let TURN_SPEED = 1.6;
+let var fly = false;
+let var key_w = false; let var key_s = false;
+let var key_a = false; let var key_d = false;
+let var key_r = false; let var key_f = false;
+let var key_up = false; let var key_down = false;
+
+fun update_fly(dt) {
+    if (key_left) cam_yaw = cam_yaw - TURN_SPEED * dt;
+    if (key_right) cam_yaw = cam_yaw + TURN_SPEED * dt;
+    if (key_up) cam_pitch = cam_pitch + TURN_SPEED * dt;
+    if (key_down) cam_pitch = cam_pitch - TURN_SPEED * dt;
+    cam_pitch = cam_pitch.clip(-1.4, 1.4);
+    cam_roll = 0.0;
+
+    let fx = cam_yaw.sin() * cam_pitch.cos();
+    let fy = cam_pitch.sin();
+    let fz = cam_yaw.cos() * cam_pitch.cos();
+    let rx = cam_yaw.cos();
+    let rz = 0.0 - cam_yaw.sin();
+    let var mf = 0.0;
+    let var ms = 0.0;
+    let var mu = 0.0;
+    if (key_w) mf = mf + 1.0;
+    if (key_s) mf = mf - 1.0;
+    if (key_d) ms = ms + 1.0;
+    if (key_a) ms = ms - 1.0;
+    if (key_r) mu = mu + 1.0;
+    if (key_f) mu = mu - 1.0;
+    let sp = FLY_SPEED * dt;
+    cam_x = cam_x + (fx * mf + rx * ms) * sp;
+    cam_y = cam_y + (fy * mf + mu) * sp;
+    cam_z = cam_z + (fz * mf + rz * ms) * sp;
+}
+
+// --- Main ---
+
+// Take in every cell that has arrived, and any other messages for the caller
+fun poll_messages(events) {
+    loop {
+        let msg = $actor_poll();
+        if (msg == nil) return;
+        if (msg instanceof CellMsg) store_cell(msg.cell);
+        else if (events != nil) events.push(msg);
+    }
+}
+
+// Block until no wanted cell is missing
+fun await_cells() {
+    update_wants(true);
+    while (num_missing > 0) {
+        let msg = $actor_recv();
+        if (msg instanceof CellMsg) store_cell(msg.cell);
+        poll_messages(nil);
+        update_wants(false);
+    }
+}
+
+fun stop_gens() {
+    for (let var g = 0; g < NUM_GENS; ++g) $actor_send(gen_ids[g], GenStop());
+    for (let var g = 0; g < NUM_GENS; ++g) $actor_join(gen_ids[g]);
+}
+
+let var fixed_view = false;
+if (args.view != nil) {
+    let parts = args.view.split(",");
+    if (parts.len != 5) {
+        $println("expected --view x,y,z,yaw,pitch");
+        $exit(1);
+    }
+    cam_x = parts[0].parse_float();
+    cam_y = parts[1].parse_float();
+    cam_z = parts[2].parse_float();
+    cam_yaw = parts[3].parse_float() * PI / 180.0;
+    cam_pitch = parts[4].parse_float() * PI / 180.0;
+    fixed_view = true;
+}
+
+rider_start();
+if (!fixed_view) ride_camera();
+
+let OFFLINE_DT = 1.0 / 60.0;
+
+let hud_font = PixelFont(2, 0xFFFFFF, nil);
+let var stats_text = "";
+
+fun draw_hud() {
+    let kmh = (ride_speed * 3.6).floor();
+    if (!fly) hud_font.draw_text(frame_image, 16, 16, kmh.to_s() + " km/h");
+    hud_font.draw_text(frame_image, 16, FRAME_HEIGHT - 32, stats_text);
+}
+
+if (args.bench || args.capture) {
+    let var n = 1;
+    if (args.bench) n = 300;
+    if (args.frames != nil) n = args.frames;
+
+    let t_start = $time_current_ms();
+    await_cells();
+    $println("initial cells: " + cells_received.to_s() + " in " + ($time_current_ms() - t_start).to_s() + " ms");
+
+    // Full throttle along the set path
+    key_accel = true;
+
+    let var render_ms = 0;
+    let var total_faces = 0;
+    let var total_px = 0;
+    for (let var i = 0; i < n; ++i) {
+        if (!fixed_view) {
+            update_ride(OFFLINE_DT);
+            ride_camera();
+        }
+        await_cells();
+        let t0 = $time_current_ms();
+        render_frame();
+        render_ms = render_ms + ($time_current_ms() - t0);
+        total_faces = total_faces + faces_drawn;
+        total_px = total_px + pixels_drawn;
+        if (args.capture) {
+            draw_hud();
+            $write_file(args.prefix + "_" + i.to_s() + ".raw", frame_buffer);
+        }
+    }
+    $println(n.to_s() + " frames, " + (render_ms.to_f() / n.to_f()).format_decimals(2) + " ms/frame, "
+             + (total_faces.idiv(n)).to_s() + " faces/frame, "
+             + (total_px.idiv(n)).to_s() + " pixels/frame, "
+             + cells_received.to_s() + " cells built");
+    stop_gens();
+    return;
+}
+
+$println("building the city around the start...");
+await_cells();
+
+let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Night Ride 2", 0);
+
+let events = [];
+let var last_ms = $time_current_ms();
+let var frame_no = 0;
+let var render_accum = 0;
+
+loop {
+    poll_messages(events);
+    let var quit = false;
+    while (events.len > 0) {
+        let msg = events.remove(0);
+        if (!(msg instanceof UIEvent)) continue;
+        if (msg.kind == 'CLOSE_WINDOW') { quit = true; break; }
+        let down = msg.kind == 'KEY_DOWN';
+        if (msg.kind != 'KEY_DOWN' && msg.kind != 'KEY_UP') continue;
+        let k = msg.key;
+        if (down && k == 'ESCAPE') { quit = true; break; }
+        if (down && k == 'C') {
+            fly = !fly;
+            if (!fly) ride_camera();
+        }
+        if (k == 'SPACE') key_accel = down;
+        if (k == 'LEFT') key_left = down;
+        if (k == 'RIGHT') key_right = down;
+        if (k == 'UP') key_up = down;
+        if (k == 'DOWN') key_down = down;
+        if (k == 'W') key_w = down;
+        if (k == 'S') key_s = down;
+        if (k == 'A') key_a = down;
+        if (k == 'D') key_d = down;
+        if (k == 'R') key_r = down;
+        if (k == 'F') key_f = down;
+    }
+    if (quit) break;
+
+    let now = $time_current_ms();
+    let dt = ((now - last_ms).to_f() / 1000.0).min(0.1);
+    last_ms = now;
+
+    if (fly) {
+        update_fly(dt);
+    } else {
+        update_ride(dt);
+        ride_camera();
+    }
+    send_engine();
+    update_wants(false);
+
+    let t0 = $time_current_ms();
+    render_frame();
+    render_accum = render_accum + ($time_current_ms() - t0);
+
+    draw_hud();
+    $window_draw_frame(window, frame_buffer);
+
+    frame_no = frame_no + 1;
+    if (frame_no >= 30) {
+        let avg = render_accum.to_f() / frame_no.to_f();
+        stats_text = avg.format_decimals(1) + " ms  " + faces_drawn.to_s() + " faces  "
+                 + num_missing.to_s() + " cells pending";
+        $println("render: " + avg.format_decimals(2) + " ms  faces: " + faces_drawn.to_s()
+                 + "  skipped nodes: " + nodes_skipped.to_s() + "  pending: " + num_missing.to_s());
+        frame_no = 0;
+        render_accum = 0;
+    }
+}
+
+stop_gens();
+if (audio_id != nil) {
+    $actor_send(audio_id, EngineState(0.0, 0.0, false, true, 0.0));
+    $actor_join(audio_id);
+}
