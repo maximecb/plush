@@ -16,10 +16,15 @@
 //
 // Record a dozen or so examples of each word, keeping them short, plus a good
 // number of noise clips. Training runs continuously in the background.
+//
+// Every sample is saved as a WAV file in ./speech_data, labeled in
+// speech_data/labels.csv, and the samples there are loaded on startup.
 
 from random import Xoshiro128;
 from image import Image, rgb, COLOR_BLACK, COLOR_WHITE, COLOR_RED, COLOR_GREY;
 from pixelfont import PixelFont;
+from wav import AudioData, load_wav, save_wav;
+from csv import parse_csv_file, format_csv;
 
 let rng = Xoshiro128(1);
 
@@ -88,6 +93,12 @@ let MAX_RECORD_SAMPLES = SAMPLE_RATE * MAX_RECORD_SECS;
 let TRIM_MS = 50;
 let TRIM_FRAMES = (SAMPLE_RATE * TRIM_MS).idiv(1000 * FFT_SIZE);
 let SILENCE_THRESHOLD = 0.05;
+
+// Where recorded samples are saved, one WAV file each, and loaded from on
+// startup. The CSV file gives the label of each WAV file, empty for a
+// negative sample.
+let DATA_DIR = "speech_data";
+let LABELS_PATH = DATA_DIR + "/labels.csv";
 
 // Longest label the input box accepts
 let MAX_LABEL_LEN = 16;
@@ -428,6 +439,16 @@ fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sam
         magnitudes[band_idx] = band_magnitude;
     }
     return magnitudes;
+}
+
+// Turns FFT_SIZE samples of audio into one normalized frame of mel bands.
+// Overwrites real_parts and imag_parts.
+fun compute_frame(real_parts, imag_parts) {
+    imag_parts.zero_fill();
+    hanning_window(real_parts);
+    fft(real_parts, imag_parts, false);
+    let magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
+    return normalize_magnitudes(magnitudes);
 }
 
 // Produces the network's input: one ByteArray of float32, which is what
@@ -920,6 +941,126 @@ fun beep_actor() {
     }
 }
 
+// --- Dataset ---
+//
+// Samples saved on disk, along with how many there are of each word, for the
+// display. The network keeps its own list of words, in output order.
+class Dataset {
+    init(self) {
+        // Rows of labels.csv, as [file name, label]
+        self.rows = [];
+        self.next_id = 0;
+
+        self.words = [];
+        self.counts = [];
+        self.neg_count = 0;
+    }
+
+    count(self, word) {
+        if (word == "") {
+            self.neg_count = self.neg_count + 1;
+            return;
+        }
+
+        for (let var i = 0; i < self.words.len; ++i) {
+            if (self.words[i] == word) {
+                self.counts[i] = self.counts[i] + 1;
+                return;
+            }
+        }
+
+        self.words.push(word);
+        self.counts.push(1);
+    }
+
+    // Loads every sample listed in labels.csv, recomputes its frames and
+    // sends them to the trainer. Files that are missing or in another format
+    // are skipped, but stay listed.
+    load(self, trainer_id, real_parts, imag_parts) {
+        let rows = parse_csv_file(LABELS_PATH);
+        if (rows == nil) {
+            return;
+        }
+
+        let var num_loaded = 0;
+
+        for (let var i = 0; i < rows.len; ++i) {
+            let row = rows[i];
+
+            // The header, or a row edited by hand into the wrong shape
+            if (row.len < 2 || (i == 0 && row[0] == "file")) {
+                continue;
+            }
+
+            let file = row[0];
+            let word = row[1].trim().lower();
+            self.rows.push([file, word]);
+
+            // Numbering resumes after the highest numbered file
+            if (file.len == 15 && file.slice(0, 7) == "sample_" && file.slice(11, 15) == ".wav") {
+                let id = file.slice(7, 11).parse_int(10);
+                if (id != nil && id >= self.next_id) {
+                    self.next_id = id + 1;
+                }
+            }
+
+            let audio = load_wav(DATA_DIR + "/" + file);
+            if (audio == nil || audio.num_channels != NUM_CHANNELS || audio.sample_rate != SAMPLE_RATE) {
+                $println("Skipping " + file + ": missing, or not " + SAMPLE_RATE.to_s() + " Hz mono");
+                continue;
+            }
+
+            // Same frames as when the clip was recorded, since the clip
+            // starts on a frame boundary
+            let frames = [];
+            let num_blocks = audio.num_samples().idiv(FFT_SIZE);
+            for (let var b = 0; b < num_blocks; ++b) {
+                real_parts.memcpy(0, audio.samples, b * FFT_SIZE * 4, FFT_SIZE * 4);
+                frames.push(compute_frame(real_parts, imag_parts));
+            }
+
+            if (frames.len == 0) {
+                continue;
+            }
+
+            $actor_send(trainer_id, [frames, word]);
+            self.count(word);
+            num_loaded = num_loaded + 1;
+        }
+
+        $println("Loaded " + num_loaded.to_s() + " samples from " + DATA_DIR);
+    }
+
+    // Writes a clip to its own WAV file and lists it in labels.csv
+    save(self, clip, word) {
+        if (!$make_dir(DATA_DIR)) {
+            $println("Error: could not create " + DATA_DIR);
+            return;
+        }
+
+        let file = "sample_" + self.next_id.to_s().lpad(4, "0") + ".wav";
+        self.next_id = self.next_id + 1;
+
+        let audio = AudioData(NUM_CHANNELS, SAMPLE_RATE, 0);
+        audio.samples = clip;
+        if (!save_wav(DATA_DIR + "/" + file, audio)) {
+            $println("Error: could not write " + file);
+            return;
+        }
+
+        self.rows.push([file, word]);
+
+        // Rewritten whole, as there is no way to append to a file
+        let table = [["file", "label"]];
+        table.append(self.rows);
+        let text = ByteArray.with_size(0);
+        text.push_string(format_csv(table));
+        if (!$write_file(LABELS_PATH, text)) {
+            $println("Error: could not write " + LABELS_PATH);
+        }
+    }
+}
+
 // --- Drawing helpers ---
 
 fun draw_text(img, font, x, y, text) {
@@ -949,6 +1090,7 @@ fun print_usage() {
     $println("  ESC or the X button discards the clip");
     $println("  Close the window to quit");
     $println("");
+    $println("Samples are saved to ./" + DATA_DIR + " and loaded on startup.");
     $println("Every word you name gets its own output on one shared network.");
     $println("Only \"" + WAKE_WORD + "\" plays a beep; the others just light up.");
     $println("");
@@ -961,12 +1103,15 @@ fun main() {
     let detector_id = $actor_spawn(|| detection_actor(beep_actor_id));
     let trainer_id = $actor_spawn(|| training_actor(detector_id));
 
-    let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Word Detector", 0);
-    let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
-
     let real_parts = ByteArray.with_size(FFT_SIZE * 4);
     let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
-    imag_parts.zero_fill();
+
+    // Before the microphone is opened, so that its input doesn't back up
+    let dataset = Dataset();
+    dataset.load(trainer_id, real_parts, imag_parts);
+
+    let window_id = $window_create(WINDOW_WIDTH, WINDOW_HEIGHT, "Word Detector", 0);
+    let audio_input_device_id = $audio_open_input(SAMPLE_RATE, NUM_CHANNELS);
 
     let screen = Image(WINDOW_WIDTH, WINDOW_HEIGHT);
 
@@ -992,11 +1137,11 @@ fun main() {
     let recorded_audio = ByteArray.with_size(MAX_RECORD_SAMPLES * 4);
     let var recorded_len = 0;
 
-    // Words that have samples, only for the display. The network keeps its
-    // own copy in output order.
-    let var words = [];
-    let var counts = [];
-    let var neg_count = 0;
+    // The trimmed clip, which is what gets saved along with its label
+    let var recorded_clip = nil;
+
+    let words = dataset.words;
+    let counts = dataset.counts;
 
     // The word the detector reported last, and when it said so
     let var last_word = nil;
@@ -1015,11 +1160,7 @@ fun main() {
             recorded_len = recorded_len + FFT_SIZE;
         }
 
-        imag_parts.zero_fill();
-        hanning_window(real_parts);
-        fft(real_parts, imag_parts, false);
-        let var magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
-        magnitudes = normalize_magnitudes(magnitudes);
+        let magnitudes = compute_frame(real_parts, imag_parts);
         $actor_send(detector_id, magnitudes);
 
         if (recording) {
@@ -1064,7 +1205,7 @@ fun main() {
 
             // The words that have samples, lit up while one is being heard
             draw_text(screen, font_dim, MARGIN, LIST_Y - 30,
-                      "WORDS: " + words.len.to_s() + "   NEGATIVE SAMPLES: " + neg_count.to_s());
+                      "WORDS: " + words.len.to_s() + "   NEGATIVE SAMPLES: " + dataset.neg_count.to_s());
 
             if (words.len == 0) {
                 draw_text(screen, font_dim, MARGIN, LIST_Y, "none yet");
@@ -1147,21 +1288,17 @@ fun main() {
                         // output of their own
                         let word = "".join(label_chars).trim().lower();
                         $actor_send(trainer_id, [recorded_frames, word]);
+                        dataset.count(word);
+
+                        // Audio is kept only up to MAX_RECORD_SECS, so a clip
+                        // trimmed to past that is trained on but not saved
+                        if (recorded_clip != nil) {
+                            dataset.save(recorded_clip, word);
+                        }
 
                         if (word == "") {
-                            neg_count = neg_count + 1;
                             $println("Saved a negative sample.");
                         } else {
-                            let var idx = -1;
-                            for (let var i = 0; i < words.len; ++i) {
-                                if (words[i] == word) idx = i;
-                            }
-                            if (idx < 0) {
-                                words.push(word);
-                                counts.push(1);
-                            } else {
-                                counts[idx] = counts[idx] + 1;
-                            }
                             $println("Saved a sample of \"" + word + "\".");
                         }
 
@@ -1201,10 +1338,12 @@ fun main() {
                         let start_sample = start_frame * FFT_SIZE;
                         let end_sample = (end_frame * FFT_SIZE).min(recorded_len);
                         let clip_len = end_sample - start_sample;
+                        recorded_clip = nil;
                         if (clip_len > 0) {
                             let clip = ByteArray.with_size(clip_len * 4);
                             clip.memcpy(0, recorded_audio, start_sample * 4, clip_len * 4);
                             $actor_send(beep_actor_id, clip);
+                            recorded_clip = clip;
                         }
                     } else {
                         recorded_frames = [];
