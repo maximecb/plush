@@ -42,7 +42,9 @@ let MAX_FREQ = 3500.0;
 
 let MAX_FRAMES = 96;
 let HIDDEN_SIZE = 64;
-let LEARNING_RATE = 0.01;
+// Higher than an MLP with large initial weights would use, since the layers
+// start at the He scale and learn slowly at 0.01
+let LEARNING_RATE = 0.05;
 let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
 let DETECTION_THRESHOLD = 0.92;
 
@@ -142,47 +144,177 @@ let COLOR_XBTN = rgb(170, 45, 45);
 let COLOR_HILITE = rgb(90, 220, 120);
 let COLOR_NOISE_HILITE = rgb(225, 80, 80);
 
-fun random_f32(size, lo, hi) {
+// Uniform random weights for units with fan_in inputs each, scaled so that
+// ReLU activations keep about the same variance from layer to layer
+fun he_init_f32(size, fan_in) {
+    let lim = (6.0 / fan_in.to_f()).sqrt();
     let ba = ByteArray.with_size(size * 4);
     for (let var i = 0; i < size; ++i) {
-        ba.set_f32(i, rng.float(lo, hi));
+        ba.set_f32(i, rng.float(-lim, lim));
     }
     return ba;
 }
 
-// --- MLP Definition ---
+// --- Network Definition ---
 //
-// Every weight and activation lives in a ByteArray of float32 rather than an
-// array of boxed floats. That is what lets the layers be written as calls to
-// `dot_f32` and `axpy_f32`, which run over float32 values on the host instead
-// of one bytecode multiply and add at a time.
+// A 1D convnet that slides along time, with the mel bins of each frame as its
+// input channels. Strided convolutions shrink the time axis while the
+// channels grow, then a dense layer sees every remaining time step:
 //
-// Both weight matrices are stored row-major in one flat run, so row `r` of W1
-// is the `input_size` floats starting at `r * input_size`.
+//   input   96 x 32
+//   conv1   k=5 s=2  ->  46 x 32    sees 5 frames, about a phoneme
+//   conv2   k=3 s=2  ->  22 x 48    sees 9 frames
+//   conv3   k=3 s=2  ->  10 x 64    sees 17 frames, about a syllable
+//   dense   640      ->  64
+//   output  64       ->  one sigmoid per word
 //
+// The features are flattened rather than pooled over time, because the
+// network has to know where in the window a word is: it is trained to stop
+// firing once a word is followed by enough silence.
+//
+// Every weight and activation lives in a ByteArray of float32, so that the
+// layers can be written as calls to `dot_f32` and `axpy_f32`, which run on
+// the host instead of one bytecode multiply and add at a time.
+
+// A convolution along time, followed by a ReLU. Activations are stored
+// time-major, with the channels of each time step together, and each output
+// channel's weights as k rows of c_in. The input under the kernel at one
+// time step is then a single run of k * c_in floats, so each output is one
+// `dot_f32` against that channel's weights.
+class ConvLayer {
+    init(self, t_in, c_in, c_out, k, stride) {
+        self.t_in = t_in;
+        self.c_in = c_in;
+        self.c_out = c_out;
+        self.k = k;
+        self.stride = stride;
+        self.t_out = (t_in - k).idiv(stride) + 1;
+        self.row = k * c_in;
+
+        self.W = he_init_f32(c_out * self.row, self.row);
+        self.b = ByteArray.with_size(c_out * 4);
+        self.a = ByteArray.with_size(self.t_out * c_out * 4);
+
+        // Gradients, and the gradient with respect to the input, which
+        // backpropagates to the layer before
+        self.dW = ByteArray.with_size(c_out * self.row * 4);
+        self.db = ByteArray.with_size(c_out * 4);
+        self.dx = ByteArray.with_size(t_in * c_in * 4);
+    }
+
+    num_params(self) {
+        return self.c_out * (self.row + 1);
+    }
+
+    forward(self, x) {
+        let W = self.W;
+        let b = self.b;
+        let a = self.a;
+        let row = self.row;
+        let c_out = self.c_out;
+        let step = self.stride * self.c_in;
+
+        for (let var t = 0; t < self.t_out; ++t) {
+            let xs = t * step;
+            let out = t * c_out;
+            for (let var c = 0; c < c_out; ++c) {
+                let z = W.dot_f32(c * row, 1, x, xs, 1, row) + b.get_f32(c);
+                a.set_f32(out + c, z.max(0.0));
+            }
+        }
+
+        return a;
+    }
+
+    // Adds to dW and db given da, the gradient of the loss with respect to
+    // this layer's output, and fills dx if need_dx is set. Overlapping
+    // windows of the input add up in dx, since axpy_f32 accumulates.
+    backward(self, x, da, need_dx) {
+        let W = self.W;
+        let a = self.a;
+        let dW = self.dW;
+        let db = self.db;
+        let dx = self.dx;
+        let row = self.row;
+        let c_out = self.c_out;
+        let step = self.stride * self.c_in;
+
+        if (need_dx) {
+            dx.zero_fill();
+        }
+
+        for (let var t = 0; t < self.t_out; ++t) {
+            let xs = t * step;
+            let out = t * c_out;
+            for (let var c = 0; c < c_out; ++c) {
+                // ReLU passes a gradient through only where it was active
+                if (a.get_f32(out + c) <= 0.0) {
+                    continue;
+                }
+
+                let g = da.get_f32(out + c);
+                dW.axpy_f32(c * row, 1, x, xs, 1, row, g);
+                db.set_f32(c, db.get_f32(c) + g);
+                if (need_dx) {
+                    dx.axpy_f32(xs, 1, W, c * row, 1, row, g);
+                }
+            }
+        }
+
+        return dx;
+    }
+
+    zero_grad(self) {
+        self.dW.zero_fill();
+        self.db.zero_fill();
+    }
+
+    grad_sq(self) {
+        return self.dW.dot_f32(0, 1, self.dW, 0, 1, self.dW.num_f32()) +
+               self.db.dot_f32(0, 1, self.db, 0, 1, self.db.num_f32());
+    }
+
+    apply_grad(self, scale) {
+        self.W.axpy_f32(0, 1, self.dW, 0, 1, self.W.num_f32(), -scale);
+        self.b.axpy_f32(0, 1, self.db, 0, 1, self.b.num_f32(), -scale);
+    }
+}
+
 // The network starts with no outputs at all and grows one for each word it is
 // taught. See `add_output` for why the words share a network rather than
 // getting one each.
-class MLP {
-    init(self, input_size, hidden_size) {
-        self.input_size = input_size;
-        self.hidden_size = hidden_size;
+class ConvNet {
+    init(self) {
         self.output_size = 0;
 
-        // Names of the words, in the same order as the rows of W2
+        // Names of the words, in the same order as the rows of W_out
         self.words = [];
 
-        self.W1 = random_f32(hidden_size * input_size, -0.5, 0.5);
-        self.b1 = random_f32(hidden_size, -0.5, 0.5);
-        self.W2 = ByteArray.with_size(0);
-        self.b2 = ByteArray.with_size(0);
+        let conv1 = ConvLayer(MAX_FRAMES, NUM_MEL_BINS, 32, 5, 2);
+        let conv2 = ConvLayer(conv1.t_out, conv1.c_out, 48, 3, 2);
+        let conv3 = ConvLayer(conv2.t_out, conv2.c_out, 64, 3, 2);
 
-        // Held on the model and written in place, so that a training step
-        // allocates nothing
-        self.z1 = ByteArray.with_size(hidden_size * 4);
-        self.a1 = ByteArray.with_size(hidden_size * 4);
-        self.d_z1 = ByteArray.with_size(hidden_size * 4);
+        // A kernel spanning every time step left is a dense layer over the
+        // flattened features
+        let dense = ConvLayer(conv3.t_out, conv3.c_out, HIDDEN_SIZE, conv3.t_out, 1);
+        assert(dense.t_out == 1);
+
+        self.layers = [conv1, conv2, conv3, dense];
+
+        self.W_out = ByteArray.with_size(0);
+        self.b_out = ByteArray.with_size(0);
+        self.dW_out = ByteArray.with_size(0);
+        self.db_out = ByteArray.with_size(0);
         self.d_loss = ByteArray.with_size(0);
+        self.d_hidden = ByteArray.with_size(HIDDEN_SIZE * 4);
+    }
+
+    num_params(self) {
+        let var n = (HIDDEN_SIZE + 1) * self.output_size;
+        for (let var i = 0; i < self.layers.len; ++i) {
+            n = n + self.layers[i].num_params();
+        }
+        return n;
     }
 
     // Which output stands for a word, or -1 if it has no output yet
@@ -197,33 +329,30 @@ class MLP {
 
     // Teach the network one more word by giving it one more output.
     //
-    // The words share the hidden layer rather than getting a network each,
-    // because that layer is the network: it holds hidden_size * input_size
-    // weights against an output row's hidden_size, so a network per word
-    // would copy 2048 weights to add 64 useful ones, and each copy would
-    // only ever see its own word's recordings. Sharing means every recording
-    // trains the features all the words are recognized from, and a sample of
-    // one word doubles as a negative for the others.
+    // The words share every layer but the last, because those layers hold
+    // nearly all the weights, and sharing them means every recording trains
+    // the features all the words are recognized from. A sample of one word
+    // also doubles as a negative for the others.
     //
     // Growing costs one row: the rows already there keep their weights, so a
     // new word does not disturb the words already learned. Each output has
     // its own sigmoid rather than a softmax across them, so hearing nothing
-    // is representable -- every output is simply low -- and the words don't
-    // compete for one pool of probability.
+    // is representable, and the words don't compete for one pool of
+    // probability.
     add_output(self, name) {
-        let h = self.hidden_size;
+        let h = HIDDEN_SIZE;
         let o = self.output_size;
+        let lim = (6.0 / (h + 1).to_f()).sqrt();
 
-        self.W2.resize((o + 1) * h * 4);
+        self.W_out.resize((o + 1) * h * 4);
         for (let var c = 0; c < h; ++c) {
-            self.W2.set_f32(o * h + c, rng.float(-0.5, 0.5));
+            self.W_out.set_f32(o * h + c, rng.float(-lim, lim));
         }
 
-        self.b2.resize((o + 1) * 4);
-        self.b2.set_f32(o, rng.float(-0.5, 0.5));
-
+        self.b_out.resize((o + 1) * 4);
+        self.dW_out.resize((o + 1) * h * 4);
+        self.db_out.resize((o + 1) * 4);
         self.d_loss.resize((o + 1) * 4);
-        self.d_loss.set_f32(o, 0.0);
 
         self.words.push(name);
         self.output_size = o + 1;
@@ -231,80 +360,79 @@ class MLP {
         return o;
     }
 
-    // `x` is a ByteArray of input_size float32 values
+    // `x` is a ByteArray of MAX_FRAMES * NUM_MEL_BINS float32 values
     forward(self, x) {
-        let n = self.input_size;
-        let h = self.hidden_size;
-        let W1 = self.W1;
-        let b1 = self.b1;
-        let z1 = self.z1;
-        let a1 = self.a1;
-
-        // Hidden layer: one row of W1 against the input, then ReLU
-        for (let var r = 0; r < h; ++r) {
-            let z = W1.dot_f32(r * n, 1, x, 0, 1, n) + b1.get_f32(r);
-            z1.set_f32(r, z);
-            a1.set_f32(r, z.max(0.0));
+        let var a = x;
+        for (let var i = 0; i < self.layers.len; ++i) {
+            a = self.layers[i].forward(a);
         }
 
-        // Output layer, then the sigmoid
+        let h = HIDDEN_SIZE;
         let y_pred = Array.with_size(self.output_size, 0.0);
         for (let var o = 0; o < self.output_size; ++o) {
-            let z = self.W2.dot_f32(o * h, 1, a1, 0, 1, h) + self.b2.get_f32(o);
+            let z = self.W_out.dot_f32(o * h, 1, a, 0, 1, h) + self.b_out.get_f32(o);
             y_pred[o] = 1.0 / (1.0 + (-z).exp());
         }
 
         return y_pred;
     }
 
-    // Leaves the gradients of the pre-activations in d_loss and d_z1. The
-    // weight gradients themselves are outer products, and are never built:
-    // `update` uses each element once, where it is needed.
-    backward(self, y_true, y_pred) {
-        let h = self.hidden_size;
+    // Computes the gradients for one example, after a call to `forward` on it
+    backward(self, x, y_true, y_pred) {
+        let h = HIDDEN_SIZE;
+        let num_out = self.output_size;
+        let layers = self.layers;
+        let hidden = layers[layers.len - 1].a;
         let d_loss = self.d_loss;
 
-        for (let var o = 0; o < self.output_size; ++o) {
+        // For a sigmoid with cross-entropy, the gradient at the output's
+        // input is simply the error
+        for (let var o = 0; o < num_out; ++o) {
             d_loss.set_f32(o, y_pred[o] - y_true[o]);
         }
 
-        // d_a1 is W2 transposed times d_loss. Column `r` of W2 is a run with
-        // a stride of hidden_size, which dot_f32 reads without transposing.
-        for (let var r = 0; r < h; ++r) {
-            let d_a1 = self.W2.dot_f32(r, h, d_loss, 0, 1, self.output_size);
+        self.dW_out.zero_fill();
+        for (let var o = 0; o < num_out; ++o) {
+            let g = d_loss.get_f32(o);
+            self.dW_out.axpy_f32(o * h, 1, hidden, 0, 1, h, g);
+            self.db_out.set_f32(o, g);
+        }
 
-            // ReLU passes a gradient through only where it was active
-            if (self.z1.get_f32(r) > 0.0) {
-                self.d_z1.set_f32(r, d_a1);
-            } else {
-                self.d_z1.set_f32(r, 0.0);
-            }
+        // W_out transposed times d_loss. Column `r` of W_out is a run with a
+        // stride of h, which dot_f32 reads without transposing.
+        for (let var r = 0; r < h; ++r) {
+            self.d_hidden.set_f32(r, self.W_out.dot_f32(r, h, d_loss, 0, 1, num_out));
+        }
+
+        // The first layer's input is the example, which needs no gradient
+        let var da = self.d_hidden;
+        for (let var i = layers.len - 1; i >= 0; --i) {
+            let input = i > 0 ? layers[i - 1].a : x;
+            layers[i].zero_grad();
+            da = layers[i].backward(input, da, i > 0);
         }
     }
 
-    update(self, x, learning_rate) {
-        let n = self.input_size;
-        let h = self.hidden_size;
-        let W1 = self.W1;
-        let b1 = self.b1;
-
-        for (let var r = 0; r < h; ++r) {
-            let g = learning_rate * self.d_z1.get_f32(r);
-
-            // ReLU leaves most rows with no gradient at all, and the row is
-            // the expensive part
-            if (g != 0.0) {
-                W1.axpy_f32(r * n, 1, x, 0, 1, n, -g);
-            }
-
-            b1.set_f32(r, b1.get_f32(r) - g);
+    // One step of gradient descent, with the gradient's norm clipped
+    update(self, learning_rate) {
+        let n_out = self.dW_out.num_f32();
+        let var sq = self.dW_out.dot_f32(0, 1, self.dW_out, 0, 1, n_out) +
+                     self.db_out.dot_f32(0, 1, self.db_out, 0, 1, self.output_size);
+        for (let var i = 0; i < self.layers.len; ++i) {
+            sq = sq + self.layers[i].grad_sq();
         }
 
-        for (let var o = 0; o < self.output_size; ++o) {
-            let g = learning_rate * self.d_loss.get_f32(o);
-            self.W2.axpy_f32(o * h, 1, self.a1, 0, 1, h, -g);
-            self.b2.set_f32(o, self.b2.get_f32(o) - g);
+        let norm = sq.sqrt();
+        let var scale = learning_rate;
+        if (norm > GRADIENT_CLIP_THRESHOLD) {
+            scale = learning_rate * GRADIENT_CLIP_THRESHOLD / norm;
         }
+
+        for (let var i = 0; i < self.layers.len; ++i) {
+            self.layers[i].apply_grad(scale);
+        }
+        self.W_out.axpy_f32(0, 1, self.dW_out, 0, 1, n_out, -scale);
+        self.b_out.axpy_f32(0, 1, self.db_out, 0, 1, self.output_size, -scale);
     }
 }
 
@@ -452,7 +580,7 @@ fun compute_frame(real_parts, imag_parts) {
 }
 
 // Produces the network's input: one ByteArray of float32, which is what
-// `MLP.forward` reads. A new ByteArray is zeroed, so the padding is already
+// `ConvNet.forward` reads. A new ByteArray is zeroed, so the padding is already
 // in place when there are fewer frames than fit.
 fun flatten_and_pad(frames, max_frames, num_bins) {
     let flat = ByteArray.with_size(max_frames * num_bins * 4);
@@ -520,7 +648,8 @@ fun array_slice(arr, start, end) {
 
 fun training_actor(detection_actor_id) {
     rng.seed($time_current_ms());
-    let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE);
+    let mlp = ConvNet();
+    $println("Network parameters: " + mlp.num_params().comma_sep() + " + " + (HIDDEN_SIZE + 1).to_s() + " per word");
 
     let training_data = [];
     let var iteration_count = 0;
@@ -663,8 +792,8 @@ fun training_actor(detection_actor_id) {
             }
 
             let y_pred = mlp.forward(x);
-            mlp.backward(y_true, y_pred);
-            mlp.update(x, LEARNING_RATE);
+            mlp.backward(x, y_true, y_pred);
+            mlp.update(LEARNING_RATE);
 
             // Cross-entropy averaged over the outputs
             let var loss = 0.0;
@@ -749,8 +878,8 @@ fun detection_actor(beep_actor_id) {
             continue;
         }
 
-        if (msg instanceof MLP) {
-            // Received a new MLP model from the training actor
+        if (msg instanceof ConvNet) {
+            // Received a new model from the training actor
             current_mlp = msg;
             continue;
         }
