@@ -61,12 +61,7 @@ let MAX_ZERO_FRAMES_TO_ADD = 10;
 // Data augmentation: probability of dropping any given frame in training
 let FRAME_DROP_PROB = 0.05;
 
-// For positive examples, randomly keep only a prefix, so the label is still
-// the full word but the window is caught mid-utterance, before it's over.
-// Nothing but this word should win on it either.
-let TRUNCATED_PREFIX_PROB = 0.3;
-
-// For positive examples otherwise, randomly append trailing silence,
+// For positive examples, randomly append trailing silence,
 // anywhere up to a full detection window. Within a short grace period this
 // is still trained as the word, so a slight lag catching its end still
 // reads as a hit. Past the grace period the example is trained as
@@ -85,6 +80,9 @@ let WAKE_WORD = "computer";
 // far as the network is concerned, and only the display treats it specially:
 // pinned to the bottom of the list and lit in red rather than green.
 let NOISE_WORD = "noise";
+
+// Label of negative samples, and name of the network's output for no word
+let NONE_LABEL = "";
 
 // Longest clip that gets kept for playback
 let MAX_RECORD_SECS = 5;
@@ -166,7 +164,7 @@ fun he_init_f32(size, fan_in) {
 //   conv2   k=3 s=2  ->  22 x 48    sees 9 frames
 //   conv3   k=3 s=2  ->  10 x 64    sees 17 frames, about a syllable
 //   dense   640      ->  64
-//   output  64       ->  one sigmoid per word
+//   output  64       ->  softmax over "nothing" and each word
 //
 // The features are flattened rather than pooled over time, because the
 // network has to know where in the window a word is: it is trained to stop
@@ -280,9 +278,9 @@ class ConvLayer {
     }
 }
 
-// The network starts with no outputs at all and grows one for each word it is
-// taught. See `add_output` for why the words share a network rather than
-// getting one each.
+// The network starts with one output, for hearing no word at all, and grows
+// one for each word it is taught. See `add_output` for why the words share a
+// network rather than getting one each.
 class ConvNet {
     init(self) {
         self.output_size = 0;
@@ -307,6 +305,11 @@ class ConvNet {
         self.db_out = ByteArray.with_size(0);
         self.d_loss = ByteArray.with_size(0);
         self.d_hidden = ByteArray.with_size(HIDDEN_SIZE * 4);
+
+        // The outputs compete in a softmax, so hearing no word at all needs
+        // an output of its own. It is named by the empty label negative
+        // samples have.
+        self.add_output(NONE_LABEL);
     }
 
     num_params(self) {
@@ -334,11 +337,9 @@ class ConvNet {
     // the features all the words are recognized from. A sample of one word
     // also doubles as a negative for the others.
     //
-    // Growing costs one row: the rows already there keep their weights, so a
-    // new word does not disturb the words already learned. Each output has
-    // its own sigmoid rather than a softmax across them, so hearing nothing
-    // is representable, and the words don't compete for one pool of
-    // probability.
+    // Growing costs one row: the rows already there keep their weights. The
+    // outputs share a softmax, so the words compete, and confidence in one
+    // word is evidence against the others.
     add_output(self, name) {
         let h = HIDDEN_SIZE;
         let o = self.output_size;
@@ -369,9 +370,23 @@ class ConvNet {
 
         let h = HIDDEN_SIZE;
         let y_pred = Array.with_size(self.output_size, 0.0);
+        let var z_max = nil;
         for (let var o = 0; o < self.output_size; ++o) {
             let z = self.W_out.dot_f32(o * h, 1, a, 0, 1, h) + self.b_out.get_f32(o);
-            y_pred[o] = 1.0 / (1.0 + (-z).exp());
+            y_pred[o] = z;
+            if (z_max == nil || z > z_max) {
+                z_max = z;
+            }
+        }
+
+        // Softmax, shifted by the largest logit so exp() can't overflow
+        let var sum = 0.0;
+        for (let var o = 0; o < self.output_size; ++o) {
+            y_pred[o] = (y_pred[o] - z_max).exp();
+            sum = sum + y_pred[o];
+        }
+        for (let var o = 0; o < self.output_size; ++o) {
+            y_pred[o] = y_pred[o] / sum;
         }
 
         return y_pred;
@@ -385,8 +400,8 @@ class ConvNet {
         let hidden = layers[layers.len - 1].a;
         let d_loss = self.d_loss;
 
-        // For a sigmoid with cross-entropy, the gradient at the output's
-        // input is simply the error
+        // For a softmax with cross-entropy, the gradient at the logits is
+        // simply the error
         for (let var o = 0; o < num_out; ++o) {
             d_loss.set_f32(o, y_pred[o] - y_true[o]);
         }
@@ -697,7 +712,7 @@ fun training_actor(detection_actor_id) {
         }
 
         // Nothing to learn until at least one word has an output
-        let can_train = training_data.len > 0 && mlp.output_size > 0;
+        let can_train = training_data.len > 0 && mlp.output_size > 1;
 
         if (can_train) {
             let idx = rng.int(0, training_data.len);
@@ -753,17 +768,15 @@ fun training_actor(detection_actor_id) {
                 }
             }
 
-            // For positive examples, one of two mutually exclusive shapes,
-            // mirroring the two ways the sliding window can catch an
-            // incomplete word: cut short mid-utterance, or trailing off
-            // after it. Kept last, after the frame drop above, so a prefix
-            // isn't itself further thinned and `num_silence_frames` stays
-            // accurate to what's actually appended.
+            // For positive examples, trailing silence, as the sliding window
+            // sees after a word ends. Kept after the frame drop above, so
+            // `num_silence_frames` stays accurate to what's actually appended.
+            //
+            // Words are never cut short: a short prefix, such as the first
+            // sound of a word, can't tell one word from another, and
+            // training it as the word leads to false detections.
             let var num_silence_frames = 0;
-            if (label != "" && current_frames.len > 1 && rng.float(0.0, 1.0) < TRUNCATED_PREFIX_PROB) {
-                let cut_len = rng.int(1, current_frames.len);
-                current_frames = array_slice(current_frames, 0, cut_len);
-            } else if (label != "" && TRAILING_SILENCE_MAX_FRAMES > 0 && rng.float(0.0, 1.0) < TRAILING_SILENCE_PROB) {
+            if (label != "" && TRAILING_SILENCE_MAX_FRAMES > 0 && rng.float(0.0, 1.0) < TRAILING_SILENCE_PROB) {
                 num_silence_frames = rng.int(1, TRAILING_SILENCE_MAX_FRAMES + 1);
                 let silence_frame = Array.with_size(NUM_MEL_BINS, 0.0);
                 for (let var i = 0; i < num_silence_frames; ++i) {
@@ -779,30 +792,23 @@ fun training_actor(detection_actor_id) {
                 x.set_f32(i, x.get_f32(i) * scale_factor + rng.float(-0.5, 0.5) * NOISE_MAGNITUDE);
             }
 
-            // One target per word: 1 for the word that was said, 0 for the
-            // rest. A negative sample leaves every target at 0, and a sample
-            // of one word is a negative for all the others. Past the
-            // trailing-silence grace period, the target is all-zeros too --
-            // that much silence means the word is gone, so nothing,
-            // including it, should still be firing.
+            // One-hot on the word that was said. A negative sample targets
+            // the output for no word, and so does a word past the
+            // trailing-silence grace period: that much silence means the
+            // word is gone, so it should no longer be heard.
             let y_true = Array.with_size(mlp.output_size, 0.0);
-            let label_idx = mlp.word_index(label);
-            if (label_idx >= 0 && num_silence_frames <= TRAILING_SILENCE_GRACE_FRAMES) {
-                y_true[label_idx] = 1.0;
+            let var label_idx = mlp.word_index(label);
+            if (num_silence_frames > TRAILING_SILENCE_GRACE_FRAMES) {
+                label_idx = mlp.word_index(NONE_LABEL);
             }
+            y_true[label_idx] = 1.0;
 
             let y_pred = mlp.forward(x);
             mlp.backward(x, y_true, y_pred);
             mlp.update(LEARNING_RATE);
 
-            // Cross-entropy averaged over the outputs
-            let var loss = 0.0;
-            for (let var o = 0; o < mlp.output_size; ++o) {
-                let p = y_pred[o].max(1e-9).min(1.0 - 1e-9);
-                let y = y_true[o];
-                loss = loss - (y * p.ln() + (1.0 - y) * (1.0 - p).ln());
-            }
-            loss = loss / mlp.output_size.to_f();
+            // Cross-entropy, of the target output alone with a softmax
+            let loss = -(y_pred[label_idx].max(1e-9).ln());
 
             // The first example has nothing to average with, so it starts
             // the average off rather than being blended into zero
@@ -825,7 +831,7 @@ fun training_actor(detection_actor_id) {
                     "Itr#" + training_itr.to_s() +
                     ", " + itrs_per_sec.format_decimals(1) + " itr/s" +
                     ", loss: " + avg_loss.format_decimals(5) +
-                    ", words: " + mlp.output_size.to_s() +
+                    ", words: " + (mlp.output_size - 1).to_s() +
                     ", pos: " +
                     positive_examples_count.to_s() +
                     ", neg: " +
@@ -914,12 +920,11 @@ fun detection_actor(beep_actor_id) {
                 let x = flatten_and_pad(frame_buffer, MAX_FRAMES, NUM_MEL_BINS);
                 let y_pred = current_mlp.forward(x);
 
-                // Every output is its own detector, so the loudest one above
-                // the threshold wins rather than the outputs being compared
-                // as a distribution
+                // The most probable word wins if it is above the threshold.
+                // Output 0 is for hearing no word, and is never reported.
                 let var best = -1;
                 let var best_conf = DETECTION_THRESHOLD;
-                for (let var o = 0; o < y_pred.len; ++o) {
+                for (let var o = 1; o < y_pred.len; ++o) {
                     if (y_pred[o] > best_conf) {
                         best_conf = y_pred[o];
                         best = o;
