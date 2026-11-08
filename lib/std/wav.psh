@@ -1,0 +1,268 @@
+// WAV audio file reading and writing
+//
+//   from wav import load_wav, save_wav;
+//
+//   let snd = load_wav("examples/data/sample_nono.wav");
+//   let dev = $audio_open_output(snd.sample_rate, snd.num_channels);
+//   $audio_write_samples(dev, snd.samples);
+//
+// Samples are stored as interleaved 32-bit floats in [-1, 1], the format
+// $audio_write_samples() and $audio_read_samples() use. A frame is one
+// sample for each channel, at one point in time.
+//
+// Decoding handles PCM with 8, 16, 24 or 32 bits per sample, 32-bit IEEE
+// float, and the extensible format when it holds either of these. Other
+// chunks, such as metadata, are skipped. Compressed formats, big-endian
+// RIFX and RF64 files are not supported.
+
+// Sample formats for encoding
+let WAV_U8  = 0;
+let WAV_I16 = 1;
+let WAV_I24 = 2;
+let WAV_I32 = 3;
+let WAV_F32 = 4;
+
+// Chunk ids, as load_u32() reads their four characters
+let CHUNK_RIFF = 0x46464952;
+let CHUNK_WAVE = 0x45564157;
+let CHUNK_FMT  = 0x20746D66;
+let CHUNK_DATA = 0x61746164;
+
+// Format tags
+let TAG_PCM = 1;
+let TAG_FLOAT = 3;
+let TAG_EXTENSIBLE = 0xFFFE;
+
+// Audio held as interleaved f32 samples in [-1, 1]
+class AudioData
+{
+    // Allocates silence of the given length
+    init(self, num_channels, sample_rate, num_frames)
+    {
+        assert(num_channels instanceof Int64 && num_channels > 0);
+        assert(sample_rate instanceof Int64 && sample_rate > 0);
+        assert(num_frames instanceof Int64 && num_frames >= 0);
+
+        self.num_channels = num_channels;
+        self.sample_rate = sample_rate;
+        self.samples = ByteArray.with_size(4 * num_channels * num_frames);
+    }
+
+    // Number of samples, across all channels
+    num_samples(self)
+    {
+        return self.samples.len.idiv(4);
+    }
+
+    num_frames(self)
+    {
+        return self.samples.len.idiv(4 * self.num_channels);
+    }
+
+    // Length in seconds, as a float
+    duration(self)
+    {
+        return self.num_frames().to_f() / self.sample_rate.to_f();
+    }
+
+    get(self, frame, channel)
+    {
+        return self.samples.get_f32(frame * self.num_channels + channel);
+    }
+
+    set(self, frame, channel, value)
+    {
+        self.samples.set_f32(frame * self.num_channels + channel, value.to_f());
+    }
+}
+
+// Converts count samples of integer PCM, starting at byte pos, to floats.
+// Each sample is bytes_per long, and only 8-bit samples are unsigned.
+fun decode_pcm(data, pos, count, bytes_per, out)
+{
+    if (bytes_per == 1) {
+        for (let var i = 0; i < count; ++i) {
+            out.set_f32(i, (data[pos + i] - 128).to_f() / 128.0);
+        }
+    } else if (bytes_per == 2) {
+        for (let var i = 0; i < count; ++i) {
+            let v = (data.load_u16(pos + 2 * i) ^ 0x8000) - 0x8000;
+            out.set_f32(i, v.to_f() / 32768.0);
+        }
+    } else if (bytes_per == 3) {
+        for (let var i = 0; i < count; ++i) {
+            let p = pos + 3 * i;
+            let u = data[p] | (data[p + 1] << 8) | (data[p + 2] << 16);
+            let v = (u ^ 0x800000) - 0x800000;
+            out.set_f32(i, v.to_f() / 8388608.0);
+        }
+    } else {
+        for (let var i = 0; i < count; ++i) {
+            let v = (data.load_u32(pos + 4 * i) ^ 0x80000000) - 0x80000000;
+            out.set_f32(i, v.to_f() / 2147483648.0);
+        }
+    }
+}
+
+// Decodes the bytes of a WAV file into an AudioData. Returns nil if the data is
+// not a WAV file, is in a format that is not supported, or is cut short.
+fun decode_wav(data)
+{
+    if (data == nil || data.len < 12) {
+        return nil;
+    }
+
+    if (data.load_u32(0) != CHUNK_RIFF || data.load_u32(8) != CHUNK_WAVE) {
+        return nil;
+    }
+
+    let var fmt_pos = nil;
+    let var data_pos = nil;
+    let var data_size = 0;
+    let var pos = 12;
+
+    // Chunks can come in any order, and odd sizes are followed by a pad byte
+    while (pos + 8 <= data.len) {
+        let id = data.load_u32(pos);
+        let size = data.load_u32(pos + 4);
+        let body = pos + 8;
+
+        if (id == CHUNK_FMT) {
+            if (size < 16 || body + 16 > data.len) {
+                return nil;
+            }
+            fmt_pos = body;
+        } else if (id == CHUNK_DATA) {
+            // Writers that were cut off or that stream can leave a wrong size
+            data_pos = body;
+            data_size = size.min(data.len - body);
+            if (fmt_pos != nil) {
+                break;
+            }
+        }
+
+        pos = body + size + (size & 1);
+    }
+
+    if (fmt_pos == nil || data_pos == nil) {
+        return nil;
+    }
+
+    let var tag = data.load_u16(fmt_pos);
+    let num_channels = data.load_u16(fmt_pos + 2);
+    let sample_rate = data.load_u32(fmt_pos + 4);
+    let bits = data.load_u16(fmt_pos + 14);
+
+    // The extensible format holds the real tag in its sub-format GUID
+    if (tag == TAG_EXTENSIBLE) {
+        if (data.load_u32(fmt_pos - 4) < 40 || fmt_pos + 26 > data.len) {
+            return nil;
+        }
+        tag = data.load_u16(fmt_pos + 24);
+    }
+
+    if (num_channels == 0 || sample_rate == 0) {
+        return nil;
+    }
+
+    let is_float = tag == TAG_FLOAT && bits == 32;
+    let is_pcm = tag == TAG_PCM && (bits == 8 || bits == 16 || bits == 24 || bits == 32);
+    if (!is_float && !is_pcm) {
+        return nil;
+    }
+
+    // Partial frames at the end are dropped
+    let bytes_per = bits.idiv(8);
+    let num_frames = data_size.idiv(bytes_per * num_channels);
+    let snd = AudioData(num_channels, sample_rate, num_frames);
+    let count = num_frames * num_channels;
+
+    if (is_float) {
+        snd.samples.memcpy(0, data, data_pos, 4 * count);
+    } else {
+        decode_pcm(data, data_pos, count, bytes_per, snd.samples);
+    }
+
+    return snd;
+}
+
+// Encodes an AudioData as the bytes of a WAV file, with samples in one of the
+// WAV_* formats. Samples are clipped to [-1, 1] and rounded, with no dither.
+// Integer samples are scaled by the same factor as in decoding, so that
+// decoding and encoding again gives back the same bytes.
+fun encode_wav(snd, format)
+{
+    let bytes_per = [1, 2, 3, 4, 4][format];
+    let count = snd.num_samples();
+    let data_size = count * bytes_per;
+    let pad = data_size & 1;
+    let block_align = bytes_per * snd.num_channels;
+    let out = ByteArray.with_size(44 + data_size + pad);
+
+    out.store_u32(0, CHUNK_RIFF);
+    out.store_u32(4, 36 + data_size + pad);
+    out.store_u32(8, CHUNK_WAVE);
+    out.store_u32(12, CHUNK_FMT);
+    out.store_u32(16, 16);
+    out.store_u16(20, format == WAV_F32 ? TAG_FLOAT : TAG_PCM);
+    out.store_u16(22, snd.num_channels);
+    out.store_u32(24, snd.sample_rate);
+    out.store_u32(28, snd.sample_rate * block_align);
+    out.store_u16(32, block_align);
+    out.store_u16(34, bytes_per * 8);
+    out.store_u32(36, CHUNK_DATA);
+    out.store_u32(40, data_size);
+
+    let src = snd.samples;
+
+    if (format == WAV_F32) {
+        for (let var i = 0; i < count; ++i) {
+            out.store_f32(44 + 4 * i, src.get_f32(i).clip(-1.0, 1.0));
+        }
+    } else if (format == WAV_U8) {
+        for (let var i = 0; i < count; ++i) {
+            out[44 + i] = 128 + (src.get_f32(i).clip(-1.0, 1.0) * 128.0 + 0.5).floor().min(127);
+        }
+    } else if (format == WAV_I16) {
+        for (let var i = 0; i < count; ++i) {
+            let v = (src.get_f32(i).clip(-1.0, 1.0) * 32768.0 + 0.5).floor().min(32767);
+            out.store_u16(44 + 2 * i, v & 0xFFFF);
+        }
+    } else if (format == WAV_I24) {
+        for (let var i = 0; i < count; ++i) {
+            let v = (src.get_f32(i).clip(-1.0, 1.0) * 8388608.0 + 0.5).floor().min(8388607);
+            let p = 44 + 3 * i;
+            out[p] = v & 0xFF;
+            out[p + 1] = (v >> 8) & 0xFF;
+            out[p + 2] = (v >> 16) & 0xFF;
+        }
+    } else {
+        for (let var i = 0; i < count; ++i) {
+            let v = (src.get_f32(i).clip(-1.0, 1.0) * 2147483648.0 + 0.5).floor().min(2147483647);
+            out.store_u32(44 + 4 * i, v & 0xFFFFFFFF);
+        }
+    }
+
+    return out;
+}
+
+// Reads a WAV file into an AudioData, see decode_wav() for the formats handled.
+// Returns nil if the file can't be read or is not in one of these formats.
+fun load_wav(path)
+{
+    return decode_wav($read_file(path));
+}
+
+// Writes an AudioData to a file as 16-bit PCM.
+// Returns true on success and false on failure, like $write_file().
+fun save_wav(path, snd)
+{
+    return $write_file(path, encode_wav(snd, WAV_I16));
+}
+
+// Writes an AudioData to a file with samples in one of the WAV_* formats.
+// Returns true on success and false on failure, like $write_file().
+fun save_wav_fmt(path, snd, format)
+{
+    return $write_file(path, encode_wav(snd, format));
+}

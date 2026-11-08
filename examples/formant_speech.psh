@@ -8,6 +8,7 @@
 
 from args import ArgParser;
 from random import Xoshiro128;
+from wav import AudioData, save_wav;
 
 let rng = Xoshiro128(22222);
 
@@ -780,36 +781,6 @@ fun render(segs)
     return out;
 }
 
-// --- WAV output ---
-
-fun write_wav(path, samples)
-{
-    let num_samples = samples.len.idiv(4);
-    let data_size = num_samples * 2;
-    let buf = ByteArray.with_size(44 + data_size);
-
-    buf.store_u32(0, 0x46464952);            // "RIFF"
-    buf.store_u32(4, 36 + data_size);
-    buf.store_u32(8, 0x45564157);            // "WAVE"
-    buf.store_u32(12, 0x20746D66);           // "fmt "
-    buf.store_u32(16, 16);
-    buf.store_u16(20, 1);                    // PCM
-    buf.store_u16(22, 1);                    // mono
-    buf.store_u32(24, SAMPLE_RATE);
-    buf.store_u32(28, SAMPLE_RATE * 2);      // byte rate
-    buf.store_u16(32, 2);                    // block align
-    buf.store_u16(34, 16);                   // bits per sample
-    buf.store_u32(36, 0x61746164);           // "data"
-    buf.store_u32(40, data_size);
-
-    for (let var i = 0; i < num_samples; ++i) {
-        let v = (samples.get_f32(i).clip(-1.0, 1.0) * 32767.0).floor();
-        buf.store_u16(44 + i * 2, v & 0xFFFF);
-    }
-
-    $write_file(path, buf);
-}
-
 // --- Demo ---
 
 let DEFAULT_TEXT =
@@ -851,7 +822,9 @@ fun main()
     );
 
     if (out_path != nil) {
-        write_wav(out_path, samples);
+        let snd = AudioData(1, SAMPLE_RATE, 0);
+        snd.samples = samples;
+        save_wav(out_path, snd);
         $println("wrote " + out_path);
         return;
     }

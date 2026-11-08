@@ -1,0 +1,141 @@
+from wav import AudioData, decode_wav, encode_wav, WAV_U8, WAV_I16, WAV_I24, WAV_I32, WAV_F32;
+
+// Stereo, 3 frames of 16-bit PCM, with a LIST chunk of odd size before
+// fmt and its pad byte, so chunks have to be walked rather than assumed
+let WAV_LIST_FIRST = #[\x
+    52 49 46 46 3C 00 00 00 57 41 56 45
+    4C 49 53 54 03 00 00 00 61 62 63 00
+    66 6D 74 20 10 00 00 00 01 00 02 00 44 AC 00 00 10 B1 02 00 04 00 10 00
+    64 61 74 61 0C 00 00 00 00 00 FF 7F 00 80 00 40 FF FF 01 00
+];
+
+let snd = decode_wav(WAV_LIST_FIRST);
+assert(snd != nil);
+assert(snd.num_channels == 2);
+assert(snd.sample_rate == 44100);
+assert(snd.num_frames() == 3);
+assert(snd.num_samples() == 6);
+assert(snd.get(0, 0) == 0.0);
+assert(snd.get(0, 1) == 32767.0 / 32768.0);
+assert(snd.get(1, 0) == -1.0);
+assert(snd.get(1, 1) == 0.5);
+assert(snd.get(2, 0) == -1.0 / 32768.0);
+assert(snd.get(2, 1) == 1.0 / 32768.0);
+
+// Mono 24-bit in the extensible format, whose sub-format GUID says PCM
+let WAV_EXT_24 = #[\x
+    52 49 46 46 42 00 00 00 57 41 56 45
+    66 6D 74 20 28 00 00 00 FE FF 01 00 80 BB 00 00 80 32 02 00 03 00 18 00
+    16 00 18 00 04 00 00 00
+    01 00 00 00 00 00 10 00 80 00 00 AA 00 38 9B 71
+    64 61 74 61 06 00 00 00 00 00 C0 FF FF 7F
+];
+
+let ext = decode_wav(WAV_EXT_24);
+assert(ext != nil);
+assert(ext.num_channels == 1);
+assert(ext.sample_rate == 48000);
+assert(ext.num_frames() == 2);
+assert(ext.get(0, 0) == -0.5);
+assert(ext.get(1, 0) == 8388607.0 / 8388608.0);
+
+// 8-bit PCM is unsigned, with silence at 128
+let WAV_U8_DATA = #[\x
+    52 49 46 46 28 00 00 00 57 41 56 45
+    66 6D 74 20 10 00 00 00 01 00 01 00 40 1F 00 00 40 1F 00 00 01 00 08 00
+    64 61 74 61 03 00 00 00 80 00 C0 00
+];
+
+let u8 = decode_wav(WAV_U8_DATA);
+assert(u8 != nil);
+assert(u8.num_frames() == 3);
+assert(u8.get(0, 0) == 0.0);
+assert(u8.get(1, 0) == -1.0);
+assert(u8.get(2, 0) == 0.5);
+
+// A data size past the end of the file is clamped, and partial frames dropped
+let cut = ByteArray.with_size(WAV_LIST_FIRST.len - 3);
+cut.memcpy(0, WAV_LIST_FIRST, 0, cut.len);
+cut.store_u32(52, 0xFFFFFFFF);
+let cut_snd = decode_wav(cut);
+assert(cut_snd != nil);
+assert(cut_snd.num_frames() == 2);
+assert(cut_snd.get(1, 1) == 0.5);
+
+// Data that isn't a supported WAV file
+assert(decode_wav(nil) == nil);
+assert(decode_wav(ByteArray.with_size(0)) == nil);
+assert(decode_wav(ByteArray.with_size(64)) == nil);
+let no_data = ByteArray.with_size(44);
+no_data.memcpy(0, WAV_U8_DATA, 0, 36);
+assert(decode_wav(no_data) == nil);
+let adpcm = ByteArray.with_size(WAV_U8_DATA.len);
+adpcm.memcpy(0, WAV_U8_DATA, 0, adpcm.len);
+adpcm.store_u16(20, 2);
+assert(decode_wav(adpcm) == nil);
+
+// A new AudioData is silent
+let src = AudioData(2, 22050, 100);
+assert(src.num_frames() == 100);
+assert(src.num_samples() == 200);
+assert(src.duration() == 100.0 / 22050.0);
+for (let var i = 0; i < src.num_samples(); ++i)
+    assert(src.samples.get_f32(i) == 0.0);
+
+// Out of range values are clipped on encoding
+for (let var f = 0; f < 100; ++f) {
+    let t = f.to_f() / 100.0;
+    src.set(f, 0, (t * 6.283).sin() * 0.9);
+    src.set(f, 1, t * 3.0 - 1.5);
+}
+
+// Round trips through every format, within the precision of each
+let formats = [WAV_U8, WAV_I16, WAV_I24, WAV_I32, WAV_F32];
+let tolerances = [1.0 / 128.0, 1.0 / 32768.0, 2.0 / 8388608.0, 0.000001, 0.0];
+
+for (let var k = 0; k < formats.len; ++k) {
+    let bytes = encode_wav(src, formats[k]);
+    let back = decode_wav(bytes);
+    assert(back != nil);
+    assert(back.num_channels == 2);
+    assert(back.sample_rate == 22050);
+    assert(back.num_frames() == 100);
+
+    for (let var f = 0; f < 100; ++f) {
+        for (let var c = 0; c < 2; ++c) {
+            let want = src.get(f, c).clip(-1.0, 1.0);
+            assert((back.get(f, c) - want).abs() <= tolerances[k]);
+        }
+    }
+}
+
+// Integer PCM survives decoding and encoding again unchanged
+let reencoded = encode_wav(snd, WAV_I16);
+assert(reencoded.len == 56);
+for (let var i = 0; i < 12; ++i)
+    assert(reencoded[44 + i] == WAV_LIST_FIRST[56 + i]);
+
+let reencoded24 = encode_wav(ext, WAV_I24);
+for (let var i = 0; i < 6; ++i)
+    assert(reencoded24[44 + i] == WAV_EXT_24[68 + i]);
+
+let reencoded8 = encode_wav(u8, WAV_U8);
+for (let var i = 0; i < 3; ++i)
+    assert(reencoded8[44 + i] == WAV_U8_DATA[44 + i]);
+
+// Full scale clamps to the largest value
+let loud = AudioData(1, 8000, 2);
+loud.set(0, 0, 1.0);
+loud.set(1, 0, -1.0);
+let loud16 = encode_wav(loud, WAV_I16);
+assert(loud16.load_u16(44) == 0x7FFF);
+assert(loud16.load_u16(46) == 0x8000);
+let loud32 = encode_wav(loud, WAV_I32);
+assert(loud32.load_u32(44) == 0x7FFFFFFF);
+assert(loud32.load_u32(48) == 0x80000000);
+
+// Odd data sizes get a pad byte that the RIFF size counts
+let odd = encode_wav(AudioData(1, 8000, 3), WAV_U8);
+assert(odd.len == 48);
+assert(odd.load_u32(4) == 40);
+assert(odd.load_u32(40) == 3);

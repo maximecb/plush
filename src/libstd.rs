@@ -34,6 +34,7 @@ pub fn get_source(unit_key: &str) -> Option<&'static str>
         "random" => include_str!("../lib/std/random.psh"),
         "sha256" => include_str!("../lib/std/sha256.psh"),
         "sha512" => include_str!("../lib/std/sha512.psh"),
+        "wav" => include_str!("../lib/std/wav.psh"),
         _ => return None
     };
 
