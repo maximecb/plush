@@ -49,8 +49,10 @@ let INPUT_SIZE = MAX_FRAMES * NUM_MEL_BINS;
 let DETECTION_THRESHOLD = 0.92;
 
 // Consecutive frames the same word must win before a detection counts, to
-// smooth out one-frame flickers on words that briefly cross the threshold
-let CONFIRM_FRAMES = 2;
+// smooth out flickers on words that briefly cross the threshold. At 2, the
+// start or middle of a word still triggered other words several times as
+// often, for about 23ms less delay.
+let CONFIRM_FRAMES = 4;
 
 // Frames of enforced quiet after a detection fires, before another can
 let COOLDOWN_FRAMES = 12;
@@ -60,6 +62,10 @@ let MAX_ZERO_FRAMES_TO_ADD = 10;
 
 // Data augmentation: probability of dropping any given frame in training
 let FRAME_DROP_PROB = 0.05;
+
+// Data augmentation: probability of repeating any given frame, so words are
+// also seen stretched, as if spoken more slowly, rather than only shortened
+let FRAME_DUP_PROB = 0.1;
 
 // For positive examples, the probability of training a prefix of the word as
 // no word at all, and the longest prefix used, as a fraction of the clip.
@@ -101,6 +107,12 @@ let MAX_RECORD_SAMPLES = SAMPLE_RATE * MAX_RECORD_SECS;
 let TRIM_MS = 50;
 let TRIM_FRAMES = (SAMPLE_RATE * TRIM_MS).idiv(1000 * FFT_SIZE);
 let SILENCE_THRESHOLD = 0.05;
+
+// Frames this loud, for at least this many in a row, are taken for speech
+// when trimming. A key click is louder than silence but only lasts a frame
+// or two, and would otherwise be kept along with the silence after it.
+let SPEECH_THRESHOLD = 0.3;
+let SPEECH_MIN_RUN = 3;
 
 // Where recorded samples are saved, one WAV file each, and loaded from on
 // startup. The CSV file gives the label of each WAV file, empty for a
@@ -638,14 +650,57 @@ fun frame_is_silent(frame, threshold) {
     return peak < threshold;
 }
 
+// Range [start, end) of the speech within frames[lo..hi), or nil if there is
+// none. Speech starts with the first run of loud frames, widened back while
+// frames stay above silence. A run has to be a few frames long, so that a key
+// click isn't taken for speech, and the quiet gap after a click stops the
+// widening. The end only has silence trimmed off, since words can trail off
+// quietly, as the "s" of "yes" does, with a near-silent frame in between.
+fun find_speech(frames, lo, hi) {
+    let var first = -1;
+    let var run = 0;
+
+    for (let var i = lo; i < hi; ++i) {
+        if (frame_is_silent(frames[i], SPEECH_THRESHOLD)) {
+            run = 0;
+            continue;
+        }
+
+        run = run + 1;
+        if (run >= SPEECH_MIN_RUN) {
+            first = i - run + 1;
+            break;
+        }
+    }
+
+    if (first < 0) {
+        return nil;
+    }
+
+    while (first > lo && !frame_is_silent(frames[first - 1], SILENCE_THRESHOLD)) {
+        first = first - 1;
+    }
+    let var last = hi;
+    while (last > first && frame_is_silent(frames[last - 1], SILENCE_THRESHOLD)) {
+        last = last - 1;
+    }
+
+    return [first, last];
+}
+
 // Range [start, end) of `frames` to keep: a fixed number of frames off each
-// end, to cut the key press and release, then any silence left past that.
-// Falls back to the whole recording if trimming would leave nothing, rather
-// than throw away a short or quiet recording entirely.
+// end, to cut the key press and release, then the speech within what's left.
+// Without loud enough speech, only silence is trimmed, and failing that the
+// whole recording is kept, rather than throw away a short or quiet recording.
 fun trim_range(frames, trim_frames, silence_threshold) {
     let n = frames.len;
     let var start = trim_frames.min(n);
     let var end = (n - trim_frames).max(start);
+
+    let speech = find_speech(frames, start, end);
+    if (speech != nil) {
+        return speech;
+    }
 
     while (start < end && frame_is_silent(frames[start], silence_threshold)) {
         start = start + 1;
@@ -681,9 +736,14 @@ fun training_actor(detection_actor_id) {
 
     // The loss of any one example swings too much to read anything from, so
     // what gets printed is an exponential moving average of it. The weight
-    // gives it a memory of roughly the last hundred steps.
-    let LOSS_SMOOTHING = 0.01;
+    // gives it a memory of roughly the last thousand steps, about half a
+    // second of training.
+    let LOSS_SMOOTHING = 0.001;
     let var avg_loss = nil;
+
+    // Fraction of examples whose most probable output was the target,
+    // averaged the same way
+    let var avg_acc = nil;
 
     // Training steps per second, counted over a window rather than timed one
     // step at a time, so the number holds still long enough to read
@@ -786,6 +846,17 @@ fun training_actor(detection_actor_id) {
                 }
             }
 
+            // Data augmentation: repeat a few frames, the counterpart of
+            // dropping them
+            let stretched_frames = [];
+            for (let var i = 0; i < current_frames.len; ++i) {
+                stretched_frames.push(current_frames[i]);
+                if (rng.float(0.0, 1.0) < FRAME_DUP_PROB) {
+                    stretched_frames.push(current_frames[i]);
+                }
+            }
+            current_frames = stretched_frames;
+
             // For positive examples, trailing silence, as the sliding window
             // sees after a word ends. Kept after the frame drop above, so
             // `num_silence_frames` stays accurate to what's actually appended.
@@ -826,25 +897,35 @@ fun training_actor(detection_actor_id) {
 
             // The first example has nothing to average with, so it starts
             // the average off rather than being blended into zero
+            let var best = 0;
+            for (let var o = 1; o < y_pred.len; ++o) {
+                if (y_pred[o] > y_pred[best]) {
+                    best = o;
+                }
+            }
+            let correct = (best == label_idx) ? 1.0 : 0.0;
+
             if (avg_loss == nil) {
                 avg_loss = loss;
+                avg_acc = correct;
             } else {
                 avg_loss = avg_loss + LOSS_SMOOTHING * (loss - avg_loss);
+                avg_acc = avg_acc + LOSS_SMOOTHING * (correct - avg_acc);
             }
 
+            // Status is printed once per rate window, rather than on every
+            // step, which scrolled thousands of lines a second
             rate_count = rate_count + 1;
             let rate_elapsed = $time_current_ms() - rate_start_ms;
             if (rate_elapsed >= RATE_WINDOW_MS) {
                 itrs_per_sec = rate_count.to_f() * 1000.0 / rate_elapsed.to_f();
                 rate_start_ms = $time_current_ms();
                 rate_count = 0;
-            }
-
-            if (iteration_count % 1 == 0) {
                 $println(
                     "Itr#" + training_itr.to_s() +
                     ", " + itrs_per_sec.format_decimals(1) + " itr/s" +
-                    ", loss: " + avg_loss.format_decimals(5) +
+                    ", loss: " + avg_loss.format_decimals(4) +
+                    ", acc: " + (avg_acc * 100.0).format_decimals(1) + "%" +
                     ", words: " + (mlp.output_size - 1).to_s() +
                     ", pos: " +
                     positive_examples_count.to_s() +
@@ -1160,11 +1241,19 @@ class Dataset {
 
             // Same frames as when the clip was recorded, since the clip
             // starts on a frame boundary
-            let frames = [];
+            let var frames = [];
             let num_blocks = audio.num_samples().idiv(FFT_SIZE);
             for (let var b = 0; b < num_blocks; ++b) {
                 real_parts.memcpy(0, audio.samples, b * FFT_SIZE * 4, FFT_SIZE * 4);
                 frames.push(compute_frame(real_parts, imag_parts));
+            }
+
+            // Clips saved before trimming found speech by its loud core can
+            // still have a click and silence at the start. The fixed cut was
+            // already made when the clip was saved.
+            let speech = find_speech(frames, 0, frames.len);
+            if (speech != nil) {
+                frames = array_slice(frames, speech[0], speech[1]);
             }
 
             if (frames.len == 0) {
