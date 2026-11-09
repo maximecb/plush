@@ -58,7 +58,11 @@ let CONFIRM_FRAMES = 4;
 let COOLDOWN_FRAMES = 12;
 let NOISE_MAGNITUDE = 0.12;
 let GRADIENT_CLIP_THRESHOLD = 1.0;
-let MAX_ZERO_FRAMES_TO_ADD = 10;
+
+// Probability of dropping each output of the hidden layer in training. It
+// detected more words in new recordings, for as many wrong ones. Dropout in
+// the convolutional layers did worse.
+let HIDDEN_DROPOUT = 0.5;
 
 // Data augmentation: probability of dropping any given frame in training
 let FRAME_DROP_PROB = 0.05;
@@ -67,21 +71,67 @@ let FRAME_DROP_PROB = 0.05;
 // also seen stretched, as if spoken more slowly, rather than only shortened
 let FRAME_DUP_PROB = 0.1;
 
-// For positive examples, the probability of training a prefix of the word as
-// no word at all, and the longest prefix used, as a fraction of the clip.
-// Without these, the window catching the start or middle of one word often
-// fires another. Prefixes are never trained as the word itself: the first
-// sound of a word can't tell it apart from other words.
-let PREFIX_NEG_PROB = 0.3;
-let PREFIX_NEG_MAX_FRAC = 0.9;
+// Data augmentation: probability of shifting the pitch of a whole example,
+// and by how many semitones at most, up or down. Every frequency is scaled,
+// which moves the formants along with the voice. Larger shifts did worse on
+// the recordings tested.
+let PITCH_SHIFT_PROB = 0.5;
+let PITCH_SHIFT_MAX_SEMITONES = 3.0;
 
-// For positive examples, randomly append trailing silence,
-// anywhere up to a full detection window. Within a short grace period this
-// is still trained as the word, so a slight lag catching its end still
-// reads as a hit. Past the grace period the example is trained as
-// all-zeros: that much trailing silence means the word is gone, and
-// nothing -- including it -- should still be firing.
-let TRAILING_SILENCE_PROB = 0.5;
+// Strength of the log compression of the network's input, see
+// compress_input(). Without it, the end of "one" fired "no" far more often.
+let LOG_COMPRESSION = 100.0;
+
+// Data augmentation: probability of adding background noise to an example,
+// and the range of its level, as an RMS amplitude, picked on a log scale.
+// Without it, training only ever saw exact silence around words, and words
+// were often missed over a noisy room.
+let BG_NOISE_PROB = 0.5;
+let BG_NOISE_MIN_RMS = 0.0001;
+let BG_NOISE_MAX_RMS = 0.01;
+
+// Highest FFT bin any mel band reads
+let MEL_TOP_BIN = (MAX_FREQ * FFT_SIZE / SAMPLE_RATE).floor();
+
+// FFT magnitudes kept per frame for training, enough for the mel bands to
+// read from when the pitch is shifted down as far as it goes
+let SPEC_BINS = ((MEL_TOP_BIN.to_f() * 2.0.pow(PITCH_SHIFT_MAX_SEMITONES / 12.0)).floor() + 2).min(FFT_SIZE.idiv(2));
+
+// Probability that an example drawn from a word clip is made into a negative
+// example, trained as no word at all, rather than a positive one
+let NEG_FROM_WORD_PROB = 0.5;
+
+// Of the negative examples made from words, the fraction that are the whole
+// word followed by more silence than the grace period below. The rest are a
+// crop of the word, of 1 frame up to NEG_CROP_MAX_FRAC of it, so the window
+// catching part of one word doesn't fire another. Crops are never trained
+// as the word itself: the first sound of a word can't tell it apart from
+// other words.
+let NEG_WORD_THEN_SILENCE_PROB = 0.5;
+let NEG_CROP_MAX_FRAC = 0.75;
+
+// Which part of a word a crop is taken from: the end with this probability,
+// anywhere in the word with the next, and otherwise the start. Crops from
+// the end roughly halved how often "one" fired "no".
+let NEG_CROP_SUFFIX_PROB = 0.25;
+let NEG_CROP_ANYWHERE_PROB = 0.25;
+
+// Negative examples get their frames reordered: fully shuffled with this
+// probability, and otherwise with each neighbouring pair swapped with the
+// next probability
+let NEG_SHUFFLE_PROB = 0.2;
+let NEG_SWAP_PROB = 0.1;
+
+// Probability of trailing silence after a crop or a recorded negative
+// example, anywhere up to a full window of it. Off, since it cost hits on
+// new recordings.
+let NEG_TRAILING_SILENCE_PROB = 0.0;
+
+// Positive examples may be followed by a little silence, up to a grace
+// period, so a slight lag catching the end of a word still reads as a hit.
+// Past the grace period the word is gone, and nothing, including it,
+// should still be firing. Off, since it made words fire others more often.
+let POS_TRAILING_SILENCE_PROB = 0.0;
 let TRAILING_SILENCE_GRACE_MS = 150;
 let TRAILING_SILENCE_GRACE_FRAMES = (SAMPLE_RATE * TRAILING_SILENCE_GRACE_MS).idiv(1000 * FFT_SIZE);
 let TRAILING_SILENCE_MAX_FRAMES = MAX_FRAMES;
@@ -218,6 +268,13 @@ class ConvLayer {
         self.dW = ByteArray.with_size(c_out * self.row * 4);
         self.db = ByteArray.with_size(c_out * 4);
         self.dx = ByteArray.with_size(t_in * c_in * 4);
+
+        // Dropout, applied only while `dropping` is set, in training. Kept
+        // outputs are scaled up to make up for the dropped ones, so that
+        // detection, without dropout, sees outputs of the same size.
+        self.drop_prob = 0.0;
+        self.dropping = false;
+        self.keep_scale = 1.0;
     }
 
     num_params(self) {
@@ -238,6 +295,18 @@ class ConvLayer {
             for (let var c = 0; c < c_out; ++c) {
                 let z = W.dot_f32(c * row, 1, x, xs, 1, row) + b.get_f32(c);
                 a.set_f32(out + c, z.max(0.0));
+            }
+        }
+
+        self.keep_scale = 1.0;
+        if (self.dropping && self.drop_prob > 0.0) {
+            self.keep_scale = 1.0 / (1.0 - self.drop_prob);
+            for (let var i = 0; i < self.t_out * c_out; ++i) {
+                if (rng.float(0.0, 1.0) < self.drop_prob) {
+                    a.set_f32(i, 0.0);
+                } else {
+                    a.set_f32(i, a.get_f32(i) * self.keep_scale);
+                }
             }
         }
 
@@ -265,12 +334,13 @@ class ConvLayer {
             let xs = t * step;
             let out = t * c_out;
             for (let var c = 0; c < c_out; ++c) {
-                // ReLU passes a gradient through only where it was active
+                // ReLU passes a gradient through only where it was active,
+                // and dropout only where the output was kept
                 if (a.get_f32(out + c) <= 0.0) {
                     continue;
                 }
 
-                let g = da.get_f32(out + c);
+                let g = da.get_f32(out + c) * self.keep_scale;
                 dW.axpy_f32(c * row, 1, x, xs, 1, row, g);
                 db.set_f32(c, db.get_f32(c) + g);
                 if (need_dx) {
@@ -318,6 +388,7 @@ class ConvNet {
         assert(dense.t_out == 1);
 
         self.layers = [conv1, conv2, conv3, dense];
+        dense.drop_prob = HIDDEN_DROPOUT;
 
         self.W_out = ByteArray.with_size(0);
         self.b_out = ByteArray.with_size(0);
@@ -412,7 +483,20 @@ class ConvNet {
         return y_pred;
     }
 
-    // Computes the gradients for one example, after a call to `forward` on it
+    // Like `forward`, with dropout, for training
+    forward_train(self, x) {
+        for (let var i = 0; i < self.layers.len; ++i) {
+            self.layers[i].dropping = true;
+        }
+        let y_pred = self.forward(x);
+        for (let var i = 0; i < self.layers.len; ++i) {
+            self.layers[i].dropping = false;
+        }
+        return y_pred;
+    }
+
+    // Computes the gradients for one example, after a call to `forward` or
+    // `forward_train` on it
     backward(self, x, y_true, y_pred) {
         let h = HIDDEN_SIZE;
         let num_out = self.output_size;
@@ -546,72 +630,150 @@ fun hanning_window(buffer) {
     }
 }
 
-fun normalize_magnitudes(magnitudes) {
-    let var max_mag = 1e-9;
-    for (let var i = 0; i < magnitudes.len; ++i) {
-        if (magnitudes[i] > max_mag) {
-            max_mag = magnitudes[i];
-        }
+// Weights of the mel bands over the FFT bins, NUM_MEL_BINS rows of SPEC_BINS.
+// Each band is a triangle peaking at its center bin, with the centers spaced
+// geometrically between MIN_FREQ and MAX_FREQ. Computing the bands as a
+// matrix product is what lets training shift their pitch cheaply.
+fun make_mel_bank() {
+    let edges = Array.with_size(NUM_MEL_BINS + 2, 0);
+    for (let var i = 0; i < edges.len; ++i) {
+        let freq = MIN_FREQ * (MAX_FREQ / MIN_FREQ).pow(i.to_f() / (NUM_MEL_BINS + 1).to_f());
+        edges[i] = (freq * FFT_SIZE / SAMPLE_RATE).floor();
     }
 
-    // Don't amplify silence or near-silence
-    if (max_mag < 1.0) {
-        return magnitudes;
-    }
+    let bank = ByteArray.with_size(NUM_MEL_BINS * SPEC_BINS * 4);
+    for (let var band = 0; band < NUM_MEL_BINS; ++band) {
+        let start_bin = edges[band];
+        let center_bin = edges[band + 1];
+        let end_bin = edges[band + 2];
 
-    for (let var i = 0; i < magnitudes.len; ++i) {
-        magnitudes[i] = magnitudes[i] / max_mag;
-    }
-
-    return magnitudes;
-}
-
-fun mel_bins(real_parts, imag_parts, num_bins, min_freq, max_freq, fft_size, sample_rate) {
-    let fft_bins = Array.with_size(num_bins + 2, 0);
-    for (let var i = 0; i < fft_bins.len; ++i) {
-        let freq = min_freq * (max_freq/min_freq).pow(i.to_f() / (num_bins + 1).to_f());
-        fft_bins[i] = (freq * fft_size / sample_rate).floor();
-    }
-    let magnitudes = Array.with_size(num_bins, 0.0);
-    for (let var band_idx = 0; band_idx < num_bins; ++band_idx) {
-        let var band_magnitude = 0.0;
-        let start_bin = fft_bins[band_idx];
-        let center_bin = fft_bins[band_idx + 1];
-        let end_bin = fft_bins[band_idx + 2];
-        let max_bin = (fft_size / 2) - 1;
-        if (start_bin > max_bin) continue;
-        for (let var bin = start_bin; bin <= end_bin; ++bin) {
-            if (bin > max_bin) break;
-            let re = real_parts.get_f32(bin);
-            let im = imag_parts.get_f32(bin);
-            let magnitude = (re * re + im * im).sqrt();
+        for (let var bin = start_bin; bin <= end_bin && bin < SPEC_BINS; ++bin) {
             let var weight = 0.0;
-            if (bin >= start_bin && bin <= center_bin) {
-                if (center_bin - start_bin > 0) {
-                    weight = (bin - start_bin).to_f() / (center_bin - start_bin);
+            if (bin <= center_bin) {
+                if (center_bin > start_bin) {
+                    weight = (bin - start_bin).to_f() / (center_bin - start_bin).to_f();
                 } else if (bin == center_bin) {
                     weight = 1.0;
                 }
-            } else if (bin > center_bin && bin <= end_bin) {
-                if (end_bin - center_bin > 0) {
-                    weight = (end_bin - bin).to_f() / (end_bin - center_bin);
-                }
+            } else if (end_bin > center_bin) {
+                weight = (end_bin - bin).to_f() / (end_bin - center_bin).to_f();
             }
-            band_magnitude = band_magnitude + magnitude * weight;
+            bank.set_f32(band * SPEC_BINS + bin, weight);
         }
-        magnitudes[band_idx] = band_magnitude;
     }
-    return magnitudes;
+
+    return bank;
+}
+
+let MEL_BANK = make_mel_bank();
+
+// The mel bank for audio with every frequency scaled by `ratio`. Bin k of the
+// shifted audio is bin k / ratio of the original, read by interpolating
+// between its two neighbours, so each weight is split between those two.
+fun shifted_mel_bank(ratio) {
+    let bank = ByteArray.with_size(NUM_MEL_BINS * SPEC_BINS * 4);
+    for (let var band = 0; band < NUM_MEL_BINS; ++band) {
+        let row = band * SPEC_BINS;
+        for (let var k = 0; k <= MEL_TOP_BIN; ++k) {
+            let w = MEL_BANK.get_f32(row + k);
+            if (w == 0.0) {
+                continue;
+            }
+
+            let pos = k.to_f() / ratio;
+            let j = pos.floor();
+            let f = pos - j.to_f();
+            if (j < SPEC_BINS) {
+                bank.set_f32(row + j, bank.get_f32(row + j) + w * (1.0 - f));
+            }
+            if (j + 1 < SPEC_BINS) {
+                bank.set_f32(row + j + 1, bank.get_f32(row + j + 1) + w * f);
+            }
+        }
+    }
+    return bank;
+}
+
+// Magnitudes of the first SPEC_BINS bins of the spectrum of FFT_SIZE samples
+// of audio. Overwrites real_parts and imag_parts.
+fun compute_spectrum(real_parts, imag_parts) {
+    imag_parts.zero_fill();
+    hanning_window(real_parts);
+    fft(real_parts, imag_parts, false);
+
+    let spec = ByteArray.with_size(SPEC_BINS * 4);
+    for (let var k = 0; k < SPEC_BINS; ++k) {
+        let re = real_parts.get_f32(k);
+        let im = imag_parts.get_f32(k);
+        spec.set_f32(k, (re * re + im * im).sqrt());
+    }
+    return spec;
+}
+
+// Writes the mel bands of a spectrum, read through a bank, to `out` from
+// element `idx`. A loud frame is scaled so its peak is 1.0, while silence and
+// near-silence are left as they are rather than amplified.
+fun write_mel(spec, bank, out, idx) {
+    let var peak = 0.0;
+    for (let var b = 0; b < NUM_MEL_BINS; ++b) {
+        let v = bank.dot_f32(b * SPEC_BINS, 1, spec, 0, 1, SPEC_BINS);
+        out.set_f32(idx + b, v);
+        peak = peak.max(v);
+    }
+
+    if (peak >= 1.0) {
+        for (let var b = 0; b < NUM_MEL_BINS; ++b) {
+            out.set_f32(idx + b, out.get_f32(idx + b) / peak);
+        }
+    }
+}
+
+// One normalized frame of mel bands, as an array, from a spectrum
+fun spectrum_frame(spec) {
+    let tmp = ByteArray.with_size(NUM_MEL_BINS * 4);
+    write_mel(spec, MEL_BANK, tmp, 0);
+    let frame = Array.with_size(NUM_MEL_BINS, 0.0);
+    for (let var j = 0; j < NUM_MEL_BINS; ++j) {
+        frame[j] = tmp.get_f32(j);
+    }
+    return frame;
+}
+
+fun spectra_frames(spectra) {
+    let frames = Array.with_size(spectra.len, nil);
+    for (let var i = 0; i < spectra.len; ++i) {
+        frames[i] = spectrum_frame(spectra[i]);
+    }
+    return frames;
 }
 
 // Turns FFT_SIZE samples of audio into one normalized frame of mel bands.
 // Overwrites real_parts and imag_parts.
 fun compute_frame(real_parts, imag_parts) {
-    imag_parts.zero_fill();
-    hanning_window(real_parts);
-    fft(real_parts, imag_parts, false);
-    let magnitudes = mel_bins(real_parts, imag_parts, NUM_MEL_BINS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
-    return normalize_magnitudes(magnitudes);
+    return spectrum_frame(compute_spectrum(real_parts, imag_parts));
+}
+
+// Spectra for a ByteArray of f32 samples, one per FFT_SIZE samples, the same
+// way they are computed from the microphone
+fun audio_spectra(samples, real_parts, imag_parts) {
+    let spectra = [];
+    let num_blocks = samples.num_f32().idiv(FFT_SIZE);
+    for (let var b = 0; b < num_blocks; ++b) {
+        real_parts.memcpy(0, samples, b * FFT_SIZE * 4, FFT_SIZE * 4);
+        spectra.push(compute_spectrum(real_parts, imag_parts));
+    }
+    return spectra;
+}
+
+// The network's input for a training example, from its spectra, with the
+// mel bands read through `bank`. Laid out the same as `flatten_and_pad`.
+fun spectra_to_input(spectra, bank) {
+    let x = ByteArray.with_size(INPUT_SIZE * 4);
+    let n = spectra.len.min(MAX_FRAMES);
+    for (let var i = 0; i < n; ++i) {
+        write_mel(spectra[spectra.len - 1 - i], bank, x, (MAX_FRAMES - 1 - i) * NUM_MEL_BINS);
+    }
+    return x;
 }
 
 // Produces the network's input: one ByteArray of float32, which is what
@@ -638,7 +800,7 @@ fun flatten_and_pad(frames, max_frames, num_bins) {
 }
 
 // True when a frame is quiet enough to be silence rather than speech. Frames
-// this quiet are left unscaled by `normalize_magnitudes`, so the threshold
+// this quiet are left unscaled by `write_mel`, so the threshold
 // sits on the same scale as a loud frame's peak of 1.0.
 fun frame_is_silent(frame, threshold) {
     let var peak = 0.0;
@@ -724,6 +886,178 @@ fun array_slice(arr, start, end) {
     return out;
 }
 
+// Compresses the network's input in place, as log(1 + c * x), scaled so
+// that 1 stays 1. Quiet sounds are spread out and loud ones squeezed
+// together, so the network sees the shape of a sound more than its loudness.
+let LOG_NORM = 1.0 / (1.0 + LOG_COMPRESSION).ln();
+fun compress_input(x) {
+    for (let var i = 0; i < INPUT_SIZE; ++i) {
+        x.set_f32(i, (1.0 + LOG_COMPRESSION * x.get_f32(i).max(0.0)).ln() * LOG_NORM);
+    }
+    return x;
+}
+
+// Mel frames of white noise, at an RMS of BG_REF_RMS, to scale and add as
+// background noise
+let BG_REF_RMS = 0.001;
+fun make_bg_frames() {
+    let real_parts = ByteArray.with_size(FFT_SIZE * 4);
+    let imag_parts = ByteArray.with_size(FFT_SIZE * 4);
+    let frames = [];
+    for (let var k = 0; k < 64; ++k) {
+        for (let var i = 0; i < FFT_SIZE; ++i) {
+            real_parts.set_f32(i, rng.float(-1.0, 1.0) * BG_REF_RMS * 1.732);
+        }
+        frames.push(compute_frame(real_parts, imag_parts));
+    }
+    return frames;
+}
+let BG_FRAMES = make_bg_frames();
+
+// Adds background noise to every frame of an input, padding included, at a
+// random level, since the microphone never hears true silence
+fun add_background_noise(x) {
+    let lo = BG_NOISE_MIN_RMS.ln();
+    let hi = BG_NOISE_MAX_RMS.ln();
+    let level = rng.float(lo, hi).exp() / BG_REF_RMS;
+
+    for (let var t = 0; t < MAX_FRAMES; ++t) {
+        let frame = BG_FRAMES[rng.int(0, BG_FRAMES.len)];
+        let base = t * NUM_MEL_BINS;
+        for (let var b = 0; b < NUM_MEL_BINS; ++b) {
+            x.set_f32(base + b, x.get_f32(base + b) + frame[b] * level);
+        }
+    }
+}
+
+let SILENT_SPECTRUM = ByteArray.with_size(SPEC_BINS * 4);
+
+// Appends n frames of silence
+fun push_silence(spectra, n) {
+    for (let var i = 0; i < n; ++i) {
+        spectra.push(SILENT_SPECTRUM);
+    }
+}
+
+// A crop of a word to train as no word, from 1 frame up to
+// NEG_CROP_MAX_FRAC of it
+fun crop_word(spectra) {
+    let n = spectra.len;
+    let len = rng.int(1, (n.to_f() * NEG_CROP_MAX_FRAC).floor().max(1) + 1);
+
+    let r = rng.float(0.0, 1.0);
+    let var start = 0;
+    if (r < NEG_CROP_SUFFIX_PROB) {
+        start = n - len;
+    } else if (r < NEG_CROP_SUFFIX_PROB + NEG_CROP_ANYWHERE_PROB) {
+        start = rng.int(0, n - len + 1);
+    }
+
+    return array_slice(spectra, start, start + len);
+}
+
+// Reorders frames in place, so that the network learns from negative
+// examples that the order of sounds matters, not just which ones are there
+fun permute_frames(spectra) {
+    if (rng.float(0.0, 1.0) < NEG_SHUFFLE_PROB) {
+        rng.shuffle(spectra);
+        return;
+    }
+
+    for (let var i = 0; i + 1 < spectra.len; ++i) {
+        if (rng.float(0.0, 1.0) < NEG_SWAP_PROB) {
+            let tmp = spectra[i];
+            spectra[i] = spectra[i + 1];
+            spectra[i + 1] = tmp;
+
+            // A frame moves one place at most
+            i = i + 1;
+        }
+    }
+}
+
+// Randomly drops a few frames, so the network isn't relying on every frame
+// of a word being there, and repeats a few others, as if spoken more slowly
+fun drop_and_repeat(spectra) {
+    let out = [];
+    for (let var i = 0; i < spectra.len; ++i) {
+        if (rng.float(0.0, 1.0) < FRAME_DROP_PROB) {
+            continue;
+        }
+        out.push(spectra[i]);
+        if (rng.float(0.0, 1.0) < FRAME_DUP_PROB) {
+            out.push(spectra[i]);
+        }
+    }
+    return (out.len > 0) ? out : spectra;
+}
+
+// Makes one training example from a sample's spectra and label, with a
+// random augmentation. Returns [network input, label to train], where the
+// label is NONE_LABEL for a negative example.
+fun make_example(spectra, label) {
+    let var frames = nil;
+    let var target = label;
+
+    // Silence that goes after the example, as the window sees once a word
+    // has ended
+    let var silence = 0;
+
+    if (label == NONE_LABEL) {
+        // Any part of a recorded negative example is still one
+        let len = rng.int(1, spectra.len + 1);
+        let start = rng.int(0, spectra.len - len + 1);
+        frames = array_slice(spectra, start, start + len);
+    } else if (rng.float(0.0, 1.0) < NEG_FROM_WORD_PROB) {
+        target = NONE_LABEL;
+        if (rng.float(0.0, 1.0) < NEG_WORD_THEN_SILENCE_PROB) {
+            frames = array_slice(spectra, 0, spectra.len);
+            silence = rng.int(TRAILING_SILENCE_GRACE_FRAMES + 1, TRAILING_SILENCE_MAX_FRAMES + 1);
+        } else {
+            frames = crop_word(spectra);
+        }
+    } else {
+        frames = array_slice(spectra, 0, spectra.len);
+        if (rng.float(0.0, 1.0) < POS_TRAILING_SILENCE_PROB) {
+            silence = rng.int(1, TRAILING_SILENCE_GRACE_FRAMES + 1);
+        }
+    }
+
+    if (target == NONE_LABEL && silence == 0 && rng.float(0.0, 1.0) < NEG_TRAILING_SILENCE_PROB) {
+        silence = rng.int(1, TRAILING_SILENCE_MAX_FRAMES + 1);
+    }
+
+    if (target == NONE_LABEL) {
+        permute_frames(frames);
+    }
+
+    // Silence goes on last, so that how much there is stays exact
+    frames = drop_and_repeat(frames);
+    push_silence(frames, silence);
+
+    // Shift the pitch of the whole example
+    let var bank = MEL_BANK;
+    if (rng.float(0.0, 1.0) < PITCH_SHIFT_PROB) {
+        let semitones = rng.float(-PITCH_SHIFT_MAX_SEMITONES, PITCH_SHIFT_MAX_SEMITONES);
+        bank = shifted_mel_bank(2.0.pow(semitones / 12.0));
+    }
+    let x = spectra_to_input(frames, bank);
+
+    if (rng.float(0.0, 1.0) < BG_NOISE_PROB) {
+        add_background_noise(x);
+    }
+
+    compress_input(x);
+
+    // Scale the whole example, then add noise
+    let scale_factor = 1.0 + (rng.float(-0.5, 0.5) * 0.35);
+    for (let var i = 0; i < INPUT_SIZE; ++i) {
+        x.set_f32(i, x.get_f32(i) * scale_factor + rng.float(-0.5, 0.5) * NOISE_MAGNITUDE);
+    }
+
+    return [x, target];
+}
+
 fun training_actor(detection_actor_id) {
     rng.seed($time_current_ms());
     let mlp = ConvNet();
@@ -753,8 +1087,10 @@ fun training_actor(detection_actor_id) {
     let var itrs_per_sec = 0.0;
 
     for (let var training_itr = 1;; ++training_itr) {
-        // A sample arrives as [frames, word]. An empty word means the clip is
-        // a negative example: no output should fire for it.
+        // A sample arrives as [spectra, word], with the spectrum of each
+        // frame rather than its mel bands, so that its pitch can be shifted.
+        // An empty word means the clip is a negative example: no output
+        // should fire for it.
         let msg = $actor_poll();
         if (msg != nil) {
             training_data.push(msg);
@@ -783,112 +1119,17 @@ fun training_actor(detection_actor_id) {
         let can_train = training_data.len > 0 && mlp.output_size > 1;
 
         if (can_train) {
-            let idx = rng.int(0, training_data.len);
-            let sample = training_data[idx];
-            let frames = sample[0];
-            let label = sample[1];
+            let sample = training_data[rng.int(0, training_data.len)];
+            let example = make_example(sample[0], sample[1]);
+            let x = example[0];
 
-            // A private copy, since frames still belongs to training_data
-            // and the augmentation below pushes onto it in place
-            let var current_frames = array_slice(frames, 0, frames.len);
-
-            // For positive examples, sometimes keep only a prefix of the word
-            // and train it as no word at all, so the window catching the
-            // start or middle of a word doesn't fire another word
-            let var target = label;
-            if (label != "" && current_frames.len > 2 && rng.float(0.0, 1.0) < PREFIX_NEG_PROB) {
-                let max_len = (current_frames.len.to_f() * PREFIX_NEG_MAX_FRAC).floor().max(1);
-                current_frames = array_slice(current_frames, 0, rng.int(1, max_len + 1));
-                target = NONE_LABEL;
-            }
-
-            // For negative examples, randomly truncate the frames
-            if (label == "" && current_frames.len > 1) {
-                let max_len = current_frames.len;
-                let var start_idx = rng.int(0, max_len);
-                let var end_idx = rng.int(start_idx, max_len);
-                if (start_idx == end_idx) {
-                    // Ensure at least one frame is selected
-                    end_idx = start_idx + 1;
-                    if (end_idx > max_len) end_idx = max_len;
-                }
-                current_frames = array_slice(current_frames, start_idx, end_idx);
-            }
-
-            // For negative examples, randomly append zero frames
-            if (label == "" && MAX_ZERO_FRAMES_TO_ADD > 0) {
-                let num_zero_frames = rng.int(0, MAX_ZERO_FRAMES_TO_ADD + 1);
-                if (num_zero_frames > 0) {
-                    let zero_frame = Array.with_size(NUM_MEL_BINS, 0.0);
-                    for (let var i = 0; i < num_zero_frames; ++i) {
-                        current_frames.push(zero_frame);
-                    }
-                }
-            }
-
-            // With a small probability, for negative examples only, randomly permute the frames
-            if (label == "" && current_frames.len > 1 && rng.float(0.0, 1.0) < 0.30) {
-                rng.shuffle(current_frames);
-            }
-
-            // Data augmentation: randomly drop a few frames, positive or
-            // negative, so the network isn't relying on every frame of a
-            // word being present
-            if (current_frames.len > 1) {
-                let kept_frames = [];
-                for (let var i = 0; i < current_frames.len; ++i) {
-                    if (rng.float(0.0, 1.0) >= FRAME_DROP_PROB) {
-                        kept_frames.push(current_frames[i]);
-                    }
-                }
-                if (kept_frames.len > 0) {
-                    current_frames = kept_frames;
-                }
-            }
-
-            // Data augmentation: repeat a few frames, the counterpart of
-            // dropping them
-            let stretched_frames = [];
-            for (let var i = 0; i < current_frames.len; ++i) {
-                stretched_frames.push(current_frames[i]);
-                if (rng.float(0.0, 1.0) < FRAME_DUP_PROB) {
-                    stretched_frames.push(current_frames[i]);
-                }
-            }
-            current_frames = stretched_frames;
-
-            // For positive examples, trailing silence, as the sliding window
-            // sees after a word ends. Kept after the frame drop above, so
-            // `num_silence_frames` stays accurate to what's actually appended.
-            let var num_silence_frames = 0;
-            if (target != "" && TRAILING_SILENCE_MAX_FRAMES > 0 && rng.float(0.0, 1.0) < TRAILING_SILENCE_PROB) {
-                num_silence_frames = rng.int(1, TRAILING_SILENCE_MAX_FRAMES + 1);
-                let silence_frame = Array.with_size(NUM_MEL_BINS, 0.0);
-                for (let var i = 0; i < num_silence_frames; ++i) {
-                    current_frames.push(silence_frame);
-                }
-            }
-
-            let x = flatten_and_pad(current_frames, MAX_FRAMES, NUM_MEL_BINS);
-
-            // Data augmentation: scale the whole example, then add noise
-            let scale_factor = 1.0 + (rng.float(-0.5, 0.5) * 0.35);
-            for (let var i = 0; i < INPUT_SIZE; ++i) {
-                x.set_f32(i, x.get_f32(i) * scale_factor + rng.float(-0.5, 0.5) * NOISE_MAGNITUDE);
-            }
-
-            // One-hot on the word that was said. A negative sample targets
-            // the output for no word, and so does a word past the
-            // trailing-silence grace period: that much silence means the
-            // word is gone, so it should no longer be heard.
+            // One-hot on the word the example is of, which is the output
+            // for no word when it is a negative example
             let y_true = Array.with_size(mlp.output_size, 0.0);
-            let var label_idx = mlp.word_index(target);
-            if (num_silence_frames > TRAILING_SILENCE_GRACE_FRAMES) {
-                label_idx = mlp.word_index(NONE_LABEL);
-            }
+            let label_idx = mlp.word_index(example[1]);
             y_true[label_idx] = 1.0;
 
-            let y_pred = mlp.forward(x);
+            let y_pred = mlp.forward_train(x);
             mlp.backward(x, y_true, y_pred);
             mlp.update(LEARNING_RATE);
 
@@ -1012,7 +1253,7 @@ fun detection_actor(beep_actor_id) {
             if (cooldown_remaining > 0) {
                 cooldown_remaining = cooldown_remaining - 1;
             } else {
-                let x = flatten_and_pad(frame_buffer, MAX_FRAMES, NUM_MEL_BINS);
+                let x = compress_input(flatten_and_pad(frame_buffer, MAX_FRAMES, NUM_MEL_BINS));
                 let y_pred = current_mlp.forward(x);
 
                 // The most probable word wins if it is above the threshold.
@@ -1241,26 +1482,21 @@ class Dataset {
 
             // Same frames as when the clip was recorded, since the clip
             // starts on a frame boundary
-            let var frames = [];
-            let num_blocks = audio.num_samples().idiv(FFT_SIZE);
-            for (let var b = 0; b < num_blocks; ++b) {
-                real_parts.memcpy(0, audio.samples, b * FFT_SIZE * 4, FFT_SIZE * 4);
-                frames.push(compute_frame(real_parts, imag_parts));
-            }
+            let var spectra = audio_spectra(audio.samples, real_parts, imag_parts);
 
             // Clips saved before trimming found speech by its loud core can
             // still have a click and silence at the start. The fixed cut was
             // already made when the clip was saved.
-            let speech = find_speech(frames, 0, frames.len);
+            let speech = find_speech(spectra_frames(spectra), 0, spectra.len);
             if (speech != nil) {
-                frames = array_slice(frames, speech[0], speech[1]);
+                spectra = array_slice(spectra, speech[0], speech[1]);
             }
 
-            if (frames.len == 0) {
+            if (spectra.len == 0) {
                 continue;
             }
 
-            $actor_send(trainer_id, [frames, word]);
+            $actor_send(trainer_id, [spectra, word]);
             self.count(word);
             num_loaded = num_loaded + 1;
         }
@@ -1366,7 +1602,7 @@ fun main() {
 
     // A clip that has been recorded and is waiting to be named
     let var labeling = false;
-    let var recorded_frames = [];
+    let var recorded_spectra = [];
     let var label_chars = [];
 
     // The raw samples of the clip, kept so it can be played back. Allocated
@@ -1397,11 +1633,12 @@ fun main() {
             recorded_len = recorded_len + FFT_SIZE;
         }
 
-        let magnitudes = compute_frame(real_parts, imag_parts);
+        let spectrum = compute_spectrum(real_parts, imag_parts);
+        let magnitudes = spectrum_frame(spectrum);
         $actor_send(detector_id, magnitudes);
 
         if (recording) {
-            recorded_frames.push(magnitudes);
+            recorded_spectra.push(spectrum);
         }
 
         let now = $time_current_ms();
@@ -1524,7 +1761,7 @@ fun main() {
                         // "Computer" and "computer " would each get an
                         // output of their own
                         let word = "".join(label_chars).trim().lower();
-                        $actor_send(trainer_id, [recorded_frames, word]);
+                        $actor_send(trainer_id, [recorded_spectra, word]);
                         dataset.count(word);
 
                         // Audio is kept only up to MAX_RECORD_SECS, so a clip
@@ -1540,13 +1777,13 @@ fun main() {
                         }
 
                         labeling = false;
-                        recorded_frames = [];
+                        recorded_spectra = [];
                         label_chars = [];
                     }
                     else if (!recording) {
                         // Held down, so the repeats this produces are ignored
                         recording = true;
-                        recorded_frames = [];
+                        recorded_spectra = [];
                         recorded_len = 0;
                         $actor_send(beep_actor_id, true);
                         $println("Recording...");
@@ -1557,13 +1794,13 @@ fun main() {
                     recording = false;
                     $actor_send(beep_actor_id, false);
 
-                    if (recorded_frames.len > 0) {
+                    if (recorded_spectra.len > 0) {
                         // Cut the key press/release and any leftover silence
                         // off both ends, so this is what gets trained on
-                        let range = trim_range(recorded_frames, TRIM_FRAMES, SILENCE_THRESHOLD);
+                        let range = trim_range(spectra_frames(recorded_spectra), TRIM_FRAMES, SILENCE_THRESHOLD);
                         let start_frame = range[0];
                         let end_frame = range[1];
-                        recorded_frames = array_slice(recorded_frames, start_frame, end_frame);
+                        recorded_spectra = array_slice(recorded_spectra, start_frame, end_frame);
 
                         labeling = true;
                         label_chars = [];
@@ -1583,7 +1820,7 @@ fun main() {
                             recorded_clip = clip;
                         }
                     } else {
-                        recorded_frames = [];
+                        recorded_spectra = [];
                     }
                 }
 
@@ -1595,14 +1832,14 @@ fun main() {
                             label_chars.pop();
                         } else {
                             labeling = false;
-                            recorded_frames = [];
+                            recorded_spectra = [];
                             $println("Discarded the recording.");
                         }
                     }
 
                     if (event.key == "ESCAPE") {
                         labeling = false;
-                        recorded_frames = [];
+                        recorded_spectra = [];
                         label_chars = [];
                         $println("Discarded the recording.");
                     }
@@ -1619,7 +1856,7 @@ fun main() {
                 if (labeling && event.kind == "MOUSE_DOWN" && event.button == "LEFT") {
                     if (point_in_rect(event.x, event.y, XBTN_X, BOX_Y, XBTN_W, BOX_H)) {
                         labeling = false;
-                        recorded_frames = [];
+                        recorded_spectra = [];
                         label_chars = [];
                         $println("Discarded the recording.");
                     }
