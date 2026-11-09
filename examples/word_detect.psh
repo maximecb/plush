@@ -61,6 +61,14 @@ let MAX_ZERO_FRAMES_TO_ADD = 10;
 // Data augmentation: probability of dropping any given frame in training
 let FRAME_DROP_PROB = 0.05;
 
+// For positive examples, the probability of training a prefix of the word as
+// no word at all, and the longest prefix used, as a fraction of the clip.
+// Without these, the window catching the start or middle of one word often
+// fires another. Prefixes are never trained as the word itself: the first
+// sound of a word can't tell it apart from other words.
+let PREFIX_NEG_PROB = 0.3;
+let PREFIX_NEG_MAX_FRAC = 0.9;
+
 // For positive examples, randomly append trailing silence,
 // anywhere up to a full detection window. Within a short grace period this
 // is still trained as the word, so a slight lag catching its end still
@@ -724,6 +732,16 @@ fun training_actor(detection_actor_id) {
             // and the augmentation below pushes onto it in place
             let var current_frames = array_slice(frames, 0, frames.len);
 
+            // For positive examples, sometimes keep only a prefix of the word
+            // and train it as no word at all, so the window catching the
+            // start or middle of a word doesn't fire another word
+            let var target = label;
+            if (label != "" && current_frames.len > 2 && rng.float(0.0, 1.0) < PREFIX_NEG_PROB) {
+                let max_len = (current_frames.len.to_f() * PREFIX_NEG_MAX_FRAC).floor().max(1);
+                current_frames = array_slice(current_frames, 0, rng.int(1, max_len + 1));
+                target = NONE_LABEL;
+            }
+
             // For negative examples, randomly truncate the frames
             if (label == "" && current_frames.len > 1) {
                 let max_len = current_frames.len;
@@ -771,12 +789,8 @@ fun training_actor(detection_actor_id) {
             // For positive examples, trailing silence, as the sliding window
             // sees after a word ends. Kept after the frame drop above, so
             // `num_silence_frames` stays accurate to what's actually appended.
-            //
-            // Words are never cut short: a short prefix, such as the first
-            // sound of a word, can't tell one word from another, and
-            // training it as the word leads to false detections.
             let var num_silence_frames = 0;
-            if (label != "" && TRAILING_SILENCE_MAX_FRAMES > 0 && rng.float(0.0, 1.0) < TRAILING_SILENCE_PROB) {
+            if (target != "" && TRAILING_SILENCE_MAX_FRAMES > 0 && rng.float(0.0, 1.0) < TRAILING_SILENCE_PROB) {
                 num_silence_frames = rng.int(1, TRAILING_SILENCE_MAX_FRAMES + 1);
                 let silence_frame = Array.with_size(NUM_MEL_BINS, 0.0);
                 for (let var i = 0; i < num_silence_frames; ++i) {
@@ -797,7 +811,7 @@ fun training_actor(detection_actor_id) {
             // trailing-silence grace period: that much silence means the
             // word is gone, so it should no longer be heard.
             let y_true = Array.with_size(mlp.output_size, 0.0);
-            let var label_idx = mlp.word_index(label);
+            let var label_idx = mlp.word_index(target);
             if (num_silence_frames > TRAILING_SILENCE_GRACE_FRAMES) {
                 label_idx = mlp.word_index(NONE_LABEL);
             }
