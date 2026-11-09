@@ -1,0 +1,1420 @@
+// A demoscene intro, synced to a tracker-style tune
+//
+// Everything is generated when the program starts: the textures, the
+// lookup tables and the music. The tune is written as tracker patterns, 16
+// rows to a bar, and played by a small synth in an actor of its own at speed
+// 6 and 125 BPM, the classic Amiga tempo. The audio actor reports how many
+// samples it has produced, and the song position derived from that drives the
+// graphics. Scenes change on section boundaries and flashes land on kicks.
+//
+// Usage:
+//   plush examples/demo_intro.psh
+//   plush examples/demo_intro.psh --mute
+//   plush examples/demo_intro.psh --wav intro.wav
+//   plush examples/demo_intro.psh --capture shot
+//   plush examples/demo_intro.psh --bench
+
+from args import ArgParser;
+from image import Image, rgb, encode_tga, COLOR_WHITE, COLOR_BLACK;
+from pixelfont import PixelFont;
+from wav import AudioData, save_wav;
+
+let args = ArgParser("A demoscene intro synced to a tracker-style tune")
+    .flag("mute", "Run without sound, timed by the clock")
+    .flag("bench", "Render frames across the song without a window and report timings")
+    .opt_str("capture", nil, "Write one TGA frame per section, with names starting with this prefix")
+    .opt_str("wav", nil, "Render the music to a WAV file and exit")
+    .parse_args();
+
+let PI = 3.141592653589793;
+
+// --- Song timing ---
+
+let SAMPLE_RATE = 44100;
+
+// 50 ticks per second, as on a PAL Amiga, and 6 ticks per row
+let TICK_FRAMES = 882;
+let TICKS_PER_ROW = 6;
+let ROW_FRAMES = TICK_FRAMES * TICKS_PER_ROW;
+let ROW_SEC = ROW_FRAMES.to_f() / SAMPLE_RATE;
+let BAR_ROWS = 16;
+let BAR_SEC = ROW_SEC * BAR_ROWS;
+let SECTION_BARS = 4;
+let SECTION_SEC = BAR_SEC * SECTION_BARS;
+
+// --- Patterns ---
+
+// Notes are a name, a sharp or a dash, and an octave. "..." leaves the
+// channel playing and "===" releases the note.
+// Drums take one character per row: K kick, S snare, h closed hat, o open hat.
+
+let KS_MAIN = ["K...S...K.K.S...", "K...S...K.K.S...", "K...S...K.K.S...", "K...S...K.K.S.SS"];
+let KS_HALF = ["K...............", "K.......K.......", "K...............", "K.......K...S.SS"];
+let HH_OFF = ["..h...h...h...h.", "..h...h...h...h.", "..h...h...h...h.", "..h...h...h...h."];
+let HH_8 = ["h.h.h.h.h.h.h.h.", "h.h.h.h.h.h.h.h.", "h.h.h.h.h.h.h.h.", "h.h.h.h.h.h.h.ho"];
+let HH_16 = ["hhohhhohhhohhhoh", "hhohhhohhhohhhoh", "hhohhhohhhohhhoh", "hhohhhohhhohoooo"];
+
+let BASS_A = [
+    "A-1 ... A-2 A-1 ... A-1 A-2 ... A-1 ... A-2 A-1 ... A-1 G-2 ...",
+    "F-1 ... F-2 F-1 ... F-1 F-2 ... F-1 ... F-2 F-1 ... F-1 E-2 ...",
+    "C-2 ... C-3 C-2 ... C-2 C-3 ... C-2 ... C-3 C-2 ... C-2 B-2 ...",
+    "G-1 ... G-2 G-1 ... G-1 G-2 ... G-1 ... G-2 G-1 ... B-1 D-2 ...",
+];
+
+let BASS_END = [
+    "A-1 ... ... ... ... ... ... ... ... ... ... ... ... ... ... ...",
+    "F-1 ... ... ... ... ... ... ... ... ... ... ... ... ... ... ...",
+    "C-2 ... ... ... ... ... ... ... ... ... ... ... ... ... ... ...",
+    "A-1 ... ... ... ... ... ... ... ... ... ... ... === ... ... ...",
+];
+
+let ARP_A = [
+    "A-4 ... ... A-4 ... ... A-4 ... ... A-4 ... ... A-4 ... A-4 ...",
+    "F-4 ... ... F-4 ... ... F-4 ... ... F-4 ... ... F-4 ... F-4 ...",
+    "C-5 ... ... C-5 ... ... C-5 ... ... C-5 ... ... C-5 ... C-5 ...",
+    "G-4 ... ... G-4 ... ... G-4 ... ... G-4 ... ... G-4 ... G-4 ...",
+];
+
+let ARP_END = [
+    "A-4 ... ... ... ... ... ... ... ... ... ... ... ... ... ... ...",
+    "F-4 ... ... ... ... ... ... ... ... ... ... ... ... ... ... ...",
+    "C-5 ... ... ... ... ... ... ... ... ... ... ... ... ... ... ...",
+    "A-4 ... ... ... ... ... ... ... ... ... ... ... === ... ... ...",
+];
+
+let LEAD_A = [
+    "E-4 ... ... ... A-4 ... ... ... C-5 ... ... B-4 ... A-4 ... ...",
+    "C-5 ... ... ... ... ... A-4 ... F-4 ... ... ... A-4 ... ... ...",
+    "G-4 ... ... ... E-4 ... G-4 ... C-5 ... ... ... D-5 ... ... ...",
+    "B-4 ... ... ... ... ... ... ... D-5 ... B-4 ... G-4 ... === ...",
+];
+
+let LEAD_B = [
+    "A-4 ... C-5 ... E-5 ... ... ... D-5 ... C-5 ... D-5 ... E-5 ...",
+    "F-5 ... ... ... E-5 ... C-5 ... ... ... A-4 ... C-5 ... ... ...",
+    "E-5 ... ... ... D-5 ... C-5 ... G-4 ... ... ... C-5 ... E-5 ...",
+    "D-5 ... ... ... ... ... ... ... B-4 ... ... ... === ... ... ...",
+];
+
+// Arpeggio intervals for each bar of the Am F C G progression. The last
+// bar of the outro has an A in the arpeggio, which turns it into A major.
+let CHORDS = [[3, 7], [4, 7], [4, 7], [4, 7]];
+
+// The order list, four bars per section
+let SECTIONS = [
+    // Drums   Hats    Bass      Arpeggio Lead
+    [nil,      nil,    nil,      ARP_A,   nil   ],
+    [nil,      HH_OFF, BASS_A,   ARP_A,   nil   ],
+    [KS_MAIN,  HH_8,   BASS_A,   ARP_A,   nil   ],
+    [KS_MAIN,  HH_16,  BASS_A,   ARP_A,   LEAD_A],
+    [KS_MAIN,  HH_16,  BASS_A,   ARP_A,   LEAD_B],
+    [KS_MAIN,  HH_16,  BASS_A,   ARP_A,   LEAD_A],
+    [KS_HALF,  nil,    nil,      ARP_A,   LEAD_B],
+    [KS_MAIN,  HH_16,  BASS_A,   ARP_A,   LEAD_B],
+    [nil,      nil,    BASS_END, ARP_END, nil   ],
+];
+
+let NOTE_NONE = -1;
+let NOTE_OFF = -2;
+let NOTE_NAMES = "C-C#D-D#E-F-F#G-G#A-A#B-";
+
+let CH_K = "K".byte_at(0);
+let CH_S = "S".byte_at(0);
+let CH_H = "h".byte_at(0);
+let CH_O = "o".byte_at(0);
+
+// Convert a note such as "C#4" to a MIDI note number
+fun parse_note(tok)
+{
+    if (tok == "...") return NOTE_NONE;
+    if (tok == "===") return NOTE_OFF;
+
+    let name = tok.slice(0, 2);
+    for (let var i = 0; i < 12; ++i) {
+        if (NOTE_NAMES.slice(2 * i, 2 * i + 2) == name) {
+            return 12 * (tok.slice(2, 3).parse_int(10) + 1) + i;
+        }
+    }
+
+    assert(false);
+}
+
+fun parse_bar(str)
+{
+    let toks = str.split(" ");
+    assert(toks.len == BAR_ROWS);
+    let notes = [];
+    for (let var i = 0; i < toks.len; ++i) {
+        notes.push(parse_note(toks[i]));
+    }
+    return notes;
+}
+
+// One bar of the song, with what each channel plays
+class Bar
+{
+    init(self, sec, idx)
+    {
+        assert(sec[0] == nil || sec[0][idx].len == BAR_ROWS);
+        assert(sec[1] == nil || sec[1][idx].len == BAR_ROWS);
+        self.ks = sec[0] == nil ? nil : sec[0][idx];
+        self.hh = sec[1] == nil ? nil : sec[1][idx];
+        self.bass = sec[2] == nil ? nil : parse_bar(sec[2][idx]);
+        self.arp = sec[3] == nil ? nil : parse_bar(sec[3][idx]);
+        self.lead = sec[4] == nil ? nil : parse_bar(sec[4][idx]);
+        self.chord = CHORDS[idx];
+    }
+}
+
+let BARS = [];
+for (let var s = 0; s < SECTIONS.len; ++s) {
+    for (let var b = 0; b < SECTION_BARS; ++b) {
+        BARS.push(Bar(SECTIONS[s], b));
+    }
+}
+
+let SONG_ROWS = BARS.len * BAR_ROWS;
+let SONG_FRAMES = SONG_ROWS * ROW_FRAMES;
+let SONG_SEC = SONG_ROWS * ROW_SEC;
+
+// Seconds since the last row whose drum is the given character
+fun hit_age(t, ch)
+{
+    let row = (t / ROW_SEC).floor();
+    for (let var r = row; r >= 0 && r > row - 32; --r) {
+        let ks = BARS[r.idiv(BAR_ROWS)].ks;
+        if (ks != nil && ks.byte_at(r % BAR_ROWS) == ch) {
+            return t - r * ROW_SEC;
+        }
+    }
+    return 100.0;
+}
+
+// --- Synth ---
+
+// Per-sample multiplier for an exponential decay with this time constant
+fun decay_coef(sec)
+{
+    return (-1.0 / (sec * SAMPLE_RATE)).exp();
+}
+
+// Phase increment per sample for a MIDI note, which may be fractional
+fun note_inc(note)
+{
+    return 440.0 * (2.0).pow((note - 69.0) / 12.0) / SAMPLE_RATE;
+}
+
+class Noise
+{
+    init(self)
+    {
+        self.s = 0x12345678;
+    }
+
+    // White noise in [-1, 1], from a 32-bit xorshift generator
+    next(self)
+    {
+        let var x = self.s;
+        x = x ^ ((x << 13) & 0xFFFFFFFF);
+        x = x ^ (x >> 17);
+        x = x ^ ((x << 5) & 0xFFFFFFFF);
+        self.s = x;
+        return x.to_f() / 2147483648.0 - 1.0;
+    }
+}
+
+// A pulse or sawtooth oscillator with a decay-sustain-release envelope,
+// followed by a one-pole lowpass to take the edge off the aliasing
+class Tone
+{
+    init(self, saw, duty, decay, sustain, release, smooth)
+    {
+        self.saw = saw;
+        self.duty = duty;
+        self.kd = decay_coef(decay);
+        self.sustain = sustain;
+        self.kr = decay_coef(release);
+        self.smooth = smooth;
+        self.phase = 0.0;
+        self.inc = 0.0;
+        self.env = 0.0;
+        self.gate = false;
+        self.lp = 0.0;
+        self.note = 0;
+    }
+
+    note_on(self, note)
+    {
+        self.note = note;
+        self.inc = note_inc(note);
+        self.env = 1.0;
+        self.gate = true;
+    }
+
+    note_off(self)
+    {
+        self.gate = false;
+    }
+
+    // Change the pitch without retriggering, for arpeggios and vibrato
+    bend(self, note)
+    {
+        self.inc = note_inc(note);
+    }
+
+    sample(self)
+    {
+        let var p = self.phase + self.inc;
+        if (p >= 1.0) p = p - 1.0;
+        self.phase = p;
+
+        let s = self.saw ? 2.0 * p - 1.0 : (p < self.duty ? 1.0 : -1.0);
+
+        if (self.gate) {
+            self.env = self.sustain + (self.env - self.sustain) * self.kd;
+        } else {
+            self.env = self.env * self.kr;
+        }
+
+        self.lp = self.lp + (s * self.env - self.lp) * self.smooth;
+        return self.lp;
+    }
+}
+
+// Sawtooth through a resonant state-variable lowpass with a plucked cutoff
+class Bass
+{
+    init(self)
+    {
+        self.tone = Tone(true, 0.5, 0.3, 0.4, 0.04, 1.0);
+        self.cut = 0.0;
+        self.f = 0.1;
+        self.low = 0.0;
+        self.band = 0.0;
+    }
+
+    note_on(self, note)
+    {
+        self.tone.note_on(note);
+        self.cut = 1.0;
+    }
+
+    note_off(self)
+    {
+        self.tone.note_off();
+    }
+
+    tick(self)
+    {
+        let fc = 120.0 + 2200.0 * self.cut * self.cut;
+        self.f = 2.0 * (PI * fc / SAMPLE_RATE).sin();
+        self.cut = self.cut * 0.82;
+    }
+
+    sample(self)
+    {
+        let x = self.tone.sample();
+        self.low = self.low + self.f * self.band;
+        let high = x - self.low - 0.45 * self.band;
+        self.band = self.band + self.f * high;
+        return self.low;
+    }
+}
+
+// Sine with a falling pitch
+class Kick
+{
+    init(self)
+    {
+        self.phase = 0.0;
+        self.pitch = 0.0;
+        self.amp = 0.0;
+        self.kp = decay_coef(0.03);
+        self.ka = decay_coef(0.2);
+    }
+
+    trigger(self)
+    {
+        self.phase = 0.0;
+        self.pitch = 1.0;
+        self.amp = 1.0;
+    }
+
+    sample(self)
+    {
+        let var p = self.phase + (45.0 + 150.0 * self.pitch) / SAMPLE_RATE;
+        if (p >= 1.0) p = p - 1.0;
+        self.phase = p;
+        self.pitch = self.pitch * self.kp;
+        self.amp = self.amp * self.ka;
+        return (2.0 * PI * p).sin() * self.amp;
+    }
+}
+
+// Noise burst over a short tone
+class Snare
+{
+    init(self, noise)
+    {
+        self.noise = noise;
+        self.phase = 0.0;
+        self.namp = 0.0;
+        self.tamp = 0.0;
+        self.kn = decay_coef(0.07);
+        self.kt = decay_coef(0.04);
+    }
+
+    trigger(self)
+    {
+        self.phase = 0.0;
+        self.namp = 1.0;
+        self.tamp = 1.0;
+    }
+
+    sample(self)
+    {
+        let var p = self.phase + 190.0 / SAMPLE_RATE;
+        if (p >= 1.0) p = p - 1.0;
+        self.phase = p;
+        self.namp = self.namp * self.kn;
+        self.tamp = self.tamp * self.kt;
+        return self.noise.next() * self.namp * 0.7 + (2.0 * PI * p).sin() * self.tamp * 0.6;
+    }
+}
+
+// Highpassed noise, closed or open
+class Hat
+{
+    init(self, noise)
+    {
+        self.noise = noise;
+        self.prev = 0.0;
+        self.amp = 0.0;
+        self.k = 0.0;
+    }
+
+    trigger(self, len)
+    {
+        self.amp = 1.0;
+        self.k = decay_coef(len);
+    }
+
+    sample(self)
+    {
+        let n = self.noise.next();
+        let hp = n - self.prev;
+        self.prev = n;
+        self.amp = self.amp * self.k;
+        return hp * self.amp * 0.5;
+    }
+}
+
+// Echo of the lead, three rows long
+let ECHO_FRAMES = ROW_FRAMES * 3;
+
+// Steps through the song and mixes the channels
+class Player
+{
+    init(self)
+    {
+        let noise = Noise();
+        self.kick = Kick();
+        self.snare = Snare(noise);
+        self.hat = Hat(noise);
+        self.bass = Bass();
+        self.arp = Tone(false, 0.25, 0.3, 0.45, 0.08, 0.35);
+        self.lead = Tone(false, 0.5, 0.5, 0.65, 0.1, 0.3);
+
+        self.arp_root = 69;
+        self.chord = CHORDS[0];
+        self.lead_age = 0;
+
+        self.row = 0;
+        self.tick = 0;
+        self.tick_left = 0;
+        self.ticks = 0;
+
+        self.echo = ByteArray.with_size(ECHO_FRAMES * 4);
+        self.echo.zero_fill();
+        self.echo_pos = 0;
+    }
+
+    // Apply a channel's note for this row, releasing it on a silent bar
+    play(self, voice, notes, r)
+    {
+        if (notes == nil) {
+            voice.note_off();
+            return NOTE_NONE;
+        }
+
+        let n = notes[r];
+        if (n >= 0) {
+            voice.note_on(n);
+        } else if (n == NOTE_OFF) {
+            voice.note_off();
+        }
+        return n;
+    }
+
+    do_row(self)
+    {
+        let bar = BARS[self.row.idiv(BAR_ROWS)];
+        let r = self.row % BAR_ROWS;
+
+        if (bar.ks != nil) {
+            let c = bar.ks.byte_at(r);
+            if (c == CH_K) self.kick.trigger();
+            if (c == CH_S) self.snare.trigger();
+        }
+
+        if (bar.hh != nil) {
+            let c = bar.hh.byte_at(r);
+            if (c == CH_H) self.hat.trigger(0.025);
+            if (c == CH_O) self.hat.trigger(0.15);
+        }
+
+        self.play(self.bass, bar.bass, r);
+
+        if (self.play(self.arp, bar.arp, r) >= 0) {
+            self.arp_root = self.arp.note;
+            self.chord = bar.chord;
+        }
+
+        if (self.play(self.lead, bar.lead, r) >= 0) {
+            self.lead_age = 0;
+        }
+    }
+
+    do_tick(self)
+    {
+        // Tracker arpeggio: root, then the two intervals, one per tick
+        let step = self.ticks % 3;
+        let offs = step == 0 ? 0 : self.chord[step - 1];
+        self.arp.bend(self.arp_root + offs);
+
+        // Delayed vibrato on held lead notes
+        self.lead_age += 1;
+        if (self.lead_age > 10) {
+            self.lead.bend(self.lead.note + 0.2 * (self.lead_age * 0.9).sin());
+        }
+
+        self.bass.tick();
+        self.ticks += 1;
+    }
+
+    mix(self)
+    {
+        let lead = self.lead.sample();
+        let echo = self.echo.get_f32(self.echo_pos);
+        self.echo.set_f32(self.echo_pos, lead + echo * 0.45);
+        self.echo_pos += 1;
+        if (self.echo_pos == ECHO_FRAMES) self.echo_pos = 0;
+
+        let v = (
+            self.kick.sample() * 0.8 +
+            self.snare.sample() * 0.35 +
+            self.hat.sample() * 0.3 +
+            self.bass.sample() * 0.4 +
+            self.arp.sample() * 0.12 +
+            lead * 0.15 +
+            echo * 0.06
+        );
+
+        // Squash the peaks instead of clipping them
+        return v / (1.0 + v.abs());
+    }
+
+    // Render n samples into buf, starting at sample index idx
+    render(self, buf, idx, n)
+    {
+        let end = idx + n;
+        let var i = idx;
+
+        while (i < end) {
+            if (self.tick_left == 0) {
+                if (self.tick == 0) self.do_row();
+                self.do_tick();
+                self.tick_left = TICK_FRAMES;
+            }
+
+            let m = self.tick_left.min(end - i);
+            for (let var k = 0; k < m; ++k) {
+                buf.set_f32(i + k, self.mix());
+            }
+            i += m;
+            self.tick_left -= m;
+
+            if (self.tick_left == 0) {
+                self.tick += 1;
+                if (self.tick == TICKS_PER_ROW) {
+                    self.tick = 0;
+                    self.row = (self.row + 1) % SONG_ROWS;
+                }
+            }
+        }
+    }
+}
+
+// Body of the audio actor. The parent is told how many samples came before
+// each buffer, which is the song position at the moment it starts playing.
+fun audio_actor()
+{
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+    let parent = $actor_parent();
+    let player = Player();
+    let var buf = ByteArray.with_size(0);
+    let var frames = 0;
+
+    loop {
+        let msg = $actor_recv();
+        if (!(msg instanceof AudioNeeded)) continue;
+
+        let n = msg.num_samples;
+        if (buf.len != n * 4) buf = ByteArray.with_size(n * 4);
+
+        $actor_send(parent, frames);
+        player.render(buf, 0, n);
+        $audio_write_samples(dev, buf);
+        frames += n;
+    }
+}
+
+if (args.wav != nil) {
+    let snd = AudioData(1, SAMPLE_RATE, SONG_FRAMES);
+    let player = Player();
+    player.render(snd.samples, 0, SONG_FRAMES);
+    save_wav(args.wav, snd);
+    $println("wrote " + args.wav + ", " + SONG_SEC.format_decimals(2) + " seconds");
+    $exit(0);
+}
+
+// --- Color helpers ---
+
+let W = 640;
+let H = 400;
+
+// Table sizes for effects that pan a window over a table twice the screen size
+let TW = 2 * W;
+let TH = 2 * H;
+
+fun lerp_color(a, b, t)
+{
+    let ar = (a >> 16) & 255;
+    let ag = (a >> 8) & 255;
+    let ab = a & 255;
+    let br = (b >> 16) & 255;
+    let bg = (b >> 8) & 255;
+    let bb = b & 255;
+    return rgb(
+        ar + ((br - ar) * t).floor(),
+        ag + ((bg - ag) * t).floor(),
+        ab + ((bb - ab) * t).floor()
+    );
+}
+
+// Scale a color by a brightness in [0, 2], where 1 leaves it unchanged
+// and above 1 it is blended towards white
+fun shade(c, b)
+{
+    if (b >= 1.0) {
+        return lerp_color(c, COLOR_WHITE, (b - 1.0).min(1.0));
+    }
+    return lerp_color(COLOR_BLACK, c, b.max(0.0));
+}
+
+// Build an array of n colors from [position, color] stops
+fun gradient(stops, n)
+{
+    let colors = [];
+    let var s = 0;
+    for (let var i = 0; i < n; ++i) {
+        let pos = i.to_f() / (n - 1);
+        while (s < stops.len - 2 && pos > stops[s + 1][0]) ++s;
+        let p0 = stops[s][0];
+        let p1 = stops[s + 1][0];
+        let t = ((pos - p0) / (p1 - p0)).clip(0.0, 1.0);
+        colors.push(lerp_color(stops[s][1], stops[s + 1][1], t));
+    }
+    return colors;
+}
+
+// Write a shaded copy of a palette into a ByteArray of u32 colors
+fun shade_palette(src, b, dst, base)
+{
+    for (let var i = 0; i < src.len; ++i) {
+        dst.set_u32(base + i, shade(src[i], b));
+    }
+}
+
+fun frac(x)
+{
+    return x - x.floor();
+}
+
+fun atan2(y, x)
+{
+    if (x > 0.0) return (y / x).atan();
+    if (x < 0.0) return (y / x).atan() + (y >= 0.0 ? PI : -PI);
+    return y > 0.0 ? PI / 2.0 : -PI / 2.0;
+}
+
+// --- Text ---
+
+// Runs of lit pixels come from fonts with no background
+let SMALL_FONT = PixelFont(2, COLOR_WHITE, nil);
+
+fun draw_text(fb, font, x, y, str, color)
+{
+    let var cx = x;
+    for (let var i = 0; i < str.len; ++i) {
+        let ch = str.char_at(i);
+        if (ch == nil) continue;
+
+        let runs = font.glyph(ch);
+        for (let var k = 0; k < runs.len; k += 3) {
+            let py = y + runs[k];
+            if (py < 0 || py >= H) continue;
+            let x0 = (cx + runs[k + 1]).max(0);
+            let x1 = (cx + runs[k + 1] + runs[k + 2]).min(W);
+            if (x1 > x0) fb.bytes.fill_u32(py * W + x0, x1 - x0, color);
+        }
+
+        cx += font.char_w;
+    }
+}
+
+fun draw_centered(fb, font, y, str, color)
+{
+    draw_text(fb, font, (W - font.text_width(str)).idiv(2), y, str, color);
+}
+
+// Render a string into a mask with one byte per pixel
+fun text_mask(scale, str)
+{
+    let font = PixelFont(scale, COLOR_WHITE, COLOR_BLACK);
+    let img = Image(font.text_width(str), font.char_h);
+    img.clear(COLOR_BLACK);
+    font.draw_text(img, 0, 0, str);
+
+    let mask = ByteArray.with_size(img.width * img.height);
+    for (let var i = 0; i < img.width * img.height; ++i) {
+        mask[i] = ((img.bytes.get_u32(i) >> 8) & 255) > 127 ? 1 : 0;
+    }
+
+    return { mask: mask, w: img.width, h: img.height };
+}
+
+// --- Starfield ---
+
+class Stars
+{
+    init(self)
+    {
+        let var seed = 7;
+        fun rnd() {
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+            return seed.to_f() / 2147483648.0;
+        }
+
+        self.n = 700;
+        self.x = [];
+        self.y = [];
+        self.z = [];
+        for (let var i = 0; i < self.n; ++i) {
+            self.x.push(rnd() * 2.0 - 1.0);
+            self.y.push(rnd() * 2.0 - 1.0);
+            self.z.push(rnd());
+        }
+        self.greys = Array.with_size(16, 0);
+    }
+
+    // Star depths are a function of time alone, so seeking works
+    draw(self, fb, t, b)
+    {
+        for (let var i = 0; i < 16; ++i) {
+            self.greys[i] = shade(rgb(200, 210, 255), b * i / 15.0);
+        }
+
+        let bytes = fb.bytes;
+        let fov = W * 0.3;
+        for (let var i = 0; i < self.n; ++i) {
+            let z = frac(self.z[i] - t * 0.22) * 0.97 + 0.03;
+            let px = (W / 2 + self.x[i] / z * fov).floor();
+            let py = (H / 2 + self.y[i] / z * fov).floor();
+            if (px < 0 || py < 0 || px >= W - 1 || py >= H - 1) continue;
+
+            let c = self.greys[((1.0 - z) * 15.0).floor()];
+            let idx = py * W + px;
+            bytes.set_u32(idx, c);
+            if (z < 0.35) {
+                bytes.set_u32(idx + 1, c);
+                bytes.set_u32(idx + W, c);
+                bytes.set_u32(idx + W + 1, c);
+            }
+        }
+    }
+}
+
+// --- Copper bars ---
+
+let BAR_COLORS = [rgb(255, 60, 60), rgb(255, 160, 40), rgb(255, 240, 80), rgb(80, 255, 120), rgb(60, 160, 255), rgb(190, 90, 255)];
+
+fun draw_copper(fb, t, b)
+{
+    let half = 14;
+    for (let var k = 0; k < BAR_COLORS.len; ++k) {
+        let cy = (H * 0.5 + (t * 1.9 + k * 0.45).sin() * H * 0.36).floor();
+        for (let var r = -half; r <= half; ++r) {
+            let y = cy + r;
+            if (y < 0 || y >= H) continue;
+            let lum = (r.to_f() / half * PI / 2.0).cos();
+            fb.bytes.fill_u32(y * W, W, shade(BAR_COLORS[k], b * (0.15 + 1.05 * lum)));
+        }
+    }
+}
+
+// --- Logo ---
+
+class Logo
+{
+    init(self, str)
+    {
+        let m = text_mask(12, str);
+        self.w = m.w;
+        self.h = m.h;
+
+        // Runs of lit pixels, as row, start and length
+        self.runs = [];
+        for (let var y = 0; y < m.h; ++y) {
+            let var start = -1;
+            for (let var x = 0; x <= m.w; ++x) {
+                let lit = x < m.w && m.mask[y * m.w + x] != 0;
+                if (lit && start < 0) start = x;
+                if (!lit && start >= 0) {
+                    self.runs.push(y);
+                    self.runs.push(start);
+                    self.runs.push(x - start);
+                    start = -1;
+                }
+            }
+        }
+
+        // Chrome: sky above the middle, ground below
+        self.colors = gradient([
+            [0.0, rgb(40, 60, 170)],
+            [0.48, rgb(230, 240, 255)],
+            [0.5, rgb(90, 40, 10)],
+            [1.0, rgb(255, 210, 120)],
+        ], m.h);
+        self.row_colors = Array.with_size(m.h, 0);
+        self.offs = Array.with_size(m.h, 0);
+    }
+
+    fill(self, fb, x, y, color, use_rows)
+    {
+        let runs = self.runs;
+        for (let var k = 0; k < runs.len; k += 3) {
+            let row = runs[k];
+            let py = y + row;
+            if (py < 0 || py >= H) continue;
+            let sx = x + self.offs[row] + runs[k + 1];
+            let x0 = sx.max(0);
+            let x1 = (sx + runs[k + 2]).min(W);
+            if (x1 > x0) {
+                fb.bytes.fill_u32(py * W + x0, x1 - x0, use_rows ? self.row_colors[row] : color);
+            }
+        }
+    }
+
+    // Draw with a drop shadow, with rows shifted sideways by a wave
+    draw(self, fb, x, y, t, b, wobble)
+    {
+        for (let var r = 0; r < self.h; ++r) {
+            self.row_colors[r] = shade(self.colors[r], b);
+            self.offs[r] = ((r * 0.07 + t * 5.0).sin() * wobble).floor();
+        }
+        self.fill(fb, x + 8, y + 8, shade(rgb(0, 0, 30), b), false);
+        self.fill(fb, x, y, 0, true);
+    }
+}
+
+// --- Tunnel ---
+
+class Tunnel
+{
+    init(self)
+    {
+        // Each entry packs a fog level, a depth and an angle
+        self.table = ByteArray.with_size(TW * TH * 4);
+        for (let var y = 0; y < TH; ++y) {
+            let dy = (y - H) + 0.5;
+            for (let var x = 0; x < TW; ++x) {
+                let dx = (x - W) + 0.5;
+                let d = (dx * dx + dy * dy).sqrt();
+                let depth = (6000.0 / d).floor() & 255;
+                let angle = (atan2(dy, dx) * 256.0 / PI).floor() & 255;
+                let fog = (d / 12.0).floor().min(15);
+                self.table.set_u32(y * TW + x, (fog << 16) | (depth << 8) | angle);
+            }
+        }
+
+        // Glowing panels with a pattern inside
+        self.tex = ByteArray.with_size(65536);
+        for (let var y = 0; y < 256; ++y) {
+            for (let var x = 0; x < 256; ++x) {
+                let lx = x & 31;
+                let ly = y & 31;
+                let edge = lx.min(ly).min(31 - lx).min(31 - ly);
+                let var v = 50 + (((x ^ y) >> 1) & 15) * 6;
+                if (edge < 3) v = 215 - edge * 35;
+                self.tex[y * 256 + x] = v;
+            }
+        }
+
+        // One shaded palette per fog level
+        self.pal = ByteArray.with_size(16 * 256 * 4);
+    }
+
+    draw(self, fb, t, b, colors)
+    {
+        for (let var f = 0; f < 16; ++f) {
+            shade_palette(colors, b * f / 15.0, self.pal, f * 256);
+        }
+
+        // The center wanders, which is a window panning over the table
+        let ox = W.idiv(2) - (W * 0.22 * (t * 0.7).sin()).floor();
+        let oy = H.idiv(2) - (H * 0.22 * (t * 0.93).cos()).floor();
+        let shift = (((t * 150.0).floor() & 255) << 8) | ((t * 20.0 + 30.0 * (t * 0.4).sin()).floor() & 255);
+
+        let table = self.table;
+        let tex = self.tex;
+        let pal = self.pal;
+        let bytes = fb.bytes;
+        let var i = 0;
+        for (let var y = 0; y < H; ++y) {
+            let var j = (oy + y) * TW + ox;
+            for (let var x = 0; x < W; ++x) {
+                let v = table.get_u32(j);
+                bytes.set_u32(i, pal.get_u32(((v >> 16) << 8) | tex[(v + shift) & 0xFFFF]));
+                ++i;
+                ++j;
+            }
+        }
+    }
+}
+
+// --- Plasma ---
+
+class Plasma
+{
+    init(self)
+    {
+        // Two maps, panned independently and summed
+        self.m1 = ByteArray.with_size(TW * TH);
+        self.m2 = ByteArray.with_size(TW * TH);
+        for (let var y = 0; y < TH; ++y) {
+            for (let var x = 0; x < TW; ++x) {
+                let dx = (x - W).to_f();
+                let dy = (y - H).to_f();
+                let d = (dx * dx + dy * dy).sqrt();
+                self.m1[y * TW + x] = (64.0 + 63.0 * (d / 24.0).sin()).floor();
+                let s = (x / 47.0).sin() + (y / 31.0).sin() + ((x + y) / 71.0).sin();
+                self.m2[y * TW + x] = (64.0 + 21.0 * s).floor();
+            }
+        }
+        self.pal = ByteArray.with_size(256 * 4);
+    }
+
+    draw(self, fb, t, b, colors)
+    {
+        shade_palette(colors, b, self.pal, 0);
+
+        let o1x = (W / 2 + W * 0.48 * (t * 0.37).sin()).floor();
+        let o1y = (H / 2 + H * 0.48 * (t * 0.51).cos()).floor();
+        let o2x = (W / 2 + W * 0.48 * (t * 0.23 + 1.0).cos()).floor();
+        let o2y = (H / 2 + H * 0.48 * (t * 0.31 + 2.0).sin()).floor();
+        let rot = (t * 90.0).floor();
+
+        let m1 = self.m1;
+        let m2 = self.m2;
+        let pal = self.pal;
+        let bytes = fb.bytes;
+        let var i = 0;
+        for (let var y = 0; y < H; ++y) {
+            let var j1 = (o1y + y) * TW + o1x;
+            let var j2 = (o2y + y) * TW + o2x;
+            for (let var x = 0; x < W; ++x) {
+                bytes.set_u32(i, pal.get_u32((m1[j1] + m2[j2] + rot) & 255));
+                ++i;
+                ++j1;
+                ++j2;
+            }
+        }
+    }
+}
+
+// --- Rotozoomer ---
+
+class Roto
+{
+    init(self)
+    {
+        // Checkerboard with the name written across it
+        self.tex = ByteArray.with_size(65536);
+        for (let var y = 0; y < 256; ++y) {
+            for (let var x = 0; x < 256; ++x) {
+                let c = ((x >> 5) ^ (y >> 5)) & 1;
+                self.tex[y * 256 + x] = (c == 1 ? 150 : 30) + (x & 31) + (y & 31);
+            }
+        }
+
+        let m = text_mask(5, "PLUSH");
+        let tx = (256 - m.w).idiv(2);
+        let ty = (256 - m.h).idiv(2);
+
+        // Shadow first, then the letters
+        for (let var y = 0; y < m.h; ++y) {
+            for (let var x = 0; x < m.w; ++x) {
+                if (m.mask[y * m.w + x] != 0) {
+                    self.tex[((ty + y + 4) & 255) * 256 + ((tx + x + 4) & 255)] = 0;
+                }
+            }
+        }
+        for (let var y = 0; y < m.h; ++y) {
+            for (let var x = 0; x < m.w; ++x) {
+                if (m.mask[y * m.w + x] != 0) {
+                    self.tex[(ty + y) * 256 + tx + x] = 255;
+                }
+            }
+        }
+
+        self.colors = gradient([
+            [0.0, rgb(0, 0, 0)],
+            [0.1, rgb(20, 10, 60)],
+            [0.4, rgb(120, 30, 140)],
+            [0.6, rgb(40, 140, 200)],
+            [0.98, rgb(220, 250, 255)],
+            [1.0, rgb(255, 255, 255)],
+        ], 256);
+        self.pal = ByteArray.with_size(256 * 4);
+    }
+
+    draw(self, fb, t, b, kick)
+    {
+        shade_palette(self.colors, b, self.pal, 0);
+
+        // Texels per pixel, which shrinks on kicks so the texture jumps closer
+        let a = t * 0.45 + 0.8 * (t * 0.29).sin();
+        let s = 0.75 + 0.5 * (t * 0.67).sin() - 0.18 * kick;
+        let dux = (a.cos() * s * 65536.0).floor();
+        let dvx = (a.sin() * s * 65536.0).floor();
+        let duy = -dvx;
+        let dvy = dux;
+        let cu = (t * 40.0 * 65536.0).floor();
+        let cv = (t * 23.0 * 65536.0).floor();
+        let u0 = cu - (W / 2) * dux - (H / 2) * duy;
+        let v0 = cv - (W / 2) * dvx - (H / 2) * dvy;
+
+        let tex = self.tex;
+        let pal = self.pal;
+        let bytes = fb.bytes;
+        let var i = 0;
+        for (let var y = 0; y < H; ++y) {
+            let var u = (u0 + y * duy).floor();
+            let var v = (v0 + y * dvy).floor();
+            for (let var x = 0; x < W; ++x) {
+                bytes.set_u32(i, pal.get_u32(tex[((v >> 8) & 0xFF00) | ((u >> 16) & 0xFF)]));
+                u += dux;
+                v += dvx;
+                ++i;
+            }
+        }
+    }
+}
+
+// --- Metaballs ---
+
+let NUM_BLOBS = 5;
+let BLOB_MAX = 120;
+let BLOB_LEVEL = 60;
+
+// Extra bits of precision in the field, so contours of the sum stay smooth
+let BLOB_FRAC_BITS = 4;
+
+class Blobs
+{
+    init(self)
+    {
+        // Field of one blob, centered in the table, which reaches the
+        // surface level BLOB_LEVEL at a radius of 50 pixels
+        self.field = Array.with_size(TW * TH, 0);
+        let scale = BLOB_MAX * (1 << BLOB_FRAC_BITS);
+        for (let var y = 0; y < TH; ++y) {
+            for (let var x = 0; x < TW; ++x) {
+                let dx = (x - W).to_f();
+                let dy = (y - H).to_f();
+                let f = scale / (1.0 + (dx * dx + dy * dy) / 2500.0);
+                self.field[y * TW + x] = f.floor();
+            }
+        }
+
+        let size = NUM_BLOBS * BLOB_MAX + 1;
+        self.colors = Array.with_size(size, 0);
+        self.pal = ByteArray.with_size(size * 4);
+    }
+
+    draw(self, fb, t, b, kick, hot)
+    {
+        let bg0 = hot ? rgb(20, 0, 10) : rgb(0, 4, 20);
+        let bg1 = hot ? rgb(150, 20, 40) : rgb(20, 60, 150);
+        let in0 = hot ? rgb(255, 170, 40) : rgb(60, 220, 255);
+        let in1 = hot ? rgb(255, 255, 210) : rgb(230, 255, 255);
+
+        // Kicks lower the surface level, which swells every blob
+        let level = BLOB_LEVEL - (kick * 14.0).floor();
+        let rim = 8;
+        for (let var s = 0; s < self.colors.len; ++s) {
+            let var c = 0;
+            if (s < level - rim) {
+                let f = s.to_f() / (level - rim);
+                c = lerp_color(bg0, bg1, f * f);
+            } else if (s < level) {
+                c = lerp_color(bg1, COLOR_WHITE, (s - level + rim + 1) / rim.to_f());
+            } else {
+                c = lerp_color(in0, in1, ((s - level) / 150.0).min(1.0));
+            }
+            self.pal.set_u32(s, shade(c, b));
+        }
+
+        // Each blob is a window into the field
+        let offs = [];
+        for (let var k = 0; k < NUM_BLOBS; ++k) {
+            let bx = (W / 2 + W * 0.36 * (t * (0.5 + k * 0.17) + k * 1.3).sin()).floor();
+            let by = (H / 2 + H * 0.34 * (t * (0.7 + k * 0.11) + k * 2.1).cos()).floor();
+            offs.push((H - by) * TW + (W - bx));
+        }
+
+        let field = self.field;
+        let pal = self.pal;
+        let bytes = fb.bytes;
+        let var i = 0;
+        for (let var y = 0; y < H; ++y) {
+            let row = y * TW;
+            let var j0 = offs[0] + row;
+            let var j1 = offs[1] + row;
+            let var j2 = offs[2] + row;
+            let var j3 = offs[3] + row;
+            let var j4 = offs[4] + row;
+            for (let var x = 0; x < W; ++x) {
+                let s = field[j0] + field[j1] + field[j2] + field[j3] + field[j4];
+                bytes.set_u32(i, pal.get_u32(s >> BLOB_FRAC_BITS));
+                ++i;
+                ++j0;
+                ++j1;
+                ++j2;
+                ++j3;
+                ++j4;
+            }
+        }
+    }
+}
+
+// --- Sine scroller ---
+
+let SCROLL_SPEED = 220.0;
+
+class Scroller
+{
+    init(self, str)
+    {
+        let m = text_mask(3, str);
+        self.mask = m.mask;
+        self.w = m.w;
+        self.h = m.h;
+        self.colors = gradient([
+            [0.0, rgb(255, 255, 200)],
+            [0.5, rgb(255, 170, 30)],
+            [1.0, rgb(200, 40, 20)],
+        ], m.h);
+        self.shaded = Array.with_size(m.h, 0);
+    }
+
+    // Seconds for the whole text to cross the screen
+    duration(self)
+    {
+        return (self.w + W) / SCROLL_SPEED;
+    }
+
+    pass(self, fb, st, y_base, dx, colors, solid)
+    {
+        let scroll = (st * SCROLL_SPEED).floor();
+        let mask = self.mask;
+        let mw = self.w;
+        let bytes = fb.bytes;
+
+        for (let var x = 0; x < W; ++x) {
+            let sx = scroll + x - W - dx;
+            if (sx < 0 || sx >= mw) continue;
+            let y0 = y_base + ((x * 0.011 + st * 3.0).sin() * 45.0).floor();
+
+            for (let var r = 0; r < self.h; ++r) {
+                let y = y0 + r;
+                if (y < 0 || y >= H) continue;
+                if (mask[r * mw + sx] != 0) {
+                    bytes.set_u32(y * W + x, solid ? colors : colors[r]);
+                }
+            }
+        }
+    }
+
+    // Draw the text st seconds after it started scrolling in from the right
+    draw(self, fb, st, y_base, b)
+    {
+        for (let var r = 0; r < self.h; ++r) {
+            self.shaded[r] = shade(self.colors[r], b);
+        }
+        self.pass(fb, st, y_base + 5, 5, COLOR_BLACK, true);
+        self.pass(fb, st, y_base, 0, self.shaded, false);
+    }
+}
+
+// --- Scenes ---
+
+let SCENE_INTRO = 0;
+let SCENE_TUNNEL = 1;
+let SCENE_PLASMA = 2;
+let SCENE_ROTO = 3;
+let SCENE_BLOBS = 4;
+let SCENE_OUTRO = 5;
+
+let SCENE_NAMES = ["intro", "tunnel", "plasma", "rotozoom", "metaballs", "outro"];
+
+// Scene shown during each section of the order list
+let SCENES = [
+    SCENE_INTRO, SCENE_INTRO, SCENE_TUNNEL, SCENE_TUNNEL, SCENE_PLASMA,
+    SCENE_ROTO, SCENE_BLOBS, SCENE_BLOBS, SCENE_OUTRO,
+];
+assert(SCENES.len == SECTIONS.len);
+
+$println("generating tables...");
+let gen_start = $time_current_ms();
+
+let stars = Stars();
+let logo = Logo("PLUSH");
+let tunnel = Tunnel();
+let plasma = Plasma();
+let roto = Roto();
+let blobs = Blobs();
+
+let scroller = Scroller(
+    "HELLO DEMOSCENE!   THIS LITTLE INTRO IS WRITTEN ENTIRELY IN PLUSH...   " +
+    "EVERY PIXEL AND EVERY SAMPLE YOU SEE AND HEAR IS COMPUTED AS IT RUNS: " +
+    "PLASMA, ROTOZOOMER, TUNNEL AND METABALLS, ALL SYNCED TO A FIVE CHANNEL TRACKER TUNE.   " +
+    "NO MODULES, NO SAMPLES, NO ASSETS.   "
+);
+
+let greetings = Scroller(
+    "GREETINGS TO ALL CODERS, MUSICIANS AND PIXEL PUSHERS...   KEEP THE SCENE ALIVE!   "
+);
+
+let TUNNEL_COLORS = gradient([
+    [0.0, rgb(0, 0, 0)],
+    [0.3, rgb(10, 20, 90)],
+    [0.7, rgb(30, 160, 230)],
+    [1.0, rgb(240, 255, 255)],
+], 256);
+
+let TUNNEL_COLORS_HOT = gradient([
+    [0.0, rgb(0, 0, 0)],
+    [0.3, rgb(80, 0, 60)],
+    [0.7, rgb(240, 60, 120)],
+    [1.0, rgb(255, 240, 180)],
+], 256);
+
+// Cyclic, so the palette rotation has no seam
+let PLASMA_COLORS = gradient([
+    [0.0, rgb(10, 0, 40)],
+    [0.2, rgb(120, 0, 160)],
+    [0.4, rgb(255, 60, 120)],
+    [0.55, rgb(255, 200, 80)],
+    [0.7, rgb(40, 200, 180)],
+    [0.85, rgb(20, 60, 160)],
+    [1.0, rgb(10, 0, 40)],
+], 256);
+
+$println("tables generated in " + ($time_current_ms() - gen_start).to_s() + " ms");
+
+let fb = Image(W, H);
+
+// Opacity of a caption shown from t0 to t1, with fades at either end
+fun caption_fade(t, t0, t1)
+{
+    return ((t - t0).min(t1 - t) / 0.4).clip(0.0, 1.0);
+}
+
+fun draw_intro(t, st, section, b)
+{
+    fb.clear(rgb(0, 0, 0));
+    stars.draw(fb, t, b);
+
+    if (section == 0) {
+        let a = caption_fade(st, 0.6, 3.6);
+        if (a > 0.0) {
+            draw_centered(fb, SMALL_FONT, H.idiv(2) - 12, "PLUSH PRESENTS", shade(rgb(180, 200, 255), a * b));
+        }
+    }
+
+    if (section == 1) draw_copper(fb, t, b);
+
+    // The logo drops in at the third bar, then sways to the beat
+    let lt = t - 2.0 * BAR_SEC;
+    if (lt >= 0.0) {
+        let p = (lt / 1.2).clip(0.0, 1.0);
+        let drop = (1.0 - p) * (1.0 - p) * (1.0 - p);
+        let target = 90;
+        let beat = (-frac(t / (4.0 * ROW_SEC)) * 5.0).exp();
+        let y = (target - drop * (target + logo.h + 20) - (section == 1 ? beat * 10.0 : 0.0)).floor();
+        let wobble = section == 1 ? 4.0 + 8.0 * beat : 0.0;
+        logo.draw(fb, (W - logo.w).idiv(2), y, t, b, wobble);
+    }
+
+    if (section == 1) {
+        draw_centered(fb, SMALL_FONT, H - 60, "A TINY INTRO, WRITTEN IN PLUSH", shade(rgb(255, 255, 255), b));
+    }
+}
+
+fun draw_outro(t, st, b)
+{
+    fb.clear(rgb(0, 0, 0));
+    stars.draw(fb, t, b);
+    logo.draw(fb, (W - logo.w).idiv(2), 60, t, b, 3.0);
+
+    let lines = [
+        "THANKS FOR WATCHING <3",
+    ];
+    for (let var k = 0; k < lines.len; ++k) {
+        let a = caption_fade(st, 0.8 + k * 1.2, SECTION_SEC);
+        if (a > 0.0) {
+            draw_centered(fb, SMALL_FONT, 260 + k * 40, lines[k], shade(rgb(200, 220, 255), a * b));
+        }
+    }
+}
+
+// Draw the frame for song position t, in seconds
+fun render_frame(t)
+{
+    let section = (t / SECTION_SEC).floor().clip(0, SECTIONS.len - 1);
+    let st = t - section * SECTION_SEC;
+    let scene = SCENES[section];
+    let kick = (-hit_age(t, CH_K) * 9.0).exp();
+
+    // Fade in from black at the start and out at the end, with a white
+    // flash on each section change and a lighter one on kicks
+    let var b = (t / 2.5).min(1.0);
+    if (section > 0) b = b + 0.9 * (1.0 - st / 0.5).max(0.0);
+    b = b + 0.3 * kick;
+    b = b * ((SONG_SEC - t) / 3.0).clip(0.0, 1.0);
+    b = b.min(2.0);
+
+    if (scene == SCENE_INTRO) {
+        draw_intro(t, st, section, b);
+    } else if (scene == SCENE_TUNNEL) {
+        tunnel.draw(fb, t, b, section == 2 ? TUNNEL_COLORS : TUNNEL_COLORS_HOT);
+    } else if (scene == SCENE_PLASMA) {
+        plasma.draw(fb, t, b, PLASMA_COLORS);
+        scroller.draw(fb, st, H - 130, b.min(1.0));
+    } else if (scene == SCENE_ROTO) {
+        roto.draw(fb, t, b, kick);
+        scroller.draw(fb, st + SECTION_SEC, H - 130, b.min(1.0));
+    } else if (scene == SCENE_BLOBS) {
+        blobs.draw(fb, t, b, kick, section == 7);
+        if (section == 7) greetings.draw(fb, st, H - 130, b.min(1.0));
+    } else {
+        draw_outro(t, st, b);
+    }
+
+    return scene;
+}
+
+if (args.capture != nil) {
+    for (let var s = 0; s < SECTIONS.len; ++s) {
+        let path = args.capture + "_" + s.to_s() + ".tga";
+        render_frame((s + 0.6) * SECTION_SEC);
+        $write_file(path, encode_tga(fb, true));
+        $println("wrote " + path);
+    }
+    $exit(0);
+}
+
+if (args.bench) {
+    let totals = Array.with_size(SCENE_NAMES.len, 0);
+    let counts = Array.with_size(SCENE_NAMES.len, 0);
+    for (let var t = 0.0; t < SONG_SEC; t = t + 0.25) {
+        let t0 = $time_current_ms();
+        let scene = render_frame(t);
+        totals[scene] = totals[scene] + ($time_current_ms() - t0);
+        counts[scene] = counts[scene] + 1;
+    }
+    for (let var i = 0; i < SCENE_NAMES.len; ++i) {
+        let ms = totals[i].to_f() / counts[i];
+        $println(SCENE_NAMES[i].rpad(10, " ") + ms.format_decimals(1) + " ms/frame");
+    }
+    $exit(0);
+}
+
+// --- Main loop ---
+
+// Time between a buffer being handed over and being heard
+let AUDIO_LATENCY = 0.025;
+
+let window = $window_create(W, H, "Plush Intro", 0);
+
+let start_ms = $time_current_ms();
+let var have_pos = false;
+let var pos_frames = 0;
+let var pos_ms = 0;
+
+if (!args.mute) $actor_spawn(audio_actor);
+
+// Song position in seconds, from the audio actor's sample count when
+// there is one, interpolated with the clock between its reports
+fun song_time()
+{
+    let now = $time_current_ms();
+    if (args.mute) {
+        let t = (now - start_ms) / 1000.0;
+        return t - (t / SONG_SEC).floor() * SONG_SEC;
+    }
+    if (!have_pos) return 0.0;
+
+    let frames = pos_frames % SONG_FRAMES;
+    let t = frames.to_f() / SAMPLE_RATE + (now - pos_ms) / 1000.0 - AUDIO_LATENCY;
+    return t.clip(0.0, SONG_SEC - 0.001);
+}
+
+loop {
+    let frame_start = $time_current_ms();
+
+    loop {
+        let msg = $actor_poll();
+        if (msg == nil) break;
+
+        if (msg instanceof Int64) {
+            have_pos = true;
+            pos_frames = msg;
+            pos_ms = $time_current_ms();
+            continue;
+        }
+
+        if (msg instanceof UIEvent) {
+            if (msg.kind == 'CLOSE_WINDOW') $exit(0);
+            if (msg.kind == 'KEY_DOWN' && (msg.key == 'ESCAPE' || msg.key == 'Q')) $exit(0);
+        }
+    }
+
+    render_frame(song_time());
+    $window_draw_frame(window, fb.bytes);
+
+    let frame_ms = $time_current_ms() - frame_start;
+    if (frame_ms < 16) $actor_sleep(16 - frame_ms);
+}
