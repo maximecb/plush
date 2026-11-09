@@ -260,13 +260,71 @@ pub fn poll_ui_msg(actor: &mut Actor) -> Option<Value>
         sdl_state.event_pump = Some(sdl.event_pump().unwrap());
     }
 
-    let event_pump = sdl_state.event_pump.as_mut().unwrap();
+    // Skip over events that don't translate to a message, so that they
+    // don't hide the events queued behind them
+    loop {
+        let event = match sdl_state.event_pump.as_mut().unwrap().poll_event() {
+            Some(event) => event,
+            None => { return None; }
+        };
 
-    let event = match event_pump.poll_event() {
-        Some(event) => event,
-        None => { return None; }
-    };
+        #[cfg(target_os = "macos")]
+        macos::check_relock(sdl_state.sdl.as_ref().unwrap(), &event);
 
+        if let Some(msg) = translate_event(actor, event) {
+            return Some(msg);
+        }
+    }
+}
+
+/// Workaround for the cursor staying visible in relative mouse mode on
+/// macOS. SDL2 hides it with [NSCursor hide] when the window becomes key,
+/// which can happen before the hide can take effect (e.g. while the Dock icon
+/// is still being clicked). Neither window focus nor app activation arrive
+/// late enough, so we re-apply relative mode on the first input afterwards.
+#[cfg(target_os = "macos")]
+mod macos {
+    use sdl2::event::{Event, WindowEvent};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Set when the window regains focus, until relative mode is re-applied
+    static RELOCK_PENDING: AtomicBool = AtomicBool::new(false);
+
+    pub fn check_relock(sdl: &sdl2::Sdl, event: &Event)
+    {
+        match event {
+            Event::Window { win_event: WindowEvent::FocusGained, .. } => {
+                RELOCK_PENDING.store(true, Ordering::Relaxed);
+            }
+            Event::Window { win_event: WindowEvent::FocusLost, .. } => {
+                RELOCK_PENDING.store(false, Ordering::Relaxed);
+            }
+            Event::MouseMotion { .. } |
+            Event::MouseButtonDown { .. } |
+            Event::KeyDown { .. } => {
+                if RELOCK_PENDING.swap(false, Ordering::Relaxed) {
+                    relock_mouse(sdl);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Toggle relative mode off and on so SDL hides the cursor again. The
+    /// calls are paired, which keeps SDL's hide/unhide count balanced.
+    fn relock_mouse(sdl: &sdl2::Sdl)
+    {
+        let mouse = sdl.mouse();
+        if mouse.relative_mouse_mode() {
+            mouse.set_relative_mouse_mode(false);
+            mouse.set_relative_mouse_mode(true);
+        }
+    }
+}
+
+/// Translate an SDL event into a Plush UI message
+fn translate_event(actor: &mut Actor, event: Event) -> Option<Value>
+{
     match event.clone() {
         Event::Quit { .. } => {
             let msg = actor.alloc_obj(UIEVENT_ID);
