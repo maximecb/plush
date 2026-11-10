@@ -16,7 +16,7 @@ The Plush language has:
 - A simple TCP networking API
 - Memory safe, actor-based parallelism
 - A copying garbage-collector that runs independently for each actor
-- A very fast register-based interpreter than can even outperform Lua
+- A very fast register-based interpreter that can even outperform Lua
 - No global VM lock
 
 If you would like to know more about the design principles and ideas behind Plush, a
@@ -108,7 +108,7 @@ is the most negative integer, and `>>` preserves the sign. The shift amount must
 anything else is a runtime error.
 
 The division operator `/` always yields a floating-point value. To divide integers and stay in the integer
-domain, use the [`idiv`](#methods) method, which performs truncated division: `10.idiv(3)` is `3`.
+domain, use the [`idiv`](#core-methods) method, which performs truncated division: `10.idiv(3)` is `3`.
 
 Note that unlike in JavaScript, the `==` operator performs reference equality for objects, arrays and
 dictionaries, not structural equality.
@@ -251,7 +251,7 @@ The syntax for array literals is similar to that of JavaScript, e.g.
 let a = [0, 1, 2, 3, 4];
 ```
 
-Array elements an be accessed using the indexing operator with square brackets, e.g. `a[0] = 1`.
+Array elements can be accessed using the indexing operator with square brackets, e.g. `a[0] = 1`.
 ByteArrays can also be indexed using square brackets to read and write individual bytes.
 The length of arrays, ByteArrays and strings is accessed via the `.len` field. For strings,
 this is the length in UTF-8 bytes, not in characters.
@@ -330,6 +330,15 @@ class Point3D extends Point {
 
 let p = Point3D(1, 2, 3);
 $println(p.to_s()); // (1, 2, 3)
+```
+
+The `instanceof` operator checks whether a value is an instance of a class or one of its subclasses.
+It also works with the built-in `Int64`, `Float64`, `String`, `Array`, `ByteArray` and `Dict` classes.
+
+```plush
+$println(p instanceof Point);       // true
+$println(p instanceof Point3D);     // true
+$println("abc" instanceof String);  // true
 ```
 
 ### Imports
@@ -417,6 +426,9 @@ $println(rng.int(0, 100));
     -   `rpad(width, ch)`: Pad the right side with the single character `ch` until the string is at least `width` characters long.
     -   `split(sep)`: Given a separator string, split a string into an array of parts.
     -   `join(arr)`: Join an array of strings into one string, using this string as the separator, e.g. `", ".join(["a", "b"])`. It is an error if any element is not a string.
+    -   `to_s()`: Returns the string itself. Provided so that `to_s()` can be called on any primitive value.
+-   **Bool** and **Nil**
+    -   `to_s()`: Returns `"true"`, `"false"` or `"nil"`.
 -   **Array**
     -   `with_size(size, value)`: Creates a new array of the given size, filled with the given value.
     -   `push(value)`: Adds a value to the end of the array.
@@ -495,7 +507,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$window_lock_mouse(window_id, enabled)`: Locks the mouse to the window for FPS-style mouse look. The `dx` and `dy` fields of `MOUSE_MOVE` events report relative motion as floats.
 -   `$audio_open_output(sample_rate, num_channels)`: Opens an audio output device with the specified sample rate and number of channels. Returns a device ID.
 -   `$audio_write_samples(device_id, samples)`: Writes a `ByteArray` of `float32` audio samples to the specified audio device.
--   `$audio_open_input(sample_rate, num_channels)`: Opens an audio input device with the specified sample rate and number of channels. Returns a device ID .
+-   `$audio_open_input(sample_rate, num_channels)`: Opens an audio input device with the specified sample rate and number of channels. Returns a device ID.
 -   `$audio_read_samples(device_id, num_samples, dst_ba, index)`: Reads `num_samples` of `float32` audio samples from the specified audio device into a destination `ByteArray` starting at `index`. This function blocks until enough samples are available.
 -   `$net_listen(addr)`: Open a listening TCP socket bound to an address such as `"127.0.0.1:8080"`. Returns a socket id, or `nil` if the address could not be bound.
 -   `$net_connect(addr)`: Connect to a remote address such as `"example.com:80"`. Returns a socket id, or `nil` if the connection failed.
@@ -511,7 +523,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 
 ## Concurrency with Actors
 
-Plush supports actor-based concurrency, which allows you to write parallel programs that are safe and easy to reason about. Actors are independent processes that communicate by sending and receiving messages. A parent actor can spawn a child actor using the `$actor_spawn(f)` host function. This function takes a function as argument to be executed in the new actor. Actors work like isolated process and can only communicate through message passing. When an actor spawns a child, the child gets a copy of the parent's global variables.
+Plush supports actor-based concurrency, which allows you to write parallel programs that are safe and easy to reason about. Actors are independent processes that communicate by sending and receiving messages. A parent actor can spawn a child actor using the `$actor_spawn(f)` host function. This function takes a function as argument to be executed in the new actor. Actors work like isolated processes and can only communicate through message passing. When an actor spawns a child, the child gets a copy of the parent's global variables.
 
 Any Plush object or value can be sent to another actor, including class instances and closures. Objects sent over are deepcopied and the process is relatively fast. Throughput is in the hundreds of thousands of messages per second, or tens of gigabytes per second.
 
@@ -586,10 +598,6 @@ shortening the timeout with `$net_set_timeout()` if needed.
 
 ## Debugging
 
-At the moment there is no debugger and you may find that error messages are lackluster. Unsupported behaviors can
-result in Rust panics, sometimes without helpful messages. I've been working on gradually improving the error
-messages to make Plush more user-friendly, but PRs to improve this are welcome.
-
 To help in debugging, you can print values with `$println()` and you can use the built in `assert()` statement to
 validate your assumptions. If you run into a Rust panic with not enough context, you can also run Plush with
 `RUST_BACKTRACE=1` to produce a backtrace,
@@ -634,10 +642,10 @@ Here are some of the common operations used to manipulate image data stored in a
     ```plush
     let frame_buffer = ByteArray.with_size(width * height * 4);
     ```
-*   **Setting a single pixel:** The `store_u32` method can be used to set the color of a single pixel at a given `(x, y)` coordinate.
+*   **Setting a single pixel:** The `set_u32` method can be used to set the color of a single pixel at a given `(x, y)` coordinate.
     ```plush
     let index = y * width + x;
-    frame_buffer.store_u32(index, color);
+    frame_buffer.set_u32(index, color);
     ```
 *   **Filling a rectangle:** The `fill_u32` method is an efficient way to fill a rectangular area with a single color.
     ```plush
