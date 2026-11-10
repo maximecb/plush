@@ -2,7 +2,14 @@
 
 These are some notes about key principles and ideas that factor into
 the design of the Plush language and its VM.
-Although the language is dynamically typed, it is designed in part to be easy
+The language and VM are co-designed. Good engineering is undervalued.
+Simplicity and stability over time are also undervalued.
+I've seen too many language design choices that are terrible both from
+a performance and programmer intuition perspective.
+
+## Language Design
+
+Although Plush is dynamically typed, it is designed to be easy
 to optimize. This is why, for instance, functions and global
 variables are immutable by default. This removes the need to guard against
 functions being redefined or to implement a deoptimization mechanism for a
@@ -11,8 +18,6 @@ also something that can make code hard to follow and probably should not
 be done. That being said, it is possible to define a mutable global variable
 and assign a function to it, but if this is done, it will be clear both in the
 source code and to the VM that the function can be redefined.
-
-## Language Design
 
 One of the core design principles is minimalism. That is, try to keep both the
 language and the VM's implementation relatively simple. In my experience, those
@@ -107,6 +112,14 @@ tying certain capabilities to certain host functions. For example, the `$net_lis
 host function to open a listening/server socket could be tied to a `net_server` capability
 which is disabled by default. The ability to open an audio input device could be tied to
 an `audio_input` capability, etc.
+
+Functionality that is security sensitive should be implemented in separate host calls
+so that permissions can be granular. For example recording audio is much more security
+sensitive than outputting audio, because the first is a significant privacy risk while the
+second is annoying at most.
+Ideally, host functions should be granular enough that security sensitive host function
+can be gated by one permission/capability rather than multiple.
+
 In terms of file access, a program could eventually be limited to only the directory
 where it was installed by default, where its own bundled input data and config files are
 located. We could also add a file picker API which opens a dialog box for the user to select
