@@ -62,6 +62,9 @@ pub struct Env
 
     // Constructor calls, checked once inherited methods are resolved
     ctor_calls: Vec<CtorCall>,
+
+    // Number of loops enclosing the current statement in the current function
+    loop_depth: usize,
 }
 
 struct CtorCall
@@ -215,6 +218,7 @@ impl Program
         let mut unit = std::mem::take(self.units.get_mut(unit_key).unwrap());
 
         env.next_global_idx = self.num_globals;
+        env.loop_depth = 0;
         let base_scopes = env.scopes.len();
         let result = unit.resolve_repl_syms(self, env);
         self.num_globals = env.next_global_idx;
@@ -503,10 +507,14 @@ impl Function
             env.define(param_name, decl);
         }
 
+        // Loops outside this function can't be targeted by break/continue
+        let outer_loop_depth = std::mem::replace(&mut env.loop_depth, 0);
+
         let mut body = std::mem::take(&mut self.body);
         body.resolve_syms(prog, self, env)?;
         self.body = body;
 
+        env.loop_depth = outer_loop_depth;
         env.pop_scope();
 
         Ok(())
@@ -523,7 +531,15 @@ impl StmtBox
     ) -> Result<(), ParseError>
     {
         match self.stmt.as_mut() {
-            Stmt::Break | Stmt::Continue => {}
+            Stmt::Break | Stmt::Continue => {
+                if env.loop_depth == 0 {
+                    let keyword = if matches!(self.stmt.as_ref(), Stmt::Break) { "break" } else { "continue" };
+                    return ParseError::with_pos(
+                        &format!("`{}` outside of a loop", keyword),
+                        &self.pos
+                    );
+                }
+            }
 
             Stmt::Return(expr) => {
                 expr.resolve_syms(prog, fun, env)?;
@@ -583,8 +599,10 @@ impl StmtBox
                 env.push_scope();
                 init_stmt.resolve_syms(prog, fun, env)?;
                 test_expr.resolve_syms(prog, fun, env)?;
+                env.loop_depth += 1;
                 incr_stmt.resolve_syms(prog, fun, env)?;
                 body_stmt.resolve_syms(prog, fun, env)?;
+                env.loop_depth -= 1;
                 env.pop_scope();
             }
 
@@ -1042,5 +1060,22 @@ mod tests
         succeeds("class A { init(self, x) {} } class B extends A {} B(1);");
         fails("class A { init(self, x) {} } class B extends A {} B();");
         succeeds("class B extends A {} class A { init(self) {} } B();");
+    }
+
+    #[test]
+    fn break_continue()
+    {
+        succeeds("loop { break; }");
+        succeeds("while (true) { continue; }");
+        succeeds("for (let var i = 0; i < 10; i = i + 1) { if (i == 5) break; }");
+        succeeds("loop { loop { break; } break; }");
+        succeeds("fun f() { loop { let g = || { loop { break; } }; break; } }");
+        fails("break;");
+        fails("continue;");
+        fails("fun f() { break; }");
+        fails("if (true) { continue; }");
+        fails("loop { let f = || { break; }; }");
+        fails("class Foo { m(self) { continue; } } loop { break; }");
+        fails("for (break; true;) {}");
     }
 }
