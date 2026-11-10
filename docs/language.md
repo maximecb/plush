@@ -335,8 +335,7 @@ $println(p.to_s()); // (1, 2, 3)
 ### Imports
 
 Plush supports an `import` directive with a syntax similar to Python's. This makes it possible to import code from other files.
-There are a few restrictions. For now, only relative local imports are supported. That is, you can import from other source files,
-but Plush does not yet have a standard library to speak of. You also need to place all import directives at the beginning of the file.
+There are a few restrictions. You need to place all import directives at the beginning of the file.
 Lastly, you can import functions, classes and immutable globals declared with `let`, but you can't
 import mutable globals declared with `let var`.
 
@@ -358,7 +357,8 @@ from ./font import *;
 ```
 
 A path without a leading `./` names a standard library module. These are built into the Plush binary,
-so they can be imported from anywhere:
+so they can be imported from anywhere. The available modules can be found in the
+[`lib/std/`](/lib/std) directory:
 
 ```plush
 from random import Xoshiro128;
