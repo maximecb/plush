@@ -939,6 +939,10 @@ let faces = [];
 let brushes = [];
 let lights = [];
 
+// How bright the moon is on what it can see, set by `moonlight` in the map
+let var moon_light = 0.0;
+let MOON_REACH = 400.0;
+
 let var start_x = 0.0;
 let var start_y = 1.6;
 let var start_z = 0.0;
@@ -1380,6 +1384,35 @@ fun cmd_prism(cx, cz, radius, y0, y1, sides, rot, o) {
     add_brush(planes);
 }
 
+// A box running level from one point to another, `width` across, for anything
+// that does not lie square to the axes
+fun cmd_beam(x0, z0, x1, z1, width, y0, y1, o) {
+    let dx = x1 - x0;
+    let dz = z1 - z0;
+    let len = (dx * dx + dz * dz).sqrt();
+    if (len < 0.000001 || width <= 0.0) {
+        $println("a beam needs two ends apart and a width above zero");
+        $exit(1);
+    }
+
+    // Along the beam, and across it
+    let ux = dx / len;
+    let uz = dz / len;
+    let vx = 0.0 - uz;
+    let vz = ux;
+    let mid = vx * x0 + vz * z0;
+    let h = width * 0.5;
+
+    let planes = [];
+    planes.push(make_plane(0.0 - ux, 0.0, 0.0 - uz, 0.0 - (ux * x0 + uz * z0), pick(nil, o.side, o), o));
+    planes.push(make_plane(ux, 0.0, uz, ux * x1 + uz * z1, pick(nil, o.side, o), o));
+    planes.push(make_plane(vx, 0.0, vz, mid + h, pick(nil, o.side, o), o));
+    planes.push(make_plane(0.0 - vx, 0.0, 0.0 - vz, h - mid, pick(nil, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+    add_brush(planes);
+}
+
 // The solid above a doorway, cut away underneath into a faceted arch. This is
 // the shape Quake uses everywhere: a handful of flat segments reading as a
 // curve, each one an angled face.
@@ -1466,6 +1499,12 @@ fun parse_map(path) {
             continue;
         }
 
+        // Light from the moon drawn in the sky, on whatever has a clear line to it
+        if (cmd == "moonlight") {
+            moon_light = field_num(tok, 1, "brightness");
+            continue;
+        }
+
         if (cmd == "box") {
             cmd_box(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
                 field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
@@ -1491,6 +1530,13 @@ fun parse_map(path) {
             cmd_prism(field_num(tok, 1, "cx"), field_num(tok, 2, "cz"), field_num(tok, 3, "radius"),
                 field_num(tok, 4, "y0"), field_num(tok, 5, "y1"), field_int(tok, 6, "sides"),
                 field_num(tok, 7, "rot") * PI / 180.0, parse_opts(tok, 8));
+            continue;
+        }
+
+        if (cmd == "beam") {
+            cmd_beam(field_num(tok, 1, "x0"), field_num(tok, 2, "z0"), field_num(tok, 3, "x1"),
+                field_num(tok, 4, "z1"), field_num(tok, 5, "width"), field_num(tok, 6, "y0"),
+                field_num(tok, 7, "y1"), parse_opts(tok, 8));
             continue;
         }
 
@@ -1637,6 +1683,21 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
 
         let atten = 1.0 - dist / radius;
         lum = lum + L[4] * atten * (0.35 + 0.65 * ndotl);
+    }
+
+    // The moon is far enough off to be a direction rather than a place, and
+    // does not fade with distance. A buried sample takes none of it: unlike a
+    // lamp it would otherwise reach every roofed-over face in the level.
+    if (moon_light > 0.0 && !buried) {
+        let ce = MOON_EL.cos();
+        let dx = ce * MOON_AZ.sin();
+        let dy = MOON_EL.sin();
+        let dz = ce * MOON_AZ.cos();
+        let ndotl = nx * dx + ny * dy + nz * dz;
+        if (ndotl > 0.0 && !occluded(cx, cy, cz,
+            cx + dx * MOON_REACH, cy + dy * MOON_REACH, cz + dz * MOON_REACH)) {
+            lum = lum + moon_light * (0.35 + 0.65 * ndotl);
+        }
     }
 
     // The curve is applied here rather than per level, so what gets
