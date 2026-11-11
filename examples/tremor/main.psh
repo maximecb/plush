@@ -39,7 +39,7 @@ from ./lighting import light_world, light_level_at;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
     set_scene, set_view, set_draw_list, set_muzzle_flash, set_particles, set_screen_tint,
     render_frame_parallel, start_render_actors, stop_render_actors;
-from ./entities import Player, spawn_entities, touch_entities, load_weapons, shoot, update_blood, sound_events,
+from ./entities import Player, spawn_entities, touch_entities, load_weapons, load_gibs, shoot, update_blood, update_gibs, sound_events,
     EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
 from ./models import models;
 from ./sound import start_sound, stop_sound, play_sound, play_sound_at;
@@ -85,6 +85,7 @@ let player = Player(world.spawn_x, world.spawn_y - EYE_HEIGHT, world.spawn_z, wo
 let models_start_ms = $time_current_ms();
 let entities = spawn_entities(world, player);
 load_weapons();
+load_gibs();
 if (entities.len > 0) {
     $println("entities: " + entities.len.to_s() + ", with " + models.len.to_s() + " models loaded in "
         + ($time_current_ms() - models_start_ms).to_s() + " ms");
@@ -143,6 +144,7 @@ fun update_entities(dt) {
         list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, level, false, e.pitch]);
     }
 
+    update_gibs(dt, list);
     set_particles(update_blood(dt, player.x, player.eye_y(), player.z));
 
     // The view goes red for a moment when the player is hurt

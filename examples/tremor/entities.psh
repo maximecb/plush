@@ -7,7 +7,7 @@
 // facing along its yaw, posed by the animation it is playing.
 
 from ./physics import move_body;
-from ./models import get_model, add_model, box_model, models;
+from ./models import get_model, add_model, box_model, blob_model, models;
 from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER;
 from ./lighting import light_level_at, occluded;
 
@@ -705,23 +705,108 @@ fun spawn_blood(x, y, z, dx, dy, dz, n, floor_y) {
     }
 }
 
-// A body bursting: a great deal of blood, and chunks of it, flesh and armor,
-// thrown out every way and up, which lie where they land for a while
+// --- Gibs ---
+//
+// A body bursting: a great deal of blood, and lumps of flesh thrown out every
+// way and up, tumbling as they go, which bounce a little where they land and
+// lie there for a while. The lumps are small models of a few shapes, made
+// when the game starts, since the render actors need every model before they
+// are spawned.
+
 let GIB_DROPS = 70;
-let GIB_CHUNKS = 16;
+let GIB_CHUNKS = 12;
+let GIB_SHAPES = 5;
 let GIB_LIFE = 10.0;
-// Particles are not lit, so these are as dark as the rooms they lie in
-let GIB_COLORS = [0xFF_52_0A_08, 0xFF_3C_04_04, 0xFF_5A_2C_24, 0xFF_2E_2B_2A, 0xFF_42_3F_3C];
+let GIB_TEX = "flesh_red";
+
+// What is kept of the speed of a lump each time it hits the floor, and how
+// slow it has to be going to come to rest
+let GIB_BOUNCE = 0.3;
+let GIB_REST_SPEED = 0.6;
+
+// How long a lump takes to shrink away at the end of its life
+let GIB_FADE = 0.5;
+
+let gib_models = [];
+
+// Make the shapes of the lumps. Call this before the render actors start.
+fun load_gibs() {
+    let img = load_texture(TEX_DIR + GIB_TEX + ".tga");
+    for (let var i = 0; i < GIB_SHAPES; ++i) {
+        gib_models.push(add_model("gib " + i.to_s(), blob_model(7919 * (i + 1), img)));
+    }
+}
+
+class Gib {
+    init(self, model, x, y, z, vx, vy, vz, size, floor, level) {
+        self.model = model;
+        self.x = x; self.y = y; self.z = z;
+        self.vx = vx; self.vy = vy; self.vz = vz;
+        self.yaw = blood_rand(0.0, 2.0 * PI);
+        self.pitch = blood_rand(0.0, 2.0 * PI);
+        self.spin_yaw = blood_rand(-12.0, 12.0);
+        self.spin_pitch = blood_rand(-12.0, 12.0);
+        self.size = size;
+        self.floor = floor;
+        self.level = level;
+        self.life = blood_rand(GIB_LIFE * 0.7, GIB_LIFE);
+        self.resting = false;
+    }
+}
+
+let gibs = [];
 
 fun spawn_gibs(x, y, z, floor_y) {
     spawn_blood(x, y, z, 0.0, 0.5, 0.0, GIB_DROPS, floor_y);
+    if (gib_models.len == 0) return;
+    let level = light_level_at(x, y, z);
     for (let var i = 0; i < GIB_CHUNKS; ++i) {
         let a = blood_rand(0.0, 2.0 * PI);
         let speed = blood_rand(2.0, 6.0);
-        let color = GIB_COLORS[(blood_rand(0.0, GIB_COLORS.len.to_f())).floor().min(GIB_COLORS.len - 1)];
-        drops.push(Drop(x + blood_rand(-0.3, 0.3), y + blood_rand(-0.2, 0.3), z + blood_rand(-0.3, 0.3),
-            a.cos() * speed, blood_rand(2.0, 6.0), a.sin() * speed, blood_rand(0.1, 0.24), color,
-            blood_rand(GIB_LIFE * 0.7, GIB_LIFE), floor_y + 0.06));
+        let model = gib_models[(blood_rand(0.0, gib_models.len.to_f())).floor().min(gib_models.len - 1)];
+        gibs.push(Gib(model, x + blood_rand(-0.3, 0.3), y + blood_rand(-0.2, 0.3), z + blood_rand(-0.3, 0.3),
+            a.cos() * speed, blood_rand(2.0, 6.0), a.sin() * speed, blood_rand(0.3, 0.55), floor_y, level));
+    }
+}
+
+// Move the lumps on, and add one draw list entry for each to list
+fun update_gibs(dt, list) {
+    for (let var i = gibs.len - 1; i >= 0; --i) {
+        let g = gibs[i];
+        g.life = g.life - dt;
+        if (g.life <= 0.0) { gibs.remove(i); continue; }
+
+        if (!g.resting) {
+            g.vy = g.vy - BLOOD_GRAVITY * dt;
+
+            // Bouncing back off a wall rather than going through it. The test
+            // is made a little above the lump's base, clear of the floor.
+            let nx = g.x + g.vx * dt;
+            let nz = g.z + g.vz * dt;
+            let ty = g.y.max(g.floor) + 0.1;
+            if (occluded(g.x, ty, g.z, nx, ty, nz)) {
+                g.vx = (0.0 - g.vx) * GIB_BOUNCE;
+                g.vz = (0.0 - g.vz) * GIB_BOUNCE;
+            } else {
+                g.x = nx;
+                g.z = nz;
+            }
+            g.y = g.y + g.vy * dt;
+            g.yaw = g.yaw + g.spin_yaw * dt;
+            g.pitch = g.pitch + g.spin_pitch * dt;
+
+            // A lump's base is its lowest point, so it lands when that does
+            if (g.y < g.floor) {
+                g.y = g.floor;
+                g.vy = (0.0 - g.vy) * GIB_BOUNCE;
+                g.vx = g.vx * GIB_BOUNCE; g.vz = g.vz * GIB_BOUNCE;
+                g.spin_yaw = g.spin_yaw * GIB_BOUNCE; g.spin_pitch = g.spin_pitch * GIB_BOUNCE;
+                if (g.vy < GIB_REST_SPEED) g.resting = true;
+            }
+        }
+
+        let s = g.size * (g.life / GIB_FADE).min(1.0);
+        list.push([g.model.id, 0 - 1, 0.0, g.x, g.y, g.z, g.yaw, s, g.level, false, g.pitch]);
     }
 }
 

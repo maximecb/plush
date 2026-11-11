@@ -13,6 +13,8 @@ from png import decode_png;
 
 let MODEL_DIR = "examples/tremor/models/";
 
+let PI = 3.14159265358979;
+
 // Model textures larger than this along either axis are scaled down to it.
 // Every render actor holds its own copy of every texture.
 let MAX_TEX_SIZE = 512;
@@ -1380,6 +1382,99 @@ fun add_quad(mesh, corners, n, uvs, tex) {
     for (let var i = 0; i < 6; ++i) mesh.indices.push(base + tris[i]);
     mesh.tri_textures.push(tex);
     mesh.tri_textures.push(tex);
+}
+
+// Add a triangle to a mesh with its own three corners, facing the way n
+// points, which is also the normal it is lit by, so that it shades flat
+fun add_tri(mesh, a, b, c, n, uvs, tex) {
+    let ux = b[0] - a[0]; let uy = b[1] - a[1]; let uz = b[2] - a[2];
+    let vx = c[0] - a[0]; let vy = c[1] - a[1]; let vz = c[2] - a[2];
+    let ccw = (uy * vz - uz * vy) * n[0] + (uz * vx - ux * vz) * n[1] + (ux * vy - uy * vx) * n[2] > 0.0;
+
+    let base = mesh.num_verts();
+    let corners = [a, b, c];
+    for (let var i = 0; i < 3; ++i) {
+        let p = corners[i];
+        mesh.positions.push(p[0]); mesh.positions.push(p[1]); mesh.positions.push(p[2]);
+        mesh.normals.push(n[0]); mesh.normals.push(n[1]); mesh.normals.push(n[2]);
+        mesh.uvs.push(uvs[i * 2]); mesh.uvs.push(uvs[i * 2 + 1]);
+    }
+    if (ccw) { mesh.indices.push(base); mesh.indices.push(base + 1); mesh.indices.push(base + 2); }
+    else { mesh.indices.push(base); mesh.indices.push(base + 2); mesh.indices.push(base + 1); }
+    mesh.tri_textures.push(tex);
+}
+
+// A random number in [lo, hi), from a generator whose state is the one
+// number in state[0], so that a shape can be made again from its seed
+fun seeded_rand(state, lo, hi) {
+    state[0] = (state[0] * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lo + (hi - lo) * (state[0].to_f() / 2147483648.0);
+}
+
+// A lump about 1 across, of a shape no two seeds give alike: a sphere of a few
+// rings and segments, its points pushed in and out at random and stretched
+// unevenly along each axis, shaded flat so that every facet shows
+fun blob_model(seed, img) {
+    let mesh = MeshData();
+    mesh.textures.push(img);
+    let state = [seed];
+
+    let RINGS = 5;
+    let SEGS = 7;
+    let sx = seeded_rand(state, 0.6, 1.3);
+    let sy = seeded_rand(state, 0.45, 0.85);
+    let sz = seeded_rand(state, 0.6, 1.3);
+
+    // The points, ring by ring from the bottom pole to the top one
+    let pts = [];
+    for (let var r = 0; r <= RINGS; ++r) {
+        let phi = PI * r.to_f() / RINGS.to_f();
+        let row = [];
+        let count = (r == 0 || r == RINGS) ? 1 : SEGS;
+        for (let var k = 0; k < count; ++k) {
+            let th = 2.0 * PI * (k.to_f() + seeded_rand(state, -0.2, 0.2)) / SEGS.to_f();
+            let rad = 0.5 * seeded_rand(state, 0.65, 1.25);
+            row.push([phi.sin() * th.cos() * rad * sx, 0.0 - phi.cos() * rad * sy, phi.sin() * th.sin() * rad * sz]);
+        }
+        pts.push(row);
+    }
+
+    // Each triangle faces away from the middle
+    fun tri(m, a, b, c, u0, v0) {
+        let ux = b[0] - a[0]; let uy = b[1] - a[1]; let uz = b[2] - a[2];
+        let vx = c[0] - a[0]; let vy = c[1] - a[1]; let vz = c[2] - a[2];
+        let var nx = uy * vz - uz * vy;
+        let var ny = uz * vx - ux * vz;
+        let var nz = ux * vy - uy * vx;
+        let len = (nx * nx + ny * ny + nz * nz).sqrt().max(0.000001);
+        nx = nx / len; ny = ny / len; nz = nz / len;
+        if (nx * (a[0] + b[0] + c[0]) + ny * (a[1] + b[1] + c[1]) + nz * (a[2] + b[2] + c[2]) < 0.0) {
+            nx = 0.0 - nx; ny = 0.0 - ny; nz = 0.0 - nz;
+        }
+        add_tri(m, a, b, c, [nx, ny, nz], [u0, v0, u0 + 0.3, v0, u0, v0 + 0.3], 0);
+    }
+
+    for (let var r = 0; r < RINGS; ++r) {
+        let lo = pts[r];
+        let hi = pts[r + 1];
+        for (let var k = 0; k < SEGS; ++k) {
+            let k1 = (k + 1) % SEGS;
+            let u = k.to_f() / SEGS.to_f() * 2.0;
+            let v = r.to_f() / RINGS.to_f();
+            if (lo.len == 1) {
+                tri(mesh, lo[0], hi[k], hi[k1], u, v);
+            } else if (hi.len == 1) {
+                tri(mesh, lo[k], lo[k1], hi[0], u, v);
+            } else {
+                tri(mesh, lo[k], lo[k1], hi[k1], u, v);
+                tri(mesh, lo[k], hi[k1], hi[k], u, v);
+            }
+        }
+    }
+
+    let model = Model(mesh, MAX_TEX_SIZE);
+    model.find_bounds();
+    return model;
 }
 
 // A box `width` along x, `height` up from y = 0 and `depth` along z, centered
