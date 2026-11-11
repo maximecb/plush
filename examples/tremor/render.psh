@@ -1938,60 +1938,105 @@ fun raster_triangle() {
     pixels_drawn = pixels_drawn + span_px;
 }
 
-// Work out the gradients the span loop runs on for one triangle of a model
-// that transform() has left in view space, and draw it
-fun draw_triangle(model, t) {
-    let indices = model.indices;
-    let vX = model.vX; let vY = model.vY; let vW = model.vW; let vD = model.vD;
-    let vUZ = model.vUZ; let vVZ = model.vVZ; let vLZ = model.vLZ;
-
-    let a = indices[t * 3];
-    let b = indices[t * 3 + 1];
-    let c = indices[t * 3 + 2];
-
-    // Triangles are not clipped to the near plane, so one reaching it is
-    // dropped. That only happens with the eye almost touching the model.
-    if (vD[a] < NEAR || vD[b] < NEAR || vD[c] < NEAR) return;
-
-    let x0 = vX[a];
-    let y0 = vY[a];
-    pX[0] = x0;    pY[0] = y0;
-    pX[1] = vX[b]; pY[1] = vY[b];
-    pX[2] = vX[c]; pY[2] = vY[c];
+// Work out the gradients the span loop runs on for a triangle given by its
+// three corners on screen, each with its 1/z and u, v and light over z, and
+// draw it with the texture already set
+fun draw_projected(x0, y0, w0, uz0, vz0, lz0, x1, y1, w1, uz1, vz1, lz1, x2, y2, w2, uz2, vz2, lz2) {
+    pX[0] = x0; pY[0] = y0;
+    pX[1] = x1; pY[1] = y1;
+    pX[2] = x2; pY[2] = y2;
 
     // Too thin to cover a pixel, or to take gradients from
-    let e1x = pX[1] - x0; let e1y = pY[1] - y0;
-    let e2x = pX[2] - x0; let e2y = pY[2] - y0;
+    let e1x = x1 - x0; let e1y = y1 - y0;
+    let e2x = x2 - x0; let e2y = y2 - y0;
     let det = e1x * e2y - e2x * e1y;
     if (det > -0.000001) return;
     let inv_det = 1.0 / det;
 
-    let uz0 = vUZ[a];
-    let d1u = vUZ[b] - uz0;
-    let d2u = vUZ[c] - uz0;
+    let d1u = uz1 - uz0;
+    let d2u = uz2 - uz0;
     g_duzdx = (d1u * e2y - d2u * e1y) * inv_det;
     g_duzdy = (d2u * e1x - d1u * e2x) * inv_det;
 
-    let vz0 = vVZ[a];
-    let d1v = vVZ[b] - vz0;
-    let d2v = vVZ[c] - vz0;
+    let d1v = vz1 - vz0;
+    let d2v = vz2 - vz0;
     g_dvzdx = (d1v * e2y - d2v * e1y) * inv_det;
     g_dvzdy = (d2v * e1x - d1v * e2x) * inv_det;
 
-    let lz0 = vLZ[a];
-    let d1l = vLZ[b] - lz0;
-    let d2l = vLZ[c] - lz0;
+    let d1l = lz1 - lz0;
+    let d2l = lz2 - lz0;
     g_dlzdx = (d1l * e2y - d2l * e1y) * inv_det;
     g_dlzdy = (d2l * e1x - d1l * e2x) * inv_det;
 
-    let w0 = vW[a];
-    let d1w = vW[b] - w0;
-    let d2w = vW[c] - w0;
+    let d1w = w1 - w0;
+    let d2w = w2 - w0;
     g_dwdx = (d1w * e2y - d2w * e1y) * inv_det;
     g_dwdy = (d2w * e1x - d1w * e2x) * inv_det;
 
     g_uz0 = uz0; g_vz0 = vz0; g_lz0 = lz0; g_w0 = w0;
     g_ref_x = x0; g_ref_y = y0;
+
+    raster_triangle();
+}
+
+// A triangle cut by the near plane, in view space: up to four corners, each
+// a position, texture coordinates in texels and a light level
+let clip_x = Array.with_size(4, 0.0);
+let clip_y = Array.with_size(4, 0.0);
+let clip_z = Array.with_size(4, 0.0);
+let clip_u = Array.with_size(4, 0.0);
+let clip_v = Array.with_size(4, 0.0);
+let clip_l = Array.with_size(4, 0.0);
+let var clip_n = 0;
+
+// Add the corner a fraction f of the way from vertex a to vertex b
+fun clip_add(model, a, b, f) {
+    let n = clip_n;
+    clip_x[n] = model.vVX[a] + (model.vVX[b] - model.vVX[a]) * f;
+    clip_y[n] = model.vVY[a] + (model.vVY[b] - model.vVY[a]) * f;
+    clip_z[n] = model.vD[a] + (model.vD[b] - model.vD[a]) * f;
+    clip_u[n] = model.vert_u[a] + (model.vert_u[b] - model.vert_u[a]) * f;
+    clip_v[n] = model.vert_v[a] + (model.vert_v[b] - model.vert_v[a]) * f;
+    clip_l[n] = model.vL[a] + (model.vL[b] - model.vL[a]) * f;
+    clip_n = n + 1;
+}
+
+// Keep the start of the edge from a to b if it is in front of the near plane,
+// and where the edge crosses it if it does
+fun clip_edge(model, a, b) {
+    let da = model.vD[a];
+    let db = model.vD[b];
+    if (da >= NEAR) clip_add(model, a, b, 0.0);
+    if ((da >= NEAR) != (db >= NEAR)) clip_add(model, a, b, (NEAR - da) / (db - da));
+}
+
+// Draw corners 0, i and j of the clipped polygon
+fun draw_clipped(i, j) {
+    let w0 = 1.0 / clip_z[0]; let w1 = 1.0 / clip_z[i]; let w2 = 1.0 / clip_z[j];
+    draw_projected(
+        CENTER_X + FOCAL * clip_x[0] * w0, CENTER_Y - FOCAL * clip_y[0] * w0, w0,
+        clip_u[0] * w0, clip_v[0] * w0, clip_l[0] * w0,
+        CENTER_X + FOCAL * clip_x[i] * w1, CENTER_Y - FOCAL * clip_y[i] * w1, w1,
+        clip_u[i] * w1, clip_v[i] * w1, clip_l[i] * w1,
+        CENTER_X + FOCAL * clip_x[j] * w2, CENTER_Y - FOCAL * clip_y[j] * w2, w2,
+        clip_u[j] * w2, clip_v[j] * w2, clip_l[j] * w2);
+}
+
+// Draw one triangle of a model that transform() has left in view space. One
+// that reaches through the near plane is cut off at it, which matters for big
+// flat models such as doors, whose few triangles span more than the view.
+fun draw_triangle(model, t) {
+    let indices = model.indices;
+    let vD = model.vD;
+
+    let a = indices[t * 3];
+    let b = indices[t * 3 + 1];
+    let c = indices[t * 3 + 2];
+
+    let in_a = vD[a] >= NEAR;
+    let in_b = vD[b] >= NEAR;
+    let in_c = vD[c] >= NEAR;
+    if (!in_a && !in_b && !in_c) return;
 
     let tex = model.tri_tex[t];
     g_pix = tex.pix;
@@ -2001,7 +2046,20 @@ fun draw_triangle(model, t) {
     g_uwrap = tex.uwrap;
     g_vwrap = tex.vwrap;
 
-    raster_triangle();
+    if (in_a && in_b && in_c) {
+        let vX = model.vX; let vY = model.vY; let vW = model.vW;
+        let vUZ = model.vUZ; let vVZ = model.vVZ; let vLZ = model.vLZ;
+        draw_projected(vX[a], vY[a], vW[a], vUZ[a], vVZ[a], vLZ[a],
+                       vX[b], vY[b], vW[b], vUZ[b], vVZ[b], vLZ[b],
+                       vX[c], vY[c], vW[c], vUZ[c], vVZ[c], vLZ[c]);
+        return;
+    }
+
+    clip_n = 0;
+    clip_edge(model, a, b);
+    clip_edge(model, b, c);
+    clip_edge(model, c, a);
+    for (let var i = 1; i + 1 < clip_n; ++i) draw_clipped(i, i + 1);
 }
 
 // A direction in world space, turned into view space

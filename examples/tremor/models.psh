@@ -887,6 +887,12 @@ class Model
         self.vVZ = Array.with_size(num_verts, 0.0);
         self.vLZ = Array.with_size(num_verts, 0.0);
 
+        // Each vertex in view space before projection, and its light level,
+        // which are what a triangle crossing the near plane is clipped with
+        self.vVX = Array.with_size(num_verts, 0.0);
+        self.vVY = Array.with_size(num_verts, 0.0);
+        self.vL = Array.with_size(num_verts, 0.0);
+
         // Distance of the middle of the model in the current transform
         self.mid_depth = 0.0;
 
@@ -1104,6 +1110,7 @@ class Model
         let pose = self.pose;
         let vX = self.vX; let vY = self.vY; let vD = self.vD; let vW = self.vW;
         let vUZ = self.vUZ; let vVZ = self.vVZ; let vLZ = self.vLZ;
+        let vVX = self.vVX; let vVY = self.vVY; let vL = self.vL;
         let vert_u = self.vert_u;
         let vert_v = self.vert_v;
 
@@ -1121,10 +1128,14 @@ class Model
 
             let depth = m8 * x + m9 * y + m10 * z + m11;
             let w = 1.0 / depth;
-            vX[i] = center_x + focal * (m0 * x + m1 * y + m2 * z + m3) * w;
-            vY[i] = center_y - focal * (m4 * x + m5 * y + m6 * z + m7) * w;
+            let view_x = m0 * x + m1 * y + m2 * z + m3;
+            let view_y = m4 * x + m5 * y + m6 * z + m7;
+            vX[i] = center_x + focal * view_x * w;
+            vY[i] = center_y - focal * view_y * w;
             vD[i] = depth;
             vW[i] = w;
+            vVX[i] = view_x;
+            vVY[i] = view_y;
 
             // The normal turns with the model, and the light does not
             let nx = pose.get_f32(p + 3);
@@ -1139,6 +1150,7 @@ class Model
             vUZ[i] = vert_u[i] * w;
             vVZ[i] = vert_v[i] * w;
             vLZ[i] = level * w;
+            vL[i] = level;
             p = p + POSE_FLOATS;
         }
     }
@@ -1149,7 +1161,7 @@ class Model
     sort(self)
     {
         let indices = self.indices;
-        let vX = self.vX; let vY = self.vY; let vD = self.vD;
+        let vD = self.vD; let vVX = self.vVX; let vVY = self.vVY;
         let front_tri = self.front_tri;
         let front_bucket = self.front_bucket;
         let draw_order = self.draw_order;
@@ -1171,12 +1183,15 @@ class Model
             let c = indices[t * 3 + 2];
 
             // The front of a triangle is the side its corners run
-            // counter-clockwise on. Rows run down the screen, which turns
-            // that into a negative area here.
-            let ax = vX[a];
-            let ay = vY[a];
-            let area = (vX[b] - ax) * (vY[c] - ay) - (vX[c] - ax) * (vY[b] - ay);
-            if (area >= 0.0) continue;
+            // counter-clockwise on as the eye sees them, which is when the
+            // eye is on the side its normal points to. That is worked out in
+            // view space rather than from the corners on screen, which are
+            // meaningless for one behind the eye.
+            let ax = vVX[a]; let ay = vVY[a]; let az = vD[a];
+            let ux = vVX[b] - ax; let uy = vVY[b] - ay; let uz = vD[b] - az;
+            let wx = vVX[c] - ax; let wy = vVY[c] - ay; let wz = vD[c] - az;
+            let facing = ax * (uy * wz - uz * wy) + ay * (uz * wx - ux * wz) + az * (ux * wy - uy * wx);
+            if (facing <= 0.0) continue;
 
             let bucket = ((vD[a] + vD[b] + vD[c] - key_min) * key_scale).floor().clip(0, last_bucket);
             front_tri[count] = t;
@@ -1316,8 +1331,80 @@ fun get_model(name) {
     let model = Model.load(MODEL_DIR + name + ".glb", MAX_TEX_SIZE);
     if (model == nil) $exit(1);
 
+    return add_model(name, model);
+}
+
+// Add a model made in code to the registry under a name
+fun add_model(name, model) {
     model.id = models.len;
     models.push(model);
     models_by_name[name] = model;
+    return model;
+}
+
+// --- Models made in code ---
+
+// Add a quad to a mesh, its corners given in order around it. They are put in
+// counter-clockwise order seen from the side n points to, whichever way round
+// they come.
+fun add_quad(mesh, corners, n, uvs, tex) {
+    let a = corners[0]; let b = corners[1]; let c = corners[2];
+    let ux = b[0] - a[0]; let uy = b[1] - a[1]; let uz = b[2] - a[2];
+    let vx = c[0] - a[0]; let vy = c[1] - a[1]; let vz = c[2] - a[2];
+    let cx = uy * vz - uz * vy;
+    let cy = uz * vx - ux * vz;
+    let cz = ux * vy - uy * vx;
+    let ccw = cx * n[0] + cy * n[1] + cz * n[2] > 0.0;
+
+    let base = mesh.num_verts();
+    for (let var i = 0; i < 4; ++i) {
+        let p = corners[i];
+        mesh.positions.push(p[0]); mesh.positions.push(p[1]); mesh.positions.push(p[2]);
+        mesh.normals.push(n[0]); mesh.normals.push(n[1]); mesh.normals.push(n[2]);
+        mesh.uvs.push(uvs[i * 2]); mesh.uvs.push(uvs[i * 2 + 1]);
+    }
+
+    let var tris = [0, 1, 2, 0, 2, 3];
+    if (!ccw) tris = [0, 2, 1, 0, 3, 2];
+    for (let var i = 0; i < 6; ++i) mesh.indices.push(base + tris[i]);
+    mesh.tri_textures.push(tex);
+    mesh.tri_textures.push(tex);
+}
+
+// A box `width` along x, `height` up from y = 0 and `depth` along z, centered
+// on x and z. Its two large faces, at either end of z, show `face_img` once
+// across each. The four edges tile `edge_img` at texels_per_meter.
+fun box_model(width, height, depth, face_img, edge_img, texels_per_meter) {
+    let mesh = MeshData();
+    mesh.textures.push(face_img);
+    mesh.textures.push(edge_img);
+
+    let x0 = width * -0.5; let x1 = width * 0.5;
+    let z0 = depth * -0.5; let z1 = depth * 0.5;
+    let y0 = 0.0; let y1 = height;
+
+    // Edge texture coordinates, as a fraction of the image
+    let eu = texels_per_meter / edge_img.width.to_f();
+    let ev = texels_per_meter / edge_img.height.to_f();
+
+    // The large faces, the texture upright on both
+    add_quad(mesh, [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], 0);
+    add_quad(mesh, [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], [0.0, 0.0, -1.0],
+        [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], 0);
+
+    // The ends, top and bottom
+    let su = depth * eu; let sv = height * ev; let wu = width * eu;
+    add_quad(mesh, [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1.0, 0.0, 0.0],
+        [0.0, sv, su, sv, su, 0.0, 0.0, 0.0], 1);
+    add_quad(mesh, [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], [1.0, 0.0, 0.0],
+        [0.0, sv, su, sv, su, 0.0, 0.0, 0.0], 1);
+    add_quad(mesh, [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], [0.0, 1.0, 0.0],
+        [0.0, su, wu, su, wu, 0.0, 0.0, 0.0], 1);
+    add_quad(mesh, [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0.0, -1.0, 0.0],
+        [0.0, su, wu, su, wu, 0.0, 0.0, 0.0], 1);
+
+    let model = Model(mesh, MAX_TEX_SIZE);
+    model.find_bounds();
     return model;
 }

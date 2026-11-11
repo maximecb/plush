@@ -15,9 +15,15 @@
 //   beam  x0= z0= x1= z1= width= y0= y1= [keys]
 //   arch  axis=<x|z> a0= a1= c0= c1= ybase= ytop= segs= [keys]
 //   entity type=<kind> x= y= z= yaw=<degrees>
+//   door  x0= y0= z0= x1= y1= z1= lift= tex=
 //
 // An entity stands with its base at x, y, z. The kinds are listed in
 // spawn_entity() in entities.psh.
+//
+// A door fills its box when shut and slides up by `lift` to open when the
+// player comes close. Its texture is shown once across each of its two large
+// faces. Doors are not in the light bake, so the space a door rises into
+// should be solid, and it should sit a little inside its doorway's walls.
 //
 // Keys: tex= side= top= bottom= nx= px= ny= py= nz= pz= name the texture to
 // place on a face, light=<0..15> to force a light level instead of baking one,
@@ -505,6 +511,10 @@ box   x0=2.4 y0=0 z0=44.8 x1=8 y1=7.2 z1=46.4 tex=brick_blue
 box   x0=-2.4 y0=5.6 z0=44.8 x1=2.4 y1=7.2 z1=46.4 tex=brick_blue
 arch  axis=z a0=44.8 a1=46.4 c0=-2.4 c1=2.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
+// A door across the archway, the full height of it. Open, it still shows a
+// little at the top of the arch.
+door  x0=-2.45 y0=-0.05 z0=45.4 x1=2.45 y1=5.6 z1=45.8 lift=5.2 tex=door_grate
+
 // The floor, in four pieces around the pool
 box   x0=-8 y0=-2.4 z0=33.6 x1=8 y1=0 z1=37.6 tex=floor_checker
 box   x0=-8 y0=-2.4 z0=42.4 x1=8 y1=0 z1=46.4 tex=floor_checker
@@ -608,14 +618,32 @@ box   x0=17.6 y0=5.6 z0=77.6 x1=19.2 y1=26.4 z1=82.4 tex=stone_blocks
 box   x0=17.6 y0=-2.4 z0=77.6 x1=19.2 y1=0 z1=82.4 tex=floor_stone
 arch  axis=x a0=17.6 a1=19.2 c0=77.6 c1=82.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
-// The east wall, with a barred doorway on the top gallery: the way on, once
-// there is somewhere for it to go
+// The east wall, with an arched doorway on the top gallery and a door in it.
+// Open, the door stands well above the roof, so it rises into a housing built
+// up on the wall, which also keeps it out of sight through the opening.
 box   x0=48 y0=-2.4 z0=65.6 x1=49.6 y1=26.4 z1=77.6 tex=stone_blocks
 box   x0=48 y0=-2.4 z0=82.4 x1=49.6 y1=26.4 z1=94.4 tex=stone_blocks
 box   x0=48 y0=-2.4 z0=77.6 x1=49.6 y1=19.2 z1=82.4 tex=stone_blocks
 box   x0=48 y0=24.8 z0=77.6 x1=49.6 y1=26.4 z1=82.4 tex=stone_blocks
-box   x0=48.8 y0=19.2 z0=77.6 x1=49.6 y1=24.8 z1=82.4 tex=stone_blocks nx=door_grate fit
-arch  axis=x a0=48 a1=48.8 c0=77.6 c1=82.4 ybase=22.8 ytop=24.8 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=x a0=48 a1=49.6 c0=77.6 c1=82.4 ybase=22.8 ytop=24.8 segs=5 tex=sandstone_brick bottom=sandstone_brick
+box   x0=48 y0=26.4 z0=76.8 x1=50.4 y1=30.8 z1=83.2 tex=stone_blocks top=stone_large
+door  x0=49 y0=19.15 z0=77.55 x1=49.4 y1=24.8 z1=82.45 lift=5.2 tex=door_grate
+
+// Through the door, a corridor like the long one below, more dimly lit, to a
+// dead end for now: x 49.6..70.4, z 77.6..82.4, floor 19.2, ceiling 24.8
+box   x0=49.6 y0=18.4 z0=76 x1=72 y1=19.2 z1=84 tex=floor_stone
+box   x0=49.6 y0=24.8 z0=76 x1=72 y1=25.6 z1=84 tex=stone_large
+box   x0=49.6 y0=19.2 z0=76 x1=72 y1=24.8 z1=77.6 tex=stone_blocks
+box   x0=49.6 y0=19.2 z0=82.4 x1=72 y1=24.8 z1=84 tex=stone_blocks
+box   x0=70.4 y0=19.2 z0=77.6 x1=72 y1=24.8 z1=82.4 tex=stone_blocks
+
+arch  axis=x a0=56.8 a1=57.6 c0=77.6 c1=82.4 ybase=22.8 ytop=24.8 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=x a0=64.8 a1=65.6 c0=77.6 c1=82.4 ybase=22.8 ytop=24.8 segs=5 tex=sandstone_brick bottom=sandstone_brick
+
+box   x0=52.5 y0=21.6 z0=77.6 x1=53.9 y1=23.2 z1=77.7 tex=stone_blocks pz=light_bank light=15 fit
+box   x0=67.3 y0=21.6 z0=82.3 x1=68.7 y1=23.2 z1=82.4 tex=stone_blocks nz=light_bank light=15 fit
+light x=53.2 y=22.4 z=78.5 radius=8 brightness=0.5
+light x=68 y=22.4 z=81.5 radius=8 brightness=0.5
 
 // --- The floor, and the star sunk into it ---
 //

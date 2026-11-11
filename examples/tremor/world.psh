@@ -184,7 +184,42 @@ class World {
 
         // The entities the map places, which entities.psh makes
         self.entity_specs = [];
+        self.door_specs = [];
     }
+}
+
+// A `door` line of a map: the box the door fills when shut, how far it rises
+// to open, and its texture. It is not part of the level's solid geometry, so
+// it neither casts shadows in the light bake nor goes in the BSP tree.
+class DoorSpec {
+    init(self, x0, y0, z0, x1, y1, z1, lift, tex) {
+        self.x0 = x0; self.y0 = y0; self.z0 = z0;
+        self.x1 = x1; self.y1 = y1; self.z1 = z1;
+        self.lift = lift;
+        self.tex = tex;
+    }
+}
+
+// A solid axis-aligned box to collide with, with no faces to draw. The planes
+// are in the order cmd_box() makes them, so that the 3rd and 4th bound it
+// below and above.
+fun box_brush(x0, y0, z0, x1, y1, z1) {
+    let b = Brush([
+        Plane(-1.0, 0.0, 0.0, 0.0 - x0), Plane(1.0, 0.0, 0.0, x1),
+        Plane(0.0, -1.0, 0.0, 0.0 - y0), Plane(0.0, 1.0, 0.0, y1),
+        Plane(0.0, 0.0, -1.0, 0.0 - z0), Plane(0.0, 0.0, 1.0, z1)
+    ]);
+    b.x0 = x0; b.y0 = y0; b.z0 = z0;
+    b.x1 = x1; b.y1 = y1; b.z1 = z1;
+    return b;
+}
+
+// Move a box_brush() up or down to span y0..y1
+fun set_box_brush_y(b, y0, y1) {
+    b.planes[2].d = 0.0 - y0;
+    b.planes[3].d = y1;
+    b.y0 = y0;
+    b.y1 = y1;
 }
 
 // An `entity` line of a map: what kind of entity, and where it stands, facing
@@ -763,6 +798,13 @@ fun load_map(path) {
         if (cmd == "entity") {
             w.entity_specs.push(EntitySpec(field(tok, 1, "type"), field_num(tok, 2, "x"),
                 field_num(tok, 3, "y"), field_num(tok, 4, "z"), field_num(tok, 5, "yaw") * PI / 180.0));
+            continue;
+        }
+
+        if (cmd == "door") {
+            w.door_specs.push(DoorSpec(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"),
+                field_num(tok, 3, "z0"), field_num(tok, 4, "x1"), field_num(tok, 5, "y1"),
+                field_num(tok, 6, "z1"), field_num(tok, 7, "lift"), field(tok, 8, "tex")));
             continue;
         }
 
