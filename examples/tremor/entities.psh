@@ -9,7 +9,7 @@
 from ./physics import move_body;
 from ./models import get_model, add_model, box_model, models;
 from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER;
-from ./lighting import light_level_at;
+from ./lighting import light_level_at, occluded;
 
 // --- Player ---
 
@@ -33,6 +33,9 @@ let PITCH_LIMIT = 1.55;
 
 let MAX_HEALTH = 100;
 let MAX_SHELLS = 50;
+
+// How long being hurt shows, in the red of the view and the health number
+let HURT_FLASH_TIME = 0.6;
 
 let PI = 3.14159265358979;
 
@@ -172,18 +175,21 @@ fun spawn_entity(spec) {
     if (k == "shotgun_ammo") return pickup_prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0.0, "shells", 10);
 
     // Figures, playing their idle animation
-    if (k == "claw_cyborg") return Prop(x, y, z, yaw, "claw_cyborg", 1.9, 1, 0.0);
     if (k == "anime_girl") return Prop(x, y, z, yaw, "anime_girl", 1.7, 0, 0.0);
 
     $println("unknown entity type: " + k);
     $exit(1);
 }
 
-// Make every entity a map places, doors included. This has to come after the
-// light bake, which doors are left out of.
+// Make every entity a map places, doors and monsters included. This has to
+// come after the light bake, which doors are left out of.
 fun spawn_entities(w, player) {
     let out = [];
-    for (let var i = 0; i < w.entity_specs.len; ++i) out.push(spawn_entity(w.entity_specs[i]));
+    for (let var i = 0; i < w.entity_specs.len; ++i) {
+        let spec = w.entity_specs[i];
+        if (spec.kind == "claw_cyborg") out.push(ClawCyborg(spec.x, spec.y, spec.z, spec.yaw, player));
+        else out.push(spawn_entity(spec));
+    }
     for (let var i = 0; i < w.door_specs.len; ++i) out.push(Door(w, w.door_specs[i], player));
     return out;
 }
@@ -300,11 +306,323 @@ class Door extends Entity {
     }
 }
 
+// --- Monsters ---
+
+// How often a monster looks for the player, in seconds. Looking traces a line
+// through the world's brushes, which is too slow to do every frame.
+let SIGHT_INTERVAL = 0.2;
+
+// How long a dead monster takes to fall over onto its back
+let FALL_TIME = 0.7;
+
+// The signed angle from facing along yaw to facing along (dx, dz), in
+// radians, positive the way yaw increases
+fun turn_to(yaw, dx, dz) {
+    let fx = yaw.sin(); let fz = yaw.cos();
+    let dot = fx * dx + fz * dz;
+    let side = fz * dx - fx * dz;
+    let s = side.abs();
+    let var angle = PI * 0.5;
+    if (dot > 0.000001) angle = (s / dot).atan();
+    else if (dot < 0.0 - 0.000001) angle = PI - (s / (0.0 - dot)).atan();
+    if (side < 0.0) return 0.0 - angle;
+    return angle;
+}
+
+// Something that hunts the player. It stands idle until it sees them, or they
+// come close or hurt it, then runs at them and attacks once in reach, until
+// it is killed. Kinds of monster set the numbers and pick the animations of
+// their model in their constructor.
+class Monster extends Entity {
+    init(self, x, y, z, yaw, model, height, player) {
+        Entity.init(self, x, y, z, yaw);
+        self.set_model(model, height);
+        self.player = player;
+        self.radius = 0.5;
+        self.height = height;
+        self.step_height = STEP_HEIGHT;
+
+        self.health = 100;
+
+        // How far it sees, how close the player has to come for it to notice
+        // them even unseen, and how fast it turns, in radians per second
+        self.sight_range = 30.0;
+        self.notice_range = 4.0;
+        self.turn_speed = 5.0;
+
+        // Its animations, by number in the model, -1 for none
+        self.idle_clip = 0 - 1;
+        self.move_clip = 0 - 1;
+        self.attack_clips = [];
+
+        // How fast it moves, by default the pace of its moving animation
+        self.speed = 0.0;
+
+        // How close it has to be to attack, how far into the attack the blow
+        // lands, as a fraction of the animation, and how much it takes off
+        self.reach = 1.6;
+        self.hit_at = 0.4;
+        self.damage = 10;
+
+        // How much faster than made its attack animations are played
+        self.attack_rate = 1.0;
+
+        // "idle", "chase", "attack" or "dead", and how long in it
+        self.state = "idle";
+        self.state_time = 0.0;
+        self.sight_time = 0.0;
+        self.attack_count = 0;
+        self.hit_done = false;
+
+        // Where it stood when it died, and how far its back is behind the
+        // middle of its base, which it falls onto
+        self.dead_y = 0.0;
+        self.dead_back = 0.0;
+
+        // Set for the game to take it away
+        self.gone = false;
+    }
+
+    // The pace at which an animation carries the model over the ground, in
+    // meters per second
+    clip_speed(self, clip) {
+        let c = self.model.clips[clip];
+        let d = (c.travel_x * c.travel_x + c.travel_z * c.travel_z).sqrt();
+        return d * self.model_scale / c.duration;
+    }
+
+    // Start an animation from its beginning, unless it is already playing
+    play(self, clip) {
+        if (self.anim == clip) return;
+        self.anim = clip;
+        self.anim_time = 0.0;
+    }
+
+    set_state(self, state) {
+        self.state = state;
+        self.state_time = 0.0;
+    }
+
+    // Is there a clear line from its eyes to the player's?
+    sees_player(self) {
+        let p = self.player;
+        let dx = p.x - self.x; let dz = p.z - self.z;
+        if (dx * dx + dz * dz > self.sight_range * self.sight_range) return false;
+        let eye = self.y + self.height * 0.9;
+        return !occluded(self.x, eye, self.z, p.x, p.eye_y(), p.z);
+    }
+
+    // Take damage, which also wakes it
+    hurt(self, amount) {
+        if (self.state == "dead") return;
+        self.health = self.health - amount;
+        if (self.health <= 0) {
+            // No death animation yet: it goes stiff in its idle pose and
+            // falls over backwards
+            self.set_state("dead");
+            self.play(self.idle_clip);
+            self.anim_time = 0.0;
+            self.dead_y = self.y;
+            self.dead_back = (self.model.mid_z - self.model.pose_min_z(self.idle_clip, 0.0)) * self.model_scale;
+            return;
+        }
+        if (self.state == "idle") self.set_state("chase");
+    }
+
+    update(self, w, dt) {
+        self.anim_time = self.anim_time + dt;
+        self.state_time = self.state_time + dt;
+        let p = self.player;
+        let dx = p.x - self.x;
+        let dz = p.z - self.z;
+        let dist = (dx * dx + dz * dz).sqrt();
+
+        let var wish_x = 0.0;
+        let var wish_z = 0.0;
+
+        if (self.state == "dead") {
+            // Falling, picking up speed as it goes. Tipped about the middle of
+            // its base, its back would go through the floor, so that is lifted
+            // by as much as it has come down.
+            self.anim_time = 0.0;
+            let f = (self.state_time / FALL_TIME).min(1.0);
+            self.pitch = f * f * PI * 0.5;
+            self.y = self.dead_y + self.dead_back * self.pitch.sin();
+            return;
+        }
+
+        if (self.state == "idle") {
+            self.play(self.idle_clip);
+            self.sight_time = self.sight_time - dt;
+            if (self.sight_time <= 0.0) {
+                self.sight_time = SIGHT_INTERVAL;
+                if (dist < self.notice_range || self.sees_player()) self.set_state("chase");
+            }
+        } else if (self.state == "chase") {
+            self.play(self.move_clip);
+            let turn = turn_to(self.yaw, dx, dz);
+            let step = self.turn_speed * dt;
+            self.yaw = self.yaw + turn.clip(0.0 - step, step);
+
+            if (dist <= self.reach && turn.abs() < 0.5 && self.attack_clips.len > 0) {
+                self.set_state("attack");
+                self.anim = 0 - 1;
+                self.play(self.attack_clips[self.attack_count % self.attack_clips.len]);
+                self.attack_count = self.attack_count + 1;
+                self.hit_done = false;
+            } else if (dist > self.reach * 0.8) {
+                wish_x = self.yaw.sin() * self.speed;
+                wish_z = self.yaw.cos() * self.speed;
+            }
+        } else if (self.state == "attack") {
+            self.anim_time = self.anim_time + dt * (self.attack_rate - 1.0);
+            let dur = self.model.clips[self.anim].duration;
+            if (!self.hit_done && self.anim_time >= dur * self.hit_at) {
+                self.hit_done = true;
+                // The blow lands if the player is still in reach and in front
+                if (dist <= self.reach + 0.3 && turn_to(self.yaw, dx, dz).abs() < 0.9) p.hurt(self.damage);
+            }
+            if (self.anim_time >= dur) self.set_state("chase");
+        }
+
+        move_body(w, self, dt, wish_x, wish_z, false);
+    }
+}
+
+// A cyborg with a claw for a right hand, which slashes with the claw and
+// punches with the other hand
+class ClawCyborg extends Monster {
+    init(self, x, y, z, yaw, player) {
+        Monster.init(self, x, y, z, yaw, "claw_cyborg", 2.375, player);
+        self.radius = 0.6;
+        self.health = 120;
+        self.idle_clip = 1;
+        self.move_clip = 3;
+        self.attack_clips = [0, 4];
+        self.speed = self.clip_speed(self.move_clip);
+        self.reach = 2.1;
+        self.hit_at = 0.35;
+        self.damage = 15;
+        self.attack_rate = 1.6;
+    }
+}
+
+// The shotgun's reach, and how much a hit takes off
+let SHOT_RANGE = 60.0;
+let SHOT_DAMAGE = 40;
+
+// How many drops of blood a hit throws out
+let BLOOD_DROPS = 24;
+
+// Fire a shot from the player's eye along their view, and hurt the first
+// monster it meets before it meets a wall. Returns the monster hit, or nil.
+fun shoot(player, list) {
+    let ox = player.x; let oy = player.eye_y(); let oz = player.z;
+    let cp = player.pitch.cos();
+    let dx = player.yaw.sin() * cp;
+    let dy = player.pitch.sin();
+    let dz = player.yaw.cos() * cp;
+
+    let var best = nil;
+    let var best_t = SHOT_RANGE;
+    for (let var i = 0; i < list.len; ++i) {
+        let e = list[i];
+        if (!(e instanceof Monster) || e.state == "dead") continue;
+
+        // Where the ray passes nearest the monster's upright axis, and
+        // whether that is inside its body there
+        let ex = e.x - ox; let ez = e.z - oz;
+        let hl = dx * dx + dz * dz;
+        if (hl < 0.000001) continue;
+        let t = (ex * dx + ez * dz) / hl;
+        if (t <= 0.0 || t >= best_t) continue;
+        let px = dx * t - ex; let pz = dz * t - ez;
+        if (px * px + pz * pz > e.radius * e.radius) continue;
+        let y = oy + dy * t;
+        if (y < e.y || y > e.y + e.height) continue;
+        best = e;
+        best_t = t;
+    }
+
+    if (best == nil) return nil;
+    let hx = ox + dx * best_t; let hy = oy + dy * best_t; let hz = oz + dz * best_t;
+    if (occluded(ox, oy, oz, hx, hy, hz)) return nil;
+    best.hurt(SHOT_DAMAGE);
+    spawn_blood(hx - dx * 0.3, hy, hz - dz * 0.3, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS, best.y);
+    return best;
+}
+
+// --- Blood ---
+
+// A drop of blood, flying out from a wound and falling as far as the floor
+class Drop {
+    init(self, x, y, z, vx, vy, vz, size, color, life, floor) {
+        self.x = x; self.y = y; self.z = z;
+        self.vx = vx; self.vy = vy; self.vz = vz;
+        self.size = size;
+        self.color = color;
+        self.life = life;
+        self.floor = floor;
+    }
+}
+
+let BLOOD_GRAVITY = 9.8;
+let BLOOD_COLORS = [0xFF_8A_08_08, 0xFF_6E_04_04, 0xFF_A8_12_0C, 0xFF_50_02_02];
+
+let drops = [];
+let var blood_seed = 12345;
+
+// A random number in [lo, hi)
+fun blood_rand(lo, hi) {
+    blood_seed = (blood_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lo + (hi - lo) * (blood_seed.to_f() / 2147483648.0);
+}
+
+// A spray of n drops from a point, thrown out mostly along (dx, dy, dz),
+// which is a unit direction, and somewhat up, to land on a floor at floor_y.
+// They are drawn over whatever is behind them, so they must not go through it.
+fun spawn_blood(x, y, z, dx, dy, dz, n, floor_y) {
+    for (let var i = 0; i < n; ++i) {
+        let speed = blood_rand(0.8, 3.0);
+        let vx = (dx + blood_rand(-0.9, 0.9)) * speed;
+        let vy = (dy + blood_rand(-0.2, 1.2)) * speed;
+        let vz = (dz + blood_rand(-0.9, 0.9)) * speed;
+        let color = BLOOD_COLORS[(blood_rand(0.0, BLOOD_COLORS.len.to_f())).floor().min(BLOOD_COLORS.len - 1)];
+        drops.push(Drop(x + blood_rand(-0.1, 0.1), y + blood_rand(-0.15, 0.15), z + blood_rand(-0.1, 0.1),
+            vx, vy, vz, blood_rand(0.03, 0.08), color, blood_rand(0.35, 0.7), floor_y + 0.03));
+    }
+}
+
+// Move the drops on and let them fall, and hand the renderer what is left,
+// as set_particles() takes it
+fun update_blood(dt) {
+    let out = [];
+    for (let var i = drops.len - 1; i >= 0; --i) {
+        let d = drops[i];
+        d.life = d.life - dt;
+        if (d.life <= 0.0) { drops.remove(i); continue; }
+        d.vy = d.vy - BLOOD_GRAVITY * dt;
+        d.x = d.x + d.vx * dt;
+        d.y = d.y + d.vy * dt;
+        d.z = d.z + d.vz * dt;
+        if (d.y < d.floor) {
+            d.y = d.floor;
+            d.vx = 0.0; d.vy = 0.0; d.vz = 0.0;
+        }
+        out.push(d.x); out.push(d.y); out.push(d.z); out.push(d.size); out.push(d.color);
+    }
+    return out;
+}
+
 // Let the player touch whatever entities they overlap, and take out of the
-// list those that are used up by it
+// list those that are used up by it, and monsters that are gone
 fun touch_entities(w, player, list) {
     for (let var i = list.len - 1; i >= 0; --i) {
         let e = list[i];
+        if (e instanceof Monster) {
+            if (e.gone) list.remove(i);
+            continue;
+        }
         if (e.overlaps(player) && e.touch(w, player)) list.remove(i);
     }
 }
@@ -405,6 +723,9 @@ class Player extends Entity {
         self.health = MAX_HEALTH;
         self.shells = 0;
 
+        // Seconds since the player was last hurt, which starts out long past
+        self.hurt_time = 100.0;
+
         // The weapon in hand, nil for none, and how it is held
         self.weapon = nil;
         self.held = nil;
@@ -424,6 +745,24 @@ class Player extends Entity {
 
     eye_y(self) {
         return self.y + EYE_HEIGHT;
+    }
+
+    // Lose health, down to nothing. Nothing happens at nothing yet.
+    hurt(self, amount) {
+        self.health = (self.health - amount).max(0);
+        self.hurt_time = 0.0;
+    }
+
+    // Move on the timers of what the player sees happen to them
+    update_effects(self, dt) {
+        self.hurt_time = self.hurt_time + dt;
+    }
+
+    // How strongly the view is tinted red for having been hurt, from 1 the
+    // moment it happens down to 0
+    hurt_flash(self) {
+        if (self.hurt_time >= HURT_FLASH_TIME) return 0.0;
+        return 1.0 - self.hurt_time / HURT_FLASH_TIME;
     }
 
     // Take `amount` of something picked up. Returns false if the player has

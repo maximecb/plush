@@ -2106,11 +2106,17 @@ fun draw_instance(inst) {
         // Its own triangles keep their order among themselves.
         g_wk = HELD_DEPTH_SCALE;
     } else {
+        // Tipped over backwards by pitch, about the middle of its base. 0 is
+        // upright and PI / 2 is lying on its back.
+        let cp = inst[10].cos();
+        let sp = inst[10].sin();
+
         // The sphere around the model in all its poses, where it stands
         let r = model.radius * s;
-        let cx = ex;
-        let cy = ey + (model.mid_y - model.min_y) * s;
-        let cz = ez;
+        let up = (model.mid_y - model.min_y) * s;
+        let cx = ex - up * sp * se;
+        let cy = ey + up * cp;
+        let cz = ez - up * sp * ce;
 
         // Outside the view, or not reaching this actor's band
         for (let var i = 0; i < 5; ++i) {
@@ -2128,17 +2134,20 @@ fun draw_instance(inst) {
         // The model's own space is right-handed with its front along +z, and
         // the world's is left-handed. Turning its x around makes it left-handed
         // with its front still along +z, and the yaw then turns +z to face
-        // where the entity does. Each column here is where one of the model's
-        // axes goes in view space, scaled.
+        // where the entity does. Tipping it back swings its up axis towards
+        // its back and its front towards the sky. Each column here is where
+        // one of the model's axes goes in view space, scaled.
+        let yx = 0.0 - sp * se; let yz = 0.0 - sp * ce;
+        let zx = cp * se; let zz = cp * ce;
         m[0] = view_dir_x(0.0 - ce, 0.0, se) * s;
         m[4] = view_dir_y(0.0 - ce, 0.0, se) * s;
         m[8] = view_dir_z(0.0 - ce, 0.0, se) * s;
-        m[1] = view_dir_x(0.0, 1.0, 0.0) * s;
-        m[5] = view_dir_y(0.0, 1.0, 0.0) * s;
-        m[9] = view_dir_z(0.0, 1.0, 0.0) * s;
-        m[2] = view_dir_x(se, 0.0, ce) * s;
-        m[6] = view_dir_y(se, 0.0, ce) * s;
-        m[10] = view_dir_z(se, 0.0, ce) * s;
+        m[1] = view_dir_x(yx, cp, yz) * s;
+        m[5] = view_dir_y(yx, cp, yz) * s;
+        m[9] = view_dir_z(yx, cp, yz) * s;
+        m[2] = view_dir_x(zx, sp, zz) * s;
+        m[6] = view_dir_y(zx, sp, zz) * s;
+        m[10] = view_dir_z(zx, sp, zz) * s;
 
         // The middle of the model's base goes where the entity stands
         let bx = model.mid_x; let by = model.min_y; let bz = model.mid_z;
@@ -2318,6 +2327,81 @@ fun set_muzzle_flash(inst, px, py, pz, strength) {
     flash_strength = strength;
 }
 
+// --- Particles and the screen tint ---
+
+// Particles of this frame, such as blood, as a flat list of x, y, z, size in
+// meters and color, five numbers for each
+let var particles = [];
+
+fun set_particles(list) {
+    particles = list;
+}
+
+// Fill [x0, x1) x [y0, y1) of this band with a color, except where a model
+// held in view covers it, since particles are out in the world beyond it
+fun fill_unheld(x0, y0, x1, y1, color) {
+    let fb = frame_buffer;
+    for (let var y = y0.max(render_y0); y < y1.min(render_y1); ++y) {
+        let row = y * FRAME_WIDTH;
+        let var x = x0;
+        let var cur = mb_head[y];
+        while (x < x1) {
+            while (cur != NO_SPAN && (msp_x1[cur] <= x || !held_span(cur))) cur = msp_next[cur];
+            let var end = x1;
+            if (cur != NO_SPAN && msp_x0[cur] < end) end = msp_x0[cur];
+            for (let var i = row + x; i < row + end; ++i) fb.set_u32(i, color);
+            if (cur == NO_SPAN) break;
+            x = msp_x1[cur].max(x);
+            cur = msp_next[cur];
+        }
+    }
+}
+
+// Draw each particle as a square facing the eye. They are not tested against
+// what stands in front of them: they only ever start where a shot could see.
+fun draw_particles() {
+    let p = particles;
+    for (let var i = 0; i + 4 < p.len; i += 5) {
+        let dx = p[i] - cam_x; let dy = p[i + 1] - cam_y; let dz = p[i + 2] - cam_z;
+        let vz = view_dir_z(dx, dy, dz);
+        if (vz <= NEAR) continue;
+        let sx = CENTER_X + FOCAL * view_dir_x(dx, dy, dz) / vz;
+        let sy = CENTER_Y - FOCAL * view_dir_y(dx, dy, dz) / vz;
+        let half = (FOCAL * p[i + 3] / vz * 0.5).max(0.5);
+        let x0 = (sx - half).floor().max(0);
+        let x1 = (sx + half).ceil().min(FRAME_WIDTH);
+        let y0 = (sy - half).floor();
+        let y1 = (sy + half).ceil();
+        if (x0 >= x1 || y1 <= render_y0 || y0 >= render_y1) continue;
+        fill_unheld(x0, y0, x1, y1, p[i + 4]);
+    }
+}
+
+// A color the whole frame is pulled towards, such as red when the player is
+// hurt, and how far, in 256ths, 0 for none
+let var tint_color = 0;
+let var tint_amount = 0;
+
+fun set_screen_tint(color, amount) {
+    tint_color = color;
+    tint_amount = amount.clip(0, 256);
+}
+
+fun draw_tint() {
+    if (tint_amount <= 0) return;
+    let fb = frame_buffer;
+    let keep = 256 - tint_amount;
+    let add_rb = (tint_color & 0xFF00FF) * tint_amount;
+    let add_g = (tint_color & 0xFF00) * tint_amount;
+    let end = render_y1 * FRAME_WIDTH;
+    for (let var i = render_y0 * FRAME_WIDTH; i < end; ++i) {
+        let c = fb.get_u32(i);
+        let rb = (((c & 0xFF00FF) * keep + add_rb) >> 8) & 0xFF00FF;
+        let g = (((c & 0xFF00) * keep + add_g) >> 8) & 0xFF00;
+        fb.set_u32(i, rb | g);
+    }
+}
+
 // The models to draw from now on, as a list of entries described above
 fun set_draw_list(list) {
     draw_list = list;
@@ -2344,8 +2428,11 @@ fun render_frame() {
     // Everything opaque is down, so what was held back can be blended over it
     draw_deferred();
 
+    draw_particles();
+
     // Over everything, including the weapon it comes out of
     draw_flash();
+    draw_tint();
 
     // While this is still the band the model spans were made in, since the
     // next frame may hand this actor another
@@ -2420,6 +2507,9 @@ class RenderBandRequest {
         self.flash_y = flash_y;
         self.flash_unit = flash_unit;
         self.flash_strength = flash_strength;
+        self.particles = particles;
+        self.tint_color = tint_color;
+        self.tint_amount = tint_amount;
     }
 }
 
@@ -2467,6 +2557,9 @@ fun render_actor_loop() {
         flash_y = msg.flash_y;
         flash_unit = msg.flash_unit;
         flash_strength = msg.flash_strength;
+        particles = msg.particles;
+        tint_color = msg.tint_color;
+        tint_amount = msg.tint_amount;
 
         render_frame();
         let band_start = render_y0 * FRAME_WIDTH * 4;

@@ -37,8 +37,9 @@ from ./config import FRAME_WIDTH, FRAME_HEIGHT, MAP_PATH, NUM_RENDER_ACTORS, BEN
 from ./world import load_map, build_bsp;
 from ./lighting import light_world, light_level_at;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
-    set_scene, set_view, set_draw_list, set_muzzle_flash, render_frame_parallel, start_render_actors, stop_render_actors;
-from ./entities import Player, spawn_entities, touch_entities, load_weapons, sound_events,
+    set_scene, set_view, set_draw_list, set_muzzle_flash, set_particles, set_screen_tint,
+    render_frame_parallel, start_render_actors, stop_render_actors;
+from ./entities import Player, spawn_entities, touch_entities, load_weapons, shoot, update_blood, sound_events,
     EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
 from ./models import models;
 from ./sound import start_sound, stop_sound, play_sound, play_sound_at;
@@ -122,6 +123,11 @@ fun play_sounds() {
     sound_events.resize(0, nil);
 }
 
+// The red the view is pulled towards when the player is hurt, and how far at
+// the moment it happens, in 256ths
+let HURT_TINT = 0xFF_C0_00_00;
+let HURT_TINT_MAX = 110.0;
+
 // Move every entity on by dt, let the player pick up what they walk into, and
 // hand the renderer what it has to draw
 fun update_entities(dt) {
@@ -134,8 +140,13 @@ fun update_entities(dt) {
         if (e.model == nil) continue;
 
         let level = entity_light(e, (e.model.max_y - e.model.min_y) * e.model_scale * 0.5);
-        list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, level, false, 0.0]);
+        list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, level, false, e.pitch]);
     }
+
+    set_particles(update_blood(dt));
+
+    // The view goes red for a moment when the player is hurt
+    set_screen_tint(HURT_TINT, (player.hurt_flash() * HURT_TINT_MAX).floor());
 
     // The weapon in hand, lit by where the player stands, and its flash
     let h = player.held;
@@ -348,7 +359,11 @@ loop {
     // The last shot plays on first, so that a new one starts from its very
     // first frame
     player.update_weapon(dt);
-    if ((key_fire || mouse_fire) && player.fire()) play_sound(player.weapon, 1.0, 0.0);
+    player.update_effects(dt);
+    if ((key_fire || mouse_fire) && player.fire()) {
+        play_sound(player.weapon, 1.0, 0.0);
+        shoot(player, entities);
+    }
     update_entities(dt);
     play_sounds();
 

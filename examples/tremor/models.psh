@@ -1054,6 +1054,17 @@ class Model
         self.radius = far_sq.sqrt().max(0.000001);
     }
 
+    // How far back, along -z, the model reaches in the pose of one of its
+    // animations at a time, as set_pose() takes them
+    pose_min_z(self, clip_idx, time)
+    {
+        self.set_pose(clip_idx, time);
+        let pose = self.pose;
+        let var min_z = pose.get_f32(2);
+        for (let var p = 0; p < pose.num_f32(); p += POSE_FLOATS) min_z = min_z.min(pose.get_f32(p + 2));
+        return min_z;
+    }
+
     // Puts the model in the pose of one of its animations at a time in
     // seconds, which wraps around at the end of the animation. An index
     // that is not that of an animation gives the pose it was made in.
