@@ -402,6 +402,48 @@ class ClawHitVoice extends Voice {
     }
 }
 
+// A body bursting: a deep thump, and a wet splatter over it, which is noise
+// in a middle band broken up into many little bursts that thin out as the
+// pieces land
+class GibVoice extends Voice {
+    init(self, gain) {
+        Voice.init(self, gain);
+        self.env = 1.0;
+        self.keep = decay_rate(0.09);
+        self.lp_k = lp_coef(110.0);
+        self.lp1 = 0.0; self.lp2 = 0.0;
+
+        self.wet = 1.0;
+        self.wet_keep = decay_rate(0.25);
+        self.wf = svf_coef(rand_range(700.0, 1000.0));
+        self.wlo = 0.0; self.wbp = 0.0;
+        self.burst = 0.0;
+        self.burst_keep = decay_rate(0.006);
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            let white = noise();
+            self.t = self.t + DT;
+
+            self.env = self.env * self.keep;
+            self.lp1 = self.lp1 + (white * self.env - self.lp1) * self.lp_k;
+            self.lp2 = self.lp2 + (self.lp1 - self.lp2) * self.lp_k;
+
+            // Little bursts, at random, fewer as the splatter dies down
+            self.wet = self.wet * self.wet_keep;
+            if (noise() * 0.5 + 0.5 < 0.004 * self.wet) self.burst = rand_range(0.5, 1.0);
+            self.burst = self.burst * self.burst_keep;
+            self.wlo = self.wlo + self.wf * self.wbp;
+            self.wbp = self.wbp + self.wf * (white * (self.burst + 0.15 * self.wet) - self.wlo - 0.7 * self.wbp);
+
+            let v = soft_clip(self.lp2 * 12.0) * 0.8 + self.wbp * 0.5;
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+        }
+        return self.t < 1.0;
+    }
+}
+
 // The voice for a sound, by name. `param` means what each sound says it does,
 // such as a door's duration.
 fun make_voice(kind, gain, param) {
@@ -413,6 +455,7 @@ fun make_voice(kind, gain, param) {
     if (kind == "stomp") return StompVoice(gain);
     if (kind == "swipe") return SwipeVoice(gain, param);
     if (kind == "claw_hit") return ClawHitVoice(gain);
+    if (kind == "gib") return GibVoice(gain);
     $println("unknown sound: " + kind);
     return nil;
 }

@@ -340,6 +340,11 @@ let HIT_GAIN = 0.9;
 // How long before the blow lands the sound of the swing starts, in seconds
 let SWING_LEAD = 0.18;
 
+// How much a dead monster's body takes before it bursts, which is one shot,
+// and how loud that is
+let CORPSE_HEALTH = 40;
+let GIB_GAIN = 1.0;
+
 // How long a dead monster takes to fall over onto its back
 let FALL_TIME = 0.7;
 
@@ -413,6 +418,9 @@ class Monster extends Entity {
         self.dead_y = 0.0;
         self.dead_back = 0.0;
 
+        // How much more its body can take once dead, before it bursts
+        self.corpse_health = CORPSE_HEALTH;
+
         // Set for the game to take it away
         self.gone = false;
     }
@@ -448,7 +456,12 @@ class Monster extends Entity {
 
     // Take damage, which also wakes it
     hurt(self, amount) {
-        if (self.state == "dead") return;
+        // Its body can take this much more, and then it bursts
+        if (self.state == "dead") {
+            self.corpse_health = self.corpse_health - amount;
+            if (self.corpse_health <= 0) self.gib();
+            return;
+        }
         self.health = self.health - amount;
         if (self.health <= 0) {
             // No death animation yet: it goes stiff in its idle pose and
@@ -461,6 +474,22 @@ class Monster extends Entity {
             return;
         }
         if (self.state == "idle") self.set_state("chase");
+    }
+
+    // Its body's middle and the way up its body, which tips over with it
+    up_x(self) { return 0.0 - self.pitch.sin() * self.yaw.sin(); }
+    up_y(self) { return self.pitch.cos(); }
+    up_z(self) { return 0.0 - self.pitch.sin() * self.yaw.cos(); }
+
+    // Burst into pieces, and be taken away
+    gib(self) {
+        let h = self.height * 0.5;
+        let cx = self.x + self.up_x() * h;
+        let cy = self.y + self.up_y() * h;
+        let cz = self.z + self.up_z() * h;
+        spawn_gibs(cx, cy, cz, self.dead_y);
+        emit_sound("gib", cx, cy, cz, 0.0, GIB_GAIN);
+        self.gone = true;
     }
 
     update(self, w, dt) {
@@ -597,19 +626,30 @@ fun shoot(player, list) {
     let var best_t = SHOT_RANGE;
     for (let var i = 0; i < list.len; ++i) {
         let e = list[i];
-        if (!(e instanceof Monster) || e.state == "dead") continue;
+        if (!(e instanceof Monster) || e.gone) continue;
 
-        // Where the ray passes nearest the monster's upright axis, and
-        // whether that is inside its body there
-        let ex = e.x - ox; let ez = e.z - oz;
-        let hl = dx * dx + dz * dz;
-        if (hl < 0.000001) continue;
-        let t = (ex * dx + ez * dz) / hl;
+        // The body is a capsule up its middle, from a little above its base
+        // to a little below its top, which lies down with it when it falls.
+        // Where the ray passes nearest that line, and whether that is inside.
+        let ux = e.up_x(); let uy = e.up_y(); let uz = e.up_z();
+        let lo = e.radius * 0.5;
+        let len = e.height - e.radius;
+        let ax = e.x + ux * lo; let ay = e.y + uy * lo; let az = e.z + uz * lo;
+        let vx = ux * len; let vy = uy * len; let vz = uz * len;
+        let wx = ox - ax; let wy = oy - ay; let wz = oz - az;
+        let b = dx * vx + dy * vy + dz * vz;
+        let c = vx * vx + vy * vy + vz * vz;
+        let d = dx * wx + dy * wy + dz * wz;
+        let f = vx * wx + vy * wy + vz * wz;
+        let den = c - b * b;
+        let var s = 0.0;
+        if (den > 0.000001) s = ((f - b * d) / den).clip(0.0, 1.0);
+        let t = s * b - d;
         if (t <= 0.0 || t >= best_t) continue;
-        let px = dx * t - ex; let pz = dz * t - ez;
-        if (px * px + pz * pz > e.radius * e.radius) continue;
-        let y = oy + dy * t;
-        if (y < e.y || y > e.y + e.height) continue;
+        let px = ox + dx * t - (ax + vx * s);
+        let py = oy + dy * t - (ay + vy * s);
+        let pz = oz + dz * t - (az + vz * s);
+        if (px * px + py * py + pz * pz > e.radius * e.radius) continue;
         best = e;
         best_t = t;
     }
@@ -617,8 +657,10 @@ fun shoot(player, list) {
     if (best == nil) return nil;
     let hx = ox + dx * best_t; let hy = oy + dy * best_t; let hz = oz + dz * best_t;
     if (occluded(ox, oy, oz, hx, hy, hz)) return nil;
+    let var floor_y = best.y;
+    if (best.state == "dead") floor_y = best.dead_y;
+    spawn_blood(hx - dx * 0.3, hy, hz - dz * 0.3, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS, floor_y);
     best.hurt(SHOT_DAMAGE);
-    spawn_blood(hx - dx * 0.3, hy, hz - dz * 0.3, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS, best.y);
     return best;
 }
 
@@ -663,9 +705,30 @@ fun spawn_blood(x, y, z, dx, dy, dz, n, floor_y) {
     }
 }
 
-// Move the drops on and let them fall, and hand the renderer what is left,
-// as set_particles() takes it
-fun update_blood(dt) {
+// A body bursting: a great deal of blood, and chunks of it, flesh and armor,
+// thrown out every way and up, which lie where they land for a while
+let GIB_DROPS = 70;
+let GIB_CHUNKS = 16;
+let GIB_LIFE = 10.0;
+// Particles are not lit, so these are as dark as the rooms they lie in
+let GIB_COLORS = [0xFF_52_0A_08, 0xFF_3C_04_04, 0xFF_5A_2C_24, 0xFF_2E_2B_2A, 0xFF_42_3F_3C];
+
+fun spawn_gibs(x, y, z, floor_y) {
+    spawn_blood(x, y, z, 0.0, 0.5, 0.0, GIB_DROPS, floor_y);
+    for (let var i = 0; i < GIB_CHUNKS; ++i) {
+        let a = blood_rand(0.0, 2.0 * PI);
+        let speed = blood_rand(2.0, 6.0);
+        let color = GIB_COLORS[(blood_rand(0.0, GIB_COLORS.len.to_f())).floor().min(GIB_COLORS.len - 1)];
+        drops.push(Drop(x + blood_rand(-0.3, 0.3), y + blood_rand(-0.2, 0.3), z + blood_rand(-0.3, 0.3),
+            a.cos() * speed, blood_rand(2.0, 6.0), a.sin() * speed, blood_rand(0.1, 0.24), color,
+            blood_rand(GIB_LIFE * 0.7, GIB_LIFE), floor_y + 0.06));
+    }
+}
+
+// Move the drops on and let them fall, and hand the renderer those the eye at
+// (ex, ey, ez) can see, as set_particles() takes them. Particles are drawn
+// over everything, so one a wall hides has to be left out here.
+fun update_blood(dt, ex, ey, ez) {
     let out = [];
     for (let var i = drops.len - 1; i >= 0; --i) {
         let d = drops[i];
@@ -679,6 +742,7 @@ fun update_blood(dt) {
             d.y = d.floor;
             d.vx = 0.0; d.vy = 0.0; d.vz = 0.0;
         }
+        if (occluded(ex, ey, ez, d.x, d.y, d.z)) continue;
         out.push(d.x); out.push(d.y); out.push(d.z); out.push(d.size); out.push(d.color);
     }
     return out;
