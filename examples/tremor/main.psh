@@ -38,6 +38,11 @@ from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, 
     set_scene, set_view, set_draw_list, set_muzzle_flash, render_frame_parallel, start_render_actors, stop_render_actors;
 from ./entities import Player, spawn_entities, touch_entities, load_weapons, EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
 from ./models import models;
+from ./sound import start_sound, stop_sound, play_sound;
+
+// The audio actor starts with a copy of this actor's heap, so it is spawned
+// before the world is loaded into it. The benchmark runs silent.
+if (!BENCH) start_sound();
 
 // --- Setup ---
 
@@ -90,6 +95,20 @@ fun entity_light(e, up) {
         e.lit = true;
     }
     return e.light;
+}
+
+// How loud each of the player's own sounds is
+fun player_sound_gain(kind) {
+    if (kind == "step") return 0.7;
+    if (kind == "land") return 0.9;
+    return 0.8;
+}
+
+// Play what the player did this frame that makes a sound
+fun play_player_sounds() {
+    let events = player.events;
+    for (let var i = 0; i < events.len; ++i) play_sound(events[i], player_sound_gain(events[i]), 0.0);
+    events.resize(0, nil);
 }
 
 // Move every entity on by dt, let the player pick up what they walk into, and
@@ -317,8 +336,9 @@ loop {
     // The last shot plays on first, so that a new one starts from its very
     // first frame
     player.update_weapon(dt);
-    if (key_fire || mouse_fire) player.fire();
+    if ((key_fire || mouse_fire) && player.fire()) play_sound(player.weapon, 1.0, 0.0);
     update_entities(dt);
+    play_player_sounds();
 
     set_view(player.x, player.eye_y(), player.z, player.yaw, player.pitch, time_s * 1.1);
 
@@ -345,6 +365,7 @@ loop {
 }
 
 stop_render_actors();
+stop_sound();
 
 // Give the cursor back before exiting
 $window_lock_mouse(window, false);

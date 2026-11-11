@@ -1,0 +1,438 @@
+// Sound effects, all synthesized as they play.
+//
+// An actor of its own owns the audio device and fills a buffer whenever the
+// device asks for one. The game sends it a message for each sound to start.
+// It should be spawned as early as possible, since an actor starts with a copy
+// of its parent's heap, and this one needs nothing from the world.
+//
+// Each sound playing is a voice: an object that adds its next n samples into
+// the mix and says whether it has finished. Picking which kind of sound to
+// synthesize happens once per buffer rather than once per sample, and as many
+// can overlap as the pool has room for.
+//
+// The building blocks are those of the synthesizer in examples/space_fighter.psh:
+// white noise from a linear congruential generator, one-pole low passes, the
+// state variable filter for band passes, exponential decays and a soft limit.
+// The sounds are noise shaped by those, plus a few tones. Then the mix goes
+// through a short reverb, since the level is all stone rooms.
+//
+// To add a sound: write a Voice subclass and give it a name in make_voice().
+
+let SAMPLE_RATE = 44100;
+let DT = 1.0 / SAMPLE_RATE.to_f();
+let PI = 3.14159265358979;
+let TAU = 2.0 * PI;
+
+// The most sounds that can play at once. A new one past that is dropped.
+let MAX_VOICES = 24;
+
+// How loud everything is, before the soft limit
+let MASTER_GAIN = 0.8;
+
+// --- Building blocks ---
+
+let var noise_seed = 22222;
+
+// White noise in [-1, 1)
+fun noise() {
+    noise_seed = (noise_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return noise_seed / 1073741824.0 - 1.0;
+}
+
+// A random number in [lo, hi), for varying one sound from the next
+fun rand_range(lo, hi) {
+    return lo + (hi - lo) * (noise() * 0.5 + 0.5);
+}
+
+// What to multiply a level by every sample for it to fall to about a third
+// (1/e) in this many seconds
+fun decay_rate(seconds) {
+    return (-1.0 / (seconds * SAMPLE_RATE.to_f())).exp();
+}
+
+// The coefficient of a one-pole low pass with this cutoff:
+//   y = y + (x - y) * k
+fun lp_coef(hz) {
+    return 1.0 - (-TAU * hz / SAMPLE_RATE.to_f()).exp();
+}
+
+// The coefficient of a state variable filter with this center or cutoff:
+//   low = low + f * band
+//   band = band + f * (x - low - damp * band)
+// where low is the low pass and band the band pass. A damping of 2 does not
+// ring at all, and the lower it is the more it rings.
+fun svf_coef(hz) {
+    return 2.0 * (PI * hz / SAMPLE_RATE.to_f()).sin();
+}
+
+// Squash peaks smoothly rather than clipping them
+fun soft_clip(v) {
+    return v / (1.0 + v.abs());
+}
+
+fun note_freq(note) {
+    return 440.0 * (2.0).pow((note - 69) / 12.0);
+}
+
+// --- Voices ---
+
+// A sound that is playing. Subclasses override render().
+class Voice {
+    init(self, gain) {
+        self.gain = gain;
+        self.t = 0.0;
+    }
+
+    // Add the next n samples into mix, a ByteArray of f32. Returns false
+    // once the sound has finished, after which it is dropped.
+    render(self, mix, n) {
+        return false;
+    }
+}
+
+// The shotgun's report: Space Fighter's cannon made bigger. A burst of noise
+// heard through a broad band in the middle that is the bark, a low band that
+// is the boom and a trace of the top that is the crack, driven hard into the
+// limit. The boom has its own, slower decay, so it rolls on after the bark.
+let SHOT_LEN = 1.1;
+let SHOT_FADE = 0.5;
+
+class ShotgunVoice extends Voice {
+    init(self, gain) {
+        Voice.init(self, gain);
+        self.env = 1.0;
+        self.boom = 1.0;
+        self.crack = 1.0;
+        self.keep = decay_rate(0.11);
+        self.boom_keep = decay_rate(0.15);
+        self.crack_keep = decay_rate(0.006);
+
+        self.bark_f = svf_coef(rand_range(380.0, 560.0));
+        self.bark_lo = 0.0; self.bark_bp = 0.0;
+        self.thump_k = lp_coef(rand_range(110.0, 150.0));
+        self.thump1 = 0.0; self.thump2 = 0.0;
+        self.top_hp = 0.0;
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            let white = noise();
+            self.t = self.t + DT;
+
+            self.env = self.env * self.keep;
+            let burst = white * self.env;
+            self.bark_lo = self.bark_lo + self.bark_f * self.bark_bp;
+            self.bark_bp = self.bark_bp + self.bark_f * (burst - self.bark_lo - 1.0 * self.bark_bp);
+
+            self.boom = self.boom * self.boom_keep;
+            self.thump1 = self.thump1 + (white * self.boom - self.thump1) * self.thump_k;
+            self.thump2 = self.thump2 + (self.thump1 - self.thump2) * self.thump_k;
+
+            self.crack = self.crack * self.crack_keep;
+            let top = white * self.crack;
+            self.top_hp = self.top_hp + (top - self.top_hp) * 0.35;
+
+            // The drive keeps the boom's tail audible for a while, so it is
+            // faded out rather than stopped dead
+            let fade = ((SHOT_LEN - self.t) / SHOT_FADE).clip(0.0, 1.0);
+            let shot = soft_clip((self.bark_bp + self.thump2 * 7.0 + (top - self.top_hp) * 0.3) * 3.0);
+            mix.set_f32(i, mix.get_f32(i) + shot * fade * 2.6 * self.gain);
+        }
+        return self.t < SHOT_LEN;
+    }
+}
+
+// A footstep: a soft, muffled pad of noise. It swells in over a few
+// milliseconds rather than starting at full level, since a sharp start is
+// what makes a step sound like a click. Each one is a little different.
+class StepVoice extends Voice {
+    init(self, gain) {
+        Voice.init(self, gain);
+        self.attack = rand_range(0.005, 0.008);
+        self.keep = decay_rate(0.03);
+        self.level = 1.0;
+        self.lp_k = lp_coef(rand_range(250.0, 380.0));
+        self.lp1 = 0.0; self.lp2 = 0.0;
+        self.weight = 0.25;
+        self.len = 0.15;
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            self.t = self.t + DT;
+
+            // Rise linearly, then fall away
+            let var env = 1.0;
+            if (self.t < self.attack) {
+                env = self.t / self.attack;
+            } else {
+                self.level = self.level * self.keep;
+                env = self.level;
+            }
+
+            self.lp1 = self.lp1 + (noise() * env - self.lp1) * self.lp_k;
+            self.lp2 = self.lp2 + (self.lp1 - self.lp2) * self.lp_k;
+            mix.set_f32(i, mix.get_f32(i) + self.lp2 * self.weight * self.gain);
+        }
+        return self.t < self.len;
+    }
+}
+
+// Landing from a jump or a fall: a footstep, heavier, lower and longer
+class LandVoice extends StepVoice {
+    init(self, gain) {
+        StepVoice.init(self, gain);
+        self.attack = rand_range(0.008, 0.012);
+        self.keep = decay_rate(0.05);
+        self.lp_k = lp_coef(rand_range(160.0, 220.0));
+        self.weight = 0.6;
+        self.len = 0.3;
+    }
+}
+
+// Picking something up: two short clacks, like a gun's action being worked.
+// Each is a burst of noise through a band around 1.1 kHz.
+let PICKUP_LEVEL = 0.675;
+
+class PickupVoice extends Voice {
+    init(self, gain) {
+        Voice.init(self, gain);
+        self.clack = 0.6;
+        self.clack_keep = decay_rate(0.012);
+        self.clack_f = svf_coef(1100.0);
+        self.clack_lo = 0.0; self.clack_bp = 0.0;
+        self.second = false;
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            self.t = self.t + DT;
+            if (!self.second && self.t >= 0.12) {
+                self.second = true;
+                self.clack = 0.8;
+            }
+            self.clack = self.clack * self.clack_keep;
+            let c = noise() * self.clack;
+            self.clack_lo = self.clack_lo + self.clack_f * self.clack_bp;
+            self.clack_bp = self.clack_bp + self.clack_f * (c - self.clack_lo - 0.8 * self.clack_bp);
+            mix.set_f32(i, mix.get_f32(i) + self.clack_bp * PICKUP_LEVEL * self.gain);
+        }
+        return self.t < 0.25;
+    }
+}
+
+// A heavy door sliding open or shut, over `duration` seconds: a clunk as it
+// lets go, the rumble of it running in its track with the hum of the motor
+// driving it, then a heavier clunk as it hits the end.
+class DoorVoice extends Voice {
+    init(self, gain, duration) {
+        Voice.init(self, gain);
+        self.duration = duration;
+
+        self.clunk = 1.0;
+        self.clunk_keep = decay_rate(0.05);
+        self.clunk_k = lp_coef(110.0);
+        self.cl1 = 0.0; self.cl2 = 0.0;
+        self.stopped = false;
+
+        self.rumble_k = lp_coef(260.0);
+        self.ru1 = 0.0; self.ru2 = 0.0;
+        self.grind_f = svf_coef(900.0);
+        self.gr_lo = 0.0; self.gr_bp = 0.0;
+        self.wobble = 0.0;
+
+        self.motor = 0.0;
+        self.motor_k = lp_coef(400.0);
+        self.mo_lp = 0.0;
+    }
+
+    render(self, mix, n) {
+        let d = self.duration;
+        for (let var i = 0; i < n; ++i) {
+            let white = noise();
+            self.t = self.t + DT;
+            let t = self.t;
+
+            // Ramps in and out over a tenth of a second at either end of the run
+            let run = (t / 0.1).min((d - t) / 0.1).clip(0.0, 1.0);
+
+            // Rumble and grind, which wander a little in level
+            self.wobble = self.wobble + (white - self.wobble) * 0.0008;
+            self.ru1 = self.ru1 + (white - self.ru1) * self.rumble_k;
+            self.ru2 = self.ru2 + (self.ru1 - self.ru2) * self.rumble_k;
+            self.gr_lo = self.gr_lo + self.grind_f * self.gr_bp;
+            self.gr_bp = self.gr_bp + self.grind_f * (white - self.gr_lo - 0.5 * self.gr_bp);
+            let track = (self.ru2 * 5.0 + self.gr_bp * 0.05) * (0.8 + 6.0 * self.wobble);
+
+            // The motor: a low saw, its pitch rising as it takes the load
+            self.motor = self.motor + (55.0 + 8.0 * run) * DT;
+            if (self.motor >= 1.0) self.motor = self.motor - 1.0;
+            self.mo_lp = self.mo_lp + ((self.motor * 2.0 - 1.0) - self.mo_lp) * self.motor_k;
+
+            // The clunk at the end restarts the one from the start, heavier
+            if (!self.stopped && t >= d) {
+                self.stopped = true;
+                self.clunk = 1.6;
+            }
+            self.clunk = self.clunk * self.clunk_keep;
+            self.cl1 = self.cl1 + (white * self.clunk - self.cl1) * self.clunk_k;
+            self.cl2 = self.cl2 + (self.cl1 - self.cl2) * self.clunk_k;
+
+            let v = (track * 0.5 + self.mo_lp * 0.12) * run + self.cl2 * 8.0;
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+        }
+        return self.t < d + 0.4;
+    }
+}
+
+// The voice for a sound, by name. `param` means what each sound says it does,
+// such as a door's duration.
+fun make_voice(kind, gain, param) {
+    if (kind == "shotgun") return ShotgunVoice(gain);
+    if (kind == "step") return StepVoice(gain);
+    if (kind == "land") return LandVoice(gain);
+    if (kind == "pickup") return PickupVoice(gain);
+    if (kind == "door") return DoorVoice(gain, param);
+    $println("unknown sound: " + kind);
+    return nil;
+}
+
+// --- The mix ---
+
+let voices = [];
+
+// The reverb: a few echoes feeding back on themselves, each darkened a little
+// every time around, which reads as a stone room rather than a canyon. The
+// lengths share no factor, so that the echoes don't pile up on one another.
+let ECHO_LENS = [1557, 1993, 2371, 2803];
+let ECHO_FEEDBACK = 0.4;
+let ECHO_DAMP = 0.35;
+let REVERB_MIX = 0.05;
+
+let echo_bufs = [];
+let echo_pos = [0, 0, 0, 0];
+let echo_lp = [0.0, 0.0, 0.0, 0.0];
+for (let var k = 0; k < ECHO_LENS.len; ++k) echo_bufs.push(ByteArray.with_size(ECHO_LENS[k] * 4));
+
+fun start_voice(kind, gain, param) {
+    if (voices.len >= MAX_VOICES) return;
+    let v = make_voice(kind, gain, param);
+    if (v != nil) voices.push(v);
+}
+
+// Fill buf with the next n samples of everything playing
+fun mix_into(buf, n) {
+    // A float of zero is all zero bits
+    buf.fill_u32(0, n, 0);
+
+    for (let var k = voices.len - 1; k >= 0; --k) {
+        if (!voices[k].render(buf, n)) voices.remove(k);
+    }
+
+    let b0 = echo_bufs[0]; let b1 = echo_bufs[1]; let b2 = echo_bufs[2]; let b3 = echo_bufs[3];
+    let var p0 = echo_pos[0]; let var p1 = echo_pos[1]; let var p2 = echo_pos[2]; let var p3 = echo_pos[3];
+    let var l0 = echo_lp[0]; let var l1 = echo_lp[1]; let var l2 = echo_lp[2]; let var l3 = echo_lp[3];
+    let n0 = ECHO_LENS[0]; let n1 = ECHO_LENS[1]; let n2 = ECHO_LENS[2]; let n3 = ECHO_LENS[3];
+
+    for (let var i = 0; i < n; ++i) {
+        let dry = buf.get_f32(i);
+
+        let e0 = b0.get_f32(p0); let e1 = b1.get_f32(p1);
+        let e2 = b2.get_f32(p2); let e3 = b3.get_f32(p3);
+        l0 = l0 + (e0 - l0) * (1.0 - ECHO_DAMP);
+        l1 = l1 + (e1 - l1) * (1.0 - ECHO_DAMP);
+        l2 = l2 + (e2 - l2) * (1.0 - ECHO_DAMP);
+        l3 = l3 + (e3 - l3) * (1.0 - ECHO_DAMP);
+        b0.set_f32(p0, dry + l0 * ECHO_FEEDBACK);
+        b1.set_f32(p1, dry + l1 * ECHO_FEEDBACK);
+        b2.set_f32(p2, dry + l2 * ECHO_FEEDBACK);
+        b3.set_f32(p3, dry + l3 * ECHO_FEEDBACK);
+        p0 = p0 + 1; if (p0 >= n0) p0 = 0;
+        p1 = p1 + 1; if (p1 >= n1) p1 = 0;
+        p2 = p2 + 1; if (p2 >= n2) p2 = 0;
+        p3 = p3 + 1; if (p3 >= n3) p3 = 0;
+
+        let wet = (l0 + l1 + l2 + l3) * 0.25;
+        buf.set_f32(i, soft_clip((dry + wet * REVERB_MIX) * MASTER_GAIN));
+    }
+
+    echo_pos[0] = p0; echo_pos[1] = p1; echo_pos[2] = p2; echo_pos[3] = p3;
+    echo_lp[0] = l0; echo_lp[1] = l1; echo_lp[2] = l2; echo_lp[3] = l3;
+}
+
+// --- The audio actor ---
+
+// A sound to start, sent to the audio actor
+class SoundPlay {
+    init(self, kind, gain, param) {
+        self.kind = kind;
+        self.gain = gain;
+        self.param = param;
+    }
+}
+
+class SoundStop {
+    init(self) {}
+}
+
+fun audio_actor() {
+    let dev = $audio_open_output(SAMPLE_RATE, 1);
+    if (dev == nil) $println("no audio device, running silent");
+
+    // Reused, to give the collector nothing to do
+    let var buf = ByteArray.with_size(0);
+
+    // Without a device this still runs, to take the game's messages
+    loop {
+        let msg = $actor_recv();
+
+        if (msg instanceof SoundPlay) {
+            start_voice(msg.kind, msg.gain, msg.param);
+            continue;
+        }
+        if (msg instanceof SoundStop) break;
+        if (dev == nil || !(msg instanceof AudioNeeded)) continue;
+
+        let n = msg.num_samples;
+        if (buf.len != n * 4) buf = ByteArray.with_size(n * 4);
+        mix_into(buf, n);
+        $audio_write_samples(dev, buf);
+    }
+
+    return 0;
+}
+
+// --- What the game calls ---
+
+let var sound_actor = nil;
+
+// Start the audio actor. Call this early, before the world is loaded.
+fun start_sound() {
+    sound_actor = $actor_spawn(audio_actor);
+}
+
+fun stop_sound() {
+    if (sound_actor == nil) return;
+    $actor_send(sound_actor, SoundStop());
+    $actor_join(sound_actor);
+    sound_actor = nil;
+}
+
+// Play a sound at a level from 0 to 1. Does nothing if sound isn't started.
+fun play_sound(kind, gain, param) {
+    if (sound_actor == nil) return;
+    $actor_send(sound_actor, SoundPlay(kind, gain, param));
+}
+
+// How far away a sound is at half its level
+let SOUND_REF_DIST = 6.0;
+
+// Play a sound made somewhere in the world, quieter the further it is from
+// the listener. There is one channel, so it can't tell which side it came from.
+fun play_sound_at(kind, x, y, z, lx, ly, lz, gain, param) {
+    let dx = x - lx; let dy = y - ly; let dz = z - lz;
+    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+    let g = gain / (1.0 + d / SOUND_REF_DIST);
+    if (g < 0.02) return;
+    play_sound(kind, g, param);
+}

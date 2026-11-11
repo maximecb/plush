@@ -41,6 +41,10 @@ let BOB_DIP = 0.03;
 let BOB_TURN = 0.04;
 let BOB_EASE = 6.0;
 
+// How fast the player has to be falling, in meters per second, for landing
+// to make a sound
+let LAND_SPEED = 4.0;
+
 class Entity {
     init(self, x, y, z, yaw) {
         self.x = x;
@@ -283,6 +287,10 @@ class Player extends Entity {
 
         // Seconds since the last shot, which starts out long past
         self.shot_time = 100.0;
+
+        // What the player did this frame that makes a sound, such as "step"
+        // or "pickup", for the game to play and then clear
+        self.events = [];
     }
 
     eye_y(self) {
@@ -296,6 +304,7 @@ class Player extends Entity {
             self.weapon = item;
             self.held = pose;
         }
+        self.events.push("pickup");
     }
 
     // Advance the player by one frame. `mf` and `ms` are how hard they are
@@ -329,9 +338,14 @@ class Player extends Entity {
         // Walking. Forward is where the camera looks, flattened onto the floor.
         let old_x = self.x;
         let old_z = self.z;
+        let was_on_ground = self.on_ground;
+        let fall_speed = 0.0 - self.vel_y;
         let vx = (sin_yaw * mf + cos_yaw * ms) * WALK_SPEED;
         let vz = (cos_yaw * mf - sin_yaw * ms) * WALK_SPEED;
         move_body(w, self, dt, vx, vz, want_up);
+
+        // Coming down hard enough to hear, which a step down a stair is not
+        if (!was_on_ground && self.on_ground && fall_speed > LAND_SPEED) self.events.push("land");
 
         let dx = self.x - old_x;
         let dz = self.z - old_z;
@@ -345,7 +359,13 @@ class Player extends Entity {
         let walking = self.on_ground && dist > 0.0001;
         let target = walking ? 1.0 : 0.0;
         self.bob_amount = self.bob_amount + (target - self.bob_amount) * (dt * BOB_EASE).min(1.0);
+
+        // A footstep lands at the bottom of each dip of the bob, which is a
+        // quarter of the way into each half of the stride
+        let before = ((self.bob_phase - 0.5 * PI) / PI).floor();
         self.bob_phase = self.bob_phase + dist * (2.0 * PI / BOB_STRIDE);
+        let after = ((self.bob_phase - 0.5 * PI) / PI).floor();
+        if (walking && after != before) self.events.push("step");
     }
 
     // Where the bob puts the weapon, as an offset in view space to the right
