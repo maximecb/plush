@@ -37,6 +37,7 @@ from image import Image;
 from random import Xoshiro128;
 from ./config import FRAME_WIDTH, FRAME_HEIGHT;
 from ./world import MOON_AZ, MOON_EL, face_u, face_v;
+from ./models import models, Projection, Light;
 
 // Projection. FOCAL is half the frame width over the tangent of half the
 // horizontal field of view, so this is a 90 degree view.
@@ -239,22 +240,247 @@ let MAX_VIS = 128;
 let vis_x0 = Array.with_size(MAX_VIS, 0);
 let vis_x1 = Array.with_size(MAX_VIS, 0);
 
-// TODO: meshes. The plan is to keep this one s-buffer and give it a second
-// insert, as examples/model_viewer.psh has: the triangles of a mesh have no
-// BSP order among themselves, so their spans carry 1/z, as its value at x = 0
-// and its step per pixel, and a new one takes the pixels where it is nearer.
+// --- The model s-buffer ---
 //
-// A mesh is drawn when the traversal reaches where it stands. Faces met
-// before it are nearer and faces met after it are further, so a face needs
-// no real depth: `sbuf_insert` stays as it is, and only has to store a 1/z
-// larger than any real one in each interval it makes or widens. The mesh
-// insert then loses to faces with no special case, and once the mesh is done
-// its spans are plain coverage that `sbuf_insert` merges like any other.
+// Models have no place in the BSP order, so they get a second s-buffer whose
+// spans know how far away they are, the one from examples/model_viewer.psh.
+// Each span keeps 1/z as its value at x = 0 and its step per pixel, which is
+// linear along a scanline, and a new span takes the pixels where it is nearer.
 //
-// Only `sbuf_insert` may mark a scanline full: one covered in part by the
-// spans of a mesh can still take nearer spans of that mesh. And those spans
-// are not merged, so `sbuf_covers_rect` misses what a mesh hides until they
-// are, which costs time but not correctness.
+// Models are drawn first, before any face. A face then has to be nearer than
+// the models where it lands, which `mesh_clip` works out from the face's own
+// 1/z, and where it is not, the model shows through. The face still marks
+// those pixels covered in the face s-buffer, which is right: everything drawn
+// after it is behind it, and so behind the model too. What no face claims
+// stays the model's, which is why the sky has to go around these spans.
+//
+// A scanline no model reached has no spans here, and costs a face one test.
+let MAX_MESH_SPANS = 65536;
+
+let msp_x0 = Array.with_size(MAX_MESH_SPANS, 0);
+let msp_x1 = Array.with_size(MAX_MESH_SPANS, 0);
+let msp_w = Array.with_size(MAX_MESH_SPANS, 0.0);
+let msp_dw = Array.with_size(MAX_MESH_SPANS, 0.0);
+let msp_next = Array.with_size(MAX_MESH_SPANS, NO_SPAN);
+let var msp_top = 0;
+let var msp_free = NO_SPAN;
+
+let mb_head = Array.with_size(FRAME_HEIGHT, NO_SPAN);
+
+// Whether any model was drawn into this band since the last reset
+let var mesh_used = false;
+
+// Where `mesh_clip` gathers the pieces it keeps before copying them back
+let clip_x0 = Array.with_size(MAX_VIS, 0);
+let clip_x1 = Array.with_size(MAX_VIS, 0);
+
+// Called at the end of a frame, while render_y0/render_y1 are still the band
+// the spans were made in
+fun mesh_reset() {
+    if (!mesh_used) return;
+    for (let var y = render_y0; y < render_y1; ++y) mb_head[y] = NO_SPAN;
+    msp_top = 0;
+    msp_free = NO_SPAN;
+    mesh_used = false;
+}
+
+// Link a new span into scanline y, between two spans that follow each other,
+// either of which may be NO_SPAN. Returns the new span, or the one before if
+// the pool is spent, in which case the pixels are left as not covered.
+fun msb_link(y, prev, next, x0, x1, w, dw) {
+    let var s = msp_free;
+    if (s != NO_SPAN) {
+        msp_free = msp_next[s];
+    } else if (msp_top < MAX_MESH_SPANS) {
+        s = msp_top;
+        msp_top = msp_top + 1;
+    } else {
+        return prev;
+    }
+
+    msp_x0[s] = x0;
+    msp_x1[s] = x1;
+    msp_w[s] = w;
+    msp_dw[s] = dw;
+    msp_next[s] = next;
+    if (prev == NO_SPAN) mb_head[y] = s; else msp_next[prev] = s;
+    return s;
+}
+
+// Insert [x0, x1) into scanline y, with 1/z being w at x = 0 and changing by
+// dw per pixel, and report which parts of it are to be drawn, in
+// vis_x0/vis_x1: those not covered yet, and those nearer than what is there.
+fun msb_insert(y, x0, x1, w, dw) {
+    let var n_vis = 0;
+    let var prev = NO_SPAN;
+    let var cur = mb_head[y];
+
+    // Skip the spans entirely left of x0
+    while (cur != NO_SPAN && msp_x1[cur] <= x0) {
+        prev = cur;
+        cur = msp_next[cur];
+    }
+
+    // Everything left of cx has been dealt with. Pixels from run up to cx are
+    // a part to draw that is not in the list yet, if run is not negative. It
+    // belongs between prev and cur.
+    let var cx = x0;
+    let var run = 0 - 1;
+
+    while (cur != NO_SPAN && cx < x1) {
+        let sx0 = msp_x0[cur];
+        if (sx0 >= x1) break;
+        let sx1 = msp_x1[cur];
+
+        // Nothing is in the way before this span
+        if (sx0 > cx) {
+            if (run < 0) run = cx;
+            cx = sx0;
+        }
+
+        // The pixels shared with this span, and how much nearer the new span
+        // is at the first and the last of them
+        let var end = sx1 < x1 ? sx1 : x1;
+        let dw_diff = dw - msp_dw[cur];
+        let w_diff = w - msp_w[cur];
+        let near_start = w_diff + cx * dw_diff;
+        let near_end = w_diff + (end - 1) * dw_diff;
+
+        // If it is nearer at one end only, the two cross. Stop at the
+        // crossing, and the rest comes around again.
+        if ((near_start > 0.0) != (near_end > 0.0)) {
+            end = ((cx - near_start / dw_diff).floor() + 1).clip(cx + 1, end - 1);
+        }
+
+        if (near_start > 0.0) {
+            // The new span takes these pixels, and what was there keeps the
+            // pixels on either side of them
+            if (cx > sx0) {
+                let next = msp_next[cur];
+                msp_x1[cur] = cx;
+                prev = cur;
+                cur = next;
+                if (end < sx1) cur = msb_link(y, prev, next, end, sx1, msp_w[prev], msp_dw[prev]);
+                if (cur == prev) cur = next;
+            } else if (end < sx1) {
+                msp_x0[cur] = end;
+            } else {
+                // Nothing is left of it
+                let next = msp_next[cur];
+                if (prev == NO_SPAN) mb_head[y] = next; else msp_next[prev] = next;
+                msp_next[cur] = msp_free;
+                msp_free = cur;
+                cur = next;
+            }
+
+            if (run < 0) run = cx;
+            cx = end;
+        } else {
+            // The new span is hidden here, which ends the part to draw
+            if (run >= 0) {
+                if (n_vis < MAX_VIS) {
+                    vis_x0[n_vis] = run;
+                    vis_x1[n_vis] = cx;
+                    n_vis = n_vis + 1;
+                }
+                prev = msb_link(y, prev, cur, run, cx, w, dw);
+                run = 0 - 1;
+            }
+
+            cx = end;
+            if (end == sx1) {
+                prev = cur;
+                cur = msp_next[cur];
+            }
+        }
+    }
+
+    // Nothing is in the way after the last span
+    if (cx < x1) {
+        if (run < 0) run = cx;
+        cx = x1;
+    }
+
+    if (run >= 0) {
+        if (n_vis < MAX_VIS) {
+            vis_x0[n_vis] = run;
+            vis_x1[n_vis] = cx;
+            n_vis = n_vis + 1;
+        }
+        msb_link(y, prev, cur, run, cx, w, dw);
+    }
+
+    return n_vis;
+}
+
+// Keep the parts of the n pieces in vis_x0/vis_x1 on scanline y where a face
+// whose 1/z is w at x = 0, changing by dw per pixel, is nearer than any model
+// span there. The pieces left are written back to vis_x0/vis_x1, and their
+// number returned. The model spans are left as they are.
+fun mesh_clip(y, n, w, dw) {
+    let var m = 0;
+
+    for (let var k = 0; k < n; ++k) {
+        let var cx = vis_x0[k];
+        let x1 = vis_x1[k];
+        let var cur = mb_head[y];
+        while (cur != NO_SPAN && msp_x1[cur] <= cx) cur = msp_next[cur];
+
+        while (cx < x1 && m < MAX_VIS) {
+            // Clear of every model span from here on
+            if (cur == NO_SPAN || msp_x0[cur] >= x1) {
+                clip_x0[m] = cx; clip_x1[m] = x1; m = m + 1;
+                break;
+            }
+
+            // Clear up to the next model span
+            let sx0 = msp_x0[cur];
+            if (sx0 > cx) {
+                clip_x0[m] = cx; clip_x1[m] = sx0; m = m + 1;
+                cx = sx0;
+                if (m >= MAX_VIS) break;
+            }
+
+            // Over the pixels shared with that span, the face is kept where it
+            // is nearer, and the two may cross once
+            let sx1 = msp_x1[cur];
+            let var end = sx1 < x1 ? sx1 : x1;
+            let dw_diff = dw - msp_dw[cur];
+            let w_diff = w - msp_w[cur];
+            let near_start = w_diff + cx * dw_diff;
+            let near_end = w_diff + (end - 1) * dw_diff;
+
+            if ((near_start > 0.0) == (near_end > 0.0)) {
+                if (near_start > 0.0) { clip_x0[m] = cx; clip_x1[m] = end; m = m + 1; }
+            } else {
+                let cross = ((cx - near_start / dw_diff).floor() + 1).clip(cx + 1, end - 1);
+                if (near_start > 0.0) { clip_x0[m] = cx; clip_x1[m] = cross; }
+                else { clip_x0[m] = cross; clip_x1[m] = end; }
+                m = m + 1;
+            }
+
+            cx = end;
+            if (end == sx1) cur = msp_next[cur];
+        }
+    }
+
+    for (let var k = 0; k < m; ++k) {
+        vis_x0[k] = clip_x0[k];
+        vis_x1[k] = clip_x1[k];
+    }
+    return m;
+}
+
+// Is pixel x of scanline y covered by a model?
+fun mesh_at(y, x) {
+    let var cur = mb_head[y];
+    while (cur != NO_SPAN) {
+        if (msp_x0[cur] > x) return false;
+        if (msp_x1[cur] > x) return true;
+        cur = msp_next[cur];
+    }
+    return false;
+}
 
 // --- Faces held back to blend ---
 //
@@ -494,7 +720,6 @@ fun sky_row(y) {
 // s-buffer's intervals are sorted, disjoint and coalesced, so the gaps between
 // them are already exactly what is still uncovered and one walk finds them all.
 fun sky_span(y, x0, x1, c) {
-    let fb = frame_buffer;
     let row = y * FRAME_WIDTH;
     let var cx = x0;
     let var cur = sb_head[y];
@@ -503,10 +728,33 @@ fun sky_span(y, x0, x1, c) {
     while (cur != NO_SPAN) {
         let sx0 = sp_x0[cur];
         if (sx0 >= x1) break;
-        if (sx0 > cx) fb.fill_u32(row + cx, sx0 - cx, c);
+        if (sx0 > cx) sky_fill(y, row, cx, sx0, c);
         let sx1 = sp_x1[cur];
         if (sx1 > cx) cx = sx1;
         cur = sp_next[cur];
+    }
+    if (cx < x1) sky_fill(y, row, cx, x1, c);
+}
+
+// Paint [x0, x1) of scanline y, which no face claimed, around whatever models
+// were drawn there
+fun sky_fill(y, row, x0, x1, c) {
+    let fb = frame_buffer;
+    let var cur = mb_head[y];
+    if (cur == NO_SPAN) {
+        fb.fill_u32(row + x0, x1 - x0, c);
+        return;
+    }
+
+    let var cx = x0;
+    while (cur != NO_SPAN && msp_x1[cur] <= x0) cur = msp_next[cur];
+    while (cur != NO_SPAN) {
+        let sx0 = msp_x0[cur];
+        if (sx0 >= x1) break;
+        if (sx0 > cx) fb.fill_u32(row + cx, sx0 - cx, c);
+        let sx1 = msp_x1[cur];
+        if (sx1 > cx) cx = sx1;
+        cur = msp_next[cur];
     }
     if (cx < x1) fb.fill_u32(row + cx, x1 - cx, c);
 }
@@ -516,11 +764,11 @@ fun sky_span(y, x0, x1, c) {
 fun sky_at(y, x) {
     let var cur = sb_head[y];
     while (cur != NO_SPAN) {
-        if (sp_x0[cur] > x) return true;
+        if (sp_x0[cur] > x) return !mesh_at(y, x);
         if (sp_x1[cur] > x) return false;
         cur = sp_next[cur];
     }
-    return true;
+    return !mesh_at(y, x);
 }
 
 // This replaces clearing the frame: every pixel is either covered by the opaque
@@ -812,7 +1060,15 @@ fun raster_poly(m) {
                 if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
 
                 if (scan_y >= render_y0 && xa < xb) {
-                    let n_vis = sbuf_visible(scan_y, xa, xb);
+                    let var n_vis = sbuf_visible(scan_y, xa, xb);
+
+                    // The rows of this run carry no interpolants, so 1/z for
+                    // the model test comes straight off the gradients
+                    if (n_vis > 0 && mb_head[scan_y] != NO_SPAN) {
+                        let w0 = g_w0 + (0.5 - g_ref_x) * dwdx + (scan_y + 0.5 - g_ref_y) * g_dwdy;
+                        n_vis = mesh_clip(scan_y, n_vis, w0, dwdx);
+                    }
+
                     for (let var k = 0; k < n_vis; ++k) {
                         if (ds_top >= MAX_DEFER_SPANS) break;
                         ds_y[ds_top] = scan_y;
@@ -841,7 +1097,11 @@ fun raster_poly(m) {
             // point rounding at polygon edges; this branch is per row, never
             // in the pixel hot path.
             if (scan_y >= render_y0 && xa < xb) {
-                let n_vis = sbuf_insert(scan_y, xa, xb);
+                let var n_vis = sbuf_insert(scan_y, xa, xb);
+                if (n_vis > 0 && mb_head[scan_y] != NO_SPAN) {
+                    n_vis = mesh_clip(scan_y, n_vis, w_row, dwdx);
+                }
+
                 for (let var k = 0; k < n_vis; ++k) {
                     let var x = vis_x0[k];
                     let piece_end = vis_x1[k];
@@ -1448,12 +1708,384 @@ fun bsp_draw(node) {
     bsp_draw(far_child);
 }
 
+// --- Models ---
+//
+// Each frame comes with a draw list, one entry per model to draw:
+//
+//   [model id, animation, time, x, y, z, yaw, scale, light level]
+//
+// The model stands with the middle of its base at x, y, z, facing along yaw
+// the way the player does. The light level is on the 0..255 scale the bake
+// uses, sampled where the model stands.
+
+let var draw_list = [];
+
+// The light on a model: mostly from above, a little from the side it is seen
+// from, so that it has some shape to it. Unit length, in world space.
+let MODEL_LIGHT_X = 0.3;
+let MODEL_LIGHT_Y = 0.9;
+let MODEL_LIGHT_Z = 0.3;
+let MODEL_LIGHT_LEN = (MODEL_LIGHT_X * MODEL_LIGHT_X + MODEL_LIGHT_Y * MODEL_LIGHT_Y
+    + MODEL_LIGHT_Z * MODEL_LIGHT_Z).sqrt();
+
+// How much of the level a model takes facing away from that light, and how
+// much more it takes facing it
+let MODEL_AMBIENT = 0.6;
+let MODEL_DIFFUSE = 0.55;
+
+let model_proj = Projection(FOCAL, CENTER_X, CENTER_Y);
+
+// The transform from the model being drawn to view space
+let model_mat = Array.with_size(12, 0.0);
+
+// The 1/z-weighted light of the triangle being drawn, which models carry per
+// vertex and faces do not
+let var g_dlzdx = 0.0; let var g_dlzdy = 0.0; let var g_lz0 = 0.0;
+
+// The corners of the triangle being drawn are pX/pY[0..3]
+
+// Walk the triangle in pX/pY scanline by scanline, hand each span to the model
+// s-buffer, and draw whatever comes back as visible. Rows outside this actor's
+// band are stepped over but not drawn.
+fun raster_triangle() {
+    let var top = 0;
+    let var y_min = pY[0];
+    let var bot = 0;
+    let var y_max = pY[0];
+    for (let var i = 1; i < 3; ++i) {
+        if (pY[i] < y_min) { y_min = pY[i]; top = i; }
+        if (pY[i] > y_max) { y_max = pY[i]; bot = i; }
+    }
+
+    let var scan_y = y_min.floor();
+    if (scan_y < 0) scan_y = 0;
+    let var end_y = y_max.floor();
+    if (end_y > render_y1) end_y = render_y1;
+    if (scan_y >= end_y) return;
+
+    let y_off = scan_y + 0.5 - g_ref_y;
+    let x_off = 0.5 - g_ref_x;
+    let var uz_row = g_uz0 + x_off * g_duzdx + y_off * g_duzdy;
+    let var vz_row = g_vz0 + x_off * g_dvzdx + y_off * g_dvzdy;
+    let var lz_row = g_lz0 + x_off * g_dlzdx + y_off * g_dlzdy;
+    let var w_row = g_w0 + x_off * g_dwdx + y_off * g_dwdy;
+
+    let duzdx = g_duzdx; let dvzdx = g_dvzdx;
+    let dlzdx = g_dlzdx; let dwdx = g_dwdx;
+    let pix = g_pix;
+    let umask = g_umask;
+    let vshift = g_vshift;
+    let vmask = g_vmask;
+    let uwrap = g_uwrap;
+    let vwrap = g_vwrap;
+    let mask_rb = MASK_RB;
+    let fb = frame_buffer;
+
+    // Every triangle drawn faces the eye, so the corners after the top one run
+    // down its left side, and those before it down its right side
+    let var cl = top; let var xl = 0.0; let var dxl = 0.0; let var end_l = scan_y;
+    let var cr = top; let var xr = 0.0; let var dxr = 0.0; let var end_r = scan_y;
+    let var row = scan_y * FRAME_WIDTH;
+    let var span_px = 0;
+
+    while (scan_y < end_y) {
+        while (scan_y >= end_l && cl != bot) {
+            let ya = pY[cl];
+            let xa = pX[cl];
+            cl = (cl + 1) % 3;
+            let yb = pY[cl];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_l = e;
+            if (end_l > scan_y && yb > ya) {
+                dxl = (pX[cl] - xa) / (yb - ya);
+                xl = xa + (scan_y + 1 - ya) * dxl;
+            }
+        }
+        while (scan_y >= end_r && cr != bot) {
+            let ya = pY[cr];
+            let xa = pX[cr];
+            cr = (cr + 2) % 3;
+            let yb = pY[cr];
+            let var e = yb.floor();
+            if (e > end_y) e = end_y;
+            end_r = e;
+            if (end_r > scan_y && yb > ya) {
+                dxr = (pX[cr] - xa) / (yb - ya);
+                xr = xa + (scan_y + 1 - ya) * dxr;
+            }
+        }
+
+        let var band_end = end_l;
+        if (end_r < band_end) band_end = end_r;
+        if (band_end <= scan_y) break;
+
+        while (scan_y < band_end) {
+            let var xa = xl.floor();
+            if (xa < 0) xa = 0;
+            let var xb = xr.floor();
+            if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
+
+            if (scan_y >= render_y0 && xa < xb) {
+                let n_vis = msb_insert(scan_y, xa, xb, w_row, dwdx);
+                for (let var k = 0; k < n_vis; ++k) {
+                    let var x = vis_x0[k];
+                    let piece_end = vis_x1[k];
+
+                    let var uz = uz_row + x * duzdx;
+                    let var vz = vz_row + x * dvzdx;
+                    let var lz = lz_row + x * dlzdx;
+                    let var w = w_row + x * dwdx;
+                    let var z = 1.0 / w;
+                    let var u = uz * z;
+                    let var v = vz * z;
+
+                    let var wscale = 0.0;
+                    let adw = dwdx.abs();
+                    if (adw > 0.0) wscale = PERSP_TOL / adw;
+
+                    let var lfx = (lz * z * L_ONE).floor();
+                    if (lfx < L_MIN_FX) lfx = L_MIN_FX;
+                    else if (lfx > L_MAX_FX) lfx = L_MAX_FX;
+
+                    while (x < piece_end) {
+                        let var run = SUB_MAX;
+                        if (wscale > 0.0) {
+                            let nf = w * wscale;
+                            if (nf < SUB_MAX.to_f()) {
+                                run = nf.floor();
+                                if (run < 1) run = 1;
+                            }
+                        }
+
+                        let var xe = x + run;
+                        if (xe > piece_end) xe = piece_end;
+                        let len = xe - x;
+
+                        let uz_e = uz + len * duzdx;
+                        let vz_e = vz + len * dvzdx;
+                        let lz_e = lz + len * dlzdx;
+                        let w_e = w + len * dwdx;
+                        let z_e = 1.0 / w_e;
+                        let u_e = uz_e * z_e;
+                        let v_e = vz_e * z_e;
+
+                        let inv_len = INV_N[len];
+                        let var du = (u_e - u) * inv_len;
+                        let var dv = (v_e - v) * inv_len;
+                        if (du > GRAD_LIMIT) du = GRAD_LIMIT;
+                        else if (du < 0.0 - GRAD_LIMIT) du = 0.0 - GRAD_LIMIT;
+                        if (dv > GRAD_LIMIT) dv = GRAD_LIMIT;
+                        else if (dv < 0.0 - GRAD_LIMIT) dv = 0.0 - GRAD_LIMIT;
+
+                        let ufx = ((((u + BIAS_TEXELS) * FP_ONE).floor()) & uwrap) + EXC_FX;
+                        let vfx = ((((v + BIAS_TEXELS) * FP_ONE).floor()) & vwrap) + EXC_FX;
+                        let var t = (vfx << 32) + ufx;
+                        let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
+
+                        let var lfx_e = (lz_e * z_e * L_ONE).floor();
+                        if (lfx_e < L_MIN_FX) lfx_e = L_MIN_FX;
+                        else if (lfx_e > L_MAX_FX) lfx_e = L_MAX_FX;
+
+                        let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
+
+                        let var lp = lfx;
+                        let var i = row + x;
+                        let end_i = row + xe;
+                        span_px = span_px + len;
+                        while (i < end_i) {
+                            let c = pix.get_u32(((t >> vshift) & vmask)
+                                              | ((t >> U_SHIFT) & umask));
+                            let x = ((c & mask_rb) | ((c & MASK_G) << 24))
+                                  * (lp >> L_SHIFT);
+                            fb.set_u32(i, ((x >> 8) & mask_rb)
+                                        | ((x >> 32) & 0xFF00));
+                            t = t + dt;
+                            lp = lp + dl;
+                            i = i + 1;
+                        }
+
+                        lfx = lfx_e;
+                        uz = uz_e; vz = vz_e; lz = lz_e; w = w_e;
+                        u = u_e; v = v_e;
+                        x = xe;
+                    }
+                }
+            }
+
+            xl = xl + dxl;
+            xr = xr + dxr;
+            uz_row = uz_row + g_duzdy;
+            vz_row = vz_row + g_dvzdy;
+            lz_row = lz_row + g_dlzdy;
+            w_row = w_row + g_dwdy;
+            row = row + FRAME_WIDTH;
+            scan_y = scan_y + 1;
+        }
+    }
+
+    pixels_drawn = pixels_drawn + span_px;
+}
+
+// Work out the gradients the span loop runs on for one triangle of a model
+// that transform() has left in view space, and draw it
+fun draw_triangle(model, t) {
+    let indices = model.indices;
+    let vX = model.vX; let vY = model.vY; let vW = model.vW; let vD = model.vD;
+    let vUZ = model.vUZ; let vVZ = model.vVZ; let vLZ = model.vLZ;
+
+    let a = indices[t * 3];
+    let b = indices[t * 3 + 1];
+    let c = indices[t * 3 + 2];
+
+    // Triangles are not clipped to the near plane, so one reaching it is
+    // dropped. That only happens with the eye almost touching the model.
+    if (vD[a] < NEAR || vD[b] < NEAR || vD[c] < NEAR) return;
+
+    let x0 = vX[a];
+    let y0 = vY[a];
+    pX[0] = x0;    pY[0] = y0;
+    pX[1] = vX[b]; pY[1] = vY[b];
+    pX[2] = vX[c]; pY[2] = vY[c];
+
+    // Too thin to cover a pixel, or to take gradients from
+    let e1x = pX[1] - x0; let e1y = pY[1] - y0;
+    let e2x = pX[2] - x0; let e2y = pY[2] - y0;
+    let det = e1x * e2y - e2x * e1y;
+    if (det > -0.000001) return;
+    let inv_det = 1.0 / det;
+
+    let uz0 = vUZ[a];
+    let d1u = vUZ[b] - uz0;
+    let d2u = vUZ[c] - uz0;
+    g_duzdx = (d1u * e2y - d2u * e1y) * inv_det;
+    g_duzdy = (d2u * e1x - d1u * e2x) * inv_det;
+
+    let vz0 = vVZ[a];
+    let d1v = vVZ[b] - vz0;
+    let d2v = vVZ[c] - vz0;
+    g_dvzdx = (d1v * e2y - d2v * e1y) * inv_det;
+    g_dvzdy = (d2v * e1x - d1v * e2x) * inv_det;
+
+    let lz0 = vLZ[a];
+    let d1l = vLZ[b] - lz0;
+    let d2l = vLZ[c] - lz0;
+    g_dlzdx = (d1l * e2y - d2l * e1y) * inv_det;
+    g_dlzdy = (d2l * e1x - d1l * e2x) * inv_det;
+
+    let w0 = vW[a];
+    let d1w = vW[b] - w0;
+    let d2w = vW[c] - w0;
+    g_dwdx = (d1w * e2y - d2w * e1y) * inv_det;
+    g_dwdy = (d2w * e1x - d1w * e2x) * inv_det;
+
+    g_uz0 = uz0; g_vz0 = vz0; g_lz0 = lz0; g_w0 = w0;
+    g_ref_x = x0; g_ref_y = y0;
+
+    let tex = model.tri_tex[t];
+    g_pix = tex.pix;
+    g_umask = tex.umask;
+    g_vshift = tex.vshift;
+    g_vmask = tex.vmask;
+    g_uwrap = tex.uwrap;
+    g_vwrap = tex.vwrap;
+
+    raster_triangle();
+}
+
+// A direction in world space, turned into view space
+fun view_dir_x(x, y, z) { return x * cos_yaw - z * sin_yaw; }
+fun view_dir_y(x, y, z) { return y * cos_pitch - (x * sin_yaw + z * cos_yaw) * sin_pitch; }
+fun view_dir_z(x, y, z) { return (x * sin_yaw + z * cos_yaw) * cos_pitch + y * sin_pitch; }
+
+// Draw one entry of the draw list into the model s-buffer
+fun draw_instance(inst) {
+    let model = models[inst[0]];
+    let ex = inst[3]; let ey = inst[4]; let ez = inst[5];
+    let yaw = inst[6];
+    let s = inst[7];
+    let level = inst[8];
+
+    // The sphere around the model in all its poses, where it stands
+    let r = model.radius * s;
+    let cx = ex;
+    let cy = ey + (model.mid_y - model.min_y) * s;
+    let cz = ez;
+
+    // Outside the view, or not reaching this actor's band
+    for (let var i = 0; i < 5; ++i) {
+        let nx = fr_nx[i]; let ny = fr_ny[i]; let nz = fr_nz[i];
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        if (nx * cx + ny * cy + nz * cz - fr_d[i] + r * len < 0.0) return;
+    }
+    let depth = view_dir_z(cx - cam_x, cy - cam_y, cz - cam_z);
+    if (depth > r + NEAR) {
+        let sy = CENTER_Y - FOCAL * view_dir_y(cx - cam_x, cy - cam_y, cz - cam_z) / depth;
+        let sr = FOCAL * r / (depth - r);
+        if (sy + sr < render_y0.to_f() || sy - sr > render_y1.to_f()) return;
+    }
+
+    // The model's own space is right-handed with its front along +z, and the
+    // world's is left-handed. Turning its x around makes it left-handed with
+    // its front still along +z, and the yaw then turns +z to face where the
+    // entity does. Each column here is where one of the model's axes goes in
+    // view space, scaled.
+    let ce = yaw.cos();
+    let se = yaw.sin();
+    let m = model_mat;
+    m[0] = view_dir_x(0.0 - ce, 0.0, se) * s;
+    m[4] = view_dir_y(0.0 - ce, 0.0, se) * s;
+    m[8] = view_dir_z(0.0 - ce, 0.0, se) * s;
+    m[1] = view_dir_x(0.0, 1.0, 0.0) * s;
+    m[5] = view_dir_y(0.0, 1.0, 0.0) * s;
+    m[9] = view_dir_z(0.0, 1.0, 0.0) * s;
+    m[2] = view_dir_x(se, 0.0, ce) * s;
+    m[6] = view_dir_y(se, 0.0, ce) * s;
+    m[10] = view_dir_z(se, 0.0, ce) * s;
+
+    // The middle of the model's base goes where the entity stands
+    let bx = model.mid_x; let by = model.min_y; let bz = model.mid_z;
+    let dx = ex - cam_x; let dy = ey - cam_y; let dz = ez - cam_z;
+    m[3] = view_dir_x(dx, dy, dz) - (m[0] * bx + m[1] * by + m[2] * bz);
+    m[7] = view_dir_y(dx, dy, dz) - (m[4] * bx + m[5] * by + m[6] * bz);
+    m[11] = view_dir_z(dx, dy, dz) - (m[8] * bx + m[9] * by + m[10] * bz);
+
+    let k = level / 255.0;
+    let lx = MODEL_LIGHT_X / MODEL_LIGHT_LEN;
+    let ly = MODEL_LIGHT_Y / MODEL_LIGHT_LEN;
+    let lz = MODEL_LIGHT_Z / MODEL_LIGHT_LEN;
+    let light = Light(view_dir_x(lx, ly, lz), view_dir_y(lx, ly, lz), view_dir_z(lx, ly, lz),
+        MODEL_AMBIENT * k, MODEL_DIFFUSE * k);
+
+    model.set_pose(inst[1], inst[2]);
+    model.transform(m, s, model_proj, light);
+    model.sort();
+
+    let draw_order = model.draw_order;
+    for (let var i = 0; i < model.tris_drawn; ++i) {
+        draw_triangle(model, draw_order[i]);
+    }
+    mesh_used = true;
+}
+
+fun draw_models() {
+    for (let var i = 0; i < draw_list.len; ++i) draw_instance(draw_list[i]);
+}
+
+// The models to draw from now on, as a list of entries described above
+fun set_draw_list(list) {
+    draw_list = list;
+}
+
 fun render_frame() {
     pixels_drawn = 0;
     rect_faces_skipped = 0;
     rect_nodes_skipped = 0;
     sbuf_reset();
     update_frustum();
+
+    // Models first: every face drawn after them is tested against them
+    draw_models();
     bsp_draw(bsp_root);
 
     // The opaque pass is what decides which pixels are sky, and the blend pass
@@ -1465,6 +2097,10 @@ fun render_frame() {
 
     // Everything opaque is down, so what was held back can be blended over it
     draw_deferred();
+
+    // While this is still the band the model spans were made in, since the
+    // next frame may hand this actor another
+    mesh_reset();
 }
 
 // Where the camera is and which way it looks, and how far along the lava swell
@@ -1530,6 +2166,7 @@ class RenderBandRequest {
         self.sin_pitch = sin_pitch;
         self.cos_pitch = cos_pitch;
         self.warp_phase = warp_phase;
+        self.draw_list = draw_list;
     }
 }
 
@@ -1572,6 +2209,7 @@ fun render_actor_loop() {
         sin_pitch = msg.sin_pitch;
         cos_pitch = msg.cos_pitch;
         warp_phase = msg.warp_phase;
+        draw_list = msg.draw_list;
 
         render_frame();
         let band_start = render_y0 * FRAME_WIDTH * 4;

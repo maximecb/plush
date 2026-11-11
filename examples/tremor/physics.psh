@@ -1,6 +1,7 @@
 // Collision against the world's brushes, and moving a body through it under
 // gravity. A body is anything with a position and a size: see Entity in
-// entities.psh for the fields read and written here.
+// entities.psh for the fields read and written here. A body's y is the bottom
+// of its box, which for something that walks is where its feet are.
 
 from ./world import PLANE_EPS;
 
@@ -119,7 +120,7 @@ fun brush_top_near(b, x, z, r, walkable_only) {
 // it, so that it can walk out. The box is shrunk a little so that walls the
 // body only touches still count.
 fun brushes_inside(w, body) {
-    let cy = body.feet + 0.1 + (body.height - 0.1) * 0.5;
+    let cy = body.y + 0.1 + (body.height - 0.1) * 0.5;
     let hy = (body.height - 0.1) * 0.5 - 0.01;
     let r = body.radius - 0.01;
     let brushes = w.brushes;
@@ -139,10 +140,10 @@ fun contains(list, item) {
     return false;
 }
 
-// Would the body run into anything with its feet at this position? Brushes in
-// skip are passed through.
-fun blocked(w, body, x, feet, z, skip) {
-    let cy = feet + 0.1 + (body.height - 0.1) * 0.5;
+// Would the body run into anything with the bottom of its box at this
+// position? Brushes in skip are passed through.
+fun blocked(w, body, x, y, z, skip) {
+    let cy = y + 0.1 + (body.height - 0.1) * 0.5;
     let hy = (body.height - 0.1) * 0.5;
     let r = body.radius;
     let brushes = w.brushes;
@@ -155,16 +156,17 @@ fun blocked(w, body, x, feet, z, skip) {
         // height is taken under the body, so a ramp is steppable where it is
         // still low and solid once it has risen.
         let support = brush_top_near(b, x, z, r, true);
-        if (support != nil && support[0] <= feet + body.step_height) continue;
+        if (support != nil && support[0] <= y + body.step_height) continue;
 
         if (brush_hits(b, x, cy, z, r, hy, r)) return true;
     }
     return false;
 }
 
-// The highest surface under the body that is within a step of its feet
-fun support_at(w, body, x, feet, z, walkable_only) {
-    let reach = feet + body.step_height;
+// The highest surface under the body that is within a step of the bottom of
+// its box
+fun support_at(w, body, x, y, z, walkable_only) {
+    let reach = y + body.step_height;
     let brushes = w.brushes;
     let var best = nil;
 
@@ -207,11 +209,11 @@ fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
     let dx = body.vel_x * dt;
     let dz = body.vel_z * dt;
     if (dx != 0.0) {
-        if (!blocked(w, body, body.x + dx, body.feet, body.z, inside)) body.x = body.x + dx;
+        if (!blocked(w, body, body.x + dx, body.y, body.z, inside)) body.x = body.x + dx;
         else body.vel_x = 0.0;
     }
     if (dz != 0.0) {
-        if (!blocked(w, body, body.x, body.feet, body.z + dz, inside)) body.z = body.z + dz;
+        if (!blocked(w, body, body.x, body.y, body.z + dz, inside)) body.z = body.z + dz;
         else body.vel_z = 0.0;
     }
 
@@ -224,15 +226,15 @@ fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
     body.vel_y = body.vel_y - GRAVITY * dt;
     if (body.vel_y < 0.0 - MAX_FALL_SPEED) body.vel_y = 0.0 - MAX_FALL_SPEED;
 
-    let var next_feet = body.feet + body.vel_y * dt;
+    let var next_y = body.y + body.vel_y * dt;
 
     if (body.vel_y > 0.0) {
         // On the way up, stop dead at a ceiling rather than rising through it
-        if (blocked(w, body, body.x, next_feet, body.z, inside)) {
-            next_feet = body.feet;
+        if (blocked(w, body, body.x, next_y, body.z, inside)) {
+            next_y = body.y;
             body.vel_y = 0.0;
         }
-        body.feet = next_feet;
+        body.y = next_y;
         body.on_ground = false;
         return;
     }
@@ -241,22 +243,22 @@ fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
     // body up onto low ledges as it walks into them, since it looks for ground
     // within a step of its feet. A body on the ground stays on it going down a
     // walkable slope rather than flying off it, but drops off a stair.
-    let ground = support_at(w, body, body.x, body.feet, body.z, false);
-    let var land = ground != nil && next_feet <= ground[0];
+    let ground = support_at(w, body, body.x, body.y, body.z, false);
+    let var land = ground != nil && next_y <= ground[0];
     if (ground != nil && body.on_ground) {
         let mx = body.x - start_x;
         let mz = body.z - start_z;
         let moved = (mx * mx + mz * mz).sqrt();
-        if (body.feet - ground[0] <= MAX_CLIMB_SLOPE * moved + 0.001) land = true;
+        if (body.y - ground[0] <= MAX_CLIMB_SLOPE * moved + 0.001) land = true;
     }
     if (!land) {
-        body.feet = next_feet;
+        body.y = next_y;
         body.slide_speed = 0.0;
         body.on_ground = false;
         return;
     }
 
-    body.feet = ground[0];
+    body.y = ground[0];
     body.vel_y = 0.0;
 
     let plane = ground[1];
@@ -283,16 +285,16 @@ fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
     let slide_z = plane.nz * along;
     let old_x = body.x;
     let old_z = body.z;
-    if (!blocked(w, body, body.x + slide_x, body.feet, body.z, inside)) body.x = body.x + slide_x;
-    if (!blocked(w, body, body.x, body.feet, body.z + slide_z, inside)) body.z = body.z + slide_z;
+    if (!blocked(w, body, body.x + slide_x, body.y, body.z, inside)) body.x = body.x + slide_x;
+    if (!blocked(w, body, body.x, body.y, body.z + slide_z, inside)) body.z = body.z + slide_z;
 
     // Follow only the distance travelled along this face. At its edge, retain
     // the downward part of the slide velocity and let regular falling take over.
-    let lower = support_at(w, body, body.x, body.feet, body.z, false);
-    if (lower != nil && lower[1] == plane && lower[0] < body.feet) {
-        body.feet = lower[0];
-    } else if (lower != nil && lower[0] >= body.feet - body.step_height) {
-        body.feet = lower[0];
+    let lower = support_at(w, body, body.x, body.y, body.z, false);
+    if (lower != nil && lower[1] == plane && lower[0] < body.y) {
+        body.y = lower[0];
+    } else if (lower != nil && lower[0] >= body.y - body.step_height) {
+        body.y = lower[0];
         body.on_ground = plane_is_walkable(lower[1]);
         if (body.on_ground) body.slide_speed = 0.0;
     } else if (body.x != old_x || body.z != old_z) {

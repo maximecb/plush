@@ -204,6 +204,41 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
         .clip(0.0, SHADE_MAX);
 }
 
+// The light level at a point in the open, such as where a model stands, on the
+// same scale as light_at. There is no surface to face the lamps, so each one
+// counts as much as it would for a surface turned half towards it. This only
+// works once light_world has run.
+fun light_level_at(x, y, z) {
+    let var lum = AMBIENT;
+    for (let var i = 0; i < lights.len; ++i) {
+        let L = lights[i];
+        let dx = L[0] - x;
+        let dy = L[1] - y;
+        let dz = L[2] - z;
+        let dist2 = dx * dx + dy * dy + dz * dz;
+        let radius = L[3];
+        if (dist2 >= radius * radius) continue;
+        if (occluded(x, y, z, L[0], L[1], L[2])) continue;
+
+        let atten = 1.0 - dist2.sqrt() / radius;
+        lum = lum + L[4] * atten * 0.675;
+    }
+
+    if (moon_light > 0.0) {
+        let ce = MOON_EL.cos();
+        let dx = ce * MOON_AZ.sin();
+        let dy = MOON_EL.sin();
+        let dz = ce * MOON_AZ.cos();
+        if (!occluded(x, y, z, x + dx * MOON_REACH, y + dy * MOON_REACH, z + dz * MOON_REACH)) {
+            lum = lum + moon_light * 0.675;
+        }
+    }
+
+    let t = lum.clip(0.0, 1.0);
+    return ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+        .clip(0.0, SHADE_MAX);
+}
+
 // Solve a small system in place by Gauss-Jordan with partial pivoting. `a` is
 // `n` rows of `n + 1` columns, the last of them the right hand side.
 //

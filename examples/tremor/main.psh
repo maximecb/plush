@@ -8,6 +8,7 @@
 //   render.psh    the s-buffer renderer and its pool of render actors
 //   physics.psh   collision and moving bodies under gravity
 //   entities.psh  things that move about in the world, the player included
+//   models.psh    3D models that entities are drawn with
 //
 // This file wires them together: it loads and prepares the level, then either
 // runs the benchmark tour or opens a window and runs the game loop.
@@ -31,10 +32,11 @@ from image import save_tga;
 from pixelfont import PixelFont;
 from ./config import FRAME_WIDTH, FRAME_HEIGHT, MAP_PATH, NUM_RENDER_ACTORS, BENCH, BENCH_FRAMES, SHOT_DIR;
 from ./world import load_map, build_bsp;
-from ./lighting import light_world;
+from ./lighting import light_world, light_level_at;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
-    set_scene, set_view, render_frame_parallel, start_render_actors, stop_render_actors;
-from ./entities import Player, EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
+    set_scene, set_view, set_draw_list, render_frame_parallel, start_render_actors, stop_render_actors;
+from ./entities import Player, spawn_entities, EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
+from ./models import models;
 
 // --- Setup ---
 
@@ -66,6 +68,38 @@ $println("main actor GC/message heaps: "
     + (main_mem_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB");
 
 let player = Player(world.spawn_x, world.spawn_y - EYE_HEIGHT, world.spawn_z, world.spawn_yaw);
+
+// The entities load their models as they are made, which has to happen before
+// the render actors are spawned with their copy of every model
+let models_start_ms = $time_current_ms();
+let entities = spawn_entities(world);
+if (entities.len > 0) {
+    $println("entities: " + entities.len.to_s() + ", with " + models.len.to_s() + " models loaded in "
+        + ($time_current_ms() - models_start_ms).to_s() + " ms");
+}
+
+// Move every entity on by dt, and hand the renderer those it has to draw
+fun update_entities(dt) {
+    let list = [];
+    for (let var i = 0; i < entities.len; ++i) {
+        let e = entities[i];
+        e.update(world, dt);
+        if (e.model == nil) continue;
+
+        // The light is taken at mid height, and again only once the entity
+        // has moved a little
+        let dx = e.x - e.lit_x; let dy = e.y - e.lit_y; let dz = e.z - e.lit_z;
+        if (!e.lit || dx * dx + dy * dy + dz * dz > 0.0625) {
+            let mid = (e.model.max_y - e.model.min_y) * e.model_scale * 0.5;
+            e.light = light_level_at(e.x, e.y + mid, e.z);
+            e.lit_x = e.x; e.lit_y = e.y; e.lit_z = e.z;
+            e.lit = true;
+        }
+
+        list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, e.light]);
+    }
+    set_draw_list(list);
+}
 
 // A set tour of the level: x, y, z, yaw, pitch. Used by the headless mode
 // below, which renders the tour without opening a window, times it, and can
@@ -101,6 +135,7 @@ if (BENCH) {
     for (let var i = 0; i < BENCH_FRAMES; ++i) {
         let view = TOUR[i % TOUR.len];
         set_view(view[0], view[1], view[2], view[3], view[4], i.to_f() * 0.21);
+        update_entities(1.0 / 60.0);
 
         let t0 = $time_current_ms();
         render_frame_parallel(i);
@@ -251,6 +286,7 @@ loop {
     if (key_left) ms = ms - 1.0;
 
     player.move(world, dt, mf, ms, key_up || mouse_up, key_down);
+    update_entities(dt);
 
     set_view(player.x, player.eye_y(), player.z, player.yaw, player.pitch, time_s * 1.1);
 

@@ -181,6 +181,21 @@ class World {
         self.spawn_y = 1.6;
         self.spawn_z = 0.0;
         self.spawn_yaw = 0.0;
+
+        // The entities the map places, which entities.psh makes
+        self.entity_specs = [];
+    }
+}
+
+// An `entity` line of a map: what kind of entity, and where it stands, facing
+// along yaw in radians
+class EntitySpec {
+    init(self, kind, x, y, z, yaw) {
+        self.kind = kind;
+        self.x = x;
+        self.y = y;
+        self.z = z;
+        self.yaw = yaw;
     }
 }
 
@@ -741,6 +756,13 @@ fun load_map(path) {
         // Light from the moon drawn in the sky, on whatever has a clear line to it
         if (cmd == "moonlight") {
             w.moon_light = field_num(tok, 1, "brightness");
+            continue;
+        }
+
+        // Something that is not part of the level's solid geometry
+        if (cmd == "entity") {
+            w.entity_specs.push(EntitySpec(field(tok, 1, "type"), field_num(tok, 2, "x"),
+                field_num(tok, 3, "y"), field_num(tok, 4, "z"), field_num(tok, 5, "yaw") * PI / 180.0));
             continue;
         }
 

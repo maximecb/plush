@@ -1,0 +1,1323 @@
+// 3D models, read from binary glTF files, with their textures and baked
+// animations. This is the Model class of examples/model_viewer.psh, with a
+// registry on top so that the render actors can name a model by number rather
+// than be sent a copy of it.
+//
+// A model is posed, moved into view space and its triangles sorted here. The
+// triangles are drawn by render.psh.
+
+from image import Image, rgb;
+from jpeg import decode_jpeg;
+from json import parse_json, Error;
+from png import decode_png;
+
+let MODEL_DIR = "examples/tremor/models/";
+
+// Model textures larger than this along either axis are scaled down to it.
+// Every render actor holds its own copy of every texture.
+let MAX_TEX_SIZE = 512;
+
+// The fixed point format of the span loop in render.psh, which the texture
+// masks below are worked out for
+let FP_BITS = 16;
+
+// --- Textures ---
+
+// Returns the largest power of two that is at most n
+fun floor_pow2(n) {
+    let var p = 1;
+    while (p * 2 <= n) p = p * 2;
+    return p;
+}
+
+// A texture, and the masks the span loop wraps its coordinates with. The
+// span loop needs power-of-two sizes, so an image of another size is scaled
+// down to the nearest one, and to max_size if that is not zero.
+class MeshTexture {
+    init(self, img, max_size) {
+        let var w = floor_pow2(img.width);
+        let var h = floor_pow2(img.height);
+        if (max_size > 0) {
+            w = w.min(max_size);
+            h = h.min(max_size);
+        }
+
+        let var t = img;
+        if (w != img.width || h != img.height) t = img.resize(w, h);
+
+        self.pix = t.bytes;
+        self.width = w;
+        self.height = h;
+        self.src_width = img.width;
+        self.src_height = img.height;
+
+        let var shift = 0;
+        while ((1 << shift) < w) shift = shift + 1;
+
+        self.umask = w - 1;
+        self.vshift = 32 + FP_BITS - shift;
+        self.vmask = (h - 1) << shift;
+        self.uwrap = (w << FP_BITS) - 1;
+        self.vwrap = (h << FP_BITS) - 1;
+    }
+}
+
+// --- Loading a model ---
+
+// A .glb file is a JSON description of a scene followed by a block of binary
+// data holding its vertices, indices, images and animations. What is read
+// from it: the triangles of every mesh, with positions, normals, texture
+// coordinates and the base color texture of each material, which may be a
+// JPEG or a PNG stored in the file. And, if a mesh has a skeleton, the
+// skeleton and its animations, which are only used to work out where the
+// vertices are at each frame, see the Model class.
+
+// Chunk types, as load_u32() reads their four characters
+let MAGIC_GLTF = 0x46546C67;
+let CHUNK_JSON = 0x4E4F534A;
+let CHUNK_BIN = 0x004E4942;
+
+// Component types of accessors
+let COMP_I8 = 5120;
+let COMP_U8 = 5121;
+let COMP_I16 = 5122;
+let COMP_U16 = 5123;
+let COMP_U32 = 5125;
+let COMP_F32 = 5126;
+
+// The only kind of primitive that is loaded
+let MODE_TRIANGLES = 4;
+
+// The triangles of a file, as they are stored in it. Vertices are shared
+// between triangles, and each triangle has one texture.
+class MeshData
+{
+    init(self)
+    {
+        // Three floats per vertex for positions and unit normals, and two
+        // for texture coordinates, which run from 0 to 1 across the image
+        // with v pointing down
+        self.positions = [];
+        self.normals = [];
+        self.uvs = [];
+
+        // Four joints of the skeleton per vertex, and how much the vertex
+        // follows each one. The weights of a vertex that follows none are
+        // all zero.
+        self.joints = [];
+        self.weights = [];
+
+        // Three vertex numbers per triangle, counter-clockwise when the
+        // triangle is seen from its front
+        self.indices = [];
+
+        // For each triangle, the index of its texture
+        self.tri_textures = [];
+
+        // Images, of any size
+        self.textures = [];
+    }
+
+    num_verts(self)
+    {
+        return self.positions.len.idiv(3);
+    }
+}
+
+// Prints why a file could not be loaded, and returns nil
+fun fail(path, msg)
+{
+    $println(path + ": " + msg);
+    return nil;
+}
+
+// Number of bytes of a component type, zero if it doesn't exist
+fun comp_size(comp_type)
+{
+    if (comp_type == COMP_I8 || comp_type == COMP_U8) return 1;
+    if (comp_type == COMP_I16 || comp_type == COMP_U16) return 2;
+    if (comp_type == COMP_U32 || comp_type == COMP_F32) return 4;
+    return 0;
+}
+
+// Number of components of the elements of an accessor type
+fun type_comps(name)
+{
+    if (name == "SCALAR") return 1;
+    if (name == "VEC2") return 2;
+    if (name == "VEC3") return 3;
+    if (name == "VEC4") return 4;
+    if (name == "MAT4") return 16;
+    return 0;
+}
+
+// The parts of a file that is being loaded
+class GlbFile
+{
+    init(self, json, bin)
+    {
+        self.json = json;
+        self.bin = bin;
+
+        // Texture index in the mesh of each image and flat color in use
+        self.image_slots = {};
+    }
+
+    // Reads the elements of an accessor into a flat array, which must have
+    // num_comps components each. Floats and normalized integers are read as
+    // floats, and other integers as they are. Returns nil if the accessor
+    // is of another kind or runs past the end of the data.
+    read_accessor(self, index, num_comps)
+    {
+        let bin = self.bin;
+        let acc = self.json.accessors[index];
+        if (acc.has("sparse") || !acc.has("bufferView") || type_comps(acc.type) != num_comps) {
+            return nil;
+        }
+
+        let view = self.json.bufferViews[acc.bufferView];
+        let comp_type = acc.componentType;
+        let size = comp_size(comp_type);
+        if (size == 0 || view.get_or("buffer", 0) != 0) {
+            return nil;
+        }
+
+        // Elements are packed unless the view gives a distance between them
+        let stride = view.get_or("byteStride", size * num_comps);
+        let start = view.get_or("byteOffset", 0) + acc.get_or("byteOffset", 0);
+        let count = acc.count;
+        if (count < 0 || start < 0 || stride < size * num_comps) {
+            return nil;
+        }
+        if (count > 0 && start + (count - 1) * stride + size * num_comps > bin.len) {
+            return nil;
+        }
+
+        // Normalized integers stand for the range 0 to 1, or -1 to 1
+        let normalized = acc.get_or("normalized", false);
+        let out = Array.with_size(count * num_comps, 0);
+
+        for (let var i = 0; i < count; ++i) {
+            for (let var j = 0; j < num_comps; ++j) {
+                let pos = start + i * stride + j * size;
+                let var val = 0;
+
+                if (comp_type == COMP_F32) {
+                    val = bin.load_f32(pos);
+                } else if (comp_type == COMP_U32) {
+                    val = bin.load_u32(pos);
+                } else if (comp_type == COMP_U16) {
+                    val = bin.load_u16(pos);
+                    if (normalized) val = val / 65535.0;
+                } else if (comp_type == COMP_I16) {
+                    val = bin.load_u16(pos);
+                    if (val >= 32768) val -= 65536;
+                    if (normalized) val = (val / 32767.0).max(-1.0);
+                } else if (comp_type == COMP_U8) {
+                    val = bin[pos];
+                    if (normalized) val = val / 255.0;
+                } else {
+                    val = bin[pos];
+                    if (val >= 128) val -= 256;
+                    if (normalized) val = (val / 127.0).max(-1.0);
+                }
+
+                out[i * num_comps + j] = val;
+            }
+        }
+
+        return out;
+    }
+
+    // Decodes an image stored in the file. Returns nil if it is stored
+    // elsewhere, or in a format that can't be decoded.
+    read_image(self, index)
+    {
+        let image = self.json.images[index];
+        if (!image.has("bufferView")) {
+            return nil;
+        }
+
+        let view = self.json.bufferViews[image.bufferView];
+        let start = view.get_or("byteOffset", 0);
+        let size = view.byteLength;
+        if (start < 0 || size < 4 || start + size > self.bin.len) {
+            return nil;
+        }
+
+        let data = ByteArray.with_size(size);
+        data.memcpy(0, self.bin, start, size);
+
+        // Tell the formats apart by how they start
+        if (data[0] == 0xFF && data[1] == 0xD8) {
+            return decode_jpeg(data);
+        }
+
+        return decode_png(data);
+    }
+
+    // Returns the index in a mesh of the texture of a primitive, adding
+    // it to the mesh if this is its first use. A primitive with no
+    // texture gets one pixel of the base color of its material.
+    texture_slot(self, mesh, path, prim)
+    {
+        let var key = "white";
+        let var img = nil;
+        let var color = rgb(255, 255, 255);
+
+        if (prim.has("material")) {
+            let pbr = self.json.materials[prim.material].get_or("pbrMetallicRoughness", {});
+
+            if (pbr.has("baseColorFactor")) {
+                let f = pbr.baseColorFactor;
+                let r = (f[0] * 255.0).floor().clip(0, 255);
+                let g = (f[1] * 255.0).floor().clip(0, 255);
+                let b = (f[2] * 255.0).floor().clip(0, 255);
+                color = rgb(r, g, b);
+                key = "color " + color.to_s();
+            }
+
+            if (pbr.has("baseColorTexture")) {
+                let texture = self.json.textures[pbr.baseColorTexture.index];
+                if (texture.has("source")) {
+                    let image_key = "image " + texture.source.to_s();
+                    if (self.image_slots.has(image_key)) {
+                        return self.image_slots[image_key];
+                    }
+
+                    img = self.read_image(texture.source);
+                    if (img == nil) {
+                        $println(path + ": could not decode image " + texture.source.to_s());
+                    } else {
+                        key = image_key;
+                    }
+                }
+            }
+        }
+
+        if (self.image_slots.has(key)) {
+            return self.image_slots[key];
+        }
+
+        if (img == nil) {
+            img = Image(1, 1);
+            img.clear(color);
+        }
+
+        let slot = mesh.textures.len;
+        mesh.textures.push(img);
+        self.image_slots[key] = slot;
+        return slot;
+    }
+
+    // Appends the triangles of a primitive to a mesh, with the joints its
+    // vertices follow if it is skinned. Returns an error message, or nil
+    // on success.
+    add_primitive(self, mesh, path, prim, skinned)
+    {
+        // Points, lines, strips and fans are skipped
+        if (prim.get_or("mode", MODE_TRIANGLES) != MODE_TRIANGLES || !prim.attributes.has("POSITION")) {
+            return nil;
+        }
+
+        let attrs = prim.attributes;
+        let positions = self.read_accessor(attrs.POSITION, 3);
+        if (positions == nil) {
+            return "unsupported vertex positions";
+        }
+        let count = positions.len.idiv(3);
+
+        // Vertices are used in order when there are no indices
+        let var indices = nil;
+        if (prim.has("indices")) {
+            indices = self.read_accessor(prim.indices, 1);
+            if (indices == nil) {
+                return "unsupported vertex indices";
+            }
+        } else {
+            indices = Array.with_size(count, 0);
+            for (let var i = 0; i < count; ++i) {
+                indices[i] = i;
+            }
+        }
+
+        for (let var i = 0; i < indices.len; ++i) {
+            if (indices[i] < 0 || indices[i] >= count) {
+                return "vertex index out of range";
+            }
+        }
+        indices.resize(indices.len - indices.len % 3, 0);
+
+        let var normals = nil;
+        if (attrs.has("NORMAL")) {
+            normals = self.read_accessor(attrs.NORMAL, 3);
+        }
+        if (normals == nil || normals.len != positions.len) {
+            normals = compute_normals(positions, indices);
+        }
+
+        let var uvs = nil;
+        if (attrs.has("TEXCOORD_0")) {
+            uvs = self.read_accessor(attrs.TEXCOORD_0, 2);
+        }
+        if (uvs == nil || uvs.len != count * 2) {
+            uvs = Array.with_size(count * 2, 0.0);
+        }
+
+        // A vertex with no joints is left where it is
+        let var joints = nil;
+        let var weights = nil;
+        if (skinned && attrs.has("JOINTS_0") && attrs.has("WEIGHTS_0")) {
+            joints = self.read_accessor(attrs.JOINTS_0, 4);
+            weights = self.read_accessor(attrs.WEIGHTS_0, 4);
+        }
+        if (joints == nil || weights == nil || joints.len != count * 4 || weights.len != count * 4) {
+            joints = Array.with_size(count * 4, 0);
+            weights = Array.with_size(count * 4, 0.0);
+        }
+
+        // Vertex numbers are relative to the start of the primitive
+        let base = mesh.num_verts();
+        let slot = self.texture_slot(mesh, path, prim);
+
+        for (let var i = 0; i < positions.len; ++i) {
+            mesh.positions.push(positions[i].to_f());
+        }
+        for (let var i = 0; i < uvs.len; ++i) {
+            mesh.uvs.push(uvs[i].to_f());
+        }
+        for (let var i = 0; i < joints.len; ++i) {
+            mesh.joints.push(joints[i]);
+            mesh.weights.push(weights[i].to_f());
+        }
+
+        // Make sure normals are of unit length
+        for (let var i = 0; i < normals.len; i += 3) {
+            let nx = normals[i].to_f();
+            let ny = normals[i + 1].to_f();
+            let nz = normals[i + 2].to_f();
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            let scale = len > 0.0 ? 1.0 / len : 0.0;
+            mesh.normals.push(nx * scale);
+            mesh.normals.push(ny * scale);
+            mesh.normals.push(nz * scale);
+        }
+
+        for (let var i = 0; i < indices.len; ++i) {
+            mesh.indices.push(base + indices[i]);
+        }
+        for (let var i = 0; i < indices.len; i += 3) {
+            mesh.tri_textures.push(slot);
+        }
+
+        return nil;
+    }
+}
+
+// Computes a normal for each vertex of a mesh that has none, as the sum
+// of the normals of the triangles around it, weighted by their areas
+fun compute_normals(positions, indices)
+{
+    let normals = Array.with_size(positions.len, 0.0);
+
+    for (let var i = 0; i < indices.len; i += 3) {
+        let a = indices[i] * 3;
+        let b = indices[i + 1] * 3;
+        let c = indices[i + 2] * 3;
+
+        // The cross product of two edges is as long as twice the area
+        let ux = positions[b] - positions[a];
+        let uy = positions[b + 1] - positions[a + 1];
+        let uz = positions[b + 2] - positions[a + 2];
+        let vx = positions[c] - positions[a];
+        let vy = positions[c + 1] - positions[a + 1];
+        let vz = positions[c + 2] - positions[a + 2];
+        let nx = uy * vz - uz * vy;
+        let ny = uz * vx - ux * vz;
+        let nz = ux * vy - uy * vx;
+
+        for (let var j = 0; j < 3; ++j) {
+            let v = indices[i + j] * 3;
+            normals[v] += nx;
+            normals[v + 1] += ny;
+            normals[v + 2] += nz;
+        }
+    }
+
+    return normals;
+}
+
+// --- Skeletons ---
+
+// A transform is an array of 12 floats, three rows of a rotation and scale
+// followed by an offset: the point (x, y, z) goes to
+//
+//   m[0] * x + m[1] * y + m[2] * z + m[3]
+//   m[4] * x + m[5] * y + m[6] * z + m[7]
+//   m[8] * x + m[9] * y + m[10] * z + m[11]
+
+// Returns the transform that applies b and then a
+fun mat_mul(a, b)
+{
+    let out = Array.with_size(12, 0.0);
+
+    for (let var row = 0; row < 12; row += 4) {
+        for (let var col = 0; col < 4; ++col) {
+            out[row + col] = a[row] * b[col] + a[row + 1] * b[4 + col] + a[row + 2] * b[8 + col];
+        }
+        out[row + 3] += a[row + 3];
+    }
+
+    return out;
+}
+
+// Returns the transform that scales by s, turns by the quaternion q, which
+// is stored as x, y, z, w, and then moves by t
+fun mat_from_trs(t, q, s)
+{
+    let x = q[0];
+    let y = q[1];
+    let z = q[2];
+    let w = q[3];
+
+    return [
+        (1.0 - 2.0 * (y * y + z * z)) * s[0], 2.0 * (x * y - w * z) * s[1], 2.0 * (x * z + w * y) * s[2], t[0],
+        2.0 * (x * y + w * z) * s[0], (1.0 - 2.0 * (x * x + z * z)) * s[1], 2.0 * (y * z - w * x) * s[2], t[1],
+        2.0 * (x * z - w * y) * s[0], 2.0 * (y * z + w * x) * s[1], (1.0 - 2.0 * (x * x + y * y)) * s[2], t[2]
+    ];
+}
+
+// Returns a transform from the 16 numbers of a matrix as files store them,
+// one column after the other, starting at index pos of an array
+fun mat_from_columns(vals, pos)
+{
+    let out = Array.with_size(12, 0.0);
+
+    for (let var row = 0; row < 3; ++row) {
+        for (let var col = 0; col < 4; ++col) {
+            out[row * 4 + col] = vals[pos + col * 4 + row].to_f();
+        }
+    }
+
+    return out;
+}
+
+// What an animation does to one of the three parts of the transform of a
+// node over time
+class Channel
+{
+    init(self, node, part, times, values, step)
+    {
+        self.node = node;
+
+        // 0 for the offset, 1 for the rotation and 2 for the scale
+        self.part = part;
+
+        // Times in seconds, in order, and the value at each one, which
+        // is 4 numbers for a rotation and 3 otherwise
+        self.times = times;
+        self.values = values;
+        self.size = part == 1 ? 4 : 3;
+
+        // Whether a value holds until the next one, rather than changing
+        // into it gradually
+        self.step = step;
+    }
+
+    // Returns the value at a time, as a new array
+    sample(self, time)
+    {
+        let times = self.times;
+        let size = self.size;
+        let last = times.len - 1;
+        let out = Array.with_size(size, 0.0);
+
+        // Find the last key that is not after the time
+        let var lo = 0;
+        let var hi = last;
+        while (lo < hi) {
+            let mid = (lo + hi + 1).idiv(2);
+            if (times[mid] <= time) lo = mid; else hi = mid - 1;
+        }
+
+        // How far along the time is from that key to the next
+        let var frac = 0.0;
+        if (lo < last && !self.step && time > times[lo]) {
+            frac = (time - times[lo]) / (times[lo + 1] - times[lo]);
+        }
+
+        let a = lo * size;
+        let b = (lo < last ? lo + 1 : lo) * size;
+        let values = self.values;
+
+        // Of the two quaternions that stand for a rotation, go towards
+        // the one that is closer
+        let var sign = 1.0;
+        if (size == 4) {
+            let dot = values[a] * values[b] + values[a + 1] * values[b + 1]
+                    + values[a + 2] * values[b + 2] + values[a + 3] * values[b + 3];
+            if (dot < 0.0) sign = -1.0;
+        }
+
+        let var len_sq = 0.0;
+        for (let var i = 0; i < size; ++i) {
+            out[i] = values[a + i] + (values[b + i] * sign - values[a + i]) * frac;
+            len_sq += out[i] * out[i];
+        }
+
+        // A rotation has to be of unit length
+        if (size == 4 && len_sq > 0.0) {
+            let scale = 1.0 / len_sq.sqrt();
+            for (let var i = 0; i < 4; ++i) out[i] = out[i] * scale;
+        }
+
+        return out;
+    }
+}
+
+// The nodes of a file and the joints of a skin, which is what it takes to
+// work out where an animation puts the vertices. Nodes form a tree, and
+// the transform of each one is relative to its parent.
+class Skeleton
+{
+    init(self, file, skin)
+    {
+        let nodes = file.json.nodes;
+        self.nodes = nodes;
+
+        // The parent of each node, -1 for those that have none
+        self.parents = Array.with_size(nodes.len, 0 - 1);
+        for (let var i = 0; i < nodes.len; ++i) {
+            let children = nodes[i].get_or("children", []);
+            for (let var j = 0; j < children.len; ++j) {
+                self.parents[children[j]] = i;
+            }
+        }
+
+        // The nodes, with each one after its parent
+        self.order = [];
+        let placed = Array.with_size(nodes.len, false);
+        while (self.order.len < nodes.len) {
+            let before = self.order.len;
+            for (let var i = 0; i < nodes.len; ++i) {
+                let parent = self.parents[i];
+                if (!placed[i] && (parent < 0 || placed[parent])) {
+                    placed[i] = true;
+                    self.order.push(i);
+                }
+            }
+
+            // Nodes left over are in a loop, which a tree can't have
+            if (self.order.len == before) break;
+        }
+
+        // The node of each joint, and the transform that takes a vertex
+        // from where the mesh has it to the space of that joint
+        self.joints = skin.joints;
+        self.inverse_bind = [];
+        let var matrices = nil;
+        if (skin.has("inverseBindMatrices")) {
+            matrices = file.read_accessor(skin.inverseBindMatrices, 16);
+        }
+        for (let var i = 0; i < self.joints.len; ++i) {
+            if (matrices != nil && matrices.len >= (i + 1) * 16) {
+                self.inverse_bind.push(mat_from_columns(matrices, i * 16));
+            } else {
+                self.inverse_bind.push([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+            }
+        }
+
+        // The root is the first joint whose parent is not a joint, which
+        // is the one that carries the whole body
+        let is_joint = Array.with_size(nodes.len, false);
+        for (let var i = 0; i < self.joints.len; ++i) {
+            is_joint[self.joints[i]] = true;
+        }
+        self.root_node = self.joints[0];
+        for (let var i = 0; i < self.joints.len; ++i) {
+            let parent = self.parents[self.joints[i]];
+            if (parent < 0 || !is_joint[parent]) {
+                self.root_node = self.joints[i];
+                break;
+            }
+        }
+
+        // Where the last call to joint_transforms() put the root, along
+        // the two level axes
+        self.root_x = 0.0;
+        self.root_z = 0.0;
+    }
+
+    // Returns the transform of each joint at a time of an animation, given
+    // as a list of channels: where it takes a vertex of the mesh to
+    joint_transforms(self, channels, time)
+    {
+        let nodes = self.nodes;
+
+        // The three parts of the transform of each node, where animated
+        let parts = Array.with_size(nodes.len * 3, nil);
+        for (let var i = 0; i < channels.len; ++i) {
+            let channel = channels[i];
+            parts[channel.node * 3 + channel.part] = channel.sample(time);
+        }
+
+        // The transform of each node relative to the whole model, which
+        // is that of its parent followed by its own
+        let world = Array.with_size(nodes.len, nil);
+        for (let var i = 0; i < self.order.len; ++i) {
+            let n = self.order[i];
+            let node = nodes[n];
+            let var local = nil;
+
+            if (node.has("matrix")) {
+                local = mat_from_columns(node.matrix, 0);
+            } else {
+                let var t = parts[n * 3];
+                let var q = parts[n * 3 + 1];
+                let var s = parts[n * 3 + 2];
+                if (t == nil) t = node.get_or("translation", [0.0, 0.0, 0.0]);
+                if (q == nil) q = node.get_or("rotation", [0.0, 0.0, 0.0, 1.0]);
+                if (s == nil) s = node.get_or("scale", [1.0, 1.0, 1.0]);
+                local = mat_from_trs(t, q, s);
+            }
+
+            let parent = self.parents[n];
+            world[n] = parent < 0 ? local : mat_mul(world[parent], local);
+        }
+
+        // Where the root of the skeleton is, see root_x
+        let root = world[self.root_node];
+        self.root_x = root[3];
+        self.root_z = root[11];
+
+        let out = [];
+        for (let var i = 0; i < self.joints.len; ++i) {
+            out.push(mat_mul(world[self.joints[i]], self.inverse_bind[i]));
+        }
+
+        return out;
+    }
+
+    // Reads an animation of the file as a list of channels. Those of a
+    // kind that is not supported are left out.
+    read_channels(self, file, anim)
+    {
+        let channels = [];
+
+        for (let var i = 0; i < anim.channels.len; ++i) {
+            let target = anim.channels[i].target;
+            let sampler = anim.samplers[anim.channels[i].sampler];
+            if (!target.has("node")) continue;
+
+            let var part = 0 - 1;
+            if (target.path == "translation") part = 0;
+            if (target.path == "rotation") part = 1;
+            if (target.path == "scale") part = 2;
+            if (part < 0) continue;
+
+            // Curves between keys would take other values than these
+            let kind = sampler.get_or("interpolation", "LINEAR");
+            if (kind != "LINEAR" && kind != "STEP") continue;
+
+            let times = file.read_accessor(sampler.input, 1);
+            let values = file.read_accessor(sampler.output, part == 1 ? 4 : 3);
+            if (times == nil || values == nil || times.len == 0) continue;
+            if (values.len != times.len * (part == 1 ? 4 : 3)) continue;
+
+            channels.push(Channel(target.node, part, times, values, kind == "STEP"));
+        }
+
+        return channels;
+    }
+}
+
+// --- Models ---
+
+// Floats per vertex of a pose: a position and a normal
+let POSE_FLOATS = 6;
+
+// The range of distances a model can span is cut into this many steps, to
+// sort its triangles by step with a counting sort
+let NUM_BUCKETS = 2048;
+
+// One animation of a model, as the pose of the model at regular times
+class Clip
+{
+    init(self, name, duration, src_fps, num_frames, frames, travel_x, travel_z)
+    {
+        self.name = name;
+
+        // Length in seconds, after which it starts over
+        self.duration = duration;
+
+        // Keys per second in the file, 0 if it has no animated channel
+        self.src_fps = src_fps;
+
+        // How far the animation would carry the model over the ground in
+        // that time, in the space of the model. The poses stay in place,
+        // so whatever moves the model has to do it at this pace for the
+        // feet not to slide.
+        self.travel_x = travel_x;
+        self.travel_z = travel_z;
+
+        // Poses, at times that are duration / num_frames apart. They are
+        // stored one after the other, as f32 values.
+        self.num_frames = num_frames;
+        self.frames = frames;
+    }
+}
+
+// How view space turns into pixels: the distance to the screen in pixels,
+// and the pixel where the axis of the eye meets it
+class Projection
+{
+    init(self, focal, center_x, center_y)
+    {
+        self.focal = focal;
+        self.center_x = center_x;
+        self.center_y = center_y;
+    }
+}
+
+// The light a model is lit by, in view space: the unit vector it comes
+// from, the level a vertex facing away from it is left with, and what it
+// adds to one facing it squarely. A level of one leaves the texture as it is.
+class Light
+{
+    init(self, x, y, z, ambient, diffuse)
+    {
+        self.x = x;
+        self.y = y;
+        self.z = z;
+        self.ambient = ambient;
+        self.diffuse = diffuse;
+    }
+}
+
+// A model that can be posed and drawn. Everything about one kind of model
+// is in here, so that several of them can be on screen: what is loaded
+// once, and the working arrays that drawing one takes.
+//
+// A pose is the position and the normal of every vertex. Animations are
+// not played back from the skeleton: when the model is loaded, each one is
+// turned into a pose for each of its keys, and the pose at a given
+// time is a mix of the two around it. This takes memory, but mixing two
+// poses is a few calls that run over whole arrays, whatever the number of
+// joints.
+//
+// A model is made with Model.load(), which reads it from a file. To draw
+// it: set_pose(), then transform(), then sort(). That leaves the screen
+// position, depth and light of its vertices in vX, vY, vD, vW, vUZ, vVZ and
+// vLZ, and the triangles that face the eye in draw_order, nearest first,
+// tris_drawn of them. Drawing those is up to the renderer, which reads
+// indices and tri_tex for the corners and texture of each. The same
+// Model can be drawn several times in a frame, each time with another
+// pose and transform, as the working arrays are only used in between.
+class Model
+{
+    init(self, mesh, max_tex_size)
+    {
+        self.num_verts = mesh.num_verts();
+        self.num_tris = mesh.indices.len.idiv(3);
+        self.indices = mesh.indices;
+        self.clips = [];
+
+        let num_verts = self.num_verts;
+        let num_tris = self.num_tris;
+
+        // Textures, and that of each triangle
+        self.textures = [];
+        for (let var i = 0; i < mesh.textures.len; ++i) {
+            self.textures.push(MeshTexture(mesh.textures[i], max_tex_size));
+        }
+        self.tri_tex = Array.with_size(num_tris, nil);
+        for (let var t = 0; t < num_tris; ++t) {
+            self.tri_tex[t] = self.textures[mesh.tri_textures[t]];
+        }
+
+        // Texture coordinates of each vertex in texels. A vertex belongs to
+        // the triangles of one texture only, so it can take its size from
+        // any of them.
+        self.vert_u = Array.with_size(num_verts, 0.0);
+        self.vert_v = Array.with_size(num_verts, 0.0);
+        for (let var i = 0; i < self.indices.len; ++i) {
+            let v = self.indices[i];
+            let tex = self.tri_tex[i.idiv(3)];
+            self.vert_u[v] = mesh.uvs[v * 2] * tex.width;
+            self.vert_v[v] = mesh.uvs[v * 2 + 1] * tex.height;
+        }
+
+        // The pose the model was made in, which is the one it has when
+        // no animation is playing
+        self.rest = ByteArray.with_size(num_verts * POSE_FLOATS * 4);
+        for (let var i = 0; i < num_verts; ++i) {
+            for (let var j = 0; j < 3; ++j) {
+                self.rest.set_f32(i * POSE_FLOATS + j, mesh.positions[i * 3 + j]);
+                self.rest.set_f32(i * POSE_FLOATS + 3 + j, mesh.normals[i * 3 + j]);
+            }
+        }
+
+        // The middle of the box around the model in all of its poses, and
+        // the distance from there to its furthest vertex
+        self.mid_x = 0.0;
+        self.mid_y = 0.0;
+        self.mid_z = 0.0;
+        self.min_y = 0.0;
+        self.max_y = 0.0;
+        self.radius = 0.0;
+
+        // Its number in the registry, see get_model()
+        self.id = 0 - 1;
+
+        // The scale of the current transform
+        self.cur_scale = 1.0;
+
+        // The current pose
+        self.pose = ByteArray.with_size(self.rest.len);
+        self.pose.memcpy(0, self.rest, 0, self.rest.len);
+
+        // Screen position and distance of each vertex in the current
+        // pose and transform, and the four quantities the span loop
+        // interpolates
+        self.vX = Array.with_size(num_verts, 0.0);
+        self.vY = Array.with_size(num_verts, 0.0);
+        self.vD = Array.with_size(num_verts, 0.0);
+        self.vW = Array.with_size(num_verts, 0.0);
+        self.vUZ = Array.with_size(num_verts, 0.0);
+        self.vVZ = Array.with_size(num_verts, 0.0);
+        self.vLZ = Array.with_size(num_verts, 0.0);
+
+        // Distance of the middle of the model in the current transform
+        self.mid_depth = 0.0;
+
+        // Triangles that face the eye, before and after sorting, and
+        // where each step of the sort starts
+        self.bucket_pos = Array.with_size(NUM_BUCKETS, 0);
+        self.front_tri = Array.with_size(num_tris, 0);
+        self.front_bucket = Array.with_size(num_tris, 0);
+        self.draw_order = Array.with_size(num_tris, 0);
+        self.tris_drawn = 0;
+    }
+
+    // Adds an animation, as the pose at each of its frames. This is where
+    // the skeleton is used: a vertex goes where each of its joints takes
+    // it, in proportion to its weights.
+    bake_clip(self, mesh, skeleton, name, channels)
+    {
+        // An animation runs until its last key
+        let var duration = 0.0;
+        for (let var i = 0; i < channels.len; ++i) {
+            let times = channels[i].times;
+            duration = duration.max(times[times.len - 1].to_f());
+        }
+
+        // The key rate is that of the channel with the most keys, as a
+        // constant channel only has one at each end
+        let var src_fps = 0.0;
+        let var most_keys = 2;
+        for (let var i = 0; i < channels.len; ++i) {
+            let times = channels[i].times;
+            let span = times[times.len - 1].to_f() - times[0].to_f();
+            if (times.len > most_keys && span > 0.0) {
+                most_keys = times.len;
+                src_fps = (times.len - 1).to_f() / span;
+            }
+        }
+
+        // One pose for each key of that rate. With no channel that has a
+        // key between its ends there is no rate, and the clip is one pose.
+        let var num_frames = 1;
+        if (src_fps > 0.0) num_frames = (duration * src_fps + 0.5).floor().max(1);
+        let frame_floats = self.num_verts * POSE_FLOATS;
+        let frames = ByteArray.with_size(num_frames * frame_floats * 4);
+        let positions = mesh.positions;
+        let normals = mesh.normals;
+        let joints = mesh.joints;
+        let weights = mesh.weights;
+
+        // How far the animation carries the model over the ground from
+        // its start to its end. A walk does that, and would start over
+        // from where it began each time around.
+        skeleton.joint_transforms(channels, 0.0);
+        let start_x = skeleton.root_x;
+        let start_z = skeleton.root_z;
+        skeleton.joint_transforms(channels, duration);
+        let travel_x = skeleton.root_x - start_x;
+        let travel_z = skeleton.root_z - start_z;
+
+        for (let var f = 0; f < num_frames; ++f) {
+            let transforms = skeleton.joint_transforms(channels, f * duration / num_frames);
+
+            // The model is kept in place by taking that travel out, as
+            // much of it as there would be by this frame at a steady pace
+            let shift_x = travel_x * f / num_frames;
+            let shift_z = travel_z * f / num_frames;
+
+            for (let var v = 0; v < self.num_verts; ++v) {
+                let px = positions[v * 3];
+                let py = positions[v * 3 + 1];
+                let pz = positions[v * 3 + 2];
+                let nx = normals[v * 3];
+                let ny = normals[v * 3 + 1];
+                let nz = normals[v * 3 + 2];
+
+                // Sums over the joints of the vertex
+                let var sx = 0.0; let var sy = 0.0; let var sz = 0.0;
+                let var tx = 0.0; let var ty = 0.0; let var tz = 0.0;
+                let var total = 0.0;
+
+                for (let var k = 0; k < 4; ++k) {
+                    let weight = weights[v * 4 + k];
+                    if (weight <= 0.0 || joints[v * 4 + k] >= transforms.len) continue;
+
+                    let m = transforms[joints[v * 4 + k]];
+                    sx += weight * (m[0] * px + m[1] * py + m[2] * pz + m[3]);
+                    sy += weight * (m[4] * px + m[5] * py + m[6] * pz + m[7]);
+                    sz += weight * (m[8] * px + m[9] * py + m[10] * pz + m[11]);
+                    tx += weight * (m[0] * nx + m[1] * ny + m[2] * nz);
+                    ty += weight * (m[4] * nx + m[5] * ny + m[6] * nz);
+                    tz += weight * (m[8] * nx + m[9] * ny + m[10] * nz);
+                    total += weight;
+                }
+
+                // A vertex with no joints stays where it is
+                if (total <= 0.0) {
+                    sx = px; sy = py; sz = pz;
+                    tx = nx; ty = ny; tz = nz;
+                    total = 1.0;
+                } else {
+                    sx -= total * shift_x;
+                    sz -= total * shift_z;
+                }
+
+                let len = (tx * tx + ty * ty + tz * tz).sqrt();
+                let n_scale = len > 0.0 ? 1.0 / len : 0.0;
+                let p_scale = 1.0 / total;
+                let out = f * frame_floats + v * POSE_FLOATS;
+                frames.set_f32(out, sx * p_scale);
+                frames.set_f32(out + 1, sy * p_scale);
+                frames.set_f32(out + 2, sz * p_scale);
+                frames.set_f32(out + 3, tx * n_scale);
+                frames.set_f32(out + 4, ty * n_scale);
+                frames.set_f32(out + 5, tz * n_scale);
+            }
+        }
+
+        self.clips.push(Clip(name, duration, src_fps, num_frames, frames, travel_x, travel_z));
+    }
+
+    // Works out the box and the sphere around the model in all of its
+    // poses, once they are all known
+    find_bounds(self)
+    {
+        let poses = [self.rest];
+        for (let var i = 0; i < self.clips.len; ++i) {
+            poses.push(self.clips[i].frames);
+        }
+
+        let var min_x = self.rest.get_f32(0); let var max_x = min_x;
+        let var min_y = self.rest.get_f32(1); let var max_y = min_y;
+        let var min_z = self.rest.get_f32(2); let var max_z = min_z;
+        for (let var i = 0; i < poses.len; ++i) {
+            let data = poses[i];
+            for (let var p = 0; p < data.num_f32(); p += POSE_FLOATS) {
+                let x = data.get_f32(p);
+                let y = data.get_f32(p + 1);
+                let z = data.get_f32(p + 2);
+                min_x = min_x.min(x); max_x = max_x.max(x);
+                min_y = min_y.min(y); max_y = max_y.max(y);
+                min_z = min_z.min(z); max_z = max_z.max(z);
+            }
+        }
+        self.mid_x = (min_x + max_x) * 0.5;
+        self.mid_y = (min_y + max_y) * 0.5;
+        self.mid_z = (min_z + max_z) * 0.5;
+        self.min_y = min_y;
+        self.max_y = max_y;
+
+        let var far_sq = 0.0;
+        for (let var i = 0; i < poses.len; ++i) {
+            let data = poses[i];
+            for (let var p = 0; p < data.num_f32(); p += POSE_FLOATS) {
+                let dx = data.get_f32(p) - self.mid_x;
+                let dy = data.get_f32(p + 1) - self.mid_y;
+                let dz = data.get_f32(p + 2) - self.mid_z;
+                far_sq = far_sq.max(dx * dx + dy * dy + dz * dz);
+            }
+        }
+        self.radius = far_sq.sqrt().max(0.000001);
+    }
+
+    // Puts the model in the pose of one of its animations at a time in
+    // seconds, which wraps around at the end of the animation. An index
+    // that is not that of an animation gives the pose it was made in.
+    set_pose(self, clip_idx, time)
+    {
+        let pose = self.pose;
+        if (clip_idx < 0 || clip_idx >= self.clips.len) {
+            pose.memcpy(0, self.rest, 0, pose.len);
+            return;
+        }
+
+        // The frame before the time, the one after it, which is the first
+        // one again at the end, and how far along the time is between them
+        let clip = self.clips[clip_idx];
+        let num_frames = clip.num_frames;
+        let at = (time / clip.duration) * num_frames;
+        let whole = at.floor();
+        let frac = at - whole;
+        let a = ((whole % num_frames) + num_frames) % num_frames;
+        let b = (a + 1) % num_frames;
+
+        // pose = a + frac * (b - a), over every float of the pose at once
+        let count = self.num_verts * POSE_FLOATS;
+        pose.memcpy(0, clip.frames, a * count * 4, count * 4);
+        if (frac > 0.0 && a != b) {
+            pose.axpy_f32(0, 1, clip.frames, b * count, 1, count, frac);
+            pose.axpy_f32(0, 1, clip.frames, a * count, 1, count, 0.0 - frac);
+        }
+    }
+
+    // Moves the vertices of the current pose into view space, projects
+    // and lights them. View space has x pointing right, y up and z away
+    // from the eye, and m is the transform that takes a point of the
+    // model there. It may scale evenly along all axes, by `scale`, and must
+    // turn the right-handed space of the model into this left-handed one, as
+    // the side a triangle is seen from is told from which way around its
+    // corners are on screen. The projection and the light are those of a
+    // Projection and a Light.
+    transform(self, m, scale, proj, light)
+    {
+        self.cur_scale = scale;
+        let focal = proj.focal;
+        let center_x = proj.center_x;
+        let center_y = proj.center_y;
+        // A scaled m lengthens the normals by the same factor, which the
+        // light direction takes back out
+        let inv_scale = 1.0 / scale;
+        let light_x = light.x * inv_scale;
+        let light_y = light.y * inv_scale;
+        let light_z = light.z * inv_scale;
+        let ambient = light.ambient;
+        let diffuse = light.diffuse;
+
+        let pose = self.pose;
+        let vX = self.vX; let vY = self.vY; let vD = self.vD; let vW = self.vW;
+        let vUZ = self.vUZ; let vVZ = self.vVZ; let vLZ = self.vLZ;
+        let vert_u = self.vert_u;
+        let vert_v = self.vert_v;
+
+        let m0 = m[0]; let m1 = m[1]; let m2 = m[2]; let m3 = m[3];
+        let m4 = m[4]; let m5 = m[5]; let m6 = m[6]; let m7 = m[7];
+        let m8 = m[8]; let m9 = m[9]; let m10 = m[10]; let m11 = m[11];
+
+        self.mid_depth = m8 * self.mid_x + m9 * self.mid_y + m10 * self.mid_z + m11;
+
+        let var p = 0;
+        for (let var i = 0; i < self.num_verts; ++i) {
+            let x = pose.get_f32(p);
+            let y = pose.get_f32(p + 1);
+            let z = pose.get_f32(p + 2);
+
+            let depth = m8 * x + m9 * y + m10 * z + m11;
+            let w = 1.0 / depth;
+            vX[i] = center_x + focal * (m0 * x + m1 * y + m2 * z + m3) * w;
+            vY[i] = center_y - focal * (m4 * x + m5 * y + m6 * z + m7) * w;
+            vD[i] = depth;
+            vW[i] = w;
+
+            // The normal turns with the model, and the light does not
+            let nx = pose.get_f32(p + 3);
+            let ny = pose.get_f32(p + 4);
+            let nz = pose.get_f32(p + 5);
+            let var facing = (m0 * nx + m1 * ny + m2 * nz) * light_x
+                           + (m4 * nx + m5 * ny + m6 * nz) * light_y
+                           + (m8 * nx + m9 * ny + m10 * nz) * light_z;
+            if (facing < 0.0) facing = 0.0;
+            let level = (ambient + diffuse * facing) * 255.0;
+
+            vUZ[i] = vert_u[i] * w;
+            vVZ[i] = vert_v[i] * w;
+            vLZ[i] = level * w;
+            p = p + POSE_FLOATS;
+        }
+    }
+
+    // Fills draw_order with the triangles that face the eye, nearest
+    // first, going by the distance of their middle. The counting sort
+    // takes time in proportion to their number.
+    sort(self)
+    {
+        let indices = self.indices;
+        let vX = self.vX; let vY = self.vY; let vD = self.vD;
+        let front_tri = self.front_tri;
+        let front_bucket = self.front_bucket;
+        let draw_order = self.draw_order;
+        let bucket_pos = self.bucket_pos;
+
+        // Three times the distance of the nearest point of the sphere
+        // around the model, as the keys are sums over three corners
+        let radius = self.radius * self.cur_scale;
+        let key_min = 3.0 * (self.mid_depth - radius);
+        let key_scale = NUM_BUCKETS.to_f() / (6.0 * radius);
+        let last_bucket = NUM_BUCKETS - 1;
+
+        for (let var i = 0; i < NUM_BUCKETS; ++i) bucket_pos[i] = 0;
+
+        let var count = 0;
+        for (let var t = 0; t < self.num_tris; ++t) {
+            let a = indices[t * 3];
+            let b = indices[t * 3 + 1];
+            let c = indices[t * 3 + 2];
+
+            // The front of a triangle is the side its corners run
+            // counter-clockwise on. Rows run down the screen, which turns
+            // that into a negative area here.
+            let ax = vX[a];
+            let ay = vY[a];
+            let area = (vX[b] - ax) * (vY[c] - ay) - (vX[c] - ax) * (vY[b] - ay);
+            if (area >= 0.0) continue;
+
+            let bucket = ((vD[a] + vD[b] + vD[c] - key_min) * key_scale).floor().clip(0, last_bucket);
+            front_tri[count] = t;
+            front_bucket[count] = bucket;
+            bucket_pos[bucket] = bucket_pos[bucket] + 1;
+            count = count + 1;
+        }
+
+        // Turn the number of triangles in each bucket into where it starts
+        let var start = 0;
+        for (let var i = 0; i < NUM_BUCKETS; ++i) {
+            let n = bucket_pos[i];
+            bucket_pos[i] = start;
+            start = start + n;
+        }
+
+        for (let var i = 0; i < count; ++i) {
+            let bucket = front_bucket[i];
+            draw_order[bucket_pos[bucket]] = front_tri[i];
+            bucket_pos[bucket] = bucket_pos[bucket] + 1;
+        }
+
+        self.tris_drawn = count;
+    }
+
+    // Loads a binary glTF file into a new Model, with textures scaled down
+    // to max_tex_size along either axis if that is not zero. Prints a message
+    // and returns nil if the file can't be read or is malformed. This is
+    // called on the class, as Model.load(), and takes no self.
+    load(path, max_tex_size)
+    {
+        let data = $read_file(path);
+        if (data == nil) {
+            return fail(path, "could not read the file");
+        }
+
+        // A header of magic number, version and total size
+        if (data.len < 12 || data.load_u32(0) != MAGIC_GLTF) {
+            return fail(path, "not a binary glTF file");
+        }
+        if (data.load_u32(4) != 2) {
+            return fail(path, "only version 2 of glTF is supported");
+        }
+
+        // Then chunks, each one a size, a type and a body
+        let var json_text = nil;
+        let var bin = ByteArray.with_size(0);
+        let var pos = 12;
+        while (pos + 8 <= data.len) {
+            let size = data.load_u32(pos);
+            let kind = data.load_u32(pos + 4);
+            pos += 8;
+            if (pos + size > data.len) {
+                return fail(path, "the file is cut short");
+            }
+
+            if (kind == CHUNK_JSON && json_text == nil) {
+                json_text = String.from_utf8(data, pos, size);
+            } else if (kind == CHUNK_BIN && bin.len == 0) {
+                bin = ByteArray.with_size(size);
+                bin.memcpy(0, data, pos, size);
+            }
+
+            pos += size;
+        }
+
+        if (json_text == nil) {
+            return fail(path, "no scene description");
+        }
+        let json = parse_json(json_text);
+        if (json instanceof Error) {
+            return fail(path, json.msg);
+        }
+
+        // A mesh is skinned when the node that uses it names a skin. Only one
+        // skin is supported: the vertices of meshes with another don't move.
+        let nodes = json.get_or("nodes", []);
+        let var skin_idx = 0 - 1;
+        let skinned_meshes = {};
+        for (let var i = 0; i < nodes.len; ++i) {
+            if (!nodes[i].has("mesh") || !nodes[i].has("skin")) continue;
+            if (skin_idx < 0) skin_idx = nodes[i].skin;
+            if (nodes[i].skin == skin_idx) skinned_meshes[nodes[i].mesh.to_s()] = true;
+        }
+
+        let file = GlbFile(json, bin);
+        let mesh = MeshData();
+        let meshes = json.get_or("meshes", []);
+
+        for (let var i = 0; i < meshes.len; ++i) {
+            let prims = meshes[i].primitives;
+            let skinned = skinned_meshes.has(i.to_s());
+            for (let var j = 0; j < prims.len; ++j) {
+                let error = file.add_primitive(mesh, path, prims[j], skinned);
+                if (error != nil) {
+                    return fail(path, error);
+                }
+            }
+        }
+
+        if (mesh.indices.len == 0) {
+            return fail(path, "no triangles");
+        }
+
+        let model = Model(mesh, max_tex_size);
+
+        // The skeleton is only needed to turn the animations into poses
+        let anims = json.get_or("animations", []);
+        if (skin_idx >= 0 && anims.len > 0) {
+            let skeleton = Skeleton(file, json.skins[skin_idx]);
+            for (let var i = 0; i < anims.len; ++i) {
+                let channels = skeleton.read_channels(file, anims[i]);
+                if (channels.len == 0) continue;
+
+                let name = anims[i].get_or("name", "animation " + i.to_s());
+                model.bake_clip(mesh, skeleton, name, channels);
+            }
+        }
+
+        model.find_bounds();
+        return model;
+    }
+}
+
+// --- The registry ---
+
+// Every model loaded, by number. Render actors get their own copy of this when
+// they are spawned, so every model has to be loaded before that.
+let models = [];
+let models_by_name = {};
+
+// Loads examples/tremor/models/<name>.glb the first time it is asked for, and
+// hands back the same Model every time after that
+fun get_model(name) {
+    if (models_by_name.has(name)) return models_by_name[name];
+
+    let model = Model.load(MODEL_DIR + name + ".glb", MAX_TEX_SIZE);
+    if (model == nil) $exit(1);
+
+    model.id = models.len;
+    models.push(model);
+    models_by_name[name] = model;
+    return model;
+}

@@ -1,8 +1,13 @@
 // Things that move about in the world. An entity is a body that physics.psh
-// can move: a position, measured at its feet, a size, and how it is falling.
+// can move: a position, a size, and how it is falling. The position is at the
+// bottom middle of its box, so y is where the feet are for one that walks.
 // The player is the first kind.
+//
+// An entity may have a 3D model, which is drawn standing at its position and
+// facing along its yaw, posed by the animation it is playing.
 
 from ./physics import move_body;
+from ./models import get_model;
 
 // --- Player ---
 
@@ -25,9 +30,9 @@ let MOUSE_SENS = 0.0032;
 let PITCH_LIMIT = 1.55;
 
 class Entity {
-    init(self, x, feet, z, yaw) {
+    init(self, x, y, z, yaw) {
         self.x = x;
-        self.feet = feet;
+        self.y = y;
         self.z = z;
         self.yaw = yaw;
         self.pitch = 0.0;
@@ -44,16 +49,84 @@ class Entity {
         self.slide_speed = 0.0;
         self.on_ground = false;
         self.jump_speed = 0.0;
+
+        // The Model it is drawn with, or nil for none, how much it is scaled,
+        // and the animation it is playing, -1 for none, and how far into it
+        self.model = nil;
+        self.model_scale = 1.0;
+        self.anim = 0 - 1;
+        self.anim_time = 0.0;
+
+        // The light level the model was last drawn with, and where, so that it
+        // is only sampled again once the entity has moved
+        self.light = 0.0;
+        self.lit_x = 0.0;
+        self.lit_y = 0.0;
+        self.lit_z = 0.0;
+        self.lit = false;
+    }
+
+    // Give the entity a model, by its name under examples/tremor/models/,
+    // scaled so that it stands `height` meters tall
+    set_model(self, name, height) {
+        self.model = get_model(name);
+        self.model_scale = height / (self.model.max_y - self.model.min_y);
     }
 
     // Called once per frame. Kinds of entity that change over time, whether a
     // monster, a door or a projectile, override this.
-    update(self, w, dt) {}
+    update(self, w, dt) {
+        self.anim_time = self.anim_time + dt;
+    }
+}
+
+// Something placed in a map that is only there to be seen, standing still or
+// turning on the spot as pickups do
+class Prop extends Entity {
+    init(self, x, y, z, yaw, model, height, anim, spin) {
+        Entity.init(self, x, y, z, yaw);
+        self.set_model(model, height);
+        self.anim = anim;
+
+        // How fast it turns, in radians per second
+        self.spin = spin;
+    }
+
+    update(self, w, dt) {
+        Entity.update(self, w, dt);
+        self.yaw = self.yaw + self.spin * dt;
+    }
+}
+
+// Make the entity a map's `entity` line asks for
+fun spawn_entity(spec) {
+    let k = spec.kind;
+    let x = spec.x; let y = spec.y; let z = spec.z; let yaw = spec.yaw;
+
+    // Pickups, turning slowly
+    if (k == "health_kit") return Prop(x, y, z, yaw, "health_kit", 0.45, 0 - 1, 1.2);
+    if (k == "armor_shard") return Prop(x, y, z, yaw, "armor_shard", 0.45, 0 - 1, 1.2);
+    if (k == "shotgun") return Prop(x, y, z, yaw, "shotgun", 0.3, 0 - 1, 1.2);
+    if (k == "shotgun_ammo") return Prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0 - 1, 1.2);
+
+    // Figures, playing their idle animation
+    if (k == "claw_cyborg") return Prop(x, y, z, yaw, "claw_cyborg", 1.9, 1, 0.0);
+    if (k == "anime_girl") return Prop(x, y, z, yaw, "anime_girl", 1.7, 0, 0.0);
+
+    $println("unknown entity type: " + k);
+    $exit(1);
+}
+
+// Make every entity a map places
+fun spawn_entities(w) {
+    let out = [];
+    for (let var i = 0; i < w.entity_specs.len; ++i) out.push(spawn_entity(w.entity_specs[i]));
+    return out;
 }
 
 class Player extends Entity {
-    init(self, x, feet, z, yaw) {
-        Entity.init(self, x, feet, z, yaw);
+    init(self, x, y, z, yaw) {
+        Entity.init(self, x, y, z, yaw);
         self.radius = PLAYER_RADIUS;
         self.height = PLAYER_HEIGHT;
         self.step_height = STEP_HEIGHT;
@@ -62,7 +135,7 @@ class Player extends Entity {
     }
 
     eye_y(self) {
-        return self.feet + EYE_HEIGHT;
+        return self.y + EYE_HEIGHT;
     }
 
     // Advance the player by one frame. `mf` and `ms` are how hard they are
@@ -79,10 +152,10 @@ class Player extends Entity {
             let cos_pitch = self.pitch.cos();
             self.x = self.x + (sin_yaw * cos_pitch * mf + cos_yaw * ms) * step;
             self.z = self.z + (cos_yaw * cos_pitch * mf - sin_yaw * ms) * step;
-            self.feet = self.feet + sin_pitch * mf * step;
+            self.y = self.y + sin_pitch * mf * step;
 
-            if (want_up) self.feet = self.feet + FLY_SPEED * dt;
-            if (want_down) self.feet = self.feet - FLY_SPEED * dt;
+            if (want_up) self.y = self.y + FLY_SPEED * dt;
+            if (want_down) self.y = self.y - FLY_SPEED * dt;
 
             self.vel_x = 0.0;
             self.vel_y = 0.0;
