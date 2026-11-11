@@ -28,7 +28,7 @@ mod repl;
 
 extern crate sdl2;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::Mutex;
 use crate::vm::VM;
@@ -187,6 +187,21 @@ fn example_dirs() -> Vec<PathBuf>
     dirs
 }
 
+// An example is either a single <name>.psh file, or a <name> directory
+// holding a main.psh along with the other files it uses
+fn example_file(dir: &Path, name: &str) -> Option<String>
+{
+    if dir.join(format!("{}.psh", name)).is_file() {
+        return Some(format!("{}.psh", name));
+    }
+
+    if dir.join(name).join("main.psh").is_file() {
+        return Some(format!("{}/main.psh", name));
+    }
+
+    None
+}
+
 // Examples refer to their data files as "examples/data/...", so running one
 // means entering the directory that contains the examples directory, not the
 // examples directory itself
@@ -195,9 +210,10 @@ fn find_example(name: &str) -> String
     let dirs = example_dirs();
 
     for dir in &dirs {
-        if !dir.join(format!("{}.psh", name)).exists() {
-            continue;
-        }
+        let file = match example_file(dir, name) {
+            Some(file) => file,
+            None => continue,
+        };
 
         let (root, sub) = match (dir.parent(), dir.file_name()) {
             (Some(root), Some(sub)) => (root, sub.to_string_lossy().into_owned()),
@@ -209,7 +225,7 @@ fn find_example(name: &str) -> String
             exit(-1);
         }
 
-        return format!("{}/{}.psh", sub, name);
+        return format!("{}/{}", sub, file);
     }
 
     println!("Error: no example named \"{}\"", name);
@@ -227,9 +243,18 @@ fn list_examples(dirs: &[PathBuf])
 
         let mut names: Vec<String> = entries
             .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter_map(|n| n.strip_suffix(".psh").map(str::to_string))
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                if e.path().join("main.psh").is_file() {
+                    return Some(name);
+                }
+                name.strip_suffix(".psh").map(str::to_string)
+            })
             .collect();
+
+        // A name can be both a file and a directory, but is only run once
+        names.sort();
+        names.dedup();
 
         if names.is_empty() {
             continue;
@@ -238,7 +263,6 @@ fn list_examples(dirs: &[PathBuf])
         // Resolve the path so the location shown is unambiguous
         let path = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
 
-        names.sort();
         println!("\n{} examples available in {}:", names.len(), path.display());
         for name in names {
             println!("  {}", name);

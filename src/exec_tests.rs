@@ -87,7 +87,16 @@ fn test_file(file_path: &str, no_exec: bool)
 fn examples()
 {
     for file in fs::read_dir("./examples").unwrap() {
-        let file_path = file.unwrap().path().display().to_string();
+        let path = file.unwrap().path();
+
+        // Multi-file examples are parsed from their main.psh, which pulls
+        // in everything else they import
+        if path.join("main.psh").is_file() {
+            test_file(&path.join("main.psh").display().to_string(), true);
+            continue;
+        }
+
+        let file_path = path.display().to_string();
 
         if !file_path.ends_with(".psh") {
             continue;
