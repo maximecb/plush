@@ -1,0 +1,61 @@
+// The heads-up display: the player's health in the bottom left corner and,
+// once they have a weapon, its ammunition in the bottom right. Each is a big
+// number under a small label, in the Monogram pixel font, drawn with a drop
+// shadow so it reads against bright and dark walls alike.
+
+from pixelfont import PixelFont;
+from ./config import FRAME_WIDTH, FRAME_HEIGHT;
+
+// Whole pixels per font pixel, so the glyphs stay crisp: 4 at 720 lines
+let BIG_SCALE = (FRAME_HEIGHT * 4).idiv(720).max(1);
+let SMALL_SCALE = BIG_SCALE.idiv(2).max(1);
+let SHADOW = SMALL_SCALE;
+let MARGIN = BIG_SCALE * 6;
+
+let LABEL_COLOR = 0xFF_B8_B0_A0;
+let VALUE_COLOR = 0xFF_F0_C0_50;
+let HEALTH_COLOR = 0xFF_70_E0_70;
+let LOW_COLOR = 0xFF_E8_40_30;
+let SHADOW_COLOR = 0xFF_00_00_00;
+
+// At or below this much health, it is shown in red
+let LOW_HEALTH = 25;
+
+let label_font = PixelFont(SMALL_SCALE, LABEL_COLOR, nil);
+let label_shadow = PixelFont(SMALL_SCALE, SHADOW_COLOR, nil);
+let value_font = PixelFont(BIG_SCALE, VALUE_COLOR, nil);
+let health_font = PixelFont(BIG_SCALE, HEALTH_COLOR, nil);
+let low_font = PixelFont(BIG_SCALE, LOW_COLOR, nil);
+let value_shadow = PixelFont(BIG_SCALE, SHADOW_COLOR, nil);
+
+fun shadowed(img, font, shadow, x, y, text) {
+    shadow.draw_text(img, x + SHADOW, y + SHADOW, text);
+    font.draw_text(img, x, y, text);
+}
+
+// Draw a label over a value, with their left edges at x, or their right
+// edges at x when right-aligned
+fun draw_field(img, x, label, value, font, right) {
+    let value_y = FRAME_HEIGHT - MARGIN - value_font.char_h;
+    let label_y = value_y - label_font.char_h;
+    let var lx = x;
+    let var vx = x;
+    if (right) {
+        lx = x - label_font.text_width(label);
+        vx = x - value_font.text_width(value);
+    }
+    shadowed(img, label_font, label_shadow, lx, label_y, label);
+    shadowed(img, font, value_shadow, vx, value_y, value);
+}
+
+fun draw_hud(img, player) {
+    let var hf = health_font;
+    if (player.health <= LOW_HEALTH) hf = low_font;
+    draw_field(img, MARGIN, "HEALTH", player.health.to_s(), hf, false);
+
+    if (player.weapon != nil) {
+        let var af = value_font;
+        if (player.shells == 0) af = low_font;
+        draw_field(img, FRAME_WIDTH - MARGIN, "AMMO", player.shells.to_s(), af, true);
+    }
+}

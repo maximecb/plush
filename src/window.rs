@@ -486,6 +486,10 @@ fn translate_keycode(sdl_keycode: Keycode) -> Option<&'static str>
         Keycode::Return => Some("RETURN"),
         Keycode::LShift => Some("SHIFT"),
         Keycode::RShift => Some("SHIFT"),
+        Keycode::LAlt => Some("ALT"),
+        Keycode::RAlt => Some("ALT"),
+        Keycode::LCtrl => Some("CTRL"),
+        Keycode::RCtrl => Some("CTRL"),
         Keycode::Tab => Some("TAB"),
         _ => None,
     }
