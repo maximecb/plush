@@ -1,0 +1,1122 @@
+// The level: its brushes, faces, lights and textures, read from a .map file,
+// and the BSP tree its faces are drawn in.
+//
+// The world is a set of convex brushes, each one given as the half-spaces
+// that bound it, which is how Quake's own map format works. Faces fall out of
+// intersecting those planes, so arches, ramps and angled walls cost nothing
+// extra: the renderer only ever sees convex polygons.
+
+from image import load_tga;
+
+let TEX_DIR = "examples/tremor/textures/";
+
+// --- Units ---
+
+// World space is metric: positions, distances and speeds are all in meters
+// TEXELS_PER_METER defines the texture density and is what an unscaled
+// face's `scale` key defaults to.
+let TEXELS_PER_METER = 40.0;
+
+// Levels a map may ask for by name, which are turned into a scale on the same
+// curve everything else uses
+let NUM_LEVELS = 16;
+
+let PI = 3.14159265358979;
+let PLANE_EPS = 0.00025;
+let BIG = 409.6;
+
+// Where the moon hangs in the sky, which both the sky and the light bake use
+let MOON_AZ = 0.107;       // Radians right of straight ahead
+let MOON_EL = 0.4054;      // Radians above the horizon
+
+// --- Textures ---
+
+// Loads a texture, which the span loop needs to be power-of-two sized
+fun load_texture(path) {
+    let img = load_tga(path);
+    if (img == nil) {
+        $println(path + ": could not read an uncompressed 32-bit TGA");
+        $exit(1);
+    }
+
+    let w = img.width;
+    let h = img.height;
+    if (w < 1 || h < 1 || (w & (w - 1)) != 0 || (h & (h - 1)) != 0) {
+        $println(path + ": expected a power-of-two sized texture");
+        $exit(1);
+    }
+
+    return img;
+}
+
+// A texture as loaded. Shading happens per pixel, so the pixels are used as
+// they are; the masks the span loop wraps them with are worked out by the
+// renderer, which owns the fixed point format they depend on.
+class Texture {
+    init(self, name) {
+        let t = load_texture(TEX_DIR + name + ".tga");
+        self.name = name;
+        self.base = t.bytes;
+        self.width = t.width;
+        self.height = t.height;
+    }
+}
+
+// --- Geometry ---
+
+// A bounding half-space: the brush is the set of points with
+// nx*x + ny*y + nz*z <= d. The texture and flags of the face this plane cuts
+// ride along with it.
+class Plane {
+    init(self, nx, ny, nz, d) {
+        self.nx = nx;
+        self.ny = ny;
+        self.nz = nz;
+        self.d = d;
+        self.tex = nil;
+        self.light = -1;
+        self.fit = false;
+        self.flow = false;
+        self.scale = TEXELS_PER_METER;
+        self.turn = false;
+        self.flip = false;
+        self.alpha = 1.0;
+    }
+}
+
+// A convex solid, kept for collision and as the source of its own faces. The
+// box around it is worth having: it rejects most brushes outright, and it is
+// exact where the plane test below is not.
+class Brush {
+    init(self, planes) {
+        self.planes = planes;
+        self.x0 = 0.0; self.y0 = 0.0; self.z0 = 0.0;
+        self.x1 = 0.0; self.y1 = 0.0; self.z1 = 0.0;
+        self.alpha = 1.0;
+    }
+}
+
+// One face: a convex polygon on one plane, its vertices held flat as x, y, z
+// triples. Texture coordinates are world coordinates projected along whichever
+// axis the normal is most nearly parallel to, which is what Quake does too, and
+// what makes neighbouring brushes line up with no authoring.
+class Face {
+    init(self, verts, nx, ny, nz, d, tex, light, fit, flow, scale, turn, flip, alpha) {
+        self.v = verts;
+        self.nx = nx;
+        self.ny = ny;
+        self.nz = nz;
+        self.d = d;
+        self.tex = tex;
+        self.light = light;
+        self.fit = fit;
+        self.flow = flow;
+        self.scale = scale;
+        self.turn = turn;
+        self.flip = flip;
+        self.alpha = alpha;
+
+        // What the span loop actually wants: how much of the destination
+        // survives, as a 0..255 multiplier. The source side needs no number of
+        // its own because alpha is folded into the baked light instead, which
+        // leaves the opaque loop's one multiply doing the same work it did.
+        // Rounding to whole 255ths here is what makes the two sum to 255 and
+        // keeps a blended channel inside its sixteen bits.
+        self.alpha8 = (alpha * 255.0).floor().clip(0, 255);
+        self.inv_alpha8 = 255 - self.alpha8;
+
+        // A point inside the face, which `light_at` steps towards to ask
+        // whether a sample is walled in. Pieces cut off a face keep the whole
+        // face's point rather than taking their own, so that two of them
+        // meeting at a corner step the same way and find the same answer.
+        let nv = verts.len.idiv(3);
+        let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+        for (let var i = 0; i < nv; ++i) {
+            cx = cx + verts[i * 3]; cy = cy + verts[i * 3 + 1]; cz = cz + verts[i * 3 + 2];
+        }
+        let inv_nv = 1.0 / nv.to_f();
+        self.mid_x = cx * inv_nv; self.mid_y = cy * inv_nv; self.mid_z = cz * inv_nv;
+
+        let ax = nx.abs();
+        let ay = ny.abs();
+        let az = nz.abs();
+        let var taxis = 2;
+        if (ax >= ay && ax >= az) taxis = 0;
+        else if (ay >= ax && ay >= az) taxis = 1;
+        self.taxis = taxis;
+
+        // Set when the face is textured to fit, and when it is lit
+        self.su = 1.0; self.ou = 0.0;
+        self.sv = 1.0; self.ov = 0.0;
+        self.pix = nil;
+        self.umask = 0;
+        self.vshift = 0;
+        self.vmask = 0;
+        self.uwrap = 0;
+        self.vwrap = 0;
+
+        // The planes the light asks this face to be cut on, gathered while it
+        // is still whole and handed down to every piece taken out of it
+        self.cuts = nil;
+
+        // The light across the face, as a bilinear function of u and v
+        self.lu0 = 0.0; self.lv0 = 0.0;
+        self.l_k = 0.0; self.l_u = 0.0; self.l_v = 0.0; self.l_uv = 0.0;
+    }
+}
+
+// Everything a map file describes
+class World {
+    init(self) {
+        self.textures = [];
+        self.tex_by_name = {};
+        self.faces = [];
+        self.brushes = [];
+        self.lights = [];
+
+        // How bright the moon is on what it can see, set by `moonlight`
+        self.moon_light = 0.0;
+
+        self.spawn_x = 0.0;
+        self.spawn_y = 1.6;
+        self.spawn_z = 0.0;
+        self.spawn_yaw = 0.0;
+    }
+}
+
+// Loads a texture the first time its name is used in the map, and hands back
+// the same instance every time after that
+fun get_tex(w, name) {
+    if (w.tex_by_name.has(name)) return w.tex_by_name[name];
+    let t = Texture(name);
+    w.textures.push(t);
+    w.tex_by_name[name] = t;
+    return t;
+}
+
+// The texture coordinates of a point on a face, before fit and flow. A wall
+// takes v from -y so that the texture is the right way up.
+fun axis_u(taxis, x, y, z) {
+    if (taxis == 0) return z;
+    return x;
+}
+
+fun axis_v(taxis, x, y, z) {
+    if (taxis == 1) return z;
+    return 0.0 - y;
+}
+
+// `turn` gives the face a quarter turn, u' = v and v' = -u, which is what lays
+// the grain of a texture along a beam instead of across it
+fun face_u(taxis, turn, x, y, z) {
+    if (turn) return axis_v(taxis, x, y, z);
+    return axis_u(taxis, x, y, z);
+}
+
+fun face_v(taxis, turn, x, y, z) {
+    if (turn) return 0.0 - axis_u(taxis, x, y, z);
+    return axis_v(taxis, x, y, z);
+}
+
+// The same in texels, with the face's fit or scale applied, which is what the
+// span loop carries. The baked light is a function of these, so it has to be
+// laid out on exactly the coordinates the loop hands it.
+fun texel_u(f, x, y, z) {
+    let var u = face_u(f.taxis, f.turn, x, y, z);
+    if (f.flip) u = 0.0 - u;
+    if (f.fit) return u * f.su + f.ou;
+    return u * f.scale;
+}
+
+fun texel_v(f, x, y, z) {
+    let v = face_v(f.taxis, f.turn, x, y, z);
+    if (f.fit) return v * f.sv + f.ov;
+    return v * f.scale;
+}
+
+// A big quad lying on the plane, ready to be cut down by the other planes of
+// its brush
+fun plane_quad(p) {
+    // Any direction not parallel to the normal will do to start from
+    let var ax = 0.0; let var ay = 0.0; let var az = 1.0;
+    if (p.nz.abs() > 0.9) { ax = 1.0; ay = 0.0; az = 0.0; }
+
+    // t1 = normalize(cross(n, a)), t2 = cross(n, t1)
+    let var t1x = p.ny * az - p.nz * ay;
+    let var t1y = p.nz * ax - p.nx * az;
+    let var t1z = p.nx * ay - p.ny * ax;
+    let len = (t1x * t1x + t1y * t1y + t1z * t1z).sqrt();
+    t1x = t1x / len; t1y = t1y / len; t1z = t1z / len;
+
+    let t2x = p.ny * t1z - p.nz * t1y;
+    let t2y = p.nz * t1x - p.nx * t1z;
+    let t2z = p.nx * t1y - p.ny * t1x;
+
+    // The point of the plane closest to the origin, and the corners around it
+    let cx = p.nx * p.d;
+    let cy = p.ny * p.d;
+    let cz = p.nz * p.d;
+
+    let out = [];
+    for (let var i = 0; i < 4; ++i) {
+        let var s1 = BIG; let var s2 = BIG;
+        if (i == 1 || i == 2) s1 = 0.0 - BIG;
+        if (i == 2 || i == 3) s2 = 0.0 - BIG;
+        out.push(cx + t1x * s1 + t2x * s2);
+        out.push(cy + t1y * s1 + t2y * s2);
+        out.push(cz + t1z * s1 + t2z * s2);
+    }
+    return out;
+}
+
+// Cut a polygon down to the part of it inside a plane, that is the part with
+// nx*x + ny*y + nz*z <= d. Returns a new vertex list.
+fun clip_poly(poly, nx, ny, nz, d) {
+    let n = poly.len.idiv(3);
+    let out = [];
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+
+        let xi = poly[i * 3]; let yi = poly[i * 3 + 1]; let zi = poly[i * 3 + 2];
+        let xj = poly[j * 3]; let yj = poly[j * 3 + 1]; let zj = poly[j * 3 + 2];
+
+        let di = nx * xi + ny * yi + nz * zi - d;
+        let dj = nx * xj + ny * yj + nz * zj - d;
+
+        if (di <= PLANE_EPS) {
+            out.push(xi); out.push(yi); out.push(zi);
+        }
+        if ((di > PLANE_EPS) != (dj > PLANE_EPS)) {
+            let t = di / (di - dj);
+            out.push(xi + (xj - xi) * t);
+            out.push(yi + (yj - yi) * t);
+            out.push(zi + (zj - zi) * t);
+        }
+    }
+    return out;
+}
+
+// Turn a convex brush into the faces of its surface: for each plane, the big
+// quad lying on it, cut down by every other plane of the brush
+fun brush_to_faces(planes) {
+    let out = [];
+    for (let var i = 0; i < planes.len; ++i) {
+        let p = planes[i];
+        if (p.tex == nil) continue;
+
+        let var poly = plane_quad(p);
+        for (let var j = 0; j < planes.len; ++j) {
+            if (j == i) continue;
+            let q = planes[j];
+            poly = clip_poly(poly, q.nx, q.ny, q.nz, q.d);
+            if (poly.len < 9) break;
+        }
+
+        if (poly.len < 9) continue;
+        out.push(Face(poly, p.nx, p.ny, p.nz, p.d, p.tex, p.light, p.fit, p.flow, p.scale, p.turn,
+            p.flip, p.alpha));
+    }
+    return out;
+}
+
+// Fit mode maps the texture exactly once across the face, which is what the
+// doors, screens and light fixtures want
+fun set_fit(f) {
+    let width = f.tex.width.to_f();
+    let height = f.tex.height.to_f();
+    let n = f.v.len.idiv(3);
+
+    let var u0 = 0.0; let var u1 = 0.0;
+    let var v0 = 0.0; let var v1 = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
+        let var u = face_u(f.taxis, f.turn, x, y, z);
+        let v = face_v(f.taxis, f.turn, x, y, z);
+        if (f.flip) u = 0.0 - u;
+        if (i == 0) { u0 = u; u1 = u; v0 = v; v1 = v; }
+        if (u < u0) u0 = u;
+        if (u > u1) u1 = u;
+        if (v < v0) v0 = v;
+        if (v > v1) v1 = v;
+    }
+
+    if (u1 - u0 > 0.000025) { f.su = width / (u1 - u0); f.ou = 0.0 - f.su * u0; }
+    if (v1 - v0 > 0.000025) { f.sv = height / (v1 - v0); f.ov = 0.0 - f.sv * v0; }
+}
+
+// --- Map parsing ---
+
+fun tokenize(line) {
+    let body = line.split("//")[0];
+    let raw = body.split(" ");
+    let out = [];
+    for (let var i = 0; i < raw.len; ++i) {
+        let t = raw[i].trim();
+        if (t.len > 0) out.push(t);
+    }
+    return out;
+}
+
+fun parse_num(s) {
+    let f = s.parse_float();
+    if (f != nil) return f;
+    let i = s.parse_int(10);
+    if (i != nil) return i.to_f();
+    $println("bad number in map: " + s);
+    $exit(1);
+}
+
+// The value out of a `name=value` token at a fixed position in a command,
+// checking that its name is the one expected there
+fun field(tok, i, name) {
+    if (i >= tok.len) {
+        $println("missing " + name + "= in map line");
+        $exit(1);
+    }
+    let kv = tok[i].split("=");
+    if (kv.len != 2 || kv[0] != name) {
+        $println("expected " + name + "=, got " + tok[i]);
+        $exit(1);
+    }
+    return kv[1];
+}
+
+fun field_num(tok, i, name) { return parse_num(field(tok, i, name)); }
+fun field_int(tok, i, name) { return field(tok, i, name).parse_int(10); }
+
+// The keys every brush command takes: which texture goes on which face, how it
+// is applied, and whether the light is baked or forced
+class BrushOpts {
+    init(self) {
+        self.tex = nil;
+        self.top = nil;
+        self.bottom = nil;
+        self.side = nil;
+        self.nx = nil; self.px = nil;
+        self.ny = nil; self.py = nil;
+        self.nz = nil; self.pz = nil;
+        self.light = -1;
+        self.fit = false;
+        self.flow = false;
+        self.scale = TEXELS_PER_METER;
+        self.turn = false;
+        self.flip = false;
+
+        // 1 is opaque. Below that the face is blended over whatever stands
+        // behind it, and the whole face carries the one value.
+        self.alpha = 1.0;
+    }
+}
+
+fun parse_opts(w, tok, first) {
+    let o = BrushOpts();
+    for (let var i = first; i < tok.len; ++i) {
+        let t = tok[i];
+        if (t == "fit") { o.fit = true; continue; }
+        if (t == "flow") { o.flow = true; continue; }
+        if (t == "turn") { o.turn = true; continue; }
+        if (t == "flip") { o.flip = true; continue; }
+
+        let kv = t.split("=");
+        if (kv.len != 2) {
+            $println("bad map token: " + t);
+            $exit(1);
+        }
+        let key = kv[0];
+        let val = kv[1];
+
+        if (key == "light") { o.light = val.parse_int(10).clip(0, NUM_LEVELS - 1); continue; }
+        if (key == "scale") { o.scale = parse_num(val); continue; }
+        if (key == "alpha") { o.alpha = parse_num(val).clip(0.0, 1.0); continue; }
+
+        let tex = get_tex(w, val);
+
+        if (key == "tex") { o.tex = tex; continue; }
+        if (key == "top") { o.top = tex; continue; }
+        if (key == "bottom") { o.bottom = tex; continue; }
+        if (key == "side") { o.side = tex; continue; }
+        if (key == "nx") { o.nx = tex; continue; }
+        if (key == "px") { o.px = tex; continue; }
+        if (key == "ny") { o.ny = tex; continue; }
+        if (key == "py") { o.py = tex; continue; }
+        if (key == "nz") { o.nz = tex; continue; }
+        if (key == "pz") { o.pz = tex; continue; }
+
+        $println("unknown map key: " + key);
+        $exit(1);
+    }
+    return o;
+}
+
+fun make_plane(nx, ny, nz, d, tex, o) {
+    let p = Plane(nx, ny, nz, d);
+    p.tex = tex;
+    p.light = o.light;
+    p.fit = o.fit;
+    p.flow = o.flow;
+    p.scale = o.scale;
+    p.turn = o.turn;
+    p.flip = o.flip;
+    p.alpha = o.alpha;
+    return p;
+}
+
+// The texture for one face, falling back from the face key to the role key to
+// the catch-all
+fun pick(specific, role, o) {
+    if (specific != nil) return specific;
+    if (role != nil) return role;
+    return o.tex;
+}
+
+// The box around a brush, from the corners of every plane cut down by the rest.
+// This walks all the planes rather than only the textured ones, so that a brush
+// with hidden faces still gets the bounds of the whole solid.
+fun set_brush_bounds(b, planes) {
+    let var any = false;
+
+    for (let var i = 0; i < planes.len; ++i) {
+        let var poly = plane_quad(planes[i]);
+        for (let var j = 0; j < planes.len; ++j) {
+            if (j == i) continue;
+            let q = planes[j];
+            poly = clip_poly(poly, q.nx, q.ny, q.nz, q.d);
+            if (poly.len < 9) break;
+        }
+        if (poly.len < 9) continue;
+
+        let n = poly.len.idiv(3);
+        for (let var k = 0; k < n; ++k) {
+            let x = poly[k * 3];
+            let y = poly[k * 3 + 1];
+            let z = poly[k * 3 + 2];
+            if (!any) {
+                b.x0 = x; b.x1 = x; b.y0 = y; b.y1 = y; b.z0 = z; b.z1 = z;
+                any = true;
+            }
+            if (x < b.x0) b.x0 = x;
+            if (x > b.x1) b.x1 = x;
+            if (y < b.y0) b.y0 = y;
+            if (y > b.y1) b.y1 = y;
+            if (z < b.z0) b.z0 = z;
+            if (z > b.z1) b.z1 = z;
+        }
+    }
+}
+
+fun add_brush(w, planes) {
+    let b = Brush(planes);
+    set_brush_bounds(b, planes);
+
+    // A solid you can see through is one light passes through as well, so the
+    // clearest of its planes is what the shadow test goes by. It stays solid to
+    // walk into: a window is still a wall to the player.
+    for (let var i = 0; i < planes.len; ++i) {
+        if (planes[i].alpha < b.alpha) b.alpha = planes[i].alpha;
+    }
+    w.brushes.push(b);
+
+    let new_faces = brush_to_faces(planes);
+    for (let var i = 0; i < new_faces.len; ++i) w.faces.push(new_faces[i]);
+}
+
+// An axis-aligned box
+fun cmd_box(w, x0, y0, z0, x1, y1, z1, o) {
+    let planes = [];
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+    planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - z0, pick(o.nz, o.side, o), o));
+    planes.push(make_plane(0.0, 0.0, 1.0, z1, pick(o.pz, o.side, o), o));
+    add_brush(w, planes);
+}
+
+// A box with its top cut down to a slope, for ramps and buttresses. `dir` says
+// which side stays at full height.
+fun cmd_ramp(w, x0, y0, z0, x1, y1, z1, dir, o) {
+    let planes = [];
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - z0, pick(o.nz, o.side, o), o));
+    planes.push(make_plane(0.0, 0.0, 1.0, z1, pick(o.pz, o.side, o), o));
+
+    // The slope runs from the low edge up to the high edge, so its normal leans
+    // away from the high side
+    let var nx = 0.0;
+    let var nz = 0.0;
+    if (dir == "px") nx = 0.0 - (y1 - y0) / (x1 - x0);
+    else if (dir == "nx") nx = (y1 - y0) / (x1 - x0);
+    else if (dir == "pz") nz = 0.0 - (y1 - y0) / (z1 - z0);
+    else if (dir == "nz") nz = (y1 - y0) / (z1 - z0);
+    else {
+        $println("ramp direction must be px, nx, pz or nz, got " + dir);
+        $exit(1);
+    }
+
+    let len = (nx * nx + 1.0 + nz * nz).sqrt();
+    let ux = nx / len;
+    let uy = 1.0 / len;
+    let uz = nz / len;
+
+    // The slope passes through the top of the high edge
+    let var px = x1;
+    let var pz = z1;
+    if (dir == "nx") px = x0;
+    if (dir == "nz") pz = z0;
+
+    planes.push(make_plane(ux, uy, uz, ux * px + uy * y1 + uz * pz, pick(o.py, o.top, o), o));
+    add_brush(w, planes);
+}
+
+// A slab of even thickness on a plane that leans back as it rises, which is
+// what a wall that is not upright is made of. The line from (y0, z0) to
+// (y1, z1) is the face that looks into the room, and the solid runs `thick`
+// behind it, square to that face rather than along z, so a slab keeps its
+// thickness however far it leans. Bounded in x by x0..x1 and in y by y0..y1:
+// a mullion is a narrow one and a pane of glass a thin one, and both sit on
+// the same plane as the wall they divide.
+//
+// A ramp leans too, but everything under its slope is solid, which is right
+// for ground and wrong for a wall with a room on the other side of it.
+fun cmd_slab(w, x0, y0, z0, x1, y1, z1, thick, o) {
+    let dy = y1 - y0;
+    let dz = z1 - z0;
+    let len = (dy * dy + dz * dz).sqrt();
+    if (len < 0.000001 || thick <= 0.0) {
+        $println("a slab needs y1 above y0 and a thickness above zero");
+        $exit(1);
+    }
+
+    // Square to the run of the slab, pointing back into the room
+    let ny = dz / len;
+    let nz = 0.0 - dy / len;
+    let d = ny * y0 + nz * z0;
+
+    let planes = [];
+    planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - x0, pick(o.nx, o.side, o), o));
+    planes.push(make_plane(1.0, 0.0, 0.0, x1, pick(o.px, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+    planes.push(make_plane(0.0, ny, nz, d, pick(o.nz, nil, o), o));
+    planes.push(make_plane(0.0, 0.0 - ny, 0.0 - nz, thick - d, pick(o.pz, nil, o), o));
+    add_brush(w, planes);
+}
+
+// A vertical column with `sides` flat faces, for pillars and pedestals
+fun cmd_prism(w, cx, cz, radius, y0, y1, sides, rot, o) {
+    let planes = [];
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+
+    for (let var i = 0; i < sides; ++i) {
+        let a = rot + 2.0 * PI * i.to_f() / sides.to_f();
+        let nx = a.cos();
+        let nz = a.sin();
+        planes.push(make_plane(nx, 0.0, nz, nx * cx + nz * cz + radius, pick(nil, o.side, o), o));
+    }
+    add_brush(w, planes);
+}
+
+// A box running level from one point to another, `width` across, for anything
+// that does not lie square to the axes
+fun cmd_beam(w, x0, z0, x1, z1, width, y0, y1, o) {
+    let dx = x1 - x0;
+    let dz = z1 - z0;
+    let len = (dx * dx + dz * dz).sqrt();
+    if (len < 0.000001 || width <= 0.0) {
+        $println("a beam needs two ends apart and a width above zero");
+        $exit(1);
+    }
+
+    // Along the beam, and across it
+    let ux = dx / len;
+    let uz = dz / len;
+    let vx = 0.0 - uz;
+    let vz = ux;
+    let mid = vx * x0 + vz * z0;
+    let h = width * 0.5;
+
+    let planes = [];
+    planes.push(make_plane(0.0 - ux, 0.0, 0.0 - uz, 0.0 - (ux * x0 + uz * z0), pick(nil, o.side, o), o));
+    planes.push(make_plane(ux, 0.0, uz, ux * x1 + uz * z1, pick(nil, o.side, o), o));
+    planes.push(make_plane(vx, 0.0, vz, mid + h, pick(nil, o.side, o), o));
+    planes.push(make_plane(0.0 - vx, 0.0, 0.0 - vz, h - mid, pick(nil, o.side, o), o));
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+    add_brush(w, planes);
+}
+
+// The solid above a doorway, cut away underneath into a faceted arch. This is
+// the shape Quake uses everywhere: a handful of flat segments reading as a
+// curve, each one an angled face.
+//
+//   axis    "x" or "z", the axis the wall is thick along
+//   a0, a1  how thick the wall is, along that axis
+//   c0, c1  the width of the opening, along the other horizontal axis
+//   ybase   the height the arch starts curving in at
+//   ytop    the top of the solid
+//   segs    how many facets the curve is cut into
+fun cmd_arch(w, axis, a0, a1, c0, c1, ybase, ytop, segs, o) {
+    let mid = (c0 + c1) * 0.5;
+    let radius = (c1 - c0) * 0.5;
+    let rise = ytop - ybase;
+
+    for (let var i = 0; i < segs; ++i) {
+        // Two points a step apart along the curve, in the plane of the opening
+        let t0 = PI * i.to_f() / segs.to_f();
+        let t1 = PI * (i + 1).to_f() / segs.to_f();
+        let ca0 = mid - radius * t0.cos();
+        let ca1 = mid - radius * t1.cos();
+        let ya0 = ybase + rise * t0.sin();
+        let ya1 = ybase + rise * t1.sin();
+
+        let planes = [];
+        if (axis == "x") {
+            planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - a0, pick(o.nx, o.side, o), o));
+            planes.push(make_plane(1.0, 0.0, 0.0, a1, pick(o.px, o.side, o), o));
+            planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - ca0, nil, o));
+            planes.push(make_plane(0.0, 0.0, 1.0, ca1, nil, o));
+        } else {
+            planes.push(make_plane(0.0, 0.0, -1.0, 0.0 - a0, pick(o.nz, o.side, o), o));
+            planes.push(make_plane(0.0, 0.0, 1.0, a1, pick(o.pz, o.side, o), o));
+            planes.push(make_plane(-1.0, 0.0, 0.0, 0.0 - ca0, nil, o));
+            planes.push(make_plane(1.0, 0.0, 0.0, ca1, nil, o));
+        }
+        planes.push(make_plane(0.0, 1.0, 0.0, ytop, pick(o.py, o.top, o), o));
+
+        // The underside: the plane through both curve points, facing down into
+        // the opening
+        let dc = ca1 - ca0;
+        let dy = ya1 - ya0;
+        let len = (dc * dc + dy * dy).sqrt();
+        let var un = 0.0 - dy / len;
+        let var uy = dc / len;
+        if (uy > 0.0) { un = 0.0 - un; uy = 0.0 - uy; }
+
+        let var nx = 0.0;
+        let var nz = 0.0;
+        let var d = 0.0;
+        if (axis == "x") { nz = un; d = nz * ca0 + uy * ya0; }
+        else { nx = un; d = nx * ca0 + uy * ya0; }
+        planes.push(make_plane(nx, uy, nz, d, pick(nil, o.bottom, o), o));
+
+        add_brush(w, planes);
+    }
+}
+
+// Read a map file into a new World
+fun load_map(path) {
+    let text = $read_file_utf8(path);
+    if (text == nil) {
+        $println("could not read " + path);
+        $exit(1);
+    }
+
+    let w = World();
+
+    let lines = text.split("\n");
+    for (let var li = 0; li < lines.len; ++li) {
+        let tok = tokenize(lines[li]);
+        if (tok.len == 0) continue;
+        let cmd = tok[0];
+
+        if (cmd == "spawn") {
+            w.spawn_x = field_num(tok, 1, "x");
+            w.spawn_y = field_num(tok, 2, "y");
+            w.spawn_z = field_num(tok, 3, "z");
+            w.spawn_yaw = field_num(tok, 4, "yaw") * PI / 180.0;
+            continue;
+        }
+
+        // A point light: where it is, how far it reaches, how strong it is
+        if (cmd == "light") {
+            w.lights.push([field_num(tok, 1, "x"), field_num(tok, 2, "y"), field_num(tok, 3, "z"),
+                field_num(tok, 4, "radius"), field_num(tok, 5, "brightness")]);
+            continue;
+        }
+
+        // Light from the moon drawn in the sky, on whatever has a clear line to it
+        if (cmd == "moonlight") {
+            w.moon_light = field_num(tok, 1, "brightness");
+            continue;
+        }
+
+        if (cmd == "box") {
+            cmd_box(w, field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                parse_opts(w, tok, 7));
+            continue;
+        }
+
+        if (cmd == "ramp") {
+            cmd_ramp(w, field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                field(tok, 7, "dir"), parse_opts(w, tok, 8));
+            continue;
+        }
+
+        if (cmd == "slab") {
+            cmd_slab(w, field_num(tok, 1, "x0"), field_num(tok, 2, "y0"), field_num(tok, 3, "z0"),
+                field_num(tok, 4, "x1"), field_num(tok, 5, "y1"), field_num(tok, 6, "z1"),
+                field_num(tok, 7, "thick"), parse_opts(w, tok, 8));
+            continue;
+        }
+
+        if (cmd == "prism") {
+            cmd_prism(w, field_num(tok, 1, "cx"), field_num(tok, 2, "cz"), field_num(tok, 3, "radius"),
+                field_num(tok, 4, "y0"), field_num(tok, 5, "y1"), field_int(tok, 6, "sides"),
+                field_num(tok, 7, "rot") * PI / 180.0, parse_opts(w, tok, 8));
+            continue;
+        }
+
+        if (cmd == "beam") {
+            cmd_beam(w, field_num(tok, 1, "x0"), field_num(tok, 2, "z0"), field_num(tok, 3, "x1"),
+                field_num(tok, 4, "z1"), field_num(tok, 5, "width"), field_num(tok, 6, "y0"),
+                field_num(tok, 7, "y1"), parse_opts(w, tok, 8));
+            continue;
+        }
+
+        if (cmd == "arch") {
+            cmd_arch(w, field(tok, 1, "axis"), field_num(tok, 2, "a0"), field_num(tok, 3, "a1"),
+                field_num(tok, 4, "c0"), field_num(tok, 5, "c1"), field_num(tok, 6, "ybase"),
+                field_num(tok, 7, "ytop"), field_int(tok, 8, "segs"), parse_opts(w, tok, 9));
+            continue;
+        }
+
+        $println("unknown map command: " + cmd);
+        $exit(1);
+    }
+
+    // Fit each face while it is still whole. Everything after this cuts faces
+    // up, for the tree and again for the light, and a piece fitted to itself
+    // would squeeze a whole texture into whatever the cut left it: that is what
+    // made the middle of a tall lamp panel come out at a different scale from
+    // its ends.
+    for (let var i = 0; i < w.faces.len; ++i) {
+        if (w.faces[i].fit) set_fit(w.faces[i]);
+    }
+
+    return w;
+}
+
+// --- Cutting faces up ---
+
+// Split a face in two at a plane, returning the pieces that survive. Both keep
+// everything else about the face they came from, the fit mapping and the baked
+// light included. Every one of those is a function of world position rather
+// than of the corners it was worked out from, so a piece that inherits one
+// lands exactly where that part of the whole face did. That is what lets the
+// tree cut a lit piece up without the fragments parting company: they read the
+// same light field instead of fitting one each.
+fun split_face(f, nx, ny, nz, d) {
+    let back = clip_poly(f.v, nx, ny, nz, d);
+    let front = clip_poly(f.v, 0.0 - nx, 0.0 - ny, 0.0 - nz, 0.0 - d);
+    let out = [];
+    if (back.len >= 9) {
+        let g = Face(back, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
+            f.flip, f.alpha);
+        g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        g.mid_x = f.mid_x; g.mid_y = f.mid_y; g.mid_z = f.mid_z;
+        g.cuts = f.cuts;
+        g.lu0 = f.lu0; g.lv0 = f.lv0;
+        g.l_k = f.l_k; g.l_u = f.l_u; g.l_v = f.l_v; g.l_uv = f.l_uv;
+        out.push(g);
+    }
+    if (front.len >= 9) {
+        let g = Face(front, f.nx, f.ny, f.nz, f.d, f.tex, f.light, f.fit, f.flow, f.scale, f.turn,
+            f.flip, f.alpha);
+        g.su = f.su; g.ou = f.ou; g.sv = f.sv; g.ov = f.ov;
+        g.mid_x = f.mid_x; g.mid_y = f.mid_y; g.mid_z = f.mid_z;
+        g.cuts = f.cuts;
+        g.lu0 = f.lu0; g.lv0 = f.lv0;
+        g.l_k = f.l_k; g.l_u = f.l_u; g.l_v = f.l_v; g.l_uv = f.l_uv;
+        out.push(g);
+    }
+    return out;
+}
+
+// Slice a face along one axis at every grid line it crosses. Each cut takes
+// the piece below the line off the front and carries the remainder forward, so
+// this costs one split per piece rather than rescanning the whole list.
+fun slice_axis(f, axis, grid, out) {
+    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+    if (axis == 0) nx = 1.0;
+    else if (axis == 1) ny = 1.0;
+    else nz = 1.0;
+
+    let var rest = f;
+    loop {
+        let n = rest.v.len.idiv(3);
+        let var lo = rest.v[axis];
+        let var hi = lo;
+        for (let var j = 1; j < n; ++j) {
+            let c = rest.v[j * 3 + axis];
+            if (c < lo) lo = c;
+            if (c > hi) hi = c;
+        }
+
+        if (hi - lo <= grid + 0.0125) { out.push(rest); return; }
+
+        // Cut on the grid line just past the low edge, so that the quads of
+        // neighbouring faces line up. A cut landing within the clipper's
+        // epsilon of an edge would hand back a piece identical to the one it
+        // came from and this loop would never end, so keep clear of both ends.
+        let var cut = (lo / grid).floor().to_f() * grid + grid;
+        if (cut - lo < 0.025) cut = cut + grid;
+        if (cut > hi - 0.025) { out.push(rest); return; }
+
+        let parts = split_face(rest, nx, ny, nz, cut);
+        if (parts.len < 2) { out.push(rest); return; }
+
+        out.push(parts[0]);
+        rest = parts[1];
+    }
+}
+
+// Cut a face into a grid of pieces no larger than `grid` across. The lava uses
+// this: its corners have to be close enough together for a sine wave running
+// through them to read as a curve rather than as a fold.
+fun subdivide_grid(f, grid, out) {
+    let var work = [f];
+
+    for (let var axis = 0; axis < 3; ++axis) {
+        // A face has no extent along the axis it faces
+        if (axis == f.taxis) continue;
+
+        let next = [];
+        for (let var i = 0; i < work.len; ++i) slice_axis(work[i], axis, grid, next);
+        work = next;
+    }
+
+    for (let var i = 0; i < work.len; ++i) out.push(work[i]);
+}
+
+// --- BSP tree ---
+
+class BspNode {
+    init(self, nx, ny, nz, d) {
+        self.nx = nx;
+        self.ny = ny;
+        self.nz = nz;
+        self.d = d;
+        self.on = [];
+        self.front = nil;
+        self.back = nil;
+
+        // The box around everything in this subtree, filled in once the tree
+        // is built. Testing it against the view means a room the camera is not
+        // looking at costs one test instead of one per face.
+        self.cx = 0.0; self.cy = 0.0; self.cz = 0.0;
+        self.hx = 0.0; self.hy = 0.0; self.hz = 0.0;
+        self.empty = true;
+        self.moving = false;
+    }
+}
+
+let var bsp_splits = 0;
+let var bsp_nodes = 0;
+
+// Where a face sits relative to a plane: 0 on it, 1 in front, 2 behind, 3
+// across it
+fun classify(f, nx, ny, nz, d) {
+    let n = f.v.len.idiv(3);
+    let var lo = 0.0;
+    let var hi = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let s = nx * f.v[i * 3] + ny * f.v[i * 3 + 1] + nz * f.v[i * 3 + 2] - d;
+        if (i == 0) { lo = s; hi = s; }
+        if (s < lo) lo = s;
+        if (s > hi) hi = s;
+    }
+    if (hi <= PLANE_EPS && lo >= 0.0 - PLANE_EPS) return 0;
+    if (lo >= 0.0 - PLANE_EPS) return 1;
+    if (hi <= PLANE_EPS) return 2;
+    return 3;
+}
+
+fun score_plane(face_list, nx, ny, nz, d) {
+    let var front = 0;
+    let var back = 0;
+    let var cut = 0;
+    for (let var i = 0; i < face_list.len; ++i) {
+        let c = classify(face_list[i], nx, ny, nz, d);
+        if (c == 1) front = front + 1;
+        else if (c == 2) back = back + 1;
+        else if (c == 3) cut = cut + 1;
+    }
+
+    let var diff = front - back;
+    if (diff < 0) diff = 0 - diff;
+
+    // An axis-aligned plane cuts far fewer faces in a level built mostly of
+    // boxes, so it is worth a head start over an angled one
+    let var bonus = 0;
+    if (nx.abs() < 0.99 && ny.abs() < 0.99 && nz.abs() < 0.99) bonus = 6;
+    return diff + 8 * cut + bonus;
+}
+
+// The same geometric plane may occur on many faces, sometimes with the normal
+// reversed. Scoring it again spends a candidate without considering a new
+// partition of the faces.
+fun same_plane(a, b) {
+    let direct = (a.nx - b.nx).abs() <= PLANE_EPS
+        && (a.ny - b.ny).abs() <= PLANE_EPS
+        && (a.nz - b.nz).abs() <= PLANE_EPS
+        && (a.d - b.d).abs() <= PLANE_EPS;
+    if (direct) return true;
+
+    return (a.nx + b.nx).abs() <= PLANE_EPS
+        && (a.ny + b.ny).abs() <= PLANE_EPS
+        && (a.nz + b.nz).abs() <= PLANE_EPS
+        && (a.d + b.d).abs() <= PLANE_EPS;
+}
+
+fun add_unique_plane(candidate_list, f) {
+    for (let var i = 0; i < candidate_list.len; ++i) {
+        if (same_plane(candidate_list[i], f)) return false;
+    }
+    candidate_list.push(f);
+    return true;
+}
+
+fun bsp_build(face_list) {
+    if (face_list.len == 0) return nil;
+
+    // Candidate planes are the face planes themselves. Trying every one of them
+    // is quadratic, so a long list is sampled instead. Walk the other offsets
+    // through that sample when it contains duplicate planes, keeping the same
+    // scoring budget but replacing duplicates with distinct partitions.
+    let var step = 1;
+    if (face_list.len > 24) step = face_list.len.idiv(24);
+
+    let target = (face_list.len + step - 1).idiv(step);
+    let candidates = [];
+    let var offset = 0;
+    while (candidates.len < target && offset < step) {
+        let var i = offset;
+        while (i < face_list.len && candidates.len < target) {
+            add_unique_plane(candidates, face_list[i]);
+            i = i + step;
+        }
+        offset = offset + 1;
+    }
+
+    let var bf = candidates[0];
+    let var best_score = score_plane(face_list, bf.nx, bf.ny, bf.nz, bf.d);
+    for (let var i = 1; i < candidates.len; ++i) {
+        let f = candidates[i];
+        let s = score_plane(face_list, f.nx, f.ny, f.nz, f.d);
+        if (s < best_score) {
+            best_score = s;
+            bf = f;
+        }
+    }
+
+    let node = BspNode(bf.nx, bf.ny, bf.nz, bf.d);
+    bsp_nodes = bsp_nodes + 1;
+
+    let front_list = [];
+    let back_list = [];
+    for (let var k = 0; k < face_list.len; ++k) {
+        let f = face_list[k];
+        let c = classify(f, node.nx, node.ny, node.nz, node.d);
+
+        if (c == 0) { node.on.push(f); continue; }
+        if (c == 1) { front_list.push(f); continue; }
+        if (c == 2) { back_list.push(f); continue; }
+
+        let parts = split_face(f, node.nx, node.ny, node.nz, node.d);
+        for (let var q = 0; q < parts.len; ++q) {
+            let g = parts[q];
+            if (classify(g, node.nx, node.ny, node.nz, node.d) == 1) front_list.push(g);
+            else back_list.push(g);
+        }
+        bsp_splits = bsp_splits + 1;
+    }
+
+    node.front = bsp_build(front_list);
+    node.back = bsp_build(back_list);
+    return node;
+}
+
+// The box around everything in a subtree, from the faces it holds and the
+// boxes of its children
+fun compute_bounds(node) {
+    if (node == nil) return;
+    compute_bounds(node.front);
+    compute_bounds(node.back);
+
+    let var lo_x = 0.0; let var lo_y = 0.0; let var lo_z = 0.0;
+    let var hi_x = 0.0; let var hi_y = 0.0; let var hi_z = 0.0;
+    let var any = false;
+
+    for (let var i = 0; i < node.on.len; ++i) {
+        let f = node.on[i];
+        if (f.flow) node.moving = true;
+        let n = f.v.len.idiv(3);
+        for (let var k = 0; k < n; ++k) {
+            let x = f.v[k * 3];
+            let y = f.v[k * 3 + 1];
+            let z = f.v[k * 3 + 2];
+            if (!any) { lo_x = x; hi_x = x; lo_y = y; hi_y = y; lo_z = z; hi_z = z; any = true; }
+            if (x < lo_x) lo_x = x;
+            if (x > hi_x) hi_x = x;
+            if (y < lo_y) lo_y = y;
+            if (y > hi_y) hi_y = y;
+            if (z < lo_z) lo_z = z;
+            if (z > hi_z) hi_z = z;
+        }
+    }
+
+    for (let var c = 0; c < 2; ++c) {
+        let var child = node.front;
+        if (c == 1) child = node.back;
+        if (child == nil || child.empty) continue;
+        if (child.moving) node.moving = true;
+
+        let cl_x = child.cx - child.hx; let ch_x = child.cx + child.hx;
+        let cl_y = child.cy - child.hy; let ch_y = child.cy + child.hy;
+        let cl_z = child.cz - child.hz; let ch_z = child.cz + child.hz;
+
+        if (!any) {
+            lo_x = cl_x; hi_x = ch_x; lo_y = cl_y; hi_y = ch_y; lo_z = cl_z; hi_z = ch_z;
+            any = true;
+        }
+        if (cl_x < lo_x) lo_x = cl_x;
+        if (ch_x > hi_x) hi_x = ch_x;
+        if (cl_y < lo_y) lo_y = cl_y;
+        if (ch_y > hi_y) hi_y = ch_y;
+        if (cl_z < lo_z) lo_z = cl_z;
+        if (ch_z > hi_z) hi_z = ch_z;
+    }
+
+    node.empty = !any;
+    if (!any) return;
+
+    node.cx = (lo_x + hi_x) * 0.5;
+    node.cy = (lo_y + hi_y) * 0.5;
+    node.cz = (lo_z + hi_z) * 0.5;
+    node.hx = (hi_x - lo_x) * 0.5;
+    node.hy = (hi_y - lo_y) * 0.5;
+    node.hz = (hi_z - lo_z) * 0.5;
+}
+
+// A built tree, and what it took to build it
+class Bsp {
+    init(self, root, nodes, splits) {
+        self.root = root;
+        self.nodes = nodes;
+        self.splits = splits;
+    }
+}
+
+fun build_bsp(face_list) {
+    bsp_nodes = 0;
+    bsp_splits = 0;
+    let root = bsp_build(face_list);
+    compute_bounds(root);
+    return Bsp(root, bsp_nodes, bsp_splits);
+}

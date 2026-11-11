@@ -1,0 +1,545 @@
+// The light bake: light levels worked out per face at load time from the
+// point lights in the map and the moon, and the cuts that let a face carry a
+// pool of light.
+
+from ./world import NUM_LEVELS, MOON_AZ, MOON_EL, texel_u, texel_v, split_face, subdivide_grid;
+
+// Light is applied per pixel, by scaling the texel as it is read rather than
+// by reading it from a pre-darkened copy of the texture.
+//
+// A table of darkened copies makes shading free per pixel, but it quantizes:
+// with sixteen copies a gradient shows sixteen bands. Scaling instead costs
+// arithmetic on every pixel and gives a continuous level, and it drops the
+// table, so a texture is its own size again rather than sixteen times it.
+//
+// The scale runs 0..255, so a channel product is at most 255 * 255 and stays
+// inside sixteen bits. That is what lets one multiply carry all three
+// channels: see the span loop. Stopping at 255 rather than 256 keeps the
+// product off the sixteenth bit. The endpoint clamps below keep the multiplier
+// in that range, making spilling one channel into the next impossible.
+let SHADE_MAX = 255.0;
+
+// How dark an unlit surface goes and how bright a fully lit one gets. Quake's
+// rooms are mostly dark with pools of light around the fixtures, so the floor
+// here is low and the lamps have to earn every step above it.
+let MIN_SHADE = 0.09;
+let MAX_SHADE = 1.0;
+
+// A face is cut until interpolation reproduces the light across it, but never
+// into pieces smaller than this, and never more than LIGHT_DEPTH halvings deep
+let LIGHT_GRID = 1.4;
+let LIGHT_DEPTH = 4;
+
+// How far the interpolated scale may sit from the real one, on the 0..256
+// scale, before the face is worth cutting
+let LIGHT_TOL = 16.0;
+
+// The level everything starts from, before any lamp reaches it
+let AMBIENT = 0.13;
+
+// The size of the quads lava is cut into, small enough that the swell the
+// renderer gives their corners reads as a curve
+let LAVA_GRID = 1.0;
+
+// How far a sample looks towards the moon for anything in the way
+let MOON_REACH = 400.0;
+
+// What is being lit, set by `light_world`
+let var brushes = nil;
+let var lights = nil;
+let var moon_light = 0.0;
+
+// Does any brush stand between these two points? The segment is clipped
+// against the brush's half-spaces the way `plane_quad` clips a face, and the
+// brush bounds reject nearly all of them before that runs, which is what keeps
+// a linear walk over every brush cheap enough to do per sample.
+fun occluded(ax, ay, az, bx, by, bz) {
+    let dx = bx - ax; let dy = by - ay; let dz = bz - az;
+
+    let var lx = ax; let var hx = bx;
+    if (hx < lx) { lx = bx; hx = ax; }
+    let var ly = ay; let var hy = by;
+    if (hy < ly) { ly = by; hy = ay; }
+    let var lz = az; let var hz = bz;
+    if (hz < lz) { lz = bz; hz = az; }
+
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (b.alpha < 1.0) continue;
+        if (hx < b.x0 || lx > b.x1) continue;
+        if (hy < b.y0 || ly > b.y1) continue;
+        if (hz < b.z0 || lz > b.z1) continue;
+
+        let planes = b.planes;
+        let var t0 = 0.0;
+        let var t1 = 1.0;
+        let var miss = false;
+
+        for (let var j = 0; j < planes.len; ++j) {
+            let p = planes[j];
+            let num = p.nx * ax + p.ny * ay + p.nz * az - p.d;
+            let den = p.nx * dx + p.ny * dy + p.nz * dz;
+
+            // Parallel to the plane: outside it rules the brush out, inside it
+            // says nothing
+            if (den > 0.0 - 0.000001 && den < 0.000001) {
+                if (num > 0.0) { miss = true; break; }
+                continue;
+            }
+
+            let t = (0.0 - num) / den;
+            if (den > 0.0) { if (t < t1) t1 = t; }
+            else { if (t > t0) t0 = t; }
+            if (t0 > t1) { miss = true; break; }
+        }
+
+        // A sample sits about a centimeter off its own surface, which is not
+        // enough to clear a wall its face runs into at a corner. Requiring the
+        // segment to pass through some thickness is what keeps those seams
+        // from reading as occlusions and drawing a dark line down every join.
+        if (!miss && t1 - t0 > 0.002) return true;
+    }
+
+    return false;
+}
+
+// Is this point strictly inside a brush? Boundaries do not count: a sample
+// lifted off one surface routinely lands exactly on another.
+fun in_solid(x, y, z) {
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (x <= b.x0 || x >= b.x1) continue;
+        if (y <= b.y0 || y >= b.y1) continue;
+        if (z <= b.z0 || z >= b.z1) continue;
+
+        let planes = b.planes;
+        let var inside = true;
+        for (let var j = 0; j < planes.len; ++j) {
+            let p = planes[j];
+            if (p.nx * x + p.ny * y + p.nz * z - p.d > 0.0 - 0.00125) { inside = false; break; }
+        }
+        if (inside) return true;
+    }
+    return false;
+}
+
+// The light level at one point on a surface facing a given way. `tx, ty, tz`
+// is the middle of the whole face the point belongs to, not of the piece it is
+// being baked with, and says which way is inward along it. Answering the same
+// for every piece of a face is what keeps the reply the same at a point two of
+// them share.
+fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
+    // Lift the sample off the surface, so that a fixture sitting flush against
+    // a wall still counts as being in front of it
+    let cx = px + nx * 0.0125;
+    let cy = py + ny * 0.0125;
+    let cz = pz + nz * 0.0125;
+
+    // Most of a face is usually walled in by the brushes around it: an arcade
+    // pocket is a gap left between two wall boxes, so the face that shows in
+    // the gap runs the whole height of the wall with all but a window of it
+    // buried. A sample down in that buried part sees no lamp at all, and since
+    // its neighbours see none either there is nothing for `light_curves` to cut
+    // on, so the window bakes as dark as the stone around it.
+    //
+    // A buried sample has no visibility worth reporting, so it reports none and
+    // takes the light it would have had before shadows. Faces out in the open
+    // are untouched, and one standing in a real shadow still goes dark.
+    //
+    // The test is done a little inside the face rather than at the sample: a
+    // corner of a face is a corner of its brush too, and sits on the bounding
+    // planes of whatever it abuts rather than within them.
+    let mx = tx - cx; let my = ty - cy; let mz = tz - cz;
+    let span = (mx * mx + my * my + mz * mz).sqrt();
+    let var probe = 0.5;
+    if (span > 0.05) probe = 0.025 / span;
+    let buried = in_solid(cx + mx * probe, cy + my * probe, cz + mz * probe);
+
+    let var lum = AMBIENT;
+    for (let var i = 0; i < lights.len; ++i) {
+        let L = lights[i];
+        let dx = L[0] - cx;
+        let dy = L[1] - cy;
+        let dz = L[2] - cz;
+        let dist2 = dx * dx + dy * dy + dz * dz;
+        let radius = L[3];
+        if (dist2 >= radius * radius) continue;
+
+        let dist = dist2.sqrt();
+        if (dist < 0.000025) { lum = lum + L[4]; continue; }
+
+        // Facing the light counts for most of it, but a surface edge on to it
+        // keeps a little, which softens the falloff around corners
+        let ndotl = (nx * dx + ny * dy + nz * dz) / dist;
+        if (ndotl <= 0.0) continue;
+
+        // Anything solid in the way takes the lamp out entirely
+        if (!buried && occluded(cx, cy, cz, L[0], L[1], L[2])) continue;
+
+        let atten = 1.0 - dist / radius;
+        lum = lum + L[4] * atten * (0.35 + 0.65 * ndotl);
+    }
+
+    // The moon is far enough off to be a direction rather than a place, and
+    // does not fade with distance. A buried sample takes none of it: unlike a
+    // lamp it would otherwise reach every roofed-over face in the level.
+    if (moon_light > 0.0 && !buried) {
+        let ce = MOON_EL.cos();
+        let dx = ce * MOON_AZ.sin();
+        let dy = MOON_EL.sin();
+        let dz = ce * MOON_AZ.cos();
+        let ndotl = nx * dx + ny * dy + nz * dz;
+        if (ndotl > 0.0 && !occluded(cx, cy, cz,
+            cx + dx * MOON_REACH, cy + dy * MOON_REACH, cz + dz * MOON_REACH)) {
+            lum = lum + moon_light * (0.35 + 0.65 * ndotl);
+        }
+    }
+
+    // The curve is applied here rather than per level, so what gets
+    // interpolated across a face is the finished scale. It bends towards the
+    // dark end, where a step is worth more to the eye than it is up in the
+    // light.
+    let t = lum.clip(0.0, 1.0);
+    return ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+        .clip(0.0, SHADE_MAX);
+}
+
+// Solve a small system in place by Gauss-Jordan with partial pivoting. `a` is
+// `n` rows of `n + 1` columns, the last of them the right hand side.
+//
+// An unknown whose column has no usable pivot is left at zero and its column
+// skipped, rather than the whole solve failing. Columns are taken in order, so
+// what a piece is too degenerate to carry is dropped from the end: a triangle
+// supports a plane and loses the cross term, a sliver loses more.
+fun solve_system(a, n, out) {
+    let stride = n + 1;
+    let piv_row = Array.with_size(n, 0 - 1);
+    let var row = 0;
+
+    for (let var c = 0; c < n; ++c) {
+        let var best = row;
+        let var mag = 0.0;
+        for (let var r = row; r < n; ++r) {
+            let m = a[r * stride + c].abs();
+            if (m > mag) { mag = m; best = r; }
+        }
+        if (mag < 0.000001) continue;
+
+        if (best != row) {
+            for (let var k = c; k <= n; ++k) {
+                let t = a[row * stride + k];
+                a[row * stride + k] = a[best * stride + k];
+                a[best * stride + k] = t;
+            }
+        }
+
+        let inv = 1.0 / a[row * stride + c];
+        for (let var k = c; k <= n; ++k) a[row * stride + k] = a[row * stride + k] * inv;
+
+        for (let var r = 0; r < n; ++r) {
+            if (r == row) continue;
+            let m = a[r * stride + c];
+            if (m == 0.0) continue;
+            for (let var k = c; k <= n; ++k) {
+                a[r * stride + k] = a[r * stride + k] - m * a[row * stride + k];
+            }
+        }
+
+        piv_row[c] = row;
+        row = row + 1;
+    }
+
+    for (let var c = 0; c < n; ++c) {
+        if (piv_row[c] < 0) out[c] = 0.0;
+        else out[c] = a[piv_row[c] * stride + n];
+    }
+}
+
+// The light across a face, as a bilinear function of its texture coordinates.
+// A face given an explicit level in the map takes it everywhere, which shades
+// it flat the way it used to be.
+//
+// Corners are sampled where they are, not pulled in towards the middle, and
+// `k + a * u + b * v + c * u * v` has one term per corner, so all four samples
+// are carried exactly. A plane has three and cannot: fitting one left every
+// corner off its own sample by a quarter of the bilinear twist, in opposite
+// directions either side of a shared edge, which is what seamed. `light_curves`
+// never cut on it either, since it probes the centre and the edge midpoints,
+// where a bilinear level is what interpolation already gives.
+//
+// On an edge with u or v constant the cross term folds into the linear ones, so
+// the level runs straight between the two shared corner values and both sides
+// agree. Cuts and faces are axis aligned, which is every edge that matters
+// here; a slanted one keeps a little of the old disagreement.
+fun bake_face_light(f) {
+    let n = f.v.len.idiv(3);
+    let top = SHADE_MAX;
+
+    f.lu0 = 0.0; f.lv0 = 0.0;
+    f.l_u = 0.0; f.l_v = 0.0; f.l_uv = 0.0;
+
+    // Lava is its own light: it is as bright as the scale goes wherever it is,
+    // and nothing standing over it makes it any dimmer
+    if (f.flow) {
+        f.l_k = top;
+        return;
+    }
+
+    if (f.light >= 0) {
+        // A level named in the map, put on the same curve
+        let t = f.light.to_f() / (NUM_LEVELS - 1).to_f();
+        f.l_k = ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+            .clip(0.0, top);
+        return;
+    }
+
+    let inv_n = 1.0 / n.to_f();
+    let uv = Array.with_size(n, 0.0);
+    let vv = Array.with_size(n, 0.0);
+    let lv = Array.with_size(n, 0.0);
+    let var uc = 0.0; let var vc = 0.0;
+
+    for (let var i = 0; i < n; ++i) {
+        let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
+        uv[i] = texel_u(f, x, y, z);
+        vv[i] = texel_v(f, x, y, z);
+        lv[i] = light_at(x, y, z, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+        uc = uc + uv[i]; vc = vc + vv[i];
+    }
+    uc = uc * inv_n; vc = vc * inv_n;
+
+    // Centred and scaled to the unit square, so that the solve is on numbers
+    // around one whatever size the piece is and wherever the map put it
+    let var hu = 0.0; let var hv = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let du = (uv[i] - uc).abs();
+        let dv = (vv[i] - vc).abs();
+        if (du > hu) hu = du;
+        if (dv > hv) hv = dv;
+    }
+    if (hu < 0.000001) hu = 1.0;
+    if (hv < 0.000001) hv = 1.0;
+
+    // The normal equations of the least squares fit over 1, u, v and u * v.
+    // For the usual four cornered piece the fit is exact and this is just how
+    // the four terms get solved for; a piece with more corners than terms
+    // takes the closest bilinear there is.
+    let a = Array.with_size(20, 0.0);
+    let p = Array.with_size(4, 0.0);
+    for (let var i = 0; i < n; ++i) {
+        p[0] = 1.0;
+        p[1] = (uv[i] - uc) / hu;
+        p[2] = (vv[i] - vc) / hv;
+        p[3] = p[1] * p[2];
+        for (let var r = 0; r < 4; ++r) {
+            for (let var c = 0; c < 4; ++c) a[r * 5 + c] = a[r * 5 + c] + p[r] * p[c];
+            a[r * 5 + 4] = a[r * 5 + 4] + p[r] * lv[i];
+        }
+    }
+
+    let coef = Array.with_size(4, 0.0);
+    solve_system(a, 4, coef);
+
+    f.lu0 = uc; f.lv0 = vc;
+    f.l_k = coef[0];
+    f.l_u = coef[1] / hu;
+    f.l_v = coef[2] / hv;
+    f.l_uv = coef[3] / (hu * hv);
+}
+
+// --- Cutting faces up for lighting ---
+
+// Does interpolating the corner levels miss the light inside the face?
+//
+// This is a weaker test than flat shading needed, and that is the whole point.
+// Flat shading had to cut wherever the light changed at all, because one level
+// had to serve the whole piece. The baked fit reproduces any light bilinear in
+// u and v exactly, and the probes below sit where a bilinear level is the mean
+// of the corners around them, so what they measure is what the fit leaves
+// behind: a wall fading evenly from one end to the other is left whole, and
+// only a lamp pool sitting in the middle of a surface asks for pieces.
+fun light_curves(f) {
+    if (f.light >= 0 || f.flow) return false;
+
+    let n = f.v.len.idiv(3);
+    let vl = Array.with_size(n, 0.0);
+    let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+    let var mean = 0.0;
+
+    for (let var i = 0; i < n; ++i) {
+        cx = cx + f.v[i * 3]; cy = cy + f.v[i * 3 + 1]; cz = cz + f.v[i * 3 + 2];
+    }
+    let inv_n = 1.0 / n.to_f();
+    cx = cx * inv_n; cy = cy * inv_n; cz = cz * inv_n;
+
+    for (let var i = 0; i < n; ++i) {
+        vl[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
+            f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+        mean = mean + vl[i];
+    }
+    mean = mean * inv_n;
+
+    // The middle, where a lamp pool that the corners all miss shows up
+    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - mean).abs()
+        > LIGHT_TOL) {
+        return true;
+    }
+
+    // And the edge midpoints, where interpolation is the mean of two corners.
+    // A pool sitting against one edge misses the centre test but not this one.
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+
+        let mx = (f.v[i * 3] + f.v[j * 3]) * 0.5;
+        let my = (f.v[i * 3 + 1] + f.v[j * 3 + 1]) * 0.5;
+        let mz = (f.v[i * 3 + 2] + f.v[j * 3 + 2]) * 0.5;
+        let interp = (vl[i] + vl[j]) * 0.5;
+        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - interp).abs()
+            > LIGHT_TOL) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Halve a face across its longer side, gathering the planes the light asks to
+// be cut on rather than cutting as it goes.
+//
+// Cutting as it goes leaves a cut running half way across the piece next to it,
+// where the neighbour was already straight enough to be left whole. The level
+// along the edge they share is then one straight run on one side and two on the
+// other, and the shading steps at the T. Gathering first and running every
+// plane right across the face afterwards is what makes the pieces line up.
+fun collect_cuts(f, depth, cuts) {
+    if (depth <= 0 || !light_curves(f)) return;
+
+    let n = f.v.len.idiv(3);
+    let var axis = 0;
+    let var span = 0.0 - 1.0;
+    let var cut = 0.0;
+
+    for (let var a = 0; a < 3; ++a) {
+        if (a == f.taxis) continue;
+
+        let var lo = f.v[a];
+        let var hi = lo;
+        for (let var j = 1; j < n; ++j) {
+            let c = f.v[j * 3 + a];
+            if (c < lo) lo = c;
+            if (c > hi) hi = c;
+        }
+
+        if (hi - lo > span) {
+            span = hi - lo;
+            axis = a;
+            cut = (lo + hi) * 0.5;
+        }
+    }
+
+    if (span < LIGHT_GRID) return;
+
+    let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+    if (axis == 0) nx = 1.0;
+    else if (axis == 1) ny = 1.0;
+    else nz = 1.0;
+
+    let parts = split_face(f, nx, ny, nz, cut);
+    if (parts.len < 2) return;
+
+    let list = cuts[axis];
+    let var seen = false;
+    for (let var i = 0; i < list.len; ++i) {
+        if ((list[i] - cut).abs() < 0.001) { seen = true; break; }
+    }
+    if (!seen) list.push(cut);
+
+    for (let var i = 0; i < parts.len; ++i) collect_cuts(parts[i], depth - 1, cuts);
+}
+
+// Cut a face on every plane gathered for it. A plane that misses a piece leaves
+// it whole, so a fragment the tree took out of the middle of a face is cut by
+// just the planes that cross it and still lines up with what is either side.
+fun apply_cuts(f, out) {
+    let cuts = f.cuts;
+    if (cuts == nil) { out.push(f); return; }
+
+    let var work = [f];
+    for (let var axis = 0; axis < 3; ++axis) {
+        let list = cuts[axis];
+        let var nx = 0.0; let var ny = 0.0; let var nz = 0.0;
+        if (axis == 0) nx = 1.0;
+        else if (axis == 1) ny = 1.0;
+        else nz = 1.0;
+
+        for (let var c = 0; c < list.len; ++c) {
+            let next = [];
+            for (let var i = 0; i < work.len; ++i) {
+                let parts = split_face(work[i], nx, ny, nz, list[c]);
+                if (parts.len < 2) next.push(work[i]);
+                else { next.push(parts[0]); next.push(parts[1]); }
+            }
+            work = next;
+        }
+    }
+
+    for (let var i = 0; i < work.len; ++i) out.push(work[i]);
+}
+
+// Cut every face of the world for the light and bake it, returning the lit
+// pieces. This runs before the tree divides anything.
+//
+// The tree cuts a face into fragments of its own, and lighting them afterwards
+// meant each fragment gathered its own cuts and fitted its own light. Two
+// fragments of one wall then met along a plane the tree had chosen, cut to
+// different depths on either side of it and reading two different fits, which
+// is a seam down the middle of a surface the map never divided. Baking first
+// leaves the tree nothing to disagree about: it inherits a light field rather
+// than fitting one.
+fun light_world(w) {
+    brushes = w.brushes;
+    lights = w.lights;
+    moon_light = w.moon_light;
+
+    let faces = w.faces;
+    let lit_faces = [];
+
+    for (let var i = 0; i < faces.len; ++i) {
+        let f = faces[i];
+        let pieces = [];
+
+        if (f.flow) {
+            // A moving surface is still cut on a fixed grid: it needs corners
+            // close enough together for the wave to read as a curve
+            subdivide_grid(f, LAVA_GRID, pieces);
+        } else {
+            let cuts = [[], [], []];
+            collect_cuts(f, LIGHT_DEPTH, cuts);
+            f.cuts = cuts;
+            apply_cuts(f, pieces);
+        }
+
+        for (let var k = 0; k < pieces.len; ++k) {
+            let g = pieces[k];
+            bake_face_light(g);
+
+            // Alpha rides into the level the face was baked at, rather than
+            // being a second number the span loop has to apply. The multiplier
+            // it interpolates then already carries it, so a blended pixel pays
+            // for the destination and nothing more. This is also what bounds
+            // that multiplier by alpha8, which is what keeps the two halves of
+            // the blend summing to 255.
+            if (g.alpha < 1.0) {
+                g.l_k = g.l_k * g.alpha;
+                g.l_u = g.l_u * g.alpha;
+                g.l_v = g.l_v * g.alpha;
+                g.l_uv = g.l_uv * g.alpha;
+            }
+
+            lit_faces.push(g);
+        }
+    }
+
+    return lit_faces;
+}

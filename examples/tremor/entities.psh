@@ -1,0 +1,97 @@
+// Things that move about in the world. An entity is a body that physics.psh
+// can move: a position, measured at its feet, a size, and how it is falling.
+// The player is the first kind.
+
+from ./physics import move_body;
+
+// --- Player ---
+
+let EYE_HEIGHT = 1.6;
+let PLAYER_RADIUS = 0.45;
+let PLAYER_HEIGHT = 1.7;
+let STEP_HEIGHT = 0.7;
+
+let WALK_SPEED = 7.5;
+let FLY_SPEED = 15.0;
+
+// A jump clears about 1.5 m, which is twice the height of a step and enough
+// to hop onto the low ledges, but nowhere near the parapet
+let JUMP_SPEED = 8.25;
+
+let TURN_SPEED = 2.6;
+let MOUSE_SENS = 0.0032;
+
+// Look up/down limit. Just shy of fully up/down.
+let PITCH_LIMIT = 1.55;
+
+class Entity {
+    init(self, x, feet, z, yaw) {
+        self.x = x;
+        self.feet = feet;
+        self.z = z;
+        self.yaw = yaw;
+        self.pitch = 0.0;
+
+        // The box it collides with, and the tallest step it climbs without
+        // jumping
+        self.radius = 0.5;
+        self.height = 1.0;
+        self.step_height = 0.5;
+
+        self.vel_y = 0.0;
+        self.slide_speed = 0.0;
+        self.on_ground = false;
+        self.jump_speed = 0.0;
+    }
+
+    // Called once per frame. Kinds of entity that change over time, whether a
+    // monster, a door or a projectile, override this.
+    update(self, w, dt) {}
+}
+
+class Player extends Entity {
+    init(self, x, feet, z, yaw) {
+        Entity.init(self, x, feet, z, yaw);
+        self.radius = PLAYER_RADIUS;
+        self.height = PLAYER_HEIGHT;
+        self.step_height = STEP_HEIGHT;
+        self.jump_speed = JUMP_SPEED;
+        self.noclip = false;
+    }
+
+    eye_y(self) {
+        return self.feet + EYE_HEIGHT;
+    }
+
+    // Advance the player by one frame. `mf` and `ms` are how hard they are
+    // pushing forward and sideways, each -1, 0 or 1.
+    move(self, w, dt, mf, ms, want_up, want_down) {
+        let sin_yaw = self.yaw.sin();
+        let cos_yaw = self.yaw.cos();
+
+        if (self.noclip) {
+            // Off the leash: move along the way the camera is actually
+            // pointing, pitch included, and pass through everything
+            let step = FLY_SPEED * dt;
+            let sin_pitch = self.pitch.sin();
+            let cos_pitch = self.pitch.cos();
+            self.x = self.x + (sin_yaw * cos_pitch * mf + cos_yaw * ms) * step;
+            self.z = self.z + (cos_yaw * cos_pitch * mf - sin_yaw * ms) * step;
+            self.feet = self.feet + sin_pitch * mf * step;
+
+            if (want_up) self.feet = self.feet + FLY_SPEED * dt;
+            if (want_down) self.feet = self.feet - FLY_SPEED * dt;
+
+            self.vel_y = 0.0;
+            self.slide_speed = 0.0;
+            self.on_ground = false;
+            return;
+        }
+
+        // Walking. Forward is where the camera looks, flattened onto the floor.
+        let step = WALK_SPEED * dt;
+        let dx = (sin_yaw * mf + cos_yaw * ms) * step;
+        let dz = (cos_yaw * mf - sin_yaw * ms) * step;
+        move_body(w, self, dt, dx, dz, want_up);
+    }
+}

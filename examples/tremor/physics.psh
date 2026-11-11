@@ -1,0 +1,238 @@
+// Collision against the world's brushes, and moving a body through it under
+// gravity. A body is anything with a position and a size: see Entity in
+// entities.psh for the fields read and written here.
+
+from ./world import PLANE_EPS;
+
+// The steepest ground that can be walked up, as rise over run. Anything above
+// it is a wall, however solid it is underneath: the buttresses leaning off the
+// courtyard and the slabs of a wall that tilts back were all climbable before,
+// since each step up them is short enough to look like a kerb.
+let MAX_CLIMB_SLOPE = 0.5;
+let STEEP_SLIDE_MAX_SPEED = 10.0;
+
+let GRAVITY = 22.5;
+let MAX_FALL_SPEED = 35.0;
+
+// How high the solid reaches on the vertical line through a point, or nil if
+// that line misses the brush entirely. This is what lets a body walk up a
+// ramp: the answer follows the slope.
+//
+// Normals need not be unit: this compares run against rise on the same normal.
+fun plane_is_walkable(p) {
+    if (p == nil) return true;
+    let run = (p.nx * p.nx + p.nz * p.nz).sqrt();
+    return run <= MAX_CLIMB_SLOPE * p.ny;
+}
+
+// With walkable_only set, ground too steep to climb answers nil so that the
+// brush reads as a wall. The result also carries the supporting plane because
+// a falling body that lands on a steep face has to slide along it.
+fun brush_top(b, x, z, walkable_only) {
+    let planes = b.planes;
+    let var lo = 0.0 - 1000000.0;
+    let var hi = 1000000.0;
+    let var hi_p = nil;
+
+    for (let var i = 0; i < planes.len; ++i) {
+        let p = planes[i];
+        let c = p.d - p.nx * x - p.nz * z;
+        if (p.ny > 0.0001) {
+            let y = c / p.ny;
+            if (y < hi) {
+                hi = y;
+                hi_p = p;
+            }
+        } else if (p.ny < 0.0 - 0.0001) {
+            let y = c / p.ny;
+            if (y > lo) lo = y;
+        } else {
+            // A vertical plane the line falls outside of rules the brush out
+            if (c < 0.0 - PLANE_EPS) return nil;
+        }
+    }
+
+    if (hi < lo) return nil;
+
+    if (walkable_only && !plane_is_walkable(hi_p)) return nil;
+    return [hi, hi_p];
+}
+
+// Does a box run into this brush? The boxes are compared first: the plane test
+// below pushes each plane out by the box's reach along its normal, which rounds
+// the solid outward around its edges, and near the top of a ramp that reads as
+// a hit for a body standing clear above the slope.
+fun brush_hits(b, cx, cy, cz, hx, hy, hz) {
+    if (cx + hx <= b.x0 || cx - hx >= b.x1) return false;
+    if (cy + hy <= b.y0 || cy - hy >= b.y1) return false;
+    if (cz + hz <= b.z0 || cz - hz >= b.z1) return false;
+
+    let planes = b.planes;
+    for (let var i = 0; i < planes.len; ++i) {
+        let p = planes[i];
+        let r = p.nx.abs() * hx + p.ny.abs() * hy + p.nz.abs() * hz;
+        if (p.nx * cx + p.ny * cy + p.nz * cz - p.d > r) return false;
+    }
+    return true;
+}
+
+// How high a brush reaches anywhere under a footprint of radius r, not just
+// under the middle of it. Sampling only the middle would leave the foot of a
+// ramp unclimbable: the box reaches the slope a step before its centre does,
+// so the brush reads as a wall rather than as something to step onto.
+//
+// The samples have to cover the whole footprint that blocked() collides with,
+// corners and all. A brush the box overlaps but no sample lands inside reads as
+// having no top, and blocked() then takes it for a wall: sampling short of the
+// radius is what used to stop the climb one step up a flight, the box catching
+// the next tread while every sample fell just clear of it.
+fun brush_top_near(b, x, z, r, walkable_only) {
+    // Nothing to sample if the footprint misses the brush altogether
+    if (x + r < b.x0 || x - r > b.x1) return nil;
+    if (z + r < b.z0 || z - r > b.z1) return nil;
+
+    let var best = nil;
+
+    for (let var i = 0; i < 3; ++i) {
+        let var sx = x;
+        if (i == 1) sx = x - r;
+        else if (i == 2) sx = x + r;
+
+        for (let var j = 0; j < 3; ++j) {
+            let var sz = z;
+            if (j == 1) sz = z - r;
+            else if (j == 2) sz = z + r;
+
+            let support = brush_top(b, sx, sz, walkable_only);
+            if (support == nil) continue;
+            if (best == nil || support[0] > best[0]) best = support;
+        }
+    }
+    return best;
+}
+
+// Would the body run into anything with its feet at this position?
+fun blocked(w, body, x, feet, z) {
+    let cy = feet + 0.1 + (body.height - 0.1) * 0.5;
+    let hy = (body.height - 0.1) * 0.5;
+    let r = body.radius;
+    let brushes = w.brushes;
+
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+
+        // Anything low enough to step onto is not something to walk into. The
+        // height is taken under the body, so a ramp is steppable where it is
+        // still low and solid once it has risen.
+        let support = brush_top_near(b, x, z, r, true);
+        if (support != nil && support[0] <= feet + body.step_height) continue;
+
+        if (brush_hits(b, x, cy, z, r, hy, r)) return true;
+    }
+    return false;
+}
+
+// The highest surface under the body that is within a step of its feet
+fun support_at(w, body, x, feet, z, walkable_only) {
+    let reach = feet + body.step_height;
+    let brushes = w.brushes;
+    let var best = nil;
+
+    for (let var i = 0; i < brushes.len; ++i) {
+        let support = brush_top_near(brushes[i], x, z, body.radius, walkable_only);
+        if (support == nil) continue;
+        if (support[0] > reach) continue;
+        if (best == nil || support[0] > best[0]) best = support;
+    }
+    return best;
+}
+
+// Advance a body by one frame: walk it by dx, dz, jump if asked and able, and
+// let gravity have it. Lands it on the ground, steps it up onto low ledges and
+// slides it down slopes too steep to stand on.
+fun move_body(w, body, dt, dx, dz, want_jump) {
+    if (dx != 0.0 || dz != 0.0) {
+        // One axis at a time, so that a wall slides instead of stopping
+        if (!blocked(w, body, body.x + dx, body.feet, body.z)) body.x = body.x + dx;
+        if (!blocked(w, body, body.x, body.feet, body.z + dz)) body.z = body.z + dz;
+    }
+
+    // A jump is a shove upwards; from there gravity has it
+    if (want_jump && body.on_ground) {
+        body.vel_y = body.jump_speed;
+        body.on_ground = false;
+    }
+
+    body.vel_y = body.vel_y - GRAVITY * dt;
+    if (body.vel_y < 0.0 - MAX_FALL_SPEED) body.vel_y = 0.0 - MAX_FALL_SPEED;
+
+    let var next_feet = body.feet + body.vel_y * dt;
+
+    if (body.vel_y > 0.0) {
+        // On the way up, stop dead at a ceiling rather than rising through it
+        if (blocked(w, body, body.x, next_feet, body.z)) {
+            next_feet = body.feet;
+            body.vel_y = 0.0;
+        }
+        body.feet = next_feet;
+        body.on_ground = false;
+        return;
+    }
+
+    // On the way down, land on whatever is under us. The same test steps the
+    // body up onto low ledges as it walks into them, since it looks for ground
+    // within a step of its feet.
+    let ground = support_at(w, body, body.x, body.feet, body.z, false);
+    if (ground == nil || next_feet > ground[0]) {
+        body.feet = next_feet;
+        body.slide_speed = 0.0;
+        body.on_ground = false;
+        return;
+    }
+
+    body.feet = ground[0];
+    body.vel_y = 0.0;
+
+    let plane = ground[1];
+    body.on_ground = plane_is_walkable(plane);
+
+    if (body.on_ground || plane == nil) {
+        body.slide_speed = 0.0;
+        return;
+    }
+
+    // Accelerate along a steep face instead of starting at full slide speed on
+    // contact. For an upward-facing plane, its horizontal normal points
+    // downhill.
+    let run = (plane.nx * plane.nx + plane.nz * plane.nz).sqrt();
+    if (run <= 0.0001) return;
+
+    let plen = (run * run + plane.ny * plane.ny).sqrt();
+    let nrun = run / plen;
+    let nup = plane.ny / plen;
+    body.slide_speed = (body.slide_speed + GRAVITY * nrun * dt).min(STEEP_SLIDE_MAX_SPEED);
+
+    let along = body.slide_speed * nup * dt / run;
+    let slide_x = plane.nx * along;
+    let slide_z = plane.nz * along;
+    let old_x = body.x;
+    let old_z = body.z;
+    if (!blocked(w, body, body.x + slide_x, body.feet, body.z)) body.x = body.x + slide_x;
+    if (!blocked(w, body, body.x, body.feet, body.z + slide_z)) body.z = body.z + slide_z;
+
+    // Follow only the distance travelled along this face. At its edge, retain
+    // the downward part of the slide velocity and let regular falling take over.
+    let lower = support_at(w, body, body.x, body.feet, body.z, false);
+    if (lower != nil && lower[1] == plane && lower[0] < body.feet) {
+        body.feet = lower[0];
+    } else if (lower != nil && lower[0] >= body.feet - body.step_height) {
+        body.feet = lower[0];
+        body.on_ground = plane_is_walkable(lower[1]);
+        if (body.on_ground) body.slide_speed = 0.0;
+    } else if (body.x != old_x || body.z != old_z) {
+        body.vel_y = 0.0 - body.slide_speed * nrun;
+        body.slide_speed = 0.0;
+    } else {
+        body.slide_speed = 0.0;
+    }
+}
