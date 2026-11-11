@@ -242,14 +242,16 @@ let vis_x1 = Array.with_size(MAX_VIS, 0);
 
 // --- The model s-buffer ---
 //
-// Models have no place in the BSP order, so they get a second s-buffer whose
-// spans know how far away they are, the one from examples/model_viewer.psh.
-// Each span keeps 1/z as its value at x = 0 and its step per pixel, which is
-// linear along a scanline, and a new span takes the pixels where it is nearer.
+// Models are not split by the tree's planes, so they get a second s-buffer
+// whose spans know how far away they are, the one from
+// examples/model_viewer.psh. Each span keeps 1/z as its value at x = 0 and its
+// step per pixel, which is linear along a scanline, and a new span takes the
+// pixels where it is nearer.
 //
-// Models are drawn first, before any face. A face then has to be nearer than
-// the models where it lands, which `mesh_clip` works out from the face's own
-// 1/z, and where it is not, the model shows through. The face still marks
+// Models are drawn as the tree walk meets them (see `place_models`), and a
+// weapon held in view before anything. A face drawn after a model has to be
+// nearer than it where it lands, which `mesh_clip` works out from the face's
+// own 1/z, and where it is not, the model shows through. The face still marks
 // those pixels covered in the face s-buffer, which is right: everything drawn
 // after it is behind it, and so behind the model too. What no face claims
 // stays the model's, which is why the sky has to go around these spans.
@@ -1573,6 +1575,91 @@ fun draw_deferred() {
     }
 }
 
+// --- Models in the tree ---
+//
+// Each model in the world is pushed down the tree by its box until it either
+// crosses a plane or reaches an empty side of a node, and is drawn where the
+// walk meets it, so that it hides what is behind it and is hidden by what is
+// in front the way faces are.
+//
+// One in an empty side is like a face there: nothing drawn after it can be in
+// front of it, so what it draws joins the face s-buffer, and can rule out
+// whole nodes behind it. Those sharing a side are drawn nearest first, and
+// only join once all of them are done, since they may overlap each other.
+//
+// One crossing a plane goes on down the side the eye is on. Whatever is in the
+// face s-buffer when it is drawn is still nearer than all of it, even the part
+// beyond the plane. What is drawn after it may not be, which the model
+// s-buffer sorts out, so it only joins the face s-buffer once the walk is done
+// with the first node it crossed.
+//
+// The lists live in a pool, linked by index. Nodes keep the heads, which are
+// only good for the frame numbered place_frame.
+let MAX_PLACED = 512;
+let pl_inst = Array.with_size(MAX_PLACED, nil);
+let pl_next = Array.with_size(MAX_PLACED, 0);
+let pl_owner = Array.with_size(MAX_PLACED, nil);
+let pl_dist = Array.with_size(MAX_PLACED, 0.0);
+let pl_cx = Array.with_size(MAX_PLACED, 0.0);
+let pl_cy = Array.with_size(MAX_PLACED, 0.0);
+let pl_cz = Array.with_size(MAX_PLACED, 0.0);
+let pl_hx = Array.with_size(MAX_PLACED, 0.0);
+let pl_hy = Array.with_size(MAX_PLACED, 0.0);
+let pl_hz = Array.with_size(MAX_PLACED, 0.0);
+let var pl_num = 0;
+let var place_frame = 0;
+
+// How far a box may poke through a plane and still count as on one side of
+// it, for rounding: the part poking through would show over the face there
+let PLACE_SLACK = 0.002;
+
+// Whether the model being drawn is clipped against the face s-buffer, which
+// is right for one met in the tree walk, since all of it is nearer, and
+// whether the pieces it draws are written down to join that s-buffer later
+let var g_model_clip = false;
+let var g_recording = false;
+
+// The node whose end the pieces being drawn wait for, nil for none
+let var g_rec_owner = nil;
+
+// Where a scanline of a model is left after the face s-buffer
+let cov_x0 = Array.with_size(MAX_VIS, 0);
+let cov_x1 = Array.with_size(MAX_VIS, 0);
+
+// The pieces models have drawn this frame, waiting to be added to the face
+// s-buffer. Running out only means fewer of them are added, which costs time
+// but not correctness, since faces still meet them in the model s-buffer.
+let MAX_REC = 32768;
+let rec_y = Array.with_size(MAX_REC, 0);
+let rec_x0 = Array.with_size(MAX_REC, 0);
+let rec_x1 = Array.with_size(MAX_REC, 0);
+let rec_owner = Array.with_size(MAX_REC, nil);
+let var rec_top = 0;
+
+// Add the pieces recorded from first on that wait for owner
+fun rec_flush(first, owner) {
+    for (let var i = first; i < rec_top; ++i) {
+        if (screen_done) return;
+        if (rec_owner[i] == owner) sbuf_insert(rec_y[i], rec_x0[i], rec_x1[i]);
+    }
+}
+
+// Where the last box `box_occluded` projected landed on screen, if all of it
+// was in front of the eye
+let var box_on_screen = false;
+let var box_rx0 = 0; let var box_ry0 = 0;
+let var box_rx1 = 0; let var box_ry1 = 0;
+
+// What the face s-buffer leaves visible of the rectangle a model can reach,
+// row by row, so that its triangles are not each walking the whole row
+let MAX_GAPS = 16384;
+let gap_x0 = Array.with_size(MAX_GAPS, 0);
+let gap_x1 = Array.with_size(MAX_GAPS, 0);
+let gap_first = Array.with_size(FRAME_HEIGHT, 0);
+let gap_count = Array.with_size(FRAME_HEIGHT, 0);
+let var gaps_x0 = 0; let var gaps_x1 = 0;
+let var gaps_y0 = 0; let var gaps_y1 = 0;
+
 // The five planes of the view frustum, in world space, as normal and offset.
 // A point is inside a plane when nx*x + ny*y + nz*z - d >= 0.
 let fr_nx = Array.with_size(5, 0.0);
@@ -1639,16 +1726,22 @@ fun node_hidden(node) {
 fun node_occluded(node) {
     // Moving lava can leave the static box computed from its source face.
     if (node.moving) return false;
+    return box_occluded(node.cx, node.cy, node.cz, node.hx, node.hy, node.hz);
+}
 
+// The same for any box, given by its center and half extents. This only
+// proves it hidden if everything in the s-buffer is known to be nearer.
+fun box_occluded(cx, cy, cz, hx, hy, hz) {
+    box_on_screen = false;
     let var box_x0 = 0.0; let var box_y0 = 0.0;
     let var box_x1 = 0.0; let var box_y1 = 0.0;
     for (let var i = 0; i < 8; ++i) {
-        let var wx = node.cx - node.hx;
-        let var wy = node.cy - node.hy;
-        let var wz = node.cz - node.hz;
-        if ((i & 1) != 0) wx = node.cx + node.hx;
-        if ((i & 2) != 0) wy = node.cy + node.hy;
-        if ((i & 4) != 0) wz = node.cz + node.hz;
+        let var wx = cx - hx;
+        let var wy = cy - hy;
+        let var wz = cz - hz;
+        if ((i & 1) != 0) wx = cx + hx;
+        if ((i & 2) != 0) wy = cy + hy;
+        if ((i & 4) != 0) wz = cz + hz;
 
         let dx = wx - cam_x;
         let dy = wy - cam_y;
@@ -1676,28 +1769,94 @@ fun node_occluded(node) {
     let ry0 = box_y0.floor().max(0);
     let rx1 = box_x1.floor().min(FRAME_WIDTH);
     let ry1 = box_y1.floor().min(FRAME_HEIGHT);
+    box_rx0 = rx0; box_ry0 = ry0; box_rx1 = rx1; box_ry1 = ry1;
+    box_on_screen = true;
     return rx0 < rx1 && ry0 < ry1 && sbuf_covers_rect(rx0, ry0, rx1, ry1);
+}
+
+// Take down the gaps for the box `box_occluded` last projected, a pixel wider
+// all around for rounding, or for the whole band if it reached behind the eye.
+// A row whose gaps did not fit gets a count of -1. Returns whether nothing at
+// all is in the way there.
+fun cache_gaps() {
+    gaps_x0 = 0; gaps_x1 = FRAME_WIDTH;
+    gaps_y0 = render_y0; gaps_y1 = render_y1;
+    if (box_on_screen) {
+        gaps_x0 = (box_rx0 - 1).max(0);
+        gaps_x1 = (box_rx1 + 1).min(FRAME_WIDTH);
+        gaps_y0 = (box_ry0 - 1).max(render_y0);
+        gaps_y1 = (box_ry1 + 1).min(render_y1);
+    }
+
+    let var top = 0;
+    let var clear = true;
+    for (let var y = gaps_y0; y < gaps_y1; ++y) {
+        let n = sbuf_visible(y, gaps_x0, gaps_x1);
+        if (n != 1 || vis_x0[0] != gaps_x0 || vis_x1[0] != gaps_x1) clear = false;
+        if (top + n > MAX_GAPS) {
+            gap_count[y] = 0 - 1;
+            continue;
+        }
+        gap_first[y] = top;
+        gap_count[y] = n;
+        for (let var k = 0; k < n; ++k) {
+            gap_x0[top] = vis_x0[k];
+            gap_x1[top] = vis_x1[k];
+            top = top + 1;
+        }
+    }
+    return clear;
+}
+
+// The parts of [x0, x1) on scanline y the face s-buffer leaves visible, into
+// cov_x0/cov_x1, and their number
+fun model_gaps(y, x0, x1) {
+    if (y < gaps_y0 || y >= gaps_y1 || x0 < gaps_x0 || x1 > gaps_x1 || gap_count[y] < 0) {
+        let n = sbuf_visible(y, x0, x1);
+        for (let var k = 0; k < n; ++k) { cov_x0[k] = vis_x0[k]; cov_x1[k] = vis_x1[k]; }
+        return n;
+    }
+
+    let var n = 0;
+    let end = gap_first[y] + gap_count[y];
+    for (let var g = gap_first[y]; g < end; ++g) {
+        let lo = gap_x0[g].max(x0);
+        let hi = gap_x1[g].min(x1);
+        if (lo < hi) { cov_x0[n] = lo; cov_x1[n] = hi; n = n + 1; }
+    }
+    return n;
 }
 
 
 // Walk the tree from the eye: everything on the near side of a plane, then the
-// faces lying in it, then everything beyond
+// faces lying in it, then everything beyond. Models placed in the tree are met
+// along the way, see `place_models`.
 fun bsp_draw(node) {
     if (node == nil) return;
     if (screen_done) return;
-    if (node_hidden(node)) return;
+
+    // The box is around the faces only, so models in a subtree it rules out
+    // still have to be visited on their own
+    if (node_hidden(node)) {
+        draw_placed_tree(node);
+        return;
+    }
     if (node_occluded(node)) {
         rect_nodes_skipped = rect_nodes_skipped + 1;
+        draw_placed_tree(node);
         return;
     }
 
-    let side = node.nx * cam_x + node.ny * cam_y + node.nz * cam_z - node.d;
+    let placed = node.m_frame == place_frame && node.m_count > 0;
+    let first = rec_top;
 
+    let near_front = node.nx * cam_x + node.ny * cam_y + node.nz * cam_z - node.d >= 0.0;
     let var near_child = node.back;
     let var far_child = node.front;
-    if (side >= 0.0) { near_child = node.front; far_child = node.back; }
+    if (near_front) { near_child = node.front; far_child = node.back; }
 
-    bsp_draw(near_child);
+    if (near_child != nil) bsp_draw(near_child);
+    else if (placed) draw_placed(near_front ? node.m_front : node.m_back);
 
     let on = node.on;
     for (let var i = 0; i < on.len; ++i) {
@@ -1705,18 +1864,47 @@ fun bsp_draw(node) {
         draw_face(on[i]);
     }
 
-    bsp_draw(far_child);
+    if (far_child != nil) bsp_draw(far_child);
+    else if (placed) draw_placed(near_front ? node.m_back : node.m_front);
+
+    // What models crossing this plane drew can stand in front of nothing
+    // from here on
+    if (placed && node.m_cross) rec_flush(first, node);
+}
+
+// Visit only the models placed in a subtree, in the same order
+fun draw_placed_tree(node) {
+    if (node == nil || screen_done) return;
+    if (node.m_frame != place_frame || node.m_count == 0) return;
+    let first = rec_top;
+
+    let near_front = node.nx * cam_x + node.ny * cam_y + node.nz * cam_z - node.d >= 0.0;
+    if (near_front) {
+        if (node.front != nil) draw_placed_tree(node.front); else draw_placed(node.m_front);
+        if (node.back != nil) draw_placed_tree(node.back); else draw_placed(node.m_back);
+    } else {
+        if (node.back != nil) draw_placed_tree(node.back); else draw_placed(node.m_back);
+        if (node.front != nil) draw_placed_tree(node.front); else draw_placed(node.m_front);
+    }
+
+    if (node.m_cross) rec_flush(first, node);
 }
 
 // --- Models ---
 //
 // Each frame comes with a draw list, one entry per model to draw:
 //
-//   [model id, animation, time, x, y, z, yaw, scale, light level]
+//   [model id, animation, time, x, y, z, yaw, scale, light level, in view, pitch]
 //
 // The model stands with the middle of its base at x, y, z, facing along yaw
 // the way the player does. The light level is on the 0..255 scale the bake
 // uses, sampled where the model stands.
+//
+// With `in view` set, the model is held in front of the eye rather than placed
+// in the world, like a weapon: x, y, z are where its middle goes in view space,
+// with x to the right, y up and z ahead, and it is drawn in front of anything
+// in the world, however close. Pitch tips it up after the yaw has turned it,
+// and is only used in view.
 
 let var draw_list = [];
 
@@ -1741,6 +1929,11 @@ let model_mat = Array.with_size(12, 0.0);
 // The 1/z-weighted light of the triangle being drawn, which models carry per
 // vertex and faces do not
 let var g_dlzdx = 0.0; let var g_dlzdy = 0.0; let var g_lz0 = 0.0;
+
+// What the 1/z of the model being drawn is scaled by in the model s-buffer:
+// 1 for one standing in the world, HELD_DEPTH_SCALE for one held in view
+let var g_wk = 1.0;
+let HELD_DEPTH_SCALE = 1000.0;
 
 // The corners of the triangle being drawn are pX/pY[0..3]
 
@@ -1826,8 +2019,28 @@ fun raster_triangle() {
             let var xb = xr.floor();
             if (xb > FRAME_WIDTH) xb = FRAME_WIDTH;
 
+            // What the face s-buffer already covers is nearer, so only the
+            // gaps in it go on to the depth test against other models
+            let var n_cov = 0;
             if (scan_y >= render_y0 && xa < xb) {
-                let n_vis = msb_insert(scan_y, xa, xb, w_row, dwdx);
+                if (g_model_clip) {
+                    n_cov = model_gaps(scan_y, xa, xb);
+                } else {
+                    n_cov = 1; cov_x0[0] = xa; cov_x1[0] = xb;
+                }
+            }
+
+            for (let var ci = 0; ci < n_cov; ++ci) {
+                let n_vis = msb_insert(scan_y, cov_x0[ci], cov_x1[ci], w_row * g_wk, dwdx * g_wk);
+                if (g_recording) {
+                    for (let var k = 0; k < n_vis && rec_top < MAX_REC; ++k) {
+                        rec_y[rec_top] = scan_y;
+                        rec_x0[rec_top] = vis_x0[k];
+                        rec_x1[rec_top] = vis_x1[k];
+                        rec_owner[rec_top] = g_rec_owner;
+                        rec_top = rec_top + 1;
+                    }
+                }
                 for (let var k = 0; k < n_vis; ++k) {
                     let var x = vis_x0[k];
                     let piece_end = vis_x1[k];
@@ -1927,60 +2140,105 @@ fun raster_triangle() {
     pixels_drawn = pixels_drawn + span_px;
 }
 
-// Work out the gradients the span loop runs on for one triangle of a model
-// that transform() has left in view space, and draw it
-fun draw_triangle(model, t) {
-    let indices = model.indices;
-    let vX = model.vX; let vY = model.vY; let vW = model.vW; let vD = model.vD;
-    let vUZ = model.vUZ; let vVZ = model.vVZ; let vLZ = model.vLZ;
-
-    let a = indices[t * 3];
-    let b = indices[t * 3 + 1];
-    let c = indices[t * 3 + 2];
-
-    // Triangles are not clipped to the near plane, so one reaching it is
-    // dropped. That only happens with the eye almost touching the model.
-    if (vD[a] < NEAR || vD[b] < NEAR || vD[c] < NEAR) return;
-
-    let x0 = vX[a];
-    let y0 = vY[a];
-    pX[0] = x0;    pY[0] = y0;
-    pX[1] = vX[b]; pY[1] = vY[b];
-    pX[2] = vX[c]; pY[2] = vY[c];
+// Work out the gradients the span loop runs on for a triangle given by its
+// three corners on screen, each with its 1/z and u, v and light over z, and
+// draw it with the texture already set
+fun draw_projected(x0, y0, w0, uz0, vz0, lz0, x1, y1, w1, uz1, vz1, lz1, x2, y2, w2, uz2, vz2, lz2) {
+    pX[0] = x0; pY[0] = y0;
+    pX[1] = x1; pY[1] = y1;
+    pX[2] = x2; pY[2] = y2;
 
     // Too thin to cover a pixel, or to take gradients from
-    let e1x = pX[1] - x0; let e1y = pY[1] - y0;
-    let e2x = pX[2] - x0; let e2y = pY[2] - y0;
+    let e1x = x1 - x0; let e1y = y1 - y0;
+    let e2x = x2 - x0; let e2y = y2 - y0;
     let det = e1x * e2y - e2x * e1y;
     if (det > -0.000001) return;
     let inv_det = 1.0 / det;
 
-    let uz0 = vUZ[a];
-    let d1u = vUZ[b] - uz0;
-    let d2u = vUZ[c] - uz0;
+    let d1u = uz1 - uz0;
+    let d2u = uz2 - uz0;
     g_duzdx = (d1u * e2y - d2u * e1y) * inv_det;
     g_duzdy = (d2u * e1x - d1u * e2x) * inv_det;
 
-    let vz0 = vVZ[a];
-    let d1v = vVZ[b] - vz0;
-    let d2v = vVZ[c] - vz0;
+    let d1v = vz1 - vz0;
+    let d2v = vz2 - vz0;
     g_dvzdx = (d1v * e2y - d2v * e1y) * inv_det;
     g_dvzdy = (d2v * e1x - d1v * e2x) * inv_det;
 
-    let lz0 = vLZ[a];
-    let d1l = vLZ[b] - lz0;
-    let d2l = vLZ[c] - lz0;
+    let d1l = lz1 - lz0;
+    let d2l = lz2 - lz0;
     g_dlzdx = (d1l * e2y - d2l * e1y) * inv_det;
     g_dlzdy = (d2l * e1x - d1l * e2x) * inv_det;
 
-    let w0 = vW[a];
-    let d1w = vW[b] - w0;
-    let d2w = vW[c] - w0;
+    let d1w = w1 - w0;
+    let d2w = w2 - w0;
     g_dwdx = (d1w * e2y - d2w * e1y) * inv_det;
     g_dwdy = (d2w * e1x - d1w * e2x) * inv_det;
 
     g_uz0 = uz0; g_vz0 = vz0; g_lz0 = lz0; g_w0 = w0;
     g_ref_x = x0; g_ref_y = y0;
+
+    raster_triangle();
+}
+
+// A triangle cut by the near plane, in view space: up to four corners, each
+// a position, texture coordinates in texels and a light level
+let clip_x = Array.with_size(4, 0.0);
+let clip_y = Array.with_size(4, 0.0);
+let clip_z = Array.with_size(4, 0.0);
+let clip_u = Array.with_size(4, 0.0);
+let clip_v = Array.with_size(4, 0.0);
+let clip_l = Array.with_size(4, 0.0);
+let var clip_n = 0;
+
+// Add the corner a fraction f of the way from vertex a to vertex b
+fun clip_add(model, a, b, f) {
+    let n = clip_n;
+    clip_x[n] = model.vVX[a] + (model.vVX[b] - model.vVX[a]) * f;
+    clip_y[n] = model.vVY[a] + (model.vVY[b] - model.vVY[a]) * f;
+    clip_z[n] = model.vD[a] + (model.vD[b] - model.vD[a]) * f;
+    clip_u[n] = model.vert_u[a] + (model.vert_u[b] - model.vert_u[a]) * f;
+    clip_v[n] = model.vert_v[a] + (model.vert_v[b] - model.vert_v[a]) * f;
+    clip_l[n] = model.vL[a] + (model.vL[b] - model.vL[a]) * f;
+    clip_n = n + 1;
+}
+
+// Keep the start of the edge from a to b if it is in front of the near plane,
+// and where the edge crosses it if it does
+fun clip_edge(model, a, b) {
+    let da = model.vD[a];
+    let db = model.vD[b];
+    if (da >= NEAR) clip_add(model, a, b, 0.0);
+    if ((da >= NEAR) != (db >= NEAR)) clip_add(model, a, b, (NEAR - da) / (db - da));
+}
+
+// Draw corners 0, i and j of the clipped polygon
+fun draw_clipped(i, j) {
+    let w0 = 1.0 / clip_z[0]; let w1 = 1.0 / clip_z[i]; let w2 = 1.0 / clip_z[j];
+    draw_projected(
+        CENTER_X + FOCAL * clip_x[0] * w0, CENTER_Y - FOCAL * clip_y[0] * w0, w0,
+        clip_u[0] * w0, clip_v[0] * w0, clip_l[0] * w0,
+        CENTER_X + FOCAL * clip_x[i] * w1, CENTER_Y - FOCAL * clip_y[i] * w1, w1,
+        clip_u[i] * w1, clip_v[i] * w1, clip_l[i] * w1,
+        CENTER_X + FOCAL * clip_x[j] * w2, CENTER_Y - FOCAL * clip_y[j] * w2, w2,
+        clip_u[j] * w2, clip_v[j] * w2, clip_l[j] * w2);
+}
+
+// Draw one triangle of a model that transform() has left in view space. One
+// that reaches through the near plane is cut off at it, which matters for big
+// flat models such as doors, whose few triangles span more than the view.
+fun draw_triangle(model, t) {
+    let indices = model.indices;
+    let vD = model.vD;
+
+    let a = indices[t * 3];
+    let b = indices[t * 3 + 1];
+    let c = indices[t * 3 + 2];
+
+    let in_a = vD[a] >= NEAR;
+    let in_b = vD[b] >= NEAR;
+    let in_c = vD[c] >= NEAR;
+    if (!in_a && !in_b && !in_c) return;
 
     let tex = model.tri_tex[t];
     g_pix = tex.pix;
@@ -1990,7 +2248,20 @@ fun draw_triangle(model, t) {
     g_uwrap = tex.uwrap;
     g_vwrap = tex.vwrap;
 
-    raster_triangle();
+    if (in_a && in_b && in_c) {
+        let vX = model.vX; let vY = model.vY; let vW = model.vW;
+        let vUZ = model.vUZ; let vVZ = model.vVZ; let vLZ = model.vLZ;
+        draw_projected(vX[a], vY[a], vW[a], vUZ[a], vVZ[a], vLZ[a],
+                       vX[b], vY[b], vW[b], vUZ[b], vVZ[b], vLZ[b],
+                       vX[c], vY[c], vW[c], vUZ[c], vVZ[c], vLZ[c]);
+        return;
+    }
+
+    clip_n = 0;
+    clip_edge(model, a, b);
+    clip_edge(model, b, c);
+    clip_edge(model, c, a);
+    for (let var i = 1; i + 1 < clip_n; ++i) draw_clipped(i, i + 1);
 }
 
 // A direction in world space, turned into view space
@@ -1998,57 +2269,105 @@ fun view_dir_x(x, y, z) { return x * cos_yaw - z * sin_yaw; }
 fun view_dir_y(x, y, z) { return y * cos_pitch - (x * sin_yaw + z * cos_yaw) * sin_pitch; }
 fun view_dir_z(x, y, z) { return (x * sin_yaw + z * cos_yaw) * cos_pitch + y * sin_pitch; }
 
-// Draw one entry of the draw list into the model s-buffer
+// The transform of a model held in front of the eye, into m: x, y, z are
+// where the middle of the model goes in view space, yaw turns it about the
+// view's up axis and then pitch about its right axis, tipping its front up.
+// The axes are those of a model standing in the world, without the camera.
+fun held_matrix(m, model, x, y, z, yaw, pitch, s) {
+    let ce = yaw.cos(); let se = yaw.sin();
+    let cp = pitch.cos(); let sp = pitch.sin();
+
+    m[0] = (0.0 - ce) * s; m[4] = se * sp * s; m[8] = se * cp * s;
+    m[1] = 0.0;            m[5] = cp * s;      m[9] = (0.0 - sp) * s;
+    m[2] = se * s;         m[6] = ce * sp * s; m[10] = ce * cp * s;
+
+    let bx = model.mid_x; let by = model.mid_y; let bz = model.mid_z;
+    m[3] = x - (m[0] * bx + m[1] * by + m[2] * bz);
+    m[7] = y - (m[4] * bx + m[5] * by + m[6] * bz);
+    m[11] = z - (m[8] * bx + m[9] * by + m[10] * bz);
+}
+
+// Could this entry of the draw list, standing in the world, show in the view
+// and in this actor's band? Tested with the sphere around it in all its poses.
+fun instance_in_band(inst) {
+    let model = models[inst[0]];
+    let s = inst[7];
+    let yaw = inst[6];
+    let sp = inst[10].sin();
+    let r = model.radius * s;
+    let up = (model.mid_y - model.min_y) * s;
+    let cx = inst[3] - up * sp * yaw.sin();
+    let cy = inst[4] + up * inst[10].cos();
+    let cz = inst[5] - up * sp * yaw.cos();
+
+    for (let var i = 0; i < 5; ++i) {
+        let nx = fr_nx[i]; let ny = fr_ny[i]; let nz = fr_nz[i];
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        if (nx * cx + ny * cy + nz * cz - fr_d[i] + r * len < 0.0) return false;
+    }
+    let depth = view_dir_z(cx - cam_x, cy - cam_y, cz - cam_z);
+    if (depth > r + NEAR) {
+        let sy = CENTER_Y - FOCAL * view_dir_y(cx - cam_x, cy - cam_y, cz - cam_z) / depth;
+        let sr = FOCAL * r / (depth - r);
+        if (sy + sr < render_y0.to_f() || sy - sr > render_y1.to_f()) return false;
+    }
+    return true;
+}
+
+// Draw one entry of the draw list into the model s-buffer. One standing in
+// the world has been through `instance_in_band` already.
 fun draw_instance(inst) {
     let model = models[inst[0]];
     let ex = inst[3]; let ey = inst[4]; let ez = inst[5];
     let yaw = inst[6];
     let s = inst[7];
     let level = inst[8];
+    let in_view = inst[9];
 
-    // The sphere around the model in all its poses, where it stands
-    let r = model.radius * s;
-    let cx = ex;
-    let cy = ey + (model.mid_y - model.min_y) * s;
-    let cz = ez;
-
-    // Outside the view, or not reaching this actor's band
-    for (let var i = 0; i < 5; ++i) {
-        let nx = fr_nx[i]; let ny = fr_ny[i]; let nz = fr_nz[i];
-        let len = (nx * nx + ny * ny + nz * nz).sqrt();
-        if (nx * cx + ny * cy + nz * cz - fr_d[i] + r * len < 0.0) return;
-    }
-    let depth = view_dir_z(cx - cam_x, cy - cam_y, cz - cam_z);
-    if (depth > r + NEAR) {
-        let sy = CENTER_Y - FOCAL * view_dir_y(cx - cam_x, cy - cam_y, cz - cam_z) / depth;
-        let sr = FOCAL * r / (depth - r);
-        if (sy + sr < render_y0.to_f() || sy - sr > render_y1.to_f()) return;
-    }
-
-    // The model's own space is right-handed with its front along +z, and the
-    // world's is left-handed. Turning its x around makes it left-handed with
-    // its front still along +z, and the yaw then turns +z to face where the
-    // entity does. Each column here is where one of the model's axes goes in
-    // view space, scaled.
     let ce = yaw.cos();
     let se = yaw.sin();
     let m = model_mat;
-    m[0] = view_dir_x(0.0 - ce, 0.0, se) * s;
-    m[4] = view_dir_y(0.0 - ce, 0.0, se) * s;
-    m[8] = view_dir_z(0.0 - ce, 0.0, se) * s;
-    m[1] = view_dir_x(0.0, 1.0, 0.0) * s;
-    m[5] = view_dir_y(0.0, 1.0, 0.0) * s;
-    m[9] = view_dir_z(0.0, 1.0, 0.0) * s;
-    m[2] = view_dir_x(se, 0.0, ce) * s;
-    m[6] = view_dir_y(se, 0.0, ce) * s;
-    m[10] = view_dir_z(se, 0.0, ce) * s;
 
-    // The middle of the model's base goes where the entity stands
-    let bx = model.mid_x; let by = model.min_y; let bz = model.mid_z;
-    let dx = ex - cam_x; let dy = ey - cam_y; let dz = ez - cam_z;
-    m[3] = view_dir_x(dx, dy, dz) - (m[0] * bx + m[1] * by + m[2] * bz);
-    m[7] = view_dir_y(dx, dy, dz) - (m[4] * bx + m[5] * by + m[6] * bz);
-    m[11] = view_dir_z(dx, dy, dz) - (m[8] * bx + m[9] * by + m[10] * bz);
+    if (in_view) {
+        held_matrix(m, model, ex, ey, ez, yaw, inst[10], s);
+
+        // Its 1/z is stored scaled up by this much, so that it wins against
+        // any wall the eye is standing close enough to for it to reach into.
+        // Its own triangles keep their order among themselves.
+        g_wk = HELD_DEPTH_SCALE;
+    } else {
+        // Tipped over backwards by pitch, about the middle of its base. 0 is
+        // upright and PI / 2 is lying on its back.
+        let cp = inst[10].cos();
+        let sp = inst[10].sin();
+
+        // The model's own space is right-handed with its front along +z, and
+        // the world's is left-handed. Turning its x around makes it left-handed
+        // with its front still along +z, and the yaw then turns +z to face
+        // where the entity does. Tipping it back swings its up axis towards
+        // its back and its front towards the sky. Each column here is where
+        // one of the model's axes goes in view space, scaled.
+        let yx = 0.0 - sp * se; let yz = 0.0 - sp * ce;
+        let zx = cp * se; let zz = cp * ce;
+        m[0] = view_dir_x(0.0 - ce, 0.0, se) * s;
+        m[4] = view_dir_y(0.0 - ce, 0.0, se) * s;
+        m[8] = view_dir_z(0.0 - ce, 0.0, se) * s;
+        m[1] = view_dir_x(yx, cp, yz) * s;
+        m[5] = view_dir_y(yx, cp, yz) * s;
+        m[9] = view_dir_z(yx, cp, yz) * s;
+        m[2] = view_dir_x(zx, sp, zz) * s;
+        m[6] = view_dir_y(zx, sp, zz) * s;
+        m[10] = view_dir_z(zx, sp, zz) * s;
+
+        // The middle of the model's base goes where the entity stands
+        let bx = model.mid_x; let by = model.min_y; let bz = model.mid_z;
+        let dx = ex - cam_x; let dy = ey - cam_y; let dz = ez - cam_z;
+        m[3] = view_dir_x(dx, dy, dz) - (m[0] * bx + m[1] * by + m[2] * bz);
+        m[7] = view_dir_y(dx, dy, dz) - (m[4] * bx + m[5] * by + m[6] * bz);
+        m[11] = view_dir_z(dx, dy, dz) - (m[8] * bx + m[9] * by + m[10] * bz);
+
+        g_wk = 1.0;
+    }
 
     let k = level / 255.0;
     let lx = MODEL_LIGHT_X / MODEL_LIGHT_LEN;
@@ -2068,8 +2387,350 @@ fun draw_instance(inst) {
     mesh_used = true;
 }
 
-fun draw_models() {
-    for (let var i = 0; i < draw_list.len; ++i) draw_instance(draw_list[i]);
+// --- Models in the tree, see the top of the BSP walk ---
+
+// Link placed model i into the list starting at head, nearest first, and
+// return the new head
+fun pl_link(head, i) {
+    let d = pl_dist[i];
+    if (head < 0 || d <= pl_dist[head]) {
+        pl_next[i] = head;
+        return i;
+    }
+    let var cur = head;
+    while (pl_next[cur] >= 0 && pl_dist[pl_next[cur]] < d) cur = pl_next[cur];
+    pl_next[i] = pl_next[cur];
+    pl_next[cur] = i;
+    return head;
+}
+
+// Place the models of the draw list in the tree. Those that cannot be, such as
+// one held in view, are drawn right away, ahead of everything.
+fun place_models() {
+    place_frame = place_frame + 1;
+    pl_num = 0;
+    rec_top = 0;
+
+    for (let var k = 0; k < draw_list.len; ++k) {
+        let inst = draw_list[k];
+        if (!inst[9] && !instance_in_band(inst)) continue;
+        if (inst[9] || bsp_root == nil || pl_num >= MAX_PLACED) {
+            draw_instance(inst);
+            continue;
+        }
+
+        let model = models[inst[0]];
+        let s = inst[7];
+        let pitch = inst[10];
+        let i = pl_num;
+        pl_num = pl_num + 1;
+        pl_inst[i] = inst;
+
+        if (pitch.abs() < 0.001) {
+            // Upright, its own box turned by its yaw, all poses included
+            let ce = inst[6].cos().abs(); let se = inst[6].sin().abs();
+            let ax = model.half_x * s; let az = model.half_z * s;
+            let half_h = (model.max_y - model.min_y) * s * 0.5;
+            pl_cx[i] = inst[3]; pl_cy[i] = inst[4] + half_h; pl_cz[i] = inst[5];
+            pl_hx[i] = ce * ax + se * az; pl_hy[i] = half_h; pl_hz[i] = se * ax + ce * az;
+        } else {
+            // Tipped over, the sphere around it, as `draw_instance` has it
+            let r = model.radius * s;
+            let up = (model.mid_y - model.min_y) * s;
+            let sp = pitch.sin();
+            let yaw = inst[6];
+            pl_cx[i] = inst[3] - up * sp * yaw.sin();
+            pl_cy[i] = inst[4] + up * pitch.cos();
+            pl_cz[i] = inst[5] - up * sp * yaw.cos();
+            pl_hx[i] = r; pl_hy[i] = r; pl_hz[i] = r;
+        }
+
+        let cx = pl_cx[i]; let cy = pl_cy[i]; let cz = pl_cz[i];
+        let hx = pl_hx[i]; let hy = pl_hy[i]; let hz = pl_hz[i];
+        let dx = cx - cam_x; let dy = cy - cam_y; let dz = cz - cam_z;
+        pl_dist[i] = dx * dx + dy * dy + dz * dz;
+
+        pl_owner[i] = nil;
+        let var node = bsp_root;
+        loop {
+            if (node.m_frame != place_frame) {
+                node.m_frame = place_frame;
+                node.m_count = 0;
+                node.m_cross = false;
+                node.m_front = 0 - 1;
+                node.m_back = 0 - 1;
+            }
+            node.m_count = node.m_count + 1;
+
+            let dist = node.nx * cx + node.ny * cy + node.nz * cz - node.d;
+            let reach = node.nx.abs() * hx + node.ny.abs() * hy + node.nz.abs() * hz;
+            let var front = dist - reach >= 0.0 - PLACE_SLACK;
+            if (!front && dist + reach > PLACE_SLACK) {
+                // Across the plane: on with the eye's side, waiting for the
+                // first such node to be done
+                front = node.nx * cam_x + node.ny * cam_y + node.nz * cam_z - node.d >= 0.0;
+                if (pl_owner[i] == nil) {
+                    pl_owner[i] = node;
+                    node.m_cross = true;
+                }
+            }
+
+            if (front) {
+                if (node.front == nil) { node.m_front = pl_link(node.m_front, i); break; }
+                node = node.front;
+            } else {
+                if (node.back == nil) { node.m_back = pl_link(node.m_back, i); break; }
+                node = node.back;
+            }
+        }
+    }
+}
+
+// Draw the models placed in an empty side of a node. Those that crossed no
+// plane on the way join the face s-buffer once they are all done.
+fun draw_placed(head) {
+    if (head < 0) return;
+    let first = rec_top;
+
+    g_recording = true;
+    for (let var i = head; i >= 0; i = pl_next[i]) {
+        if (screen_done) break;
+
+        // Everything in the face s-buffer is nearer, so covering the box's
+        // rectangle there hides it
+        if (box_occluded(pl_cx[i], pl_cy[i], pl_cz[i], pl_hx[i], pl_hy[i], pl_hz[i])) continue;
+
+        // With nothing in the way, its triangles can skip the face s-buffer
+        g_model_clip = !cache_gaps();
+        g_rec_owner = pl_owner[i];
+        draw_instance(pl_inst[i]);
+    }
+    g_model_clip = false;
+    g_recording = false;
+    g_rec_owner = nil;
+
+    rec_flush(first, nil);
+}
+
+// --- Muzzle flash ---
+//
+// No lamp can be added to the baked light for a frame, so a shot shows as a
+// glow added over the finished frame where the muzzle is, the way a bright
+// light blooms in a camera. Each render actor adds it to its own band, last,
+// over everything, which is where a weapon held in view is anyway.
+
+let FLASH_CORE = 0xFFFFF0C8;
+let FLASH_HALO = 0xFFFF8A28;
+
+// The flash of this frame: where on screen, its size in pixels per unit of
+// the model it comes out of, and its strength, 0 for no flash
+let var flash_x = 0.0;
+let var flash_y = 0.0;
+let var flash_unit = 0.0;
+let var flash_strength = 0.0;
+
+// How a glow fades from its middle out to its edge, as 256ths, indexed by the
+// squared distance as a fraction of the squared radius, so that drawing one
+// takes no square root. The fraction of the radius left is raised to a power:
+// higher is a smaller, hotter middle.
+let GLOW_STEPS = 256;
+
+fun glow_table(power) {
+    let t = Array.with_size(GLOW_STEPS + 1, 0);
+    for (let var i = 0; i < GLOW_STEPS; ++i) {
+        let f = 1.0 - (i.to_f() / GLOW_STEPS.to_f()).sqrt();
+        t[i] = (f.pow(power) * 256.0).floor();
+    }
+    return t;
+}
+
+let HALO_TABLE = glow_table(1.6);
+let CORE_TABLE = glow_table(1.5);
+
+// A span of the model s-buffer belongs to a model held in view when its 1/z
+// is past anything a model standing in the world could have, since a held one
+// is stored scaled up by HELD_DEPTH_SCALE
+let HELD_MIN_W = 50.0;
+
+fun held_span(s) {
+    return msp_w[s] + msp_x0[s].to_f() * msp_dw[s] > HELD_MIN_W;
+}
+
+// Add color to this band of the frame around a pixel, fading out to nothing
+// at radius r along the table. Strength 1 adds the whole color at the middle.
+//
+// The flash comes out of the far end of the barrel, so the weapon it comes out
+// of stands in front of it: pixels a model held in view covers are left alone.
+fun draw_glow(cx, cy, r, color, strength, table) {
+    if (r < 1.0) return;
+
+    // The color as it is added at the middle, times 256
+    let cr = (((color >> 16) & 0xFF).to_f() * strength).floor();
+    let cg = (((color >> 8) & 0xFF).to_f() * strength).floor();
+    let cb = ((color & 0xFF).to_f() * strength).floor();
+
+    let rr = r * r;
+    let scale = GLOW_STEPS.to_f() / rr;
+    let y0 = (cy - r).floor().max(render_y0);
+    let y1 = (cy + r).floor().min(render_y1 - 1);
+
+    for (let var y = y0; y <= y1; ++y) {
+        let dy = y.to_f() + 0.5 - cy;
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+
+        // Only the part of the row inside the circle
+        let h = h2.sqrt();
+        let x0 = (cx - h).floor().max(0);
+        let x1 = (cx + h).floor().min(FRAME_WIDTH - 1) + 1;
+        let row = y * FRAME_WIDTH;
+        let dy2 = dy * dy;
+
+        // And of that, the runs between the spans of a held model
+        let var x = x0;
+        let var cur = mb_head[y];
+        while (x < x1) {
+            while (cur != NO_SPAN && (msp_x1[cur] <= x || !held_span(cur))) cur = msp_next[cur];
+
+            let var end = x1;
+            if (cur != NO_SPAN && msp_x0[cur] < end) end = msp_x0[cur];
+            if (end > x) glow_run(row, x, end, cx, dy2, scale, table, cr, cg, cb);
+
+            if (cur == NO_SPAN) break;
+            x = msp_x1[cur].max(x);
+            cur = msp_next[cur];
+        }
+    }
+}
+
+// Add the glow to pixels [x0, x1) of a row. It is smooth enough that a pair of
+// pixels can share a level, which halves the work of finding it.
+fun glow_run(row, x0, x1, cx, dy2, scale, table, cr, cg, cb) {
+    let fb = frame_buffer;
+    let var x = x0;
+    while (x < x1) {
+        let dx = x.to_f() + 1.0 - cx;
+        let k = table[((dx * dx + dy2) * scale).floor().min(GLOW_STEPS)];
+        let ar = (cr * k) >> 8;
+        let ag = (cg * k) >> 8;
+        let ab = (cb * k) >> 8;
+
+        let end = (x + 2).min(x1);
+        while (x < end) {
+            let i = row + x;
+            let c = fb.get_u32(i);
+            let r8 = (((c >> 16) & 0xFF) + ar).min(255);
+            let g8 = (((c >> 8) & 0xFF) + ag).min(255);
+            let b8 = ((c & 0xFF) + ab).min(255);
+            fb.set_u32(i, (r8 << 16) | (g8 << 8) | b8);
+            x = x + 1;
+        }
+    }
+}
+
+fun draw_flash() {
+    if (flash_strength <= 0.0) return;
+    draw_glow(flash_x, flash_y, 0.3 * flash_unit, FLASH_HALO, 0.75 * flash_strength, HALO_TABLE);
+    draw_glow(flash_x, flash_y, 0.16 * flash_unit, FLASH_CORE, 1.0 * flash_strength, CORE_TABLE);
+}
+
+// Flash the muzzle of a model held in view this frame, given by its draw list
+// entry, at a point of the model in its own space, which is where the muzzle
+// is. Strength runs from 1 as the shot goes off down to 0, which is no flash.
+fun set_muzzle_flash(inst, px, py, pz, strength) {
+    flash_strength = 0.0;
+    if (inst == nil || strength <= 0.0) return;
+
+    let model = models[inst[0]];
+    let s = inst[7];
+    let m = Array.with_size(12, 0.0);
+    held_matrix(m, model, inst[3], inst[4], inst[5], inst[6], inst[10], s);
+
+    let vx = m[0] * px + m[1] * py + m[2] * pz + m[3];
+    let vy = m[4] * px + m[5] * py + m[6] * pz + m[7];
+    let vz = m[8] * px + m[9] * py + m[10] * pz + m[11];
+    if (vz <= NEAR) return;
+
+    // Sized with the model, so that it stays the same against the gun
+    flash_x = CENTER_X + FOCAL * vx / vz;
+    flash_y = CENTER_Y - FOCAL * vy / vz;
+    flash_unit = FOCAL * s / vz;
+    flash_strength = strength;
+}
+
+// --- Particles and the screen tint ---
+
+// Particles of this frame, such as blood, as a flat list of x, y, z, size in
+// meters and color, five numbers for each
+let var particles = [];
+
+fun set_particles(list) {
+    particles = list;
+}
+
+// Fill [x0, x1) x [y0, y1) of this band with a color, except where a model
+// held in view covers it, since particles are out in the world beyond it
+fun fill_unheld(x0, y0, x1, y1, color) {
+    let fb = frame_buffer;
+    for (let var y = y0.max(render_y0); y < y1.min(render_y1); ++y) {
+        let row = y * FRAME_WIDTH;
+        let var x = x0;
+        let var cur = mb_head[y];
+        while (x < x1) {
+            while (cur != NO_SPAN && (msp_x1[cur] <= x || !held_span(cur))) cur = msp_next[cur];
+            let var end = x1;
+            if (cur != NO_SPAN && msp_x0[cur] < end) end = msp_x0[cur];
+            for (let var i = row + x; i < row + end; ++i) fb.set_u32(i, color);
+            if (cur == NO_SPAN) break;
+            x = msp_x1[cur].max(x);
+            cur = msp_next[cur];
+        }
+    }
+}
+
+// Draw each particle as a square facing the eye. They are not tested against
+// what stands in front of them: they only ever start where a shot could see.
+fun draw_particles() {
+    let p = particles;
+    for (let var i = 0; i + 4 < p.len; i += 5) {
+        let dx = p[i] - cam_x; let dy = p[i + 1] - cam_y; let dz = p[i + 2] - cam_z;
+        let vz = view_dir_z(dx, dy, dz);
+        if (vz <= NEAR) continue;
+        let sx = CENTER_X + FOCAL * view_dir_x(dx, dy, dz) / vz;
+        let sy = CENTER_Y - FOCAL * view_dir_y(dx, dy, dz) / vz;
+        let half = (FOCAL * p[i + 3] / vz * 0.5).max(0.5);
+        let x0 = (sx - half).floor().max(0);
+        let x1 = (sx + half).ceil().min(FRAME_WIDTH);
+        let y0 = (sy - half).floor();
+        let y1 = (sy + half).ceil();
+        if (x0 >= x1 || y1 <= render_y0 || y0 >= render_y1) continue;
+        fill_unheld(x0, y0, x1, y1, p[i + 4]);
+    }
+}
+
+// A color the whole frame is pulled towards, such as red when the player is
+// hurt, and how far, in 256ths, 0 for none
+let var tint_color = 0;
+let var tint_amount = 0;
+
+fun set_screen_tint(color, amount) {
+    tint_color = color;
+    tint_amount = amount.clip(0, 256);
+}
+
+fun draw_tint() {
+    if (tint_amount <= 0) return;
+    let fb = frame_buffer;
+    let keep = 256 - tint_amount;
+    let add_rb = (tint_color & 0xFF00FF) * tint_amount;
+    let add_g = (tint_color & 0xFF00) * tint_amount;
+    let end = render_y1 * FRAME_WIDTH;
+    for (let var i = render_y0 * FRAME_WIDTH; i < end; ++i) {
+        let c = fb.get_u32(i);
+        let rb = (((c & 0xFF00FF) * keep + add_rb) >> 8) & 0xFF00FF;
+        let g = (((c & 0xFF00) * keep + add_g) >> 8) & 0xFF00;
+        fb.set_u32(i, rb | g);
+    }
 }
 
 // The models to draw from now on, as a list of entries described above
@@ -2084,8 +2745,8 @@ fun render_frame() {
     sbuf_reset();
     update_frustum();
 
-    // Models first: every face drawn after them is tested against them
-    draw_models();
+    // Models are met in the tree walk, apart from those drawn up front here
+    place_models();
     bsp_draw(bsp_root);
 
     // The opaque pass is what decides which pixels are sky, and the blend pass
@@ -2097,6 +2758,12 @@ fun render_frame() {
 
     // Everything opaque is down, so what was held back can be blended over it
     draw_deferred();
+
+    draw_particles();
+
+    // Over everything, including the weapon it comes out of
+    draw_flash();
+    draw_tint();
 
     // While this is still the band the model spans were made in, since the
     // next frame may hand this actor another
@@ -2167,6 +2834,13 @@ class RenderBandRequest {
         self.cos_pitch = cos_pitch;
         self.warp_phase = warp_phase;
         self.draw_list = draw_list;
+        self.flash_x = flash_x;
+        self.flash_y = flash_y;
+        self.flash_unit = flash_unit;
+        self.flash_strength = flash_strength;
+        self.particles = particles;
+        self.tint_color = tint_color;
+        self.tint_amount = tint_amount;
     }
 }
 
@@ -2210,6 +2884,13 @@ fun render_actor_loop() {
         cos_pitch = msg.cos_pitch;
         warp_phase = msg.warp_phase;
         draw_list = msg.draw_list;
+        flash_x = msg.flash_x;
+        flash_y = msg.flash_y;
+        flash_unit = msg.flash_unit;
+        flash_strength = msg.flash_strength;
+        particles = msg.particles;
+        tint_color = msg.tint_color;
+        tint_amount = msg.tint_amount;
 
         render_frame();
         let band_start = render_y0 * FRAME_WIDTH * 4;

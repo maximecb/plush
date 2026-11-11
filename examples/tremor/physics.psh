@@ -10,6 +10,9 @@ from ./world import PLANE_EPS;
 // courtyard and the slabs of a wall that tilts back were all climbable before,
 // since each step up them is short enough to look like a kerb.
 let MAX_CLIMB_SLOPE = 0.5;
+
+// How fast overlapping solid bodies drift apart, in m/s per meter of overlap
+let PUSH_RATE = 8.0;
 let STEEP_SLIDE_MAX_SPEED = 10.0;
 
 let GRAVITY = 22.5;
@@ -188,14 +191,31 @@ fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
     let start_x = body.x;
     let start_z = body.z;
 
+    // Overlapping other solid bodies, it doesn't walk any further into them,
+    // and drifts out. Going by the wish keeps walls in the way of the drift.
+    let var wx = wish_x;
+    let var wz = wish_z;
+    let px = body.push_x;
+    let pz = body.push_z;
+    if (px != 0.0 || pz != 0.0) {
+        let len = (px * px + pz * pz).sqrt();
+        let into = (wx * px + wz * pz) / len;
+        if (into < 0.0) {
+            wx = wx - into * px / len;
+            wz = wz - into * pz / len;
+        }
+        wx = wx + px * PUSH_RATE;
+        wz = wz + pz * PUSH_RATE;
+    }
+
     // On the ground, the wish is the velocity. In the air the velocity carries
     // on, and the wish only steers it.
     if (body.on_ground) {
-        body.vel_x = wish_x;
-        body.vel_z = wish_z;
+        body.vel_x = wx;
+        body.vel_z = wz;
     } else {
-        let ax = wish_x - body.vel_x;
-        let az = wish_z - body.vel_z;
+        let ax = wx - body.vel_x;
+        let az = wz - body.vel_z;
         let len = (ax * ax + az * az).sqrt();
         let max = AIR_ACCEL * dt;
         let var s = 1.0;

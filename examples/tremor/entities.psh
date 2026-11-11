@@ -7,7 +7,9 @@
 // facing along its yaw, posed by the animation it is playing.
 
 from ./physics import move_body;
-from ./models import get_model;
+from ./models import get_model, add_model, box_model, blob_model, models;
+from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER;
+from ./lighting import light_level_at, occluded;
 
 // --- Player ---
 
@@ -17,7 +19,7 @@ let PLAYER_HEIGHT = 1.7;
 let STEP_HEIGHT = 0.7;
 
 let WALK_SPEED = 7.5;
-let FLY_SPEED = 15.0;
+let FLY_SPEED = 22.5;
 
 // A jump clears about 1.5 m, which is twice the height of a step and enough
 // to hop onto the low ledges, but nowhere near the parapet
@@ -28,6 +30,40 @@ let MOUSE_SENS = 0.0032;
 
 // Look up/down limit. Just shy of fully up/down.
 let PITCH_LIMIT = 1.55;
+
+let MAX_HEALTH = 100;
+let MAX_SHELLS = 50;
+
+// How long being hurt shows, in the red of the view and the health number
+let HURT_FLASH_TIME = 0.6;
+
+// A blow shoves the player away from what struck them at this speed in m/s,
+// which dies away at this rate per second: the shove carries them speed /
+// rate meters in all
+let KNOCK_SPEED = 8.0;
+let KNOCK_DECAY = 8.0;
+
+// And knocks their aim off, by as much as this in radians across and up or
+// down, spread over a moment at this rate per second
+let JOLT_YAW = 0.6;
+let JOLT_PITCH = 0.42;
+let JOLT_DECAY = 14.0;
+
+let PI = 3.14159265358979;
+
+// The weapon bob: how far the player walks in one stride of two steps, how
+// far the weapon swings to each side and dips at each step, in meters at the
+// distance it is held, and how far it turns as it swings, in radians. The
+// ease is how quickly it starts and settles, per second.
+let BOB_STRIDE = 6.0;
+let BOB_SIDE = 0.035;
+let BOB_DIP = 0.03;
+let BOB_TURN = 0.04;
+let BOB_EASE = 6.0;
+
+// How fast the player has to be falling, in meters per second, for landing
+// to make a sound
+let LAND_SPEED = 4.0;
 
 class Entity {
     init(self, x, y, z, yaw) {
@@ -50,6 +86,12 @@ class Entity {
         self.on_ground = false;
         self.jump_speed = 0.0;
 
+        // Set for a body that other solid bodies can't walk through, and how
+        // far it overlaps them this frame, which move_body() pushes it out of
+        self.solid = false;
+        self.push_x = 0.0;
+        self.push_z = 0.0;
+
         // The Model it is drawn with, or nil for none, how much it is scaled,
         // and the animation it is playing, -1 for none, and how far into it
         self.model = nil;
@@ -64,6 +106,10 @@ class Entity {
         self.lit_y = 0.0;
         self.lit_z = 0.0;
         self.lit = false;
+
+        // Set for an entity that keeps the light level it was given, rather
+        // than taking it again where it moves to
+        self.fixed_light = false;
     }
 
     // Give the entity a model, by its name under examples/tremor/models/,
@@ -78,10 +124,25 @@ class Entity {
     update(self, w, dt) {
         self.anim_time = self.anim_time + dt;
     }
+
+    // Called when the player's box overlaps this one. Returns true if the
+    // entity is used up and should be removed from the world.
+    touch(self, w, player) {
+        return false;
+    }
+
+    // Does this entity's box overlap another's?
+    overlaps(self, e) {
+        let dx = self.x - e.x;
+        let dz = self.z - e.z;
+        let r = self.radius + e.radius;
+        if (dx * dx + dz * dz >= r * r) return false;
+        return self.y < e.y + e.height && e.y < self.y + self.height;
+    }
 }
 
-// Something placed in a map that is only there to be seen, standing still or
-// turning on the spot as pickups do
+// Something placed in a map to be seen, standing still or turning on the spot
+// as pickups do, and possibly picked up
 class Prop extends Entity {
     init(self, x, y, z, yaw, model, height, anim, spin) {
         Entity.init(self, x, y, z, yaw);
@@ -90,12 +151,33 @@ class Prop extends Entity {
 
         // How fast it turns, in radians per second
         self.spin = spin;
+
+        // What the player gets for walking into it, or nil if it can't be
+        // picked up, and how much of it
+        self.pickup = nil;
+        self.amount = 0;
+
+        // Touched within the reach of its model as it turns
+        self.radius = (self.model.radius * self.model_scale).min(1.0);
+        self.height = height;
     }
 
     update(self, w, dt) {
         Entity.update(self, w, dt);
         self.yaw = self.yaw + self.spin * dt;
     }
+
+    touch(self, w, player) {
+        if (self.pickup == nil) return false;
+        return player.give(self.pickup, self.amount);
+    }
+}
+
+fun pickup_prop(x, y, z, yaw, model, height, spin, item, amount) {
+    let p = Prop(x, y, z, yaw, model, height, 0 - 1, spin);
+    p.pickup = item;
+    p.amount = amount;
+    return p;
 }
 
 // Make the entity a map's `entity` line asks for
@@ -103,25 +185,902 @@ fun spawn_entity(spec) {
     let k = spec.kind;
     let x = spec.x; let y = spec.y; let z = spec.z; let yaw = spec.yaw;
 
-    // Pickups, turning slowly
-    if (k == "health_kit") return Prop(x, y, z, yaw, "health_kit", 0.45, 0 - 1, 1.2);
-    if (k == "armor_shard") return Prop(x, y, z, yaw, "armor_shard", 0.45, 0 - 1, 1.2);
-    if (k == "shotgun") return Prop(x, y, z, yaw, "shotgun", 0.3, 0 - 1, 1.2);
-    if (k == "shotgun_ammo") return Prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0 - 1, 1.2);
+    // Pickups. Those that would look odd spinning stay put, the rest turn
+    // slowly.
+    if (k == "health_kit") return pickup_prop(x, y, z, yaw, "health_kit", 0.675, 0.0, "health", 25);
+    if (k == "armor_shard") return Prop(x, y, z, yaw, "armor_shard", 0.675, 0 - 1, 1.2);
+    if (k == "shotgun") return pickup_prop(x, y, z, yaw, "shotgun", 0.6, 1.2, "shotgun", 8);
+    if (k == "shotgun_ammo") return pickup_prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0.0, "shells", 10);
 
     // Figures, playing their idle animation
-    if (k == "claw_cyborg") return Prop(x, y, z, yaw, "claw_cyborg", 1.9, 1, 0.0);
     if (k == "anime_girl") return Prop(x, y, z, yaw, "anime_girl", 1.7, 0, 0.0);
 
     $println("unknown entity type: " + k);
     $exit(1);
 }
 
-// Make every entity a map places
-fun spawn_entities(w) {
+// Make every entity a map places, doors and monsters included. This has to
+// come after the light bake, which doors are left out of.
+fun spawn_entities(w, player) {
     let out = [];
-    for (let var i = 0; i < w.entity_specs.len; ++i) out.push(spawn_entity(w.entity_specs[i]));
+    for (let var i = 0; i < w.entity_specs.len; ++i) {
+        let spec = w.entity_specs[i];
+        if (spec.kind == "claw_cyborg") out.push(ClawCyborg(spec.x, spec.y, spec.z, spec.yaw, player));
+        else out.push(spawn_entity(spec));
+    }
+    for (let var i = 0; i < w.door_specs.len; ++i) out.push(Door(w, w.door_specs[i], player));
     return out;
+}
+
+// Sounds that entities other than the player make, as [kind, x, y, z, param,
+// gain], for the game to play and then clear
+let sound_events = [];
+
+fun emit_sound(kind, x, y, z, param, gain) {
+    sound_events.push([kind, x, y, z, param, gain]);
+}
+
+// --- Doors ---
+
+// How close the player has to come for a door to open, from the middle of
+// their body to the nearest edge of the doorway, in meters
+let DOOR_REACH = 2.0;
+
+// How fast a door rises and falls, in m/s, and how long it stays open once
+// the player has gone, in seconds
+let DOOR_SPEED = 2.4;
+let DOOR_WAIT = 3.0;
+
+let DOOR_EDGE_TEX = "metal_dark";
+
+// How loud a door is, from right next to it
+let DOOR_GAIN = 0.675;
+
+// A door that slides up out of the way when the player comes close, and back
+// down a while after they leave. Its position is the middle of its bottom
+// edge, and it has a solid box in the world's brush list that moves with it.
+class Door extends Entity {
+    init(self, w, spec, player) {
+        Entity.init(self, (spec.x0 + spec.x1) * 0.5, spec.y0, (spec.z0 + spec.z1) * 0.5, 0.0);
+        self.x0 = spec.x0; self.y0 = spec.y0; self.z0 = spec.z0;
+        self.x1 = spec.x1; self.y1 = spec.y1; self.z1 = spec.z1;
+        self.lift = spec.lift;
+        self.player = player;
+
+        // The side it opens from, if only one, after which it stays open
+        self.from = spec.from;
+        self.held = false;
+
+        // How far it has risen, which way it is moving, and how long it has
+        // left to stay open
+        self.pos = 0.0;
+        self.dir = 0;
+        self.wait = 0.0;
+
+        // Not something to touch
+        self.radius = 0.0;
+        self.height = 0.0;
+
+        // The model, which faces along z, so a door shut across x is turned
+        let var width = spec.x1 - spec.x0;
+        let var depth = spec.z1 - spec.z0;
+        if (depth > width) {
+            self.yaw = PI * 0.5;
+            width = spec.z1 - spec.z0;
+            depth = spec.x1 - spec.x0;
+        }
+        let model = box_model(width, spec.y1 - spec.y0, depth,
+            load_texture(TEX_DIR + spec.tex + ".tga"),
+            load_texture(TEX_DIR + DOOR_EDGE_TEX + ".tga"), TEXELS_PER_METER);
+        self.model = add_model("door " + models.len.to_s(), model);
+
+        // Lit as the brighter of the two rooms it stands between, taken a
+        // little out from each face before its box is in the way
+        let var ox = 0.0;
+        let var oz = 0.0;
+        if (self.yaw == 0.0) oz = 1.0; else ox = 1.0;
+        let ly = spec.y0 + 1.2;
+        self.light = light_level_at(self.x - ox, ly, self.z - oz).max(light_level_at(self.x + ox, ly, self.z + oz));
+        self.fixed_light = true;
+        self.lit = true;
+
+        self.brush = box_brush(spec.x0, spec.y0, spec.z0, spec.x1, spec.y1, spec.z1);
+        w.brushes.push(self.brush);
+    }
+
+    // Is the player close enough to open it, and at its level?
+    player_near(self) {
+        let p = self.player;
+        if (p.y >= self.y1 || p.y + p.height <= self.y0 - 0.5) return false;
+        let dx = (self.x0 - p.x).max(p.x - self.x1).max(0.0);
+        let dz = (self.z0 - p.z).max(p.z - self.z1).max(0.0);
+        if (dx * dx + dz * dz >= DOOR_REACH * DOOR_REACH) return false;
+        if (self.from == "nx") return p.x < self.x0;
+        if (self.from == "px") return p.x > self.x1;
+        if (self.from == "nz") return p.z < self.z0;
+        if (self.from == "pz") return p.z > self.z1;
+        return true;
+    }
+
+    // Is the player standing where the door comes down to?
+    player_in_way(self) {
+        let p = self.player;
+        let r = p.radius;
+        if (p.x + r <= self.x0 || p.x - r >= self.x1) return false;
+        if (p.z + r <= self.z0 || p.z - r >= self.z1) return false;
+        return p.y < self.y1 && p.y + p.height > self.y0;
+    }
+
+    // Set off up (1) or down (-1), with the sound of the run from here
+    start(self, dir) {
+        self.dir = dir;
+        let var dist = self.pos;
+        if (dir > 0) dist = self.lift - self.pos;
+        emit_sound("door", self.x, self.y0 + (self.y1 - self.y0) * 0.5, self.z, dist / DOOR_SPEED, DOOR_GAIN);
+    }
+
+    update(self, w, dt) {
+        if (self.held) {
+            // Opened from its one side, and stays that way
+        } else if (self.player_near()) {
+            self.wait = DOOR_WAIT;
+            if (self.pos < self.lift && self.dir <= 0) self.start(1);
+            if (self.from != nil) self.held = true;
+        } else if (self.dir == 0 && self.pos > 0.0) {
+            self.wait = self.wait - dt;
+            if (self.wait <= 0.0 && !self.player_in_way()) self.start(0 - 1);
+        }
+
+        if (self.dir < 0 && self.player_in_way()) self.start(1);
+
+        if (self.dir != 0) {
+            self.pos = self.pos + self.dir.to_f() * DOOR_SPEED * dt;
+            if (self.pos >= self.lift) { self.pos = self.lift; self.dir = 0; }
+            if (self.pos <= 0.0) { self.pos = 0.0; self.dir = 0; }
+            set_box_brush_y(self.brush, self.y0 + self.pos, self.y1 + self.pos);
+            self.y = self.y0 + self.pos;
+        }
+    }
+}
+
+// --- Monsters ---
+
+// How often a monster looks for the player, in seconds. Looking traces a line
+// through the world's brushes, which is too slow to do every frame.
+let SIGHT_INTERVAL = 0.2;
+
+// How loud a monster's footsteps, the swing of its attacks and the blows that
+// land are, from right next to it
+let STOMP_GAIN = 0.8;
+let SWING_GAIN = 0.7;
+let HIT_GAIN = 0.9;
+
+// How long before the blow lands the sound of the swing starts, in seconds
+let SWING_LEAD = 0.18;
+
+// How much a dead monster's body takes before it bursts, which is one shot,
+// and how loud that is
+let CORPSE_HEALTH = 40;
+let GIB_GAIN = 1.0;
+
+// How loud a monster's groan of pain is, and about how long it keeps quiet
+// after one, in seconds, so that a stream of hits is not a stream of groans
+let PAIN_GAIN = 1.2;
+let PAIN_WAIT = 0.6;
+
+// How long a dead monster takes to fall over onto its back
+let FALL_TIME = 0.7;
+
+// The signed angle from facing along yaw to facing along (dx, dz), in
+// radians, positive the way yaw increases
+fun turn_to(yaw, dx, dz) {
+    let fx = yaw.sin(); let fz = yaw.cos();
+    let dot = fx * dx + fz * dz;
+    let side = fz * dx - fx * dz;
+    let s = side.abs();
+    let var angle = PI * 0.5;
+    if (dot > 0.000001) angle = (s / dot).atan();
+    else if (dot < 0.0 - 0.000001) angle = PI - (s / (0.0 - dot)).atan();
+    if (side < 0.0) return 0.0 - angle;
+    return angle;
+}
+
+// Something that hunts the player. It stands idle until it sees them, or they
+// come close or hurt it, then runs at them and attacks once in reach, until
+// it is killed. Kinds of monster set the numbers and pick the animations of
+// their model in their constructor.
+class Monster extends Entity {
+    init(self, x, y, z, yaw, model, height, player) {
+        Entity.init(self, x, y, z, yaw);
+        self.set_model(model, height);
+        self.player = player;
+        self.radius = 0.5;
+        self.height = height;
+        self.step_height = STEP_HEIGHT;
+        self.solid = true;
+
+        self.health = 100;
+
+        // How far it sees ahead, within how wide a cone, and how far it sees
+        // in any direction, out of the corner of its eye. How close the player
+        // has to come for it to notice them even unseen, and how fast it
+        // turns, in radians per second.
+        self.sight_range = 60.0;
+        self.sight_cone = (80.0 * PI / 180.0).cos();
+        self.glance_range = 30.0;
+        self.notice_range = 4.0;
+        self.turn_speed = 5.0;
+
+        // Its animations, by number in the model, -1 for none
+        self.idle_clip = 0 - 1;
+        self.move_clip = 0 - 1;
+        self.attack_clips = [];
+
+        // How fast it moves, by default the pace of its moving animation
+        self.speed = 0.0;
+
+        // How close it has to be to attack, how far into the attack the blow
+        // lands, as a fraction of the animation, and how much it takes off
+        self.reach = 1.6;
+        self.hit_at = 0.4;
+        self.damage = 10;
+
+        // How much faster than made its attack animations are played
+        self.attack_rate = 1.0;
+
+        // "idle", "chase", "attack" or "dead", and how long in it
+        self.state = "idle";
+        self.state_time = 0.0;
+        self.sight_time = 0.0;
+        self.attack_count = 0;
+        self.hit_done = false;
+        self.swing_done = false;
+
+        // How far it goes between footsteps, 0 for silent feet, and how far
+        // it has gone since the last one
+        self.stride = 0.0;
+        self.stride_left = 0.0;
+
+        // Where it stood when it died, and how far its back is behind the
+        // middle of its base, which it falls onto
+        self.dead_y = 0.0;
+        self.dead_back = 0.0;
+
+        // How much more its body can take once dead, before it bursts
+        self.corpse_health = CORPSE_HEALTH;
+
+        // How long until it can groan again
+        self.pain_wait = 0.0;
+
+        // Set for the game to take it away
+        self.gone = false;
+    }
+
+    // The pace at which an animation carries the model over the ground, in
+    // meters per second
+    clip_speed(self, clip) {
+        let c = self.model.clips[clip];
+        let d = (c.travel_x * c.travel_x + c.travel_z * c.travel_z).sqrt();
+        return d * self.model_scale / c.duration;
+    }
+
+    // Start an animation from its beginning, unless it is already playing
+    play(self, clip) {
+        if (self.anim == clip) return;
+        self.anim = clip;
+        self.anim_time = 0.0;
+    }
+
+    set_state(self, state) {
+        self.state = state;
+        self.state_time = 0.0;
+    }
+
+    // Is the player where it looks, and is there a clear line from its eyes to
+    // theirs? The cheap tests go first, so the line is only traced for a
+    // player it could see.
+    sees_player(self) {
+        let p = self.player;
+        let dx = p.x - self.x; let dz = p.z - self.z;
+        let d2 = dx * dx + dz * dz;
+        if (d2 > self.sight_range * self.sight_range) return false;
+        if (d2 > self.glance_range * self.glance_range) {
+            let ahead = dx * self.yaw.sin() + dz * self.yaw.cos();
+            if (ahead < self.sight_cone * d2.sqrt()) return false;
+        }
+        let eye = self.y + self.height * 0.9;
+        return !occluded(self.x, eye, self.z, p.x, p.eye_y(), p.z);
+    }
+
+    // Take damage, which also wakes it
+    hurt(self, amount) {
+        // Its body can take this much more, and then it bursts
+        if (self.state == "dead") {
+            self.corpse_health = self.corpse_health - amount;
+            if (self.corpse_health <= 0) self.gib();
+            return;
+        }
+        self.health = self.health - amount;
+
+        // A groan, unless the last is still going, and a longer one as it dies
+        let dying = self.health <= 0;
+        if (dying || self.pain_wait <= 0.0) {
+            let mouth = self.y + self.height * 0.85;
+            emit_sound("groan", self.x, mouth, self.z, dying ? 1.0 : 0.0, PAIN_GAIN);
+            self.pain_wait = blood_rand(PAIN_WAIT * 0.7, PAIN_WAIT * 1.3);
+        }
+
+        if (dying) {
+            // No death animation yet: it goes stiff in its idle pose and
+            // falls over backwards
+            self.set_state("dead");
+            self.solid = false;
+            self.play(self.idle_clip);
+            self.anim_time = 0.0;
+            self.dead_y = self.y;
+            self.dead_back = (self.model.mid_z - self.model.pose_min_z(self.idle_clip, 0.0)) * self.model_scale;
+            return;
+        }
+        if (self.state == "idle") self.set_state("chase");
+    }
+
+    // Its body's middle and the way up its body, which tips over with it
+    up_x(self) { return 0.0 - self.pitch.sin() * self.yaw.sin(); }
+    up_y(self) { return self.pitch.cos(); }
+    up_z(self) { return 0.0 - self.pitch.sin() * self.yaw.cos(); }
+
+    // Burst into pieces, and be taken away
+    gib(self) {
+        let h = self.height * 0.5;
+        let cx = self.x + self.up_x() * h;
+        let cy = self.y + self.up_y() * h;
+        let cz = self.z + self.up_z() * h;
+        spawn_gibs(cx, cy, cz, self.dead_y);
+        emit_sound("gib", cx, cy, cz, 0.0, GIB_GAIN);
+        self.gone = true;
+    }
+
+    update(self, w, dt) {
+        self.anim_time = self.anim_time + dt;
+        self.state_time = self.state_time + dt;
+        self.pain_wait = self.pain_wait - dt;
+        let p = self.player;
+        let dx = p.x - self.x;
+        let dz = p.z - self.z;
+        let dist = (dx * dx + dz * dz).sqrt();
+
+        // How far off the player is in 3D, from feet to feet, which is what
+        // decides whether they are in reach: one flying overhead is not
+        let dy = p.y - self.y;
+        let dist3 = (dist * dist + dy * dy).sqrt();
+
+        let var wish_x = 0.0;
+        let var wish_z = 0.0;
+
+        if (self.state == "dead") {
+            // Falling, picking up speed as it goes. Tipped about the middle of
+            // its base, its back would go through the floor, so that is lifted
+            // by as much as it has come down.
+            self.anim_time = 0.0;
+            let f = (self.state_time / FALL_TIME).min(1.0);
+            self.pitch = f * f * PI * 0.5;
+            self.y = self.dead_y + self.dead_back * self.pitch.sin();
+            return;
+        }
+
+        if (self.state == "idle") {
+            self.play(self.idle_clip);
+            self.sight_time = self.sight_time - dt;
+            if (self.sight_time <= 0.0) {
+                self.sight_time = SIGHT_INTERVAL;
+                if (dist3 < self.notice_range || self.sees_player()) self.set_state("chase");
+            }
+        } else if (self.state == "chase") {
+            self.play(self.move_clip);
+            let turn = turn_to(self.yaw, dx, dz);
+            let step = self.turn_speed * dt;
+            self.yaw = self.yaw + turn.clip(0.0 - step, step);
+
+            if (dist3 <= self.reach && turn.abs() < 0.5 && self.attack_clips.len > 0) {
+                self.set_state("attack");
+                self.anim = 0 - 1;
+                self.play(self.attack_clips[self.attack_count % self.attack_clips.len]);
+                self.attack_count = self.attack_count + 1;
+                self.hit_done = false;
+                self.swing_done = false;
+            } else if (dist > self.reach * 0.8) {
+                wish_x = self.yaw.sin() * self.speed;
+                wish_z = self.yaw.cos() * self.speed;
+            }
+        } else if (self.state == "attack") {
+            self.anim_time = self.anim_time + dt * (self.attack_rate - 1.0);
+            let dur = self.model.clips[self.anim].duration;
+            let hit_time = dur * self.hit_at;
+            let eye = self.y + self.height * 0.7;
+
+            // The swing is heard building up to the blow
+            if (!self.swing_done && self.anim_time >= hit_time - SWING_LEAD * self.attack_rate) {
+                self.swing_done = true;
+                let lead = (hit_time - self.anim_time) / self.attack_rate;
+                emit_sound("swipe", self.x, eye, self.z, lead, SWING_GAIN);
+            }
+
+            if (!self.hit_done && self.anim_time >= hit_time) {
+                self.hit_done = true;
+                // The blow lands if the player is still in reach and in front
+                if (dist3 <= self.reach + 0.3 && turn_to(self.yaw, dx, dz).abs() < 0.9) {
+                    p.struck(self.damage, self.x, self.z);
+                    emit_sound("claw_hit", p.x, p.eye_y(), p.z, 0.0, HIT_GAIN);
+                }
+            }
+            if (self.anim_time >= dur) self.set_state("chase");
+        }
+
+        let start_x = self.x;
+        let start_z = self.z;
+        move_body(w, self, dt, wish_x, wish_z, false);
+
+        // A footstep every stride of ground it covers on its feet
+        if (self.stride > 0.0 && self.on_ground) {
+            let mx = self.x - start_x;
+            let mz = self.z - start_z;
+            let moved = (mx * mx + mz * mz).sqrt();
+            self.stride_left = self.stride_left - moved;
+            if (moved > 0.0 && self.stride_left <= 0.0) {
+                self.stride_left = self.stride_left + self.stride;
+                emit_sound("stomp", self.x, self.y, self.z, 0.0, STOMP_GAIN);
+            }
+        }
+    }
+}
+
+// A cyborg with a claw for a right hand, which slashes with the claw and
+// punches with the other hand
+class ClawCyborg extends Monster {
+    init(self, x, y, z, yaw, player) {
+        Monster.init(self, x, y, z, yaw, "claw_cyborg", 2.375, player);
+        self.radius = 0.6;
+        self.health = 120;
+        self.idle_clip = 1;
+        self.move_clip = 3;
+        self.attack_clips = [0, 4];
+        self.speed = self.clip_speed(self.move_clip);
+        self.reach = 2.1;
+        self.hit_at = 0.35;
+        self.damage = 15;
+
+        // Its run takes about four steps a second
+        self.stride = self.speed * 0.27;
+        self.attack_rate = 1.6;
+    }
+}
+
+// The shotgun's reach, and how much a shot takes off if every pellet lands
+let SHOT_RANGE = 60.0;
+let SHOT_DAMAGE = 40.0;
+
+// The pellets in a shot, spread at random over a cone this wide
+let SHOT_PELLETS = 12;
+let SHOT_SPREAD = 4.0 * PI / 180.0;
+
+// How many drops of blood a pellet throws out
+let BLOOD_DROPS = 3;
+
+// Fire a shot from the player's eye along their view: a spread of pellets,
+// each hurting the first monster it meets before it meets a wall, with a share
+// of the damage. Returns a monster hit, or nil.
+fun shoot(player, list) {
+    let ox = player.x; let oy = player.eye_y(); let oz = player.z;
+    let cp = player.pitch.cos();
+    let sp = player.pitch.sin();
+    let sy = player.yaw.sin();
+    let cy = player.yaw.cos();
+
+    // The view's forward, right and up directions
+    let fx = sy * cp; let fy = sp; let fz = cy * cp;
+    let rx = cy; let rz = 0.0 - sy;
+    let ux = 0.0 - sy * sp; let uy = cp; let uz = 0.0 - cy * sp;
+
+    // What each monster hit takes, added up, so it is hurt once per shot and
+    // the pellets that kill it do not also go into its corpse
+    let hit = [];
+    let dmg = [];
+    let share = SHOT_DAMAGE / SHOT_PELLETS.to_f();
+
+    for (let var p = 0; p < SHOT_PELLETS; ++p) {
+        // A point spread evenly over the disc of the cone
+        let r = (SHOT_SPREAD * 0.5) * blood_rand(0.0, 1.0).sqrt();
+        let a = blood_rand(0.0, 2.0 * PI);
+        let across = r * a.cos();
+        let up = r * a.sin();
+        let var dx = fx + rx * across + ux * up;
+        let var dy = fy + uy * up;
+        let var dz = fz + rz * across + uz * up;
+        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+        dx = dx / len; dy = dy / len; dz = dz / len;
+
+        let res = trace_monsters(list, ox, oy, oz, dx, dy, dz);
+        if (res == nil) continue;
+        let e = res[0];
+        let t = res[1];
+        let hx = ox + dx * t; let hy = oy + dy * t; let hz = oz + dz * t;
+        if (occluded(ox, oy, oz, hx, hy, hz)) continue;
+
+        let var floor_y = e.y;
+        if (e.state == "dead") floor_y = e.dead_y;
+        spawn_blood(hx - dx * 0.3, hy, hz - dz * 0.3, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS, floor_y);
+
+        let var k = 0;
+        while (k < hit.len && hit[k] != e) k = k + 1;
+        if (k == hit.len) { hit.push(e); dmg.push(0.0); }
+        dmg[k] = dmg[k] + share;
+    }
+
+    for (let var i = 0; i < hit.len; ++i) hit[i].hurt(dmg[i]);
+    if (hit.len == 0) return nil;
+    return hit[0];
+}
+
+// The first monster along a ray from (ox, oy, oz) in the unit direction
+// (dx, dy, dz) within the shot's range, as [monster, distance], or nil
+fun trace_monsters(list, ox, oy, oz, dx, dy, dz) {
+    let var best = nil;
+    let var best_t = SHOT_RANGE;
+    for (let var i = 0; i < list.len; ++i) {
+        let e = list[i];
+        if (!(e instanceof Monster) || e.gone) continue;
+
+        // The body is a capsule up its middle, from a little above its base
+        // to a little below its top, which lies down with it when it falls.
+        // Where the ray passes nearest that line, and whether that is inside.
+        let ux = e.up_x(); let uy = e.up_y(); let uz = e.up_z();
+        let lo = e.radius * 0.5;
+        let len = e.height - e.radius;
+        let ax = e.x + ux * lo; let ay = e.y + uy * lo; let az = e.z + uz * lo;
+        let vx = ux * len; let vy = uy * len; let vz = uz * len;
+        let wx = ox - ax; let wy = oy - ay; let wz = oz - az;
+        let b = dx * vx + dy * vy + dz * vz;
+        let c = vx * vx + vy * vy + vz * vz;
+        let d = dx * wx + dy * wy + dz * wz;
+        let f = vx * wx + vy * wy + vz * wz;
+        let den = c - b * b;
+        let var s = 0.0;
+        if (den > 0.000001) s = ((f - b * d) / den).clip(0.0, 1.0);
+        let t = s * b - d;
+        if (t <= 0.0 || t >= best_t) continue;
+        let px = ox + dx * t - (ax + vx * s);
+        let py = oy + dy * t - (ay + vy * s);
+        let pz = oz + dz * t - (az + vz * s);
+        if (px * px + py * py + pz * pz > e.radius * e.radius) continue;
+        best = e;
+        best_t = t;
+    }
+
+    if (best == nil) return nil;
+    return [best, best_t];
+}
+
+// --- Blood ---
+
+// A drop of blood, flying out from a wound and falling as far as the floor
+class Drop {
+    init(self, x, y, z, vx, vy, vz, size, color, life, floor) {
+        self.x = x; self.y = y; self.z = z;
+        self.vx = vx; self.vy = vy; self.vz = vz;
+        self.size = size;
+        self.color = color;
+        self.life = life;
+        self.floor = floor;
+    }
+}
+
+let BLOOD_GRAVITY = 9.8;
+let BLOOD_COLORS = [0xFF_8A_08_08, 0xFF_6E_04_04, 0xFF_A8_12_0C, 0xFF_50_02_02];
+
+let drops = [];
+let var blood_seed = 12345;
+
+// A random number in [lo, hi)
+fun blood_rand(lo, hi) {
+    blood_seed = (blood_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return lo + (hi - lo) * (blood_seed.to_f() / 2147483648.0);
+}
+
+// A spray of n drops from a point, thrown out mostly along (dx, dy, dz),
+// which is a unit direction, and somewhat up, to land on a floor at floor_y.
+// They are drawn over whatever is behind them, so they must not go through it.
+fun spawn_blood(x, y, z, dx, dy, dz, n, floor_y) {
+    for (let var i = 0; i < n; ++i) {
+        let speed = blood_rand(0.8, 3.0);
+        let vx = (dx + blood_rand(-0.9, 0.9)) * speed;
+        let vy = (dy + blood_rand(-0.2, 1.2)) * speed;
+        let vz = (dz + blood_rand(-0.9, 0.9)) * speed;
+        let color = BLOOD_COLORS[(blood_rand(0.0, BLOOD_COLORS.len.to_f())).floor().min(BLOOD_COLORS.len - 1)];
+        drops.push(Drop(x + blood_rand(-0.1, 0.1), y + blood_rand(-0.15, 0.15), z + blood_rand(-0.1, 0.1),
+            vx, vy, vz, blood_rand(0.03, 0.08), color, blood_rand(0.35, 0.7), floor_y + 0.03));
+    }
+}
+
+// --- Gibs ---
+//
+// A body bursting: a great deal of blood, and lumps of flesh thrown out every
+// way and up, tumbling as they go, which bounce a little where they land and
+// lie there for a while. The lumps are small models of a few shapes, made
+// when the game starts, since the render actors need every model before they
+// are spawned.
+
+let GIB_DROPS = 70;
+let GIB_CHUNKS = 12;
+let GIB_SHAPES = 5;
+let GIB_TEX = "flesh_red";
+
+// Lumps stay where they land until there are more than this many, and then
+// the oldest shrink away
+let MAX_GIBS = 50;
+
+// What is kept of the speed of a lump each time it hits the floor, and how
+// slow it has to be going to come to rest
+let GIB_BOUNCE = 0.3;
+let GIB_REST_SPEED = 0.6;
+
+// How long a lump takes to shrink away once it is one too many
+let GIB_FADE = 8.0;
+
+let gib_models = [];
+
+// Make the shapes of the lumps. Call this before the render actors start.
+fun load_gibs() {
+    let img = load_texture(TEX_DIR + GIB_TEX + ".tga");
+    for (let var i = 0; i < GIB_SHAPES; ++i) {
+        gib_models.push(add_model("gib " + i.to_s(), blob_model(7919 * (i + 1), img)));
+    }
+}
+
+class Gib {
+    init(self, model, x, y, z, vx, vy, vz, size, floor, level) {
+        self.model = model;
+        self.x = x; self.y = y; self.z = z;
+        self.vx = vx; self.vy = vy; self.vz = vz;
+        self.yaw = blood_rand(0.0, 2.0 * PI);
+        self.pitch = blood_rand(0.0, 2.0 * PI);
+        self.spin_yaw = blood_rand(-12.0, 12.0);
+        self.spin_pitch = blood_rand(-12.0, 12.0);
+        self.size = size;
+        self.floor = floor;
+        self.level = level;
+
+        // Time left to shrink away, once it has started to
+        self.fading = false;
+        self.life = GIB_FADE;
+        self.resting = false;
+    }
+}
+
+let gibs = [];
+
+fun spawn_gibs(x, y, z, floor_y) {
+    spawn_blood(x, y, z, 0.0, 0.5, 0.0, GIB_DROPS, floor_y);
+    if (gib_models.len == 0) return;
+    let level = light_level_at(x, y, z);
+    for (let var i = 0; i < GIB_CHUNKS; ++i) {
+        let a = blood_rand(0.0, 2.0 * PI);
+        let speed = blood_rand(2.0, 6.0);
+        let model = gib_models[(blood_rand(0.0, gib_models.len.to_f())).floor().min(gib_models.len - 1)];
+        gibs.push(Gib(model, x + blood_rand(-0.3, 0.3), y + blood_rand(-0.2, 0.3), z + blood_rand(-0.3, 0.3),
+            a.cos() * speed, blood_rand(2.0, 6.0), a.sin() * speed, blood_rand(0.3, 0.55), floor_y, level));
+    }
+}
+
+// Move the lumps on, and add one draw list entry for each to list
+fun update_gibs(dt, list) {
+    // The oldest come first, so those over the limit are at the front
+    let var keep = 0;
+    for (let var i = 0; i < gibs.len; ++i) {
+        if (!gibs[i].fading) keep = keep + 1;
+    }
+    for (let var i = 0; i < gibs.len && keep > MAX_GIBS; ++i) {
+        if (!gibs[i].fading) { gibs[i].fading = true; keep = keep - 1; }
+    }
+
+    for (let var i = gibs.len - 1; i >= 0; --i) {
+        let g = gibs[i];
+        if (g.fading) {
+            g.life = g.life - dt;
+            if (g.life <= 0.0) { gibs.remove(i); continue; }
+        }
+
+        if (!g.resting) {
+            g.vy = g.vy - BLOOD_GRAVITY * dt;
+
+            // Bouncing back off a wall rather than going through it. The test
+            // is made a little above the lump's base, clear of the floor.
+            let nx = g.x + g.vx * dt;
+            let nz = g.z + g.vz * dt;
+            let ty = g.y.max(g.floor) + 0.1;
+            if (occluded(g.x, ty, g.z, nx, ty, nz)) {
+                g.vx = (0.0 - g.vx) * GIB_BOUNCE;
+                g.vz = (0.0 - g.vz) * GIB_BOUNCE;
+            } else {
+                g.x = nx;
+                g.z = nz;
+            }
+            g.y = g.y + g.vy * dt;
+            g.yaw = g.yaw + g.spin_yaw * dt;
+            g.pitch = g.pitch + g.spin_pitch * dt;
+
+            // A lump's base is its lowest point, so it lands when that does
+            if (g.y < g.floor) {
+                g.y = g.floor;
+                g.vy = (0.0 - g.vy) * GIB_BOUNCE;
+                g.vx = g.vx * GIB_BOUNCE; g.vz = g.vz * GIB_BOUNCE;
+                g.spin_yaw = g.spin_yaw * GIB_BOUNCE; g.spin_pitch = g.spin_pitch * GIB_BOUNCE;
+                if (g.vy < GIB_REST_SPEED) g.resting = true;
+            }
+        }
+
+        let s = g.size * (g.life / GIB_FADE).min(1.0);
+        list.push([g.model.id, 0 - 1, 0.0, g.x, g.y, g.z, g.yaw, s, g.level, false, g.pitch]);
+    }
+}
+
+// Move the drops on and let them fall, and hand the renderer those the eye at
+// (ex, ey, ez) can see, as set_particles() takes them. Particles are drawn
+// over everything, so one a wall hides has to be left out here.
+fun update_blood(dt, ex, ey, ez) {
+    let out = [];
+    for (let var i = drops.len - 1; i >= 0; --i) {
+        let d = drops[i];
+        d.life = d.life - dt;
+        if (d.life <= 0.0) { drops.remove(i); continue; }
+        d.vy = d.vy - BLOOD_GRAVITY * dt;
+        d.x = d.x + d.vx * dt;
+        d.y = d.y + d.vy * dt;
+        d.z = d.z + d.vz * dt;
+        if (d.y < d.floor) {
+            d.y = d.floor;
+            d.vx = 0.0; d.vy = 0.0; d.vz = 0.0;
+        }
+        if (occluded(ex, ey, ez, d.x, d.y, d.z)) continue;
+        out.push(d.x); out.push(d.y); out.push(d.z); out.push(d.size); out.push(d.color);
+    }
+    return out;
+}
+
+// The solid bodies this frame, reused from one frame to the next
+let solids = [];
+
+// Find which solid bodies overlap and by how much, for move_body() to push
+// them apart. The player is one of them, though not in the list. Every pair is
+// tried, which is cheap for the few dozen monsters a level has; a grid would
+// be the next step for hundreds.
+fun separate_bodies(player, list) {
+    solids.resize(0, nil);
+    player.push_x = 0.0;
+    player.push_z = 0.0;
+    if (player.solid) solids.push(player);
+    for (let var i = 0; i < list.len; ++i) {
+        let e = list[i];
+        e.push_x = 0.0;
+        e.push_z = 0.0;
+        if (e.solid) solids.push(e);
+    }
+
+    for (let var i = 0; i < solids.len; ++i) {
+        let a = solids[i];
+        for (let var j = i + 1; j < solids.len; ++j) {
+            let b = solids[j];
+            let var dx = a.x - b.x;
+            let var dz = a.z - b.z;
+            let r = a.radius + b.radius;
+            let d2 = dx * dx + dz * dz;
+            if (d2 >= r * r) continue;
+            if (a.y >= b.y + b.height || b.y >= a.y + a.height) continue;
+
+            // Right on top of each other, they part along an arbitrary line
+            let var d = d2.sqrt();
+            if (d < 0.001) { dx = 1.0; dz = 0.0; d = 1.0; }
+            let s = (r - d) * 0.5 / d;
+            a.push_x = a.push_x + dx * s; a.push_z = a.push_z + dz * s;
+            b.push_x = b.push_x - dx * s; b.push_z = b.push_z - dz * s;
+        }
+    }
+}
+
+// Let the player touch whatever entities they overlap, and take out of the
+// list those that are used up by it, and monsters that are gone
+fun touch_entities(w, player, list) {
+    for (let var i = list.len - 1; i >= 0; --i) {
+        let e = list[i];
+        if (e instanceof Monster) {
+            if (e.gone) list.remove(i);
+            continue;
+        }
+        if (e.overlaps(player) && e.touch(w, player)) list.remove(i);
+    }
+}
+
+// --- Weapons ---
+
+// How a weapon is held: its model, how much that is scaled, where its middle
+// sits in view space (to the right, up and ahead of the eye), and its turn
+// about the view's up axis, which aims its barrel.
+//
+// It is drawn in front of everything, so its distance only sets how big it
+// looks against its scale: twice as far and twice the scale looks the same.
+// It is kept well out, clear of the near plane.
+//
+// The model has to have been loaded before the render actors were spawned,
+// which load_weapons() sees to.
+class HeldPose {
+    init(self, model, scale, x, y, z, yaw) {
+        self.model = get_model(model);
+        self.scale = scale;
+        self.x = x;
+        self.y = y;
+        self.z = z;
+        self.yaw = yaw;
+
+        // Where the muzzle flash is centered, in the model's own space
+        self.muzzle_x = 0.0;
+        self.muzzle_y = 0.0;
+        self.muzzle_z = 0.0;
+
+        // How long a shot takes, recoil and reloading included, before the
+        // next one can be fired, in seconds
+        self.cycle = 1.0;
+    }
+}
+
+let WEAPONS = ["shotgun"];
+
+fun held_pose(weapon) {
+    if (weapon == "shotgun") {
+        let p = HeldPose("shotgun", 1.2, 0.42, 0 - 0.42, 1.0, 1.4);
+        // A little past the end of the barrel, where the flash bursts out
+        p.muzzle_x = 0.62;
+        p.muzzle_y = 0.252;
+        p.cycle = 0.85;
+        return p;
+    }
+    return nil;
+}
+
+// --- Firing ---
+//
+// A shot is played out from the time since it was fired. The weapon kicks
+// back towards the eye and tips up, quickly, then settles; the pump follows,
+// dipping and tilting it down and back up again. The flash lasts a few frames.
+
+let KICK_TIME = 0.05;
+let SETTLE_TIME = 0.25;
+let PUMP_START = 0.36;
+let PUMP_TIME = 0.42;
+let FLASH_TIME = 0.06;
+
+// How far towards full brightness the flash lights the weapon
+let FLASH_LIGHT = 0.4;
+
+// How far the kick carries the weapon back and up, in meters at the distance
+// it is held, and how far it tips up, in radians
+let KICK_BACK = 0.16;
+let KICK_UP = 0.05;
+let KICK_PITCH = 0.32;
+
+// How far the pump drops the weapon and tilts it down, and turns it in
+let PUMP_DROP = 0.07;
+let PUMP_PITCH = 0.14;
+let PUMP_YAW = 0.06;
+
+// Smooth from 0 at t = 0 to 1 at t = 1
+fun smooth(t) {
+    let u = t.clip(0.0, 1.0);
+    return u * u * (3.0 - 2.0 * u);
+}
+
+// Load the model of every weapon, which has to happen before the render
+// actors are spawned, whether or not the map has one lying about
+fun load_weapons() {
+    for (let var i = 0; i < WEAPONS.len; ++i) held_pose(WEAPONS[i]);
 }
 
 class Player extends Entity {
@@ -131,11 +1090,105 @@ class Player extends Entity {
         self.height = PLAYER_HEIGHT;
         self.step_height = STEP_HEIGHT;
         self.jump_speed = JUMP_SPEED;
+        self.solid = true;
         self.noclip = false;
+
+        self.health = MAX_HEALTH;
+        self.shells = 0;
+
+        // Seconds since the player was last hurt, which starts out long past
+        self.hurt_time = 100.0;
+
+        // What is left of the last blow: the shove, in m/s along the ground,
+        // and how fast it is still turning their aim, in radians per second
+        self.knock_x = 0.0;
+        self.knock_z = 0.0;
+        self.jolt_yaw = 0.0;
+        self.jolt_pitch = 0.0;
+
+        // The weapon in hand, nil for none, and how it is held
+        self.weapon = nil;
+        self.held = nil;
+
+        // How far through a stride the weapon bob is, in radians, and how
+        // much of it shows, from 0 standing still to 1 walking
+        self.bob_phase = 0.0;
+        self.bob_amount = 0.0;
+
+        // Seconds since the last shot, which starts out long past
+        self.shot_time = 100.0;
+
+        // What the player did this frame that makes a sound, such as "step"
+        // or "pickup", for the game to play and then clear
+        self.events = [];
     }
 
     eye_y(self) {
         return self.y + EYE_HEIGHT;
+    }
+
+    // Lose health, down to nothing. Nothing happens at nothing yet.
+    hurt(self, amount) {
+        self.health = (self.health - amount).max(0);
+        self.hurt_time = 0.0;
+    }
+
+    // Take a blow from something at (from_x, from_z): the damage, a shove
+    // away from it, and a jolt to the aim in a random direction
+    struck(self, amount, from_x, from_z) {
+        self.hurt(amount);
+
+        let dx = self.x - from_x;
+        let dz = self.z - from_z;
+        let len = (dx * dx + dz * dz).sqrt();
+        if (len > 0.001) {
+            self.knock_x = dx / len * KNOCK_SPEED;
+            self.knock_z = dz / len * KNOCK_SPEED;
+        }
+
+        // Turning at the rate that adds up to the jolt as it dies away
+        self.jolt_yaw = blood_rand(0.0 - JOLT_YAW, JOLT_YAW) * JOLT_DECAY;
+        self.jolt_pitch = blood_rand(0.0 - JOLT_PITCH, JOLT_PITCH) * JOLT_DECAY;
+    }
+
+    // Move on the timers of what the player sees happen to them, and the
+    // jolt to their aim
+    update_effects(self, dt) {
+        self.hurt_time = self.hurt_time + dt;
+
+        self.yaw = self.yaw + self.jolt_yaw * dt;
+        self.pitch = (self.pitch + self.jolt_pitch * dt).clip(0.0 - PITCH_LIMIT, PITCH_LIMIT);
+        let keep = (0.0 - JOLT_DECAY * dt).exp();
+        self.jolt_yaw = self.jolt_yaw * keep;
+        self.jolt_pitch = self.jolt_pitch * keep;
+    }
+
+    // How strongly the view is tinted red for having been hurt, from 1 the
+    // moment it happens down to 0
+    hurt_flash(self) {
+        if (self.hurt_time >= HURT_FLASH_TIME) return 0.0;
+        return 1.0 - self.hurt_time / HURT_FLASH_TIME;
+    }
+
+    // Take `amount` of something picked up. Returns false if the player has
+    // no room for it, in which case it is left where it lies.
+    give(self, item, amount) {
+        if (item == "health") {
+            if (self.health >= MAX_HEALTH) return false;
+            self.health = (self.health + amount).min(MAX_HEALTH);
+        } else if (item == "shells") {
+            if (self.shells >= MAX_SHELLS) return false;
+            self.shells = (self.shells + amount).min(MAX_SHELLS);
+        } else {
+            // A weapon, which comes loaded
+            let pose = held_pose(item);
+            if (pose == nil) return false;
+            self.weapon = item;
+            self.held = pose;
+            self.shells = (self.shells + amount).min(MAX_SHELLS);
+        }
+        self.events.push("pickup");
+        return true;
     }
 
     // Advance the player by one frame. `mf` and `ms` are how hard they are
@@ -162,12 +1215,117 @@ class Player extends Entity {
             self.vel_z = 0.0;
             self.slide_speed = 0.0;
             self.on_ground = false;
+            self.update_bob(dt, 0.0);
             return;
         }
 
         // Walking. Forward is where the camera looks, flattened onto the floor.
-        let vx = (sin_yaw * mf + cos_yaw * ms) * WALK_SPEED;
-        let vz = (cos_yaw * mf - sin_yaw * ms) * WALK_SPEED;
+        let old_x = self.x;
+        let old_z = self.z;
+        let was_on_ground = self.on_ground;
+        let fall_speed = 0.0 - self.vel_y;
+        // Whatever is left of a shove carries them along with their own steps
+        let vx = (sin_yaw * mf + cos_yaw * ms) * WALK_SPEED + self.knock_x;
+        let vz = (cos_yaw * mf - sin_yaw * ms) * WALK_SPEED + self.knock_z;
+        let keep = (0.0 - KNOCK_DECAY * dt).exp();
+        self.knock_x = self.knock_x * keep;
+        self.knock_z = self.knock_z * keep;
         move_body(w, self, dt, vx, vz, want_up);
+
+        // Coming down hard enough to hear, which a step down a stair is not
+        if (!was_on_ground && self.on_ground && fall_speed > LAND_SPEED) self.events.push("land");
+
+        let dx = self.x - old_x;
+        let dz = self.z - old_z;
+        self.update_bob(dt, (dx * dx + dz * dz).sqrt());
+    }
+
+    // Carry the weapon bob on by the distance walked this frame. It eases in
+    // as the player sets off and settles as they stop or leave the ground,
+    // rather than freezing wherever it was.
+    update_bob(self, dt, dist) {
+        let walking = self.on_ground && dist > 0.0001;
+        let target = walking ? 1.0 : 0.0;
+        self.bob_amount = self.bob_amount + (target - self.bob_amount) * (dt * BOB_EASE).min(1.0);
+
+        // A footstep lands at the bottom of each dip of the bob, which is a
+        // quarter of the way into each half of the stride
+        let before = ((self.bob_phase - 0.5 * PI) / PI).floor();
+        self.bob_phase = self.bob_phase + dist * (2.0 * PI / BOB_STRIDE);
+        let after = ((self.bob_phase - 0.5 * PI) / PI).floor();
+        if (walking && after != before) self.events.push("step");
+    }
+
+    // Where the bob puts the weapon, as an offset in view space to the right
+    // and up, and a turn about the view's up axis. Side to side once a
+    // stride, and down at each of its two steps, which traces a figure of
+    // eight.
+    bob_x(self) {
+        return self.bob_phase.sin() * BOB_SIDE * self.bob_amount;
+    }
+
+    bob_y(self) {
+        return 0.0 - (1.0 - (self.bob_phase * 2.0).cos()) * 0.5 * BOB_DIP * self.bob_amount;
+    }
+
+    bob_yaw(self) {
+        return self.bob_phase.sin() * BOB_TURN * self.bob_amount;
+    }
+
+    // Fire the weapon in hand, if there is one, it is loaded and the last
+    // shot is over. Returns whether it went off.
+    fire(self) {
+        if (self.held == nil || self.shells <= 0 || self.shot_time < self.held.cycle) return false;
+        self.shot_time = 0.0;
+        self.shells = self.shells - 1;
+        return true;
+    }
+
+    update_weapon(self, dt) {
+        self.shot_time = self.shot_time + dt;
+    }
+
+    // How far into the kick of the last shot the weapon is, from 0 at rest to
+    // 1 thrown all the way back, and likewise for the pump
+    kick(self) {
+        let t = self.shot_time;
+        if (t < KICK_TIME) {
+            let u = t / KICK_TIME;
+            return 1.0 - (1.0 - u) * (1.0 - u);
+        }
+        return 1.0 - smooth((t - KICK_TIME) / SETTLE_TIME);
+    }
+
+    pump(self) {
+        let t = self.shot_time - PUMP_START;
+        if (t <= 0.0 || t >= PUMP_TIME) return 0.0;
+        return (PI * t / PUMP_TIME).sin();
+    }
+
+    // How bright the muzzle flash is, from 1 as the shot goes off to 0
+    flash(self) {
+        if (self.shot_time >= FLASH_TIME) return 0.0;
+        return 1.0 - self.shot_time / FLASH_TIME;
+    }
+
+    // The draw list entry for the weapon in hand, with the bob, the kick and
+    // the pump put on its pose, lit at `level`, or nil with nothing in hand
+    held_entry(self, level) {
+        let h = self.held;
+        if (h == nil) return nil;
+
+        let k = self.kick();
+        let p = self.pump();
+        let x = h.x + self.bob_x();
+        let y = h.y + self.bob_y() + KICK_UP * k - PUMP_DROP * p;
+        let z = h.z - KICK_BACK * k;
+        let yaw = h.yaw + self.bob_yaw() + PUMP_YAW * p;
+        let pitch = KICK_PITCH * k - PUMP_PITCH * p;
+
+        // The flash lights up the weapon it comes out of, part of the way to
+        // full brightness
+        let lit = level + (255.0 - level) * FLASH_LIGHT * self.flash();
+
+        return [h.model.id, 0 - 1, 0.0, x, y, z, yaw, h.scale, lit, true, pitch];
     }
 }

@@ -9,6 +9,8 @@
 //   physics.psh   collision and moving bodies under gravity
 //   entities.psh  things that move about in the world, the player included
 //   models.psh    3D models that entities are drawn with
+//   sound.psh     synthesized sound effects
+//   hud.psh       the health and ammunition display
 //
 // This file wires them together: it loads and prepares the level, then either
 // runs the benchmark tour or opens a window and runs the game loop.
@@ -21,6 +23,7 @@
 //   space       jump, or rise while noclipping
 //   c           sink, while noclipping
 //   n           toggle noclip
+//   left mouse  fire, also alt (option on a Mac)
 //   escape / q  quit
 //
 // With --bench, it renders a number of frames of a set tour of the level
@@ -34,9 +37,17 @@ from ./config import FRAME_WIDTH, FRAME_HEIGHT, MAP_PATH, NUM_RENDER_ACTORS, BEN
 from ./world import load_map, build_bsp;
 from ./lighting import light_world, light_level_at;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
-    set_scene, set_view, set_draw_list, render_frame_parallel, start_render_actors, stop_render_actors;
-from ./entities import Player, spawn_entities, EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
+    set_scene, set_view, set_draw_list, set_muzzle_flash, set_particles, set_screen_tint,
+    render_frame_parallel, start_render_actors, stop_render_actors;
+from ./entities import Player, spawn_entities, touch_entities, separate_bodies, load_weapons, load_gibs, shoot, update_blood, update_gibs, sound_events,
+    EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
 from ./models import models;
+from ./sound import start_sound, stop_sound, play_sound, play_sound_at;
+from ./hud import draw_hud;
+
+// The audio actor starts with a copy of this actor's heap, so it is spawned
+// before the world is loaded into it. The benchmark runs silent.
+if (!BENCH) start_sound();
 
 // --- Setup ---
 
@@ -72,32 +83,84 @@ let player = Player(world.spawn_x, world.spawn_y - EYE_HEIGHT, world.spawn_z, wo
 // The entities load their models as they are made, which has to happen before
 // the render actors are spawned with their copy of every model
 let models_start_ms = $time_current_ms();
-let entities = spawn_entities(world);
+let entities = spawn_entities(world, player);
+load_weapons();
+load_gibs();
 if (entities.len > 0) {
     $println("entities: " + entities.len.to_s() + ", with " + models.len.to_s() + " models loaded in "
         + ($time_current_ms() - models_start_ms).to_s() + " ms");
 }
 
-// Move every entity on by dt, and hand the renderer those it has to draw
+// The light level on an entity, taken `up` above its base, and taken again
+// only once the entity has moved a little
+fun entity_light(e, up) {
+    if (e.fixed_light) return e.light;
+    let dx = e.x - e.lit_x; let dy = e.y - e.lit_y; let dz = e.z - e.lit_z;
+    if (!e.lit || dx * dx + dy * dy + dz * dz > 0.0625) {
+        e.light = light_level_at(e.x, e.y + up, e.z);
+        e.lit_x = e.x; e.lit_y = e.y; e.lit_z = e.z;
+        e.lit = true;
+    }
+    return e.light;
+}
+
+// How loud each of the player's own sounds is
+fun player_sound_gain(kind) {
+    if (kind == "step") return 0.7;
+    if (kind == "land") return 0.9;
+    return 0.8;
+}
+
+// Play what the player and everything else did this frame that makes a sound
+fun play_sounds() {
+    let events = player.events;
+    for (let var i = 0; i < events.len; ++i) play_sound(events[i], player_sound_gain(events[i]), 0.0);
+    events.resize(0, nil);
+
+    for (let var i = 0; i < sound_events.len; ++i) {
+        let s = sound_events[i];
+        play_sound_at(s[0], s[1], s[2], s[3], player.x, player.eye_y(), player.z, s[5], s[4]);
+    }
+    sound_events.resize(0, nil);
+}
+
+// The red the view is pulled towards when the player is hurt, and how far at
+// the moment it happens, in 256ths
+let HURT_TINT = 0xFF_C0_00_00;
+let HURT_TINT_MAX = 110.0;
+
+// Move every entity on by dt, let the player pick up what they walk into, and
+// hand the renderer what it has to draw
 fun update_entities(dt) {
+    touch_entities(world, player, entities);
+    separate_bodies(player, entities);
+
     let list = [];
     for (let var i = 0; i < entities.len; ++i) {
         let e = entities[i];
         e.update(world, dt);
         if (e.model == nil) continue;
 
-        // The light is taken at mid height, and again only once the entity
-        // has moved a little
-        let dx = e.x - e.lit_x; let dy = e.y - e.lit_y; let dz = e.z - e.lit_z;
-        if (!e.lit || dx * dx + dy * dy + dz * dz > 0.0625) {
-            let mid = (e.model.max_y - e.model.min_y) * e.model_scale * 0.5;
-            e.light = light_level_at(e.x, e.y + mid, e.z);
-            e.lit_x = e.x; e.lit_y = e.y; e.lit_z = e.z;
-            e.lit = true;
-        }
-
-        list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, e.light]);
+        let level = entity_light(e, (e.model.max_y - e.model.min_y) * e.model_scale * 0.5);
+        list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, level, false, e.pitch]);
     }
+
+    update_gibs(dt, list);
+    set_particles(update_blood(dt, player.x, player.eye_y(), player.z));
+
+    // The view goes red for a moment when the player is hurt
+    set_screen_tint(HURT_TINT, (player.hurt_flash() * HURT_TINT_MAX).floor());
+
+    // The weapon in hand, lit by where the player stands, and its flash
+    let h = player.held;
+    if (h != nil) {
+        let held = player.held_entry(entity_light(player, EYE_HEIGHT));
+        list.push(held);
+        set_muzzle_flash(held, h.muzzle_x, h.muzzle_y, h.muzzle_z, player.flash());
+    } else {
+        set_muzzle_flash(nil, 0.0, 0.0, 0.0, 0.0);
+    }
+
     set_draw_list(list);
 }
 
@@ -116,7 +179,13 @@ let TOUR = [
     [ 12.0, 7.8,  25.5, -2.1, -0.28],
     [  0.0, 1.6,  29.0,  0.0,  0.0],
     [  0.0, 1.6,  40.5,  0.0,  0.0],
-    [  0.0, 1.6,  47.5,  0.0, -0.05]
+    [  0.0, 1.6,  47.5,  0.0, -0.05],
+    [-38.0, 8.0,  29.6, -1.57, 0.1],
+    [-60.0, 20.0, 29.6,  1.57, 0.0],
+    [ 21.0, 1.6,  80.0,  1.57, 0.1],
+    [ 45.5, 20.8, 90.0, -2.4, -0.2],
+    [ 52.0, 20.8, 80.0,  1.57, 0.0],
+    [ 75.2, 20.8, 88.0,  3.14, 0.0]
 ];
 
 let actor_start_ms = $time_current_ms();
@@ -147,6 +216,7 @@ if (BENCH) {
         if (ms > worst_ms) worst_ms = ms;
 
         if (SHOT_DIR != nil && i < TOUR.len) {
+            draw_hud(frame_image, player);
             let path = SHOT_DIR + "/view" + i.to_s() + ".tga";
             if (!save_tga(path, frame_image)) $println("could not write " + path);
         }
@@ -197,6 +267,11 @@ let var key_down = false;
 // one does not cancel the other
 let var mouse_up = false;
 
+// Fire, held down to keep firing as fast as the weapon allows. The left mouse
+// button and ALT are tracked apart for the same reason.
+let var key_fire = false;
+let var mouse_fire = false;
+
 fun set_key(key, down) {
     if (key == 'W') key_fwd = down;
     else if (key == 'S') key_back = down;
@@ -208,6 +283,7 @@ fun set_key(key, down) {
     else if (key == 'DOWN') key_look_d = down;
     else if (key == 'SPACE') key_up = down;
     else if (key == 'C') key_down = down;
+    else if (key == 'ALT') key_fire = down;
 }
 
 // --- Main loop ---
@@ -250,6 +326,7 @@ loop {
             }
             if (msg.key == 'N') {
                 player.noclip = !player.noclip;
+                player.solid = !player.noclip;
                 $println('noclip=' + player.noclip.to_s());
             }
 
@@ -264,9 +341,11 @@ loop {
         }
         else if (msg.kind == 'MOUSE_DOWN') {
             if (msg.button == 'RIGHT') mouse_up = true;
+            if (msg.button == 'LEFT') mouse_fire = true;
         }
         else if (msg.kind == 'MOUSE_UP') {
             if (msg.button == 'RIGHT') mouse_up = false;
+            if (msg.button == 'LEFT') mouse_fire = false;
         }
     }
     if (quit) break;
@@ -286,7 +365,17 @@ loop {
     if (key_left) ms = ms - 1.0;
 
     player.move(world, dt, mf, ms, key_up || mouse_up, key_down);
+
+    // The last shot plays on first, so that a new one starts from its very
+    // first frame
+    player.update_weapon(dt);
+    player.update_effects(dt);
+    if ((key_fire || mouse_fire) && player.fire()) {
+        play_sound(player.weapon, 1.0, 0.0);
+        shoot(player, entities);
+    }
     update_entities(dt);
+    play_sounds();
 
     set_view(player.x, player.eye_y(), player.z, player.yaw, player.pitch, time_s * 1.1);
 
@@ -308,11 +397,13 @@ loop {
         last_report_ms = report_ms;
     }
 
+    draw_hud(frame_image, player);
     draw_fps_counter();
     $window_draw_frame(window, frame_buffer);
 }
 
 stop_render_actors();
+stop_sound();
 
 // Give the cursor back before exiting
 $window_lock_mouse(window, false);
