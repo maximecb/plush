@@ -29,6 +29,18 @@ let MOUSE_SENS = 0.0032;
 // Look up/down limit. Just shy of fully up/down.
 let PITCH_LIMIT = 1.55;
 
+let PI = 3.14159265358979;
+
+// The weapon bob: how far the player walks in one stride of two steps, how
+// far the weapon swings to each side and dips at each step, in meters at the
+// distance it is held, and how far it turns as it swings, in radians. The
+// ease is how quickly it starts and settles, per second.
+let BOB_STRIDE = 6.0;
+let BOB_SIDE = 0.035;
+let BOB_DIP = 0.03;
+let BOB_TURN = 0.04;
+let BOB_EASE = 6.0;
+
 class Entity {
     init(self, x, y, z, yaw) {
         self.x = x;
@@ -215,6 +227,11 @@ class Player extends Entity {
         // The weapon in hand, nil for none, and how it is held
         self.weapon = nil;
         self.held = nil;
+
+        // How far through a stride the weapon bob is, in radians, and how
+        // much of it shows, from 0 standing still to 1 walking
+        self.bob_phase = 0.0;
+        self.bob_amount = 0.0;
     }
 
     eye_y(self) {
@@ -254,12 +271,45 @@ class Player extends Entity {
             self.vel_z = 0.0;
             self.slide_speed = 0.0;
             self.on_ground = false;
+            self.update_bob(dt, 0.0);
             return;
         }
 
         // Walking. Forward is where the camera looks, flattened onto the floor.
+        let old_x = self.x;
+        let old_z = self.z;
         let vx = (sin_yaw * mf + cos_yaw * ms) * WALK_SPEED;
         let vz = (cos_yaw * mf - sin_yaw * ms) * WALK_SPEED;
         move_body(w, self, dt, vx, vz, want_up);
+
+        let dx = self.x - old_x;
+        let dz = self.z - old_z;
+        self.update_bob(dt, (dx * dx + dz * dz).sqrt());
+    }
+
+    // Carry the weapon bob on by the distance walked this frame. It eases in
+    // as the player sets off and settles as they stop or leave the ground,
+    // rather than freezing wherever it was.
+    update_bob(self, dt, dist) {
+        let walking = self.on_ground && dist > 0.0001;
+        let target = walking ? 1.0 : 0.0;
+        self.bob_amount = self.bob_amount + (target - self.bob_amount) * (dt * BOB_EASE).min(1.0);
+        self.bob_phase = self.bob_phase + dist * (2.0 * PI / BOB_STRIDE);
+    }
+
+    // Where the bob puts the weapon, as an offset in view space to the right
+    // and up, and a turn about the view's up axis. Side to side once a
+    // stride, and down at each of its two steps, which traces a figure of
+    // eight.
+    bob_x(self) {
+        return self.bob_phase.sin() * BOB_SIDE * self.bob_amount;
+    }
+
+    bob_y(self) {
+        return 0.0 - (1.0 - (self.bob_phase * 2.0).cos()) * 0.5 * BOB_DIP * self.bob_amount;
+    }
+
+    bob_yaw(self) {
+        return self.bob_phase.sin() * BOB_TURN * self.bob_amount;
     }
 }
