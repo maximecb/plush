@@ -670,6 +670,48 @@ fun cmd_prism(w, cx, cz, radius, y0, y1, sides, rot, o) {
     add_brush(w, planes);
 }
 
+// An upright prism on any convex polygon, its corners given as "x,z;x,z;..."
+// in either order around it
+fun cmd_poly(w, y0, y1, pts, o) {
+    let xs = [];
+    let zs = [];
+    let pairs = pts.split(";");
+    for (let var i = 0; i < pairs.len; ++i) {
+        let xz = pairs[i].split(",");
+        if (xz.len != 2) {
+            $println("bad poly corner: " + pairs[i]);
+            $exit(1);
+        }
+        xs.push(parse_num(xz[0]));
+        zs.push(parse_num(xz[1]));
+    }
+
+    let n = xs.len;
+    let var area = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let j = (i + 1) % n;
+        area = area + xs[i] * zs[j] - xs[j] * zs[i];
+    }
+
+    let planes = [];
+    planes.push(make_plane(0.0, -1.0, 0.0, 0.0 - y0, pick(o.ny, o.bottom, o), o));
+    planes.push(make_plane(0.0, 1.0, 0.0, y1, pick(o.py, o.top, o), o));
+
+    // Each side faces out, which is to its right going around the way that
+    // makes the area positive
+    for (let var i = 0; i < n; ++i) {
+        let j = (i + 1) % n;
+        let ex = xs[j] - xs[i];
+        let ez = zs[j] - zs[i];
+        let len = (ex * ex + ez * ez).sqrt();
+        let var nx = ez / len;
+        let var nz = (0.0 - ex) / len;
+        if (area < 0.0) { nx = 0.0 - nx; nz = 0.0 - nz; }
+        planes.push(make_plane(nx, 0.0, nz, nx * xs[i] + nz * zs[i], pick(nil, o.side, o), o));
+    }
+    add_brush(w, planes);
+}
+
 // A box running level from one point to another, `width` across, for anything
 // that does not lie square to the axes
 fun cmd_beam(w, x0, z0, x1, z1, width, y0, y1, o) {
@@ -833,6 +875,11 @@ fun load_map(path) {
             cmd_prism(w, field_num(tok, 1, "cx"), field_num(tok, 2, "cz"), field_num(tok, 3, "radius"),
                 field_num(tok, 4, "y0"), field_num(tok, 5, "y1"), field_int(tok, 6, "sides"),
                 field_num(tok, 7, "rot") * PI / 180.0, parse_opts(w, tok, 8));
+            continue;
+        }
+
+        if (cmd == "poly") {
+            cmd_poly(w, field_num(tok, 1, "y0"), field_num(tok, 2, "y1"), field(tok, 3, "pts"), parse_opts(w, tok, 4));
             continue;
         }
 

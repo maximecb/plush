@@ -37,6 +37,18 @@ let MAX_SHELLS = 50;
 // How long being hurt shows, in the red of the view and the health number
 let HURT_FLASH_TIME = 0.6;
 
+// A blow shoves the player away from what struck them at this speed in m/s,
+// which dies away at this rate per second: the shove carries them speed /
+// rate meters in all
+let KNOCK_SPEED = 8.0;
+let KNOCK_DECAY = 8.0;
+
+// And knocks their aim off, by as much as this in radians across and up or
+// down, spread over a moment at this rate per second
+let JOLT_YAW = 0.6;
+let JOLT_PITCH = 0.42;
+let JOLT_DECAY = 14.0;
+
 let PI = 3.14159265358979;
 
 // The weapon bob: how far the player walks in one stride of two steps, how
@@ -194,9 +206,13 @@ fun spawn_entities(w, player) {
     return out;
 }
 
-// Sounds that entities other than the player make, as [kind, x, y, z, param],
-// for the game to play and then clear
+// Sounds that entities other than the player make, as [kind, x, y, z, param,
+// gain], for the game to play and then clear
 let sound_events = [];
+
+fun emit_sound(kind, x, y, z, param, gain) {
+    sound_events.push([kind, x, y, z, param, gain]);
+}
 
 // --- Doors ---
 
@@ -210,6 +226,9 @@ let DOOR_SPEED = 2.4;
 let DOOR_WAIT = 3.0;
 
 let DOOR_EDGE_TEX = "metal_dark";
+
+// How loud a door is, from right next to it
+let DOOR_GAIN = 0.675;
 
 // A door that slides up out of the way when the player comes close, and back
 // down a while after they leave. Its position is the middle of its bottom
@@ -282,7 +301,7 @@ class Door extends Entity {
         self.dir = dir;
         let var dist = self.pos;
         if (dir > 0) dist = self.lift - self.pos;
-        sound_events.push(["door", self.x, self.y0 + (self.y1 - self.y0) * 0.5, self.z, dist / DOOR_SPEED]);
+        emit_sound("door", self.x, self.y0 + (self.y1 - self.y0) * 0.5, self.z, dist / DOOR_SPEED, DOOR_GAIN);
     }
 
     update(self, w, dt) {
@@ -311,6 +330,15 @@ class Door extends Entity {
 // How often a monster looks for the player, in seconds. Looking traces a line
 // through the world's brushes, which is too slow to do every frame.
 let SIGHT_INTERVAL = 0.2;
+
+// How loud a monster's footsteps, the swing of its attacks and the blows that
+// land are, from right next to it
+let STOMP_GAIN = 0.8;
+let SWING_GAIN = 0.7;
+let HIT_GAIN = 0.9;
+
+// How long before the blow lands the sound of the swing starts, in seconds
+let SWING_LEAD = 0.18;
 
 // How long a dead monster takes to fall over onto its back
 let FALL_TIME = 0.7;
@@ -373,6 +401,12 @@ class Monster extends Entity {
         self.sight_time = 0.0;
         self.attack_count = 0;
         self.hit_done = false;
+        self.swing_done = false;
+
+        // How far it goes between footsteps, 0 for silent feet, and how far
+        // it has gone since the last one
+        self.stride = 0.0;
+        self.stride_left = 0.0;
 
         // Where it stood when it died, and how far its back is behind the
         // middle of its base, which it falls onto
@@ -437,6 +471,11 @@ class Monster extends Entity {
         let dz = p.z - self.z;
         let dist = (dx * dx + dz * dz).sqrt();
 
+        // How far off the player is in 3D, from feet to feet, which is what
+        // decides whether they are in reach: one flying overhead is not
+        let dy = p.y - self.y;
+        let dist3 = (dist * dist + dy * dy).sqrt();
+
         let var wish_x = 0.0;
         let var wish_z = 0.0;
 
@@ -456,7 +495,7 @@ class Monster extends Entity {
             self.sight_time = self.sight_time - dt;
             if (self.sight_time <= 0.0) {
                 self.sight_time = SIGHT_INTERVAL;
-                if (dist < self.notice_range || self.sees_player()) self.set_state("chase");
+                if (dist3 < self.notice_range || self.sees_player()) self.set_state("chase");
             }
         } else if (self.state == "chase") {
             self.play(self.move_clip);
@@ -464,12 +503,13 @@ class Monster extends Entity {
             let step = self.turn_speed * dt;
             self.yaw = self.yaw + turn.clip(0.0 - step, step);
 
-            if (dist <= self.reach && turn.abs() < 0.5 && self.attack_clips.len > 0) {
+            if (dist3 <= self.reach && turn.abs() < 0.5 && self.attack_clips.len > 0) {
                 self.set_state("attack");
                 self.anim = 0 - 1;
                 self.play(self.attack_clips[self.attack_count % self.attack_clips.len]);
                 self.attack_count = self.attack_count + 1;
                 self.hit_done = false;
+                self.swing_done = false;
             } else if (dist > self.reach * 0.8) {
                 wish_x = self.yaw.sin() * self.speed;
                 wish_z = self.yaw.cos() * self.speed;
@@ -477,15 +517,42 @@ class Monster extends Entity {
         } else if (self.state == "attack") {
             self.anim_time = self.anim_time + dt * (self.attack_rate - 1.0);
             let dur = self.model.clips[self.anim].duration;
-            if (!self.hit_done && self.anim_time >= dur * self.hit_at) {
+            let hit_time = dur * self.hit_at;
+            let eye = self.y + self.height * 0.7;
+
+            // The swing is heard building up to the blow
+            if (!self.swing_done && self.anim_time >= hit_time - SWING_LEAD * self.attack_rate) {
+                self.swing_done = true;
+                let lead = (hit_time - self.anim_time) / self.attack_rate;
+                emit_sound("swipe", self.x, eye, self.z, lead, SWING_GAIN);
+            }
+
+            if (!self.hit_done && self.anim_time >= hit_time) {
                 self.hit_done = true;
                 // The blow lands if the player is still in reach and in front
-                if (dist <= self.reach + 0.3 && turn_to(self.yaw, dx, dz).abs() < 0.9) p.hurt(self.damage);
+                if (dist3 <= self.reach + 0.3 && turn_to(self.yaw, dx, dz).abs() < 0.9) {
+                    p.struck(self.damage, self.x, self.z);
+                    emit_sound("claw_hit", p.x, p.eye_y(), p.z, 0.0, HIT_GAIN);
+                }
             }
             if (self.anim_time >= dur) self.set_state("chase");
         }
 
+        let start_x = self.x;
+        let start_z = self.z;
         move_body(w, self, dt, wish_x, wish_z, false);
+
+        // A footstep every stride of ground it covers on its feet
+        if (self.stride > 0.0 && self.on_ground) {
+            let mx = self.x - start_x;
+            let mz = self.z - start_z;
+            let moved = (mx * mx + mz * mz).sqrt();
+            self.stride_left = self.stride_left - moved;
+            if (moved > 0.0 && self.stride_left <= 0.0) {
+                self.stride_left = self.stride_left + self.stride;
+                emit_sound("stomp", self.x, self.y, self.z, 0.0, STOMP_GAIN);
+            }
+        }
     }
 }
 
@@ -503,6 +570,9 @@ class ClawCyborg extends Monster {
         self.reach = 2.1;
         self.hit_at = 0.35;
         self.damage = 15;
+
+        // Its run takes about four steps a second
+        self.stride = self.speed * 0.27;
         self.attack_rate = 1.6;
     }
 }
@@ -726,6 +796,13 @@ class Player extends Entity {
         // Seconds since the player was last hurt, which starts out long past
         self.hurt_time = 100.0;
 
+        // What is left of the last blow: the shove, in m/s along the ground,
+        // and how fast it is still turning their aim, in radians per second
+        self.knock_x = 0.0;
+        self.knock_z = 0.0;
+        self.jolt_yaw = 0.0;
+        self.jolt_pitch = 0.0;
+
         // The weapon in hand, nil for none, and how it is held
         self.weapon = nil;
         self.held = nil;
@@ -753,9 +830,34 @@ class Player extends Entity {
         self.hurt_time = 0.0;
     }
 
-    // Move on the timers of what the player sees happen to them
+    // Take a blow from something at (from_x, from_z): the damage, a shove
+    // away from it, and a jolt to the aim in a random direction
+    struck(self, amount, from_x, from_z) {
+        self.hurt(amount);
+
+        let dx = self.x - from_x;
+        let dz = self.z - from_z;
+        let len = (dx * dx + dz * dz).sqrt();
+        if (len > 0.001) {
+            self.knock_x = dx / len * KNOCK_SPEED;
+            self.knock_z = dz / len * KNOCK_SPEED;
+        }
+
+        // Turning at the rate that adds up to the jolt as it dies away
+        self.jolt_yaw = blood_rand(0.0 - JOLT_YAW, JOLT_YAW) * JOLT_DECAY;
+        self.jolt_pitch = blood_rand(0.0 - JOLT_PITCH, JOLT_PITCH) * JOLT_DECAY;
+    }
+
+    // Move on the timers of what the player sees happen to them, and the
+    // jolt to their aim
     update_effects(self, dt) {
         self.hurt_time = self.hurt_time + dt;
+
+        self.yaw = self.yaw + self.jolt_yaw * dt;
+        self.pitch = (self.pitch + self.jolt_pitch * dt).clip(0.0 - PITCH_LIMIT, PITCH_LIMIT);
+        let keep = (0.0 - JOLT_DECAY * dt).exp();
+        self.jolt_yaw = self.jolt_yaw * keep;
+        self.jolt_pitch = self.jolt_pitch * keep;
     }
 
     // How strongly the view is tinted red for having been hurt, from 1 the
@@ -819,8 +921,12 @@ class Player extends Entity {
         let old_z = self.z;
         let was_on_ground = self.on_ground;
         let fall_speed = 0.0 - self.vel_y;
-        let vx = (sin_yaw * mf + cos_yaw * ms) * WALK_SPEED;
-        let vz = (cos_yaw * mf - sin_yaw * ms) * WALK_SPEED;
+        // Whatever is left of a shove carries them along with their own steps
+        let vx = (sin_yaw * mf + cos_yaw * ms) * WALK_SPEED + self.knock_x;
+        let vz = (cos_yaw * mf - sin_yaw * ms) * WALK_SPEED + self.knock_z;
+        let keep = (0.0 - KNOCK_DECAY * dt).exp();
+        self.knock_x = self.knock_x * keep;
+        self.knock_z = self.knock_z * keep;
         move_body(w, self, dt, vx, vz, want_up);
 
         // Coming down hard enough to hear, which a step down a stair is not

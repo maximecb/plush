@@ -1,7 +1,9 @@
-// The heads-up display: the player's health in the bottom left corner and,
-// once they have a weapon, its ammunition in the bottom right. Each is a big
-// number under a small label, in the Monogram pixel font, drawn with a drop
-// shadow so it reads against bright and dark walls alike.
+// The heads-up display: a crosshair in the middle while the player holds a
+// weapon, the player's health in the
+// bottom left corner and, once they have a weapon, its ammunition in the
+// bottom right. Those two are each a big number under a small label, in the
+// Monogram pixel font. Everything has a drop shadow so it reads against
+// bright and dark walls alike.
 
 from pixelfont import PixelFont;
 from ./config import FRAME_WIDTH, FRAME_HEIGHT;
@@ -49,7 +51,31 @@ fun draw_field(img, x, label, value, font, right) {
     shadowed(img, font, value_shadow, vx, value_y, value);
 }
 
+// The crosshair: four short arms around the middle of the view, with a gap
+// where they would meet, shadowed like the text
+let CROSS_ARM = BIG_SCALE * 2;
+let CROSS_GAP = BIG_SCALE;
+let CROSS_THICK = BIG_SCALE.idiv(2).max(1);
+let CROSS_COLOR = 0xFF_E8_E8_E8;
+
+fun draw_cross(img, cx, cy, color) {
+    let t = CROSS_THICK;
+    let h = t.idiv(2);
+    img.fill_rect(cx - CROSS_GAP - CROSS_ARM, cy - h, CROSS_ARM, t, color);
+    img.fill_rect(cx + CROSS_GAP, cy - h, CROSS_ARM, t, color);
+    img.fill_rect(cx - h, cy - CROSS_GAP - CROSS_ARM, t, CROSS_ARM, color);
+    img.fill_rect(cx - h, cy + CROSS_GAP, t, CROSS_ARM, color);
+}
+
 fun draw_hud(img, player) {
+    // Only something to aim with needs aiming
+    if (player.weapon != nil) {
+        let cx = FRAME_WIDTH.idiv(2);
+        let cy = FRAME_HEIGHT.idiv(2);
+        draw_cross(img, cx + SHADOW.idiv(2).max(1), cy + SHADOW.idiv(2).max(1), SHADOW_COLOR);
+        draw_cross(img, cx, cy, CROSS_COLOR);
+    }
+
     let var hf = health_font;
     if (player.health <= LOW_HEALTH) hf = low_font;
     if (player.hurt_flash() > 0.0) hf = flash_font;

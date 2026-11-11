@@ -285,6 +285,123 @@ class DoorVoice extends Voice {
     }
 }
 
+// A heavy armored foot coming down: a deep thud, and the clank of metal
+// plates ringing at two pitches that are not in tune with each other. Each
+// one is a little different.
+class StompVoice extends Voice {
+    init(self, gain) {
+        Voice.init(self, gain);
+        self.attack = 0.004;
+        self.level = 1.0;
+        self.keep = decay_rate(0.05);
+        self.lp_k = lp_coef(rand_range(70.0, 95.0));
+        self.lp1 = 0.0; self.lp2 = 0.0;
+
+        self.ring = 1.0;
+        self.ring_keep = decay_rate(0.002);
+        self.f1 = svf_coef(rand_range(480.0, 560.0));
+        self.lo1 = 0.0; self.bp1 = 0.0;
+        self.f2 = svf_coef(rand_range(1250.0, 1450.0));
+        self.lo2 = 0.0; self.bp2 = 0.0;
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            let white = noise();
+            self.t = self.t + DT;
+
+            let var env = 1.0;
+            if (self.t < self.attack) {
+                env = self.t / self.attack;
+            } else {
+                self.level = self.level * self.keep;
+                env = self.level;
+            }
+            self.lp1 = self.lp1 + (white * env - self.lp1) * self.lp_k;
+            self.lp2 = self.lp2 + (self.lp1 - self.lp2) * self.lp_k;
+
+            // A click that sets the two plates ringing, lightly damped
+            self.ring = self.ring * self.ring_keep;
+            let x = white * self.ring;
+            self.lo1 = self.lo1 + self.f1 * self.bp1;
+            self.bp1 = self.bp1 + self.f1 * (x - self.lo1 - 0.03 * self.bp1);
+            self.lo2 = self.lo2 + self.f2 * self.bp2;
+            self.bp2 = self.bp2 + self.f2 * (x - self.lo2 - 0.05 * self.bp2);
+
+            let v = self.lp2 * 4.0 + (self.bp1 * 0.05 + self.bp2 * 0.03);
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+        }
+        return self.t < 0.3;
+    }
+}
+
+// An arm swung hard through the air: noise through a band that sweeps up as
+// the swing picks up speed and back down as it passes, swelling and fading
+// with it. The loudest moment is `peak` seconds in, which is when the blow
+// lands.
+class SwipeVoice extends Voice {
+    init(self, gain, peak) {
+        Voice.init(self, gain);
+        self.peak = peak.max(0.05);
+        self.len = self.peak + 0.15;
+        self.lo = 0.0; self.bp = 0.0;
+        self.pitch = rand_range(0.85, 1.15);
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            self.t = self.t + DT;
+
+            // 0 at the start and end, 1 at the peak, and smooth in between
+            let var s = self.t / self.peak;
+            if (self.t > self.peak) s = 1.0 - (self.t - self.peak) / (self.len - self.peak);
+            s = s.clip(0.0, 1.0);
+            let env = s * s * (3.0 - 2.0 * s);
+
+            let f = svf_coef((350.0 + 1500.0 * env) * self.pitch);
+            self.lo = self.lo + f * self.bp;
+            self.bp = self.bp + f * (noise() - self.lo - 1.2 * self.bp);
+            mix.set_f32(i, mix.get_f32(i) + self.bp * env * env * 0.5 * self.gain);
+        }
+        return self.t < self.len;
+    }
+}
+
+// A claw or a fist landing on the player: a heavy body thump and a short
+// tearing rasp on top of it
+class ClawHitVoice extends Voice {
+    init(self, gain) {
+        Voice.init(self, gain);
+        self.env = 1.0;
+        self.keep = decay_rate(0.06);
+        self.lp_k = lp_coef(rand_range(130.0, 170.0));
+        self.lp1 = 0.0; self.lp2 = 0.0;
+        self.rasp = 1.0;
+        self.rasp_keep = decay_rate(0.035);
+        self.rf = svf_coef(rand_range(1800.0, 2400.0));
+        self.rlo = 0.0; self.rbp = 0.0;
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            let white = noise();
+            self.t = self.t + DT;
+
+            self.env = self.env * self.keep;
+            self.lp1 = self.lp1 + (white * self.env - self.lp1) * self.lp_k;
+            self.lp2 = self.lp2 + (self.lp1 - self.lp2) * self.lp_k;
+
+            self.rasp = self.rasp * self.rasp_keep;
+            self.rlo = self.rlo + self.rf * self.rbp;
+            self.rbp = self.rbp + self.rf * (white * self.rasp - self.rlo - 0.8 * self.rbp);
+
+            let v = soft_clip(self.lp2 * 9.0) * 0.8 + self.rbp * 0.25;
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+        }
+        return self.t < 0.35;
+    }
+}
+
 // The voice for a sound, by name. `param` means what each sound says it does,
 // such as a door's duration.
 fun make_voice(kind, gain, param) {
@@ -293,6 +410,9 @@ fun make_voice(kind, gain, param) {
     if (kind == "land") return LandVoice(gain);
     if (kind == "pickup") return PickupVoice(gain);
     if (kind == "door") return DoorVoice(gain, param);
+    if (kind == "stomp") return StompVoice(gain);
+    if (kind == "swipe") return SwipeVoice(gain, param);
+    if (kind == "claw_hit") return ClawHitVoice(gain);
     $println("unknown sound: " + kind);
     return nil;
 }
