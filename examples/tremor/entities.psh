@@ -78,10 +78,25 @@ class Entity {
     update(self, w, dt) {
         self.anim_time = self.anim_time + dt;
     }
+
+    // Called when the player's box overlaps this one. Returns true if the
+    // entity is used up and should be removed from the world.
+    touch(self, w, player) {
+        return false;
+    }
+
+    // Does this entity's box overlap another's?
+    overlaps(self, e) {
+        let dx = self.x - e.x;
+        let dz = self.z - e.z;
+        let r = self.radius + e.radius;
+        if (dx * dx + dz * dz >= r * r) return false;
+        return self.y < e.y + e.height && e.y < self.y + self.height;
+    }
 }
 
-// Something placed in a map that is only there to be seen, standing still or
-// turning on the spot as pickups do
+// Something placed in a map to be seen, standing still or turning on the spot
+// as pickups do, and possibly picked up
 class Prop extends Entity {
     init(self, x, y, z, yaw, model, height, anim, spin) {
         Entity.init(self, x, y, z, yaw);
@@ -90,11 +105,25 @@ class Prop extends Entity {
 
         // How fast it turns, in radians per second
         self.spin = spin;
+
+        // What the player gets for walking into it, or nil if it can't be
+        // picked up
+        self.pickup = nil;
+
+        // Touched within the reach of its model as it turns
+        self.radius = (self.model.radius * self.model_scale).min(1.0);
+        self.height = height;
     }
 
     update(self, w, dt) {
         Entity.update(self, w, dt);
         self.yaw = self.yaw + self.spin * dt;
+    }
+
+    touch(self, w, player) {
+        if (self.pickup == nil) return false;
+        player.give(self.pickup);
+        return true;
     }
 }
 
@@ -103,11 +132,16 @@ fun spawn_entity(spec) {
     let k = spec.kind;
     let x = spec.x; let y = spec.y; let z = spec.z; let yaw = spec.yaw;
 
-    // Pickups, turning slowly
-    if (k == "health_kit") return Prop(x, y, z, yaw, "health_kit", 0.45, 0 - 1, 1.2);
-    if (k == "armor_shard") return Prop(x, y, z, yaw, "armor_shard", 0.45, 0 - 1, 1.2);
-    if (k == "shotgun") return Prop(x, y, z, yaw, "shotgun", 0.3, 0 - 1, 1.2);
-    if (k == "shotgun_ammo") return Prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0 - 1, 1.2);
+    // Pickups. Those that would look odd spinning stay put, the rest turn
+    // slowly.
+    if (k == "health_kit") return Prop(x, y, z, yaw, "health_kit", 0.675, 0 - 1, 0.0);
+    if (k == "armor_shard") return Prop(x, y, z, yaw, "armor_shard", 0.675, 0 - 1, 1.2);
+    if (k == "shotgun") {
+        let p = Prop(x, y, z, yaw, "shotgun", 0.6, 0 - 1, 1.2);
+        p.pickup = "shotgun";
+        return p;
+    }
+    if (k == "shotgun_ammo") return Prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0 - 1, 0.0);
 
     // Figures, playing their idle animation
     if (k == "claw_cyborg") return Prop(x, y, z, yaw, "claw_cyborg", 1.9, 1, 0.0);
@@ -124,6 +158,51 @@ fun spawn_entities(w) {
     return out;
 }
 
+// Let the player touch whatever entities they overlap, and take out of the
+// list those that are used up by it
+fun touch_entities(w, player, list) {
+    for (let var i = list.len - 1; i >= 0; --i) {
+        let e = list[i];
+        if (e.overlaps(player) && e.touch(w, player)) list.remove(i);
+    }
+}
+
+// --- Weapons ---
+
+// How a weapon is held: its model, how much that is scaled, where its middle
+// sits in view space (to the right, up and ahead of the eye), and its turn
+// about the view's up axis, which aims its barrel.
+//
+// It is drawn in front of everything, so its distance only sets how big it
+// looks against its scale: twice as far and twice the scale looks the same.
+// It is kept well out, clear of the near plane.
+//
+// The model has to have been loaded before the render actors were spawned,
+// which load_weapons() sees to.
+class HeldPose {
+    init(self, model, scale, x, y, z, yaw) {
+        self.model = get_model(model);
+        self.scale = scale;
+        self.x = x;
+        self.y = y;
+        self.z = z;
+        self.yaw = yaw;
+    }
+}
+
+let WEAPONS = ["shotgun"];
+
+fun held_pose(weapon) {
+    if (weapon == "shotgun") return HeldPose("shotgun", 1.2, 0.42, 0 - 0.42, 1.0, 1.4);
+    return nil;
+}
+
+// Load the model of every weapon, which has to happen before the render
+// actors are spawned, whether or not the map has one lying about
+fun load_weapons() {
+    for (let var i = 0; i < WEAPONS.len; ++i) held_pose(WEAPONS[i]);
+}
+
 class Player extends Entity {
     init(self, x, y, z, yaw) {
         Entity.init(self, x, y, z, yaw);
@@ -132,10 +211,23 @@ class Player extends Entity {
         self.step_height = STEP_HEIGHT;
         self.jump_speed = JUMP_SPEED;
         self.noclip = false;
+
+        // The weapon in hand, nil for none, and how it is held
+        self.weapon = nil;
+        self.held = nil;
     }
 
     eye_y(self) {
         return self.y + EYE_HEIGHT;
+    }
+
+    // Take something picked up
+    give(self, item) {
+        let pose = held_pose(item);
+        if (pose != nil) {
+            self.weapon = item;
+            self.held = pose;
+        }
     }
 
     // Advance the player by one frame. `mf` and `ms` are how hard they are

@@ -35,7 +35,7 @@ from ./world import load_map, build_bsp;
 from ./lighting import light_world, light_level_at;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
     set_scene, set_view, set_draw_list, render_frame_parallel, start_render_actors, stop_render_actors;
-from ./entities import Player, spawn_entities, EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
+from ./entities import Player, spawn_entities, touch_entities, load_weapons, EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
 from ./models import models;
 
 // --- Setup ---
@@ -73,31 +73,46 @@ let player = Player(world.spawn_x, world.spawn_y - EYE_HEIGHT, world.spawn_z, wo
 // the render actors are spawned with their copy of every model
 let models_start_ms = $time_current_ms();
 let entities = spawn_entities(world);
+load_weapons();
 if (entities.len > 0) {
     $println("entities: " + entities.len.to_s() + ", with " + models.len.to_s() + " models loaded in "
         + ($time_current_ms() - models_start_ms).to_s() + " ms");
 }
 
-// Move every entity on by dt, and hand the renderer those it has to draw
+// The light level on an entity, taken `up` above its base, and taken again
+// only once the entity has moved a little
+fun entity_light(e, up) {
+    let dx = e.x - e.lit_x; let dy = e.y - e.lit_y; let dz = e.z - e.lit_z;
+    if (!e.lit || dx * dx + dy * dy + dz * dz > 0.0625) {
+        e.light = light_level_at(e.x, e.y + up, e.z);
+        e.lit_x = e.x; e.lit_y = e.y; e.lit_z = e.z;
+        e.lit = true;
+    }
+    return e.light;
+}
+
+// Move every entity on by dt, let the player pick up what they walk into, and
+// hand the renderer what it has to draw
 fun update_entities(dt) {
+    touch_entities(world, player, entities);
+
     let list = [];
     for (let var i = 0; i < entities.len; ++i) {
         let e = entities[i];
         e.update(world, dt);
         if (e.model == nil) continue;
 
-        // The light is taken at mid height, and again only once the entity
-        // has moved a little
-        let dx = e.x - e.lit_x; let dy = e.y - e.lit_y; let dz = e.z - e.lit_z;
-        if (!e.lit || dx * dx + dy * dy + dz * dz > 0.0625) {
-            let mid = (e.model.max_y - e.model.min_y) * e.model_scale * 0.5;
-            e.light = light_level_at(e.x, e.y + mid, e.z);
-            e.lit_x = e.x; e.lit_y = e.y; e.lit_z = e.z;
-            e.lit = true;
-        }
-
-        list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, e.light]);
+        let level = entity_light(e, (e.model.max_y - e.model.min_y) * e.model_scale * 0.5);
+        list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, level, false]);
     }
+
+    // The weapon in hand, lit by where the player stands
+    let held = player.held;
+    if (held != nil) {
+        let level = entity_light(player, EYE_HEIGHT);
+        list.push([held.model.id, 0 - 1, 0.0, held.x, held.y, held.z, held.yaw, held.scale, level, true]);
+    }
+
     set_draw_list(list);
 }
 
