@@ -29,6 +29,9 @@ let MOUSE_SENS = 0.0032;
 // Look up/down limit. Just shy of fully up/down.
 let PITCH_LIMIT = 1.55;
 
+let MAX_HEALTH = 100;
+let MAX_SHELLS = 50;
+
 let PI = 3.14159265358979;
 
 // The weapon bob: how far the player walks in one stride of two steps, how
@@ -123,8 +126,9 @@ class Prop extends Entity {
         self.spin = spin;
 
         // What the player gets for walking into it, or nil if it can't be
-        // picked up
+        // picked up, and how much of it
         self.pickup = nil;
+        self.amount = 0;
 
         // Touched within the reach of its model as it turns
         self.radius = (self.model.radius * self.model_scale).min(1.0);
@@ -138,9 +142,15 @@ class Prop extends Entity {
 
     touch(self, w, player) {
         if (self.pickup == nil) return false;
-        player.give(self.pickup);
-        return true;
+        return player.give(self.pickup, self.amount);
     }
+}
+
+fun pickup_prop(x, y, z, yaw, model, height, spin, item, amount) {
+    let p = Prop(x, y, z, yaw, model, height, 0 - 1, spin);
+    p.pickup = item;
+    p.amount = amount;
+    return p;
 }
 
 // Make the entity a map's `entity` line asks for
@@ -150,14 +160,10 @@ fun spawn_entity(spec) {
 
     // Pickups. Those that would look odd spinning stay put, the rest turn
     // slowly.
-    if (k == "health_kit") return Prop(x, y, z, yaw, "health_kit", 0.675, 0 - 1, 0.0);
+    if (k == "health_kit") return pickup_prop(x, y, z, yaw, "health_kit", 0.675, 0.0, "health", 25);
     if (k == "armor_shard") return Prop(x, y, z, yaw, "armor_shard", 0.675, 0 - 1, 1.2);
-    if (k == "shotgun") {
-        let p = Prop(x, y, z, yaw, "shotgun", 0.6, 0 - 1, 1.2);
-        p.pickup = "shotgun";
-        return p;
-    }
-    if (k == "shotgun_ammo") return Prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0 - 1, 0.0);
+    if (k == "shotgun") return pickup_prop(x, y, z, yaw, "shotgun", 0.6, 1.2, "shotgun", 8);
+    if (k == "shotgun_ammo") return pickup_prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0.0, "shells", 10);
 
     // Figures, playing their idle animation
     if (k == "claw_cyborg") return Prop(x, y, z, yaw, "claw_cyborg", 1.9, 1, 0.0);
@@ -276,6 +282,9 @@ class Player extends Entity {
         self.jump_speed = JUMP_SPEED;
         self.noclip = false;
 
+        self.health = MAX_HEALTH;
+        self.shells = 0;
+
         // The weapon in hand, nil for none, and how it is held
         self.weapon = nil;
         self.held = nil;
@@ -297,14 +306,25 @@ class Player extends Entity {
         return self.y + EYE_HEIGHT;
     }
 
-    // Take something picked up
-    give(self, item) {
-        let pose = held_pose(item);
-        if (pose != nil) {
+    // Take `amount` of something picked up. Returns false if the player has
+    // no room for it, in which case it is left where it lies.
+    give(self, item, amount) {
+        if (item == "health") {
+            if (self.health >= MAX_HEALTH) return false;
+            self.health = (self.health + amount).min(MAX_HEALTH);
+        } else if (item == "shells") {
+            if (self.shells >= MAX_SHELLS) return false;
+            self.shells = (self.shells + amount).min(MAX_SHELLS);
+        } else {
+            // A weapon, which comes loaded
+            let pose = held_pose(item);
+            if (pose == nil) return false;
             self.weapon = item;
             self.held = pose;
+            self.shells = (self.shells + amount).min(MAX_SHELLS);
         }
         self.events.push("pickup");
+        return true;
     }
 
     // Advance the player by one frame. `mf` and `ms` are how hard they are
@@ -384,11 +404,12 @@ class Player extends Entity {
         return self.bob_phase.sin() * BOB_TURN * self.bob_amount;
     }
 
-    // Fire the weapon in hand, if there is one and the last shot is over.
-    // Returns whether it went off.
+    // Fire the weapon in hand, if there is one, it is loaded and the last
+    // shot is over. Returns whether it went off.
     fire(self) {
-        if (self.held == nil || self.shot_time < self.held.cycle) return false;
+        if (self.held == nil || self.shells <= 0 || self.shot_time < self.held.cycle) return false;
         self.shot_time = 0.0;
+        self.shells = self.shells - 1;
         return true;
     }
 
