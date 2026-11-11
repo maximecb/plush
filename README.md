@@ -124,7 +124,7 @@ To run a plush script:
 # See the many example programs under /examples, /benchmarks and /tests
 cargo run examples/helloworld.psh
 cargo run examples/plasma.psh
-cargo run --release examples/tremor.psh
+cargo run --release examples/tremor/main.psh
 ```
 
 To start the REPL:

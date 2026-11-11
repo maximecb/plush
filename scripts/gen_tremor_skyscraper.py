@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a walkable glass skyscraper map for examples/tremor.psh."""
+"""Generate a walkable glass skyscraper map for examples/tremor/main.psh."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ STREET_LIGHT_Z = -34.12
 STREET_LIGHT_HEIGHT = 6.5
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = REPO_ROOT / "examples" / "data" / "skyscraper.map"
+DEFAULT_OUTPUT = REPO_ROOT / "examples" / "tremor" / "maps" / "skyscraper.map"
 
 
 def number(value: float) -> str:
