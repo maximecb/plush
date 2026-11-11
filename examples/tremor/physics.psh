@@ -14,6 +14,10 @@ let STEEP_SLIDE_MAX_SPEED = 10.0;
 let GRAVITY = 22.5;
 let MAX_FALL_SPEED = 35.0;
 
+// In the air a body keeps its horizontal velocity, and the keys change it by
+// at most this many m/s²
+let AIR_ACCEL = 8.0;
+
 // How high the solid reaches on the vertical line through a point, or nil if
 // that line misses the brush entirely. This is what lets a body walk up a
 // ramp: the answer follows the slope.
@@ -111,8 +115,33 @@ fun brush_top_near(b, x, z, r, walkable_only) {
     return best;
 }
 
-// Would the body run into anything with its feet at this position?
-fun blocked(w, body, x, feet, z) {
+// The brushes the body is already in, like one it spawned in. They don't block
+// it, so that it can walk out. The box is shrunk a little so that walls the
+// body only touches still count.
+fun brushes_inside(w, body) {
+    let cy = body.feet + 0.1 + (body.height - 0.1) * 0.5;
+    let hy = (body.height - 0.1) * 0.5 - 0.01;
+    let r = body.radius - 0.01;
+    let brushes = w.brushes;
+    let inside = [];
+
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (brush_hits(b, body.x, cy, body.z, r, hy, r)) inside.push(b);
+    }
+    return inside;
+}
+
+fun contains(list, item) {
+    for (let var i = 0; i < list.len; ++i) {
+        if (list[i] == item) return true;
+    }
+    return false;
+}
+
+// Would the body run into anything with its feet at this position? Brushes in
+// skip are passed through.
+fun blocked(w, body, x, feet, z, skip) {
     let cy = feet + 0.1 + (body.height - 0.1) * 0.5;
     let hy = (body.height - 0.1) * 0.5;
     let r = body.radius;
@@ -120,6 +149,7 @@ fun blocked(w, body, x, feet, z) {
 
     for (let var i = 0; i < brushes.len; ++i) {
         let b = brushes[i];
+        if (skip.len > 0 && contains(skip, b)) continue;
 
         // Anything low enough to step onto is not something to walk into. The
         // height is taken under the body, so a ramp is steppable where it is
@@ -147,14 +177,42 @@ fun support_at(w, body, x, feet, z, walkable_only) {
     return best;
 }
 
-// Advance a body by one frame: walk it by dx, dz, jump if asked and able, and
-// let gravity have it. Lands it on the ground, steps it up onto low ledges and
-// slides it down slopes too steep to stand on.
-fun move_body(w, body, dt, dx, dz, want_jump) {
-    if (dx != 0.0 || dz != 0.0) {
-        // One axis at a time, so that a wall slides instead of stopping
-        if (!blocked(w, body, body.x + dx, body.feet, body.z)) body.x = body.x + dx;
-        if (!blocked(w, body, body.x, body.feet, body.z + dz)) body.z = body.z + dz;
+// Advance a body by one frame: walk it at the horizontal velocity wish_x,
+// wish_z in m/s, jump if asked and able, and let gravity have it. Lands it on
+// the ground, steps it up onto low ledges and slides it down slopes too steep
+// to stand on.
+fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
+    let inside = brushes_inside(w, body);
+    let start_x = body.x;
+    let start_z = body.z;
+
+    // On the ground, the wish is the velocity. In the air the velocity carries
+    // on, and the wish only steers it.
+    if (body.on_ground) {
+        body.vel_x = wish_x;
+        body.vel_z = wish_z;
+    } else {
+        let ax = wish_x - body.vel_x;
+        let az = wish_z - body.vel_z;
+        let len = (ax * ax + az * az).sqrt();
+        let max = AIR_ACCEL * dt;
+        let var s = 1.0;
+        if (len > max) s = max / len;
+        body.vel_x = body.vel_x + ax * s;
+        body.vel_z = body.vel_z + az * s;
+    }
+
+    // One axis at a time, so that a wall slides instead of stopping. Hitting
+    // one stops the velocity into it.
+    let dx = body.vel_x * dt;
+    let dz = body.vel_z * dt;
+    if (dx != 0.0) {
+        if (!blocked(w, body, body.x + dx, body.feet, body.z, inside)) body.x = body.x + dx;
+        else body.vel_x = 0.0;
+    }
+    if (dz != 0.0) {
+        if (!blocked(w, body, body.x, body.feet, body.z + dz, inside)) body.z = body.z + dz;
+        else body.vel_z = 0.0;
     }
 
     // A jump is a shove upwards; from there gravity has it
@@ -170,7 +228,7 @@ fun move_body(w, body, dt, dx, dz, want_jump) {
 
     if (body.vel_y > 0.0) {
         // On the way up, stop dead at a ceiling rather than rising through it
-        if (blocked(w, body, body.x, next_feet, body.z)) {
+        if (blocked(w, body, body.x, next_feet, body.z, inside)) {
             next_feet = body.feet;
             body.vel_y = 0.0;
         }
@@ -181,9 +239,17 @@ fun move_body(w, body, dt, dx, dz, want_jump) {
 
     // On the way down, land on whatever is under us. The same test steps the
     // body up onto low ledges as it walks into them, since it looks for ground
-    // within a step of its feet.
+    // within a step of its feet. A body on the ground stays on it going down a
+    // walkable slope rather than flying off it, but drops off a stair.
     let ground = support_at(w, body, body.x, body.feet, body.z, false);
-    if (ground == nil || next_feet > ground[0]) {
+    let var land = ground != nil && next_feet <= ground[0];
+    if (ground != nil && body.on_ground) {
+        let mx = body.x - start_x;
+        let mz = body.z - start_z;
+        let moved = (mx * mx + mz * mz).sqrt();
+        if (body.feet - ground[0] <= MAX_CLIMB_SLOPE * moved + 0.001) land = true;
+    }
+    if (!land) {
         body.feet = next_feet;
         body.slide_speed = 0.0;
         body.on_ground = false;
@@ -217,8 +283,8 @@ fun move_body(w, body, dt, dx, dz, want_jump) {
     let slide_z = plane.nz * along;
     let old_x = body.x;
     let old_z = body.z;
-    if (!blocked(w, body, body.x + slide_x, body.feet, body.z)) body.x = body.x + slide_x;
-    if (!blocked(w, body, body.x, body.feet, body.z + slide_z)) body.z = body.z + slide_z;
+    if (!blocked(w, body, body.x + slide_x, body.feet, body.z, inside)) body.x = body.x + slide_x;
+    if (!blocked(w, body, body.x, body.feet, body.z + slide_z, inside)) body.z = body.z + slide_z;
 
     // Follow only the distance travelled along this face. At its edge, retain
     // the downward part of the slide velocity and let regular falling take over.
