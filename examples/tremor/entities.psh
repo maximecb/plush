@@ -199,14 +199,62 @@ class HeldPose {
         self.y = y;
         self.z = z;
         self.yaw = yaw;
+
+        // Where the muzzle flash is centered, in the model's own space
+        self.muzzle_x = 0.0;
+        self.muzzle_y = 0.0;
+        self.muzzle_z = 0.0;
+
+        // How long a shot takes, recoil and reloading included, before the
+        // next one can be fired, in seconds
+        self.cycle = 1.0;
     }
 }
 
 let WEAPONS = ["shotgun"];
 
 fun held_pose(weapon) {
-    if (weapon == "shotgun") return HeldPose("shotgun", 1.2, 0.42, 0 - 0.42, 1.0, 1.4);
+    if (weapon == "shotgun") {
+        let p = HeldPose("shotgun", 1.2, 0.42, 0 - 0.42, 1.0, 1.4);
+        // A little past the end of the barrel, where the flash bursts out
+        p.muzzle_x = 0.62;
+        p.muzzle_y = 0.252;
+        p.cycle = 0.85;
+        return p;
+    }
     return nil;
+}
+
+// --- Firing ---
+//
+// A shot is played out from the time since it was fired. The weapon kicks
+// back towards the eye and tips up, quickly, then settles; the pump follows,
+// dipping and tilting it down and back up again. The flash lasts a few frames.
+
+let KICK_TIME = 0.05;
+let SETTLE_TIME = 0.25;
+let PUMP_START = 0.36;
+let PUMP_TIME = 0.42;
+let FLASH_TIME = 0.06;
+
+// How far towards full brightness the flash lights the weapon
+let FLASH_LIGHT = 0.4;
+
+// How far the kick carries the weapon back and up, in meters at the distance
+// it is held, and how far it tips up, in radians
+let KICK_BACK = 0.16;
+let KICK_UP = 0.05;
+let KICK_PITCH = 0.32;
+
+// How far the pump drops the weapon and tilts it down, and turns it in
+let PUMP_DROP = 0.07;
+let PUMP_PITCH = 0.14;
+let PUMP_YAW = 0.06;
+
+// Smooth from 0 at t = 0 to 1 at t = 1
+fun smooth(t) {
+    let u = t.clip(0.0, 1.0);
+    return u * u * (3.0 - 2.0 * u);
 }
 
 // Load the model of every weapon, which has to happen before the render
@@ -232,6 +280,9 @@ class Player extends Entity {
         // much of it shows, from 0 standing still to 1 walking
         self.bob_phase = 0.0;
         self.bob_amount = 0.0;
+
+        // Seconds since the last shot, which starts out long past
+        self.shot_time = 100.0;
     }
 
     eye_y(self) {
@@ -311,5 +362,61 @@ class Player extends Entity {
 
     bob_yaw(self) {
         return self.bob_phase.sin() * BOB_TURN * self.bob_amount;
+    }
+
+    // Fire the weapon in hand, if there is one and the last shot is over.
+    // Returns whether it went off.
+    fire(self) {
+        if (self.held == nil || self.shot_time < self.held.cycle) return false;
+        self.shot_time = 0.0;
+        return true;
+    }
+
+    update_weapon(self, dt) {
+        self.shot_time = self.shot_time + dt;
+    }
+
+    // How far into the kick of the last shot the weapon is, from 0 at rest to
+    // 1 thrown all the way back, and likewise for the pump
+    kick(self) {
+        let t = self.shot_time;
+        if (t < KICK_TIME) {
+            let u = t / KICK_TIME;
+            return 1.0 - (1.0 - u) * (1.0 - u);
+        }
+        return 1.0 - smooth((t - KICK_TIME) / SETTLE_TIME);
+    }
+
+    pump(self) {
+        let t = self.shot_time - PUMP_START;
+        if (t <= 0.0 || t >= PUMP_TIME) return 0.0;
+        return (PI * t / PUMP_TIME).sin();
+    }
+
+    // How bright the muzzle flash is, from 1 as the shot goes off to 0
+    flash(self) {
+        if (self.shot_time >= FLASH_TIME) return 0.0;
+        return 1.0 - self.shot_time / FLASH_TIME;
+    }
+
+    // The draw list entry for the weapon in hand, with the bob, the kick and
+    // the pump put on its pose, lit at `level`, or nil with nothing in hand
+    held_entry(self, level) {
+        let h = self.held;
+        if (h == nil) return nil;
+
+        let k = self.kick();
+        let p = self.pump();
+        let x = h.x + self.bob_x();
+        let y = h.y + self.bob_y() + KICK_UP * k - PUMP_DROP * p;
+        let z = h.z - KICK_BACK * k;
+        let yaw = h.yaw + self.bob_yaw() + PUMP_YAW * p;
+        let pitch = KICK_PITCH * k - PUMP_PITCH * p;
+
+        // The flash lights up the weapon it comes out of, part of the way to
+        // full brightness
+        let lit = level + (255.0 - level) * FLASH_LIGHT * self.flash();
+
+        return [h.model.id, 0 - 1, 0.0, x, y, z, yaw, h.scale, lit, true, pitch];
     }
 }

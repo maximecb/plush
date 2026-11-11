@@ -1712,7 +1712,7 @@ fun bsp_draw(node) {
 //
 // Each frame comes with a draw list, one entry per model to draw:
 //
-//   [model id, animation, time, x, y, z, yaw, scale, light level, in view]
+//   [model id, animation, time, x, y, z, yaw, scale, light level, in view, pitch]
 //
 // The model stands with the middle of its base at x, y, z, facing along yaw
 // the way the player does. The light level is on the 0..255 scale the bake
@@ -1721,7 +1721,8 @@ fun bsp_draw(node) {
 // With `in view` set, the model is held in front of the eye rather than placed
 // in the world, like a weapon: x, y, z are where its middle goes in view space,
 // with x to the right, y up and z ahead, and it is drawn in front of anything
-// in the world, however close.
+// in the world, however close. Pitch tips it up after the yaw has turned it,
+// and is only used in view.
 
 let var draw_list = [];
 
@@ -2008,6 +2009,24 @@ fun view_dir_x(x, y, z) { return x * cos_yaw - z * sin_yaw; }
 fun view_dir_y(x, y, z) { return y * cos_pitch - (x * sin_yaw + z * cos_yaw) * sin_pitch; }
 fun view_dir_z(x, y, z) { return (x * sin_yaw + z * cos_yaw) * cos_pitch + y * sin_pitch; }
 
+// The transform of a model held in front of the eye, into m: x, y, z are
+// where the middle of the model goes in view space, yaw turns it about the
+// view's up axis and then pitch about its right axis, tipping its front up.
+// The axes are those of a model standing in the world, without the camera.
+fun held_matrix(m, model, x, y, z, yaw, pitch, s) {
+    let ce = yaw.cos(); let se = yaw.sin();
+    let cp = pitch.cos(); let sp = pitch.sin();
+
+    m[0] = (0.0 - ce) * s; m[4] = se * sp * s; m[8] = se * cp * s;
+    m[1] = 0.0;            m[5] = cp * s;      m[9] = (0.0 - sp) * s;
+    m[2] = se * s;         m[6] = ce * sp * s; m[10] = ce * cp * s;
+
+    let bx = model.mid_x; let by = model.mid_y; let bz = model.mid_z;
+    m[3] = x - (m[0] * bx + m[1] * by + m[2] * bz);
+    m[7] = y - (m[4] * bx + m[5] * by + m[6] * bz);
+    m[11] = z - (m[8] * bx + m[9] * by + m[10] * bz);
+}
+
 // Draw one entry of the draw list into the model s-buffer
 fun draw_instance(inst) {
     let model = models[inst[0]];
@@ -2022,17 +2041,7 @@ fun draw_instance(inst) {
     let m = model_mat;
 
     if (in_view) {
-        // Held in front of the eye: x, y, z are where the middle of the model
-        // goes in view space, and yaw turns it about the view's up axis. The
-        // axes are those of the world case below, without the camera.
-        m[0] = (0.0 - ce) * s; m[4] = 0.0;   m[8] = se * s;
-        m[1] = 0.0;            m[5] = s;     m[9] = 0.0;
-        m[2] = se * s;         m[6] = 0.0;   m[10] = ce * s;
-
-        let bx = model.mid_x; let by = model.mid_y; let bz = model.mid_z;
-        m[3] = ex - (m[0] * bx + m[1] * by + m[2] * bz);
-        m[7] = ey - (m[4] * bx + m[5] * by + m[6] * bz);
-        m[11] = ez - (m[8] * bx + m[9] * by + m[10] * bz);
+        held_matrix(m, model, ex, ey, ez, yaw, inst[10], s);
 
         // Its 1/z is stored scaled up by this much, so that it wins against
         // any wall the eye is standing close enough to for it to reach into.
@@ -2105,6 +2114,152 @@ fun draw_models() {
     for (let var i = 0; i < draw_list.len; ++i) draw_instance(draw_list[i]);
 }
 
+// --- Muzzle flash ---
+//
+// No lamp can be added to the baked light for a frame, so a shot shows as a
+// glow added over the finished frame where the muzzle is, the way a bright
+// light blooms in a camera. Each render actor adds it to its own band, last,
+// over everything, which is where a weapon held in view is anyway.
+
+let FLASH_CORE = 0xFFFFF0C8;
+let FLASH_HALO = 0xFFFF8A28;
+
+// The flash of this frame: where on screen, its size in pixels per unit of
+// the model it comes out of, and its strength, 0 for no flash
+let var flash_x = 0.0;
+let var flash_y = 0.0;
+let var flash_unit = 0.0;
+let var flash_strength = 0.0;
+
+// How a glow fades from its middle out to its edge, as 256ths, indexed by the
+// squared distance as a fraction of the squared radius, so that drawing one
+// takes no square root. The fraction of the radius left is raised to a power:
+// higher is a smaller, hotter middle.
+let GLOW_STEPS = 256;
+
+fun glow_table(power) {
+    let t = Array.with_size(GLOW_STEPS + 1, 0);
+    for (let var i = 0; i < GLOW_STEPS; ++i) {
+        let f = 1.0 - (i.to_f() / GLOW_STEPS.to_f()).sqrt();
+        t[i] = (f.pow(power) * 256.0).floor();
+    }
+    return t;
+}
+
+let HALO_TABLE = glow_table(1.6);
+let CORE_TABLE = glow_table(1.5);
+
+// A span of the model s-buffer belongs to a model held in view when its 1/z
+// is past anything a model standing in the world could have, since a held one
+// is stored scaled up by HELD_DEPTH_SCALE
+let HELD_MIN_W = 50.0;
+
+fun held_span(s) {
+    return msp_w[s] + msp_x0[s].to_f() * msp_dw[s] > HELD_MIN_W;
+}
+
+// Add color to this band of the frame around a pixel, fading out to nothing
+// at radius r along the table. Strength 1 adds the whole color at the middle.
+//
+// The flash comes out of the far end of the barrel, so the weapon it comes out
+// of stands in front of it: pixels a model held in view covers are left alone.
+fun draw_glow(cx, cy, r, color, strength, table) {
+    if (r < 1.0) return;
+
+    // The color as it is added at the middle, times 256
+    let cr = (((color >> 16) & 0xFF).to_f() * strength).floor();
+    let cg = (((color >> 8) & 0xFF).to_f() * strength).floor();
+    let cb = ((color & 0xFF).to_f() * strength).floor();
+
+    let rr = r * r;
+    let scale = GLOW_STEPS.to_f() / rr;
+    let y0 = (cy - r).floor().max(render_y0);
+    let y1 = (cy + r).floor().min(render_y1 - 1);
+
+    for (let var y = y0; y <= y1; ++y) {
+        let dy = y.to_f() + 0.5 - cy;
+        let h2 = rr - dy * dy;
+        if (h2 <= 0.0) continue;
+
+        // Only the part of the row inside the circle
+        let h = h2.sqrt();
+        let x0 = (cx - h).floor().max(0);
+        let x1 = (cx + h).floor().min(FRAME_WIDTH - 1) + 1;
+        let row = y * FRAME_WIDTH;
+        let dy2 = dy * dy;
+
+        // And of that, the runs between the spans of a held model
+        let var x = x0;
+        let var cur = mb_head[y];
+        while (x < x1) {
+            while (cur != NO_SPAN && (msp_x1[cur] <= x || !held_span(cur))) cur = msp_next[cur];
+
+            let var end = x1;
+            if (cur != NO_SPAN && msp_x0[cur] < end) end = msp_x0[cur];
+            if (end > x) glow_run(row, x, end, cx, dy2, scale, table, cr, cg, cb);
+
+            if (cur == NO_SPAN) break;
+            x = msp_x1[cur].max(x);
+            cur = msp_next[cur];
+        }
+    }
+}
+
+// Add the glow to pixels [x0, x1) of a row. It is smooth enough that a pair of
+// pixels can share a level, which halves the work of finding it.
+fun glow_run(row, x0, x1, cx, dy2, scale, table, cr, cg, cb) {
+    let fb = frame_buffer;
+    let var x = x0;
+    while (x < x1) {
+        let dx = x.to_f() + 1.0 - cx;
+        let k = table[((dx * dx + dy2) * scale).floor().min(GLOW_STEPS)];
+        let ar = (cr * k) >> 8;
+        let ag = (cg * k) >> 8;
+        let ab = (cb * k) >> 8;
+
+        let end = (x + 2).min(x1);
+        while (x < end) {
+            let i = row + x;
+            let c = fb.get_u32(i);
+            let r8 = (((c >> 16) & 0xFF) + ar).min(255);
+            let g8 = (((c >> 8) & 0xFF) + ag).min(255);
+            let b8 = ((c & 0xFF) + ab).min(255);
+            fb.set_u32(i, (r8 << 16) | (g8 << 8) | b8);
+            x = x + 1;
+        }
+    }
+}
+
+fun draw_flash() {
+    if (flash_strength <= 0.0) return;
+    draw_glow(flash_x, flash_y, 0.3 * flash_unit, FLASH_HALO, 0.75 * flash_strength, HALO_TABLE);
+    draw_glow(flash_x, flash_y, 0.12 * flash_unit, FLASH_CORE, 1.0 * flash_strength, CORE_TABLE);
+}
+
+// Flash the muzzle of a model held in view this frame, given by its draw list
+// entry, at a point of the model in its own space, which is where the muzzle
+// is. Strength runs from 1 as the shot goes off down to 0, which is no flash.
+fun set_muzzle_flash(inst, px, py, pz, strength) {
+    flash_strength = 0.0;
+    if (inst == nil || strength <= 0.0) return;
+
+    let model = models[inst[0]];
+    let s = inst[7];
+    let m = Array.with_size(12, 0.0);
+    held_matrix(m, model, inst[3], inst[4], inst[5], inst[6], inst[10], s);
+
+    let vx = m[0] * px + m[1] * py + m[2] * pz + m[3];
+    let vy = m[4] * px + m[5] * py + m[6] * pz + m[7];
+    let vz = m[8] * px + m[9] * py + m[10] * pz + m[11];
+    if (vz <= NEAR) return;
+
+    // Sized with the model, so that it stays the same against the gun
+    flash_x = CENTER_X + FOCAL * vx / vz;
+    flash_y = CENTER_Y - FOCAL * vy / vz;
+    flash_unit = FOCAL * s / vz;
+    flash_strength = strength;
+}
+
 // The models to draw from now on, as a list of entries described above
 fun set_draw_list(list) {
     draw_list = list;
@@ -2130,6 +2285,9 @@ fun render_frame() {
 
     // Everything opaque is down, so what was held back can be blended over it
     draw_deferred();
+
+    // Over everything, including the weapon it comes out of
+    draw_flash();
 
     // While this is still the band the model spans were made in, since the
     // next frame may hand this actor another
@@ -2200,6 +2358,10 @@ class RenderBandRequest {
         self.cos_pitch = cos_pitch;
         self.warp_phase = warp_phase;
         self.draw_list = draw_list;
+        self.flash_x = flash_x;
+        self.flash_y = flash_y;
+        self.flash_unit = flash_unit;
+        self.flash_strength = flash_strength;
     }
 }
 
@@ -2243,6 +2405,10 @@ fun render_actor_loop() {
         cos_pitch = msg.cos_pitch;
         warp_phase = msg.warp_phase;
         draw_list = msg.draw_list;
+        flash_x = msg.flash_x;
+        flash_y = msg.flash_y;
+        flash_unit = msg.flash_unit;
+        flash_strength = msg.flash_strength;
 
         render_frame();
         let band_start = render_y0 * FRAME_WIDTH * 4;
