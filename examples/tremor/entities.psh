@@ -606,22 +606,75 @@ class ClawCyborg extends Monster {
     }
 }
 
-// The shotgun's reach, and how much a hit takes off
+// The shotgun's reach, and how much a shot takes off if every pellet lands
 let SHOT_RANGE = 60.0;
-let SHOT_DAMAGE = 40;
+let SHOT_DAMAGE = 40.0;
 
-// How many drops of blood a hit throws out
-let BLOOD_DROPS = 24;
+// The pellets in a shot, spread at random over a cone this wide
+let SHOT_PELLETS = 12;
+let SHOT_SPREAD = 4.0 * PI / 180.0;
 
-// Fire a shot from the player's eye along their view, and hurt the first
-// monster it meets before it meets a wall. Returns the monster hit, or nil.
+// How many drops of blood a pellet throws out
+let BLOOD_DROPS = 3;
+
+// Fire a shot from the player's eye along their view: a spread of pellets,
+// each hurting the first monster it meets before it meets a wall, with a share
+// of the damage. Returns a monster hit, or nil.
 fun shoot(player, list) {
     let ox = player.x; let oy = player.eye_y(); let oz = player.z;
     let cp = player.pitch.cos();
-    let dx = player.yaw.sin() * cp;
-    let dy = player.pitch.sin();
-    let dz = player.yaw.cos() * cp;
+    let sp = player.pitch.sin();
+    let sy = player.yaw.sin();
+    let cy = player.yaw.cos();
 
+    // The view's forward, right and up directions
+    let fx = sy * cp; let fy = sp; let fz = cy * cp;
+    let rx = cy; let rz = 0.0 - sy;
+    let ux = 0.0 - sy * sp; let uy = cp; let uz = 0.0 - cy * sp;
+
+    // What each monster hit takes, added up, so it is hurt once per shot and
+    // the pellets that kill it do not also go into its corpse
+    let hit = [];
+    let dmg = [];
+    let share = SHOT_DAMAGE / SHOT_PELLETS.to_f();
+
+    for (let var p = 0; p < SHOT_PELLETS; ++p) {
+        // A point spread evenly over the disc of the cone
+        let r = (SHOT_SPREAD * 0.5) * blood_rand(0.0, 1.0).sqrt();
+        let a = blood_rand(0.0, 2.0 * PI);
+        let across = r * a.cos();
+        let up = r * a.sin();
+        let var dx = fx + rx * across + ux * up;
+        let var dy = fy + uy * up;
+        let var dz = fz + rz * across + uz * up;
+        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+        dx = dx / len; dy = dy / len; dz = dz / len;
+
+        let res = trace_monsters(list, ox, oy, oz, dx, dy, dz);
+        if (res == nil) continue;
+        let e = res[0];
+        let t = res[1];
+        let hx = ox + dx * t; let hy = oy + dy * t; let hz = oz + dz * t;
+        if (occluded(ox, oy, oz, hx, hy, hz)) continue;
+
+        let var floor_y = e.y;
+        if (e.state == "dead") floor_y = e.dead_y;
+        spawn_blood(hx - dx * 0.3, hy, hz - dz * 0.3, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS, floor_y);
+
+        let var k = 0;
+        while (k < hit.len && hit[k] != e) k = k + 1;
+        if (k == hit.len) { hit.push(e); dmg.push(0.0); }
+        dmg[k] = dmg[k] + share;
+    }
+
+    for (let var i = 0; i < hit.len; ++i) hit[i].hurt(dmg[i]);
+    if (hit.len == 0) return nil;
+    return hit[0];
+}
+
+// The first monster along a ray from (ox, oy, oz) in the unit direction
+// (dx, dy, dz) within the shot's range, as [monster, distance], or nil
+fun trace_monsters(list, ox, oy, oz, dx, dy, dz) {
     let var best = nil;
     let var best_t = SHOT_RANGE;
     for (let var i = 0; i < list.len; ++i) {
@@ -655,13 +708,7 @@ fun shoot(player, list) {
     }
 
     if (best == nil) return nil;
-    let hx = ox + dx * best_t; let hy = oy + dy * best_t; let hz = oz + dz * best_t;
-    if (occluded(ox, oy, oz, hx, hy, hz)) return nil;
-    let var floor_y = best.y;
-    if (best.state == "dead") floor_y = best.dead_y;
-    spawn_blood(hx - dx * 0.3, hy, hz - dz * 0.3, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS, floor_y);
-    best.hurt(SHOT_DAMAGE);
-    return best;
+    return [best, best_t];
 }
 
 // --- Blood ---
