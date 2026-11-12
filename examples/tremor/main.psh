@@ -37,7 +37,7 @@ from ./config import FRAME_WIDTH, FRAME_HEIGHT, MAP_PATH, NUM_RENDER_ACTORS, BEN
 from ./world import load_map, build_bsp;
 from ./lighting import light_world, light_level_at;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
-    set_scene, set_view, set_draw_list, set_muzzle_flash, set_particles, set_screen_tint,
+    set_scene, set_view, set_roll, set_draw_list, set_muzzle_flash, set_particles, set_screen_tint,
     render_frame_parallel, start_render_actors, stop_render_actors;
 from ./entities import Player, spawn_entities, touch_entities, separate_bodies, load_weapons, load_gibs, shoot, update_blood, update_gibs, sound_events,
     EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
@@ -114,7 +114,11 @@ fun player_sound_gain(kind) {
 // Play what the player and everything else did this frame that makes a sound
 fun play_sounds() {
     let events = player.events;
-    for (let var i = 0; i < events.len; ++i) play_sound(events[i], player_sound_gain(events[i]), 0.0);
+    for (let var i = 0; i < events.len; ++i) {
+        // Dying is a long, low groan, for now the monsters' own
+        if (events[i] == "die") play_sound("groan", 1.0, 1.0);
+        else play_sound(events[i], player_sound_gain(events[i]), 0.0);
+    }
     events.resize(0, nil);
 
     for (let var i = 0; i < sound_events.len; ++i) {
@@ -128,6 +132,7 @@ fun play_sounds() {
 // the moment it happens, in 256ths
 let HURT_TINT = 0xFF_C0_00_00;
 let HURT_TINT_MAX = 110.0;
+let DEAD_TINT = 140.0;
 
 // Move every entity on by dt, let the player pick up what they walk into, and
 // hand the renderer what it has to draw
@@ -149,11 +154,14 @@ fun update_entities(dt) {
     set_particles(update_blood(dt, player.x, player.eye_y(), player.z));
 
     // The view goes red for a moment when the player is hurt
-    set_screen_tint(HURT_TINT, (player.hurt_flash() * HURT_TINT_MAX).floor());
+    // Dead, it stays red
+    let var tint = player.hurt_flash() * HURT_TINT_MAX;
+    if (player.dead) tint = DEAD_TINT;
+    set_screen_tint(HURT_TINT, tint.floor());
 
     // The weapon in hand, lit by where the player stands, and its flash
     let h = player.held;
-    if (h != nil) {
+    if (h != nil && !player.dead) {
         let held = player.held_entry(entity_light(player, EYE_HEIGHT));
         list.push(held);
         set_muzzle_flash(held, h.muzzle_x, h.muzzle_y, h.muzzle_z, player.flash());
@@ -366,6 +374,10 @@ loop {
 
     player.move(world, dt, mf, ms, key_up || mouse_up, key_down);
 
+    // Back to the start after dying, when they ask or after a while
+    let want_back = key_fire || mouse_fire || key_up || mouse_up;
+    if (player.must_respawn() || (player.can_respawn() && want_back)) player.respawn();
+
     // The last shot plays on first, so that a new one starts from its very
     // first frame
     player.update_weapon(dt);
@@ -378,6 +390,7 @@ loop {
     play_sounds();
 
     set_view(player.x, player.eye_y(), player.z, player.yaw, player.pitch, time_s * 1.1);
+    set_roll(player.view_roll());
 
     let render_start = $time_current_ms();
     render_frame_parallel(render_frame_id);

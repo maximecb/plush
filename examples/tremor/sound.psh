@@ -1,4 +1,5 @@
-// Sound effects, all synthesized as they play.
+// Sound effects, synthesized as they play, but for a few recorded splats that
+// are loaded from examples/tremor/sounds/ when this is imported.
 //
 // An actor of its own owns the audio device and fills a buffer whenever the
 // device asks for one. The game sends it a message for each sound to start.
@@ -17,6 +18,8 @@
 // through a short reverb, since the level is all stone rooms.
 //
 // To add a sound: write a Voice subclass and give it a name in make_voice().
+
+from wav import load_wav;
 
 let SAMPLE_RATE = 44100;
 let DT = 1.0 / SAMPLE_RATE.to_f();
@@ -444,6 +447,44 @@ class GibVoice extends Voice {
     }
 }
 
+// A recorded sound, played once through at a pitch a little off its own each
+// time, so the same few don't sound like a loop. The clip is mono, at any
+// rate, and is stepped through at its rate times the pitch.
+class SampleVoice extends Voice {
+    init(self, gain, clip, pitch) {
+        Voice.init(self, gain);
+        self.data = clip.samples;
+        self.len = clip.num_frames();
+        self.step = clip.sample_rate.to_f() / SAMPLE_RATE.to_f() * pitch;
+        self.pos = 0.0;
+    }
+
+    render(self, mix, n) {
+        let data = self.data;
+        let last = self.len - 1;
+        for (let var i = 0; i < n; ++i) {
+            let k = self.pos.floor();
+            if (k >= last) return false;
+            let f = self.pos - k.to_f();
+            let a = data.get_f32(k);
+            let v = a + (data.get_f32(k + 1) - a) * f;
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+            self.pos = self.pos + self.step;
+        }
+        return true;
+    }
+}
+
+// Splats of meat, cut out of a recording (CC0, by Independent.nu: "2 wooden
+// squish splatter sequences" on OpenGameArt), one picked at random each time
+let SOUND_DIR = "examples/tremor/sounds/";
+let NUM_SPLATS = 5;
+let splat_clips = [];
+for (let var i = 1; i <= NUM_SPLATS; ++i) {
+    let clip = load_wav(SOUND_DIR + "splat_" + i.to_s() + ".wav");
+    if (clip != nil) splat_clips.push(clip);
+}
+
 // A low groan of pain: a buzzing saw with a growl an octave under it, heard
 // through two vowel-like bands, that barks up in pitch as it starts and then
 // sags. Its pitch wanders and its level flutters, like a rough throat. With
@@ -532,6 +573,11 @@ fun make_voice(kind, gain, param) {
     if (kind == "claw_hit") return ClawHitVoice(gain);
     if (kind == "gib") return GibVoice(gain);
     if (kind == "groan") return GroanVoice(gain, param > 0.0);
+    if (kind == "squish") {
+        if (splat_clips.len == 0) return nil;
+        let k = rand_range(0.0, splat_clips.len.to_f()).floor().min(splat_clips.len - 1);
+        return SampleVoice(gain, splat_clips[k], rand_range(0.9, 1.1));
+    }
     $println("unknown sound: " + kind);
     return nil;
 }

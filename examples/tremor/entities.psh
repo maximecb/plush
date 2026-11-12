@@ -6,7 +6,7 @@
 // An entity may have a 3D model, which is drawn standing at its position and
 // facing along its yaw, posed by the animation it is playing.
 
-from ./physics import move_body;
+from ./physics import move_body, brush_top, is_lava;
 from ./models import get_model, add_model, box_model, blob_model, models;
 from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER;
 from ./lighting import light_level_at, occluded;
@@ -36,6 +36,16 @@ let MAX_SHELLS = 50;
 
 // How long being hurt shows, in the red of the view and the health number
 let HURT_FLASH_TIME = 0.6;
+
+// Dead, the view drops to this height above the floor over this long, and
+// tips over sideways by this much. Fire or jump brings the player back at the
+// start once the wait is over, and they come back by themselves after the
+// longer one.
+let DEAD_EYE_HEIGHT = 0.15;
+let DEAD_ROLL = 70.0 * 3.14159265358979 / 180.0;
+let DEATH_FALL_TIME = 0.5;
+let RESPAWN_WAIT = 1.0;
+let RESPAWN_AUTO = 5.0;
 
 // A blow shoves the player away from what struck them at this speed in m/s,
 // which dies away at this rate per second: the shove carries them speed /
@@ -85,6 +95,9 @@ class Entity {
         self.slide_speed = 0.0;
         self.on_ground = false;
         self.jump_speed = 0.0;
+
+        // The plane of what it last landed on, nil while in the air
+        self.ground_plane = nil;
 
         // Set for a body that other solid bodies can't walk through, and how
         // far it overlaps them this frame, which move_body() pushes it out of
@@ -206,6 +219,7 @@ fun spawn_entities(w, player) {
     for (let var i = 0; i < w.entity_specs.len; ++i) {
         let spec = w.entity_specs[i];
         if (spec.kind == "claw_cyborg") out.push(ClawCyborg(spec.x, spec.y, spec.z, spec.yaw, player));
+        else if (spec.kind == "gib_chute") out.push(GibChute(w, spec.x, spec.y, spec.z, player));
         else out.push(spawn_entity(spec));
     }
     for (let var i = 0; i < w.door_specs.len; ++i) out.push(Door(w, w.door_specs[i], player));
@@ -826,6 +840,9 @@ let GIB_REST_SPEED = 0.6;
 // How long a lump takes to shrink away once it is one too many
 let GIB_FADE = 8.0;
 
+// How fast a lump that lands in lava goes under, in m/s
+let GIB_SINK_SPEED = 0.35;
+
 let gib_models = [];
 
 // Make the shapes of the lumps. Call this before the render actors start.
@@ -853,6 +870,11 @@ class Gib {
         self.fading = false;
         self.life = GIB_FADE;
         self.resting = false;
+
+        // Set for a lump that sinks into what it lands on, as into lava, and
+        // for one that takes the light again as it goes, as it falls a long way
+        self.sink = false;
+        self.relight = false;
     }
 }
 
@@ -868,6 +890,71 @@ fun spawn_gibs(x, y, z, floor_y) {
         let model = gib_models[(blood_rand(0.0, gib_models.len.to_f())).floor().min(gib_models.len - 1)];
         gibs.push(Gib(model, x + blood_rand(-0.3, 0.3), y + blood_rand(-0.2, 0.3), z + blood_rand(-0.3, 0.3),
             a.cos() * speed, blood_rand(2.0, 6.0), a.sin() * speed, blood_rand(0.3, 0.55), floor_y, level));
+    }
+}
+
+// --- Gib chutes ---
+//
+// A hole that lumps of flesh drop out of, now and then, a few at a time, with
+// a squelch and a little blood. They fall onto whatever is below, and sink
+// into it if it is lava. It only runs with the player within earshot, so that
+// the lumps it drops don't push out those the player made.
+
+let CHUTE_WAIT_MIN = 0.4;
+let CHUTE_WAIT_MAX = 1.2;
+let CHUTE_MIN_LUMPS = 2;
+let CHUTE_MAX_LUMPS = 4;
+let CHUTE_DRIFT = 0.6;
+let CHUTE_DROPS = 8;
+let CHUTE_RANGE = 40.0;
+let SQUISH_GAIN = 0.50;
+
+// The top of the highest brush under (x, z) at or below y, and whether it is
+// lava, as [y, lava]; or nil if there is nothing under it
+fun ground_below(w, x, y, z) {
+    let var best = nil;
+    for (let var i = 0; i < w.brushes.len; ++i) {
+        let top = brush_top(w.brushes[i], x, z, false);
+        if (top == nil || top[0] > y) continue;
+        if (best == nil || top[0] > best[0]) best = top;
+    }
+    if (best == nil) return nil;
+    return [best[0], is_lava(best[1])];
+}
+
+class GibChute extends Entity {
+    init(self, w, x, y, z, player) {
+        Entity.init(self, x, y, z, 0.0);
+        self.radius = 0.0;
+        self.player = player;
+        self.wait = blood_rand(CHUTE_WAIT_MIN, CHUTE_WAIT_MAX);
+        let ground = ground_below(w, x, y, z);
+        self.floor = ground == nil ? y - 100.0 : ground[0];
+        self.lava = ground != nil && ground[1];
+    }
+
+    update(self, w, dt) {
+        let p = self.player;
+        let dx = p.x - self.x; let dy = p.y - self.y; let dz = p.z - self.z;
+        if (dx * dx + dy * dy + dz * dz > CHUTE_RANGE * CHUTE_RANGE) return;
+
+        self.wait = self.wait - dt;
+        if (self.wait > 0.0) return;
+        self.wait = blood_rand(CHUTE_WAIT_MIN, CHUTE_WAIT_MAX);
+
+        spawn_blood(self.x, self.y, self.z, 0.0, -1.0, 0.0, CHUTE_DROPS, self.floor);
+        emit_sound("squish", self.x, self.y, self.z, 0.0, SQUISH_GAIN);
+        if (gib_models.len == 0) return;
+        let n = blood_rand(CHUTE_MIN_LUMPS.to_f(), CHUTE_MAX_LUMPS.to_f() + 1.0).floor().min(CHUTE_MAX_LUMPS);
+        for (let var i = 0; i < n; ++i) {
+            let model = gib_models[(blood_rand(0.0, gib_models.len.to_f())).floor().min(gib_models.len - 1)];
+            let g = Gib(model, self.x + blood_rand(-0.3, 0.3), self.y - blood_rand(0.0, 0.3), self.z + blood_rand(-0.3, 0.3),
+                blood_rand(0.0 - CHUTE_DRIFT, CHUTE_DRIFT), blood_rand(-1.0, 0.0), blood_rand(0.0 - CHUTE_DRIFT, CHUTE_DRIFT),
+                blood_rand(0.3, 0.55), self.floor, light_level_at(self.x, self.y, self.z));
+            g.sink = self.lava;
+            g.relight = true;
+            gibs.push(g);
+        }
     }
 }
 
@@ -889,6 +976,17 @@ fun update_gibs(dt, list) {
             if (g.life <= 0.0) { gibs.remove(i); continue; }
         }
 
+        // Going down into lava, slowly and straight, until it is under
+        if (g.sink && g.y <= g.floor) {
+            g.y = g.y - GIB_SINK_SPEED * dt;
+            g.yaw = g.yaw + g.spin_yaw * 0.1 * dt;
+            if (g.y < g.floor - g.size) { gibs.remove(i); continue; }
+            list.push([g.model.id, 0 - 1, 0.0, g.x, g.y, g.z, g.yaw, g.size, g.level, false, g.pitch]);
+            continue;
+        }
+
+        if (g.relight) g.level = light_level_at(g.x, g.y + g.size * 0.5, g.z);
+
         if (!g.resting) {
             g.vy = g.vy - BLOOD_GRAVITY * dt;
 
@@ -908,9 +1006,11 @@ fun update_gibs(dt, list) {
             g.yaw = g.yaw + g.spin_yaw * dt;
             g.pitch = g.pitch + g.spin_pitch * dt;
 
-            // A lump's base is its lowest point, so it lands when that does
-            if (g.y < g.floor) {
-                g.y = g.floor;
+            // A lump's base is its lowest point, so it lands when that does,
+            // and one that sinks goes on down from there
+            let landed = g.y < g.floor;
+            if (landed) g.y = g.floor;
+            if (landed && !g.sink) {
                 g.vy = (0.0 - g.vy) * GIB_BOUNCE;
                 g.vx = g.vx * GIB_BOUNCE; g.vz = g.vz * GIB_BOUNCE;
                 g.spin_yaw = g.spin_yaw * GIB_BOUNCE; g.spin_pitch = g.spin_pitch * GIB_BOUNCE;
@@ -1096,6 +1196,12 @@ class Player extends Entity {
         self.health = MAX_HEALTH;
         self.shells = 0;
 
+        // Where they come back to after dying, and whether they are dead and
+        // for how long
+        self.spawn = [x, y, z, yaw];
+        self.dead = false;
+        self.dead_time = 0.0;
+
         // Seconds since the player was last hurt, which starts out long past
         self.hurt_time = 100.0;
 
@@ -1123,14 +1229,52 @@ class Player extends Entity {
         self.events = [];
     }
 
+    // Dead, the eye sinks to near the floor, and the view tips over with it
     eye_y(self) {
-        return self.y + EYE_HEIGHT;
+        if (!self.dead) return self.y + EYE_HEIGHT;
+        let f = (self.dead_time / DEATH_FALL_TIME).min(1.0);
+        return self.y + EYE_HEIGHT + (DEAD_EYE_HEIGHT - EYE_HEIGHT) * f * f;
     }
 
-    // Lose health, down to nothing. Nothing happens at nothing yet.
+    view_roll(self) {
+        if (!self.dead) return 0.0;
+        let f = (self.dead_time / DEATH_FALL_TIME).min(1.0);
+        return DEAD_ROLL * f * f;
+    }
+
+    // Lose health, and die with none left
     hurt(self, amount) {
+        if (self.dead) return;
         self.health = (self.health - amount).max(0);
         self.hurt_time = 0.0;
+        if (self.health <= 0) self.die();
+    }
+
+    die(self) {
+        self.dead = true;
+        self.dead_time = 0.0;
+        self.health = 0;
+        self.knock_x = 0.0; self.knock_z = 0.0;
+        self.jolt_yaw = 0.0; self.jolt_pitch = 0.0;
+        self.events.push("die");
+    }
+
+    // Can they come back yet, by their own choice or because they have been
+    // dead long enough
+    can_respawn(self) { return self.dead && self.dead_time >= RESPAWN_WAIT; }
+    must_respawn(self) { return self.dead && self.dead_time >= RESPAWN_AUTO; }
+
+    // Back at the start, whole, with what they were carrying
+    respawn(self) {
+        let s = self.spawn;
+        self.x = s[0]; self.y = s[1]; self.z = s[2];
+        self.yaw = s[3]; self.pitch = 0.0;
+        self.vel_x = 0.0; self.vel_y = 0.0; self.vel_z = 0.0;
+        self.on_ground = false;
+        self.ground_plane = nil;
+        self.health = MAX_HEALTH;
+        self.dead = false;
+        self.hurt_time = 100.0;
     }
 
     // Take a blow from something at (from_x, from_z): the damage, a shove
@@ -1194,6 +1338,14 @@ class Player extends Entity {
     // Advance the player by one frame. `mf` and `ms` are how hard they are
     // pushing forward and sideways, each -1, 0 or 1.
     move(self, w, dt, mf, ms, want_up, want_down) {
+        // Dead, they only fall
+        if (self.dead) {
+            self.dead_time = self.dead_time + dt;
+            if (!self.noclip) move_body(w, self, dt, 0.0, 0.0, false);
+            self.update_bob(dt, 0.0);
+            return;
+        }
+
         let sin_yaw = self.yaw.sin();
         let cos_yaw = self.yaw.cos();
 
@@ -1231,6 +1383,12 @@ class Player extends Entity {
         self.knock_x = self.knock_x * keep;
         self.knock_z = self.knock_z * keep;
         move_body(w, self, dt, vx, vz, want_up);
+
+        // Lava is the end of them
+        if (is_lava(self.ground_plane)) {
+            self.hurt(self.health);
+            return;
+        }
 
         // Coming down hard enough to hear, which a step down a stair is not
         if (!was_on_ground && self.on_ground && fall_speed > LAND_SPEED) self.events.push("land");
@@ -1275,7 +1433,7 @@ class Player extends Entity {
     // Fire the weapon in hand, if there is one, it is loaded and the last
     // shot is over. Returns whether it went off.
     fire(self) {
-        if (self.held == nil || self.shells <= 0 || self.shot_time < self.held.cycle) return false;
+        if (self.dead || self.held == nil || self.shells <= 0 || self.shot_time < self.held.cycle) return false;
         self.shot_time = 0.0;
         self.shells = self.shells - 1;
         return true;

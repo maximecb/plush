@@ -115,6 +115,11 @@ let var cos_yaw = 1.0;
 let var sin_pitch = 0.0;
 let var cos_pitch = 1.0;
 
+// Roll turns the view about the way it looks, after yaw and pitch: eye x and
+// y become x cos + y sin and y cos - x sin
+let var sin_roll = 0.0;
+let var cos_roll = 1.0;
+
 // --- Scratch buffers, reused so that drawing a frame allocates no arrays ---
 
 let MAX_VERTS = 32;
@@ -690,7 +695,8 @@ fun color_add_sat(a, b) {
 // The gradient runs along the world's up axis, so it is baked once into a table
 // indexed by height above the horizon and then sampled through the camera.
 // Pitch slides the whole table up or down the frame, which is what looking up
-// at the sky should do. There is no roll to follow, so the mapping is exact.
+// at the sky should do. Without roll the mapping is exact; with it, the rows
+// lean, and each is painted in short runs of the color at their middle.
 
 let SKY_ZENITH = 0xFF0A0614;
 let SKY_HAZE = 0xFF2A2038;
@@ -717,6 +723,15 @@ fun sky_row(y) {
     let vy = (CENTER_Y + (y.to_f() - CENTER_Y) * cos_pitch - FOCAL * sin_pitch).floor();
     return bg_rows[vy.max(0).min(FRAME_HEIGHT - 1)];
 }
+
+// The same at pixel (x, y), taking the roll off first
+fun sky_at_xy(x, y) {
+    let ry = CENTER_Y - ((x.to_f() - CENTER_X) * sin_roll + (CENTER_Y - y.to_f()) * cos_roll);
+    let vy = (CENTER_Y + (ry - CENTER_Y) * cos_pitch - FOCAL * sin_pitch).floor();
+    return bg_rows[vy.max(0).min(FRAME_HEIGHT - 1)];
+}
+
+let SKY_RUN = 8;
 
 // Paint the parts of [x0, x1) on scanline y that no polygon claimed. The
 // s-buffer's intervals are sorted, disjoint and coalesced, so the gaps between
@@ -786,7 +801,13 @@ fun draw_sky() {
         let cur = sb_head[y];
         if (cur != NO_SPAN && sp_x0[cur] <= 0 && sp_x1[cur] >= FRAME_WIDTH) continue;
 
-        sky_span(y, 0, FRAME_WIDTH, sky_row(y));
+        if (sin_roll == 0.0) {
+            sky_span(y, 0, FRAME_WIDTH, sky_row(y));
+        } else {
+            for (let var x = 0; x < FRAME_WIDTH; x = x + SKY_RUN) {
+                sky_span(y, x, (x + SKY_RUN).min(FRAME_WIDTH), sky_at_xy(x + SKY_RUN.idiv(2), y));
+            }
+        }
         any = true;
     }
     return any;
@@ -811,8 +832,8 @@ fun project_dir(dx, dy, dz) {
     let ez = rz * cos_pitch + dy * sin_pitch;
     if (ez <= 0.01) return false;
     let s = FOCAL / ez;
-    proj_x = CENTER_X + rx * s;
-    proj_y = CENTER_Y - ey * s;
+    proj_x = CENTER_X + (rx * cos_roll + ey * sin_roll) * s;
+    proj_y = CENTER_Y - (ey * cos_roll - rx * sin_roll) * s;
     return true;
 }
 
@@ -851,7 +872,8 @@ fun glow_disc(cx, cy, r, add) {
         let h = h2.sqrt().floor();
         let xa = (cx - h).max(0);
         let xb = (cx + h + 1).min(FRAME_WIDTH);
-        if (xa < xb) sky_span(y, xa, xb, color_add_sat(sky_row(y), add));
+        let under = sin_roll == 0.0 ? sky_row(y) : sky_at_xy(cx, y);
+        if (xa < xb) sky_span(y, xa, xb, color_add_sat(under, add));
     }
 }
 
@@ -1423,15 +1445,16 @@ fun face_setup(f, cull) {
             v = v * scale;
         }
 
-        // Into view space: yaw about the up axis, then pitch
+        // Into view space: yaw about the up axis, then pitch, then roll
         let dx = wx - cam_x;
         let dy = wy - cam_y;
         let dz = wz - cam_z;
         let rx = dx * cos_yaw - dz * sin_yaw;
         let rz = dx * sin_yaw + dz * cos_yaw;
+        let ry = dy * cos_pitch - rz * sin_pitch;
 
-        aX[i] = rx;
-        aY[i] = dy * cos_pitch - rz * sin_pitch;
+        aX[i] = rx * cos_roll + ry * sin_roll;
+        aY[i] = ry * cos_roll - rx * sin_roll;
         aZ[i] = rz * cos_pitch + dy * sin_pitch;
         aU[i] = u;
         aV[i] = v;
@@ -1678,13 +1701,19 @@ fun update_frustum() {
     let fy = sin_pitch;
     let fz = cos_pitch * cos_yaw;
 
-    let rx = cos_yaw;
-    let ry = 0.0;
-    let rz = 0.0 - sin_yaw;
+    // Right and up before the roll, and then turned by it
+    let rx0 = cos_yaw;
+    let rz0 = 0.0 - sin_yaw;
+    let ux0 = 0.0 - sin_pitch * sin_yaw;
+    let uy0 = cos_pitch;
+    let uz0 = 0.0 - sin_pitch * cos_yaw;
 
-    let ux = 0.0 - sin_pitch * sin_yaw;
-    let uy = cos_pitch;
-    let uz = 0.0 - sin_pitch * cos_yaw;
+    let rx = rx0 * cos_roll + ux0 * sin_roll;
+    let ry = uy0 * sin_roll;
+    let rz = rz0 * cos_roll + uz0 * sin_roll;
+    let ux = ux0 * cos_roll - rx0 * sin_roll;
+    let uy = uy0 * cos_roll;
+    let uz = uz0 * cos_roll - rz0 * sin_roll;
 
     // How far the frustum opens out, per unit of depth
     let tan_h = CENTER_X / FOCAL;
@@ -1746,11 +1775,13 @@ fun box_occluded(cx, cy, cz, hx, hy, hz) {
         let dx = wx - cam_x;
         let dy = wy - cam_y;
         let dz = wz - cam_z;
-        let vx = dx * cos_yaw - dz * sin_yaw;
+        let rx = dx * cos_yaw - dz * sin_yaw;
         let rz = dx * sin_yaw + dz * cos_yaw;
-        let vy = dy * cos_pitch - rz * sin_pitch;
+        let ry = dy * cos_pitch - rz * sin_pitch;
         let vz = rz * cos_pitch + dy * sin_pitch;
         if (vz <= NEAR) return false;
+        let vx = rx * cos_roll + ry * sin_roll;
+        let vy = ry * cos_roll - rx * sin_roll;
 
         let sx = CENTER_X + FOCAL * vx / vz;
         let sy = CENTER_Y - FOCAL * vy / vz;
@@ -2265,8 +2296,16 @@ fun draw_triangle(model, t) {
 }
 
 // A direction in world space, turned into view space
-fun view_dir_x(x, y, z) { return x * cos_yaw - z * sin_yaw; }
-fun view_dir_y(x, y, z) { return y * cos_pitch - (x * sin_yaw + z * cos_yaw) * sin_pitch; }
+fun view_dir_x(x, y, z) {
+    let rx = x * cos_yaw - z * sin_yaw;
+    let ry = y * cos_pitch - (x * sin_yaw + z * cos_yaw) * sin_pitch;
+    return rx * cos_roll + ry * sin_roll;
+}
+fun view_dir_y(x, y, z) {
+    let rx = x * cos_yaw - z * sin_yaw;
+    let ry = y * cos_pitch - (x * sin_yaw + z * cos_yaw) * sin_pitch;
+    return ry * cos_roll - rx * sin_roll;
+}
 fun view_dir_z(x, y, z) { return (x * sin_yaw + z * cos_yaw) * cos_pitch + y * sin_pitch; }
 
 // The transform of a model held in front of the eye, into m: x, y, z are
@@ -2783,6 +2822,14 @@ fun set_view(x, y, z, yaw, pitch, phase) {
     sin_pitch = pitch.sin();
     cos_pitch = pitch.cos();
     warp_phase = phase;
+    set_roll(0.0);
+}
+
+// Turn the view about the way it looks, in radians. Call after set_view(),
+// which levels it.
+fun set_roll(roll) {
+    sin_roll = roll == 0.0 ? 0.0 : roll.sin();
+    cos_roll = roll.cos();
 }
 
 // Hang each piece's texture on it, along with the masks the span loop wraps it
@@ -2832,6 +2879,8 @@ class RenderBandRequest {
         self.cos_yaw = cos_yaw;
         self.sin_pitch = sin_pitch;
         self.cos_pitch = cos_pitch;
+        self.sin_roll = sin_roll;
+        self.cos_roll = cos_roll;
         self.warp_phase = warp_phase;
         self.draw_list = draw_list;
         self.flash_x = flash_x;
@@ -2882,6 +2931,8 @@ fun render_actor_loop() {
         cos_yaw = msg.cos_yaw;
         sin_pitch = msg.sin_pitch;
         cos_pitch = msg.cos_pitch;
+        sin_roll = msg.sin_roll;
+        cos_roll = msg.cos_roll;
         warp_phase = msg.warp_phase;
         draw_list = msg.draw_list;
         flash_x = msg.flash_x;

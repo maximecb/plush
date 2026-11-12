@@ -182,6 +182,13 @@ fun support_at(w, body, x, y, z, walkable_only) {
     return best;
 }
 
+// Is this the surface of lava, which kills what lands in it?
+fun is_lava(plane) {
+    if (plane == nil || plane.tex == nil) return false;
+    let name = plane.tex.name;
+    return name.len >= 4 && name.slice(0, 4) == "lava";
+}
+
 // Advance a body by one frame: walk it at the horizontal velocity wish_x,
 // wish_z in m/s, jump if asked and able, and let gravity have it. Lands it on
 // the ground, steps it up onto low ledges and slides it down slopes too steep
@@ -256,6 +263,7 @@ fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
         }
         body.y = next_y;
         body.on_ground = false;
+        body.ground_plane = nil;
         return;
     }
 
@@ -275,6 +283,7 @@ fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
         body.y = next_y;
         body.slide_speed = 0.0;
         body.on_ground = false;
+        body.ground_plane = nil;
         return;
     }
 
@@ -282,6 +291,7 @@ fun move_body(w, body, dt, wish_x, wish_z, want_jump) {
     body.vel_y = 0.0;
 
     let plane = ground[1];
+    body.ground_plane = plane;
     body.on_ground = plane_is_walkable(plane);
 
     if (body.on_ground || plane == nil) {

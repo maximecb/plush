@@ -1,5 +1,5 @@
 // The heads-up display: a crosshair in the middle while the player holds a
-// weapon, the player's health in the
+// weapon, or word that they are dead, the player's health in the
 // bottom left corner and, once they have a weapon, its ammunition in the
 // bottom right. Those two are each a big number under a small label, in the
 // Monogram pixel font. Everything has a drop shadow so it reads against
@@ -68,8 +68,21 @@ fun draw_cross(img, cx, cy, color) {
 }
 
 fun draw_hud(img, player) {
+    // Dead, a word to say so in the middle, and how to come back once they can
+    if (player.dead) {
+        let msg = "YOU DIED";
+        let mx = (FRAME_WIDTH - low_font.text_width(msg)).idiv(2);
+        let my = (FRAME_HEIGHT - low_font.char_h).idiv(2);
+        shadowed(img, low_font, value_shadow, mx, my, msg);
+        if (player.can_respawn()) {
+            let hint = "FIRE OR JUMP TO TRY AGAIN";
+            let hx = (FRAME_WIDTH - label_font.text_width(hint)).idiv(2);
+            shadowed(img, label_font, label_shadow, hx, my + low_font.char_h + MARGIN.idiv(2), hint);
+        }
+    }
+
     // Only something to aim with needs aiming
-    if (player.weapon != nil) {
+    if (player.weapon != nil && !player.dead) {
         let cx = FRAME_WIDTH.idiv(2);
         let cy = FRAME_HEIGHT.idiv(2);
         draw_cross(img, cx + SHADOW.idiv(2).max(1), cy + SHADOW.idiv(2).max(1), SHADOW_COLOR);
