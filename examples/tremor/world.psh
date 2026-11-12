@@ -1048,79 +1048,152 @@ fun classify(f, nx, ny, nz, d) {
     return 3;
 }
 
-fun score_plane(face_list, nx, ny, nz, d) {
-    let var front = 0;
-    let var back = 0;
-    let var cut = 0;
+// Choosing the plane to split on at each node.
+//
+// The renderer goes fast by skipping whole subtrees whose box is out of view
+// or already covered, so what makes a good split is tight boxes around what
+// ends up on each side: rooms rather than slices through the middle of them.
+// That is what the surface area heuristic scores. The candidates are the
+// planes the most face area lies on, which are the big walls and floors, and
+// which adding a small brush somewhere barely changes, so neither does the
+// tree. Both were chosen by timing the slowest views in the level against an
+// even split of the faces between sampled planes, which was slower in every
+// one of them and swung by up to 5 ms either way when a room was added.
+
+// How many planes are tried at each node, and what cutting a face costs, in
+// faces
+let BSP_CANDIDATES = 24;
+let BSP_CUT_COST = 1.0;
+
+fun face_area(f) {
+    let v = f.v;
+    let n = v.len.idiv(3);
+    let var ax = 0.0; let var ay = 0.0; let var az = 0.0;
+    for (let var i = 1; i + 1 < n; ++i) {
+        let ux = v[i * 3] - v[0]; let uy = v[i * 3 + 1] - v[1]; let uz = v[i * 3 + 2] - v[2];
+        let wx = v[i * 3 + 3] - v[0]; let wy = v[i * 3 + 4] - v[1]; let wz = v[i * 3 + 5] - v[2];
+        ax = ax + uy * wz - uz * wy;
+        ay = ay + uz * wx - ux * wz;
+        az = az + ux * wy - uy * wx;
+    }
+    return 0.5 * (ax * ax + ay * ay + az * az).sqrt();
+}
+
+// The same plane whichever way it faces, as a key to gather faces by
+fun plane_key(f) {
+    let var nx = f.nx; let var ny = f.ny; let var nz = f.nz; let var d = f.d;
+    if (nx < 0.0 - PLANE_EPS || (nx.abs() <= PLANE_EPS && (ny < 0.0 - PLANE_EPS || (ny.abs() <= PLANE_EPS && nz < 0.0)))) {
+        nx = 0.0 - nx; ny = 0.0 - ny; nz = 0.0 - nz; d = 0.0 - d;
+    }
+    return key_part(nx) + "," + key_part(ny) + "," + key_part(nz) + "," + key_part(d);
+}
+
+fun key_part(x) {
+    return (x * 1000.0 + 0.5).floor().to_s();
+}
+
+// The planes the most face area lies on, at most `count` of them. Small brushes
+// added somewhere barely move this ranking, so the tree stays much the same.
+fun area_candidates(face_list, count) {
+    let by_key = {};
+    let planes = [];
+    let areas = [];
     for (let var i = 0; i < face_list.len; ++i) {
-        let c = classify(face_list[i], nx, ny, nz, d);
-        if (c == 1) front = front + 1;
-        else if (c == 2) back = back + 1;
-        else if (c == 3) cut = cut + 1;
+        let f = face_list[i];
+        let key = plane_key(f);
+        if (by_key.has(key)) {
+            let k = by_key[key];
+            areas[k] = areas[k] + face_area(f);
+        } else {
+            by_key[key] = planes.len;
+            planes.push(f);
+            areas.push(face_area(f));
+        }
     }
 
-    let var diff = front - back;
-    if (diff < 0) diff = 0 - diff;
-
-    // An axis-aligned plane cuts far fewer faces in a level built mostly of
-    // boxes, so it is worth a head start over an angled one
-    let var bonus = 0;
-    if (nx.abs() < 0.99 && ny.abs() < 0.99 && nz.abs() < 0.99) bonus = 6;
-    return diff + 8 * cut + bonus;
-}
-
-// The same geometric plane may occur on many faces, sometimes with the normal
-// reversed. Scoring it again spends a candidate without considering a new
-// partition of the faces.
-fun same_plane(a, b) {
-    let direct = (a.nx - b.nx).abs() <= PLANE_EPS
-        && (a.ny - b.ny).abs() <= PLANE_EPS
-        && (a.nz - b.nz).abs() <= PLANE_EPS
-        && (a.d - b.d).abs() <= PLANE_EPS;
-    if (direct) return true;
-
-    return (a.nx + b.nx).abs() <= PLANE_EPS
-        && (a.ny + b.ny).abs() <= PLANE_EPS
-        && (a.nz + b.nz).abs() <= PLANE_EPS
-        && (a.d + b.d).abs() <= PLANE_EPS;
-}
-
-fun add_unique_plane(candidate_list, f) {
-    for (let var i = 0; i < candidate_list.len; ++i) {
-        if (same_plane(candidate_list[i], f)) return false;
+    // Keep the best few, in order, by insertion
+    let best = [];
+    let best_area = [];
+    for (let var i = 0; i < planes.len; ++i) {
+        let a = areas[i];
+        if (best.len == count && a <= best_area[count - 1]) continue;
+        let var j = best.len;
+        if (j == count) j = count - 1;
+        else { best.push(nil); best_area.push(0.0); }
+        while (j > 0 && best_area[j - 1] < a) {
+            best[j] = best[j - 1];
+            best_area[j] = best_area[j - 1];
+            j = j - 1;
+        }
+        best[j] = planes[i];
+        best_area[j] = a;
     }
-    candidate_list.push(f);
-    return true;
+    return best;
+}
+
+// Half the surface of a box, given its corners
+fun box_area(x0, y0, z0, x1, y1, z1) {
+    let dx = x1 - x0; let dy = y1 - y0; let dz = z1 - z0;
+    return dx * dy + dy * dz + dz * dx;
+}
+
+// The surface area heuristic: what it would cost to look into each side of
+// the split, which is how many faces are there times how likely a view is to
+// reach into their box, going by its surface. Cut faces count on both sides.
+fun sah_score(face_list, nx, ny, nz, d) {
+    let BIG_F = 1000000.0;
+    let var fx0 = BIG_F; let var fy0 = BIG_F; let var fz0 = BIG_F;
+    let var fx1 = 0.0 - BIG_F; let var fy1 = 0.0 - BIG_F; let var fz1 = 0.0 - BIG_F;
+    let var bx0 = BIG_F; let var by0 = BIG_F; let var bz0 = BIG_F;
+    let var bx1 = 0.0 - BIG_F; let var by1 = 0.0 - BIG_F; let var bz1 = 0.0 - BIG_F;
+    let var nf = 0; let var nb = 0; let var nc = 0;
+
+    for (let var i = 0; i < face_list.len; ++i) {
+        let f = face_list[i];
+        let c = classify(f, nx, ny, nz, d);
+        if (c == 0) continue;
+        if (c == 3) nc = nc + 1;
+        let v = f.v;
+        let n = v.len.idiv(3);
+        for (let var k = 0; k < n; ++k) {
+            let x = v[k * 3]; let y = v[k * 3 + 1]; let z = v[k * 3 + 2];
+            let s = nx * x + ny * y + nz * z - d;
+            if (s >= 0.0 - PLANE_EPS) {
+                if (x < fx0) fx0 = x; if (x > fx1) fx1 = x;
+                if (y < fy0) fy0 = y; if (y > fy1) fy1 = y;
+                if (z < fz0) fz0 = z; if (z > fz1) fz1 = z;
+            }
+            if (s <= PLANE_EPS) {
+                if (x < bx0) bx0 = x; if (x > bx1) bx1 = x;
+                if (y < by0) by0 = y; if (y > by1) by1 = y;
+                if (z < bz0) bz0 = z; if (z > bz1) bz1 = z;
+            }
+        }
+        if (c == 1) nf = nf + 1;
+        if (c == 2) nb = nb + 1;
+    }
+
+    // In faces: the box areas are taken as fractions of the box around both
+    let whole = box_area(fx0.min(bx0), fy0.min(by0), fz0.min(bz0), fx1.max(bx1), fy1.max(by1), fz1.max(bz1)).max(0.000001);
+    let var cost = BSP_CUT_COST * nc.to_f();
+    if (nf + nc > 0) cost = cost + (nf + nc).to_f() * box_area(fx0, fy0, fz0, fx1, fy1, fz1) / whole;
+    if (nb + nc > 0) cost = cost + (nb + nc).to_f() * box_area(bx0, by0, bz0, bx1, by1, bz1) / whole;
+    return cost;
 }
 
 fun bsp_build(face_list) {
     if (face_list.len == 0) return nil;
 
     // Candidate planes are the face planes themselves. Trying every one of them
-    // is quadratic, so a long list is sampled instead. Walk the other offsets
-    // through that sample when it contains duplicate planes, keeping the same
-    // scoring budget but replacing duplicates with distinct partitions.
-    let var step = 1;
-    if (face_list.len > 24) step = face_list.len.idiv(24);
+    // is quadratic, so only a few are tried.
+    let candidates = area_candidates(face_list, BSP_CANDIDATES);
 
-    let target = (face_list.len + step - 1).idiv(step);
-    let candidates = [];
-    let var offset = 0;
-    while (candidates.len < target && offset < step) {
-        let var i = offset;
-        while (i < face_list.len && candidates.len < target) {
-            add_unique_plane(candidates, face_list[i]);
-            i = i + step;
-        }
-        offset = offset + 1;
-    }
-
-    let var bf = candidates[0];
-    let var best_score = score_plane(face_list, bf.nx, bf.ny, bf.nz, bf.d);
-    for (let var i = 1; i < candidates.len; ++i) {
+    let var bf = nil;
+    let var best_score = 0.0;
+    for (let var i = 0; i < candidates.len; ++i) {
         let f = candidates[i];
-        let s = score_plane(face_list, f.nx, f.ny, f.nz, f.d);
-        if (s < best_score) {
+        let s = sah_score(face_list, f.nx, f.ny, f.nz, f.d);
+        if (bf == nil || s < best_score) {
             best_score = s;
             bf = f;
         }
