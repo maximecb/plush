@@ -35,11 +35,11 @@ from image import save_tga;
 from pixelfont import PixelFont;
 from ./config import FRAME_WIDTH, FRAME_HEIGHT, MAP_PATH, NUM_RENDER_ACTORS, BENCH, BENCH_FRAMES, SHOT_DIR;
 from ./world import load_map, build_bsp;
-from ./lighting import light_world, light_level_at, occluded;
+from ./lighting import light_world, light_level_at;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
     set_scene, set_view, set_draw_list, set_muzzle_flash, set_particles, set_screen_tint,
     render_frame_parallel, start_render_actors, stop_render_actors;
-from ./entities import Player, Monster, Prop, spawn_entities, touch_entities, load_weapons, load_gibs, shoot, update_blood, update_gibs, sound_events,
+from ./entities import Player, spawn_entities, touch_entities, load_weapons, load_gibs, shoot, update_blood, update_gibs, sound_events,
     EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
 from ./models import models;
 from ./sound import start_sound, stop_sound, play_sound, play_sound_at;
@@ -129,44 +129,6 @@ fun play_sounds() {
 let HURT_TINT = 0xFF_C0_00_00;
 let HURT_TINT_MAX = 110.0;
 
-// Where the view is seen from, which decides what can be seen
-let var eye_x = 0.0;
-let var eye_y = 0.0;
-let var eye_z = 0.0;
-
-fun set_eye(x, y, z) {
-    eye_x = x; eye_y = y; eye_z = z;
-}
-
-// Is all of e behind walls from the eye? Models are drawn before the world,
-// so one the walls hide still costs its full drawing. Tested with rays to its
-// middle, its top, its foot and either side of it. Only monsters and props are
-// tested: a door's own brush would stop every ray to it.
-fun hidden(e) {
-    if (!(e instanceof Monster) && !(e instanceof Prop)) return false;
-
-    // Along its body, which tips over with it when it falls
-    let var ux = 0.0; let var uy = 1.0; let var uz = 0.0;
-    if (e instanceof Monster) { ux = e.up_x(); uy = e.up_y(); uz = e.up_z(); }
-    let h = e.height.max(0.3);
-    let mx = e.x + ux * h * 0.5; let my = e.y + uy * h * 0.5; let mz = e.z + uz * h * 0.5;
-    if (!occluded(eye_x, eye_y, eye_z, mx, my, mz)) return false;
-
-    let top = h - 0.1;
-    if (!occluded(eye_x, eye_y, eye_z, e.x + ux * top, e.y + uy * top, e.z + uz * top)) return false;
-    let foot = (h * 0.3).min(0.2);
-    if (!occluded(eye_x, eye_y, eye_z, e.x + ux * foot, e.y + uy * foot, e.z + uz * foot)) return false;
-
-    // Either side, level and across the line of sight
-    let r = e.radius.max(0.3) * 1.2;
-    let dx = mx - eye_x; let dz = mz - eye_z;
-    let len = (dx * dx + dz * dz).sqrt().max(0.001);
-    let sx = (0.0 - dz) / len * r; let sz = dx / len * r;
-    if (!occluded(eye_x, eye_y, eye_z, mx + sx, my, mz + sz)) return false;
-    if (!occluded(eye_x, eye_y, eye_z, mx - sx, my, mz - sz)) return false;
-    return true;
-}
-
 // Move every entity on by dt, let the player pick up what they walk into, and
 // hand the renderer what it has to draw
 fun update_entities(dt) {
@@ -177,7 +139,6 @@ fun update_entities(dt) {
         let e = entities[i];
         e.update(world, dt);
         if (e.model == nil) continue;
-        if (hidden(e)) continue;
 
         let level = entity_light(e, (e.model.max_y - e.model.min_y) * e.model_scale * 0.5);
         list.push([e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, level, false, e.pitch]);
@@ -242,7 +203,6 @@ if (BENCH) {
     for (let var i = 0; i < BENCH_FRAMES; ++i) {
         let view = TOUR[i % TOUR.len];
         set_view(view[0], view[1], view[2], view[3], view[4], i.to_f() * 0.21);
-        set_eye(view[0], view[1], view[2]);
         update_entities(1.0 / 60.0);
 
         let t0 = $time_current_ms();
@@ -412,7 +372,6 @@ loop {
         play_sound(player.weapon, 1.0, 0.0);
         shoot(player, entities);
     }
-    set_eye(player.x, player.eye_y(), player.z);
     update_entities(dt);
     play_sounds();
 
