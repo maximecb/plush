@@ -86,6 +86,12 @@ class Entity {
         self.on_ground = false;
         self.jump_speed = 0.0;
 
+        // Set for a body that other solid bodies can't walk through, and how
+        // far it overlaps them this frame, which move_body() pushes it out of
+        self.solid = false;
+        self.push_x = 0.0;
+        self.push_z = 0.0;
+
         // The Model it is drawn with, or nil for none, how much it is scaled,
         // and the animation it is playing, -1 for none, and how far into it
         self.model = nil;
@@ -391,6 +397,7 @@ class Monster extends Entity {
         self.radius = 0.5;
         self.height = height;
         self.step_height = STEP_HEIGHT;
+        self.solid = true;
 
         self.health = 100;
 
@@ -507,6 +514,7 @@ class Monster extends Entity {
             // No death animation yet: it goes stiff in its idle pose and
             // falls over backwards
             self.set_state("dead");
+            self.solid = false;
             self.play(self.idle_clip);
             self.anim_time = 0.0;
             self.dead_y = self.y;
@@ -938,6 +946,46 @@ fun update_blood(dt, ex, ey, ez) {
     return out;
 }
 
+// The solid bodies this frame, reused from one frame to the next
+let solids = [];
+
+// Find which solid bodies overlap and by how much, for move_body() to push
+// them apart. The player is one of them, though not in the list. Every pair is
+// tried, which is cheap for the few dozen monsters a level has; a grid would
+// be the next step for hundreds.
+fun separate_bodies(player, list) {
+    solids.resize(0, nil);
+    player.push_x = 0.0;
+    player.push_z = 0.0;
+    if (player.solid) solids.push(player);
+    for (let var i = 0; i < list.len; ++i) {
+        let e = list[i];
+        e.push_x = 0.0;
+        e.push_z = 0.0;
+        if (e.solid) solids.push(e);
+    }
+
+    for (let var i = 0; i < solids.len; ++i) {
+        let a = solids[i];
+        for (let var j = i + 1; j < solids.len; ++j) {
+            let b = solids[j];
+            let var dx = a.x - b.x;
+            let var dz = a.z - b.z;
+            let r = a.radius + b.radius;
+            let d2 = dx * dx + dz * dz;
+            if (d2 >= r * r) continue;
+            if (a.y >= b.y + b.height || b.y >= a.y + a.height) continue;
+
+            // Right on top of each other, they part along an arbitrary line
+            let var d = d2.sqrt();
+            if (d < 0.001) { dx = 1.0; dz = 0.0; d = 1.0; }
+            let s = (r - d) * 0.5 / d;
+            a.push_x = a.push_x + dx * s; a.push_z = a.push_z + dz * s;
+            b.push_x = b.push_x - dx * s; b.push_z = b.push_z - dz * s;
+        }
+    }
+}
+
 // Let the player touch whatever entities they overlap, and take out of the
 // list those that are used up by it, and monsters that are gone
 fun touch_entities(w, player, list) {
@@ -1042,6 +1090,7 @@ class Player extends Entity {
         self.height = PLAYER_HEIGHT;
         self.step_height = STEP_HEIGHT;
         self.jump_speed = JUMP_SPEED;
+        self.solid = true;
         self.noclip = false;
 
         self.health = MAX_HEALTH;

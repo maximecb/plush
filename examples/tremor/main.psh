@@ -39,7 +39,7 @@ from ./lighting import light_world, light_level_at;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
     set_scene, set_view, set_draw_list, set_muzzle_flash, set_particles, set_screen_tint,
     render_frame_parallel, start_render_actors, stop_render_actors;
-from ./entities import Player, spawn_entities, touch_entities, load_weapons, load_gibs, shoot, update_blood, update_gibs, sound_events,
+from ./entities import Player, spawn_entities, touch_entities, separate_bodies, load_weapons, load_gibs, shoot, update_blood, update_gibs, sound_events,
     EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
 from ./models import models;
 from ./sound import start_sound, stop_sound, play_sound, play_sound_at;
@@ -133,6 +133,7 @@ let HURT_TINT_MAX = 110.0;
 // hand the renderer what it has to draw
 fun update_entities(dt) {
     touch_entities(world, player, entities);
+    separate_bodies(player, entities);
 
     let list = [];
     for (let var i = 0; i < entities.len; ++i) {
@@ -325,6 +326,7 @@ loop {
             }
             if (msg.key == 'N') {
                 player.noclip = !player.noclip;
+                player.solid = !player.noclip;
                 $println('noclip=' + player.noclip.to_s());
             }
 
