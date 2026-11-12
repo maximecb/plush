@@ -241,6 +241,10 @@ class Door extends Entity {
         self.lift = spec.lift;
         self.player = player;
 
+        // The side it opens from, if only one, after which it stays open
+        self.from = spec.from;
+        self.held = false;
+
         // How far it has risen, which way it is moving, and how long it has
         // left to stay open
         self.pos = 0.0;
@@ -284,7 +288,12 @@ class Door extends Entity {
         if (p.y >= self.y1 || p.y + p.height <= self.y0 - 0.5) return false;
         let dx = (self.x0 - p.x).max(p.x - self.x1).max(0.0);
         let dz = (self.z0 - p.z).max(p.z - self.z1).max(0.0);
-        return dx * dx + dz * dz < DOOR_REACH * DOOR_REACH;
+        if (dx * dx + dz * dz >= DOOR_REACH * DOOR_REACH) return false;
+        if (self.from == "nx") return p.x < self.x0;
+        if (self.from == "px") return p.x > self.x1;
+        if (self.from == "nz") return p.z < self.z0;
+        if (self.from == "pz") return p.z > self.z1;
+        return true;
     }
 
     // Is the player standing where the door comes down to?
@@ -305,9 +314,12 @@ class Door extends Entity {
     }
 
     update(self, w, dt) {
-        if (self.player_near()) {
+        if (self.held) {
+            // Opened from its one side, and stays that way
+        } else if (self.player_near()) {
             self.wait = DOOR_WAIT;
             if (self.pos < self.lift && self.dir <= 0) self.start(1);
+            if (self.from != nil) self.held = true;
         } else if (self.dir == 0 && self.pos > 0.0) {
             self.wait = self.wait - dt;
             if (self.wait <= 0.0 && !self.player_in_way()) self.start(0 - 1);
@@ -377,9 +389,13 @@ class Monster extends Entity {
 
         self.health = 100;
 
-        // How far it sees, how close the player has to come for it to notice
-        // them even unseen, and how fast it turns, in radians per second
-        self.sight_range = 30.0;
+        // How far it sees ahead, within how wide a cone, and how far it sees
+        // in any direction, out of the corner of its eye. How close the player
+        // has to come for it to notice them even unseen, and how fast it
+        // turns, in radians per second.
+        self.sight_range = 60.0;
+        self.sight_cone = (80.0 * PI / 180.0).cos();
+        self.glance_range = 30.0;
         self.notice_range = 4.0;
         self.turn_speed = 5.0;
 
@@ -445,11 +461,18 @@ class Monster extends Entity {
         self.state_time = 0.0;
     }
 
-    // Is there a clear line from its eyes to the player's?
+    // Is the player where it looks, and is there a clear line from its eyes to
+    // theirs? The cheap tests go first, so the line is only traced for a
+    // player it could see.
     sees_player(self) {
         let p = self.player;
         let dx = p.x - self.x; let dz = p.z - self.z;
-        if (dx * dx + dz * dz > self.sight_range * self.sight_range) return false;
+        let d2 = dx * dx + dz * dz;
+        if (d2 > self.sight_range * self.sight_range) return false;
+        if (d2 > self.glance_range * self.glance_range) {
+            let ahead = dx * self.yaw.sin() + dz * self.yaw.cos();
+            if (ahead < self.sight_cone * d2.sqrt()) return false;
+        }
         let eye = self.y + self.height * 0.9;
         return !occluded(self.x, eye, self.z, p.x, p.eye_y(), p.z);
     }

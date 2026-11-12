@@ -16,7 +16,7 @@
 //   poly  y0= y1= pts=x,z;x,z;... [keys]    (any convex polygon, upright)
 //   arch  axis=<x|z> a0= a1= c0= c1= ybase= ytop= segs= [keys]
 //   entity type=<kind> x= y= z= yaw=<degrees>
-//   door  x0= y0= z0= x1= y1= z1= lift= tex=
+//   door  x0= y0= z0= x1= y1= z1= lift= tex= [from=<nx|px|nz|pz>]
 //
 // An entity stands with its base at x, y, z. The kinds are listed in
 // spawn_entity() in entities.psh.
@@ -25,6 +25,7 @@
 // player comes close. Its texture is shown once across each of its two large
 // faces. Doors are not in the light bake, so the space a door rises into
 // should be solid, and it should sit a little inside its doorway's walls.
+// Given `from`, it opens only for someone on that side of it, and stays open.
 //
 // Keys: tex= side= top= bottom= nx= px= ny= py= nz= pz= name the texture to
 // place on a face, light=<0..15> to force a light level instead of baking one,
@@ -593,11 +594,14 @@ light x=10.8 y=4.25 z=80 radius=7 brightness=0.41
 // Something guarding the way to the tower, facing back down the corridor
 entity type=claw_cyborg x=13.6 y=0 z=80 yaw=-90
 
-// The west branch: a few paces, and a grate across it
+// The west branch: a few paces, and a grate across it. The grate only lifts
+// for someone coming from behind it, out of the lower halls, and then stays
+// up, so the way back from there is short.
 box   x0=-9.6 y0=-0.8 z0=76 x1=-4 y1=0 z1=84 tex=floor_stone
 box   x0=-9.6 y0=5.6 z0=76 x1=-4 y1=6.4 z1=84 tex=stone_large
 box   x0=-9.6 y0=0 z0=76 x1=-4 y1=5.6 z1=77.6 tex=stone_blocks
-box   x0=-9.6 y0=0 z0=77.6 x1=-8 y1=5.6 z1=82.4 tex=stone_blocks px=door_grate fit
+box   x0=-10.4 y0=6.4 z0=76.8 x1=-8.8 y1=11.2 z1=83.2 tex=stone_blocks
+door  x0=-9.5 y0=-0.05 z0=77.55 x1=-9.1 y1=5.6 z1=82.45 lift=5.15 tex=door_grate from=nx
 arch  axis=x a0=-4 a1=-2.4 c0=77.6 c1=82.4 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
 
 // ===========================================================================
@@ -801,6 +805,10 @@ box   x0=24 y0=19.2 z0=70 x1=43.2 y1=20 z1=70.4 tex=sandstone_brick
 box   x0=24 y0=19.2 z0=89.6 x1=43.2 y1=20 z1=90 tex=sandstone_brick
 box   x0=23.6 y0=19.2 z0=70 x1=24 y1=20 z1=90 tex=sandstone_brick
 box   x0=43.2 y0=19.2 z0=70 x1=43.6 y1=20 z1=90 tex=sandstone_brick
+
+// Shells left in the far corners, to fill up on before the door
+entity type=shotgun_ammo x=21.6 y=19.2 z=67.6 yaw=40
+entity type=shotgun_ammo x=21.6 y=19.2 z=92.4 yaw=-30
 box   x0=27.2 y0=19.2 z0=68 x1=40 y1=20 z1=68.3 tex=sandstone_brick
 box   x0=27.2 y0=19.2 z0=65.6 x1=27.5 y1=20 z1=68 tex=sandstone_brick
 
@@ -871,7 +879,7 @@ light x=33.6 y=17.8 z=66.8 radius=8 brightness=0.45
 
 // --- The cliff the castle stands on, and the wall built up on it ---
 
-box   x0=64 y0=-9.6 z0=28.8 x1=81.6 y1=9.6 z1=112 tex=rock_craggy top=dirt scale=32
+box   x0=70.4 y0=-9.6 z0=28.8 x1=81.6 y1=9.6 z1=112 tex=rock_craggy top=dirt scale=32
 box   x0=70.4 y0=9.6 z0=51.2 x1=79.2 y1=19.2 z1=96 tex=stone_blocks top=floor_stone
 box   x0=70.4 y0=-9.6 z0=96 x1=84.8 y1=19.2 z1=105.6 tex=stone_blocks top=floor_stone
 
@@ -925,12 +933,14 @@ box   x0=80.8 y0=20.4 z0=96 x1=82.4 y1=21.6 z1=96.8 tex=stone_blocks
 // --- The gatehouse at the north end ---
 //
 // A room x 70.4..80, z 38.4..48.8, floor 19.2, ceiling 24.8, entered through
-// an arch and a door in its south wall. A dead end for now. The door rises
-// into the wall over the arch.
+// an arch and a door in its south wall. The door rises into the wall over the
+// arch. An arch in the west wall opens onto the stair down to the lower halls.
 
 box   x0=68.8 y0=9.6 z0=36.8 x1=81.6 y1=19.2 z1=51.2 tex=stone_blocks top=floor_stone
 box   x0=68.8 y0=19.2 z0=36.8 x1=81.6 y1=30.4 z1=38.4 tex=stone_blocks
-box   x0=68.8 y0=19.2 z0=38.4 x1=70.4 y1=30.4 z1=48.8 tex=stone_blocks
+box   x0=68.8 y0=19.2 z0=43.2 x1=70.4 y1=30.4 z1=48.8 tex=stone_blocks
+box   x0=68.8 y0=24.8 z0=38.4 x1=70.4 y1=30.4 z1=43.2 tex=stone_blocks
+arch  axis=x a0=68.8 a1=70.4 c0=38.4 c1=43.2 ybase=22.8 ytop=24.8 segs=5 tex=sandstone_brick bottom=sandstone_brick
 box   x0=80 y0=19.2 z0=38.4 x1=81.6 y1=30.4 z1=48.8 tex=stone_blocks
 box   x0=70.4 y0=24.8 z0=38.4 x1=80 y1=30.4 z1=48.8 tex=stone_blocks bottom=stone_large
 box   x0=68.8 y0=19.2 z0=48.8 x1=72.8 y1=30.4 z1=51.2 tex=stone_blocks
@@ -986,6 +996,9 @@ box   x0=128 y0=-9.6 z0=112 x1=144 y1=28 z1=152 tex=rock_craggy top=dirt scale=3
 box   x0=64 y0=-9.6 z0=140 x1=84 y1=24 z1=152 tex=rock_craggy top=dirt scale=32
 box   x0=84 y0=-9.6 z0=140 x1=104 y1=19.2 z1=152 tex=rock_craggy top=dirt scale=32
 box   x0=104 y0=-9.6 z0=140 x1=128 y1=26.4 z1=152 tex=rock_craggy top=dirt scale=32
+// The hill the south end of the castle backs onto, seen over the bastion
+box   x0=56 y0=-9.6 z0=107.2 x1=70.4 y1=16 z1=140 tex=rock_craggy top=dirt scale=32
+box   x0=24 y0=-9.6 z0=107.2 x1=56 y1=24 z1=152 tex=rock_craggy top=dirt scale=32
 box   x0=81.6 y0=-9.6 z0=12.8 x1=100 y1=18.4 z1=20.8 tex=rock_craggy top=dirt scale=32
 box   x0=100 y0=-9.6 z0=12.8 x1=128 y1=24 z1=20.8 tex=rock_craggy top=dirt scale=32
 box   x0=64 y0=-9.6 z0=12.8 x1=81.6 y1=24 z1=28.8 tex=rock_craggy top=dirt scale=32
@@ -1033,6 +1046,278 @@ entity type=claw_cyborg x=78.4 y=19.2 z=101 yaw=180
 entity type=claw_cyborg x=75.2 y=19.2 z=54.4 yaw=0
 entity type=shotgun_ammo x=74.4 y=19.2 z=103.2 yaw=30
 entity type=health_kit x=75.2 y=19.2 z=46 yaw=0
+
+// ===========================================================================
+// The lower halls: a stair hall beside the gatehouse, x 54.4..68.8, z
+// 38.4..56, coming down from 19.2 to 9.6; then the undercroft, a pillared
+// hall under the battlements running south, x 54.4..68.8, z 57.6..105.6,
+// floor 9.6, ceiling 16; then a passage west, z 100.8..105.6, down a tall stair
+// to floor 0 and on past the south side of the star tower, to the back of the
+// grate in the long corridor's west branch, and to the sanctum.
+// ===========================================================================
+
+// --- The stair hall ---
+//
+// One flight down the north wall from the gatehouse, a landing in the corner,
+// and a second flight down the west wall to the floor, both railed on the side
+// that drops to it.
+
+box   x0=52.8 y0=8.8 z0=36.8 x1=70.4 y1=9.6 z1=57.6 tex=floor_stone
+box   x0=52.8 y0=24.8 z0=36.8 x1=70.4 y1=25.6 z1=57.6 tex=stone_large
+box   x0=52.8 y0=9.6 z0=36.8 x1=68.8 y1=24.8 z1=38.4 tex=stone_blocks
+box   x0=52.8 y0=9.6 z0=38.4 x1=54.4 y1=24.8 z1=56 tex=stone_blocks
+box   x0=68.8 y0=9.6 z0=51.2 x1=70.4 y1=24.8 z1=56 tex=stone_blocks
+
+// South wall, with the arched way on to the undercroft, set back far enough to
+// leave some floor at the foot of the stair
+box   x0=52.8 y0=9.6 z0=56 x1=62.4 y1=24.8 z1=57.6 tex=stone_blocks
+box   x0=67.2 y0=9.6 z0=56 x1=70.4 y1=24.8 z1=57.6 tex=stone_blocks
+box   x0=62.4 y0=15.2 z0=56 x1=67.2 y1=24.8 z1=57.6 tex=stone_blocks
+arch  axis=z a0=56 a1=57.6 c0=62.4 c1=67.2 ybase=13.2 ytop=15.2 segs=5 tex=sandstone_brick bottom=sandstone_brick
+
+box   x0=68 y0=9.6 z0=38.4 x1=68.8 y1=18.8 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=67.2 y0=9.6 z0=38.4 x1=68 y1=18.4 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=66.4 y0=9.6 z0=38.4 x1=67.2 y1=18 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=65.6 y0=9.6 z0=38.4 x1=66.4 y1=17.6 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=64.8 y0=9.6 z0=38.4 x1=65.6 y1=17.2 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=64 y0=9.6 z0=38.4 x1=64.8 y1=16.8 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=63.2 y0=9.6 z0=38.4 x1=64 y1=16.4 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=62.4 y0=9.6 z0=38.4 x1=63.2 y1=16 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=61.6 y0=9.6 z0=38.4 x1=62.4 y1=15.6 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=60.8 y0=9.6 z0=38.4 x1=61.6 y1=15.2 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=60 y0=9.6 z0=38.4 x1=60.8 y1=14.8 z1=43.2 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=38.4 x1=60 y1=14.4 z1=43.2 tex=stone_blocks top=floor_stone
+
+box   x0=54.4 y0=9.6 z0=43.2 x1=59.2 y1=14 z1=44 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=44 x1=59.2 y1=13.6 z1=44.8 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=44.8 x1=59.2 y1=13.2 z1=45.6 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=45.6 x1=59.2 y1=12.8 z1=46.4 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=46.4 x1=59.2 y1=12.4 z1=47.2 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=47.2 x1=59.2 y1=12 z1=48 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=48 x1=59.2 y1=11.6 z1=48.8 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=48.8 x1=59.2 y1=11.2 z1=49.6 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=49.6 x1=59.2 y1=10.8 z1=50.4 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=50.4 x1=59.2 y1=10.4 z1=51.2 tex=stone_blocks top=floor_stone
+box   x0=54.4 y0=9.6 z0=51.2 x1=59.2 y1=10 z1=52 tex=stone_blocks top=floor_stone
+
+box   x0=59.2 y0=9.6 z0=43.2 x1=60 y1=15.4 z1=43.6 tex=sandstone_brick
+box   x0=68 y0=9.6 z0=43.2 x1=68.8 y1=19.8 z1=43.6 tex=sandstone_brick
+box   x0=67.2 y0=9.6 z0=43.2 x1=68 y1=19.4 z1=43.6 tex=sandstone_brick
+box   x0=66.4 y0=9.6 z0=43.2 x1=67.2 y1=19 z1=43.6 tex=sandstone_brick
+box   x0=65.6 y0=9.6 z0=43.2 x1=66.4 y1=18.6 z1=43.6 tex=sandstone_brick
+box   x0=64.8 y0=9.6 z0=43.2 x1=65.6 y1=18.2 z1=43.6 tex=sandstone_brick
+box   x0=64 y0=9.6 z0=43.2 x1=64.8 y1=17.8 z1=43.6 tex=sandstone_brick
+box   x0=63.2 y0=9.6 z0=43.2 x1=64 y1=17.4 z1=43.6 tex=sandstone_brick
+box   x0=62.4 y0=9.6 z0=43.2 x1=63.2 y1=17 z1=43.6 tex=sandstone_brick
+box   x0=61.6 y0=9.6 z0=43.2 x1=62.4 y1=16.6 z1=43.6 tex=sandstone_brick
+box   x0=60.8 y0=9.6 z0=43.2 x1=61.6 y1=16.2 z1=43.6 tex=sandstone_brick
+box   x0=60 y0=9.6 z0=43.2 x1=60.8 y1=15.8 z1=43.6 tex=sandstone_brick
+box   x0=59.2 y0=9.6 z0=43.2 x1=59.6 y1=15 z1=44 tex=sandstone_brick
+box   x0=59.2 y0=9.6 z0=44 x1=59.6 y1=14.6 z1=44.8 tex=sandstone_brick
+box   x0=59.2 y0=9.6 z0=44.8 x1=59.6 y1=14.2 z1=45.6 tex=sandstone_brick
+box   x0=59.2 y0=9.6 z0=45.6 x1=59.6 y1=13.8 z1=46.4 tex=sandstone_brick
+box   x0=59.2 y0=9.6 z0=46.4 x1=59.6 y1=13.4 z1=47.2 tex=sandstone_brick
+box   x0=59.2 y0=9.6 z0=47.2 x1=59.6 y1=13 z1=48 tex=sandstone_brick
+box   x0=59.2 y0=9.6 z0=48 x1=59.6 y1=12.6 z1=48.8 tex=sandstone_brick
+box   x0=59.2 y0=9.6 z0=48.8 x1=59.6 y1=12.2 z1=49.6 tex=sandstone_brick
+
+// Lamps over each flight and on the floor, and some light for the height of it
+box   x0=61.3 y0=18.4 z0=38.4 x1=62.7 y1=20 z1=38.5 tex=stone_blocks pz=light_bank light=15 fit
+box   x0=54.4 y0=14.4 z0=47.3 x1=54.5 y1=16 z1=48.7 tex=stone_blocks px=light_bank light=15 fit
+box   x0=68.7 y0=12 z0=47.3 x1=68.8 y1=13.6 z1=48.7 tex=stone_blocks nx=light_bank light=15 fit
+light x=62 y=19.2 z=39.4 radius=10 brightness=0.7
+light x=55.4 y=15.2 z=48 radius=10 brightness=0.7
+light x=67.8 y=12.8 z=48 radius=10 brightness=0.7
+box   x0=56.9 y0=12 z0=55.9 x1=58.3 y1=13.6 z1=56 tex=stone_blocks nz=light_bank light=15 fit
+light x=57.6 y=12.8 z=55.1 radius=9 brightness=0.6
+light x=62 y=22 z=46 radius=12 brightness=0.35
+
+entity type=claw_cyborg x=64 y=9.6 z=48 yaw=180
+entity type=shotgun_ammo x=67.2 y=9.6 z=45.2 yaw=20
+
+// --- The undercroft ---
+//
+// A row of pillars down the middle, with a pair of arches across from each to
+// the walls, and lamps on alternate walls between them.
+
+box   x0=52.8 y0=8.8 z0=57.6 x1=70.4 y1=9.6 z1=107.2 tex=floor_stone
+box   x0=52.8 y0=16 z0=56 x1=70.4 y1=16.8 z1=107.2 tex=stone_large
+box   x0=68.8 y0=9.6 z0=57.6 x1=70.4 y1=16 z1=105.6 tex=stone_blocks
+box   x0=52.8 y0=9.6 z0=105.6 x1=70.4 y1=16 z1=107.2 tex=stone_blocks
+
+// West wall, with the arched way on to the stair down
+box   x0=52.8 y0=9.6 z0=57.6 x1=54.4 y1=16 z1=100.8 tex=stone_blocks
+box   x0=52.8 y0=15.2 z0=100.8 x1=54.4 y1=16 z1=105.6 tex=stone_blocks
+arch  axis=x a0=52.8 a1=54.4 c0=100.8 c1=105.6 ybase=13.2 ytop=15.2 segs=5 tex=sandstone_brick bottom=sandstone_brick
+
+box   x0=60.8 y0=9.6 z0=60.8 x1=62.4 y1=16 z1=62.4 tex=sandstone_brick
+box   x0=60.8 y0=9.6 z0=68.8 x1=62.4 y1=16 z1=70.4 tex=sandstone_brick
+box   x0=60.8 y0=9.6 z0=76.8 x1=62.4 y1=16 z1=78.4 tex=sandstone_brick
+box   x0=60.8 y0=9.6 z0=84.8 x1=62.4 y1=16 z1=86.4 tex=sandstone_brick
+box   x0=60.8 y0=9.6 z0=92.8 x1=62.4 y1=16 z1=94.4 tex=sandstone_brick
+arch  axis=z a0=60.8 a1=62.4 c0=54.4 c1=60.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=60.8 a1=62.4 c0=62.4 c1=68.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=68.8 a1=70.4 c0=54.4 c1=60.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=68.8 a1=70.4 c0=62.4 c1=68.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=76.8 a1=78.4 c0=54.4 c1=60.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=76.8 a1=78.4 c0=62.4 c1=68.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=84.8 a1=86.4 c0=54.4 c1=60.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=84.8 a1=86.4 c0=62.4 c1=68.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=92.8 a1=94.4 c0=54.4 c1=60.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=z a0=92.8 a1=94.4 c0=62.4 c1=68.8 ybase=14 ytop=16 segs=5 tex=sandstone_brick bottom=sandstone_brick
+
+box   x0=68.7 y0=12 z0=58.5 x1=68.8 y1=13.6 z1=59.9 tex=stone_blocks nx=light_bank light=15 fit
+box   x0=54.4 y0=12 z0=64.9 x1=54.5 y1=13.6 z1=66.3 tex=stone_blocks px=light_bank light=15 fit
+box   x0=68.7 y0=12 z0=72.9 x1=68.8 y1=13.6 z1=74.3 tex=stone_blocks nx=light_bank light=15 fit
+box   x0=54.4 y0=12 z0=80.9 x1=54.5 y1=13.6 z1=82.3 tex=stone_blocks px=light_bank light=15 fit
+box   x0=68.7 y0=12 z0=88.9 x1=68.8 y1=13.6 z1=90.3 tex=stone_blocks nx=light_bank light=15 fit
+box   x0=54.4 y0=12 z0=96.9 x1=54.5 y1=13.6 z1=98.3 tex=stone_blocks px=light_bank light=15 fit
+light x=67.9 y=12.8 z=59.2 radius=9 brightness=0.6
+light x=55.3 y=12.8 z=65.6 radius=9 brightness=0.6
+light x=67.9 y=12.8 z=73.6 radius=9 brightness=0.6
+light x=55.3 y=12.8 z=81.6 radius=9 brightness=0.6
+light x=67.9 y=12.8 z=89.6 radius=9 brightness=0.6
+light x=55.3 y=12.8 z=97.6 radius=9 brightness=0.6
+
+entity type=claw_cyborg x=57.6 y=9.6 z=76 yaw=180
+entity type=claw_cyborg x=65.6 y=9.6 z=88 yaw=180
+entity type=claw_cyborg x=58.4 y=9.6 z=100 yaw=180
+entity type=shotgun_ammo x=67.2 y=9.6 z=104 yaw=0
+entity type=health_kit x=65.6 y=9.6 z=104 yaw=0
+
+// --- The passage west ---
+//
+// A tall shaft with a stair down it from 9.6 to 0, then a corridor at the
+// height of the long one, ribbed and lit the same.
+
+box   x0=44 y0=-0.8 z0=100.8 x1=52.8 y1=9.6 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=24 y0=15.2 z0=99.2 x1=52.8 y1=16 z1=107.2 tex=stone_large
+box   x0=24 y0=-0.8 z0=99.2 x1=52.8 y1=15.2 z1=100.8 tex=stone_blocks
+box   x0=24 y0=-0.8 z0=105.6 x1=52.8 y1=15.2 z1=107.2 tex=stone_blocks
+box   x0=23.2 y0=5.6 z0=99.2 x1=24 y1=15.2 z1=107.2 tex=stone_blocks
+
+box   x0=43.2 y0=-0.8 z0=100.8 x1=44 y1=9.2 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=42.4 y0=-0.8 z0=100.8 x1=43.2 y1=8.8 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=41.6 y0=-0.8 z0=100.8 x1=42.4 y1=8.4 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=40.8 y0=-0.8 z0=100.8 x1=41.6 y1=8 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=40 y0=-0.8 z0=100.8 x1=40.8 y1=7.6 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=39.2 y0=-0.8 z0=100.8 x1=40 y1=7.2 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=38.4 y0=-0.8 z0=100.8 x1=39.2 y1=6.8 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=37.6 y0=-0.8 z0=100.8 x1=38.4 y1=6.4 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=36.8 y0=-0.8 z0=100.8 x1=37.6 y1=6 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=36 y0=-0.8 z0=100.8 x1=36.8 y1=5.6 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=35.2 y0=-0.8 z0=100.8 x1=36 y1=5.2 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=34.4 y0=-0.8 z0=100.8 x1=35.2 y1=4.8 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=33.6 y0=-0.8 z0=100.8 x1=34.4 y1=4.4 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=32.8 y0=-0.8 z0=100.8 x1=33.6 y1=4 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=32 y0=-0.8 z0=100.8 x1=32.8 y1=3.6 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=31.2 y0=-0.8 z0=100.8 x1=32 y1=3.2 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=30.4 y0=-0.8 z0=100.8 x1=31.2 y1=2.8 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=29.6 y0=-0.8 z0=100.8 x1=30.4 y1=2.4 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=28.8 y0=-0.8 z0=100.8 x1=29.6 y1=2 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=28 y0=-0.8 z0=100.8 x1=28.8 y1=1.6 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=27.2 y0=-0.8 z0=100.8 x1=28 y1=1.2 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=26.4 y0=-0.8 z0=100.8 x1=27.2 y1=0.8 z1=105.6 tex=stone_blocks top=floor_stone
+box   x0=25.6 y0=-0.8 z0=100.8 x1=26.4 y1=0.4 z1=105.6 tex=stone_blocks top=floor_stone
+
+box   x0=-27.2 y0=-0.8 z0=99.2 x1=25.6 y1=0 z1=107.2 tex=floor_stone
+box   x0=-27.2 y0=5.6 z0=99.2 x1=24 y1=6.4 z1=107.2 tex=stone_large
+box   x0=-16 y0=0 z0=99.2 x1=24 y1=5.6 z1=100.8 tex=stone_blocks
+box   x0=-27.2 y0=0 z0=99.2 x1=-20.8 y1=5.6 z1=100.8 tex=stone_blocks
+box   x0=-27.2 y0=0 z0=105.6 x1=24 y1=5.6 z1=107.2 tex=stone_blocks
+
+arch  axis=x a0=16 a1=16.8 c0=100.8 c1=105.6 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=x a0=8 a1=8.8 c0=100.8 c1=105.6 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=x a0=0 a1=0.8 c0=100.8 c1=105.6 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+arch  axis=x a0=-8 a1=-7.2 c0=100.8 c1=105.6 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+
+box   x0=45.3 y0=12 z0=100.8 x1=46.7 y1=13.6 z1=100.9 tex=stone_blocks pz=light_bank light=15 fit
+box   x0=34.5 y0=7.2 z0=105.5 x1=35.9 y1=8.8 z1=105.6 tex=stone_blocks nz=light_bank light=15 fit
+box   x0=26.5 y0=3.2 z0=100.8 x1=27.9 y1=4.8 z1=100.9 tex=stone_blocks pz=light_bank light=15 fit
+box   x0=11.3 y0=2.4 z0=100.8 x1=12.7 y1=4 z1=100.9 tex=stone_blocks pz=light_bank light=15 fit
+box   x0=-4.7 y0=2.4 z0=105.5 x1=-3.3 y1=4 z1=105.6 tex=stone_blocks nz=light_bank light=15 fit
+light x=46 y=12.8 z=101.7 radius=10 brightness=0.65
+light x=35.2 y=8 z=104.7 radius=10 brightness=0.65
+light x=27.2 y=4 z=101.7 radius=9 brightness=0.65
+light x=12 y=3.2 z=101.7 radius=8 brightness=0.65
+light x=-4 y=3.2 z=104.7 radius=8 brightness=0.65
+
+entity type=claw_cyborg x=10.4 y=0 z=103.2 yaw=90
+
+// --- Behind the grate ---
+//
+// A passage north from the end of the one west, x -20.8..-16, which turns
+// east at z 80 to the back of the grate.
+
+box   x0=-22.4 y0=-0.8 z0=76 x1=-9.6 y1=0 z1=99.2 tex=floor_stone
+box   x0=-22.4 y0=5.6 z0=76 x1=-9.6 y1=6.4 z1=99.2 tex=stone_large
+box   x0=-22.4 y0=0 z0=76 x1=-20.8 y1=5.6 z1=99.2 tex=stone_blocks
+box   x0=-22.4 y0=0 z0=76 x1=-9.6 y1=5.6 z1=77.6 tex=stone_blocks
+box   x0=-16 y0=0 z0=82.4 x1=-9.6 y1=5.6 z1=84 tex=stone_blocks
+box   x0=-16 y0=0 z0=84 x1=-14.4 y1=5.6 z1=99.2 tex=stone_blocks
+
+box   x0=-20.8 y0=2.4 z0=89.3 x1=-20.7 y1=4 z1=90.7 tex=stone_blocks px=light_bank light=15 fit
+box   x0=-13.5 y0=2.4 z0=77.6 x1=-12.1 y1=4 z1=77.7 tex=stone_blocks pz=light_bank light=15 fit
+light x=-19.9 y=3.2 z=90 radius=9 brightness=0.6
+light x=-12.8 y=3.2 z=78.5 radius=7 brightness=0.55
+
+entity type=health_kit x=-18.4 y=0 z=84 yaw=0
+entity type=shotgun_ammo x=-18.4 y=0 z=96 yaw=0
+
+// --- The sanctum: x -48..-27.2, z 89.6..116.8, floor 0, ceiling 12.8 ---
+//
+// Behind a door at the far end of the passage west. Pillars, a channel of lava
+// down either side, and a dais at the far end under three lit crosses, with
+// what holds the castle standing on it.
+
+box   x0=-49.6 y0=12.8 z0=88 x1=-25.6 y1=13.6 z1=118.4 tex=stone_large
+box   x0=-49.6 y0=-2.4 z0=89.6 x1=-48 y1=12.8 z1=116.8 tex=stone_blocks
+box   x0=-49.6 y0=-2.4 z0=88 x1=-25.6 y1=12.8 z1=89.6 tex=stone_blocks
+box   x0=-49.6 y0=-2.4 z0=116.8 x1=-25.6 y1=12.8 z1=118.4 tex=stone_blocks
+box   x0=-27.2 y0=-2.4 z0=89.6 x1=-25.6 y1=12.8 z1=100.8 tex=stone_blocks
+box   x0=-27.2 y0=-2.4 z0=105.6 x1=-25.6 y1=12.8 z1=116.8 tex=stone_blocks
+box   x0=-27.2 y0=5.6 z0=100.8 x1=-25.6 y1=12.8 z1=105.6 tex=stone_blocks
+arch  axis=x a0=-27.2 a1=-25.6 c0=100.8 c1=105.6 ybase=3.6 ytop=5.6 segs=5 tex=sandstone_brick bottom=sandstone_brick
+box   x0=-26.4 y0=6.4 z0=100 x1=-24 y1=11.2 z1=106.4 tex=stone_blocks
+door  x0=-25.5 y0=-0.05 z0=100.75 x1=-25.1 y1=5.6 z1=105.65 lift=5.15 tex=door_grate
+
+// The floor, around the two channels
+box   x0=-48 y0=-2.4 z0=89.6 x1=-27.2 y1=0 z1=92.8 tex=stone_blocks top=floor_stone
+box   x0=-48 y0=-2.4 z0=94.4 x1=-27.2 y1=0 z1=112 tex=stone_blocks top=floor_stone
+box   x0=-48 y0=-2.4 z0=113.6 x1=-27.2 y1=0 z1=116.8 tex=stone_blocks top=floor_stone
+box   x0=-48 y0=-2.4 z0=92.8 x1=-44.8 y1=0 z1=94.4 tex=stone_blocks top=floor_stone
+box   x0=-30.4 y0=-2.4 z0=92.8 x1=-27.2 y1=0 z1=94.4 tex=stone_blocks top=floor_stone
+box   x0=-48 y0=-2.4 z0=112 x1=-44.8 y1=0 z1=113.6 tex=stone_blocks top=floor_stone
+box   x0=-30.4 y0=-2.4 z0=112 x1=-27.2 y1=0 z1=113.6 tex=stone_blocks top=floor_stone
+box   x0=-44.8 y0=-2.4 z0=92.8 x1=-30.4 y1=-0.6 z1=94.4 tex=lava flow
+box   x0=-44.8 y0=-2.4 z0=112 x1=-30.4 y1=-0.6 z1=113.6 tex=lava flow
+
+// The dais, and the crosses over it
+box   x0=-48 y0=0 z0=97.6 x1=-43.2 y1=1.2 z1=108.8 tex=stone_blocks top=floor_stone
+box   x0=-43.2 y0=0 z0=97.6 x1=-42.4 y1=0.8 z1=108.8 tex=stone_blocks top=floor_stone
+box   x0=-42.4 y0=0 z0=97.6 x1=-41.6 y1=0.4 z1=108.8 tex=stone_blocks top=floor_stone
+box   x0=-48 y0=3.2 z0=101.6 x1=-47.9 y1=8 z1=104.8 tex=stone_blocks px=light_cross light=15 fit
+box   x0=-48 y0=4 z0=98.4 x1=-47.9 y1=6.4 z1=100 tex=stone_blocks px=light_cross light=15 fit
+box   x0=-48 y0=4 z0=106.4 x1=-47.9 y1=6.4 z1=108 tex=stone_blocks px=light_cross light=15 fit
+
+prism cx=-38.4 cz=97.6 radius=0.9 y0=0 y1=12.8 sides=8 rot=22.5 tex=sandstone_brick
+prism cx=-38.4 cz=108.8 radius=0.9 y0=0 y1=12.8 sides=8 rot=22.5 tex=sandstone_brick
+prism cx=-31.2 cz=97.6 radius=0.9 y0=0 y1=12.8 sides=8 rot=22.5 tex=sandstone_brick
+prism cx=-31.2 cz=108.8 radius=0.9 y0=0 y1=12.8 sides=8 rot=22.5 tex=sandstone_brick
+
+box   x0=-36.7 y0=5.6 z0=89.6 x1=-35.3 y1=7.2 z1=89.7 tex=stone_blocks pz=light_bank light=15 fit
+box   x0=-36.7 y0=5.6 z0=116.7 x1=-35.3 y1=7.2 z1=116.8 tex=stone_blocks nz=light_bank light=15 fit
+light x=-46.4 y=5.6 z=103.2 radius=12 brightness=0.8
+light x=-36 y=6.4 z=90.6 radius=12 brightness=0.6
+light x=-36 y=6.4 z=115.8 radius=12 brightness=0.6
+light x=-37.6 y=1 z=93.6 radius=8 brightness=0.5
+light x=-37.6 y=1 z=112.8 radius=8 brightness=0.5
+light x=-37.6 y=10 z=103.2 radius=16 brightness=0.3
+
+entity type=claw_cyborg x=-45.6 y=1.2 z=100 yaw=90
+entity type=claw_cyborg x=-45.6 y=1.2 z=106.4 yaw=90
+entity type=claw_cyborg x=-34.4 y=0 z=103.2 yaw=90
+entity type=armor_shard x=-46.4 y=1.2 z=103.2 yaw=90
 
 // ===========================================================================
 // The monolith chamber: interior x -84.8..-33.6, z 4..55.2, floor 6.4,

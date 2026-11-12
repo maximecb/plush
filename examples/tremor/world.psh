@@ -192,11 +192,12 @@ class World {
 // to open, and its texture. It is not part of the level's solid geometry, so
 // it neither casts shadows in the light bake nor goes in the BSP tree.
 class DoorSpec {
-    init(self, x0, y0, z0, x1, y1, z1, lift, tex) {
+    init(self, x0, y0, z0, x1, y1, z1, lift, tex, from) {
         self.x0 = x0; self.y0 = y0; self.z0 = z0;
         self.x1 = x1; self.y1 = y1; self.z1 = z1;
         self.lift = lift;
         self.tex = tex;
+        self.from = from;
     }
 }
 
@@ -844,9 +845,11 @@ fun load_map(path) {
         }
 
         if (cmd == "door") {
+            let var from = nil;
+            if (tok.len > 9) from = field(tok, 9, "from");
             w.door_specs.push(DoorSpec(field_num(tok, 1, "x0"), field_num(tok, 2, "y0"),
                 field_num(tok, 3, "z0"), field_num(tok, 4, "x1"), field_num(tok, 5, "y1"),
-                field_num(tok, 6, "z1"), field_num(tok, 7, "lift"), field(tok, 8, "tex")));
+                field_num(tok, 6, "z1"), field_num(tok, 7, "lift"), field(tok, 8, "tex"), from));
             continue;
         }
 
