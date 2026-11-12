@@ -357,6 +357,11 @@ let SWING_LEAD = 0.18;
 let CORPSE_HEALTH = 40;
 let GIB_GAIN = 1.0;
 
+// How loud a monster's groan of pain is, and about how long it keeps quiet
+// after one, in seconds, so that a stream of hits is not a stream of groans
+let PAIN_GAIN = 1.2;
+let PAIN_WAIT = 0.6;
+
 // How long a dead monster takes to fall over onto its back
 let FALL_TIME = 0.7;
 
@@ -437,6 +442,9 @@ class Monster extends Entity {
         // How much more its body can take once dead, before it bursts
         self.corpse_health = CORPSE_HEALTH;
 
+        // How long until it can groan again
+        self.pain_wait = 0.0;
+
         // Set for the game to take it away
         self.gone = false;
     }
@@ -486,7 +494,16 @@ class Monster extends Entity {
             return;
         }
         self.health = self.health - amount;
-        if (self.health <= 0) {
+
+        // A groan, unless the last is still going, and a longer one as it dies
+        let dying = self.health <= 0;
+        if (dying || self.pain_wait <= 0.0) {
+            let mouth = self.y + self.height * 0.85;
+            emit_sound("groan", self.x, mouth, self.z, dying ? 1.0 : 0.0, PAIN_GAIN);
+            self.pain_wait = blood_rand(PAIN_WAIT * 0.7, PAIN_WAIT * 1.3);
+        }
+
+        if (dying) {
             // No death animation yet: it goes stiff in its idle pose and
             // falls over backwards
             self.set_state("dead");
@@ -518,6 +535,7 @@ class Monster extends Entity {
     update(self, w, dt) {
         self.anim_time = self.anim_time + dt;
         self.state_time = self.state_time + dt;
+        self.pain_wait = self.pain_wait - dt;
         let p = self.player;
         let dx = p.x - self.x;
         let dz = p.z - self.z;
@@ -786,16 +804,19 @@ fun spawn_blood(x, y, z, dx, dy, dz, n, floor_y) {
 let GIB_DROPS = 70;
 let GIB_CHUNKS = 12;
 let GIB_SHAPES = 5;
-let GIB_LIFE = 10.0;
 let GIB_TEX = "flesh_red";
+
+// Lumps stay where they land until there are more than this many, and then
+// the oldest shrink away
+let MAX_GIBS = 50;
 
 // What is kept of the speed of a lump each time it hits the floor, and how
 // slow it has to be going to come to rest
 let GIB_BOUNCE = 0.3;
 let GIB_REST_SPEED = 0.6;
 
-// How long a lump takes to shrink away at the end of its life
-let GIB_FADE = 0.5;
+// How long a lump takes to shrink away once it is one too many
+let GIB_FADE = 8.0;
 
 let gib_models = [];
 
@@ -819,7 +840,10 @@ class Gib {
         self.size = size;
         self.floor = floor;
         self.level = level;
-        self.life = blood_rand(GIB_LIFE * 0.7, GIB_LIFE);
+
+        // Time left to shrink away, once it has started to
+        self.fading = false;
+        self.life = GIB_FADE;
         self.resting = false;
     }
 }
@@ -841,10 +865,21 @@ fun spawn_gibs(x, y, z, floor_y) {
 
 // Move the lumps on, and add one draw list entry for each to list
 fun update_gibs(dt, list) {
+    // The oldest come first, so those over the limit are at the front
+    let var keep = 0;
+    for (let var i = 0; i < gibs.len; ++i) {
+        if (!gibs[i].fading) keep = keep + 1;
+    }
+    for (let var i = 0; i < gibs.len && keep > MAX_GIBS; ++i) {
+        if (!gibs[i].fading) { gibs[i].fading = true; keep = keep - 1; }
+    }
+
     for (let var i = gibs.len - 1; i >= 0; --i) {
         let g = gibs[i];
-        g.life = g.life - dt;
-        if (g.life <= 0.0) { gibs.remove(i); continue; }
+        if (g.fading) {
+            g.life = g.life - dt;
+            if (g.life <= 0.0) { gibs.remove(i); continue; }
+        }
 
         if (!g.resting) {
             g.vy = g.vy - BLOOD_GRAVITY * dt;

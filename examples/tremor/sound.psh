@@ -444,6 +444,81 @@ class GibVoice extends Voice {
     }
 }
 
+// A low groan of pain: a buzzing saw with a growl an octave under it, heard
+// through two vowel-like bands, that barks up in pitch as it starts and then
+// sags. Its pitch wanders and its level flutters, like a rough throat. With
+// `dying` set it is longer, lower and falls further. Each one is different.
+// It starts a moment late, as a reaction, which also keeps the shotgun's
+// blast from drowning it out.
+class GroanVoice extends Voice {
+    init(self, gain, dying) {
+        Voice.init(self, gain);
+        self.t = 0.0 - rand_range(0.12, 0.2);
+        self.len = rand_range(0.3, 0.45);
+        self.base = rand_range(62.0, 84.0);
+        self.sag = 0.22;
+        if (dying) {
+            self.len = rand_range(1.0, 1.3);
+            self.base = self.base * 0.85;
+            self.sag = 0.4;
+        }
+
+        self.phase = 0.0;
+        self.sub = 0.0;
+        self.drift = 0.0;
+        self.flutter_hz = rand_range(18.0, 28.0);
+        self.growl = rand_range(0.3, 0.6);
+
+        self.f1 = svf_coef(rand_range(380.0, 520.0));
+        self.lo1 = 0.0; self.bp1 = 0.0;
+        self.f2 = svf_coef(rand_range(850.0, 1150.0));
+        self.lo2 = 0.0; self.bp2 = 0.0;
+        self.f3 = svf_coef(rand_range(2200.0, 2700.0));
+        self.lo3 = 0.0; self.bp3 = 0.0;
+        self.breath_k = lp_coef(1200.0);
+        self.breath = 0.0;
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            let white = noise();
+            self.t = self.t + DT;
+            let t = self.t;
+            if (t < 0.0) continue;
+            let s = (t / self.len).min(1.0);
+
+            // In quickly, then dying away over the last part of it
+            let env = (t / 0.04).min(1.0) * ((self.len - t) / (self.len * 0.6)).clip(0.0, 1.0);
+
+            // The bark up at the start, the sag after, and the wander
+            self.drift = self.drift + (white - self.drift) * 0.002;
+            let f = self.base * (1.0 + 0.3 * (-t / 0.08).exp()) * (1.0 - self.sag * s) * (1.0 + 1.5 * self.drift);
+            self.phase = self.phase + f * DT;
+            if (self.phase >= 1.0) self.phase = self.phase - 1.0;
+            self.sub = self.sub + f * 0.5 * DT;
+            if (self.sub >= 1.0) self.sub = self.sub - 1.0;
+
+            let saw = self.phase * 2.0 - 1.0;
+            let var sq = 1.0;
+            if (self.sub >= 0.5) sq = -1.0;
+            self.breath = self.breath + (white - self.breath) * self.breath_k;
+            let src = saw + sq * self.growl + self.breath * 0.6;
+
+            self.lo1 = self.lo1 + self.f1 * self.bp1;
+            self.bp1 = self.bp1 + self.f1 * (src - self.lo1 - 0.35 * self.bp1);
+            self.lo2 = self.lo2 + self.f2 * self.bp2;
+            self.bp2 = self.bp2 + self.f2 * (src - self.lo2 - 0.4 * self.bp2);
+            self.lo3 = self.lo3 + self.f3 * self.bp3;
+            self.bp3 = self.bp3 + self.f3 * (src - self.lo3 - 0.5 * self.bp3);
+
+            let flutter = 1.0 - 0.35 * (0.5 + 0.5 * (TAU * self.flutter_hz * t).sin());
+            let v = soft_clip((self.lo1 * 0.25 + self.bp1 + self.bp2 * 0.6 + self.bp3 * 0.35) * 2.5) * env * flutter;
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+        }
+        return self.t < self.len;
+    }
+}
+
 // The voice for a sound, by name. `param` means what each sound says it does,
 // such as a door's duration.
 fun make_voice(kind, gain, param) {
@@ -456,6 +531,7 @@ fun make_voice(kind, gain, param) {
     if (kind == "swipe") return SwipeVoice(gain, param);
     if (kind == "claw_hit") return ClawHitVoice(gain);
     if (kind == "gib") return GibVoice(gain);
+    if (kind == "groan") return GroanVoice(gain, param > 0.0);
     $println("unknown sound: " + kind);
     return nil;
 }
