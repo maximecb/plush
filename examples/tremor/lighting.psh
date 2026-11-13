@@ -103,6 +103,61 @@ fun occluded(ax, ay, az, bx, by, bz) {
     return false;
 }
 
+// How many brushes the segment between two points passes through, up to
+// `most`. Doors count while they are shut, since their brushes are in the
+// list and rise with them. See-through brushes count too: they are solid.
+// A brush only counts if the segment goes some way into it, so that one
+// running along a face, or clipping a corner, does not.
+let CROSS_MIN_DEPTH = 0.05;
+
+fun brushes_crossed(ax, ay, az, bx, by, bz, most) {
+    let dx = bx - ax; let dy = by - ay; let dz = bz - az;
+    let len = (dx * dx + dy * dy + dz * dz).sqrt();
+    if (len < 0.000001) return 0;
+    let min_t = CROSS_MIN_DEPTH / len;
+
+    let var lx = ax; let var hx = bx;
+    if (hx < lx) { lx = bx; hx = ax; }
+    let var ly = ay; let var hy = by;
+    if (hy < ly) { ly = by; hy = ay; }
+    let var lz = az; let var hz = bz;
+    if (hz < lz) { lz = bz; hz = az; }
+
+    let var count = 0;
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (hx < b.x0 || lx > b.x1) continue;
+        if (hy < b.y0 || ly > b.y1) continue;
+        if (hz < b.z0 || lz > b.z1) continue;
+
+        let planes = b.planes;
+        let var t0 = 0.0;
+        let var t1 = 1.0;
+        let var miss = false;
+
+        for (let var j = 0; j < planes.len; ++j) {
+            let p = planes[j];
+            let num = p.nx * ax + p.ny * ay + p.nz * az - p.d;
+            let den = p.nx * dx + p.ny * dy + p.nz * dz;
+            if (den > 0.0 - 0.000001 && den < 0.000001) {
+                if (num > 0.0) { miss = true; break; }
+                continue;
+            }
+            let t = (0.0 - num) / den;
+            if (den > 0.0) { if (t < t1) t1 = t; }
+            else { if (t > t0) t0 = t; }
+            if (t0 > t1) { miss = true; break; }
+        }
+
+        if (!miss && t1 - t0 > min_t) {
+            count = count + 1;
+            if (count >= most) return count;
+        }
+    }
+
+    return count;
+}
+
 // Is this point strictly inside a brush? Boundaries do not count: a sample
 // lifted off one surface routinely lands exactly on another.
 fun in_solid(x, y, z) {

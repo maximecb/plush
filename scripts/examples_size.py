@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Report the size of every file under examples/ and the total.
+# Report the size of every file under examples/, largest first, and the total.
 
 import argparse
 import os
@@ -29,7 +29,6 @@ def collect_files(root):
 def main():
     parser = argparse.ArgumentParser(description="Compute the total size of the examples folder")
     parser.add_argument("--dir", default=os.path.join(repo_root(), "examples"))
-    parser.add_argument("--sort", action="store_true", help="Sort by size, largest first")
     parser.add_argument("--bytes", action="store_true", help="Print raw byte counts")
     args = parser.parse_args()
 
@@ -37,9 +36,9 @@ def main():
     if not os.path.isdir(root):
         parser.error(f"not a directory: {root}")
 
+    # Largest first, and files of the same size by name
     files = collect_files(root)
-    if args.sort:
-        files.sort(key=lambda entry: entry[1], reverse=True)
+    files.sort(key=lambda entry: (-entry[1], os.path.relpath(entry[0], root)))
 
     total = 0
     for path, size in files:

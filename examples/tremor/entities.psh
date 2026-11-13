@@ -9,7 +9,7 @@
 from ./physics import move_body, brush_top, is_lava;
 from ./models import get_model, add_model, box_model, blob_model, models;
 from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER;
-from ./lighting import light_level_at, occluded;
+from ./lighting import light_level_at, occluded, SHADE_MAX;
 
 // --- Player ---
 
@@ -33,6 +33,9 @@ let PITCH_LIMIT = 1.55;
 
 let MAX_HEALTH = 100;
 let MAX_SHELLS = 50;
+
+// How long a message to the player takes to fade out, in seconds
+let MESSAGE_TIME = 5.0;
 
 // How long being hurt shows, in the red of the view and the health number
 let HURT_FLASH_TIME = 0.6;
@@ -123,6 +126,11 @@ class Entity {
         // Set for an entity that keeps the light level it was given, rather
         // than taking it again where it moves to
         self.fixed_light = false;
+
+        // A light of its own for its model to be shaded by, as [ambient,
+        // diffuse, x, y, z] with the direction it comes from, or nil for the
+        // one every model has
+        self.model_light = nil;
     }
 
     // Give the entity a model, by its name under examples/tremor/models/,
@@ -193,7 +201,157 @@ fun pickup_prop(x, y, z, yaw, model, height, spin, item, amount) {
     return p;
 }
 
-// Make the entity a map's `entity` line asks for
+// The relic: a skull hanging in the air over its stand, bobbing slowly, at
+// full brightness and with motes of white light circling and rising round it
+let RELIC_HEIGHT = 0.9;
+let RELIC_BOB = 0.05;
+let RELIC_BOB_SPEED = 1.3;
+let RELIC_REACH = 1.0;
+
+// How bright it shows, of full brightness. Below 1, the light models take
+// from above still gives it some shape.
+let RELIC_SHADE = 0.7;
+
+// The light it is shaded by: harder than the one other models have, and from
+// above and in front, so that its face has some shape
+let RELIC_LIGHT = [0.15, 1.15, 0.5, 0.6, 0.6];
+let AURA_MOTES = 64;
+let AURA_RISE = 0.3;
+let AURA_SPAN = RELIC_HEIGHT * 1.5;
+
+// How far out the motes circle, and how far round the middle the skull
+// hides those behind it
+let AURA_R0 = RELIC_HEIGHT * 0.7;
+let AURA_R1 = RELIC_HEIGHT * 0.95;
+let RELIC_HIDE = RELIC_HEIGHT * 0.55;
+
+// Every relic, for update_auras() to draw the motes of
+let relics = [];
+
+class Relic extends Entity {
+    init(self, x, y, z, yaw) {
+        Entity.init(self, x, y, z, yaw);
+        self.set_model("skull", RELIC_HEIGHT);
+        self.base_y = y;
+        self.light = SHADE_MAX * RELIC_SHADE;
+        self.fixed_light = true;
+        self.lit = true;
+        self.model_light = RELIC_LIGHT;
+
+        // The brush it hangs over, found on the first update, which the
+        // motes behind it are hidden by
+        self.stand = nil;
+        self.looked_for_stand = false;
+
+        // Taken by reaching out to it from in front of its stand
+        self.radius = RELIC_REACH;
+        self.height = RELIC_HEIGHT;
+
+        // Each mote as its angle round the skull, how fast that turns, its
+        // distance out, how far up the column it is, and its size
+        self.motes = [];
+        for (let var i = 0; i < AURA_MOTES; ++i) {
+            self.motes.push([blood_rand(0.0, 2.0 * PI), blood_rand(0.4, 1.0) * (i % 2 == 0 ? 1.0 : -1.0),
+                blood_rand(AURA_R0, AURA_R1), blood_rand(0.0, 1.0), blood_rand(0.015, 0.03)]);
+        }
+        relics.push(self);
+    }
+
+    update(self, w, dt) {
+        Entity.update(self, w, dt);
+        if (!self.looked_for_stand) {
+            self.looked_for_stand = true;
+            for (let var i = 0; i < w.brushes.len; ++i) {
+                let b = w.brushes[i];
+                if (self.x < b.x0 || self.x > b.x1 || self.z < b.z0 || self.z > b.z1) continue;
+                if (b.y1 > self.base_y + 0.01) continue;
+                if (self.stand == nil || b.y1 > self.stand.y1) self.stand = b;
+            }
+        }
+        self.y = self.base_y + RELIC_BOB * (self.anim_time * RELIC_BOB_SPEED).sin();
+        for (let var i = 0; i < self.motes.len; ++i) {
+            let m = self.motes[i];
+            m[0] = m[0] + m[1] * dt;
+            m[3] = m[3] + AURA_RISE / AURA_SPAN * dt;
+            if (m[3] >= 1.0) m[3] = m[3] - 1.0;
+        }
+    }
+
+    // Taking it ends the level
+    touch(self, w, player) {
+        if (player.dead || player.finished) return false;
+        player.finish();
+        for (let var i = relics.len - 1; i >= 0; --i) {
+            if (relics[i] == self) relics.remove(i);
+        }
+        return true;
+    }
+}
+
+// Does the segment from (ax, ay, az) to (bx, by, bz) pass through a brush's
+// bounding box?
+fun segment_hits_box(ax, ay, az, bx, by, bz, b) {
+    let var t0 = 0.0;
+    let var t1 = 1.0;
+    let lo = [b.x0, b.y0, b.z0];
+    let hi = [b.x1, b.y1, b.z1];
+    let a = [ax, ay, az];
+    let d = [bx - ax, by - ay, bz - az];
+    for (let var k = 0; k < 3; ++k) {
+        if (d[k].abs() < 0.000001) {
+            if (a[k] < lo[k] || a[k] > hi[k]) return false;
+        } else {
+            let var u0 = (lo[k] - a[k]) / d[k];
+            let var u1 = (hi[k] - a[k]) / d[k];
+            if (u0 > u1) { let t = u0; u0 = u1; u1 = t; }
+            t0 = t0.max(u0);
+            t1 = t1.min(u1);
+            if (t0 > t1) return false;
+        }
+    }
+    return true;
+}
+
+// Add the motes round each relic that the eye at (ex, ey, ez) can see to a
+// particle list. Particles are drawn over everything, so motes walls hide,
+// or the skull itself, are left out.
+fun update_auras(ex, ey, ez, out) {
+    for (let var k = 0; k < relics.len; ++k) {
+        let r = relics[k];
+        let cy = r.y + RELIC_HEIGHT * 0.5;
+        if (occluded(ex, ey, ez, r.x, cy, r.z)) continue;
+
+        // The skull's distance from the eye, and the direction to it
+        let sx = r.x - ex; let sy = cy - ey; let sz = r.z - ez;
+        let sd = (sx * sx + sy * sy + sz * sz).sqrt();
+
+        for (let var i = 0; i < r.motes.len; ++i) {
+            let m = r.motes[i];
+            let px = r.x + m[0].cos() * m[2];
+            let py = r.y + (m[3] - 0.15) * AURA_SPAN;
+            let pz = r.z + m[0].sin() * m[2];
+
+            // Behind the skull and within its outline, it would show through
+            let dx = px - ex; let dy = py - ey; let dz = pz - ez;
+            let along = (dx * sx + dy * sy + dz * sz) / sd;
+            if (along > sd) {
+                let ox = dx - sx * along / sd; let oy = dy - sy * along / sd; let oz = dz - sz * along / sd;
+                if (ox * ox + oy * oy + oz * oz < RELIC_HIDE * RELIC_HIDE) continue;
+            }
+
+            // Or behind the stand
+            if (r.stand != nil && segment_hits_box(ex, ey, ez, px, py, pz, r.stand)) continue;
+
+            // Brightest halfway up, dimming towards either end
+            let fade = 1.0 - (m[3] * 2.0 - 1.0).abs();
+            let c = (110.0 + 145.0 * fade).floor();
+            out.push(px); out.push(py); out.push(pz); out.push(m[4]);
+            out.push(0xFF_00_00_00 | (c << 16) | (c << 8) | c);
+        }
+    }
+}
+
+// Make the entity a point entity of the map asks for, by its classname
 fun spawn_entity(spec) {
     let k = spec.kind;
     let x = spec.x; let y = spec.y; let z = spec.z; let yaw = spec.yaw;
@@ -204,6 +362,8 @@ fun spawn_entity(spec) {
     if (k == "armor_shard") return Prop(x, y, z, yaw, "armor_shard", 0.675, 0 - 1, 1.2);
     if (k == "shotgun") return pickup_prop(x, y, z, yaw, "shotgun", 0.6, 1.2, "shotgun", 8);
     if (k == "shotgun_ammo") return pickup_prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0.0, "shells", 10);
+    if (k == "relic") return Relic(x, y, z, yaw);
+    if (k == "keycard") return pickup_prop(x, y, z, yaw, "keycard", 0.375, 1.5, "keycard", 1);
 
     // Figures, playing their idle animation
     if (k == "anime_girl") return Prop(x, y, z, yaw, "anime_girl", 1.7, 0, 0.0);
@@ -216,14 +376,22 @@ fun spawn_entity(spec) {
 // come after the light bake, which doors are left out of.
 fun spawn_entities(w, player) {
     let out = [];
+    spawn_placed(w, player, out);
+    for (let var i = 0; i < w.door_specs.len; ++i) out.push(Door(w, w.door_specs[i], player));
+    return out;
+}
+
+// Add the point entities of the map to a list, counting the monsters
+fun spawn_placed(w, player, out) {
     for (let var i = 0; i < w.entity_specs.len; ++i) {
         let spec = w.entity_specs[i];
-        if (spec.kind == "claw_cyborg") out.push(ClawCyborg(spec.x, spec.y, spec.z, spec.yaw, player));
+        if (spec.kind == "claw_cyborg") {
+            out.push(ClawCyborg(spec.x, spec.y, spec.z, spec.yaw, player));
+            player.monsters = player.monsters + 1;
+        }
         else if (spec.kind == "gib_chute") out.push(GibChute(w, spec.x, spec.y, spec.z, player));
         else out.push(spawn_entity(spec));
     }
-    for (let var i = 0; i < w.door_specs.len; ++i) out.push(Door(w, w.door_specs[i], player));
-    return out;
 }
 
 // Sounds that entities other than the player make, as [kind, x, y, z, param,
@@ -264,6 +432,11 @@ class Door extends Entity {
         // The side it opens from, if only one, after which it stays open
         self.from = spec.from;
         self.held = false;
+
+        // The keycard it needs, if any, and whether the player standing at it
+        // has already been told so
+        self.key = spec.key;
+        self.refused = false;
 
         // How far it has risen, which way it is moving, and how long it has
         // left to stay open
@@ -325,6 +498,17 @@ class Door extends Entity {
         return p.y < self.y1 && p.y + p.height > self.y0;
     }
 
+    // Shut again, as at the start of the level
+    reset(self) {
+        self.held = false;
+        self.refused = false;
+        self.pos = 0.0;
+        self.dir = 0;
+        self.wait = 0.0;
+        set_box_brush_y(self.brush, self.y0, self.y1);
+        self.y = self.y0;
+    }
+
     // Set off up (1) or down (-1), with the sound of the run from here
     start(self, dir) {
         self.dir = dir;
@@ -334,9 +518,18 @@ class Door extends Entity {
     }
 
     update(self, w, dt) {
+        let near = !self.held && self.player_near();
+
+        // Without the key it stays shut, and says why once per approach
+        let locked = near && self.key != nil && !self.player.keycard;
+        if (locked && !self.refused) {
+            self.player.tell("You need the " + self.key + " keycard to open this door.");
+        }
+        self.refused = locked;
+
         if (self.held) {
             // Opened from its one side, and stays that way
-        } else if (self.player_near()) {
+        } else if (near && !locked) {
             self.wait = DOOR_WAIT;
             if (self.pos < self.lift && self.dir <= 0) self.start(1);
             if (self.from != nil) self.held = true;
@@ -525,6 +718,8 @@ class Monster extends Entity {
         }
 
         if (dying) {
+            self.player.kills = self.player.kills + 1;
+
             // No death animation yet: it goes stiff in its idle pose and
             // falls over backwards
             self.set_state("dead");
@@ -907,7 +1102,7 @@ let CHUTE_MAX_LUMPS = 4;
 let CHUTE_DRIFT = 0.6;
 let CHUTE_DROPS = 8;
 let CHUTE_RANGE = 40.0;
-let SQUISH_GAIN = 0.50;
+let SQUISH_GAIN = 0.40;
 
 // The top of the highest brush under (x, z) at or below y, and whether it is
 // lava, as [y, lava]; or nil if there is nothing under it
@@ -1195,6 +1390,21 @@ class Player extends Entity {
 
         self.health = MAX_HEALTH;
         self.shells = 0;
+        self.keycard = false;
+
+        // A line of text shown to the player, and how long it has left to
+        // fade out
+        self.message = nil;
+        self.message_time = 0.0;
+
+        // How long they have been playing, how many monsters they have
+        // killed out of how many there are, and whether they have finished
+        // the level and how long ago
+        self.play_time = 0.0;
+        self.kills = 0;
+        self.monsters = 0;
+        self.finished = false;
+        self.finish_time = 0.0;
 
         // Where they come back to after dying, and whether they are dead and
         // for how long
@@ -1244,7 +1454,7 @@ class Player extends Entity {
 
     // Lose health, and die with none left
     hurt(self, amount) {
-        if (self.dead) return;
+        if (self.dead || self.finished) return;
         self.health = (self.health - amount).max(0);
         self.hurt_time = 0.0;
         if (self.health <= 0) self.die();
@@ -1314,6 +1524,34 @@ class Player extends Entity {
         return 1.0 - self.hurt_time / HURT_FLASH_TIME;
     }
 
+    // Back at the start as at the beginning of the level, with nothing
+    restart(self) {
+        let s = self.spawn;
+        let noclip = self.noclip;
+        Player.init(self, s[0], s[1], s[2], s[3]);
+        self.noclip = noclip;
+    }
+
+    // Finish the level
+    finish(self) {
+        self.finished = true;
+        self.finish_time = 0.0;
+        self.message = nil;
+        self.events.push("pickup");
+    }
+
+    // Show the player a line of text, which then fades out
+    tell(self, text) {
+        self.message = text;
+        self.message_time = MESSAGE_TIME;
+    }
+
+    // How opaque the message is, from 1 when shown down to 0
+    message_alpha(self) {
+        if (self.message == nil) return 0.0;
+        return (self.message_time / MESSAGE_TIME).clip(0.0, 1.0);
+    }
+
     // Take `amount` of something picked up. Returns false if the player has
     // no room for it, in which case it is left where it lies.
     give(self, item, amount) {
@@ -1323,6 +1561,9 @@ class Player extends Entity {
         } else if (item == "shells") {
             if (self.shells >= MAX_SHELLS) return false;
             self.shells = (self.shells + amount).min(MAX_SHELLS);
+        } else if (item == "keycard") {
+            if (self.keycard) return false;
+            self.keycard = true;
         } else {
             // A weapon, which comes loaded
             let pose = held_pose(item);
@@ -1338,6 +1579,18 @@ class Player extends Entity {
     // Advance the player by one frame. `mf` and `ms` are how hard they are
     // pushing forward and sideways, each -1, 0 or 1.
     move(self, w, dt, mf, ms, want_up, want_down) {
+        if (self.message != nil) {
+            self.message_time = self.message_time - dt;
+            if (self.message_time <= 0.0) self.message = nil;
+        }
+
+        // Done, they stay where they are
+        if (self.finished) {
+            self.finish_time = self.finish_time + dt;
+            return;
+        }
+        self.play_time = self.play_time + dt;
+
         // Dead, they only fall
         if (self.dead) {
             self.dead_time = self.dead_time + dt;
@@ -1433,7 +1686,7 @@ class Player extends Entity {
     // Fire the weapon in hand, if there is one, it is loaded and the last
     // shot is over. Returns whether it went off.
     fire(self) {
-        if (self.dead || self.held == nil || self.shells <= 0 || self.shot_time < self.held.cycle) return false;
+        if (self.dead || self.finished || self.held == nil || self.shells <= 0 || self.shot_time < self.held.cycle) return false;
         self.shot_time = 0.0;
         self.shells = self.shells - 1;
         return true;
@@ -1486,4 +1739,28 @@ class Player extends Entity {
 
         return [h.model.id, 0 - 1, 0.0, x, y, z, yaw, h.scale, lit, true, pitch];
     }
+}
+
+// --- Starting over ---
+
+// Start the level over: the player back at the start with nothing, and every
+// entity as the map placed it. Doors are shut again rather than made anew,
+// since each has a model the render actors were started with.
+fun restart_level(w, player, list) {
+    let doors = [];
+    for (let var i = 0; i < list.len; ++i) {
+        if (list[i] instanceof Door) {
+            list[i].reset();
+            doors.push(list[i]);
+        }
+    }
+    list.resize(0, nil);
+    relics.resize(0, nil);
+    drops.resize(0, nil);
+    gibs.resize(0, nil);
+    sound_events.resize(0, nil);
+
+    player.restart();
+    spawn_placed(w, player, list);
+    for (let var i = 0; i < doors.len; ++i) list.push(doors[i]);
 }

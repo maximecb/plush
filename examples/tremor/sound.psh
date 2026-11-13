@@ -32,6 +32,21 @@ let MAX_VOICES = 24;
 // How loud everything is, before the soft limit
 let MASTER_GAIN = 0.8;
 
+// What gets through each brush between a sound and the listener. Close by, a
+// wall or two in the way only takes the edge off, since sound finds its way
+// round; far off, each one counts for more. In between, the two are blended.
+let MUFFLE_NEAR = 0.88;
+let MUFFLE_FAR = 0.65;
+let MUFFLE_NEAR_DIST = 15.0;
+let MUFFLE_FAR_DIST = 25.0;
+
+// And how dull it is: the cutoff of its low pass is MUFFLE_HZ through one far
+// brush, and falls by half for each more, never past the bounds. Near brushes
+// count for as much less as they take less of the level.
+let MUFFLE_HZ = 2000.0;
+let MUFFLE_HZ_MIN = 200.0;
+let MUFFLE_HZ_MAX = 8000.0;
+
 // --- Building blocks ---
 
 let var noise_seed = 22222;
@@ -560,6 +575,42 @@ class GroanVoice extends Voice {
     }
 }
 
+// A voice heard through walls: it renders into a buffer of its own, which goes
+// through two one-pole low passes on its way into the mix, so that what is
+// left of it is dull as well as quiet
+class MuffledVoice extends Voice {
+    init(self, inner, hz) {
+        Voice.init(self, 1.0);
+        self.inner = inner;
+        self.k = lp_coef(hz);
+        self.lp1 = 0.0;
+        self.lp2 = 0.0;
+        self.buf = ByteArray.with_size(0);
+    }
+
+    render(self, mix, n) {
+        let var buf = self.buf;
+        if (buf.len != n * 4) {
+            buf = ByteArray.with_size(n * 4);
+            self.buf = buf;
+        }
+        buf.fill_u32(0, n, 0);
+        let more = self.inner.render(buf, n);
+
+        let k = self.k;
+        let var lp1 = self.lp1;
+        let var lp2 = self.lp2;
+        for (let var i = 0; i < n; ++i) {
+            lp1 = lp1 + (buf.get_f32(i) - lp1) * k;
+            lp2 = lp2 + (lp1 - lp2) * k;
+            mix.set_f32(i, mix.get_f32(i) + lp2);
+        }
+        self.lp1 = lp1;
+        self.lp2 = lp2;
+        return more;
+    }
+}
+
 // The voice for a sound, by name. `param` means what each sound says it does,
 // such as a door's duration.
 fun make_voice(kind, gain, param) {
@@ -599,10 +650,13 @@ let echo_pos = [0, 0, 0, 0];
 let echo_lp = [0.0, 0.0, 0.0, 0.0];
 for (let var k = 0; k < ECHO_LENS.len; ++k) echo_bufs.push(ByteArray.with_size(ECHO_LENS[k] * 4));
 
-fun start_voice(kind, gain, param) {
+// Start a sound, through a low pass at `hz`, or none if 0
+fun start_voice(kind, gain, param, hz) {
     if (voices.len >= MAX_VOICES) return;
-    let v = make_voice(kind, gain, param);
-    if (v != nil) voices.push(v);
+    let var v = make_voice(kind, gain, param);
+    if (v == nil) return;
+    if (hz > 0.0) v = MuffledVoice(v, hz);
+    voices.push(v);
 }
 
 // Fill buf with the next n samples of everything playing
@@ -647,12 +701,14 @@ fun mix_into(buf, n) {
 
 // --- The audio actor ---
 
-// A sound to start, sent to the audio actor
+// A sound to start, sent to the audio actor, and the cutoff of the low pass
+// it is heard through, 0 for none
 class SoundPlay {
-    init(self, kind, gain, param) {
+    init(self, kind, gain, param, hz) {
         self.kind = kind;
         self.gain = gain;
         self.param = param;
+        self.hz = hz;
     }
 }
 
@@ -672,7 +728,7 @@ fun audio_actor() {
         let msg = $actor_recv();
 
         if (msg instanceof SoundPlay) {
-            start_voice(msg.kind, msg.gain, msg.param);
+            start_voice(msg.kind, msg.gain, msg.param, msg.hz);
             continue;
         }
         if (msg instanceof SoundStop) break;
@@ -706,18 +762,37 @@ fun stop_sound() {
 // Play a sound at a level from 0 to 1. Does nothing if sound isn't started.
 fun play_sound(kind, gain, param) {
     if (sound_actor == nil) return;
-    $actor_send(sound_actor, SoundPlay(kind, gain, param));
+    $actor_send(sound_actor, SoundPlay(kind, gain, param, 0.0));
 }
 
 // How far away a sound is at half its level
 let SOUND_REF_DIST = 6.0;
 
 // Play a sound made somewhere in the world, quieter the further it is from
-// the listener. There is one channel, so it can't tell which side it came from.
-fun play_sound_at(kind, x, y, z, lx, ly, lz, gain, param) {
+// the listener, and quieter and duller for each of the `walls` brushes in
+// between. There is one channel, so it can't tell which side it came from.
+fun play_sound_at(kind, x, y, z, lx, ly, lz, gain, param, walls) {
     let dx = x - lx; let dy = y - ly; let dz = z - lz;
     let d = (dx * dx + dy * dy + dz * dz).sqrt();
-    let g = gain / (1.0 + d / SOUND_REF_DIST);
+    let through = muffle_through(d).pow(walls.to_f());
+    let g = gain * through / (1.0 + d / SOUND_REF_DIST);
     if (g < 0.02) return;
-    play_sound(kind, g, param);
+    if (sound_actor == nil) return;
+    $actor_send(sound_actor, SoundPlay(kind, g, param, muffle_hz(walls, through)));
+}
+
+// What gets through each brush between a sound and a listener this far away
+fun muffle_through(d) {
+    let t = ((d - MUFFLE_NEAR_DIST) / (MUFFLE_FAR_DIST - MUFFLE_NEAR_DIST)).clip(0.0, 1.0);
+    let s = t * t * (3.0 - 2.0 * t);
+    return MUFFLE_NEAR + (MUFFLE_FAR - MUFFLE_NEAR) * s;
+}
+
+// The low pass cutoff for a sound through `walls` brushes that let `through`
+// of it by, or 0 for none. It is as dull as it would be through the number of
+// far brushes that take the same off it.
+fun muffle_hz(walls, through) {
+    if (walls == 0) return 0.0;
+    let far_walls = through.ln() / MUFFLE_FAR.ln();
+    return (MUFFLE_HZ * 0.5.pow(far_walls - 1.0)).clip(MUFFLE_HZ_MIN, MUFFLE_HZ_MAX);
 }

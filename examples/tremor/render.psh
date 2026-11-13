@@ -36,7 +36,7 @@
 from image import Image;
 from random import Xoshiro128;
 from ./config import FRAME_WIDTH, FRAME_HEIGHT;
-from ./world import MOON_AZ, MOON_EL, face_u, face_v;
+from ./world import MOON_AZ, MOON_EL;
 from ./models import models, Projection, Light;
 
 // Projection. FOCAL is half the frame width over the tangent of half the
@@ -1413,10 +1413,8 @@ fun face_setup(f, cull) {
     // Faces pointing away from the eye are the inside of a solid
     if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return 0;
 
-    let taxis = f.taxis;
-    let turn = f.turn;
-    let flip = f.flip;
-    let scale = f.scale;
+    let ux = f.ux; let uy = f.uy; let uz = f.uz; let ou = f.ou;
+    let vx = f.vx; let vy = f.vy; let vz = f.vz; let ov = f.ov;
     let n = f.v.len.idiv(3);
     if (n > MAX_VERTS - 8) return 0;
 
@@ -1433,17 +1431,8 @@ fun face_setup(f, cull) {
                     + WAVE_AMP * (wz * WAVE_FREQ + warp_phase * 0.83).sin();
         }
 
-        let var u = face_u(taxis, turn, wx, wy, wz);
-        let var v = face_v(taxis, turn, wx, wy, wz);
-        if (flip) u = 0.0 - u;
-
-        if (f.fit) {
-            u = u * f.su + f.ou;
-            v = v * f.sv + f.ov;
-        } else {
-            u = u * scale;
-            v = v * scale;
-        }
+        let u = ux * wx + uy * wy + uz * wz + ou;
+        let v = vx * wx + vy * wy + vz * wz + ov;
 
         // Into view space: yaw about the up axis, then pitch, then roll
         let dx = wx - cam_x;
@@ -2408,12 +2397,22 @@ fun draw_instance(inst) {
         g_wk = 1.0;
     }
 
+    // An entry can bring a light of its own: [ambient, diffuse, x, y, z]
     let k = level / 255.0;
-    let lx = MODEL_LIGHT_X / MODEL_LIGHT_LEN;
-    let ly = MODEL_LIGHT_Y / MODEL_LIGHT_LEN;
-    let lz = MODEL_LIGHT_Z / MODEL_LIGHT_LEN;
+    let var lx = MODEL_LIGHT_X / MODEL_LIGHT_LEN;
+    let var ly = MODEL_LIGHT_Y / MODEL_LIGHT_LEN;
+    let var lz = MODEL_LIGHT_Z / MODEL_LIGHT_LEN;
+    let var ambient = MODEL_AMBIENT;
+    let var diffuse = MODEL_DIFFUSE;
+    if (inst.len > 11) {
+        let own = inst[11];
+        ambient = own[0];
+        diffuse = own[1];
+        let len = (own[2] * own[2] + own[3] * own[3] + own[4] * own[4]).sqrt();
+        lx = own[2] / len; ly = own[3] / len; lz = own[4] / len;
+    }
     let light = Light(view_dir_x(lx, ly, lz), view_dir_y(lx, ly, lz), view_dir_z(lx, ly, lz),
-        MODEL_AMBIENT * k, MODEL_DIFFUSE * k);
+        ambient * k, diffuse * k);
 
     model.set_pose(inst[1], inst[2]);
     model.transform(m, s, model_proj, light);

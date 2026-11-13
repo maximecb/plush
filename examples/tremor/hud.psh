@@ -67,7 +67,110 @@ fun draw_cross(img, cx, cy, color) {
     img.fill_rect(cx - h, cy + CROSS_GAP, t, CROSS_ARM, color);
 }
 
+// Messages to the player, a little smaller than the numbers
+let MESSAGE_SCALE = (FRAME_HEIGHT * 3).idiv(720).max(1);
+let MESSAGE_COLOR = 0xFF_F0_E8_D8;
+let message_font = PixelFont(MESSAGE_SCALE, MESSAGE_COLOR, nil);
+
+// Draw text in a color blended over the image by an opacity from 0 to 1,
+// using the font only for the shapes of its glyphs
+fun blended_text(img, font, x, y, text, color, alpha) {
+    let a = (alpha * 256.0).floor().clip(0, 256);
+    if (a == 0) return;
+    let cr = (color >> 16) & 0xFF;
+    let cg = (color >> 8) & 0xFF;
+    let cb = color & 0xFF;
+    let bytes = img.bytes;
+    let width = img.width;
+    let height = img.height;
+
+    let var cx = x;
+    for (let var i = 0; i < text.len; ++i) {
+        let ch = text.char_at(i);
+        if (ch == nil) continue;
+
+        // Runs of lit pixels, each a row, a starting column and a length
+        let runs = font.glyph(ch);
+        for (let var k = 0; k < runs.len; k += 3) {
+            let py = y + runs[k];
+            if (py < 0 || py >= height) continue;
+            let x0 = (cx + runs[k + 1]).max(0);
+            let x1 = (cx + runs[k + 1] + runs[k + 2]).min(width);
+            for (let var px = x0; px < x1; ++px) {
+                let idx = py * width + px;
+                let d = bytes.get_u32(idx);
+                let dr = (d >> 16) & 0xFF;
+                let dg = (d >> 8) & 0xFF;
+                let db = d & 0xFF;
+                let r = dr + ((cr - dr) * a).idiv(256);
+                let g = dg + ((cg - dg) * a).idiv(256);
+                let b = db + ((cb - db) * a).idiv(256);
+                bytes.set_u32(idx, 0xFF_00_00_00 | (r << 16) | (g << 8) | b);
+            }
+        }
+        cx += font.char_w;
+    }
+}
+
+// The player's message, centred across the view 60% of the way down
+fun draw_message(img, player) {
+    let alpha = player.message_alpha();
+    if (alpha <= 0.0) return;
+    let text = player.message;
+    let x = (FRAME_WIDTH - message_font.text_width(text)).idiv(2);
+    let y = (FRAME_HEIGHT * 3).idiv(5) - message_font.char_h.idiv(2);
+    blended_text(img, message_font, x + SHADOW, y + SHADOW, text, SHADOW_COLOR, alpha);
+    blended_text(img, message_font, x, y, text, MESSAGE_COLOR, alpha);
+}
+
+// The level done: the view has faded to white, and what the player did is
+// written over it in dark letters, fading in after it
+let END_COLOR = 0xFF_28_22_1C;
+let END_FADE_START = 0.6;
+let END_FADE_TIME = 1.2;
+let end_font = PixelFont(BIG_SCALE, END_COLOR, nil);
+
+// Write a line centred across the view with its top at y
+fun centred_line(img, font, y, text, alpha) {
+    let x = (FRAME_WIDTH - font.text_width(text)).idiv(2);
+    blended_text(img, font, x, y, text, END_COLOR, alpha);
+}
+
+// Seconds as minutes and seconds, such as 3:07
+fun format_time(t) {
+    let s = t.floor();
+    let m = s.idiv(60);
+    let r = s - m * 60;
+    return m.to_s() + ":" + (r < 10 ? "0" : "") + r.to_s();
+}
+
+fun draw_end(img, player) {
+    let alpha = ((player.finish_time - END_FADE_START) / END_FADE_TIME).clip(0.0, 1.0);
+    if (alpha <= 0.0) return;
+
+    let title = "LEVEL COMPLETE";
+    let stats = "TIME " + format_time(player.play_time) + "    KILLS "
+        + player.kills.to_s() + "/" + player.monsters.to_s();
+    let hint = "ENTER TO PLAY AGAIN    ESCAPE TO QUIT";
+
+    let gap = MARGIN.idiv(2);
+    let total = end_font.char_h + gap + message_font.char_h + gap * 3 + label_font.char_h;
+    let var y = (FRAME_HEIGHT - total).idiv(2);
+    centred_line(img, end_font, y, title, alpha);
+    y = y + end_font.char_h + gap;
+    centred_line(img, message_font, y, stats, alpha);
+    y = y + message_font.char_h + gap * 3;
+    centred_line(img, label_font, y, hint, alpha);
+}
+
 fun draw_hud(img, player) {
+    if (player.finished) {
+        draw_end(img, player);
+        return;
+    }
+
+    draw_message(img, player);
+
     // Dead, a word to say so in the middle, and how to come back once they can
     if (player.dead) {
         let msg = "YOU DIED";
