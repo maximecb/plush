@@ -82,11 +82,14 @@ assert(vf.get_pixel(1, 1) == COLOR_RED);
 assert(vf.get_pixel(2, 0) == COLOR_BLUE);
 assert(vf.get_pixel(2, 2) == COLOR_BLACK);
 
-// Loading a TGA, whose rows are stored bottom-up
-let tex = load_tga("examples/tremor/textures/crate_wood.tga");
-assert(tex.width == 256);
-assert(tex.height == 256);
-assert(tex.get_pixel(0, 0) == 0xFF040303);
+// Decoding a TGA whose rows are stored bottom-up, as the header says when
+// its top-down bit is clear
+let bottom_up = encode_tga(img, false);
+bottom_up[17] = 0x08;
+let tex = decode_tga(bottom_up);
+assert(tex.width == img.width);
+assert(tex.height == img.height);
+assert(tex.get_pixel(3, img.height - 1 - 2) == COLOR_RED);
 
 assert(load_tga("no/such/file.tga") == nil);
 

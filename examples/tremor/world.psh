@@ -6,7 +6,7 @@
 // intersecting those planes, so arches, ramps and angled walls cost nothing
 // extra: the renderer only ever sees convex polygons.
 
-from image import load_tga;
+from png import load_png;
 
 let TEX_DIR = "examples/tremor/textures/";
 
@@ -30,11 +30,17 @@ let MOON_EL = 0.4054;      // Radians above the horizon
 
 // --- Textures ---
 
+// Every texture loaded, by path, since doors ask for the same ones again
+let textures_by_path = {};
+
 // Loads a texture, which the span loop needs to be power-of-two sized
 fun load_texture(path) {
-    let img = load_tga(path);
+    if (textures_by_path.has(path)) return textures_by_path[path];
+
+    $println("loading texture " + path);
+    let img = load_png(path);
     if (img == nil) {
-        $println(path + ": could not read an uncompressed 32-bit TGA");
+        $println(path + ": could not read a PNG with 8 bits per channel");
         $exit(1);
     }
 
@@ -45,6 +51,7 @@ fun load_texture(path) {
         $exit(1);
     }
 
+    textures_by_path[path] = img;
     return img;
 }
 
@@ -53,7 +60,7 @@ fun load_texture(path) {
 // renderer, which owns the fixed point format they depend on.
 class Texture {
     init(self, name) {
-        let t = load_texture(TEX_DIR + name + ".tga");
+        let t = load_texture(TEX_DIR + name + ".png");
         self.name = name;
         self.base = t.bytes;
         self.width = t.width;
@@ -160,6 +167,12 @@ class Face {
         self.vmask = 0;
         self.uwrap = 0;
         self.vwrap = 0;
+
+        // The renderer's bounding sphere, set with the fields above
+        self.bx = 0.0;
+        self.by = 0.0;
+        self.bz = 0.0;
+        self.br = 0.0;
 
         // The planes the light asks this face to be cut on, gathered while it
         // is still whole and handed down to every piece taken out of it

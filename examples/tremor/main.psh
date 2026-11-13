@@ -48,16 +48,22 @@ from ./hud import draw_hud;
 
 // The audio actor starts with a copy of this actor's heap, so it is spawned
 // before the world is loaded into it. The benchmark runs silent.
-if (!BENCH) start_sound();
+if (!BENCH) {
+    $println("starting sound");
+    start_sound();
+}
 
 // --- Setup ---
 
+$println("loading map " + MAP_PATH);
 let world = load_map(MAP_PATH);
 
+$println("lighting the level");
 let light_start_ms = $time_current_ms();
 let lit_faces = light_world(world);
 let light_ms = $time_current_ms() - light_start_ms;
 
+$println("building the BSP tree");
 let bsp = build_bsp(lit_faces);
 set_scene(bsp.root);
 let main_mem_bytes = $gc_mem_size();
@@ -83,6 +89,7 @@ let player = Player(world.spawn_x, world.spawn_y - EYE_HEIGHT, world.spawn_z, wo
 
 // The entities load their models as they are made, which has to happen before
 // the render actors are spawned with their copy of every model
+$println("spawning entities");
 let models_start_ms = $time_current_ms();
 let entities = spawn_entities(world, player);
 load_weapons();
@@ -220,6 +227,7 @@ let TOUR = [
     [ 75.2, 20.8, 88.0,  3.14, 0.0]
 ];
 
+$println("starting render workers");
 let actor_start_ms = $time_current_ms();
 start_render_actors(NUM_RENDER_ACTORS);
 $println("render workers: " + NUM_RENDER_ACTORS.to_s() + " actors forked in "

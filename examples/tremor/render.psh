@@ -216,7 +216,7 @@ let frame_buffer = frame_image.bytes;
 // main actor and are changed only in the private heap of each worker.
 let var render_y0 = 0;
 let var render_y1 = FRAME_HEIGHT;
-let BAND_HEIGHT = 60;
+let BAND_HEIGHT = 45;
 
 // --- The s-buffer ---
 
@@ -983,8 +983,10 @@ fun raster_poly(m) {
         if (pY[i] > y_max) { y_max = pY[i]; bot = i; }
     }
 
+    // Start at the band's first row, not the polygon's: the edges and
+    // interpolants are worked out for whichever row the walk starts on
     let var scan_y = y_min.floor();
-    if (scan_y < 0) scan_y = 0;
+    if (scan_y < render_y0) scan_y = render_y0;
     let var end_y = y_max.floor();
     if (end_y > render_y1) end_y = render_y1;
     if (scan_y >= end_y) return;
@@ -1400,6 +1402,13 @@ fun raster_spans(first, count) {
     pixels_drawn = pixels_drawn + span_px;
 }
 
+// The five planes of the view frustum, in world space, as normal and offset.
+// A point is inside a plane when nx*x + ny*y + nz*z - d >= 0.
+let fr_nx = Array.with_size(5, 0.0);
+let fr_ny = Array.with_size(5, 0.0);
+let fr_nz = Array.with_size(5, 0.0);
+let fr_d = Array.with_size(5, 0.0);
+
 // Cull, transform, clip and project one face, and work out the gradients the
 // span loop runs on. Returns the vertex count left after clipping, or 0 if
 // there is nothing to draw.
@@ -1412,6 +1421,12 @@ fun raster_spans(first, count) {
 fun face_setup(f, cull) {
     // Faces pointing away from the eye are the inside of a solid
     if (f.nx * cam_x + f.ny * cam_y + f.nz * cam_z - f.d <= 0.0) return 0;
+
+    // Outside this actor's part of the frustum, found from a bounding sphere
+    // before paying to transform the corners
+    for (let var i = 0; i < 5; ++i) {
+        if (fr_nx[i] * f.bx + fr_ny[i] * f.by + fr_nz[i] * f.bz - fr_d[i] + f.br < 0.0) return 0;
+    }
 
     let ux = f.ux; let uy = f.uy; let uz = f.uz; let ou = f.ou;
     let vx = f.vx; let vy = f.vy; let vz = f.vz; let ov = f.ov;
@@ -1672,15 +1687,10 @@ let gap_count = Array.with_size(FRAME_HEIGHT, 0);
 let var gaps_x0 = 0; let var gaps_x1 = 0;
 let var gaps_y0 = 0; let var gaps_y1 = 0;
 
-// The five planes of the view frustum, in world space, as normal and offset.
-// A point is inside a plane when nx*x + ny*y + nz*z - d >= 0.
-let fr_nx = Array.with_size(5, 0.0);
-let fr_ny = Array.with_size(5, 0.0);
-let fr_nz = Array.with_size(5, 0.0);
-let fr_d = Array.with_size(5, 0.0);
-
+// Kept at unit length, so the distance to a plane can be held against a radius
 fun set_frustum_plane(i, nx, ny, nz, d) {
-    fr_nx[i] = nx; fr_ny[i] = ny; fr_nz[i] = nz; fr_d[i] = d;
+    let s = 1.0 / (nx * nx + ny * ny + nz * nz).sqrt();
+    fr_nx[i] = nx * s; fr_ny[i] = ny * s; fr_nz[i] = nz * s; fr_d[i] = d * s;
 }
 
 // Rebuild the frustum for where the camera is now. The camera's own axes come
@@ -1704,9 +1714,8 @@ fun update_frustum() {
     let uy = uy0 * cos_roll;
     let uz = uz0 * cos_roll - rz0 * sin_roll;
 
-    // How far the frustum opens out, per unit of depth
+    // How far the frustum opens out sideways, per unit of depth
     let tan_h = CENTER_X / FOCAL;
-    let tan_v = CENTER_Y / FOCAL;
 
     set_frustum_plane(0, fx, fy, fz, fx * cam_x + fy * cam_y + fz * cam_z + NEAR);
 
@@ -1716,10 +1725,14 @@ fun update_frustum() {
     let sx = tan_h * fx - rx; let sy = tan_h * fy - ry; let sz = tan_h * fz - rz;
     set_frustum_plane(2, sx, sy, sz, sx * cam_x + sy * cam_y + sz * cam_z);
 
-    let bx = ux + tan_v * fx; let by = uy + tan_v * fy; let bz = uz + tan_v * fz;
+    // The top and bottom planes go through the edges of this actor's band
+    // rather than the frame's, so the walk turns away subtrees outside it
+    let tan_b = (render_y1.to_f() - CENTER_Y) / FOCAL;
+    let bx = ux + tan_b * fx; let by = uy + tan_b * fy; let bz = uz + tan_b * fz;
     set_frustum_plane(3, bx, by, bz, bx * cam_x + by * cam_y + bz * cam_z);
 
-    let tx = tan_v * fx - ux; let ty = tan_v * fy - uy; let tz = tan_v * fz - uz;
+    let tan_t = (CENTER_Y - render_y0.to_f()) / FOCAL;
+    let tx = tan_t * fx - ux; let ty = tan_t * fy - uy; let tz = tan_t * fz - uz;
     set_frustum_plane(4, tx, ty, tz, tx * cam_x + ty * cam_y + tz * cam_z);
 }
 
@@ -1970,8 +1983,9 @@ fun raster_triangle() {
         if (pY[i] > y_max) { y_max = pY[i]; bot = i; }
     }
 
+    // Start at the band's first row, as `raster_poly` does
     let var scan_y = y_min.floor();
-    if (scan_y < 0) scan_y = 0;
+    if (scan_y < render_y0) scan_y = render_y0;
     let var end_y = y_max.floor();
     if (end_y > render_y1) end_y = render_y1;
     if (scan_y >= end_y) return;
@@ -2851,6 +2865,19 @@ fun prepare_node(node) {
         g.vmask = (t.height - 1) << shift;
         g.uwrap = (t.width << FP_BITS) - 1;
         g.vwrap = (t.height << FP_BITS) - 1;
+
+        // A sphere around the corners for `face_setup` to cull with, grown by
+        // how far lava swells
+        let v = g.v;
+        let var x0 = v[0]; let var y0 = v[1]; let var z0 = v[2];
+        let var x1 = x0; let var y1 = y0; let var z1 = z0;
+        for (let var k = 3; k < v.len; k = k + 3) {
+            x0 = x0.min(v[k]); y0 = y0.min(v[k + 1]); z0 = z0.min(v[k + 2]);
+            x1 = x1.max(v[k]); y1 = y1.max(v[k + 1]); z1 = z1.max(v[k + 2]);
+        }
+        let hx = (x1 - x0) * 0.5; let hy = (y1 - y0) * 0.5; let hz = (z1 - z0) * 0.5;
+        g.bx = x0 + hx; g.by = y0 + hy; g.bz = z0 + hz;
+        g.br = (hx * hx + hy * hy + hz * hz).sqrt() + (g.flow ? 2.0 * WAVE_AMP : 0.0) + 0.01;
     }
 
     prepare_node(node.front);
