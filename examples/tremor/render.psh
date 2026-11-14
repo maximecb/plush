@@ -2274,6 +2274,16 @@ fun draw_triangle(model, t) {
     let in_c = vD[c] >= NEAR;
     if (!in_a && !in_b && !in_c) return;
 
+    // Clear of this actor's band, as most of a model that reaches across
+    // several bands is, which saves setting it up for nothing
+    let all_in = in_a && in_b && in_c;
+    if (all_in) {
+        let vY = model.vY;
+        let ya = vY[a]; let yb = vY[b]; let yc = vY[c];
+        if (ya.max(yb).max(yc) < render_y0.to_f() - 1.0) return;
+        if (ya.min(yb).min(yc) > render_y1.to_f() + 1.0) return;
+    }
+
     let tex = model.tri_tex[t];
     g_pix = tex.pix;
     g_umask = tex.umask;
@@ -2282,7 +2292,7 @@ fun draw_triangle(model, t) {
     g_uwrap = tex.uwrap;
     g_vwrap = tex.vwrap;
 
-    if (in_a && in_b && in_c) {
+    if (all_in) {
         let vX = model.vX; let vY = model.vY; let vW = model.vW;
         let vUZ = model.vUZ; let vVZ = model.vVZ; let vLZ = model.vLZ;
         draw_projected(vX[a], vY[a], vW[a], vUZ[a], vVZ[a], vLZ[a],
