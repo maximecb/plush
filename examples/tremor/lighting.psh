@@ -49,10 +49,108 @@ let var brushes = nil;
 let var lights = nil;
 let var moon_light = 0.0;
 
-// Does any brush stand between these two points? The segment is clipped
-// against the brush's half-spaces the way `plane_quad` clips a face, and the
-// brush bounds reject nearly all of them before that runs, which is what keeps
-// a linear walk over every brush cheap enough to do per sample.
+// The lamps that can reach the face being baked: in range of some part of it
+// and in front of it. Its pieces share them.
+let var face_lights = [];
+
+// --- A grid over the brushes ---
+//
+// The brushes are binned by their bounds into a grid of cubes, so a segment
+// only looks at those in the cells it passes through, and a point at those in
+// its own cell. Walking every brush instead cost the bake hundreds of millions
+// of bound tests. The grid holds the brushes the map was loaded with, which
+// never move; doors are added after it is built and rise and fall, so the ones
+// past `grid_count` are still walked one by one.
+let GRID_CELL = 4.0;
+let var grid_cells = nil;
+let var grid_count = 0;
+let var grid_x0 = 0.0; let var grid_y0 = 0.0; let var grid_z0 = 0.0;
+let var grid_nx = 0; let var grid_ny = 0; let var grid_nz = 0;
+
+// Each query stamps the brushes it has tested, since a brush sits in every
+// cell its bounds reach and a segment can meet it in several
+let var grid_mark = nil;
+let var grid_query = 0;
+
+fun build_grid(list) {
+    grid_count = list.len;
+    if (grid_count == 0) return;
+
+    let var x0 = list[0].x0; let var y0 = list[0].y0; let var z0 = list[0].z0;
+    let var x1 = list[0].x1; let var y1 = list[0].y1; let var z1 = list[0].z1;
+    for (let var i = 1; i < grid_count; ++i) {
+        let b = list[i];
+        x0 = x0.min(b.x0); y0 = y0.min(b.y0); z0 = z0.min(b.z0);
+        x1 = x1.max(b.x1); y1 = y1.max(b.y1); z1 = z1.max(b.z1);
+    }
+
+    grid_x0 = x0 - 0.01; grid_y0 = y0 - 0.01; grid_z0 = z0 - 0.01;
+    grid_nx = ((x1 + 0.01 - grid_x0) / GRID_CELL).floor() + 1;
+    grid_ny = ((y1 + 0.01 - grid_y0) / GRID_CELL).floor() + 1;
+    grid_nz = ((z1 + 0.01 - grid_z0) / GRID_CELL).floor() + 1;
+    grid_cells = Array.with_size(grid_nx * grid_ny * grid_nz, nil);
+    grid_mark = Array.with_size(grid_count, 0);
+    grid_query = 0;
+
+    for (let var i = 0; i < grid_count; ++i) {
+        let b = list[i];
+        let ix0 = ((b.x0 - grid_x0) / GRID_CELL).floor();
+        let iy0 = ((b.y0 - grid_y0) / GRID_CELL).floor();
+        let iz0 = ((b.z0 - grid_z0) / GRID_CELL).floor();
+        let ix1 = ((b.x1 - grid_x0) / GRID_CELL).floor();
+        let iy1 = ((b.y1 - grid_y0) / GRID_CELL).floor();
+        let iz1 = ((b.z1 - grid_z0) / GRID_CELL).floor();
+        for (let var z = iz0; z <= iz1; ++z) {
+            for (let var y = iy0; y <= iy1; ++y) {
+                for (let var x = ix0; x <= ix1; ++x) {
+                    let c = (z * grid_ny + y) * grid_nx + x;
+                    if (grid_cells[c] == nil) grid_cells[c] = [];
+                    grid_cells[c].push(i);
+                }
+            }
+        }
+    }
+}
+
+// Does the segment from a to b, whose bounds are given, pass through some
+// thickness of this brush? It is clipped against the brush's half-spaces the
+// way `plane_quad` clips a face.
+fun seg_blocked(b, ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz) {
+    if (b.alpha < 1.0) return false;
+    if (hx < b.x0 || lx > b.x1) return false;
+    if (hy < b.y0 || ly > b.y1) return false;
+    if (hz < b.z0 || lz > b.z1) return false;
+
+    let planes = b.planes;
+    let var t0 = 0.0;
+    let var t1 = 1.0;
+
+    for (let var j = 0; j < planes.len; ++j) {
+        let p = planes[j];
+        let num = p.nx * ax + p.ny * ay + p.nz * az - p.d;
+        let den = p.nx * dx + p.ny * dy + p.nz * dz;
+
+        // Parallel to the plane: outside it rules the brush out, inside it
+        // says nothing
+        if (den > 0.0 - 0.000001 && den < 0.000001) {
+            if (num > 0.0) return false;
+            continue;
+        }
+
+        let t = (0.0 - num) / den;
+        if (den > 0.0) { if (t < t1) t1 = t; }
+        else { if (t > t0) t0 = t; }
+        if (t0 > t1) return false;
+    }
+
+    // A sample sits about a centimeter off its own surface, which is not
+    // enough to clear a wall its face runs into at a corner. Requiring the
+    // segment to pass through some thickness is what keeps those seams
+    // from reading as occlusions and drawing a dark line down every join.
+    return t1 - t0 > 0.002;
+}
+
+// Does any brush stand between these two points?
 fun occluded(ax, ay, az, bx, by, bz) {
     let dx = bx - ax; let dy = by - ay; let dz = bz - az;
 
@@ -63,41 +161,88 @@ fun occluded(ax, ay, az, bx, by, bz) {
     let var lz = az; let var hz = bz;
     if (hz < lz) { lz = bz; hz = az; }
 
-    for (let var i = 0; i < brushes.len; ++i) {
-        let b = brushes[i];
-        if (b.alpha < 1.0) continue;
-        if (hx < b.x0 || lx > b.x1) continue;
-        if (hy < b.y0 || ly > b.y1) continue;
-        if (hz < b.z0 || lz > b.z1) continue;
+    // Doors, and anything else added since the grid was built
+    for (let var i = grid_count; i < brushes.len; ++i) {
+        if (seg_blocked(brushes[i], ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz)) return true;
+    }
+    if (grid_count == 0) return false;
 
-        let planes = b.planes;
-        let var t0 = 0.0;
-        let var t1 = 1.0;
-        let var miss = false;
-
-        for (let var j = 0; j < planes.len; ++j) {
-            let p = planes[j];
-            let num = p.nx * ax + p.ny * ay + p.nz * az - p.d;
-            let den = p.nx * dx + p.ny * dy + p.nz * dz;
-
-            // Parallel to the plane: outside it rules the brush out, inside it
-            // says nothing
-            if (den > 0.0 - 0.000001 && den < 0.000001) {
-                if (num > 0.0) { miss = true; break; }
+    // Walk the cells the segment passes through, from its start. A start
+    // outside the grid has no brush to meet before it gets there, so it is
+    // walked from where it enters.
+    let var t = 0.0;
+    let var px = ax; let var py = ay; let var pz = az;
+    let gx1 = grid_x0 + grid_nx.to_f() * GRID_CELL;
+    let gy1 = grid_y0 + grid_ny.to_f() * GRID_CELL;
+    let gz1 = grid_z0 + grid_nz.to_f() * GRID_CELL;
+    if (px < grid_x0 || px >= gx1 || py < grid_y0 || py >= gy1 || pz < grid_z0 || pz >= gz1) {
+        // Clip the segment to the grid's box
+        let var e0 = 0.0; let var e1 = 1.0;
+        let lo = [grid_x0, grid_y0, grid_z0]; let hi = [gx1, gy1, gz1];
+        let o = [ax, ay, az]; let d = [dx, dy, dz];
+        for (let var k = 0; k < 3; ++k) {
+            if (d[k].abs() < 0.000000001) {
+                if (o[k] < lo[k] || o[k] >= hi[k]) return false;
                 continue;
             }
+            let var ta = (lo[k] - o[k]) / d[k];
+            let var tb = (hi[k] - o[k]) / d[k];
+            if (ta > tb) { let s = ta; ta = tb; tb = s; }
+            if (ta > e0) e0 = ta;
+            if (tb < e1) e1 = tb;
+        }
+        if (e0 > e1) return false;
+        t = e0;
+        px = ax + dx * t; py = ay + dy * t; pz = az + dz * t;
+    }
 
-            let t = (0.0 - num) / den;
-            if (den > 0.0) { if (t < t1) t1 = t; }
-            else { if (t > t0) t0 = t; }
-            if (t0 > t1) { miss = true; break; }
+    let var ix = ((px - grid_x0) / GRID_CELL).floor().clip(0, grid_nx - 1);
+    let var iy = ((py - grid_y0) / GRID_CELL).floor().clip(0, grid_ny - 1);
+    let var iz = ((pz - grid_z0) / GRID_CELL).floor().clip(0, grid_nz - 1);
+
+    // How far along the segment, as a fraction of it, the next cell
+    // boundary on each axis lies, and how far apart those boundaries are
+    let big = 1000000000.0;
+    let var sx = 0; let var tmx = big; let var tdx = big;
+    if (dx > 0.0) { sx = 1; tmx = (grid_x0 + (ix + 1).to_f() * GRID_CELL - ax) / dx; tdx = GRID_CELL / dx; }
+    else if (dx < 0.0) { sx = 0 - 1; tmx = (grid_x0 + ix.to_f() * GRID_CELL - ax) / dx; tdx = GRID_CELL / (0.0 - dx); }
+    let var sy = 0; let var tmy = big; let var tdy = big;
+    if (dy > 0.0) { sy = 1; tmy = (grid_y0 + (iy + 1).to_f() * GRID_CELL - ay) / dy; tdy = GRID_CELL / dy; }
+    else if (dy < 0.0) { sy = 0 - 1; tmy = (grid_y0 + iy.to_f() * GRID_CELL - ay) / dy; tdy = GRID_CELL / (0.0 - dy); }
+    let var sz = 0; let var tmz = big; let var tdz = big;
+    if (dz > 0.0) { sz = 1; tmz = (grid_z0 + (iz + 1).to_f() * GRID_CELL - az) / dz; tdz = GRID_CELL / dz; }
+    else if (dz < 0.0) { sz = 0 - 1; tmz = (grid_z0 + iz.to_f() * GRID_CELL - az) / dz; tdz = GRID_CELL / (0.0 - dz); }
+
+    grid_query = grid_query + 1;
+    let q = grid_query;
+    let mark = grid_mark;
+    let cells = grid_cells;
+
+    loop {
+        let cell = cells[(iz * grid_ny + iy) * grid_nx + ix];
+        if (cell != nil) {
+            for (let var k = 0; k < cell.len; ++k) {
+                let i = cell[k];
+                if (mark[i] == q) continue;
+                mark[i] = q;
+                if (seg_blocked(brushes[i], ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz)) return true;
+            }
         }
 
-        // A sample sits about a centimeter off its own surface, which is not
-        // enough to clear a wall its face runs into at a corner. Requiring the
-        // segment to pass through some thickness is what keeps those seams
-        // from reading as occlusions and drawing a dark line down every join.
-        if (!miss && t1 - t0 > 0.002) return true;
+        // On to whichever cell boundary comes first, until the segment ends
+        if (tmx <= tmy && tmx <= tmz) {
+            if (tmx > 1.0) return false;
+            ix = ix + sx; tmx = tmx + tdx;
+            if (ix < 0 || ix >= grid_nx) return false;
+        } else if (tmy <= tmz) {
+            if (tmy > 1.0) return false;
+            iy = iy + sy; tmy = tmy + tdy;
+            if (iy < 0 || iy >= grid_ny) return false;
+        } else {
+            if (tmz > 1.0) return false;
+            iz = iz + sz; tmz = tmz + tdz;
+            if (iz < 0 || iz >= grid_nz) return false;
+        }
     }
 
     return false;
@@ -160,20 +305,34 @@ fun brushes_crossed(ax, ay, az, bx, by, bz, most) {
 
 // Is this point strictly inside a brush? Boundaries do not count: a sample
 // lifted off one surface routinely lands exactly on another.
-fun in_solid(x, y, z) {
-    for (let var i = 0; i < brushes.len; ++i) {
-        let b = brushes[i];
-        if (x <= b.x0 || x >= b.x1) continue;
-        if (y <= b.y0 || y >= b.y1) continue;
-        if (z <= b.z0 || z >= b.z1) continue;
+fun point_in_brush(b, x, y, z) {
+    if (x <= b.x0 || x >= b.x1) return false;
+    if (y <= b.y0 || y >= b.y1) return false;
+    if (z <= b.z0 || z >= b.z1) return false;
 
-        let planes = b.planes;
-        let var inside = true;
-        for (let var j = 0; j < planes.len; ++j) {
-            let p = planes[j];
-            if (p.nx * x + p.ny * y + p.nz * z - p.d > 0.0 - 0.00125) { inside = false; break; }
-        }
-        if (inside) return true;
+    let planes = b.planes;
+    for (let var j = 0; j < planes.len; ++j) {
+        let p = planes[j];
+        if (p.nx * x + p.ny * y + p.nz * z - p.d > 0.0 - 0.00125) return false;
+    }
+    return true;
+}
+
+fun in_solid(x, y, z) {
+    for (let var i = grid_count; i < brushes.len; ++i) {
+        if (point_in_brush(brushes[i], x, y, z)) return true;
+    }
+
+    // A brush the point is strictly inside has bounds reaching its cell
+    let ix = ((x - grid_x0) / GRID_CELL).floor();
+    let iy = ((y - grid_y0) / GRID_CELL).floor();
+    let iz = ((z - grid_z0) / GRID_CELL).floor();
+    if (ix < 0 || ix >= grid_nx || iy < 0 || iy >= grid_ny || iz < 0 || iz >= grid_nz) return false;
+
+    let cell = grid_cells[(iz * grid_ny + iy) * grid_nx + ix];
+    if (cell == nil) return false;
+    for (let var k = 0; k < cell.len; ++k) {
+        if (point_in_brush(brushes[cell[k]], x, y, z)) return true;
     }
     return false;
 }
@@ -211,6 +370,7 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     let buried = in_solid(cx + mx * probe, cy + my * probe, cz + mz * probe);
 
     let var lum = AMBIENT;
+    let lights = face_lights;
     for (let var i = 0; i < lights.len; ++i) {
         let L = lights[i];
         let dx = L[0] - cx;
@@ -577,6 +737,36 @@ fun apply_cuts(f, out) {
     for (let var i = 0; i < work.len; ++i) out.push(work[i]);
 }
 
+// The lamps that can light some part of a face: those whose reach meets the
+// sphere around its corners and that are not behind it. Generous by a margin
+// either way, since a sample is lifted a little off the face.
+fun lights_for(f) {
+    let out = [];
+    let n = f.v.len.idiv(3);
+    let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        cx = cx + f.v[i * 3]; cy = cy + f.v[i * 3 + 1]; cz = cz + f.v[i * 3 + 2];
+    }
+    let inv_n = 1.0 / n.to_f();
+    cx = cx * inv_n; cy = cy * inv_n; cz = cz * inv_n;
+    let var r2 = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        let dx = f.v[i * 3] - cx; let dy = f.v[i * 3 + 1] - cy; let dz = f.v[i * 3 + 2] - cz;
+        r2 = r2.max(dx * dx + dy * dy + dz * dz);
+    }
+    let r = r2.sqrt() + 0.05;
+
+    for (let var i = 0; i < lights.len; ++i) {
+        let L = lights[i];
+        if (f.nx * L[0] + f.ny * L[1] + f.nz * L[2] - f.d < 0.0 - 0.05) continue;
+        let dx = L[0] - cx; let dy = L[1] - cy; let dz = L[2] - cz;
+        let reach = L[3] + r;
+        if (dx * dx + dy * dy + dz * dz >= reach * reach) continue;
+        out.push(L);
+    }
+    return out;
+}
+
 // Cut every face of the world for the light and bake it, returning the lit
 // pieces. This runs before the tree divides anything.
 //
@@ -591,6 +781,7 @@ fun light_world(w) {
     brushes = w.brushes;
     lights = w.lights;
     moon_light = w.moon_light;
+    build_grid(brushes);
 
     let faces = w.faces;
     let lit_faces = [];
@@ -598,6 +789,7 @@ fun light_world(w) {
     for (let var i = 0; i < faces.len; ++i) {
         let f = faces[i];
         let pieces = [];
+        face_lights = lights_for(f);
 
         if (f.flow) {
             // A moving surface is still cut on a fixed grid: it needs corners
