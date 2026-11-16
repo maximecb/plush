@@ -385,6 +385,29 @@ class SwipeVoice extends Voice {
     }
 }
 
+// A spider's hiss: high, breathy noise that rises fast and tails off, longer
+// as it dies
+class HissVoice extends Voice {
+    init(self, gain, dying) {
+        Voice.init(self, gain);
+        self.len = dying ? 0.7 : 0.35;
+        self.lo = 0.0; self.bp = 0.0;
+        self.f = svf_coef(rand_range(3800.0, 5200.0));
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            self.t = self.t + DT;
+            let var env = (self.t / 0.03).min(1.0) * (1.0 - self.t / self.len).max(0.0);
+            env = env * env;
+            self.lo = self.lo + self.f * self.bp;
+            self.bp = self.bp + self.f * (noise() - self.lo - 0.9 * self.bp);
+            mix.set_f32(i, mix.get_f32(i) + self.bp * env * 0.45 * self.gain);
+        }
+        return self.t < self.len;
+    }
+}
+
 // A claw or a fist landing on the player: a heavy body thump and a short
 // tearing rasp on top of it
 class ClawHitVoice extends Voice {
@@ -622,6 +645,7 @@ fun make_voice(kind, gain, param) {
     if (kind == "stomp") return StompVoice(gain);
     if (kind == "swipe") return SwipeVoice(gain, param);
     if (kind == "claw_hit") return ClawHitVoice(gain);
+    if (kind == "hiss") return HissVoice(gain, param > 0.0);
     if (kind == "gib") return GibVoice(gain);
     if (kind == "groan") return GroanVoice(gain, param > 0.0);
     if (kind == "squish") {

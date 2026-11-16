@@ -99,13 +99,15 @@ if (entities.len > 0) {
         + ($time_current_ms() - models_start_ms).to_s() + " ms");
 }
 
-// The light level on an entity, taken `up` above its base, and taken again
-// only once the entity has moved a little
+// The light level on an entity, taken `up` above its base along its own way
+// up, and taken again only once the entity has moved a little
 fun entity_light(e, up) {
     if (e.fixed_light) return e.light;
     let dx = e.x - e.lit_x; let dy = e.y - e.lit_y; let dz = e.z - e.lit_z;
     if (!e.lit || dx * dx + dy * dy + dz * dz > 0.0625) {
-        e.light = light_level_at(e.x, e.y + up, e.z);
+        let var ux = 0.0; let var uy = 1.0; let var uz = 0.0;
+        if (e.basis != nil) { ux = e.basis[3]; uy = e.basis[4]; uz = e.basis[5]; }
+        e.light = light_level_at(e.x + ux * up, e.y + uy * up, e.z + uz * up);
         e.lit_x = e.x; e.lit_y = e.y; e.lit_z = e.z;
         e.lit = true;
     }
@@ -170,7 +172,8 @@ fun update_entities(dt) {
 
         let level = entity_light(e, (e.model.max_y - e.model.min_y) * e.model_scale * 0.5);
         let entry = [e.model.id, e.anim, e.anim_time, e.x, e.y, e.z, e.yaw, e.model_scale, level, false, e.pitch];
-        if (e.model_light != nil) entry.push(e.model_light);
+        if (e.model_light != nil || e.basis != nil) entry.push(e.model_light);
+        if (e.basis != nil) entry.push(e.basis);
         list.push(entry);
     }
 

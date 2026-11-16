@@ -2348,9 +2348,13 @@ fun instance_in_band(inst) {
     let sp = inst[10].sin();
     let r = model.radius * s;
     let up = (model.mid_y - model.min_y) * s;
-    let cx = inst[3] - up * sp * yaw.sin();
-    let cy = inst[4] + up * inst[10].cos();
-    let cz = inst[5] - up * sp * yaw.cos();
+    let var cx = inst[3] - up * sp * yaw.sin();
+    let var cy = inst[4] + up * inst[10].cos();
+    let var cz = inst[5] - up * sp * yaw.cos();
+    let b = inst_basis(inst);
+    if (b != nil) {
+        cx = inst[3] + up * b[3]; cy = inst[4] + up * b[4]; cz = inst[5] + up * b[5];
+    }
 
     for (let var i = 0; i < 5; ++i) {
         let nx = fr_nx[i]; let ny = fr_ny[i]; let nz = fr_nz[i];
@@ -2364,6 +2368,13 @@ fun instance_in_band(inst) {
         if (sy + sr < render_y0.to_f() || sy - sr > render_y1.to_f()) return false;
     }
     return true;
+}
+
+// The way an entry of the draw list faces and its way up, [fx, fy, fz, ux,
+// uy, uz], for one that does not stand upright, or nil
+fun inst_basis(inst) {
+    if (inst.len > 12) return inst[12];
+    return nil;
 }
 
 // Draw one entry of the draw list into the model s-buffer. One standing in
@@ -2387,6 +2398,30 @@ fun draw_instance(inst) {
         // any wall the eye is standing close enough to for it to reach into.
         // Its own triangles keep their order among themselves.
         g_wk = HELD_DEPTH_SCALE;
+    } else if (inst_basis(inst) != nil) {
+        // Facing and up given outright. As below, the model's x turns
+        // round to make its space left-handed: it goes along forward x up.
+        let b = inst_basis(inst);
+        let fx = b[0]; let fy = b[1]; let fz = b[2];
+        let ux = b[3]; let uy = b[4]; let uz = b[5];
+        let xx = fy * uz - fz * uy; let xy = fz * ux - fx * uz; let xz = fx * uy - fy * ux;
+        m[0] = view_dir_x(xx, xy, xz) * s;
+        m[4] = view_dir_y(xx, xy, xz) * s;
+        m[8] = view_dir_z(xx, xy, xz) * s;
+        m[1] = view_dir_x(ux, uy, uz) * s;
+        m[5] = view_dir_y(ux, uy, uz) * s;
+        m[9] = view_dir_z(ux, uy, uz) * s;
+        m[2] = view_dir_x(fx, fy, fz) * s;
+        m[6] = view_dir_y(fx, fy, fz) * s;
+        m[10] = view_dir_z(fx, fy, fz) * s;
+
+        let bx = model.mid_x; let by = model.min_y; let bz = model.mid_z;
+        let dx = ex - cam_x; let dy = ey - cam_y; let dz = ez - cam_z;
+        m[3] = view_dir_x(dx, dy, dz) - (m[0] * bx + m[1] * by + m[2] * bz);
+        m[7] = view_dir_y(dx, dy, dz) - (m[4] * bx + m[5] * by + m[6] * bz);
+        m[11] = view_dir_z(dx, dy, dz) - (m[8] * bx + m[9] * by + m[10] * bz);
+
+        g_wk = 1.0;
     } else {
         // Tipped over backwards by pitch, about the middle of its base. 0 is
         // upright and PI / 2 is lying on its back.
@@ -2428,7 +2463,7 @@ fun draw_instance(inst) {
     let var lz = MODEL_LIGHT_Z / MODEL_LIGHT_LEN;
     let var ambient = MODEL_AMBIENT;
     let var diffuse = MODEL_DIFFUSE;
-    if (inst.len > 11) {
+    if (inst.len > 11 && inst[11] != nil) {
         let own = inst[11];
         ambient = own[0];
         diffuse = own[1];
@@ -2488,7 +2523,16 @@ fun place_models() {
         pl_num = pl_num + 1;
         pl_inst[i] = inst;
 
-        if (pitch.abs() < 0.001) {
+        let basis = inst_basis(inst);
+        if (basis != nil) {
+            // Facing any way at all, the sphere around it
+            let r = model.radius * s;
+            let up = (model.mid_y - model.min_y) * s;
+            pl_cx[i] = inst[3] + up * basis[3];
+            pl_cy[i] = inst[4] + up * basis[4];
+            pl_cz[i] = inst[5] + up * basis[5];
+            pl_hx[i] = r; pl_hy[i] = r; pl_hz[i] = r;
+        } else if (pitch.abs() < 0.001) {
             // Upright, its own box turned by its yaw, all poses included
             let ce = inst[6].cos().abs(); let se = inst[6].sin().abs();
             let ax = model.half_x * s; let az = model.half_z * s;

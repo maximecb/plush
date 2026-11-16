@@ -6,7 +6,7 @@
 // An entity may have a 3D model, which is drawn standing at its position and
 // facing along its yaw, posed by the animation it is playing.
 
-from ./physics import move_body, brush_top, is_lava;
+from ./physics import move_body, brush_top, is_lava, ray_brushes, GRAVITY;
 from ./models import get_model, add_model, box_model, blob_model, models;
 from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER;
 from ./lighting import light_level_at, occluded, SHADE_MAX;
@@ -131,6 +131,12 @@ class Entity {
         // diffuse, x, y, z] with the direction it comes from, or nil for the
         // one every model has
         self.model_light = nil;
+
+        // Which way its model faces and which way is up for it, as unit
+        // vectors [fx, fy, fz, ux, uy, uz], for one that need not stand
+        // upright, such as something walking up a wall. nil goes by yaw and
+        // pitch instead.
+        self.basis = nil;
     }
 
     // Give the entity a model, by its name under examples/tremor/models/,
@@ -389,6 +395,10 @@ fun spawn_placed(w, player, out) {
             out.push(ClawCyborg(spec.x, spec.y, spec.z, spec.yaw, player));
             player.monsters = player.monsters + 1;
         }
+        else if (spec.kind == "spider") {
+            out.push(Spider(spec.x, spec.y, spec.z, spec.yaw, player));
+            player.monsters = player.monsters + 1;
+        }
         else if (spec.kind == "gib_chute") out.push(GibChute(w, spec.x, spec.y, spec.z, player));
         else out.push(spawn_entity(spec));
     }
@@ -568,6 +578,9 @@ let SWING_LEAD = 0.18;
 // How much a dead monster's body takes before it bursts, which is one shot,
 // and how loud that is
 let CORPSE_HEALTH = 40;
+
+// How many lumps a body bursts into, unless its kind says otherwise
+let GIB_CHUNKS = 12;
 let GIB_GAIN = 1.0;
 
 // How loud a monster's groan of pain is, and about how long it keeps quiet
@@ -653,11 +666,14 @@ class Monster extends Entity {
         self.dead_y = 0.0;
         self.dead_back = 0.0;
 
-        // How much more its body can take once dead, before it bursts
+        // How much more its body can take once dead, before it bursts, and
+        // into how many pieces
         self.corpse_health = CORPSE_HEALTH;
+        self.gib_chunks = GIB_CHUNKS;
 
-        // How long until it can groan again
+        // How long until it can groan again, and the sound it makes
         self.pain_wait = 0.0;
+        self.pain_sound = "groan";
 
         // Set for the game to take it away
         self.gone = false;
@@ -713,7 +729,7 @@ class Monster extends Entity {
         let dying = self.health <= 0;
         if (dying || self.pain_wait <= 0.0) {
             let mouth = self.y + self.height * 0.85;
-            emit_sound("groan", self.x, mouth, self.z, dying ? 1.0 : 0.0, PAIN_GAIN);
+            emit_sound(self.pain_sound, self.x, mouth, self.z, dying ? 1.0 : 0.0, PAIN_GAIN);
             self.pain_wait = blood_rand(PAIN_WAIT * 0.7, PAIN_WAIT * 1.3);
         }
 
@@ -733,6 +749,12 @@ class Monster extends Entity {
         if (self.state == "idle") self.set_state("chase");
     }
 
+    // The height of the floor blood from it falls to
+    blood_floor(self) {
+        if (self.state == "dead") return self.dead_y;
+        return self.y;
+    }
+
     // Its body's middle and the way up its body, which tips over with it
     up_x(self) { return 0.0 - self.pitch.sin() * self.yaw.sin(); }
     up_y(self) { return self.pitch.cos(); }
@@ -744,7 +766,7 @@ class Monster extends Entity {
         let cx = self.x + self.up_x() * h;
         let cy = self.y + self.up_y() * h;
         let cz = self.z + self.up_z() * h;
-        spawn_gibs(cx, cy, cz, self.dead_y);
+        spawn_gibs(cx, cy, cz, self.dead_y, self.gib_chunks);
         emit_sound("gib", cx, cy, cz, 0.0, GIB_GAIN);
         self.gone = true;
     }
@@ -864,9 +886,514 @@ class ClawCyborg extends Monster {
     }
 }
 
-// The shotgun's reach, and how much a shot takes off if every pellet lands
+// --- Spiders ---
+//
+// A spider walks on whatever it stands on, floor, wall or ceiling alike, and
+// leaps at the player once close. Its frame is the point its feet are on, the
+// way up from that surface, and the way it faces along it. Walking moves the
+// point along the surface and then looks for the surface again: straight
+// ahead for a wall to climb onto, then under its feet, then back under the
+// edge it has walked off, to wrap round it. With none of those it falls, and
+// takes hold of whatever it lands on.
+
+// How tall it stands, which scales the model, how fast it scuttles and how
+// much faster than made its walk is played to keep its feet from sliding
+let SPIDER_HEIGHT = 0.45;
+let SPIDER_SPEED = 2.2;
+let SPIDER_STEP_RATE = 1.5;
+let SPIDER_TURN = 6.0;
+
+// It does not steer as it goes, which walks it round in circles: it turns on
+// the spot to face the player, then runs straight, and only looks again on
+// reaching another surface, after this many seconds, or once the player is
+// this far round from where it is going
+let SPIDER_AIM_TIME = 1.5;
+let SPIDER_AIM_OFF = 100.0 * 3.14159265358979 / 180.0;
+
+// Turned this close to the player, it sets off
+let SPIDER_AIMED = 0.2;
+
+// How far above the surface the probes for it start, and how far under it the
+// one beneath its feet still finds it
+let SPIDER_PROBE = 0.25;
+let SPIDER_REACH = 0.35;
+
+// Leaping: how close the player has to be, how fast it flies at them, how
+// much a bite takes off and how long before it can leap again
+let LEAP_RANGE = 4.0;
+let LEAP_SPEED = 8.0;
+let LEAP_DAMAGE = 12;
+let LEAP_COOLDOWN = 1.4;
+
+// Hanging from a ceiling, it lets go onto a player passing underneath within
+// this distance across
+let DROP_RANGE = 1.6;
+
+// How fast what is drawn turns to follow its frame, per second, so that
+// stepping onto a wall is a quick roll rather than a snap
+let SPIDER_SETTLE = 14.0;
+
+fun vlen(x, y, z) { return (x * x + y * y + z * z).sqrt(); }
+
+// The angle between two angles' worth of turning, from its sine and cosine
+fun angle_of(s, c) {
+    if (c > 0.000001) return (s / c).atan();
+    if (c < 0.0 - 0.000001) {
+        if (s >= 0.0) return PI + (s / c).atan();
+        return (s / c).atan() - PI;
+    }
+    if (s >= 0.0) return PI * 0.5;
+    return 0.0 - PI * 0.5;
+}
+
+class Spider extends Monster {
+    init(self, x, y, z, yaw, player) {
+        Monster.init(self, x, y, z, yaw, "spider", SPIDER_HEIGHT, player);
+        self.radius = 0.45;
+        self.solid = false;
+
+        // Any pellet of a shot that finds it is enough: a blast kills it
+        // however few of them do
+        self.health = 3;
+        self.corpse_health = 20;
+
+        // Small as it is, it bursts into a couple of pieces
+        self.gib_chunks = 2;
+        self.idle_clip = 0;
+        self.move_clip = 1;
+        self.attack_clips = [2];
+        self.speed = SPIDER_SPEED;
+        self.sight_range = 40.0;
+        self.glance_range = 25.0;
+        self.notice_range = 6.0;
+        self.pain_sound = "hiss";
+
+        // Up from the surface it is on, and the way it faces along it
+        self.nx = 0.0; self.ny = 1.0; self.nz = 0.0;
+        self.fx = yaw.sin(); self.fy = 0.0; self.fz = yaw.cos();
+
+        // The same, as drawn, which follow these
+        self.vx_n = 0.0; self.vy_n = 1.0; self.vz_n = 0.0;
+        self.vx_f = self.fx; self.vy_f = 0.0; self.vz_f = self.fz;
+
+        // In the air, and how fast it is going
+        self.flying = false;
+        self.vel_x = 0.0; self.vel_y = 0.0; self.vel_z = 0.0;
+        self.placed = false;
+        self.rested = false;
+
+        self.leap_wait = 0.0;
+        self.bit = false;
+        self.sees = false;
+
+        // Turning to face the player before it sets off, and how long until it
+        // looks again
+        self.aiming = true;
+        self.aim_wait = 0.0;
+
+        // The floor under it, looked for now and then, for its blood to fall to
+        self.floor_y = y;
+        self.floor_wait = 0.0;
+
+        self.basis = [self.fx, self.fy, self.fz, 0.0, 1.0, 0.0];
+
+        // Lit as other models are, from mostly above it and a little ahead,
+        // but above as it sees it: hanging from a ceiling, it is the side of
+        // it towards the room that is lit
+        self.model_light = [0.6, 0.55, 0.0, 1.0, 0.0];
+    }
+
+    up_x(self) { return self.vx_n; }
+    up_y(self) { return self.vy_n; }
+    up_z(self) { return self.vz_n; }
+
+    blood_floor(self) {
+        if (self.state == "dead") return self.dead_y;
+        return self.floor_y;
+    }
+
+    // Take hold of a surface at a point, facing as near the way given as it
+    // lies along it
+    attach(self, px, py, pz, nx, ny, nz, fx, fy, fz) {
+        self.x = px; self.y = py; self.z = pz;
+        self.nx = nx; self.ny = ny; self.nz = nz;
+        self.set_facing(fx, fy, fz);
+        self.flying = false;
+    }
+
+    // Face along the surface as near a direction as it can, keeping the old
+    // facing if that direction is straight into or out of it
+    set_facing(self, fx, fy, fz) {
+        let along = fx * self.nx + fy * self.ny + fz * self.nz;
+        let var tx = fx - self.nx * along;
+        let var ty = fy - self.ny * along;
+        let var tz = fz - self.nz * along;
+        let var len = vlen(tx, ty, tz);
+        if (len < 0.001) {
+            let a2 = self.fx * self.nx + self.fy * self.ny + self.fz * self.nz;
+            tx = self.fx - self.nx * a2; ty = self.fy - self.ny * a2; tz = self.fz - self.nz * a2;
+            len = vlen(tx, ty, tz);
+            if (len < 0.001) {
+                // Its old facing is along the new up: any line across will do
+                tx = self.ny; ty = self.nz; tz = self.nx;
+                let a3 = tx * self.nx + ty * self.ny + tz * self.nz;
+                tx = tx - self.nx * a3; ty = ty - self.ny * a3; tz = tz - self.nz * a3;
+                len = vlen(tx, ty, tz);
+            }
+        }
+        self.fx = tx / len; self.fy = ty / len; self.fz = tz / len;
+    }
+
+    // At the start, take hold of the nearest surface round where the map put
+    // it, so that one can be placed on a wall or a ceiling
+    place(self, w) {
+        self.placed = true;
+        let cx = self.x; let cy = self.y + 0.1; let cz = self.z;
+        let dirs = [[0.0, 0.0 - 1.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0 - 1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0 - 1.0]];
+        let var best = nil;
+        let var best_d = 3.0;
+        for (let var i = 0; i < dirs.len; ++i) {
+            let d = dirs[i];
+            let hit = ray_brushes(w, cx, cy, cz, cx + d[0] * 3.0, cy + d[1] * 3.0, cz + d[2] * 3.0);
+            if (hit == nil || hit[0] * 3.0 >= best_d) continue;
+            best_d = hit[0] * 3.0;
+            best = [cx + d[0] * best_d, cy + d[1] * best_d, cz + d[2] * best_d, hit[1], hit[2], hit[3]];
+        }
+        if (best == nil) { self.flying = true; return; }
+        self.attach(best[0], best[1], best[2], best[3], best[4], best[5], self.fx, self.fy, self.fz);
+        self.snap_visual();
+    }
+
+    snap_visual(self) {
+        self.vx_n = self.nx; self.vy_n = self.ny; self.vz_n = self.nz;
+        self.vx_f = self.fx; self.vy_f = self.fy; self.vz_f = self.fz;
+    }
+
+    // How far it would have to turn along the surface to face a direction,
+    // signed by which way round its up axis. Straight into or out of the
+    // surface counts as no turn at all.
+    angle_to(self, dx, dy, dz) {
+        let along = dx * self.nx + dy * self.ny + dz * self.nz;
+        let tx = dx - self.nx * along; let ty = dy - self.ny * along; let tz = dz - self.nz * along;
+        let len = vlen(tx, ty, tz);
+        if (len < 0.001) return 0.0;
+        let c = (self.fx * tx + self.fy * ty + self.fz * tz) / len;
+        let cx = self.fy * tz - self.fz * ty;
+        let cy = self.fz * tx - self.fx * tz;
+        let cz = self.fx * ty - self.fy * tx;
+        let s = (cx * self.nx + cy * self.ny + cz * self.nz) / len;
+        return angle_of(s, c);
+    }
+
+    // Turn along the surface towards a direction, at most `most` radians, and
+    // return how far there was to turn
+    turn_towards(self, dx, dy, dz, most) {
+        let angle = self.angle_to(dx, dy, dz);
+        let a = angle.clip(0.0 - most, most);
+
+        // Rotate the facing about up: f cos a + (n x f) sin a
+        let rx = self.ny * self.fz - self.nz * self.fy;
+        let ry = self.nz * self.fx - self.nx * self.fz;
+        let rz = self.nx * self.fy - self.ny * self.fx;
+        let ca = a.cos(); let sa = a.sin();
+        self.set_facing(self.fx * ca + rx * sa, self.fy * ca + ry * sa, self.fz * ca + rz * sa);
+        return angle;
+    }
+
+    // Walk a distance along the surface, and find it again
+    crawl(self, w, dist) {
+        let nx = self.nx; let ny = self.ny; let nz = self.nz;
+        let fx = self.fx; let fy = self.fy; let fz = self.fz;
+
+        // Something in the way ahead is a wall to climb onto, or a ceiling
+        // coming down, which it takes hold of where the probe met it
+        let ax = self.x + nx * SPIDER_PROBE; let ay = self.y + ny * SPIDER_PROBE; let az = self.z + nz * SPIDER_PROBE;
+        let ahead = dist + self.radius * 0.6;
+        let hit = ray_brushes(w, ax, ay, az, ax + fx * ahead, ay + fy * ahead, az + fz * ahead);
+        if (hit != nil && hit[1] * nx + hit[2] * ny + hit[3] * nz < 0.85) {
+            if (is_lava(hit[4])) { self.turn_away(); return; }
+            let t = hit[0] * ahead;
+            self.attach(ax + fx * t, ay + fy * t, az + fz * t, hit[1], hit[2], hit[3], nx, ny, nz);
+            return;
+        }
+
+        // Onwards, and the surface under its feet there, which follows a slope
+        // or a step down
+        let px = self.x + fx * dist; let py = self.y + fy * dist; let pz = self.z + fz * dist;
+        let down = ray_brushes(w, px + nx * SPIDER_PROBE, py + ny * SPIDER_PROBE, pz + nz * SPIDER_PROBE,
+            px - nx * SPIDER_REACH, py - ny * SPIDER_REACH, pz - nz * SPIDER_REACH);
+        if (down != nil) {
+            if (is_lava(down[4])) { self.turn_away(); return; }
+            let t = down[0] * (SPIDER_PROBE + SPIDER_REACH);
+            self.attach(px + nx * (SPIDER_PROBE - t), py + ny * (SPIDER_PROBE - t), pz + nz * (SPIDER_PROBE - t),
+                down[1], down[2], down[3], fx, fy, fz);
+            return;
+        }
+
+        // Walked off an edge: back under it is the face it wraps round onto,
+        // facing down that face
+        let bx = px - nx * 0.1; let by = py - ny * 0.1; let bz = pz - nz * 0.1;
+        let back = dist + 0.4;
+        let edge = ray_brushes(w, bx, by, bz, bx - fx * back, by - fy * back, bz - fz * back);
+        if (edge != nil) {
+            if (is_lava(edge[4])) { self.turn_away(); return; }
+            let t = edge[0] * back;
+            self.attach(bx - fx * t, by - fy * t, bz - fz * t, edge[1], edge[2], edge[3], 0.0 - nx, 0.0 - ny, 0.0 - nz);
+            return;
+        }
+
+        // Nothing at all: it falls
+        self.x = px; self.y = py; self.z = pz;
+        self.flying = true;
+        self.vel_x = fx * self.speed; self.vel_y = fy * self.speed; self.vel_z = fz * self.speed;
+    }
+
+    // Lava ahead: turn aside rather than walk into it
+    turn_away(self) {
+        let rx = self.ny * self.fz - self.nz * self.fy;
+        let ry = self.nz * self.fx - self.nx * self.fz;
+        let rz = self.nx * self.fy - self.ny * self.fx;
+        self.set_facing(rx, ry, rz);
+    }
+
+    // Fly on under gravity, taking hold of whatever it runs into
+    fly(self, w, dt) {
+        self.vel_y = self.vel_y - GRAVITY * dt;
+        let sx = self.vel_x * dt; let sy = self.vel_y * dt; let sz = self.vel_z * dt;
+        let len = vlen(sx, sy, sz);
+        if (len < 0.000001) return false;
+
+        // Reaching a little past the step, so that it does not end up just
+        // short of a surface and step through it next time
+        let k = (len + 0.05) / len;
+        let hit = ray_brushes(w, self.x, self.y, self.z, self.x + sx * k, self.y + sy * k, self.z + sz * k);
+        if (hit == nil) {
+            self.x = self.x + sx; self.y = self.y + sy; self.z = self.z + sz;
+            if (self.y < 0.0 - 200.0) self.gone = true;
+            return false;
+        }
+
+        let t = (hit[0] * k).min(1.0);
+        let hx = self.x + sx * t; let hy = self.y + sy * t; let hz = self.z + sz * t;
+        if (is_lava(hit[4])) {
+            self.x = hx; self.y = hy; self.z = hz;
+            emit_sound("hiss", hx, hy, hz, 1.0, PAIN_GAIN);
+            self.gone = true;
+            return true;
+        }
+        self.attach(hx, hy, hz, hit[1], hit[2], hit[3], self.vel_x, self.vel_y, self.vel_z);
+        self.vel_x = 0.0; self.vel_y = 0.0; self.vel_z = 0.0;
+        return true;
+    }
+
+    // Leap from where it clings at the middle of the player's body, on an arc
+    // that gets there
+    leap(self) {
+        let p = self.player;
+        let sx = self.x + self.nx * 0.2; let sy = self.y + self.ny * 0.2; let sz = self.z + self.nz * 0.2;
+        let tx = p.x - sx; let ty = p.y + PLAYER_HEIGHT * 0.6 - sy; let tz = p.z - sz;
+        let d = vlen(tx, ty, tz);
+        let time = (d / LEAP_SPEED).max(0.15);
+        self.x = sx; self.y = sy; self.z = sz;
+        self.vel_x = tx / time;
+        self.vel_y = ty / time + 0.5 * GRAVITY * time;
+        self.vel_z = tz / time;
+        self.flying = true;
+        self.bit = false;
+        self.set_state("attack");
+        self.anim = 0 - 1;
+        self.play(self.attack_clips[0]);
+        emit_sound("swipe", sx, sy, sz, 0.15, SWING_GAIN);
+    }
+
+    // Is the player in sight from just off the surface it is on?
+    looks(self) {
+        let p = self.player;
+        let ex = self.x + self.nx * 0.3; let ey = self.y + self.ny * 0.3; let ez = self.z + self.nz * 0.3;
+        let dx = p.x - ex; let dy = p.eye_y() - ey; let dz = p.z - ez;
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > self.sight_range * self.sight_range) return false;
+        if (d2 > self.glance_range * self.glance_range) {
+            let ahead = dx * self.fx + dy * self.fy + dz * self.fz;
+            if (ahead < self.sight_cone * d2.sqrt()) return false;
+        }
+        return !occluded(ex, ey, ez, p.x, p.eye_y(), p.z);
+    }
+
+    update(self, w, dt) {
+        self.anim_time = self.anim_time + dt;
+        self.state_time = self.state_time + dt;
+        self.pain_wait = self.pain_wait - dt;
+        self.leap_wait = self.leap_wait - dt;
+        if (!self.placed) self.place(w);
+        let p = self.player;
+
+        if (self.state == "dead") {
+            self.update_dead(w, dt);
+            self.settle(dt);
+            return;
+        }
+
+        // The floor its blood falls to
+        self.floor_wait = self.floor_wait - dt;
+        if (self.floor_wait <= 0.0) {
+            self.floor_wait = 0.3;
+            let g = ground_below(w, self.x, self.y - 0.05, self.z);
+            self.floor_y = g == nil ? self.y : g[0];
+        }
+
+        // How far the middle of the player's body is from its own
+        let cx = self.x + self.nx * 0.2; let cy = self.y + self.ny * 0.2; let cz = self.z + self.nz * 0.2;
+        let dx = p.x - cx; let dy = p.y + PLAYER_HEIGHT * 0.6 - cy; let dz = p.z - cz;
+        let dist = vlen(dx, dy, dz);
+
+        self.sight_time = self.sight_time - dt;
+        if (self.sight_time <= 0.0) {
+            self.sight_time = SIGHT_INTERVAL;
+            self.sees = !p.dead && self.looks();
+        }
+
+        if (self.flying) {
+            if (self.state == "attack" && !self.bit && !p.dead) {
+                // The bite lands when it reaches the player's body
+                let hx = p.x - self.x; let hz = p.z - self.z;
+                let reach = p.radius + self.radius * 0.7;
+                if (hx * hx + hz * hz < reach * reach && self.y > p.y - 0.2 && self.y < p.y + PLAYER_HEIGHT + 0.2) {
+                    self.bit = true;
+                    p.struck(LEAP_DAMAGE, self.x, self.z);
+                    emit_sound("claw_hit", p.x, p.eye_y(), p.z, 0.0, HIT_GAIN);
+                    // And it drops off them
+                    self.vel_x = 0.0 - self.vel_x * 0.25;
+                    self.vel_z = 0.0 - self.vel_z * 0.25;
+                    self.vel_y = 1.5;
+                }
+            }
+            if (self.fly(w, dt)) {
+                self.aiming = true;
+                if (self.state == "attack") {
+                    self.set_state("chase");
+                    self.leap_wait = LEAP_COOLDOWN;
+                }
+            }
+            self.settle(dt);
+            return;
+        }
+
+        if (self.state == "idle") {
+            self.play(self.idle_clip);
+            if (self.sees || dist < self.notice_range) self.set_state("chase");
+        } else if (self.state == "chase" || self.state == "attack") {
+            if (self.state == "attack") self.set_state("chase");
+
+            // Hanging over the player, it drops onto them
+            let across = vlen(dx, 0.0, dz);
+            if (self.ny < 0.0 - 0.5 && across < DROP_RANGE && dy < 0.0 && self.leap_wait <= 0.0 && self.sees && !p.dead) {
+                self.leap();
+                self.settle(dt);
+                return;
+            }
+
+            if (dist < LEAP_RANGE && self.leap_wait <= 0.0 && self.sees && !p.dead) {
+                self.leap();
+                self.settle(dt);
+                return;
+            }
+
+            // Time to look again, or the player has got round it
+            self.aim_wait = self.aim_wait - dt;
+            if (self.aim_wait <= 0.0 || self.angle_to(dx, dy, dz).abs() > SPIDER_AIM_OFF) self.aiming = true;
+
+            if (self.aiming) {
+                // Turning on the spot, its legs going
+                let left = self.turn_towards(dx, dy, dz, SPIDER_TURN * dt);
+                self.play(self.move_clip);
+                if (left.abs() < SPIDER_AIMED) {
+                    self.aiming = false;
+                    self.aim_wait = SPIDER_AIM_TIME;
+                }
+            } else if (dist > 1.2 && !p.dead) {
+                // Straight on across whatever it is on, keeping a little off
+                // while it gathers itself to leap again. Onto another surface,
+                // it looks for them again.
+                self.play(self.move_clip);
+                self.anim_time = self.anim_time + dt * (SPIDER_STEP_RATE - 1.0);
+                let ux = self.nx; let uy = self.ny; let uz = self.nz;
+                self.crawl(w, self.speed * dt);
+                if (self.flying || ux * self.nx + uy * self.ny + uz * self.nz < 0.9) self.aiming = true;
+            } else {
+                self.play(self.idle_clip);
+            }
+        }
+
+        self.settle(dt);
+    }
+
+    // Dead, it lets go of whatever it was on, and comes to rest on its back
+    update_dead(self, w, dt) {
+        self.anim_time = 0.0;
+        if (self.rested) return;
+        if (self.flying || self.ny < 0.5) {
+            if (!self.flying) {
+                // Pushed off the wall or ceiling it was on
+                self.flying = true;
+                self.vel_x = self.nx * 1.5; self.vel_y = self.ny * 1.5; self.vel_z = self.nz * 1.5;
+            }
+            self.fly(w, dt);
+            self.dead_y = self.y;
+            return;
+        }
+
+        // On its back: the way up as drawn turns over, and the base is lifted
+        // so the body stays on the floor as it does
+        self.rested = true;
+        self.dead_y = self.y;
+        self.nx = 0.0; self.ny = 0.0 - 1.0; self.nz = 0.0;
+        self.set_facing(self.fx, 0.0, self.fz);
+    }
+
+    // Bring the frame it is drawn with round to the one it has, and hand that
+    // to the renderer
+    settle(self, dt) {
+        let k = (SPIDER_SETTLE * dt).min(1.0);
+        let var ux = self.vx_n + (self.nx - self.vx_n) * k;
+        let var uy = self.vy_n + (self.ny - self.vy_n) * k;
+        let var uz = self.vz_n + (self.nz - self.vz_n) * k;
+        let var len = vlen(ux, uy, uz);
+        if (len < 0.001) { ux = self.nx; uy = self.ny; uz = self.nz; len = 1.0; }
+        ux = ux / len; uy = uy / len; uz = uz / len;
+
+        let var fx = self.vx_f + (self.fx - self.vx_f) * k;
+        let var fy = self.vy_f + (self.fy - self.vy_f) * k;
+        let var fz = self.vz_f + (self.fz - self.vz_f) * k;
+        let along = fx * ux + fy * uy + fz * uz;
+        fx = fx - ux * along; fy = fy - uy * along; fz = fz - uz * along;
+        len = vlen(fx, fy, fz);
+        if (len < 0.001) {
+            fx = self.fx; fy = self.fy; fz = self.fz;
+            let a2 = fx * ux + fy * uy + fz * uz;
+            fx = fx - ux * a2; fy = fy - uy * a2; fz = fz - uz * a2;
+            len = vlen(fx, fy, fz).max(0.001);
+        }
+        fx = fx / len; fy = fy / len; fz = fz / len;
+
+        self.vx_n = ux; self.vy_n = uy; self.vz_n = uz;
+        self.vx_f = fx; self.vy_f = fy; self.vz_f = fz;
+        let b = self.basis;
+        b[0] = fx; b[1] = fy; b[2] = fz; b[3] = ux; b[4] = uy; b[5] = uz;
+        let l = self.model_light;
+        l[2] = ux * 0.9 + fx * 0.3; l[3] = uy * 0.9 + fy * 0.3; l[4] = uz * 0.9 + fz * 0.3;
+
+        // Turned over, the base is above the floor by the model's height, as
+        // it hangs down from it; lift it by as much as the turn has come
+        if (self.rested) {
+            self.y = self.dead_y + self.height * (1.0 - uy) * 0.5;
+        }
+    }
+}
+
+// The shotgun's reach, and how much each pellet that lands takes off
 let SHOT_RANGE = 60.0;
-let SHOT_DAMAGE = 40.0;
+let PELLET_DAMAGE = 4.0;
 
 // The pellets in a shot, spread at random over a cone this wide
 let SHOT_PELLETS = 12;
@@ -894,7 +1421,7 @@ fun shoot(player, list) {
     // the pellets that kill it do not also go into its corpse
     let hit = [];
     let dmg = [];
-    let share = SHOT_DAMAGE / SHOT_PELLETS.to_f();
+    let share = PELLET_DAMAGE;
 
     for (let var p = 0; p < SHOT_PELLETS; ++p) {
         // A point spread evenly over the disc of the cone
@@ -915,9 +1442,7 @@ fun shoot(player, list) {
         let hx = ox + dx * t; let hy = oy + dy * t; let hz = oz + dz * t;
         if (occluded(ox, oy, oz, hx, hy, hz)) continue;
 
-        let var floor_y = e.y;
-        if (e.state == "dead") floor_y = e.dead_y;
-        spawn_blood(hx - dx * 0.3, hy, hz - dz * 0.3, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS, floor_y);
+        spawn_blood(hx - dx * 0.3, hy, hz - dz * 0.3, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS, e.blood_floor());
 
         let var k = 0;
         while (k < hit.len && hit[k] != e) k = k + 1;
@@ -1019,7 +1544,6 @@ fun spawn_blood(x, y, z, dx, dy, dz, n, floor_y) {
 // are spawned.
 
 let GIB_DROPS = 70;
-let GIB_CHUNKS = 12;
 let GIB_SHAPES = 5;
 let GIB_TEX = "flesh_red";
 
@@ -1075,11 +1599,11 @@ class Gib {
 
 let gibs = [];
 
-fun spawn_gibs(x, y, z, floor_y) {
+fun spawn_gibs(x, y, z, floor_y, chunks) {
     spawn_blood(x, y, z, 0.0, 0.5, 0.0, GIB_DROPS, floor_y);
     if (gib_models.len == 0) return;
     let level = light_level_at(x, y, z);
-    for (let var i = 0; i < GIB_CHUNKS; ++i) {
+    for (let var i = 0; i < chunks; ++i) {
         let a = blood_rand(0.0, 2.0 * PI);
         let speed = blood_rand(2.0, 6.0);
         let model = gib_models[(blood_rand(0.0, gib_models.len.to_f())).floor().min(gib_models.len - 1)];

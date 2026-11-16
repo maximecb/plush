@@ -182,6 +182,56 @@ fun support_at(w, body, x, y, z, walkable_only) {
     return best;
 }
 
+// The first brush face the segment from a to b runs into, as [t, nx, ny, nz,
+// plane] with t the fraction of the way along it and the unit normal of the
+// face, or nil if it reaches b. A segment starting inside a brush passes out
+// of that one rather than stopping at once.
+fun ray_brushes(w, ax, ay, az, bx, by, bz) {
+    let dx = bx - ax; let dy = by - ay; let dz = bz - az;
+    let lx = ax.min(bx); let hx = ax.max(bx);
+    let ly = ay.min(by); let hy = ay.max(by);
+    let lz = az.min(bz); let hz = az.max(bz);
+
+    let brushes = w.brushes;
+    let var best_t = 1.0;
+    let var best = nil;
+    for (let var i = 0; i < brushes.len; ++i) {
+        let b = brushes[i];
+        if (hx < b.x0 || lx > b.x1) continue;
+        if (hy < b.y0 || ly > b.y1) continue;
+        if (hz < b.z0 || lz > b.z1) continue;
+
+        let planes = b.planes;
+        let var t0 = 0.0;
+        let var t1 = 1.0;
+        let var enter = nil;
+        let var miss = false;
+        for (let var j = 0; j < planes.len; ++j) {
+            let p = planes[j];
+            let num = p.nx * ax + p.ny * ay + p.nz * az - p.d;
+            let den = p.nx * dx + p.ny * dy + p.nz * dz;
+            if (den > 0.0 - 0.000001 && den < 0.000001) {
+                if (num > 0.0) { miss = true; break; }
+                continue;
+            }
+            let t = (0.0 - num) / den;
+            if (den < 0.0) {
+                if (t > t0) { t0 = t; enter = p; }
+            } else if (t < t1) {
+                t1 = t;
+            }
+            if (t0 > t1) { miss = true; break; }
+        }
+        if (miss || enter == nil || t0 >= best_t) continue;
+        best_t = t0;
+        best = enter;
+    }
+
+    if (best == nil) return nil;
+    let len = (best.nx * best.nx + best.ny * best.ny + best.nz * best.nz).sqrt();
+    return [best_t, best.nx / len, best.ny / len, best.nz / len, best];
+}
+
 // Is this the surface of lava, which kills what lands in it?
 fun is_lava(plane) {
     if (plane == nil || plane.tex == nil) return false;
