@@ -25,15 +25,15 @@
 //   n           toggle noclip
 //   left mouse  fire, also alt (option on a Mac)
 //   enter       play again, once the level is done
-//   F12         save a TGA screenshot to the current directory
+//   F12         save a PNG screenshot to the current directory
 //   escape / q  quit
 //
 // With --bench, it renders a number of frames of a set tour of the level
 // without opening a window, and reports the time per frame and how many pixels
 // were written. Given --shots as well, it writes each viewpoint of the tour to
-// that directory as a TGA screenshot.
+// that directory as a PNG screenshot.
 
-from image import Image, save_tga;
+from png import save_png;
 from pixelfont import PixelFont;
 from ./config import FRAME_WIDTH, FRAME_HEIGHT, MAP_PATH, NUM_RENDER_ACTORS, BENCH, BENCH_FRAMES, SHOT_DIR;
 from ./world import load_map, build_bsp;
@@ -231,14 +231,10 @@ let TOUR = [
     [ 75.2, 20.8, 88.0,  3.14, 0.0]
 ];
 
-// The renderer leaves alpha at zero, which image viewers show as
-// transparent, so the shot is an opaque copy of the frame
+// The renderer leaves alpha at zero, which image viewers would show as
+// transparent, so screenshots are saved without alpha
 fun save_screenshot(path) {
-    let shot = Image(frame_image.width, frame_image.height);
-    let num_bytes = shot.width * shot.height * 4;
-    shot.bytes.memcpy(0, frame_image.bytes, 0, num_bytes);
-    for (let var i = 3; i < num_bytes; i = i + 4) shot.bytes[i] = 0xFF;
-    return save_tga(path, shot);
+    return save_png(path, frame_image, false);
 }
 
 $println("starting render workers");
@@ -271,7 +267,7 @@ if (BENCH) {
 
         if (SHOT_DIR != nil && i < TOUR.len) {
             draw_hud(frame_image, player);
-            let path = SHOT_DIR + "/view" + i.to_s() + ".tga";
+            let path = SHOT_DIR + "/view" + i.to_s() + ".png";
             if (!save_screenshot(path)) $println("could not write " + path);
         }
     }
@@ -468,7 +464,7 @@ loop {
     // Taken before the FPS counter is drawn, so it stays out of the shot
     if (take_shot) {
         take_shot = false;
-        let path = "tremor_" + $time_current_ms().to_s() + ".tga";
+        let path = "tremor_" + $time_current_ms().to_s() + ".png";
         if (save_screenshot(path)) $println("saved " + path);
         else $println("could not write " + path);
     }

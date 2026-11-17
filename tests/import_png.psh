@@ -1,5 +1,5 @@
-from png import decode_png, load_png;
-from image import rgb, rgba;
+from png import decode_png, load_png, encode_png, crc32;
+from image import Image, rgb, rgba;
 
 // Images of 21 by 12 pixels, one per color type, written by an encoder
 // that is not this library. The filter type changes on every row, and
@@ -289,3 +289,63 @@ assert(tex.width == 256);
 assert(tex.height == 256);
 assert(tex.get_pixel(0, 0) == 0xFF040303);
 assert(load_png("no/such/file.png") == nil);
+
+// --- Encoding ---
+
+// The checksum of a chunk with no body, whose type is IEND
+let iend = ByteArray.with_size(0);
+iend.push_string("IEND");
+assert(crc32(iend, 0, 4) == 0xAE426082);
+
+// Encodes an image and decodes it back. With alpha, every pixel comes back
+// the same. Without, they come back opaque.
+fun png_round_trip(img, alpha)
+{
+    let data = encode_png(img, alpha);
+    let back = decode_png(data);
+    assert(back != nil);
+    assert(back.width == img.width);
+    assert(back.height == img.height);
+
+    for (let var y = 0; y < img.height; ++y) {
+        for (let var x = 0; x < img.width; ++x) {
+            let c = img.get_pixel(x, y);
+            assert(back.get_pixel(x, y) == (alpha ? c : c | 0xFF_00_00_00));
+        }
+    }
+
+    // The file ends with an empty IEND chunk and its checksum
+    assert(data.load_u32(data.len - 8) == 0x444E4549);
+    assert(data.load_u32(data.len - 4) == 0x82_60_42_AE);
+    return data.len;
+}
+
+// The test images above, decoded and encoded again
+let rgba_img = decode_png(PNG_RGBA);
+png_round_trip(rgba_img, true);
+png_round_trip(rgba_img, false);
+png_round_trip(decode_png(PNG_PALETTE), true);
+png_round_trip(tex, false);
+
+// A single pixel, with translucent alpha
+let dot = Image(1, 1);
+dot.set_pixel(0, 0, rgba(10, 20, 30, 40));
+png_round_trip(dot, true);
+png_round_trip(dot, false);
+
+// Smooth gradients, along with edges and noise, so that rows pick
+// different filters
+let grad = Image(64, 48);
+for (let var y = 0; y < grad.height; ++y) {
+    for (let var x = 0; x < grad.width; ++x) {
+        let edge = x > 40 ? 90 : 0;
+        grad.set_pixel(x, y, rgba(x * 2 + edge, y * 5, (x + y) * 2, sample(x % 21, y % 12, 0)));
+    }
+}
+png_round_trip(grad, true);
+png_round_trip(grad, false);
+
+// A flat image compresses to almost nothing, from 60000 bytes
+let flat = Image(200, 100);
+flat.clear(rgb(30, 60, 90));
+assert(png_round_trip(flat, false) < 500);

@@ -1,4 +1,4 @@
-from inflate import inflate, zlib_decompress;
+from deflate import deflate, inflate, zlib_compress, zlib_decompress, code_lengths;
 
 // Streams produced by zlib, each one made to use a given kind of block
 
@@ -182,3 +182,144 @@ assert(inflate(#[\x 05 00 92 04], nil) == nil);
 // Empty input
 assert(inflate(ByteArray.with_size(0), nil) == nil);
 assert(zlib_decompress(ByteArray.with_size(0), nil) == nil);
+
+// --- Compression ---
+
+// Bytes with no pattern, from a linear congruential generator
+fun noise(count, seed)
+{
+    let bytes = ByteArray.with_size(count);
+    let var x = seed;
+    for (let var i = 0; i < count; ++i) {
+        x = (x * 1103515245 + 12345) & 0x7FFFFFFF;
+        bytes[i] = (x >> 16) & 255;
+    }
+    return bytes;
+}
+
+// Compresses data both ways, checks that it decompresses back to the same
+// bytes, and returns the size of the zlib stream
+fun round_trip(data)
+{
+    let packed = zlib_compress(data);
+    assert(same(zlib_decompress(packed, nil), data));
+    assert(same(zlib_decompress(packed, data.len), data));
+    assert(same(inflate(deflate(data), nil), data));
+    return packed.len;
+}
+
+round_trip(ByteArray.with_size(0));
+round_trip(str_bytes("a"));
+round_trip(str_bytes("abc"));
+round_trip(str_bytes(hello));
+
+// Data that repeats compresses well
+assert(round_trip(text(3000)) < 1000);
+assert(round_trip(ruler(2047)) < 1000);
+let zeros = ByteArray.with_size(100000);
+zeros.zero_fill();
+assert(round_trip(zeros) < 200);
+
+// Data with no pattern can't be compressed, but grows only a little.
+// This also spans several blocks.
+assert(round_trip(noise(70000, 1)) < 70000 + 400);
+
+// Noise repeated once, period bytes later
+fun repeated_noise(period)
+{
+    let bytes = noise(period, 2);
+    bytes.resize(2 * period);
+    bytes.memcpy(period, bytes, 0, period);
+    return bytes;
+}
+
+// Matches as far back as they can reach, and one byte further, which is
+// out of reach and doesn't compress
+assert(round_trip(repeated_noise(32767)) < 32767 + 1000);
+assert(round_trip(repeated_noise(32768)) > 2 * 32768);
+
+// Appends count bytes copied from dist bytes back
+fun push_copy(bytes, dist, count)
+{
+    let pos = bytes.len;
+    bytes.resize(pos + count);
+    bytes.memcpy(pos, bytes, pos - dist, count);
+}
+
+// Literals and short matches at all sorts of distances, with a few long
+// matches from far back among them. Being rare, those get long codes, on
+// top of having the most extra bits, which takes the most bits to write.
+fun rare_far_matches()
+{
+    let bytes = noise(33000, 4);
+    let lits = noise(30000, 5);
+    let var lit_pos = 0;
+
+    for (let var k = 0; k < 6000; ++k) {
+        let num_lits = 1 + k % 9;
+        let pos = bytes.len;
+        bytes.resize(pos + num_lits);
+        bytes.memcpy(pos, lits, lit_pos, num_lits);
+        lit_pos += num_lits;
+
+        if (k % 500 == 0) {
+            push_copy(bytes, 16385 + (k * 37) % 16000, 227 + k % 31);
+        } else {
+            push_copy(bytes, 11 + (k * 97) % 16000, 4 + k % 7);
+        }
+    }
+
+    return bytes;
+}
+round_trip(rare_far_matches());
+
+// Text, then noise, then text again
+let mixed_data = text(5000);
+mixed_data.push_string(hello);
+let mixed_noise = noise(5000, 3);
+let pos = mixed_data.len;
+mixed_data.resize(pos + mixed_noise.len);
+mixed_data.memcpy(pos, mixed_noise, 0, mixed_noise.len);
+mixed_data.push_string(hello);
+round_trip(mixed_data);
+
+// The checksum at the end of a zlib stream, big-endian
+let abc = zlib_compress(str_bytes("abc"));
+assert(abc[0] == 0x78);
+assert(abc.load_u32(abc.len - 4) == 0x27_01_4D_02);
+
+// Code lengths stay within the limit even when the frequencies would make
+// a deeper tree, as they do when they grow like Fibonacci numbers
+let fib = Array.with_size(30, 0);
+fib[0] = 1;
+fib[1] = 1;
+for (let var i = 2; i < fib.len; ++i) {
+    fib[i] = fib[i - 1] + fib[i - 2];
+}
+
+for (let var max_len = 7; max_len <= 15; max_len += 8) {
+    let lens = code_lengths(fib, fib.len, max_len);
+
+    // The code is complete: the lengths use up the code space exactly
+    let var space = 0;
+    for (let var i = 0; i < lens.len; ++i) {
+        assert(lens[i] >= 1 && lens[i] <= max_len);
+        space += 1 << (max_len - lens[i]);
+    }
+    assert(space == 1 << max_len);
+
+    // More frequent symbols don't get longer codes
+    for (let var i = 1; i < lens.len; ++i) {
+        assert(lens[i] <= lens[i - 1]);
+    }
+}
+
+// One symbol, or none, still makes a code of two
+let single = Array.with_size(10, 0);
+single[4] = 7;
+let single_lens = code_lengths(single, 10, 15);
+assert(single_lens[4] == 1);
+assert(single_lens[0] == 1);
+let none_lens = code_lengths(Array.with_size(10, 0), 10, 15);
+assert(none_lens[0] == 1);
+assert(none_lens[1] == 1);

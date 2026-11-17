@@ -1,17 +1,21 @@
-// PNG image decoding
+// PNG image decoding and encoding
 //
-//   from png import load_png;
+//   from png import load_png, save_png;
 //
 //   let img = load_png("examples/data/pigment_violet_8bpp.png");
 //   $window_draw_frame(window, img.bytes);
+//   save_png("copy.png", img, true);
 //
-// Handles images with 8 bits per channel, of every color type: greyscale,
-// RGB and palette, with or without alpha. Images with another bit depth
-// and interlaced images are not supported. Chunk checksums are not
-// verified, and neither is the checksum of the compressed data.
+// Decoding handles images with 8 bits per channel, of every color type:
+// greyscale, RGB and palette, with or without alpha. Images with another
+// bit depth and interlaced images are not supported. Chunk checksums are
+// not verified, and neither is the checksum of the compressed data.
+//
+// Encoding writes 8 bits per channel, RGB or RGBA, filtering each row
+// whichever way looks to compress best.
 
 from image import Image;
-from inflate import zlib_decompress;
+from deflate import zlib_compress, zlib_decompress;
 
 // Chunk types, as load_u32() reads their four characters
 let CHUNK_IHDR = 0x52444849;
@@ -381,4 +385,232 @@ fun load_png(path)
     }
 
     return decode_png(data);
+}
+
+// --- Encoding ---
+
+// Builds the CRC-32 of each byte value, used to checksum chunks
+fun make_crc_table()
+{
+    let table = Array.with_size(256, 0);
+
+    for (let var i = 0; i < 256; ++i) {
+        let var c = i;
+        for (let var k = 0; k < 8; ++k) {
+            if ((c & 1) != 0) {
+                c = 0xEDB88320 ^ (c >> 1);
+            } else {
+                c = c >> 1;
+            }
+        }
+        table[i] = c;
+    }
+
+    return table;
+}
+
+let CRC_TABLE = make_crc_table();
+
+// Computes the CRC-32 of count bytes of data, from index start
+fun crc32(data, start, count)
+{
+    let var c = 0xFFFFFFFF;
+    let end = start + count;
+
+    for (let var i = start; i < end; ++i) {
+        c = CRC_TABLE[(c ^ data[i]) & 255] ^ (c >> 8);
+    }
+
+    return c ^ 0xFFFFFFFF;
+}
+
+// Appends a big-endian 32-bit integer
+fun push_u32_be(out, val)
+{
+    out.push_u8((val >> 24) & 255);
+    out.push_u8((val >> 16) & 255);
+    out.push_u8((val >> 8) & 255);
+    out.push_u8(val & 255);
+}
+
+// Appends a chunk: the size of its body, its type, the body, and a
+// checksum of the type and body
+fun push_chunk(out, kind, body)
+{
+    push_u32_be(out, body.len);
+    let start = out.len;
+    out.push_string(kind);
+
+    let pos = out.len;
+    out.resize(pos + body.len);
+    out.memcpy(pos, body, 0, body.len);
+
+    push_u32_be(out, crc32(out, start, out.len - start));
+}
+
+// Writes row y of an image into line as PNG stores it: R, G, B and A bytes
+// for each pixel, or R, G and B only when keep_alpha is false. Without alpha,
+// each pixel is written as 4 bytes and the next one overwrites the last
+// byte, so line needs one byte to spare.
+fun get_row(line, img, y, keep_alpha)
+{
+    let src = img.bytes;
+    let start = y * img.width;
+    let end = start + img.width;
+
+    // Pixels are B, G, R, A in memory, so swap the red and blue bytes
+    if (keep_alpha) {
+        let var idx = 0;
+        for (let var i = start; i < end; ++i) {
+            let c = src.get_u32(i);
+            line.set_u32(idx, (c & 0xFF_00_FF_00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF));
+            ++idx;
+        }
+    } else {
+        let var pos = 0;
+        for (let var i = start; i < end; ++i) {
+            let c = src.get_u32(i);
+            line.store_u32(pos, (c & 0xFF_00) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF));
+            pos += 3;
+        }
+    }
+}
+
+// Writes the bytes of a row filtered with one of the filter types, into
+// out from index pos. The row above is prev, all zeros for the first row,
+// and left is one pixel of px bytes back. This undoes what unfilter() does.
+fun filter_row(out, pos, line, prev, stride, px, filter)
+{
+    if (filter == 0) {
+        out.memcpy(pos, line, 0, stride);
+    } else if (filter == 1) {
+        // Sub, the difference with the byte to the left
+        out.memcpy(pos, line, 0, px);
+        for (let var i = px; i < stride; ++i) {
+            out[pos + i] = (line[i] - line[i - px]) & 255;
+        }
+    } else if (filter == 2) {
+        // Up, the difference with the byte above
+        for (let var i = 0; i < stride; ++i) {
+            out[pos + i] = (line[i] - prev[i]) & 255;
+        }
+    } else if (filter == 3) {
+        // Average, the difference with the mean of left and above
+        for (let var i = 0; i < px; ++i) {
+            out[pos + i] = (line[i] - (prev[i] >> 1)) & 255;
+        }
+        for (let var i = px; i < stride; ++i) {
+            out[pos + i] = (line[i] - ((line[i - px] + prev[i]) >> 1)) & 255;
+        }
+    } else {
+        // Paeth, the difference with whichever of left, above and above
+        // left is closest to left + above - above left
+        for (let var i = 0; i < px; ++i) {
+            out[pos + i] = (line[i] - prev[i]) & 255;
+        }
+        for (let var i = px; i < stride; ++i) {
+            let left = line[i - px];
+            let up = prev[i];
+            let up_left = prev[i - px];
+
+            let var d_left = up - up_left;
+            let var d_up = left - up_left;
+            let var d_up_left = d_left + d_up;
+            if (d_left < 0) d_left = -d_left;
+            if (d_up < 0) d_up = -d_up;
+            if (d_up_left < 0) d_up_left = -d_up_left;
+
+            let var pred = up_left;
+            if (d_left <= d_up && d_left <= d_up_left) {
+                pred = left;
+            } else if (d_up <= d_up_left) {
+                pred = up;
+            }
+
+            out[pos + i] = (line[i] - pred) & 255;
+        }
+    }
+}
+
+// Sums the bytes of a filtered row, taken as signed values, which is a
+// rough measure of how well the row will compress
+fun row_cost(row, stride)
+{
+    let var cost = 0;
+
+    for (let var i = 0; i < stride; ++i) {
+        let v = row[i];
+        cost += v < 128 ? v : 256 - v;
+    }
+
+    return cost;
+}
+
+// Encodes an image as the bytes of a PNG file. With keep_alpha true, the
+// alpha channel is kept. With keep_alpha false, the image is stored as
+// opaque RGB, which is smaller, and the alpha values are ignored.
+fun encode_png(img, keep_alpha)
+{
+    assert(img instanceof Image);
+
+    let width = img.width;
+    let height = img.height;
+    let px = keep_alpha ? 4 : 3;
+    let stride = width * px;
+
+    // The rows, each with its filter type before it, compressed as one
+    // stream. Each row is filtered whichever way looks to compress best.
+    let raw = ByteArray.with_size(height * (stride + 1));
+    let var line = ByteArray.with_size(stride + 1);
+    let var prev = ByteArray.with_size(stride + 1);
+    let trial = ByteArray.with_size(stride);
+    prev.zero_fill();
+
+    for (let var y = 0; y < height; ++y) {
+        get_row(line, img, y, keep_alpha);
+
+        let var best = 0;
+        let var best_cost = -1;
+        for (let var filter = 0; filter < 5; ++filter) {
+            filter_row(trial, 0, line, prev, stride, px, filter);
+            let cost = row_cost(trial, stride);
+            if (best_cost < 0 || cost < best_cost) {
+                best = filter;
+                best_cost = cost;
+            }
+        }
+
+        let pos = y * (stride + 1);
+        raw[pos] = best;
+        filter_row(raw, pos + 1, line, prev, stride, px, best);
+
+        let tmp = prev;
+        prev = line;
+        line = tmp;
+    }
+
+    let out = #[\x 89 50 4E 47 0D 0A 1A 0A];
+
+    // Size, 8 bits per channel, the color type, and no interlacing. The
+    // compression and filter methods only have one valid value.
+    let header = ByteArray.with_size(0);
+    push_u32_be(header, width);
+    push_u32_be(header, height);
+    header.push_u8(8);
+    header.push_u8(keep_alpha ? TYPE_RGBA : TYPE_RGB);
+    header.push_u8(0);
+    header.push_u8(0);
+    header.push_u8(0);
+
+    push_chunk(out, "IHDR", header);
+    push_chunk(out, "IDAT", zlib_compress(raw));
+    push_chunk(out, "IEND", ByteArray.with_size(0));
+    return out;
+}
+
+// Writes an Image to a PNG file, see encode_png() for what keep_alpha does.
+// Returns true on success and false on failure, like $write_file().
+fun save_png(path, img, keep_alpha)
+{
+    return $write_file(path, encode_png(img, keep_alpha));
 }
