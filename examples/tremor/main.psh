@@ -25,6 +25,7 @@
 //   n           toggle noclip
 //   left mouse  fire, also alt (option on a Mac)
 //   enter       play again, once the level is done
+//   F12         save a TGA screenshot to the current directory
 //   escape / q  quit
 //
 // With --bench, it renders a number of frames of a set tour of the level
@@ -32,7 +33,7 @@
 // were written. Given --shots as well, it writes each viewpoint of the tour to
 // that directory as a TGA screenshot.
 
-from image import save_tga;
+from image import Image, save_tga;
 from pixelfont import PixelFont;
 from ./config import FRAME_WIDTH, FRAME_HEIGHT, MAP_PATH, NUM_RENDER_ACTORS, BENCH, BENCH_FRAMES, SHOT_DIR;
 from ./world import load_map, build_bsp;
@@ -230,6 +231,16 @@ let TOUR = [
     [ 75.2, 20.8, 88.0,  3.14, 0.0]
 ];
 
+// The renderer leaves alpha at zero, which image viewers show as
+// transparent, so the shot is an opaque copy of the frame
+fun save_screenshot(path) {
+    let shot = Image(frame_image.width, frame_image.height);
+    let num_bytes = shot.width * shot.height * 4;
+    shot.bytes.memcpy(0, frame_image.bytes, 0, num_bytes);
+    for (let var i = 3; i < num_bytes; i = i + 4) shot.bytes[i] = 0xFF;
+    return save_tga(path, shot);
+}
+
 $println("starting render workers");
 let actor_start_ms = $time_current_ms();
 start_render_actors(NUM_RENDER_ACTORS);
@@ -261,7 +272,7 @@ if (BENCH) {
         if (SHOT_DIR != nil && i < TOUR.len) {
             draw_hud(frame_image, player);
             let path = SHOT_DIR + "/view" + i.to_s() + ".tga";
-            if (!save_tga(path, frame_image)) $println("could not write " + path);
+            if (!save_screenshot(path)) $println("could not write " + path);
         }
     }
 
@@ -314,6 +325,9 @@ let var mouse_up = false;
 // button and ALT are tracked apart for the same reason.
 let var key_fire = false;
 let var mouse_fire = false;
+
+// Set by F12, saved once the frame is drawn
+let var take_shot = false;
 
 fun set_key(key, down) {
     if (key == 'W') key_fwd = down;
@@ -375,6 +389,7 @@ loop {
             if (msg.key == 'RETURN' && player.finished) {
                 restart_level(world, player, entities);
             }
+            if (msg.key == 'F12') take_shot = true;
 
             set_key(msg.key, true);
         }
@@ -449,6 +464,15 @@ loop {
     }
 
     draw_hud(frame_image, player);
+
+    // Taken before the FPS counter is drawn, so it stays out of the shot
+    if (take_shot) {
+        take_shot = false;
+        let path = "tremor_" + $time_current_ms().to_s() + ".tga";
+        if (save_screenshot(path)) $println("saved " + path);
+        else $println("could not write " + path);
+    }
+
     draw_fps_counter();
     $window_draw_frame(window, frame_buffer);
 }
