@@ -59,9 +59,13 @@ impl Tag
     const FIRST_FIXED: u8 = Tag::Array as u8;
     const LAST: u8 = Tag::Float64 as u8;
 
+    // Headers are only ever built from a Tag, so this checks an invariant
+    // of the allocator. It sits under every heap type test and the GC's
+    // copy loop, which is why it is not checked in release builds
+    #[inline(always)]
     fn from_u8(val: u8) -> Tag
     {
-        assert!(val >= 1 && val <= Tag::LAST, "invalid block tag {}", val);
+        debug_assert!(val >= 1 && val <= Tag::LAST, "invalid block tag {}", val);
         unsafe { std::mem::transmute(val) }
     }
 }
@@ -213,7 +217,10 @@ impl Header
         self.0 as *mut u8
     }
 
-    fn tag_u8(&self) -> u8
+    /// The tag as a raw byte. Comparing this against `Tag::X as u8` is
+    /// cheaper than decoding it with `tag()`
+    #[inline(always)]
+    pub fn tag_u8(&self) -> u8
     {
         debug_assert!(!self.is_forwarded());
         ((self.0 >> TAG_SHIFT) & TAG_BITS) as u8

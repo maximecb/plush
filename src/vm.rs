@@ -2730,8 +2730,7 @@ impl Actor
                             // Patch this instruction to avoid the method
                             // lookup next time. Bools and classes are left
                             // alone because their methods depend on more
-                            // than the type tag.
-                            let type_tag = self_val.type_of();
+                            // than the receiver's kind.
                             if host_fn == HostFnId::int64_idiv {
                                 // Integer division is common enough in hot
                                 // loops to be worth its own instruction
@@ -2741,12 +2740,12 @@ impl Actor
                                     opnds.cache,
                                 );
                             }
-                            else if !matches!(type_tag, Type::Bool | Type::Class) {
+                            else if let Some(guard) = self_val.host_guard() {
                                 self.call_caches[opnds.cache as usize].host_fn = host_fn;
                                 self.insns[this_pc] = Insn::call_method_host(
                                     opnds.start_reg,
                                     opnds.argc,
-                                    type_tag as u8,
+                                    guard,
                                     opnds.cache,
                                 );
                             }
@@ -2807,7 +2806,7 @@ impl Actor
                     let self_val = get_reg!(opnds.start_reg);
 
                     // Guard that self still has the type the method was found on
-                    if self_val.type_of() as u8 == opnds.type_tag {
+                    if self_val.matches_host_guard(opnds.guard) {
                         let host_fn = self.call_caches[opnds.cache as usize].host_fn.get();
                         let base_reg = bp + opnds.start_reg as usize;
 
@@ -3833,6 +3832,37 @@ mod tests
     fn bytearray_set_past_last_elem()
     {
         eval("let a = ByteArray.with_size(8); a.set_f32(2, 1.0);");
+    }
+
+    // One call site seeing a different kind of receiver each time, so its
+    // host guard has to miss and be repatched. The expected string is
+    // built from separate sites, which each run only once.
+    #[test]
+    fn host_guard_repatch()
+    {
+        eval_eq("
+            let big = 1 << 61;
+            let xs = [1, big, 2.5, \"s\", nil, 3, true, false, 4.5];
+            let var s = \"\";
+            for (let var i = 0; i < xs.len; ++i) s = s + xs[i].to_s() + \",\";
+            let e = (1).to_s() + \",\" + big.to_s() + \",\" + (2.5).to_s() + \",\" +
+                \"s\".to_s() + \",\" + nil.to_s() + \",\" + (3).to_s() + \",\" +
+                true.to_s() + \",\" + false.to_s() + \",\" + (4.5).to_s() + \",\";
+            return s == e;
+        ", Value::TRUE);
+    }
+
+    // Boxed and unboxed integers pass the same guard
+    #[test]
+    fn host_guard_boxed_int()
+    {
+        eval_eq("
+            let big = 1 << 61;
+            let xs = [-1, -2, 0 - big, -3];
+            let var s = 0;
+            for (let var i = 0; i < xs.len; ++i) s = s + xs[i].abs();
+            return s == big + 6;
+        ", Value::TRUE);
     }
 
     #[test]

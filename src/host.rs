@@ -239,10 +239,13 @@ macro_rules! def_host_fns {
 
 impl HostFnId
 {
-    /// Recover an id from its index, as an instruction operand holds it
+    /// Recover an id from its index, as an instruction operand holds it.
+    /// Codegen only encodes indices taken from a HostFnId, so the range
+    /// is checked in debug builds only
+    #[inline(always)]
     pub fn from_index(idx: u16) -> HostFnId
     {
-        assert!((idx as usize) < NUM_HOST_FNS);
+        debug_assert!((idx as usize) < NUM_HOST_FNS);
         unsafe { std::mem::transmute(idx) }
     }
 

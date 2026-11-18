@@ -536,14 +536,15 @@ def_opcodes! {
     // class it was last looked up on, live in the CallCache entry
     call_method { start_reg: reg, argc: u8, cache: u24 },
 
-    // Call a host method, guarded on the type tag of the value in
-    // start_reg. This is used for primitive types such as Int64, Float64
-    // and String. The guard is an immediate, so a miss costs no loads.
+    // Call a host method, guarded on the kind of value in start_reg, as
+    // `Value::host_guard` encodes it. This is used for primitive types such
+    // as Int64, Float64 and String. The guard is an immediate, so checking
+    // it costs at most a load of the receiver's header.
     // The host function itself lives in the CallCache entry, which leaves
     // room for the cache index: this site deoptimizes back into
     // call_method, and the two forms take the same operands so that the
     // switch is a write of the opcode byte
-    call_method_host { start_reg: reg, argc: u8, type_tag: u8, cache: u24 },
+    call_method_host { start_reg: reg, argc: u8, guard: u8, cache: u24 },
 
     // Integer division, specialized from a `call_method` site whose receiver
     // turned out to be an integer. Takes the same operands as call_method so
@@ -764,7 +765,7 @@ mod tests
         let host = Insn::call_method_host(1, 2, 3, 4);
         assert_eq!(
             call_method_host::decode(host),
-            call_method_host { start_reg: 1, argc: 2, type_tag: 3, cache: 4 }
+            call_method_host { start_reg: 1, argc: 2, guard: 3, cache: 4 }
         );
         let opnds = call_method::decode(Insn::call_method(1, 2, 4));
         assert_eq!((opnds.start_reg, opnds.argc, opnds.cache), (1, 2, 4));

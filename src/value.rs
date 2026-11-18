@@ -714,7 +714,47 @@ impl Value
             _ => panic!("invalid value tag {:#x}", self.0),
         }
     }
+
+    /// Guard byte for a host method call site, or None if the method found
+    /// depends on more than the receiver's kind, as it does for bools,
+    /// classes and objects. A heap value's guard is its raw header tag, an
+    /// immediate's is its low byte with the top bit set. Numbers get their
+    /// own codes so that a boxed number passes the same guard as an
+    /// unboxed one.
+    pub fn host_guard(self) -> Option<u8>
+    {
+        match self.type_of() {
+            Type::Bool | Type::Class | Type::Object => None,
+            Type::Int64 => Some(GUARD_INT64),
+            Type::Float64 => Some(GUARD_FLOAT64),
+            _ if self.is_heap() => Some(header_of(self.heap_ptr()).tag_u8()),
+            _ => Some(0x80 | self.0 as u8),
+        }
+    }
+
+    /// Check a value against a guard byte from `host_guard`. The guard is
+    /// fixed for a given call site, so the branch on it predicts well.
+    /// Pointer and number tags never have the immediate tag's low bits,
+    /// which is what lets the last case compare the low byte alone.
+    #[inline(always)]
+    pub fn matches_host_guard(self, guard: u8) -> bool
+    {
+        if guard < 0x80 {
+            self.is_heap() && header_of(self.heap_ptr()).tag_u8() == guard
+        } else if guard == GUARD_INT64 {
+            self.is_int64()
+        } else if guard == GUARD_FLOAT64 {
+            self.is_float64()
+        } else {
+            self.0 as u8 == guard & 0x7F
+        }
+    }
 }
+
+/// Host guard codes for numbers. Immediate guards always have the low
+/// three bits 0b101, so these two cannot collide with them.
+const GUARD_INT64: u8 = 0x80;
+const GUARD_FLOAT64: u8 = 0x82;
 
 impl PartialEq for Value
 {
@@ -930,6 +970,26 @@ pub(crate) use {
 mod tests
 {
     use super::*;
+
+    #[test]
+    fn host_guards()
+    {
+        let vals = [
+            Value::fixnum(7),
+            Value::try_flonum(1.5).unwrap(),
+            Value::NIL,
+            Value::UNDEF,
+        ];
+
+        for (i, a) in vals.iter().enumerate() {
+            let guard = a.host_guard().unwrap();
+            for (j, b) in vals.iter().enumerate() {
+                assert_eq!(b.matches_host_guard(guard), i == j);
+            }
+        }
+
+        assert!(Value::TRUE.host_guard().is_none());
+    }
 
     #[test]
     fn immediates()
