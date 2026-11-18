@@ -1488,9 +1488,11 @@ impl Actor
         debug_assert!(base_reg + argc <= self.stack.len());
 
         // Every argument is read before the host function runs, so no
-        // collection it triggers can happen part way through reading them
+        // collection it triggers can happen part way through reading them.
+        // Indexing off one pointer avoids an overflow check per argument.
+        let args = unsafe { self.stack.as_ptr().add(base_reg) };
         macro_rules! arg {
-            ($idx: expr) => { unsafe { *self.stack.get_unchecked(base_reg + $idx) } }
+            ($idx: expr) => { unsafe { *args.add($idx) } }
         }
 
         let result = match host_fn.f
