@@ -1,6 +1,12 @@
 # The Plush Programming Language
 
 <p align="center">
+    <img src="media/tremor_castle.png" height=150>&nbsp;
+    <img src="media/space_fighter.png" height=150>&nbsp;
+    <img src="media/tremor_city.png" height=150>
+</p>
+
+<p align="center">
     <img src="media/night_ride.png" height=180>&nbsp;
     <img src="media/mondrian.png" height=180>&nbsp;
     <img src="media/amigaball.png" height=180>
