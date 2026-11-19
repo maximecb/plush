@@ -94,14 +94,14 @@ struct CallCache
 #[macro_export]
 macro_rules! error {
     ($requester: literal, $format_str:literal $(, $arg:expr)* $(,)?) => {{
-        return $crate::host::HostResult::err(
-            format!($format_str $(, $arg)*)
+        return $crate::host::HostResult::err_with(
+            move || format!($format_str $(, $arg)*)
         );
     }};
 
     ($format_str:literal $(, $arg:expr)* $(,)?) => {{
-        return $crate::host::HostResult::err(
-            format!($format_str $(, $arg)*)
+        return $crate::host::HostResult::err_with(
+            move || format!($format_str $(, $arg)*)
         );
     }};
 }

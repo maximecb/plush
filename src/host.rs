@@ -77,6 +77,16 @@ impl HostResult
         HostResult(Value::ERR)
     }
 
+    /// Fail with a message formatted out of line. Taking the arguments by
+    /// copy in a cold function keeps them out of memory on the hot path,
+    /// where `format!` would otherwise force them onto the stack
+    #[cold]
+    #[inline(never)]
+    pub fn err_with<F: FnOnce() -> String>(f: F) -> HostResult
+    {
+        Self::err(f())
+    }
+
     #[inline(always)]
     pub fn is_err(self) -> bool
     {
