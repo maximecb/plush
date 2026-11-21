@@ -158,7 +158,8 @@ fn patch_jump(cg: &mut CodeGen, jmp_idx: usize, dst_idx: usize)
 {
     let disp = (dst_idx as i64) - (jmp_idx as i64) - 1;
     let disp = disp.try_into().expect("jump is out of range");
-    cg.actor.insns[jmp_idx] = cg.actor.insns[jmp_idx].with_branch_disp(disp);
+    let insn = cg.actor.insns[jmp_idx].with_branch_disp(disp);
+    cg.actor.insns.set(jmp_idx, insn);
 }
 
 /// Point a set of jumps, as a test can produce more than one, at the same

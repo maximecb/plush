@@ -1,4 +1,6 @@
 #![allow(unused_parens)]
+#![cfg_attr(feature = "tail_calls", feature(explicit_tail_calls))]
+#![cfg_attr(feature = "tail_calls", allow(incomplete_features))]
 
 mod utils;
 mod ast;
