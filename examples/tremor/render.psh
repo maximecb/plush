@@ -95,6 +95,23 @@ let L_SHIFT = L_FRAC;
 let L_MIN_FX = 65536;
 let L_MAX_FX = 16711680;
 
+// An opaque face lit in colour carries a red, green and blue level, as 8.12
+// fixed point. Red and blue share one accumulator, red 28 bits up, stepped by one add. Shifted down
+// 12, it multiplies red and blue of the texel at once:
+//
+//   texel & 0xFF00FF          R << 16 | B
+//   accumulator >> 12         lr << 16 | whole part of lb
+//   product                   B * lb at bit 0, R * lr at bit 32
+//
+// The cross products R * lb and B * lr start at bit 16, clear of blue's high
+// byte, and end below bit 44. Added under red's low bits they can carry into
+// its high byte at bits 52..59, but by less than 1/256 of a step, which
+// rounds red up by one now and then. Blue is scaled by a whole level, red and
+// green by a fractional one.
+let LC_ONE = 4096.0;
+let LC_FROM_L = L_FRAC - 12;
+let LC_RED_SHIFT = 28;
+
 // Red and blue sit sixteen bits apart in a pixel, which is what lets them
 // share a multiply with green once green is moved out of the way
 let MASK_RB = 0x00FF00FF;
@@ -157,6 +174,13 @@ let var g_uz0 = 0.0;   let var g_vz0 = 0.0;   let var g_w0 = 0.0;
 // interpolant of its own.
 let var g_lu0 = 0.0; let var g_lv0 = 0.0;
 let var g_l_k = 0.0; let var g_l_u = 0.0; let var g_l_v = 0.0; let var g_l_uv = 0.0;
+
+// The same per channel, for an opaque face lit in colour, which is what g_rgb
+// says. A face whose channels agree is drawn with the single level instead.
+let var g_rgb = false;
+let var g_lr_k = 0.0; let var g_lr_u = 0.0; let var g_lr_v = 0.0; let var g_lr_uv = 0.0;
+let var g_lg_k = 0.0; let var g_lg_u = 0.0; let var g_lg_v = 0.0; let var g_lg_uv = 0.0;
+let var g_lb_k = 0.0; let var g_lb_u = 0.0; let var g_lb_v = 0.0; let var g_lb_uv = 0.0;
 let var g_ref_x = 0.0; let var g_ref_y = 0.0;
 let var g_pix = nil;
 let var g_umask = 0;
@@ -1010,6 +1034,10 @@ fun raster_poly(m) {
     let duzdx = g_duzdx; let dvzdx = g_dvzdx; let dwdx = g_dwdx;
     let lu0 = g_lu0; let lv0 = g_lv0;
     let l_k = g_l_k; let l_u = g_l_u; let l_v = g_l_v; let l_uv = g_l_uv;
+    let lr_k = g_lr_k; let lr_u = g_lr_u; let lr_v = g_lr_v; let lr_uv = g_lr_uv;
+    let lg_k = g_lg_k; let lg_u = g_lg_u; let lg_v = g_lg_v; let lg_uv = g_lg_uv;
+    let lb_k = g_lb_k; let lb_u = g_lb_u; let lb_v = g_lb_v; let lb_uv = g_lb_uv;
+    let rgb = g_rgb;
     let pix = g_pix;
     let umask = g_umask;
     let vshift = g_vshift;
@@ -1022,6 +1050,8 @@ fun raster_poly(m) {
     let fb = frame_buffer;
     let l_min = g_l_min;
     let l_max = g_l_max;
+    let lc_min = g_l_min >> LC_FROM_L;
+    let lc_max = g_l_max >> LC_FROM_L;
     let collecting = g_collecting;
 
     // Per chain: the corner reached so far, the current x, how far x moves per
@@ -1135,12 +1165,11 @@ fun raster_poly(m) {
                     let var u = uz * z;
                     let var v = vz * z;
 
-                    // The level is a bilinear function of u and v, so it comes
-                    // out of the pair the loop already has rather than riding
-                    // an interpolant of its own
+                    // The levels are bilinear functions of u and v, so they
+                    // come out of the pair the loop already has rather than
+                    // riding interpolants of their own
                     let cu = u - lu0;
                     let cv = v - lv0;
-                    let l = l_k + l_u * cu + cv * (l_v + l_uv * cu);
 
                     // 1/z is what makes the affine step inside a sub-span
                     // drift, so the length follows it: the longest run with
@@ -1151,13 +1180,28 @@ fun raster_poly(m) {
                     let adw = dwdx.abs();
                     if (adw > 0.0) wscale = PERSP_TOL / adw;
 
-                    // The light at the near end of the run, clamped. Each
-                    // sub-span ends where the next one begins, so the far end
-                    // worked out below carries over instead of being floored
-                    // and clamped a second time.
-                    let var lfx = (l * L_ONE).floor();
-                    if (lfx < l_min) lfx = l_min;
-                    else if (lfx > l_max) lfx = l_max;
+                    // The light at the near end of the run, clamped: one level,
+                    // or three channels on a face lit in colour. Each sub-span
+                    // ends where the next one begins, so the far end worked
+                    // out below carries over instead of being floored and
+                    // clamped a second time.
+                    let var lfx = 0;
+                    let var lr = 0; let var lg = 0; let var lb = 0;
+                    if (rgb) {
+                        lr = ((lr_k + lr_u * cu + cv * (lr_v + lr_uv * cu)) * LC_ONE).floor();
+                        if (lr < lc_min) lr = lc_min;
+                        else if (lr > lc_max) lr = lc_max;
+                        lg = ((lg_k + lg_u * cu + cv * (lg_v + lg_uv * cu)) * LC_ONE).floor();
+                        if (lg < lc_min) lg = lc_min;
+                        else if (lg > lc_max) lg = lc_max;
+                        lb = ((lb_k + lb_u * cu + cv * (lb_v + lb_uv * cu)) * LC_ONE).floor();
+                        if (lb < lc_min) lb = lc_min;
+                        else if (lb > lc_max) lb = lc_max;
+                    } else {
+                        lfx = ((l_k + l_u * cu + cv * (l_v + l_uv * cu)) * L_ONE).floor();
+                        if (lfx < l_min) lfx = l_min;
+                        else if (lfx > l_max) lfx = l_max;
+                    }
 
                     while (x < piece_end) {
                         let var run = SUB_MAX;
@@ -1185,7 +1229,6 @@ fun raster_poly(m) {
                         let v_e = vz_e * z_e;
                         let cu_e = u_e - lu0;
                         let cv_e = v_e - lv0;
-                        let l_e = l_k + l_u * cu_e + cv_e * (l_v + l_uv * cu_e);
 
                         let inv_len = 1.0 / len;
                         let var du = (u_e - u) * inv_len;
@@ -1200,6 +1243,10 @@ fun raster_poly(m) {
                         let var t = (vfx << 32) + ufx;
                         let dt = ((dv * FP_ONE).floor() << 32) + (du * FP_ONE).floor();
 
+                        let var i = row + x;
+                        let end_i = row + xe;
+                        span_px = span_px + len;
+
                         // Both ends of the sub-span are clamped and the step
                         // is taken between the clamped pair, so every pixel
                         // along it is in range as well. Clamping only the start
@@ -1207,40 +1254,74 @@ fun raster_poly(m) {
                         // end of a channel: a face seen almost edge on is a
                         // sliver a pixel or two wide carrying the whole
                         // perspective range, and its step is enormous.
-                        let var lfx_e = (l_e * L_ONE).floor();
-                        if (lfx_e < l_min) lfx_e = l_min;
-                        else if (lfx_e > l_max) lfx_e = l_max;
+                        if (rgb) {
+                            let var lr_e = ((lr_k + lr_u * cu_e + cv_e * (lr_v + lr_uv * cu_e)) * LC_ONE).floor();
+                            if (lr_e < lc_min) lr_e = lc_min;
+                            else if (lr_e > lc_max) lr_e = lc_max;
+                            let var lg_e = ((lg_k + lg_u * cu_e + cv_e * (lg_v + lg_uv * cu_e)) * LC_ONE).floor();
+                            if (lg_e < lc_min) lg_e = lc_min;
+                            else if (lg_e > lc_max) lg_e = lc_max;
+                            let var lb_e = ((lb_k + lb_u * cu_e + cv_e * (lb_v + lb_uv * cu_e)) * LC_ONE).floor();
+                            if (lb_e < lc_min) lb_e = lc_min;
+                            else if (lb_e > lc_max) lb_e = lc_max;
 
-                        let dl = ((lfx_e - lfx) * (65536).idiv(len)) >> 16;
+                            let inv_fx = (65536).idiv(len);
+                            let dlg = ((lg_e - lg) * inv_fx) >> 16;
+                            let var lrb = (lr << LC_RED_SHIFT) + lb;
+                            let dlrb = ((((lr_e - lr) * inv_fx) >> 16) << LC_RED_SHIFT)
+                                     + (((lb_e - lb) * inv_fx) >> 16);
 
-                        let var lp = lfx;
-                        let var i = row + x;
-                        let end_i = row + xe;
-                        span_px = span_px + len;
-                        while (i < end_i) {
-                            let c = pix.get_u32(((t >> vshift) & vmask)
-                                              | ((t >> U_SHIFT) & umask));
+                            let var lgp = lg;
+                            while (i < end_i) {
+                                let c = pix.get_u32(((t >> vshift) & vmask)
+                                                  | ((t >> U_SHIFT) & umask));
+                                let x = (c & mask_rb) * (lrb >> 12);
+                                fb.set_u32(i, ((x >> 8) & 0xFF) | ((x >> 36) & 0xFF0000)
+                                            | ((((c & 0xFF00) * lgp) >> 20) & 0xFF00));
+                                t = t + dt;
+                                lrb = lrb + dlrb;
+                                lgp = lgp + dlg;
+                                i = i + 1;
+                            }
 
-                            // Red and blue are already sixteen bits apart;
-                            // moving green up to bit 32 puts all three that far
-                            // apart, so one multiply scales them without their
-                            // products running into each other. Sixty-two bit
-                            // fixnums are what make the third channel fit: in
-                            // thirty-two bits this takes two multiplies.
-                            let x = ((c & mask_rb) | ((c & MASK_G) << 24))
-                                  * (lp >> L_SHIFT);
+                            lr = lr_e; lg = lg_e; lb = lb_e;
+                        } else {
+                            let l_e = l_k + l_u * cu_e + cv_e * (l_v + l_uv * cu_e);
+                            let var lfx_e = (l_e * L_ONE).floor();
+                            if (lfx_e < l_min) lfx_e = l_min;
+                            else if (lfx_e > l_max) lfx_e = l_max;
 
-                            // Red and blue come back out together: they are
-                            // still sixteen apart after the shift, so the mask
-                            // that separated them separates the products too
-                            fb.set_u32(i, ((x >> 8) & mask_rb)
-                                        | ((x >> 32) & 0xFF00));
-                            t = t + dt;
-                            lp = lp + dl;
-                            i = i + 1;
+                            let dl = ((lfx_e - lfx) * (65536).idiv(len)) >> 16;
+
+                            let var lp = lfx;
+                            while (i < end_i) {
+                                let c = pix.get_u32(((t >> vshift) & vmask)
+                                                  | ((t >> U_SHIFT) & umask));
+
+                                // Red and blue are already sixteen bits apart;
+                                // moving green up to bit 32 puts all three that
+                                // far apart, so one multiply scales them without
+                                // their products running into each other.
+                                // Sixty-two bit fixnums are what make the third
+                                // channel fit: in thirty-two bits this takes two
+                                // multiplies.
+                                let x = ((c & mask_rb) | ((c & MASK_G) << 24))
+                                      * (lp >> L_SHIFT);
+
+                                // Red and blue come back out together: they are
+                                // still sixteen apart after the shift, so the
+                                // mask that separated them separates the
+                                // products too
+                                fb.set_u32(i, ((x >> 8) & mask_rb)
+                                            | ((x >> 32) & 0xFF00));
+                                t = t + dt;
+                                lp = lp + dl;
+                                i = i + 1;
+                            }
+
+                            lfx = lfx_e;
                         }
 
-                        lfx = lfx_e;
                         uz = uz_e; vz = vz_e; w = w_e;
                         u = u_e; v = v_e;
                         x = xe;
@@ -1541,6 +1622,14 @@ fun face_setup(f, cull) {
 
     g_lu0 = f.lu0; g_lv0 = f.lv0;
     g_l_k = f.l_k; g_l_u = f.l_u; g_l_v = f.l_v; g_l_uv = f.l_uv;
+
+    let lc = f.lc;
+    g_rgb = lc != nil;
+    if (g_rgb) {
+        g_lr_k = lc[0]; g_lr_u = lc[1]; g_lr_v = lc[2]; g_lr_uv = lc[3];
+        g_lg_k = lc[4]; g_lg_u = lc[5]; g_lg_v = lc[6]; g_lg_uv = lc[7];
+        g_lb_k = lc[8]; g_lb_u = lc[9]; g_lb_v = lc[10]; g_lb_uv = lc[11];
+    }
 
     g_uz0 = uz0; g_vz0 = vz0; g_w0 = w0;
     g_ref_x = x0; g_ref_y = y0;

@@ -181,6 +181,10 @@ class Face {
         // The light across the face, as a bilinear function of u and v
         self.lu0 = 0.0; self.lv0 = 0.0;
         self.l_k = 0.0; self.l_u = 0.0; self.l_v = 0.0; self.l_uv = 0.0;
+
+        // The same per channel, as [k, u, v, uv] for red, green and blue, on a
+        // piece whose light is coloured. Nil where all three are the level.
+        self.lc = nil;
     }
 }
 
@@ -193,8 +197,10 @@ class World {
         self.brushes = [];
         self.lights = [];
 
-        // How bright the moon is on what it can see, set by `moonlight`
+        // How bright the moon is on what it can see, set by `moonlight`, and
+        // its colour, set by `_sunlight_color`
         self.moon_light = 0.0;
+        self.moon_color = [1.0, 1.0, 1.0];
 
         self.spawn_x = 0.0;
         self.spawn_y = 1.6;
@@ -556,6 +562,20 @@ fun valve_num(ent, key, default) {
     return default;
 }
 
+// A colour key, "r g b", as three 0..1 factors, white if it is missing. Light
+// tools take 0..255, or 0..1 when no component is above 1.
+fun valve_color(li, ent, key) {
+    if (!ent.has(key)) return [1.0, 1.0, 1.0];
+    let t = valve_words(ent[key]);
+    if (t.len != 3) valve_error(li, "bad " + key + ": " + ent[key]);
+    let c = [parse_num(t[0]), parse_num(t[1]), parse_num(t[2])];
+    if (c[0] > 1.0 || c[1] > 1.0 || c[2] > 1.0) {
+        for (let var i = 0; i < 3; ++i) c[i] = c[i] / 255.0;
+    }
+    for (let var i = 0; i < 3; ++i) c[i] = c[i].clip(0.0, 1.0);
+    return c;
+}
+
 // The way an entity faces, in radians. Quake's angle turns from +x towards +y,
 // which is from our +x towards +z, where our yaw turns from +z towards +x.
 fun valve_yaw(ent) {
@@ -582,7 +602,10 @@ fun valve_entity(w, li, ent, brushes) {
     // light level or a see-through alpha on every face of its brushes, and can
     // say whether they flow whatever their texture is called.
     if (cls == "worldspawn" || cls == "func_group" || cls == "func_brush") {
-        if (cls == "worldspawn") w.moon_light = valve_num(ent, "moonlight", 0.0);
+        if (cls == "worldspawn") {
+            w.moon_light = valve_num(ent, "moonlight", 0.0);
+            w.moon_color = valve_color(li, ent, "_sunlight_color");
+        }
         let var light = -1;
         if (ent.has("light")) light = ent["light"].parse_int(10).clip(0, NUM_LEVELS - 1);
         let alpha = valve_num(ent, "alpha", 1.0).clip(0.0, 1.0);
@@ -635,10 +658,12 @@ fun valve_entity(w, li, ent, brushes) {
         return;
     }
 
+    // A lamp is [x, y, z, radius, brightness, red, green, blue]
     if (cls == "light") {
         let p = valve_point(li, ent, "origin");
+        let c = valve_color(li, ent, "_color");
         w.lights.push([p[0], p[1], p[2], valve_num(ent, "radius", 400.0) * k,
-            valve_num(ent, "brightness", 1.0)]);
+            valve_num(ent, "brightness", 1.0), c[0], c[1], c[2]]);
         return;
     }
 
@@ -716,6 +741,7 @@ fun split_face(f, nx, ny, nz, d) {
         g.cuts = f.cuts;
         g.lu0 = f.lu0; g.lv0 = f.lv0;
         g.l_k = f.l_k; g.l_u = f.l_u; g.l_v = f.l_v; g.l_uv = f.l_uv;
+        g.lc = f.lc;
         out.push(g);
     }
     if (front.len >= 9) {
@@ -724,6 +750,7 @@ fun split_face(f, nx, ny, nz, d) {
         g.cuts = f.cuts;
         g.lu0 = f.lu0; g.lv0 = f.lv0;
         g.l_k = f.l_k; g.l_u = f.l_u; g.l_v = f.l_v; g.l_uv = f.l_uv;
+        g.lc = f.lc;
         out.push(g);
     }
     return out;

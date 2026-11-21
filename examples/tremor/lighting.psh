@@ -34,6 +34,10 @@ let LIGHT_DEPTH = 4;
 // scale, before the face is worth cutting
 let LIGHT_TOL = 16.0;
 
+// How far apart a piece's channels may be, on the same scale, and still be
+// drawn with a single level. Half a level moves no pixel by a whole step.
+let GREY_TOL = 0.5;
+
 // The level everything starts from, before any lamp reaches it
 let AMBIENT = 0.13;
 
@@ -48,6 +52,12 @@ let MOON_REACH = 400.0;
 let var brushes = nil;
 let var lights = nil;
 let var moon_light = 0.0;
+let var moon_color = [1.0, 1.0, 1.0];
+
+// The red, green and blue levels `shade` worked out last
+let var at_r = 0.0;
+let var at_g = 0.0;
+let var at_b = 0.0;
 
 // The lamps that can reach the face being baked: in range of some part of it
 // and in front of it. Its pieces share them.
@@ -337,11 +347,35 @@ fun in_solid(x, y, z) {
     return false;
 }
 
-// The light level at one point on a surface facing a given way. `tx, ty, tz`
-// is the middle of the whole face the point belongs to, not of the piece it is
-// being baked with, and says which way is inward along it. Answering the same
-// for every piece of a face is what keeps the reply the same at a point two of
-// them share.
+// Put light summed per channel on the curve, returning the level and leaving
+// the three channels in `at_r`, `at_g` and `at_b`.
+//
+// The curve is applied here rather than per level, so what gets interpolated
+// across a face is the finished scale. It bends towards the dark end, where a
+// step is worth more to the eye than it is up in the light. It is applied to
+// the brightest channel and the others keep their ratio to it, so a light
+// holds its hue as it fades. White light gives three equal channels.
+fun shade(r, g, b) {
+    let peak = r.max(g).max(b);
+    let t = peak.clip(0.0, 1.0);
+    let level = ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
+        .clip(0.0, SHADE_MAX);
+
+    if (peak > 0.0) {
+        let k = level / peak;
+        at_r = r * k; at_g = g * k; at_b = b * k;
+    } else {
+        at_r = level; at_g = level; at_b = level;
+    }
+    return level;
+}
+
+// The light level at one point on a surface facing a given way, with its
+// channels left in `at_r`, `at_g` and `at_b`. `tx, ty, tz` is the middle of
+// the whole face the point belongs to, not of the piece it is being baked
+// with, and says which way is inward along it. Answering the same for every
+// piece of a face is what keeps the reply the same at a point two of them
+// share.
 fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     // Lift the sample off the surface, so that a fixture sitting flush against
     // a wall still counts as being in front of it
@@ -369,7 +403,9 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     if (span > 0.05) probe = 0.025 / span;
     let buried = in_solid(cx + mx * probe, cy + my * probe, cz + mz * probe);
 
-    let var lum = AMBIENT;
+    let var lr = AMBIENT;
+    let var lg = AMBIENT;
+    let var lb = AMBIENT;
     let lights = face_lights;
     for (let var i = 0; i < lights.len; ++i) {
         let L = lights[i];
@@ -381,7 +417,10 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
         if (dist2 >= radius * radius) continue;
 
         let dist = dist2.sqrt();
-        if (dist < 0.000025) { lum = lum + L[4]; continue; }
+        if (dist < 0.000025) {
+            lr = lr + L[4] * L[5]; lg = lg + L[4] * L[6]; lb = lb + L[4] * L[7];
+            continue;
+        }
 
         // Facing the light counts for most of it, but a surface edge on to it
         // keeps a little, which softens the falloff around corners
@@ -392,7 +431,8 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
         if (!buried && occluded(cx, cy, cz, L[0], L[1], L[2])) continue;
 
         let atten = 1.0 - dist / radius;
-        lum = lum + L[4] * atten * (0.35 + 0.65 * ndotl);
+        let p = L[4] * atten * (0.35 + 0.65 * ndotl);
+        lr = lr + p * L[5]; lg = lg + p * L[6]; lb = lb + p * L[7];
     }
 
     // The moon is far enough off to be a direction rather than a place, and
@@ -406,25 +446,23 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
         let ndotl = nx * dx + ny * dy + nz * dz;
         if (ndotl > 0.0 && !occluded(cx, cy, cz,
             cx + dx * MOON_REACH, cy + dy * MOON_REACH, cz + dz * MOON_REACH)) {
-            lum = lum + moon_light * (0.35 + 0.65 * ndotl);
+            let p = moon_light * (0.35 + 0.65 * ndotl);
+            lr = lr + p * moon_color[0]; lg = lg + p * moon_color[1]; lb = lb + p * moon_color[2];
         }
     }
 
-    // The curve is applied here rather than per level, so what gets
-    // interpolated across a face is the finished scale. It bends towards the
-    // dark end, where a step is worth more to the eye than it is up in the
-    // light.
-    let t = lum.clip(0.0, 1.0);
-    return ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
-        .clip(0.0, SHADE_MAX);
+    return shade(lr, lg, lb);
 }
 
 // The light level at a point in the open, such as where a model stands, on the
-// same scale as light_at. There is no surface to face the lamps, so each one
-// counts as much as it would for a surface turned half towards it. This only
-// works once light_world has run.
+// same scale as light_at, with its channels left in `at_r`, `at_g` and `at_b`.
+// There is no surface to face the lamps, so each one counts as much as it
+// would for a surface turned half towards it. This only works once
+// light_world has run.
 fun light_level_at(x, y, z) {
-    let var lum = AMBIENT;
+    let var lr = AMBIENT;
+    let var lg = AMBIENT;
+    let var lb = AMBIENT;
     for (let var i = 0; i < lights.len; ++i) {
         let L = lights[i];
         let dx = L[0] - x;
@@ -436,7 +474,8 @@ fun light_level_at(x, y, z) {
         if (occluded(x, y, z, L[0], L[1], L[2])) continue;
 
         let atten = 1.0 - dist2.sqrt() / radius;
-        lum = lum + L[4] * atten * 0.675;
+        let p = L[4] * atten * 0.675;
+        lr = lr + p * L[5]; lg = lg + p * L[6]; lb = lb + p * L[7];
     }
 
     if (moon_light > 0.0) {
@@ -445,13 +484,12 @@ fun light_level_at(x, y, z) {
         let dy = MOON_EL.sin();
         let dz = ce * MOON_AZ.cos();
         if (!occluded(x, y, z, x + dx * MOON_REACH, y + dy * MOON_REACH, z + dz * MOON_REACH)) {
-            lum = lum + moon_light * 0.675;
+            let p = moon_light * 0.675;
+            lr = lr + p * moon_color[0]; lg = lg + p * moon_color[1]; lb = lb + p * moon_color[2];
         }
     }
 
-    let t = lum.clip(0.0, 1.0);
-    return ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
-        .clip(0.0, SHADE_MAX);
+    return shade(lr, lg, lb);
 }
 
 // Solve a small system in place by Gauss-Jordan with partial pivoting. `a` is
@@ -527,6 +565,7 @@ fun bake_face_light(f) {
 
     f.lu0 = 0.0; f.lv0 = 0.0;
     f.l_u = 0.0; f.l_v = 0.0; f.l_uv = 0.0;
+    f.lc = nil;
 
     // Lava is its own light: it is as bright as the scale goes wherever it is,
     // and nothing standing over it makes it any dimmer
@@ -547,13 +586,19 @@ fun bake_face_light(f) {
     let uv = Array.with_size(n, 0.0);
     let vv = Array.with_size(n, 0.0);
     let lv = Array.with_size(n, 0.0);
+    let rv = Array.with_size(n, 0.0);
+    let gv = Array.with_size(n, 0.0);
+    let bv = Array.with_size(n, 0.0);
     let var uc = 0.0; let var vc = 0.0;
+    let var spread = 0.0;
 
     for (let var i = 0; i < n; ++i) {
         let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
         uv[i] = texel_u(f, x, y, z);
         vv[i] = texel_v(f, x, y, z);
         lv[i] = light_at(x, y, z, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+        rv[i] = at_r; gv[i] = at_g; bv[i] = at_b;
+        spread = spread.max(at_r.max(at_g).max(at_b) - at_r.min(at_g).min(at_b));
         uc = uc + uv[i]; vc = vc + vv[i];
     }
     uc = uc * inv_n; vc = vc * inv_n;
@@ -570,31 +615,52 @@ fun bake_face_light(f) {
     if (hu < 0.000001) hu = 1.0;
     if (hv < 0.000001) hv = 1.0;
 
-    // The normal equations of the least squares fit over 1, u, v and u * v.
-    // For the usual four cornered piece the fit is exact and this is just how
-    // the four terms get solved for; a piece with more corners than terms
-    // takes the closest bilinear there is.
+    let pu = Array.with_size(n, 0.0);
+    let pv = Array.with_size(n, 0.0);
+    for (let var i = 0; i < n; ++i) {
+        pu[i] = (uv[i] - uc) / hu;
+        pv[i] = (vv[i] - vc) / hv;
+    }
+
+    let coef = fit_bilinear(n, pu, pv, lv, hu, hv);
+    f.lu0 = uc; f.lv0 = vc;
+    f.l_k = coef[0]; f.l_u = coef[1]; f.l_v = coef[2]; f.l_uv = coef[3];
+
+    // A piece whose channels all read the level is drawn with it alone
+    f.lc = nil;
+    if (spread > GREY_TOL) {
+        f.lc = fit_bilinear(n, pu, pv, rv, hu, hv);
+        f.lc.append(fit_bilinear(n, pu, pv, gv, hu, hv));
+        f.lc.append(fit_bilinear(n, pu, pv, bv, hu, hv));
+    }
+}
+
+// Fit k + a * u + b * v + c * u * v to the samples, returned as [k, a, b, c].
+// `pu` and `pv` are the sample coordinates centred and divided by `hu` and
+// `hv`, so that the solve is on numbers around one whatever size the piece is
+// and wherever the map put it; the coefficients come back on the unscaled ones.
+//
+// These are the normal equations of the least squares fit over 1, u, v and
+// u * v. For the usual four cornered piece the fit is exact and this is just
+// how the four terms get solved for; a piece with more corners than terms
+// takes the closest bilinear there is.
+fun fit_bilinear(n, pu, pv, vals, hu, hv) {
     let a = Array.with_size(20, 0.0);
     let p = Array.with_size(4, 0.0);
     for (let var i = 0; i < n; ++i) {
         p[0] = 1.0;
-        p[1] = (uv[i] - uc) / hu;
-        p[2] = (vv[i] - vc) / hv;
+        p[1] = pu[i];
+        p[2] = pv[i];
         p[3] = p[1] * p[2];
         for (let var r = 0; r < 4; ++r) {
             for (let var c = 0; c < 4; ++c) a[r * 5 + c] = a[r * 5 + c] + p[r] * p[c];
-            a[r * 5 + 4] = a[r * 5 + 4] + p[r] * lv[i];
+            a[r * 5 + 4] = a[r * 5 + 4] + p[r] * vals[i];
         }
     }
 
     let coef = Array.with_size(4, 0.0);
     solve_system(a, 4, coef);
-
-    f.lu0 = uc; f.lv0 = vc;
-    f.l_k = coef[0];
-    f.l_u = coef[1] / hu;
-    f.l_v = coef[2] / hv;
-    f.l_uv = coef[3] / (hu * hv);
+    return [coef[0], coef[1] / hu, coef[2] / hv, coef[3] / (hu * hv)];
 }
 
 // --- Cutting faces up for lighting ---
@@ -612,9 +678,11 @@ fun light_curves(f) {
     if (f.light >= 0 || f.flow) return false;
 
     let n = f.v.len.idiv(3);
-    let vl = Array.with_size(n, 0.0);
+    let vr = Array.with_size(n, 0.0);
+    let vg = Array.with_size(n, 0.0);
+    let vb = Array.with_size(n, 0.0);
     let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
-    let var mean = 0.0;
+    let var mr = 0.0; let var mg = 0.0; let var mb = 0.0;
 
     for (let var i = 0; i < n; ++i) {
         cx = cx + f.v[i * 3]; cy = cy + f.v[i * 3 + 1]; cz = cz + f.v[i * 3 + 2];
@@ -623,17 +691,16 @@ fun light_curves(f) {
     cx = cx * inv_n; cy = cy * inv_n; cz = cz * inv_n;
 
     for (let var i = 0; i < n; ++i) {
-        vl[i] = light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
+        light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
             f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
-        mean = mean + vl[i];
+        vr[i] = at_r; vg[i] = at_g; vb[i] = at_b;
+        mr = mr + at_r; mg = mg + at_g; mb = mb + at_b;
     }
-    mean = mean * inv_n;
+    mr = mr * inv_n; mg = mg * inv_n; mb = mb * inv_n;
 
     // The middle, where a lamp pool that the corners all miss shows up
-    if ((light_at(cx, cy, cz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - mean).abs()
-        > LIGHT_TOL) {
-        return true;
-    }
+    light_at(cx, cy, cz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+    if (off_by(mr, mg, mb) > LIGHT_TOL) return true;
 
     // And the edge midpoints, where interpolation is the mean of two corners.
     // A pool sitting against one edge misses the centre test but not this one.
@@ -644,14 +711,20 @@ fun light_curves(f) {
         let mx = (f.v[i * 3] + f.v[j * 3]) * 0.5;
         let my = (f.v[i * 3 + 1] + f.v[j * 3 + 1]) * 0.5;
         let mz = (f.v[i * 3 + 2] + f.v[j * 3 + 2]) * 0.5;
-        let interp = (vl[i] + vl[j]) * 0.5;
-        if ((light_at(mx, my, mz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z) - interp).abs()
+        light_at(mx, my, mz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+        if (off_by((vr[i] + vr[j]) * 0.5, (vg[i] + vg[j]) * 0.5, (vb[i] + vb[j]) * 0.5)
             > LIGHT_TOL) {
             return true;
         }
     }
 
     return false;
+}
+
+// How far the channels `light_at` left behind are from an interpolated red,
+// green and blue, taking whichever channel is furthest off
+fun off_by(r, g, b) {
+    return (at_r - r).abs().max((at_g - g).abs()).max((at_b - b).abs());
 }
 
 // Halve a face across its longer side, gathering the planes the light asks to
@@ -781,6 +854,7 @@ fun light_world(w) {
     brushes = w.brushes;
     lights = w.lights;
     moon_light = w.moon_light;
+    moon_color = w.moon_color;
     build_grid(brushes);
 
     let faces = w.faces;
@@ -812,11 +886,15 @@ fun light_world(w) {
             // for the destination and nothing more. This is also what bounds
             // that multiplier by alpha8, which is what keeps the two halves of
             // the blend summing to 255.
+            //
+            // A see-through face keeps the single level: the blend has no room
+            // for a colour of its own.
             if (g.alpha < 1.0) {
                 g.l_k = g.l_k * g.alpha;
                 g.l_u = g.l_u * g.alpha;
                 g.l_v = g.l_v * g.alpha;
                 g.l_uv = g.l_uv * g.alpha;
+                g.lc = nil;
             }
 
             lit_faces.push(g);
