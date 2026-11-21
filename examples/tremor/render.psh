@@ -144,11 +144,6 @@ let pUZ = Array.with_size(MAX_VERTS, 0.0);
 let pVZ = Array.with_size(MAX_VERTS, 0.0);
 let pW = Array.with_size(MAX_VERTS, 0.0);
 
-// Reciprocals of the sub-span lengths, so the per-sub-span gradient is a
-// multiply rather than a divide
-let INV_N = Array.with_size(SUB_MAX + 1, 0.0);
-for (let var i = 1; i <= SUB_MAX; ++i) INV_N[i] = 1.0 / i.to_f();
-
 // Gradients of the face being drawn, and its texture
 let var g_duzdx = 0.0; let var g_duzdy = 0.0;
 let var g_dvzdx = 0.0; let var g_dvzdy = 0.0;
@@ -1192,7 +1187,7 @@ fun raster_poly(m) {
                         let cv_e = v_e - lv0;
                         let l_e = l_k + l_u * cu_e + cv_e * (l_v + l_uv * cu_e);
 
-                        let inv_len = INV_N[len];
+                        let inv_len = 1.0 / len;
                         let var du = (u_e - u) * inv_len;
                         let var dv = (v_e - v) * inv_len;
                         if (du > GRAD_LIMIT) du = GRAD_LIMIT;
@@ -1216,7 +1211,7 @@ fun raster_poly(m) {
                         if (lfx_e < l_min) lfx_e = l_min;
                         else if (lfx_e > l_max) lfx_e = l_max;
 
-                        let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
+                        let dl = ((lfx_e - lfx) * (65536).idiv(len)) >> 16;
 
                         let var lp = lfx;
                         let var i = row + x;
@@ -1354,7 +1349,7 @@ fun raster_spans(first, count) {
             let cv_e = v_e - lv0;
             let l_e = l_k + l_u * cu_e + cv_e * (l_v + l_uv * cu_e);
 
-            let inv_len = INV_N[len];
+            let inv_len = 1.0 / len;
             let var du = (u_e - u) * inv_len;
             let var dv = (v_e - v) * inv_len;
             if (du > GRAD_LIMIT) du = GRAD_LIMIT;
@@ -1371,7 +1366,7 @@ fun raster_spans(first, count) {
             if (lfx_e < l_min) lfx_e = l_min;
             else if (lfx_e > l_max) lfx_e = l_max;
 
-            let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
+            let dl = ((lfx_e - lfx) * (65536).idiv(len)) >> 16;
 
             let var lp = lfx;
             let var i = row + x;
@@ -2117,7 +2112,7 @@ fun raster_triangle() {
                         let u_e = uz_e * z_e;
                         let v_e = vz_e * z_e;
 
-                        let inv_len = INV_N[len];
+                        let inv_len = 1.0 / len;
                         let var du = (u_e - u) * inv_len;
                         let var dv = (v_e - v) * inv_len;
                         if (du > GRAD_LIMIT) du = GRAD_LIMIT;
@@ -2134,7 +2129,7 @@ fun raster_triangle() {
                         if (lfx_e < L_MIN_FX) lfx_e = L_MIN_FX;
                         else if (lfx_e > L_MAX_FX) lfx_e = L_MAX_FX;
 
-                        let dl = ((lfx_e - lfx).to_f() * inv_len).floor();
+                        let dl = ((lfx_e - lfx) * (65536).idiv(len)) >> 16;
 
                         let var lp = lfx;
                         let var i = row + x;

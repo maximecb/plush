@@ -16,7 +16,7 @@
 // face until its lighting is even enough to get away with that. Per-vertex
 // lighting is what removes the subdivision, so this is the loop that has to
 // pay for it.
-// Usage: plush benchmarks/raster_vertlight.psh [num_frames]
+// Usage: plush benchmarks/raster_vlight.psh [num_frames]
 
 from args import ArgParser;
 
@@ -244,8 +244,10 @@ fun rasterize_tri_light(v0, v1, v2, fb, tex) {
     let dudy_fx = dudy * FP_ONE;
     let dvdx_fx = dvdx * FP_ONE;
     let dvdy_fx = dvdy * FP_ONE;
-    let dldx_fx = dldx * L_ONE;
-    let dldy_fx = dldy * L_ONE;
+    // The light gradients are integers, so that span setup needs no floor().
+    // Truncating them drifts the level by at most 1/64 over a frame width.
+    let dldx_fx = (dldx * L_ONE).floor();
+    let dldy_fx = (dldy * L_ONE).floor();
 
     // The edges are walked in 16.16 fixed point as well, so that a scanline
     // start is a shift rather than a call to floor()
@@ -280,14 +282,14 @@ fun rasterize_tri_light(v0, v1, v2, fb, tex) {
         }
 
         // Texture coordinates and light level at x = 0 of the current
-        // scanline, pre-scaled and biased. These stay floats: at x = 0 the
-        // value can sit far outside the triangle, which a float carries
-        // without losing the precision that matters once a span start brings
-        // it back inside.
+        // scanline, pre-scaled and biased. The texture coordinates stay
+        // floats: at x = 0 they can sit far outside the triangle, which a
+        // float carries without losing precision. The light gradient is
+        // limited, so its level stays a small integer even out there.
         let y_off = start_scanline_y_top + 0.5 - py0;
         let var u_row_fx = (u0 + (0.5 - x0) * dudx + y_off * dudy) * FP_ONE + FP_BIAS_F;
         let var v_row_fx = (v0t + (0.5 - x0) * dvdx + y_off * dvdy) * FP_ONE + FP_BIAS_F;
-        let var l_row_fx = (l0 + (0.5 - x0) * dldx + y_off * dldy) * L_ONE;
+        let var l_row_fx = ((l0 + (0.5 - x0) * dldx + y_off * dldy) * L_ONE).floor();
         let var row = start_scanline_y_top * FRAME_WIDTH;
         let end_row = end_scanline_y_top * FRAME_WIDTH;
 
@@ -308,15 +310,15 @@ fun rasterize_tri_light(v0, v1, v2, fb, tex) {
                 // range as well. Clamping only the start would leave the step
                 // free to run the scale off the end of a channel, which
                 // overflows red into green and shows as a flash of colour.
-                let var l = (l_row_fx + start_x * dldx_fx).floor();
+                let var l = l_row_fx + start_x * dldx_fx;
                 if (l < L_MIN_FX) l = L_MIN_FX;
                 else if (l > L_MAX_FX) l = L_MAX_FX;
 
-                let var l_e = (l_row_fx + end_x * dldx_fx).floor();
+                let var l_e = l_row_fx + end_x * dldx_fx;
                 if (l_e < L_MIN_FX) l_e = L_MIN_FX;
                 else if (l_e > L_MAX_FX) l_e = L_MAX_FX;
 
-                let dl = ((l_e - l).to_f() / (end_x - start_x).to_f()).floor();
+                let dl = ((l_e - l) * (65536).idiv(end_x - start_x)) >> 16;
 
                 let var i = row + start_x;
                 let end_i = row + end_x;
@@ -373,14 +375,14 @@ fun rasterize_tri_light(v0, v1, v2, fb, tex) {
         }
 
         // Texture coordinates and light level at x = 0 of the current
-        // scanline, pre-scaled and biased. These stay floats: at x = 0 the
-        // value can sit far outside the triangle, which a float carries
-        // without losing the precision that matters once a span start brings
-        // it back inside.
+        // scanline, pre-scaled and biased. The texture coordinates stay
+        // floats: at x = 0 they can sit far outside the triangle, which a
+        // float carries without losing precision. The light gradient is
+        // limited, so its level stays a small integer even out there.
         let y_off = start_scanline_y_bot + 0.5 - py0;
         let var u_row_fx = (u0 + (0.5 - x0) * dudx + y_off * dudy) * FP_ONE + FP_BIAS_F;
         let var v_row_fx = (v0t + (0.5 - x0) * dvdx + y_off * dvdy) * FP_ONE + FP_BIAS_F;
-        let var l_row_fx = (l0 + (0.5 - x0) * dldx + y_off * dldy) * L_ONE;
+        let var l_row_fx = ((l0 + (0.5 - x0) * dldx + y_off * dldy) * L_ONE).floor();
         let var row = start_scanline_y_bot * FRAME_WIDTH;
         let end_row = end_scanline_y_bot * FRAME_WIDTH;
 
@@ -399,15 +401,15 @@ fun rasterize_tri_light(v0, v1, v2, fb, tex) {
                 // range as well. Clamping only the start would leave the step
                 // free to run the scale off the end of a channel, which
                 // overflows red into green and shows as a flash of colour.
-                let var l = (l_row_fx + start_x * dldx_fx).floor();
+                let var l = l_row_fx + start_x * dldx_fx;
                 if (l < L_MIN_FX) l = L_MIN_FX;
                 else if (l > L_MAX_FX) l = L_MAX_FX;
 
-                let var l_e = (l_row_fx + end_x * dldx_fx).floor();
+                let var l_e = l_row_fx + end_x * dldx_fx;
                 if (l_e < L_MIN_FX) l_e = L_MIN_FX;
                 else if (l_e > L_MAX_FX) l_e = L_MAX_FX;
 
-                let dl = ((l_e - l).to_f() / (end_x - start_x).to_f()).floor();
+                let dl = ((l_e - l) * (65536).idiv(end_x - start_x)) >> 16;
 
                 let var i = row + start_x;
                 let end_i = row + end_x;

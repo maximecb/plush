@@ -1,0 +1,555 @@
+// Textured triangle rasterization with colored per-vertex lighting
+// Usage: plush benchmarks/raster_vlight_rgb.psh [num_frames] [--validate] [--png path]
+//
+// The same grid, texture and frame as raster_vlight.psh, with a red, green and
+// blue light level per vertex instead of one. Each channel is scaled by its own
+// 16.16 level, interpolated in its own accumulator.
+
+from args import ArgParser;
+from image import Image;
+from png import save_png;
+
+let FRAME_WIDTH = 1024;
+let FRAME_HEIGHT = 1024;
+
+// Grid of cells, each split into two triangles: 32 * 32 * 2 = 2048 triangles
+let GRID_COLS = 32;
+let GRID_ROWS = 32;
+
+let TEX_SHIFT = 8;
+let TEX_SIZE = 1 << TEX_SHIFT;
+let TEX_MASK = TEX_SIZE - 1;
+
+let SHADE_MAX = 255.0;
+let MIN_SHADE = 0.09;
+let MAX_SHADE = 1.0;
+let AMBIENT = 0.13;
+
+// Texture coordinates packed as in raster_vlight.psh: v in the high 32 bits,
+// u in the low 32 bits, both 16.16 and biased by 256 texels
+let FP_BITS = 16;
+let FP_ONE = 65536.0;
+let FP_BIAS_F = 16777216.0;
+let FP_LIMIT = 1024.0;
+let X_LIMIT = (4 * FRAME_WIDTH).to_f();
+
+let U_SHIFT = FP_BITS;
+let U_MASK = TEX_MASK;
+let V_SHIFT = 32 + FP_BITS - TEX_SHIFT;
+let V_MASK = TEX_MASK << TEX_SHIFT;
+
+// Light levels are 16.16 fixed point on the 0..255 scale, clamped at both span
+// ends. The floor of 1.0 keeps a floored step from walking a level negative.
+let L_ONE = 65536.0;
+let L_MIN_FX = 65536;
+let L_MAX_FX = 16711680;
+let L_LIMIT = 64.0;
+
+// A channel times its whole 16.16 level puts the high byte of the scaled
+// channel at bit 40 for red, 32 for green and 24 for blue. One shift by 24
+// then brings all three to their place in the pixel. The masks are contiguous,
+// so they fold into the instructions rather than taking registers.
+let MASK_R_TEX = 0xFF0000;
+let MASK_G_TEX = 0xFF00;
+let MASK_B_TEX = 0xFF;
+let MASK_R_OUT = 0xFF0000000000;
+let MASK_G_OUT = 0xFF00000000;
+let MASK_B_OUT = 0xFF000000;
+let OUT_SHIFT = 24;
+
+let args = ArgParser("Textured triangle rasterization with colored per-vertex lighting")
+    .pos_int("num_frames", 50, "Number of frames to render")
+    .flag("validate", "Check the rendered frame against a direct per-pixel reference")
+    .opt_str("png", nil, "Save the rendered frame to this PNG file")
+    .parse_args();
+let num_frames = args.num_frames;
+
+// Screen position, texture coordinates in texels, and red, green and blue
+// light levels on the 0..255 scale
+class Vertex {
+    init(self, x, y, u, v, lr, lg, lb) {
+        self.x = x;
+        self.y = y;
+        self.u = u;
+        self.v = v;
+        self.lr = lr;
+        self.lg = lg;
+        self.lb = lb;
+    }
+}
+
+// --- Texture ---
+
+// Same color-coded texture as raster_vlight.psh
+fun make_texture() {
+    let tex = ByteArray.with_size(TEX_SIZE * TEX_SIZE * 4);
+    let half = TEX_SIZE >> 1;
+
+    for (let var y = 0; y < TEX_SIZE; ++y) {
+        for (let var x = 0; x < TEX_SIZE; ++x) {
+            let shade = 96 + (((x & (half - 1)) + (y & (half - 1))) >> 1);
+            let var r = 0; let var g = 0; let var b = 0;
+            if (y < half) {
+                if (x < half) { r = shade; }
+                else { g = shade; }
+            } else {
+                if (x < half) { b = shade; }
+                else { r = shade; g = shade; }
+            }
+
+            if ((x & 31) == 0 || (y & 31) == 0) {
+                r = r >> 2; g = g >> 2; b = b >> 2;
+            }
+
+            if (x < 24 && y < 24) { r = 255; g = 255; b = 255; }
+            if (x < 96 && y < 8) { r = 255; g = 255; b = 255; }
+
+            tex.set_u32(y * TEX_SIZE + x, 0xFF000000 | (r << 16) | (g << 8) | b);
+        }
+    }
+
+    return tex;
+}
+
+let texture = make_texture();
+
+// --- Rasterization ---
+
+// Coordinates are floats with x in [0, FRAME_WIDTH] pointing right and
+// y in [0, FRAME_HEIGHT] pointing down
+fun rasterize_tri_rgb(v0, v1, v2, fb, tex) {
+    let var p0 = v0;
+    let var p1 = v1;
+    let var p2 = v2;
+    if (p0.y > p1.y) { let tmp = p0; p0 = p1; p1 = tmp; }
+    if (p0.y > p2.y) { let tmp = p0; p0 = p2; p2 = tmp; }
+    if (p1.y > p2.y) { let tmp = p1; p1 = p2; p2 = tmp; }
+
+    let py0 = p0.y;
+    let py1 = p1.y;
+    let py2 = p2.y;
+
+    let y0 = py0.floor();
+    let y1 = py1.floor();
+    let y2 = py2.floor();
+
+    if (y0 == y2) return;
+
+    let x0 = p0.x;
+    let x1 = p1.x;
+    let x2 = p2.x;
+
+    let e1x = x1 - x0; let e1y = py1 - py0;
+    let e2x = x2 - x0; let e2y = py2 - py0;
+    let det = e1x * e2y - e2x * e1y;
+    if (det == 0.0) return;
+    let inv_det = 1.0 / det;
+
+    let u0 = p0.u; let e1u = p1.u - u0; let e2u = p2.u - u0;
+    let v0t = p0.v; let e1v = p1.v - v0t; let e2v = p2.v - v0t;
+    let r0 = p0.lr; let e1r = p1.lr - r0; let e2r = p2.lr - r0;
+    let g0 = p0.lg; let e1g = p1.lg - g0; let e2g = p2.lg - g0;
+    let b0 = p0.lb; let e1b = p1.lb - b0; let e2b = p2.lb - b0;
+
+    let dudx = (e1u * e2y - e2u * e1y) * inv_det;
+    let dudy = (e2u * e1x - e1u * e2x) * inv_det;
+    let dvdx = (e1v * e2y - e2v * e1y) * inv_det;
+    let dvdy = (e2v * e1x - e1v * e2x) * inv_det;
+    let drdx = (e1r * e2y - e2r * e1y) * inv_det;
+    let drdy = (e2r * e1x - e1r * e2x) * inv_det;
+    let dgdx = (e1g * e2y - e2g * e1y) * inv_det;
+    let dgdy = (e2g * e1x - e1g * e2x) * inv_det;
+    let dbdx = (e1b * e2y - e2b * e1y) * inv_det;
+    let dbdy = (e2b * e1x - e1b * e2x) * inv_det;
+
+    if (dudx.abs() >= FP_LIMIT || dvdx.abs() >= FP_LIMIT) return;
+    if (dudy.abs() >= FP_LIMIT || dvdy.abs() >= FP_LIMIT) return;
+    if (drdx.abs() >= L_LIMIT || drdy.abs() >= L_LIMIT) return;
+    if (dgdx.abs() >= L_LIMIT || dgdy.abs() >= L_LIMIT) return;
+    if (dbdx.abs() >= L_LIMIT || dbdy.abs() >= L_LIMIT) return;
+
+    let dt = ((dvdx * FP_ONE).floor() << 32) + (dudx * FP_ONE).floor();
+
+    let dudx_fx = dudx * FP_ONE;
+    let dudy_fx = dudy * FP_ONE;
+    let dvdx_fx = dvdx * FP_ONE;
+    let dvdy_fx = dvdy * FP_ONE;
+    // Light is stepped in integers, so that span setup needs no floor()
+    let drdx_fx = (drdx * L_ONE).floor();
+    let drdy_fx = (drdy * L_ONE).floor();
+    let dgdx_fx = (dgdx * L_ONE).floor();
+    let dgdy_fx = (dgdy * L_ONE).floor();
+    let dbdx_fx = (dbdx * L_ONE).floor();
+    let dbdy_fx = (dbdy * L_ONE).floor();
+
+    let var inv_slope1 = 0.0;
+    if (py1 > py0) inv_slope1 = (x1 - x0) / (py1 - py0);
+    let slope1_fx = (inv_slope1.clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+    let var inv_slope2 = 0.0;
+    if (py2 > py0) inv_slope2 = (x2 - x0) / (py2 - py0);
+    let slope2_fx = (inv_slope2.clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+    let start_scanline_y_top = y0.max(0);
+    let end_scanline_y_top = y1.min(FRAME_HEIGHT);
+
+    // Top half of triangle
+    if (start_scanline_y_top < end_scanline_y_top) {
+        let dy = start_scanline_y_top + 1 - py0;
+        let xa = ((x0 + dy * inv_slope1).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+        let xb = ((x0 + dy * inv_slope2).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+        // The winding decides which edge is the left one
+        let var cur_xl = xa; let var slope_l = slope1_fx;
+        let var cur_xr = xb; let var slope_r = slope2_fx;
+        if (det > 0.0) {
+            cur_xl = xb; slope_l = slope2_fx;
+            cur_xr = xa; slope_r = slope1_fx;
+        }
+
+        // Values at x = 0 of the current scanline. Texture coordinates stay
+        // floats, as they can be far out of range there; light is limited.
+        let y_off = start_scanline_y_top + 0.5 - py0;
+        let x_off = 0.5 - x0;
+        let var u_row_fx = (u0 + x_off * dudx + y_off * dudy) * FP_ONE + FP_BIAS_F;
+        let var v_row_fx = (v0t + x_off * dvdx + y_off * dvdy) * FP_ONE + FP_BIAS_F;
+        let var r_row_fx = ((r0 + x_off * drdx + y_off * drdy) * L_ONE).floor();
+        let var g_row_fx = ((g0 + x_off * dgdx + y_off * dgdy) * L_ONE).floor();
+        let var b_row_fx = ((b0 + x_off * dbdx + y_off * dbdy) * L_ONE).floor();
+        let var row = start_scanline_y_top * FRAME_WIDTH;
+        let end_row = end_scanline_y_top * FRAME_WIDTH;
+
+        while (row < end_row) {
+            let var start_x = cur_xl >> FP_BITS;
+            if (start_x < 0) start_x = 0;
+            let var end_x = cur_xr >> FP_BITS;
+            if (end_x > FRAME_WIDTH) end_x = FRAME_WIDTH;
+            if (start_x < end_x) {
+                let var t = ((v_row_fx + start_x * dvdx_fx).floor() << 32)
+                          + (u_row_fx + start_x * dudx_fx).floor();
+
+                // Each channel is clamped at both span ends and stepped
+                // between the clamped pair, so it stays in range throughout
+                let var lr = r_row_fx + start_x * drdx_fx;
+                if (lr < L_MIN_FX) lr = L_MIN_FX;
+                else if (lr > L_MAX_FX) lr = L_MAX_FX;
+                let var lr_e = r_row_fx + end_x * drdx_fx;
+                if (lr_e < L_MIN_FX) lr_e = L_MIN_FX;
+                else if (lr_e > L_MAX_FX) lr_e = L_MAX_FX;
+
+                let var lg = g_row_fx + start_x * dgdx_fx;
+                if (lg < L_MIN_FX) lg = L_MIN_FX;
+                else if (lg > L_MAX_FX) lg = L_MAX_FX;
+                let var lg_e = g_row_fx + end_x * dgdx_fx;
+                if (lg_e < L_MIN_FX) lg_e = L_MIN_FX;
+                else if (lg_e > L_MAX_FX) lg_e = L_MAX_FX;
+
+                let var lb = b_row_fx + start_x * dbdx_fx;
+                if (lb < L_MIN_FX) lb = L_MIN_FX;
+                else if (lb > L_MAX_FX) lb = L_MAX_FX;
+                let var lb_e = b_row_fx + end_x * dbdx_fx;
+                if (lb_e < L_MIN_FX) lb_e = L_MIN_FX;
+                else if (lb_e > L_MAX_FX) lb_e = L_MAX_FX;
+
+                let inv_len = (65536).idiv(end_x - start_x);
+                let dlr = ((lr_e - lr) * inv_len) >> 16;
+                let dlg = ((lg_e - lg) * inv_len) >> 16;
+                let dlb = ((lb_e - lb) * inv_len) >> 16;
+
+                let var i = row + start_x;
+                let end_i = row + end_x;
+                while (i < end_i) {
+                    let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
+                                      | ((t >> U_SHIFT) & U_MASK));
+                    fb.set_u32(i, ((((c & MASK_R_TEX) * lr) & MASK_R_OUT)
+                                 | (((c & MASK_G_TEX) * lg) & MASK_G_OUT)
+                                 | (((c & MASK_B_TEX) * lb) & MASK_B_OUT)) >> OUT_SHIFT);
+                    t = t + dt;
+                    lr = lr + dlr;
+                    lg = lg + dlg;
+                    lb = lb + dlb;
+                    ++i;
+                }
+            }
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
+            u_row_fx = u_row_fx + dudy_fx;
+            v_row_fx = v_row_fx + dvdy_fx;
+            r_row_fx = r_row_fx + drdy_fx;
+            g_row_fx = g_row_fx + dgdy_fx;
+            b_row_fx = b_row_fx + dbdy_fx;
+            row = row + FRAME_WIDTH;
+        }
+    }
+
+    let var inv_slope3 = 0.0;
+    if (py2 > py1) inv_slope3 = (x2 - x1) / (py2 - py1);
+    let slope3_fx = (inv_slope3.clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+    let start_scanline_y_bot = y1.max(0);
+    let end_scanline_y_bot = y2.min(FRAME_HEIGHT);
+
+    // Bottom half of triangle
+    if (start_scanline_y_bot < end_scanline_y_bot) {
+        let xa = ((x1 + (start_scanline_y_bot + 1 - py1) * inv_slope3).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+        let xb = ((x0 + (start_scanline_y_bot + 1 - py0) * inv_slope2).clip(-X_LIMIT, X_LIMIT) * FP_ONE).floor();
+
+        let var cur_xl = xa; let var slope_l = slope3_fx;
+        let var cur_xr = xb; let var slope_r = slope2_fx;
+        if (det > 0.0) {
+            cur_xl = xb; slope_l = slope2_fx;
+            cur_xr = xa; slope_r = slope3_fx;
+        }
+
+        let y_off = start_scanline_y_bot + 0.5 - py0;
+        let x_off = 0.5 - x0;
+        let var u_row_fx = (u0 + x_off * dudx + y_off * dudy) * FP_ONE + FP_BIAS_F;
+        let var v_row_fx = (v0t + x_off * dvdx + y_off * dvdy) * FP_ONE + FP_BIAS_F;
+        let var r_row_fx = ((r0 + x_off * drdx + y_off * drdy) * L_ONE).floor();
+        let var g_row_fx = ((g0 + x_off * dgdx + y_off * dgdy) * L_ONE).floor();
+        let var b_row_fx = ((b0 + x_off * dbdx + y_off * dbdy) * L_ONE).floor();
+        let var row = start_scanline_y_bot * FRAME_WIDTH;
+        let end_row = end_scanline_y_bot * FRAME_WIDTH;
+
+        while (row < end_row) {
+            let var start_x = cur_xl >> FP_BITS;
+            if (start_x < 0) start_x = 0;
+            let var end_x = cur_xr >> FP_BITS;
+            if (end_x > FRAME_WIDTH) end_x = FRAME_WIDTH;
+            if (start_x < end_x) {
+                let var t = ((v_row_fx + start_x * dvdx_fx).floor() << 32)
+                          + (u_row_fx + start_x * dudx_fx).floor();
+
+                let var lr = r_row_fx + start_x * drdx_fx;
+                if (lr < L_MIN_FX) lr = L_MIN_FX;
+                else if (lr > L_MAX_FX) lr = L_MAX_FX;
+                let var lr_e = r_row_fx + end_x * drdx_fx;
+                if (lr_e < L_MIN_FX) lr_e = L_MIN_FX;
+                else if (lr_e > L_MAX_FX) lr_e = L_MAX_FX;
+
+                let var lg = g_row_fx + start_x * dgdx_fx;
+                if (lg < L_MIN_FX) lg = L_MIN_FX;
+                else if (lg > L_MAX_FX) lg = L_MAX_FX;
+                let var lg_e = g_row_fx + end_x * dgdx_fx;
+                if (lg_e < L_MIN_FX) lg_e = L_MIN_FX;
+                else if (lg_e > L_MAX_FX) lg_e = L_MAX_FX;
+
+                let var lb = b_row_fx + start_x * dbdx_fx;
+                if (lb < L_MIN_FX) lb = L_MIN_FX;
+                else if (lb > L_MAX_FX) lb = L_MAX_FX;
+                let var lb_e = b_row_fx + end_x * dbdx_fx;
+                if (lb_e < L_MIN_FX) lb_e = L_MIN_FX;
+                else if (lb_e > L_MAX_FX) lb_e = L_MAX_FX;
+
+                let inv_len = (65536).idiv(end_x - start_x);
+                let dlr = ((lr_e - lr) * inv_len) >> 16;
+                let dlg = ((lg_e - lg) * inv_len) >> 16;
+                let dlb = ((lb_e - lb) * inv_len) >> 16;
+
+                let var i = row + start_x;
+                let end_i = row + end_x;
+                while (i < end_i) {
+                    let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
+                                      | ((t >> U_SHIFT) & U_MASK));
+                    fb.set_u32(i, ((((c & MASK_R_TEX) * lr) & MASK_R_OUT)
+                                 | (((c & MASK_G_TEX) * lg) & MASK_G_OUT)
+                                 | (((c & MASK_B_TEX) * lb) & MASK_B_OUT)) >> OUT_SHIFT);
+                    t = t + dt;
+                    lr = lr + dlr;
+                    lg = lg + dlg;
+                    lb = lb + dlb;
+                    ++i;
+                }
+            }
+            cur_xl = cur_xl + slope_l;
+            cur_xr = cur_xr + slope_r;
+            u_row_fx = u_row_fx + dudy_fx;
+            v_row_fx = v_row_fx + dvdy_fx;
+            r_row_fx = r_row_fx + drdy_fx;
+            g_row_fx = g_row_fx + dgdy_fx;
+            b_row_fx = b_row_fx + dbdy_fx;
+            row = row + FRAME_WIDTH;
+        }
+    }
+}
+
+// --- Lighting ---
+
+// A lamp's contribution at a point, falling off with distance
+fun lamp(x, y, lx, ly, reach, power) {
+    let dx = x - lx;
+    let dy = y - ly;
+    let dist = (dx * dx + dy * dy).sqrt();
+    if (dist >= reach) return 0.0;
+
+    let t = 1.0 - dist / reach;
+    return power * t * t;
+}
+
+// The same three lamps as raster_vlight.psh, now colored:
+// [x, y, reach, power, red, green, blue]
+let LAMPS = [
+    [300.0, 280.0, 460.0, 0.95, 1.0, 0.85, 0.65],
+    [800.0, 760.0, 400.0, 0.80, 1.0, 0.18, 0.10],
+    [150.0, 880.0, 300.0, 0.60, 0.20, 0.40, 1.0],
+];
+
+// The red, green and blue levels of a vertex. The response curve is applied
+// to the brightest channel and the others keep their ratio to it, so a light
+// keeps its hue as it fades. White lamps give the levels raster_vlight.psh does.
+fun vertex_light(x, y) {
+    let var r = AMBIENT;
+    let var g = AMBIENT;
+    let var b = AMBIENT;
+    for (let var i = 0; i < LAMPS.len; ++i) {
+        let l = LAMPS[i];
+        let p = lamp(x, y, l[0], l[1], l[2], l[3]);
+        r = r + p * l[4];
+        g = g + p * l[5];
+        b = b + p * l[6];
+    }
+
+    let peak = r.max(g).max(b);
+    let t = peak.clip(0.0, 1.0);
+    let level = (MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX;
+    let k = level / peak;
+    return [
+        (r * k).clip(0.0, SHADE_MAX),
+        (g * k).clip(0.0, SHADE_MAX),
+        (b * k).clip(0.0, SHADE_MAX),
+    ];
+}
+
+// --- Pre-generated geometry ---
+
+let vertices = [];
+for (let var r = 0; r <= GRID_ROWS; ++r) {
+    for (let var c = 0; c <= GRID_COLS; ++c) {
+        let x = (c * FRAME_WIDTH) / GRID_COLS;
+        let y = (r * FRAME_HEIGHT) / GRID_ROWS;
+        let l = vertex_light(x.to_f(), y.to_f());
+
+        vertices.push(Vertex(
+            x,
+            y,
+            (c * TEX_SIZE) / GRID_COLS,
+            (r * TEX_SIZE) / GRID_ROWS,
+            l[0], l[1], l[2]
+        ));
+    }
+}
+
+// Two triangles per cell, as indices into the vertex array
+let indices = [];
+for (let var r = 0; r < GRID_ROWS; ++r) {
+    for (let var c = 0; c < GRID_COLS; ++c) {
+        let i00 = r * (GRID_COLS + 1) + c;
+        let i11 = i00 + GRID_COLS + 2;
+
+        indices.push(i00); indices.push(i00 + 1); indices.push(i11);
+        indices.push(i00); indices.push(i11); indices.push(i11 - 1);
+    }
+}
+
+let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
+let num_tris = indices.len / 3;
+
+// --- Rendering ---
+
+let start_ms = $time_current_ms();
+
+for (let var frame = 0; frame < num_frames; ++frame) {
+    let var i = 0;
+    for (let var t = 0; t < num_tris; ++t) {
+        rasterize_tri_rgb(
+            vertices[indices[i]],
+            vertices[indices[i + 1]],
+            vertices[indices[i + 2]],
+            frame_buffer,
+            texture
+        );
+        i += 3;
+    }
+}
+
+let total_ms = $time_current_ms() - start_ms;
+let fps = (num_frames * 1000) / total_ms;
+let mpix = (num_frames * FRAME_WIDTH * FRAME_HEIGHT) / (total_ms * 1000);
+
+let var sum = 0;
+let var unlit = 0;
+for (let var p = 0; p < FRAME_WIDTH * FRAME_HEIGHT; ++p) {
+    let px = frame_buffer.get_u32(p) & 0xFFFFFF;
+    sum = (sum * 31 + px) & 0xFFFFFFFF;
+    if (px == 0) unlit = unlit + 1;
+}
+
+$println(num_frames.to_s() + " frames of " + num_tris.to_s() + " RGB lit textured triangles");
+$println("total time: " + total_ms.to_s() + "ms");
+$println("fps: " + fps.format_decimals(1));
+$println("Mpixels/s: " + mpix.format_decimals(1));
+$println("RGB checksum: " + sum.to_s() + ", unwritten pixels: " + unlit.to_s());
+
+// Interpolates the three channels at each pixel center straight from the
+// vertices of the triangle it falls in, and compares the scaled texel
+if (args.validate) {
+    let cell_w = FRAME_WIDTH.idiv(GRID_COLS);
+    let cell_h = FRAME_HEIGHT.idiv(GRID_ROWS);
+    let var differing = 0;
+    let var max_error = 0;
+
+    for (let var y = 0; y < FRAME_HEIGHT; ++y) {
+        for (let var x = 0; x < FRAME_WIDTH; ++x) {
+            let cx = x.idiv(cell_w);
+            let cy = y.idiv(cell_h);
+            let fx = ((x - cx * cell_w).to_f() + 0.5) / cell_w.to_f();
+            let fy = ((y - cy * cell_h).to_f() + 0.5) / cell_h.to_f();
+            let i00 = cy * (GRID_COLS + 1) + cx;
+            let a = vertices[i00];
+            let d = vertices[i00 + GRID_COLS + 2];
+
+            // Upper right triangle (a, b, d) or lower left (a, d, e),
+            // with weights for the corners
+            let var o = nil;
+            let var wo = 0.0;
+            let var wa = 0.0;
+            let var wd = 0.0;
+            if (fx >= fy) {
+                o = vertices[i00 + 1];
+                wa = 1.0 - fx; wo = fx - fy; wd = fy;
+            } else {
+                o = vertices[i00 + GRID_COLS + 1];
+                wa = 1.0 - fy; wo = fy - fx; wd = fx;
+            }
+
+            let lr = (wa * a.lr + wo * o.lr + wd * d.lr).clip(1.0, SHADE_MAX);
+            let lg = (wa * a.lg + wo * o.lg + wd * d.lg).clip(1.0, SHADE_MAX);
+            let lb = (wa * a.lb + wo * o.lb + wd * d.lb).clip(1.0, SHADE_MAX);
+
+            let c = texture.get_u32((y >> 2) * TEX_SIZE + (x >> 2));
+            let er = (((c >> 16) & 255).to_f() * lr / 256.0).floor();
+            let eg = (((c >> 8) & 255).to_f() * lg / 256.0).floor();
+            let eb = ((c & 255).to_f() * lb / 256.0).floor();
+
+            let actual = frame_buffer.get_u32(y * FRAME_WIDTH + x);
+            let dr = (((actual >> 16) & 255) - er).abs();
+            let dg = (((actual >> 8) & 255) - eg).abs();
+            let db = ((actual & 255) - eb).abs();
+            let error = dr.max(dg).max(db);
+            if (error > 0) differing = differing + 1;
+            if (error > max_error) max_error = error;
+        }
+    }
+
+    $println("direct comparison: " + differing.to_s()
+           + " differing pixels, maximum channel error " + max_error.to_s());
+}
+
+if (args.png != nil) {
+    let img = Image(FRAME_WIDTH, FRAME_HEIGHT);
+    for (let var p = 0; p < FRAME_WIDTH * FRAME_HEIGHT; ++p) {
+        img.bytes.set_u32(p, frame_buffer.get_u32(p) | 0xFF000000);
+    }
+    save_png(args.png, img, false);
+    $println("saved " + args.png);
+}
