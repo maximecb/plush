@@ -33,6 +33,11 @@ let PITCH_LIMIT = 1.55;
 
 let MAX_HEALTH = 100;
 let MAX_SHELLS = 50;
+let MAX_ARMOR = 100;
+
+// The share of each blow that armor takes in place of health, for as long as
+// there is armor left to take it
+let ARMOR_ABSORB = 0.3;
 
 // How long a message to the player takes to fade out, in seconds
 let MESSAGE_TIME = 5.0;
@@ -212,6 +217,22 @@ fun pickup_prop(x, y, z, yaw, model, height, spin, item, amount) {
     return p;
 }
 
+// Pickups drop to the floor under them. Those that turn float this high above
+// it, and the rest sit on it. The floor is looked for starting a little above
+// where the map puts them, in case that is level with it, and down to some
+// way below.
+let PICKUP_HOVER = 0.25;
+let LAND_START = 0.25;
+let LAND_DEPTH = 50.0;
+
+fun land_pickup(w, p) {
+    let top = p.y + LAND_START;
+    let hit = ray_brushes(w, p.x, top, p.z, p.x, top - LAND_DEPTH, p.z);
+    if (hit == nil) return;
+    p.y = top - hit[0] * LAND_DEPTH;
+    if (p.spin != 0.0) p.y = p.y + PICKUP_HOVER;
+}
+
 // The relic: a skull hanging in the air over its stand, bobbing slowly, at
 // full brightness and with motes of white light circling and rising round it
 let RELIC_HEIGHT = 0.9;
@@ -370,7 +391,7 @@ fun spawn_entity(spec) {
     // Pickups. Those that would look odd spinning stay put, the rest turn
     // slowly.
     if (k == "health_kit") return pickup_prop(x, y, z, yaw, "health_kit", 0.675, 0.0, "health", 25);
-    if (k == "armor_shard") return Prop(x, y, z, yaw, "armor_shard", 0.675, 0 - 1, 1.2);
+    if (k == "armor_shard") return pickup_prop(x, y, z, yaw, "armor_shard", 0.675, 1.2, "armor", 2);
     if (k == "shotgun") return pickup_prop(x, y, z, yaw, "shotgun", 0.6, 1.2, "shotgun", 8);
     if (k == "shotgun_ammo") return pickup_prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0.0, "shells", 10);
     if (k == "relic") return Relic(x, y, z, yaw);
@@ -405,7 +426,11 @@ fun spawn_placed(w, player, out) {
             player.monsters = player.monsters + 1;
         }
         else if (spec.kind == "gib_chute") out.push(GibChute(w, spec.x, spec.y, spec.z, player));
-        else out.push(spawn_entity(spec));
+        else {
+            let e = spawn_entity(spec);
+            if (e instanceof Prop && e.pickup != nil) land_pickup(w, e);
+            out.push(e);
+        }
     }
 }
 
@@ -1918,6 +1943,7 @@ class Player extends Entity {
         self.noclip = false;
 
         self.health = MAX_HEALTH;
+        self.armor = 0;
         self.shells = 0;
         self.keycard = false;
 
@@ -1993,6 +2019,7 @@ class Player extends Entity {
         self.dead = true;
         self.dead_time = 0.0;
         self.health = 0;
+        self.armor = 0;
         self.knock_x = 0.0; self.knock_z = 0.0;
         self.jolt_yaw = 0.0; self.jolt_pitch = 0.0;
         self.events.push("die");
@@ -2016,10 +2043,13 @@ class Player extends Entity {
         self.hurt_time = 100.0;
     }
 
-    // Take a blow from something at (from_x, from_z): the damage, a shove
-    // away from it, and a jolt to the aim in a random direction
+    // Take a blow from something at (from_x, from_z): the damage, less what
+    // armor takes, a shove away from it, and a jolt to the aim in a random
+    // direction
     struck(self, amount, from_x, from_z) {
-        self.hurt(amount);
+        let saved = (amount * ARMOR_ABSORB).ceil().min(self.armor);
+        self.armor = self.armor - saved;
+        self.hurt(amount - saved);
 
         let dx = self.x - from_x;
         let dz = self.z - from_z;
@@ -2087,6 +2117,9 @@ class Player extends Entity {
         if (item == "health") {
             if (self.health >= MAX_HEALTH) return false;
             self.health = (self.health + amount).min(MAX_HEALTH);
+        } else if (item == "armor") {
+            if (self.armor >= MAX_ARMOR) return false;
+            self.armor = (self.armor + amount).min(MAX_ARMOR);
         } else if (item == "shells") {
             if (self.shells >= MAX_SHELLS) return false;
             self.shells = (self.shells + amount).min(MAX_SHELLS);

@@ -1,5 +1,5 @@
 // The heads-up display: a crosshair in the middle while the player holds a
-// weapon, or word that they are dead, the player's health in the
+// weapon, or word that they are dead, the player's health and armor in the
 // bottom left corner and, once they have a weapon, its ammunition in the
 // bottom right. Those two are each a big number under a small label, in the
 // Monogram pixel font. Everything has a drop shadow so it reads against
@@ -17,6 +17,7 @@ let MARGIN = BIG_SCALE * 6;
 let LABEL_COLOR = 0xFF_B8_B0_A0;
 let VALUE_COLOR = 0xFF_F0_C0_50;
 let HEALTH_COLOR = 0xFF_70_E0_70;
+let ARMOR_COLOR = 0xFF_70_A8_F0;
 let LOW_COLOR = 0xFF_E8_40_30;
 let SHADOW_COLOR = 0xFF_00_00_00;
 
@@ -30,6 +31,10 @@ let health_font = PixelFont(BIG_SCALE, HEALTH_COLOR, nil);
 let flash_font = PixelFont(BIG_SCALE, 0xFF_FF_FF_FF, nil);
 let low_font = PixelFont(BIG_SCALE, LOW_COLOR, nil);
 let value_shadow = PixelFont(BIG_SCALE, SHADOW_COLOR, nil);
+let armor_font = PixelFont(BIG_SCALE, ARMOR_COLOR, nil);
+
+// Where the armor field starts, past the widest the health can be
+let ARMOR_OFFSET = value_font.text_width("100") + MARGIN * 2;
 
 fun shadowed(img, font, shadow, x, y, text) {
     shadow.draw_text(img, x + SHADOW, y + SHADOW, text);
@@ -196,6 +201,11 @@ fun draw_hud(img, player) {
     if (player.health <= LOW_HEALTH) hf = low_font;
     if (player.hurt_flash() > 0.0) hf = flash_font;
     draw_field(img, MARGIN, "HEALTH", player.health.to_s(), hf, false);
+
+    // Armor next to it, once they have some
+    if (player.armor > 0) {
+        draw_field(img, MARGIN + ARMOR_OFFSET, "ARMOR", player.armor.to_s(), armor_font, false);
+    }
 
     if (player.weapon != nil) {
         let var af = value_font;
