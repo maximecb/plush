@@ -22,10 +22,10 @@
 //   arrows      turn and look
 //   space       jump, or rise while noclipping
 //   c           sink, while noclipping
-//   n           toggle noclip
+//   F9          toggle noclip (fn+F9 on a Mac)
 //   left mouse  fire, also alt (option on a Mac)
 //   enter       play again, once the level is done
-//   F12         save a PNG screenshot to the current directory
+//   F10         save a PNG screenshot to the current directory
 //   escape      quit
 //
 // With --bench, it renders a number of frames of a set tour of the level
@@ -296,6 +296,14 @@ fun draw_fps_counter() {
     fps_font.draw_text(frame_image, FRAME_WIDTH - fps_font.text_width(fps_text) - 8, 8, fps_text);
 }
 
+// Shown while noclip is on, so a player who turned it on by accident knows
+// how to turn it off
+let NOCLIP_TEXT = "NOCLIP ON - PRESS F9 TO TURN OFF";
+
+fun draw_noclip_notice() {
+    fps_font.draw_text(frame_image, (FRAME_WIDTH - fps_font.text_width(NOCLIP_TEXT)).idiv(2), 8, NOCLIP_TEXT);
+}
+
 // Hide the cursor and aim with raw mouse motion. SDL suspends this while the
 // window is not focused and resumes it when focus returns.
 $window_lock_mouse(window, true);
@@ -322,7 +330,7 @@ let var mouse_up = false;
 let var key_fire = false;
 let var mouse_fire = false;
 
-// Set by F12, saved once the frame is drawn
+// Set by F10, saved once the frame is drawn
 let var take_shot = false;
 
 fun set_key(key, down) {
@@ -381,15 +389,17 @@ loop {
                 quit = true;
                 break;
             }
-            if (msg.key == 'N') {
+            if (msg.key == 'RETURN' && player.finished) {
+                restart_level(world, player, entities);
+            }
+            if (msg.key == 'F9') {
                 player.noclip = !player.noclip;
                 player.solid = !player.noclip;
                 $println('noclip=' + player.noclip.to_s());
             }
-            if (msg.key == 'RETURN' && player.finished) {
-                restart_level(world, player, entities);
+            if (msg.key == 'F10') {
+                take_shot = true;
             }
-            if (msg.key == 'F12') take_shot = true;
 
             set_key(msg.key, true);
         }
@@ -474,6 +484,7 @@ loop {
     }
 
     draw_fps_counter();
+    if (player.noclip) draw_noclip_notice();
     $window_draw_frame(window, frame_buffer);
 }
 
