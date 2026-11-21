@@ -959,6 +959,12 @@ let LEAP_COOLDOWN = 1.4;
 // this distance across
 let DROP_RANGE = 1.6;
 
+// Getting no closer than this to where the player was, over this many seconds
+// of chasing, it is stuck going round and hops this far their way to get free
+let STUCK_TIME = 0.75;
+let STUCK_GAIN = 0.5;
+let STUCK_HOP = 3.0;
+
 // How fast what is drawn turns to follow its frame, per second, so that
 // stepping onto a wall is a quick roll rather than a snap
 let SPIDER_SETTLE = 14.0;
@@ -1020,6 +1026,12 @@ class Spider extends Monster {
         // looks again
         self.aiming = true;
         self.aim_wait = 0.0;
+
+        // How long it has been chasing since it last checked its progress,
+        // where the player was then, and how far from there it was
+        self.stuck_time = 0.0;
+        self.stuck_x = 0.0; self.stuck_y = 0.0; self.stuck_z = 0.0;
+        self.stuck_dist = 0.0;
 
         // The floor under it, looked for now and then, for its blood to fall to
         self.floor_y = y;
@@ -1220,8 +1232,13 @@ class Spider extends Monster {
     // that gets there
     leap(self) {
         let p = self.player;
+        self.leap_to(p.x, p.y + PLAYER_HEIGHT * 0.6, p.z, 1.0);
+    }
+
+    // Leap on an arc through a point, or the given fraction of the way there
+    leap_to(self, px, py, pz, frac) {
         let sx = self.x + self.nx * 0.2; let sy = self.y + self.ny * 0.2; let sz = self.z + self.nz * 0.2;
-        let tx = p.x - sx; let ty = p.y + PLAYER_HEIGHT * 0.6 - sy; let tz = p.z - sz;
+        let tx = (px - sx) * frac; let ty = (py - sy) * frac; let tz = (pz - sz) * frac;
         let d = vlen(tx, ty, tz);
         let time = (d / LEAP_SPEED).max(0.15);
         self.x = sx; self.y = sy; self.z = sz;
@@ -1284,6 +1301,7 @@ class Spider extends Monster {
         }
 
         if (self.flying) {
+            self.stuck_time = 0.0;
             if (self.state == "attack" && !self.bit && !p.dead) {
                 // The bite lands when it reaches the player's body
                 let hx = p.x - self.x; let hz = p.z - self.z;
@@ -1327,6 +1345,23 @@ class Spider extends Monster {
                 self.leap();
                 self.settle(dt);
                 return;
+            }
+
+            // Measured against where the player was, so that them running
+            // off does not count against it
+            if (self.stuck_time <= 0.0) {
+                self.stuck_x = cx + dx; self.stuck_y = cy + dy; self.stuck_z = cz + dz;
+                self.stuck_dist = dist;
+            }
+            self.stuck_time = self.stuck_time + dt;
+            if (self.stuck_time >= STUCK_TIME) {
+                self.stuck_time = 0.0;
+                let gain = self.stuck_dist - vlen(self.stuck_x - cx, self.stuck_y - cy, self.stuck_z - cz);
+                if (gain < STUCK_GAIN && self.leap_wait <= 0.0 && self.sees && !p.dead) {
+                    self.leap_to(cx + dx, cy + dy, cz + dz, (STUCK_HOP / dist).min(1.0));
+                    self.settle(dt);
+                    return;
+                }
             }
 
             // Time to look again, or the player has got round it
