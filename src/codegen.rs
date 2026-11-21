@@ -885,14 +885,14 @@ fn gen_branch(
         }
 
         Expr::Binary { op, lhs, rhs } if cmp_branch_insn(op, jump_if_true).is_some() => {
-            // An integer literal small enough to encode goes in the
-            // instruction rather than a register. A literal on the left is
+            // An integer constant small enough to encode goes in the
+            // instruction rather than a register. A constant on the left is
             // mirrored to the right, which is what swapping the comparison
-            // around does. Literals have no side effects, so dropping one
+            // around does. Constants have no side effects, so dropping one
             // leaves the order the other operand is evaluated in untouched
-            let imm_form = if let Some(imm) = as_imm16(rhs) {
+            let imm_form = if let Some(imm) = as_imm16(rhs, cg.actor) {
                 Some((*op, lhs, imm))
-            } else if let Some(imm) = as_imm16(lhs) {
+            } else if let Some(imm) = as_imm16(lhs, cg.actor) {
                 Some((mirror_cmp(op), rhs, imm))
             } else {
                 None
@@ -996,13 +996,13 @@ fn cmp_branch_imm(op: &BinOp, jump_if_true: bool, reg_a: u16, imm: i16) -> Optio
     Some(insn)
 }
 
-/// An integer literal that fits the immediate a compare and branch carries
-fn as_imm16(expr: &ExprBox) -> Option<i16>
+/// An integer constant, a literal or an immutable global, that fits the
+/// immediate a compare and branch carries
+fn as_imm16(expr: &ExprBox, actor: &Actor) -> Option<i16>
 {
-    match expr.expr.as_ref() {
-        Expr::Int64(v) => i16::try_from(*v).ok(),
-        _ => None,
-    }
+    const_value(expr, actor)
+        .filter(|v| v.is_fixnum())
+        .and_then(|v| i16::try_from(v.as_fixnum()).ok())
 }
 
 /// The comparison that holds when the operands are swapped, for a literal

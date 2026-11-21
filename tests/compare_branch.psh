@@ -120,3 +120,49 @@ assert(lt_value(9223372036854775807, 9223372036854775808.0));
 assert(count_below(4.0) == 4);
 assert(count_below(nan) == 0);
 assert(count_below(0.0) == 0);
+
+// Immutable globals fold into the branch as an immediate when they fit,
+// on either side of the comparison. Ones too wide for it, floats, and
+// mutable globals stay in a register.
+let SMALL = 1024;
+let NEG = -7;
+let WIDE = 65536;
+let FLOAT_K = 2.5;
+let var mut_k = 3;
+
+fun small_rhs(a) { if (a > SMALL) { return true; } return false; }
+fun small_lhs(a) { if (SMALL > a) { return true; } return false; }
+fun not_small_rhs(a) { if (!(a <= SMALL)) { return true; } return false; }
+fun neg_rhs(a) { if (a <= NEG) { return true; } return false; }
+fun neg_lhs(a) { if (NEG == a) { return true; } return false; }
+fun wide_rhs(a) { if (a < WIDE) { return true; } return false; }
+fun float_rhs(a) { if (a >= FLOAT_K) { return true; } return false; }
+fun mut_rhs(a) { if (a == mut_k) { return true; } return false; }
+
+let consts = [
+    nan, inf, neg_inf, -8, -7, -7.0, 0, 2.5, 3, 1023, 1024, 1024.0, 1024.5,
+    1025, 65535, 65536, 65537, big, "abc",
+];
+
+for (let var i = 0; i < consts.len; ++i) {
+    let a = consts[i];
+
+    // Strings only compare for equality against numbers
+    if (!(a instanceof String)) {
+        assert(small_rhs(a) == (a > SMALL));
+        assert(small_lhs(a) == (SMALL > a));
+        assert(not_small_rhs(a) == !(a <= SMALL));
+        assert(neg_rhs(a) == (a <= NEG));
+        assert(wide_rhs(a) == (a < WIDE));
+        assert(float_rhs(a) == (a >= FLOAT_K));
+    }
+
+    assert(neg_lhs(a) == (NEG == a));
+    assert(mut_rhs(a) == (a == mut_k));
+}
+
+// A mutable global is read when the comparison runs, not when it compiled
+assert(mut_rhs(3));
+mut_k = 4;
+assert(!mut_rhs(3));
+assert(mut_rhs(4));
