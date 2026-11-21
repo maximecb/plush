@@ -2,8 +2,9 @@
 // Usage: plush benchmarks/raster_vlight_rgb.psh [num_frames] [--validate] [--png path]
 //
 // The same grid, texture and frame as raster_vlight.psh, with a red, green and
-// blue light level per vertex instead of one. Each channel is scaled by its own
-// 16.16 level, interpolated in its own accumulator.
+// blue light level per vertex instead of one. Red and blue share an
+// accumulator and a multiply, so a pixel costs one instruction more than with
+// a single level.
 
 from args import ArgParser;
 from image import Image;
@@ -38,24 +39,27 @@ let U_MASK = TEX_MASK;
 let V_SHIFT = 32 + FP_BITS - TEX_SHIFT;
 let V_MASK = TEX_MASK << TEX_SHIFT;
 
-// Light levels are 16.16 fixed point on the 0..255 scale, clamped at both span
+// Light levels are 8.12 fixed point on the 0..255 scale, clamped at both span
 // ends. The floor of 1.0 keeps a floored step from walking a level negative.
-let L_ONE = 65536.0;
-let L_MIN_FX = 65536;
-let L_MAX_FX = 16711680;
+let L_ONE = 4096.0;
+let L_MIN_FX = 4096;
+let L_MAX_FX = 1044480;
 let L_LIMIT = 64.0;
 
-// A channel times its whole 16.16 level puts the high byte of the scaled
-// channel at bit 40 for red, 32 for green and 24 for blue. One shift by 24
-// then brings all three to their place in the pixel. The masks are contiguous,
-// so they fold into the instructions rather than taking registers.
-let MASK_R_TEX = 0xFF0000;
-let MASK_G_TEX = 0xFF00;
-let MASK_B_TEX = 0xFF;
-let MASK_R_OUT = 0xFF0000000000;
-let MASK_G_OUT = 0xFF00000000;
-let MASK_B_OUT = 0xFF000000;
-let OUT_SHIFT = 24;
+// Red and blue light share one accumulator, red 28 bits up, stepped by one
+// add. Shifted down 12, it multiplies red and blue of the texel at once:
+//
+//   texel & 0xFF00FF          R << 16 | B
+//   accumulator >> 12         lr << 16 | whole part of lb
+//   product                   B * lb at bit 0, R * lr at bit 32
+//
+// The cross products R * lb and B * lr start at bit 16, clear of blue's high
+// byte, and end below bit 44. Added under red's low bits they can carry into
+// its high byte at bits 52..59, but by less than 1/256 of a step, which
+// rounds red up by one now and then. Blue is scaled by a whole level, red by
+// a fractional one.
+let MASK_RB = 0x00FF00FF;
+let L_RED_SHIFT = 28;
 
 let args = ArgParser("Textured triangle rasterization with colored per-vertex lighting")
     .pos_int("num_frames", 50, "Number of frames to render")
@@ -118,6 +122,12 @@ let texture = make_texture();
 // Coordinates are floats with x in [0, FRAME_WIDTH] pointing right and
 // y in [0, FRAME_HEIGHT] pointing down
 fun rasterize_tri_rgb(v0, v1, v2, fb, tex) {
+    // Held in registers: these don't fit an immediate, and would otherwise
+    // be loaded again at every use
+    let l_min = L_MIN_FX;
+    let l_max = L_MAX_FX;
+    let mask_rb = MASK_RB;
+
     let var p0 = v0;
     let var p1 = v1;
     let var p2 = v2;
@@ -231,43 +241,43 @@ fun rasterize_tri_rgb(v0, v1, v2, fb, tex) {
                 // Each channel is clamped at both span ends and stepped
                 // between the clamped pair, so it stays in range throughout
                 let var lr = r_row_fx + start_x * drdx_fx;
-                if (lr < L_MIN_FX) lr = L_MIN_FX;
-                else if (lr > L_MAX_FX) lr = L_MAX_FX;
+                if (lr < l_min) lr = l_min;
+                else if (lr > l_max) lr = l_max;
                 let var lr_e = r_row_fx + end_x * drdx_fx;
-                if (lr_e < L_MIN_FX) lr_e = L_MIN_FX;
-                else if (lr_e > L_MAX_FX) lr_e = L_MAX_FX;
+                if (lr_e < l_min) lr_e = l_min;
+                else if (lr_e > l_max) lr_e = l_max;
 
                 let var lg = g_row_fx + start_x * dgdx_fx;
-                if (lg < L_MIN_FX) lg = L_MIN_FX;
-                else if (lg > L_MAX_FX) lg = L_MAX_FX;
+                if (lg < l_min) lg = l_min;
+                else if (lg > l_max) lg = l_max;
                 let var lg_e = g_row_fx + end_x * dgdx_fx;
-                if (lg_e < L_MIN_FX) lg_e = L_MIN_FX;
-                else if (lg_e > L_MAX_FX) lg_e = L_MAX_FX;
+                if (lg_e < l_min) lg_e = l_min;
+                else if (lg_e > l_max) lg_e = l_max;
 
                 let var lb = b_row_fx + start_x * dbdx_fx;
-                if (lb < L_MIN_FX) lb = L_MIN_FX;
-                else if (lb > L_MAX_FX) lb = L_MAX_FX;
+                if (lb < l_min) lb = l_min;
+                else if (lb > l_max) lb = l_max;
                 let var lb_e = b_row_fx + end_x * dbdx_fx;
-                if (lb_e < L_MIN_FX) lb_e = L_MIN_FX;
-                else if (lb_e > L_MAX_FX) lb_e = L_MAX_FX;
+                if (lb_e < l_min) lb_e = l_min;
+                else if (lb_e > l_max) lb_e = l_max;
 
                 let inv_len = (65536).idiv(end_x - start_x);
-                let dlr = ((lr_e - lr) * inv_len) >> 16;
                 let dlg = ((lg_e - lg) * inv_len) >> 16;
-                let dlb = ((lb_e - lb) * inv_len) >> 16;
+                let var lrb = (lr << L_RED_SHIFT) + lb;
+                let dlrb = ((((lr_e - lr) * inv_len) >> 16) << L_RED_SHIFT)
+                         + (((lb_e - lb) * inv_len) >> 16);
 
                 let var i = row + start_x;
                 let end_i = row + end_x;
                 while (i < end_i) {
                     let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
                                       | ((t >> U_SHIFT) & U_MASK));
-                    fb.set_u32(i, ((((c & MASK_R_TEX) * lr) & MASK_R_OUT)
-                                 | (((c & MASK_G_TEX) * lg) & MASK_G_OUT)
-                                 | (((c & MASK_B_TEX) * lb) & MASK_B_OUT)) >> OUT_SHIFT);
+                    let x = (c & mask_rb) * (lrb >> 12);
+                    fb.set_u32(i, ((x >> 8) & 0xFF) | ((x >> 36) & 0xFF0000)
+                                | ((((c & 0xFF00) * lg) >> 20) & 0xFF00));
                     t = t + dt;
-                    lr = lr + dlr;
+                    lrb = lrb + dlrb;
                     lg = lg + dlg;
-                    lb = lb + dlb;
                     ++i;
                 }
             }
@@ -321,43 +331,43 @@ fun rasterize_tri_rgb(v0, v1, v2, fb, tex) {
                           + (u_row_fx + start_x * dudx_fx).floor();
 
                 let var lr = r_row_fx + start_x * drdx_fx;
-                if (lr < L_MIN_FX) lr = L_MIN_FX;
-                else if (lr > L_MAX_FX) lr = L_MAX_FX;
+                if (lr < l_min) lr = l_min;
+                else if (lr > l_max) lr = l_max;
                 let var lr_e = r_row_fx + end_x * drdx_fx;
-                if (lr_e < L_MIN_FX) lr_e = L_MIN_FX;
-                else if (lr_e > L_MAX_FX) lr_e = L_MAX_FX;
+                if (lr_e < l_min) lr_e = l_min;
+                else if (lr_e > l_max) lr_e = l_max;
 
                 let var lg = g_row_fx + start_x * dgdx_fx;
-                if (lg < L_MIN_FX) lg = L_MIN_FX;
-                else if (lg > L_MAX_FX) lg = L_MAX_FX;
+                if (lg < l_min) lg = l_min;
+                else if (lg > l_max) lg = l_max;
                 let var lg_e = g_row_fx + end_x * dgdx_fx;
-                if (lg_e < L_MIN_FX) lg_e = L_MIN_FX;
-                else if (lg_e > L_MAX_FX) lg_e = L_MAX_FX;
+                if (lg_e < l_min) lg_e = l_min;
+                else if (lg_e > l_max) lg_e = l_max;
 
                 let var lb = b_row_fx + start_x * dbdx_fx;
-                if (lb < L_MIN_FX) lb = L_MIN_FX;
-                else if (lb > L_MAX_FX) lb = L_MAX_FX;
+                if (lb < l_min) lb = l_min;
+                else if (lb > l_max) lb = l_max;
                 let var lb_e = b_row_fx + end_x * dbdx_fx;
-                if (lb_e < L_MIN_FX) lb_e = L_MIN_FX;
-                else if (lb_e > L_MAX_FX) lb_e = L_MAX_FX;
+                if (lb_e < l_min) lb_e = l_min;
+                else if (lb_e > l_max) lb_e = l_max;
 
                 let inv_len = (65536).idiv(end_x - start_x);
-                let dlr = ((lr_e - lr) * inv_len) >> 16;
                 let dlg = ((lg_e - lg) * inv_len) >> 16;
-                let dlb = ((lb_e - lb) * inv_len) >> 16;
+                let var lrb = (lr << L_RED_SHIFT) + lb;
+                let dlrb = ((((lr_e - lr) * inv_len) >> 16) << L_RED_SHIFT)
+                         + (((lb_e - lb) * inv_len) >> 16);
 
                 let var i = row + start_x;
                 let end_i = row + end_x;
                 while (i < end_i) {
                     let c = tex.get_u32(((t >> V_SHIFT) & V_MASK)
                                       | ((t >> U_SHIFT) & U_MASK));
-                    fb.set_u32(i, ((((c & MASK_R_TEX) * lr) & MASK_R_OUT)
-                                 | (((c & MASK_G_TEX) * lg) & MASK_G_OUT)
-                                 | (((c & MASK_B_TEX) * lb) & MASK_B_OUT)) >> OUT_SHIFT);
+                    let x = (c & mask_rb) * (lrb >> 12);
+                    fb.set_u32(i, ((x >> 8) & 0xFF) | ((x >> 36) & 0xFF0000)
+                                | ((((c & 0xFF00) * lg) >> 20) & 0xFF00));
                     t = t + dt;
-                    lr = lr + dlr;
+                    lrb = lrb + dlrb;
                     lg = lg + dlg;
-                    lb = lb + dlb;
                     ++i;
                 }
             }
