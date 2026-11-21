@@ -98,8 +98,10 @@ let MEL_TOP_BIN = (MAX_FREQ * FFT_SIZE / SAMPLE_RATE).floor();
 let SPEC_BINS = ((MEL_TOP_BIN.to_f() * 2.0.pow(PITCH_SHIFT_MAX_SEMITONES / 12.0)).floor() + 2).min(FFT_SIZE.idiv(2));
 
 // Probability that an example drawn from a word clip is made into a negative
-// example, trained as no word at all, rather than a positive one
-let NEG_FROM_WORD_PROB = 0.5;
+// example, trained as no word at all, rather than a positive one. Along with
+// collages, this makes word samples train as half positives, half negatives,
+// with collages, crops and words followed by silence a third each.
+let NEG_FROM_WORD_PROB = 0.4;
 
 // Of the negative examples made from words, the fraction that are the whole
 // word followed by more silence than the grace period below. The rest are a
@@ -121,6 +123,20 @@ let NEG_CROP_ANYWHERE_PROB = 0.25;
 // next probability
 let NEG_SHUFFLE_PROB = 0.2;
 let NEG_SWAP_PROB = 0.1;
+
+// Probability that a training example is a collage of short runs of frames
+// from random samples, trained as no word. Runs of at most 10 frames, about
+// 116ms, almost never line up into a whole word. Collages longer than the
+// window are cut to its last MAX_FRAMES frames anyway.
+let NEG_COLLAGE_PROB = 1.0 / 6.0;
+let COLLAGE_MIN_RUN = 5;
+let COLLAGE_MAX_RUN = 10;
+let COLLAGE_MIN_FRAMES = 5;
+let COLLAGE_MAX_FRAMES = MAX_FRAMES;
+
+// Probability of silence after a collage, of up to a window less one frame,
+// so that some of the collage is always left in view
+let COLLAGE_SILENCE_PROB = 0.5;
 
 // Probability of trailing silence after a crop or a recorded negative
 // example, anywhere up to a full window of it. Off, since it cost hits on
@@ -1035,6 +1051,40 @@ fun make_example(spectra, label) {
     frames = drop_and_repeat(frames);
     push_silence(frames, silence);
 
+    return [augment_frames(frames), target];
+}
+
+// A negative example made of short runs of frames from random samples, so
+// the window sees familiar sounds in an order no word has
+fun make_collage(training_data) {
+    let total = rng.int(COLLAGE_MIN_FRAMES, COLLAGE_MAX_FRAMES + 1);
+    let var frames = [];
+
+    while (frames.len < total) {
+        let spectra = training_data[rng.int(0, training_data.len)][0];
+        let n = spectra.len;
+
+        // Capped like a crop as well, so a run can't be most of a short word
+        let max_len = COLLAGE_MAX_RUN.min((n.to_f() * NEG_CROP_MAX_FRAC).floor().max(1));
+        let len = rng.int(COLLAGE_MIN_RUN.min(max_len), max_len + 1);
+        let start = rng.int(0, n - len + 1);
+
+        for (let var i = start; i < start + len && frames.len < total; ++i) {
+            frames.push(spectra[i]);
+        }
+    }
+
+    frames = drop_and_repeat(frames);
+    if (rng.float(0.0, 1.0) < COLLAGE_SILENCE_PROB) {
+        push_silence(frames, rng.int(1, MAX_FRAMES));
+    }
+
+    return [augment_frames(frames), NONE_LABEL];
+}
+
+// Turns an example's frames into the network's input, with the augmentation
+// every example gets: pitch shift, background noise, scaling and noise
+fun augment_frames(frames) {
     // Shift the pitch of the whole example
     let var bank = MEL_BANK;
     if (rng.float(0.0, 1.0) < PITCH_SHIFT_PROB) {
@@ -1055,7 +1105,7 @@ fun make_example(spectra, label) {
         x.set_f32(i, x.get_f32(i) * scale_factor + rng.float(-0.5, 0.5) * NOISE_MAGNITUDE);
     }
 
-    return [x, target];
+    return x;
 }
 
 fun training_actor(detection_actor_id) {
@@ -1119,8 +1169,13 @@ fun training_actor(detection_actor_id) {
         let can_train = training_data.len > 0 && mlp.output_size > 1;
 
         if (can_train) {
-            let sample = training_data[rng.int(0, training_data.len)];
-            let example = make_example(sample[0], sample[1]);
+            let var example = nil;
+            if (rng.float(0.0, 1.0) < NEG_COLLAGE_PROB) {
+                example = make_collage(training_data);
+            } else {
+                let sample = training_data[rng.int(0, training_data.len)];
+                example = make_example(sample[0], sample[1]);
+            }
             let x = example[0];
 
             // One-hot on the word the example is of, which is the output
