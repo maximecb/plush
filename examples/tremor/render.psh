@@ -534,6 +534,119 @@ let ds_x0 = Array.with_size(MAX_DEFER_SPANS, 0);
 let ds_x1 = Array.with_size(MAX_DEFER_SPANS, 0);
 let var ds_top = 0;
 
+// The pieces of faces drawn this frame with their 1/z, row by row, for glows
+// to be hidden by. They are only kept while there are glows to draw.
+let MAX_DEPTH_SPANS = 65536;
+let fd_x0 = Array.with_size(MAX_DEPTH_SPANS, 0);
+let fd_x1 = Array.with_size(MAX_DEPTH_SPANS, 0);
+let fd_w = Array.with_size(MAX_DEPTH_SPANS, 0.0);
+let fd_dw = Array.with_size(MAX_DEPTH_SPANS, 0.0);
+let fd_next = Array.with_size(MAX_DEPTH_SPANS, NO_SPAN);
+let fd_head = Array.with_size(FRAME_HEIGHT, NO_SPAN);
+let var fd_top = 0;
+let var g_keep_depth = false;
+
+// Start keeping face pieces for this band, or stop
+fun depth_reset(keep) {
+    g_keep_depth = keep;
+    fd_top = 0;
+    if (!keep) return;
+    for (let var y = render_y0; y < render_y1; ++y) fd_head[y] = NO_SPAN;
+}
+
+// Keep the n visible pieces of row y in vis_x0/vis_x1, whose 1/z at pixel x is
+// w_row + x * dwdx
+fun keep_face_depth(y, n, w_row, dwdx) {
+    for (let var k = 0; k < n && fd_top < MAX_DEPTH_SPANS; ++k) {
+        fd_x0[fd_top] = vis_x0[k];
+        fd_x1[fd_top] = vis_x1[k];
+        fd_w[fd_top] = w_row;
+        fd_dw[fd_top] = dwdx;
+        fd_next[fd_top] = fd_head[y];
+        fd_head[y] = fd_top;
+        fd_top = fd_top + 1;
+    }
+}
+
+// What stands in front, and what is left open, of part of a row
+let MAX_RUNS = 256;
+let occ_x0 = Array.with_size(MAX_RUNS, 0);
+let occ_x1 = Array.with_size(MAX_RUNS, 0);
+let run_x0 = Array.with_size(MAX_RUNS + 1, 0);
+let run_x1 = Array.with_size(MAX_RUNS + 1, 0);
+let var occ_n = 0;
+
+// Note the part of [a, b) where 1/z, w0 + x * dw at pixel x, is past w
+fun add_occluder(a, b, w0, dw, w) {
+    let var ca = a;
+    let var cb = b;
+    if (dw == 0.0) {
+        if (w0 <= w) return;
+    } else {
+        // Where the two cross, kept in range for the integer conversion
+        let xc = ((w - w0) / dw).clip(-1000000.0, 1000000.0);
+        if (dw > 0.0) ca = ca.max(xc.floor() + 1);
+        else cb = cb.min(xc.ceil());
+    }
+    if (ca >= cb || occ_n >= MAX_RUNS) return;
+    occ_x0[occ_n] = ca;
+    occ_x1[occ_n] = cb;
+    occ_n = occ_n + 1;
+}
+
+// Put the parts of [x0, x1) of row y that nothing drawn stands in front of,
+// at 1/z w, in run_x0/run_x1, and return how many there are
+fun open_runs(y, x0, x1, w) {
+    occ_n = 0;
+    if (g_keep_depth) {
+        let var s = fd_head[y];
+        while (s != NO_SPAN) {
+            let a = fd_x0[s].max(x0);
+            let b = fd_x1[s].min(x1);
+            if (a < b) add_occluder(a, b, fd_w[s], fd_dw[s], w);
+            s = fd_next[s];
+        }
+    }
+    let var s = mb_head[y];
+    while (s != NO_SPAN) {
+        let a = msp_x0[s].max(x0);
+        let b = msp_x1[s].min(x1);
+        if (a < b) add_occluder(a, b, msp_w[s], msp_dw[s], w);
+        s = msp_next[s];
+    }
+
+    // In order, so the gaps between them can be read off
+    for (let var i = 1; i < occ_n; ++i) {
+        let a = occ_x0[i];
+        let b = occ_x1[i];
+        let var j = i - 1;
+        while (j >= 0 && occ_x0[j] > a) {
+            occ_x0[j + 1] = occ_x0[j];
+            occ_x1[j + 1] = occ_x1[j];
+            j = j - 1;
+        }
+        occ_x0[j + 1] = a;
+        occ_x1[j + 1] = b;
+    }
+
+    let var n = 0;
+    let var x = x0;
+    for (let var i = 0; i < occ_n; ++i) {
+        if (occ_x0[i] > x) {
+            run_x0[n] = x;
+            run_x1[n] = occ_x0[i];
+            n = n + 1;
+        }
+        x = x.max(occ_x1[i]);
+    }
+    if (x < x1) {
+        run_x0[n] = x;
+        run_x1[n] = x1;
+        n = n + 1;
+    }
+    return n;
+}
+
 fun sbuf_reset() {
     for (let var y = 0; y < FRAME_HEIGHT; ++y) sb_head[y] = NO_SPAN;
     sb_full.zero_fill();
@@ -1053,6 +1166,7 @@ fun raster_poly(m) {
     let lc_min = g_l_min >> LC_FROM_L;
     let lc_max = g_l_max >> LC_FROM_L;
     let collecting = g_collecting;
+    let keep_depth = g_keep_depth;
 
     // Per chain: the corner reached so far, the current x, how far x moves per
     // scanline, and the scanline its current edge runs out on
@@ -1152,6 +1266,7 @@ fun raster_poly(m) {
                 if (n_vis > 0 && mb_head[scan_y] != NO_SPAN) {
                     n_vis = mesh_clip(scan_y, n_vis, w_row, dwdx);
                 }
+                if (keep_depth) keep_face_depth(scan_y, n_vis, w_row, dwdx);
 
                 for (let var k = 0; k < n_vis; ++k) {
                     let var x = vis_x0[k];
@@ -2734,6 +2849,10 @@ fun glow_table(power) {
     return t;
 }
 
+// Glows wider than this many pixels across their radius share a level among
+// more pixels
+let GLOW_WIDE = 40.0;
+
 let HALO_TABLE = glow_table(1.6);
 let CORE_TABLE = glow_table(1.5);
 
@@ -2752,20 +2871,31 @@ fun held_span(s) {
 // The flash comes out of the far end of the barrel, so the weapon it comes out
 // of stands in front of it: pixels a model held in view covers are left alone.
 fun draw_glow(cx, cy, r, color, strength, table) {
-    if (r < 1.0) return;
+    draw_glow_at(cx, cy, r, r, color, strength, table, HELD_MIN_W);
+}
+
+// The same with radius rx across and ry up and down, leaving out the pixels
+// of models nearer than 1/z w
+fun draw_glow_at(cx, cy, rx, ry, color, strength, table, w) {
+    if (rx < 1.0 || ry < 1.0) return;
 
     // The color as it is added at the middle, times 256
     let cr = (((color >> 16) & 0xFF).to_f() * strength).floor();
     let cg = (((color >> 8) & 0xFF).to_f() * strength).floor();
     let cb = ((color & 0xFF).to_f() * strength).floor();
 
-    let rr = r * r;
+    // Rows are squashed to make the ellipse a circle of radius rx
+    let squash = rx / ry;
+    let rr = rx * rx;
     let scale = GLOW_STEPS.to_f() / rr;
-    let y0 = (cy - r).floor().max(render_y0);
-    let y1 = (cy + r).floor().min(render_y1 - 1);
+    let y0 = (cy - ry).floor().max(render_y0);
+    let y1 = (cy + ry).floor().min(render_y1 - 1);
+
+    // How many pixels share a level: more for a wide glow, which is smoother
+    let step = rx > GLOW_WIDE ? 4 : 2;
 
     for (let var y = y0; y <= y1; ++y) {
-        let dy = y.to_f() + 0.5 - cy;
+        let dy = (y.to_f() + 0.5 - cy) * squash;
         let h2 = rr - dy * dy;
         if (h2 <= 0.0) continue;
 
@@ -2776,43 +2906,38 @@ fun draw_glow(cx, cy, r, color, strength, table) {
         let row = y * FRAME_WIDTH;
         let dy2 = dy * dy;
 
-        // And of that, the runs between the spans of a held model
-        let var x = x0;
-        let var cur = mb_head[y];
-        while (x < x1) {
-            while (cur != NO_SPAN && (msp_x1[cur] <= x || !held_span(cur))) cur = msp_next[cur];
-
-            let var end = x1;
-            if (cur != NO_SPAN && msp_x0[cur] < end) end = msp_x0[cur];
-            if (end > x) glow_run(row, x, end, cx, dy2, scale, table, cr, cg, cb);
-
-            if (cur == NO_SPAN) break;
-            x = msp_x1[cur].max(x);
-            cur = msp_next[cur];
+        // And of that, what nothing stands in front of
+        let n = open_runs(y, x0, x1, w);
+        for (let var k = 0; k < n; ++k) {
+            glow_run(row, run_x0[k], run_x1[k], cx, dy2, scale, table, cr, cg, cb, step);
         }
     }
 }
 
-// Add the glow to pixels [x0, x1) of a row. It is smooth enough that a pair of
-// pixels can share a level, which halves the work of finding it.
-fun glow_run(row, x0, x1, cx, dy2, scale, table, cr, cg, cb) {
+// Add the glow to pixels [x0, x1) of a row. It is smooth enough that a few
+// pixels in a row can share a level, which saves finding it for each.
+fun glow_run(row, x0, x1, cx, dy2, scale, table, cr, cg, cb, step) {
     let fb = frame_buffer;
+    let half = step.to_f() * 0.5;
     let var x = x0;
     while (x < x1) {
-        let dx = x.to_f() + 1.0 - cx;
+        let dx = x.to_f() + half - cx;
         let k = table[((dx * dx + dy2) * scale).floor().min(GLOW_STEPS)];
-        let ar = (cr * k) >> 8;
-        let ag = (cg * k) >> 8;
-        let ab = (cb * k) >> 8;
+        let end = (x + step).min(x1);
+        if (k == 0) { x = end; continue; }
 
-        let end = (x + 2).min(x1);
+        // Red and blue are added together, with room above each for the
+        // carry, which then saturates the channel it came out of
+        let a_rb = (((cr * k) >> 8) << 16) | ((cb * k) >> 8);
+        let a_g = ((cg * k) >> 8) << 8;
         while (x < end) {
             let i = row + x;
             let c = fb.get_u32(i);
-            let r8 = (((c >> 16) & 0xFF) + ar).min(255);
-            let g8 = (((c >> 8) & 0xFF) + ag).min(255);
-            let b8 = ((c & 0xFF) + ab).min(255);
-            fb.set_u32(i, (r8 << 16) | (g8 << 8) | b8);
+            let rb = (c & MASK_RB) + a_rb;
+            let g = (c & MASK_G) + a_g;
+            let orb = rb & 0x01000100;
+            let og = g & 0x10000;
+            fb.set_u32(i, ((rb | (orb - (orb >> 8))) & MASK_RB) | ((g | (og - (og >> 8))) & MASK_G));
             x = x + 1;
         }
     }
@@ -2846,6 +2971,42 @@ fun set_muzzle_flash(inst, px, py, pz, strength) {
     flash_y = CENTER_Y - FOCAL * vy / vz;
     flash_unit = FOCAL * s / vz;
     flash_strength = strength;
+}
+
+// --- Flames ---
+
+// The glows flames are made of this frame, as a flat list of x, y, z, radius
+// across and radius up and down in meters, color and strength, seven numbers
+// for each. Whatever faces and models stand in front of them hides them.
+let var glows = [];
+
+fun set_glows(list) {
+    glows = list;
+}
+
+let FLAME_TABLE = glow_table(0.9);
+
+fun draw_glows() {
+    let g = glows;
+    for (let var i = 0; i + 6 < g.len; i += 7) {
+        let dx = g[i] - cam_x; let dy = g[i + 1] - cam_y; let dz = g[i + 2] - cam_z;
+        let vz = view_dir_z(dx, dy, dz);
+        if (vz <= NEAR) continue;
+        let k = FOCAL / vz;
+        let rx = (g[i + 3] * k).max(1.0);
+        let ry = (g[i + 4] * k).max(1.0);
+        let sx = CENTER_X + view_dir_x(dx, dy, dz) * k;
+        let sy = CENTER_Y - view_dir_y(dx, dy, dz) * k;
+        if (sx + rx < 0.0 || sx - rx >= FRAME_WIDTH.to_f()) continue;
+        if (sy + ry < render_y0.to_f() || sy - ry >= render_y1.to_f()) continue;
+
+        // Tested as the front of a ball rather than a flat card, so that what
+        // it rises out of, such as the floor of a bowl, does not cut it off
+        // along a line through its middle
+        let front = vz - g[i + 3];
+        let w = front > NEAR ? 1.0 / front : 1.0 / NEAR;
+        draw_glow_at(sx, sy, rx, ry, g[i + 5], g[i + 6], FLAME_TABLE, w);
+    }
 }
 
 // --- Particles and the screen tint ---
@@ -2933,6 +3094,7 @@ fun render_frame() {
     rect_faces_skipped = 0;
     rect_nodes_skipped = 0;
     sbuf_reset();
+    depth_reset(glows.len > 0);
     update_frustum();
 
     // Models are met in the tree walk, apart from those drawn up front here
@@ -2949,6 +3111,7 @@ fun render_frame() {
     // Everything opaque is down, so what was held back can be blended over it
     draw_deferred();
 
+    draw_glows();
     draw_particles();
 
     // Over everything, including the weapon it comes out of
@@ -3052,6 +3215,7 @@ class RenderBandRequest {
         self.flash_unit = flash_unit;
         self.flash_strength = flash_strength;
         self.particles = particles;
+        self.glows = glows;
         self.tint_color = tint_color;
         self.tint_amount = tint_amount;
     }
@@ -3104,6 +3268,7 @@ fun render_actor_loop() {
         flash_unit = msg.flash_unit;
         flash_strength = msg.flash_strength;
         particles = msg.particles;
+        glows = msg.glows;
         tint_color = msg.tint_color;
         tint_amount = msg.tint_amount;
 

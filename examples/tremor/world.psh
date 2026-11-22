@@ -250,14 +250,20 @@ fun set_box_brush_y(b, y0, y1) {
 }
 
 // A point entity of the map: what kind of entity, and where it stands, facing
-// along yaw in radians
+// along yaw in radians, with the rest of its keys
 class EntitySpec {
-    init(self, kind, x, y, z, yaw) {
+    init(self, kind, x, y, z, yaw, keys) {
         self.kind = kind;
         self.x = x;
         self.y = y;
         self.z = z;
         self.yaw = yaw;
+        self.keys = keys;
+    }
+
+    // A number key, or the default if it is missing
+    num(self, key, default) {
+        return valve_num(self.keys, key, default);
     }
 }
 
@@ -669,7 +675,7 @@ fun valve_entity(w, li, ent, brushes) {
 
     // Anything else is a kind of entity for entities.psh to make
     let p = valve_point(li, ent, "origin");
-    w.entity_specs.push(EntitySpec(cls, p[0], p[1], p[2], valve_yaw(ent)));
+    w.entity_specs.push(EntitySpec(cls, p[0], p[1], p[2], valve_yaw(ent), ent));
 }
 
 // Entities are { } blocks of "key" "value" lines, and the brushes of an entity

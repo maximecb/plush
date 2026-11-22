@@ -8,7 +8,7 @@
 
 from ./physics import move_body, brush_top, is_lava, ray_brushes, GRAVITY;
 from ./models import get_model, add_model, box_model, blob_model, models;
-from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER;
+from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER, UNITS_PER_METER;
 from ./lighting import light_level_at, occluded, SHADE_MAX;
 
 // --- Player ---
@@ -383,6 +383,173 @@ fun update_auras(ex, ey, ez, out) {
     }
 }
 
+// --- Flames ---
+//
+// A flame burning upwards from its origin, as in a brazier or on a torch. It
+// is a bundle of glowing tongues that rise, narrow and redden, drawn added
+// over the frame, over a hot bed and inside a dim halo, with sparks thrown up
+// from it. It gives no light of its own: a `light` placed with it does that.
+
+// How tall a flame is by default, and how wide its base is for its height
+let FLAME_SIZE = 1.2;
+let FLAME_WIDTH = 0.75;
+
+let FLAME_TONGUES = 12;
+
+// How long a tongue takes to rise, in seconds, for a flame of the default
+// size. Smaller flames flicker faster.
+let FLAME_LIFE = 0.6;
+
+// Sparks per second, at the default size, and the most there are at once
+let SPARK_RATE = 3.0;
+let MAX_SPARKS = 8;
+
+// Past this far away, in meters, flames are not drawn
+let FLAME_RANGE = 80.0;
+
+let FLAME_HALO = 0xFF5A14;
+let FLAME_BED = 0xFFC060;
+let FLAME_YELLOW = 0xFFD870;
+let FLAME_ORANGE = 0xFF7A20;
+let FLAME_RED = 0xB02008;
+
+// Every flame, for update_flames() to draw
+let flames = [];
+
+fun rgb_lerp(a, b, t) {
+    let r = (((a >> 16) & 0xFF).to_f() * (1.0 - t) + ((b >> 16) & 0xFF).to_f() * t).floor();
+    let g = (((a >> 8) & 0xFF).to_f() * (1.0 - t) + ((b >> 8) & 0xFF).to_f() * t).floor();
+    let bl = ((a & 0xFF).to_f() * (1.0 - t) + (b & 0xFF).to_f() * t).floor();
+    return (r << 16) | (g << 8) | bl;
+}
+
+class Flame extends Entity {
+    init(self, x, y, z, size) {
+        Entity.init(self, x, y, z, 0.0);
+        self.radius = 0.0;
+        self.size = size;
+        self.width = size * FLAME_WIDTH;
+        self.life = FLAME_LIFE * (size / FLAME_SIZE).sqrt();
+        self.seed = blood_rand(0.0, 100.0);
+
+        // Each tongue as how far through its rise it is, where it starts out
+        // from the middle, how fast it rises and a phase for its sway
+        self.tongues = [];
+        for (let var i = 0; i < FLAME_TONGUES; ++i) {
+            let t = [i.to_f() / FLAME_TONGUES.to_f(), 0.0, 0.0, 1.0, 0.0];
+            self.respawn_tongue(t);
+            self.tongues.push(t);
+        }
+
+        // Each spark as x, y, z, velocity and the life it has left
+        self.sparks = [];
+        self.spark_wait = 0.0;
+        flames.push(self);
+    }
+
+    respawn_tongue(self, t) {
+        let a = blood_rand(0.0, 2.0 * PI);
+        let d = blood_rand(0.0, 1.0).sqrt() * self.width * 0.35;
+        t[1] = a.cos() * d;
+        t[2] = a.sin() * d;
+        t[3] = blood_rand(0.8, 1.25);
+        t[4] = blood_rand(0.0, 2.0 * PI);
+    }
+
+    update(self, w, dt) {
+        Entity.update(self, w, dt);
+        for (let var i = 0; i < self.tongues.len; ++i) {
+            let t = self.tongues[i];
+            t[0] = t[0] + dt * t[3] / self.life;
+            if (t[0] >= 1.0) {
+                t[0] = t[0] - 1.0;
+                self.respawn_tongue(t);
+            }
+        }
+
+        let k = self.size / FLAME_SIZE;
+        for (let var i = self.sparks.len - 1; i >= 0; --i) {
+            let s = self.sparks[i];
+            s[6] = s[6] - dt;
+            if (s[6] <= 0.0) { self.sparks.remove(i); continue; }
+            s[3] = s[3] + blood_rand(-1.5, 1.5) * k * dt;
+            s[5] = s[5] + blood_rand(-1.5, 1.5) * k * dt;
+            s[0] = s[0] + s[3] * dt; s[1] = s[1] + s[4] * dt; s[2] = s[2] + s[5] * dt;
+        }
+        self.spark_wait = self.spark_wait - dt;
+        if (self.spark_wait <= 0.0) {
+            self.spark_wait = blood_rand(0.5, 1.5) / (SPARK_RATE * k.sqrt());
+            if (self.sparks.len < MAX_SPARKS) {
+                self.sparks.push([
+                    self.x + blood_rand(-0.3, 0.3) * self.width, self.y + self.size * 0.3,
+                    self.z + blood_rand(-0.3, 0.3) * self.width,
+                    blood_rand(-0.3, 0.3) * k, blood_rand(1.0, 2.2) * k, blood_rand(-0.3, 0.3) * k,
+                    blood_rand(0.7, 1.4)
+                ]);
+            }
+        }
+    }
+
+    // Add its glows, sparks included, to a list for set_glows(), if the eye at
+    // (ex, ey, ez) is near enough to see it. What stands in front of them is
+    // left out as they are drawn.
+    draw(self, ex, ey, ez, glows) {
+        let h = self.size;
+        let dx = self.x - ex; let dy = self.y + h * 0.5 - ey; let dz = self.z - ez;
+        if (dx * dx + dy * dy + dz * dz > FLAME_RANGE * FLAME_RANGE) return;
+
+        let time = self.anim_time + self.seed;
+        let vis = 0.85 + 0.1 * (time * 11.3).sin() + 0.05 * (time * 23.7).sin();
+
+        glows.push(self.x); glows.push(self.y + h * 0.4); glows.push(self.z);
+        glows.push(h * 0.6); glows.push(h * 0.6); glows.push(FLAME_HALO); glows.push(0.22 * vis);
+
+        glows.push(self.x); glows.push(self.y + h * 0.06); glows.push(self.z);
+        glows.push(self.width * 0.5); glows.push(h * 0.12); glows.push(FLAME_BED); glows.push(0.9 * vis);
+
+        // The hot body of it, stretching and settling as it flickers
+        let core_h = h * (0.3 + 0.04 * (time * 9.1).sin());
+        glows.push(self.x); glows.push(self.y + core_h * 0.8); glows.push(self.z);
+        glows.push(self.width * 0.24); glows.push(core_h); glows.push(FLAME_YELLOW); glows.push(0.8 * vis);
+
+        for (let var i = 0; i < self.tongues.len; ++i) {
+            let tg = self.tongues[i];
+            let t = tg[0];
+
+            // Drawn in towards the middle as it rises, and swaying
+            let pull = 1.0 - 0.7 * t;
+            let sway = 0.06 * h * t;
+            let px = self.x + tg[1] * pull + (time * 5.3 + tg[4]).sin() * sway;
+            let pz = self.z + tg[2] * pull + (time * 4.1 + tg[4] * 1.7).cos() * sway;
+            let py = self.y + h * (0.1 + 0.8 * t);
+
+            // Tall and narrow, thinning as it goes
+            let r = self.width * 0.22 * (1.0 - 0.65 * t);
+            let var c = 0;
+            if (t < 0.4) c = rgb_lerp(FLAME_YELLOW, FLAME_ORANGE, t / 0.4);
+            else c = rgb_lerp(FLAME_ORANGE, FLAME_RED, (t - 0.4) / 0.6);
+            let env = (t / 0.1).min(1.0) * (1.0 - t).pow(1.2);
+
+            glows.push(px); glows.push(py); glows.push(pz);
+            glows.push(r); glows.push(r * 2.2); glows.push(c); glows.push(1.0 * env * vis);
+        }
+
+        // Sparks are tiny glows, cooling as they rise
+        let r = (0.015 * h / FLAME_SIZE).max(0.008);
+        for (let var i = 0; i < self.sparks.len; ++i) {
+            let s = self.sparks[i];
+            let c = rgb_lerp(FLAME_RED, FLAME_YELLOW, s[6].min(1.0));
+            glows.push(s[0]); glows.push(s[1]); glows.push(s[2]);
+            glows.push(r); glows.push(r); glows.push(c); glows.push(1.0);
+        }
+    }
+}
+
+// Add the glows of every flame near the eye at (ex, ey, ez) to a list
+fun update_flames(ex, ey, ez, glows) {
+    for (let var i = 0; i < flames.len; ++i) flames[i].draw(ex, ey, ez, glows);
+}
+
 // Make the entity a point entity of the map asks for, by its classname
 fun spawn_entity(spec) {
     let k = spec.kind;
@@ -426,6 +593,10 @@ fun spawn_placed(w, player, out) {
             player.monsters = player.monsters + 1;
         }
         else if (spec.kind == "gib_chute") out.push(GibChute(w, spec.x, spec.y, spec.z, player));
+        else if (spec.kind == "flame") {
+            let size = spec.num("size", FLAME_SIZE * UNITS_PER_METER) / UNITS_PER_METER;
+            out.push(Flame(spec.x, spec.y, spec.z, size));
+        }
         else {
             let e = spawn_entity(spec);
             if (e instanceof Prop && e.pickup != nil) land_pickup(w, e);
@@ -2353,6 +2524,7 @@ fun restart_level(w, player, list) {
     }
     list.resize(0, nil);
     relics.resize(0, nil);
+    flames.resize(0, nil);
     drops.resize(0, nil);
     gibs.resize(0, nil);
     sound_events.resize(0, nil);
