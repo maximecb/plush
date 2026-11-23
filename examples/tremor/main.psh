@@ -236,6 +236,13 @@ let TOUR = [
 
 // The renderer leaves alpha at zero, which image viewers would show as
 // transparent, so screenshots are saved without alpha
+// A number for a screenshot's name, to two decimals, with p for the point
+fun shot_num(x) {
+    let parts = x.format_decimals(2).split(".");
+    if (parts.len < 2) return parts[0];
+    return parts[0] + "p" + parts[1];
+}
+
 fun save_screenshot(path) {
     return save_png(path, frame_image, false);
 }
@@ -481,7 +488,10 @@ loop {
     // Taken before the FPS counter is drawn, so it stays out of the shot
     if (take_shot) {
         take_shot = false;
-        let path = "tremor_" + $time_current_ms().to_s() + ".png";
+        // Named for where it was taken from, so the view can be found again
+        let path = "tremor_x" + shot_num(player.x) + "_y" + shot_num(player.eye_y())
+            + "_z" + shot_num(player.z) + "_yaw" + shot_num(player.yaw)
+            + "_p" + shot_num(player.pitch) + ".png";
         if (save_screenshot(path)) $println("saved " + path);
         else $println("could not write " + path);
     }

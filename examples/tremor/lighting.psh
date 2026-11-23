@@ -2,7 +2,7 @@
 // point lights in the map and the moon, and the cuts that let a face carry a
 // pool of light.
 
-from ./world import NUM_LEVELS, MOON_AZ, MOON_EL, texel_u, texel_v, split_face, subdivide_grid;
+from ./world import NUM_LEVELS, MOON_AZ, MOON_EL, PLANE_EPS, Face, texel_u, texel_v, clip_poly, poly_area, split_face, subdivide_grid;
 
 // Light is applied per pixel, by scaling the texel as it is read rather than
 // by reading it from a pre-darkened copy of the texture.
@@ -63,6 +63,9 @@ let var at_b = 0.0;
 // and in front of it. Its pieces share them.
 let var face_lights = [];
 
+// The face `face_lights` was gathered for
+let var lights_face = nil;
+
 // --- A grid over the brushes ---
 //
 // The brushes are binned by their bounds into a grid of cubes, so a segment
@@ -122,11 +125,14 @@ fun build_grid(list) {
     }
 }
 
-// Does the segment from a to b, whose bounds are given, pass through some
-// thickness of this brush? It is clipped against the brush's half-spaces the
-// way `plane_quad` clips a face.
-fun seg_blocked(b, ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz) {
-    if (b.alpha < 1.0) return false;
+// How far, in meters, a shadow ray has to go through a brush to be blocked
+let SHADOW_MIN_DEPTH = 0.02;
+
+// Does the segment from a to b, whose bounds are given, pass through more than
+// `min_t` of its length of this brush? It is clipped against the brush's
+// half-spaces the way `plane_quad` clips a face.
+fun seg_blocked(b, ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz, min_t) {
+    if (b.lit_through) return false;
     if (hx < b.x0 || lx > b.x1) return false;
     if (hy < b.y0 || ly > b.y1) return false;
     if (hz < b.z0 || lz > b.z1) return false;
@@ -157,12 +163,15 @@ fun seg_blocked(b, ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz) {
     // enough to clear a wall its face runs into at a corner. Requiring the
     // segment to pass through some thickness is what keeps those seams
     // from reading as occlusions and drawing a dark line down every join.
-    return t1 - t0 > 0.002;
+    // It is a length rather than a share of the segment, or a ray to the
+    // moon could slip through the corner of any wall.
+    return t1 - t0 > min_t;
 }
 
 // Does any brush stand between these two points?
 fun occluded(ax, ay, az, bx, by, bz) {
     let dx = bx - ax; let dy = by - ay; let dz = bz - az;
+    let min_t = SHADOW_MIN_DEPTH / (dx * dx + dy * dy + dz * dz).sqrt().max(0.000001);
 
     let var lx = ax; let var hx = bx;
     if (hx < lx) { lx = bx; hx = ax; }
@@ -173,7 +182,7 @@ fun occluded(ax, ay, az, bx, by, bz) {
 
     // Doors, and anything else added since the grid was built
     for (let var i = grid_count; i < brushes.len; ++i) {
-        if (seg_blocked(brushes[i], ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz)) return true;
+        if (seg_blocked(brushes[i], ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz, min_t)) return true;
     }
     if (grid_count == 0) return false;
 
@@ -235,7 +244,7 @@ fun occluded(ax, ay, az, bx, by, bz) {
                 let i = cell[k];
                 if (mark[i] == q) continue;
                 mark[i] = q;
-                if (seg_blocked(brushes[i], ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz)) return true;
+                if (seg_blocked(brushes[i], ax, ay, az, dx, dy, dz, lx, ly, lz, hx, hy, hz, min_t)) return true;
             }
         }
 
@@ -316,6 +325,7 @@ fun brushes_crossed(ax, ay, az, bx, by, bz, most) {
 // Is this point strictly inside a brush? Boundaries do not count: a sample
 // lifted off one surface routinely lands exactly on another.
 fun point_in_brush(b, x, y, z) {
+    if (b.lit_through) return false;
     if (x <= b.x0 || x >= b.x1) return false;
     if (y <= b.y0 || y >= b.y1) return false;
     if (z <= b.z0 || z >= b.z1) return false;
@@ -328,6 +338,7 @@ fun point_in_brush(b, x, y, z) {
     return true;
 }
 
+// Is this point inside a brush that hides what is behind it?
 fun in_solid(x, y, z) {
     for (let var i = grid_count; i < brushes.len; ++i) {
         if (point_in_brush(brushes[i], x, y, z)) return true;
@@ -345,6 +356,786 @@ fun in_solid(x, y, z) {
         if (point_in_brush(brushes[cell[k]], x, y, z)) return true;
     }
     return false;
+}
+
+// --- Taking away what brushes cover ---
+//
+// A face is the whole side of its brush, including any part another brush
+// stands on or runs into. Lighting those parts put samples inside walls, where
+// they saw lamps on both sides of them, and interpolation spread that light
+// across the visible part. Each face is cut down to what no solid covers.
+
+// Pieces smaller than this, in square meters, are slivers left by the clipper
+let MIN_PIECE_AREA = 0.000001;
+
+// Cut a polygon lying on a plane facing (nx, ny, nz) by a brush, pushing the
+// pieces of it outside the brush onto `out`. Returns false, pushing nothing,
+// when the polygon does not reach into the brush. A polygon lying on a side
+// of the brush is covered when that side faces it, as where a wall stands on
+// a floor. When it faces the same way the two faces lie on each other, and
+// the one from the brush that came first, below `own`, is kept.
+fun carve_poly(poly, nx, ny, nz, b, own, out) {
+    let pieces = [];
+    let var rest = poly;
+    let planes = b.planes;
+
+    for (let var j = 0; j < planes.len; ++j) {
+        let q = planes[j];
+        let n = rest.len.idiv(3);
+        let var lo = 1000000000.0; let var hi = 0.0 - lo;
+        for (let var k = 0; k < n; ++k) {
+            let d = q.nx * rest[k * 3] + q.ny * rest[k * 3 + 1] + q.nz * rest[k * 3 + 2] - q.d;
+            lo = lo.min(d); hi = hi.max(d);
+        }
+
+        if (lo >= 0.0 - PLANE_EPS && hi <= PLANE_EPS) {
+            if (q.nx * nx + q.ny * ny + q.nz * nz < 0.0 || b.id < own) continue;
+            return false;
+        }
+        if (lo >= 0.0 - PLANE_EPS) return false;
+        if (hi <= PLANE_EPS) continue;
+
+        let front = clip_poly(rest, 0.0 - q.nx, 0.0 - q.ny, 0.0 - q.nz, 0.0 - q.d);
+        if (front.len >= 9 && poly_area(front) > MIN_PIECE_AREA) pieces.push(front);
+        rest = clip_poly(rest, q.nx, q.ny, q.nz, q.d);
+        if (rest.len < 9) return false;
+    }
+
+    for (let var i = 0; i < pieces.len; ++i) out.push(pieces[i]);
+    return true;
+}
+
+// The parts of a face no solid brush covers, as faces of their own. Brushes
+// light passes through cover nothing, and doors are not in the grid, since
+// they move.
+fun uncovered(f, out) {
+    if (grid_count == 0) { out.push(f); return; }
+
+    let v = f.v;
+    let n = v.len.idiv(3);
+    let var lx = v[0]; let var hx = lx;
+    let var ly = v[1]; let var hy = ly;
+    let var lz = v[2]; let var hz = lz;
+    for (let var k = 1; k < n; ++k) {
+        lx = lx.min(v[k * 3]); hx = hx.max(v[k * 3]);
+        ly = ly.min(v[k * 3 + 1]); hy = hy.max(v[k * 3 + 1]);
+        lz = lz.min(v[k * 3 + 2]); hz = hz.max(v[k * 3 + 2]);
+    }
+    let e = 0.001;
+    let ix0 = ((lx - e - grid_x0) / GRID_CELL).floor().clip(0, grid_nx - 1);
+    let iy0 = ((ly - e - grid_y0) / GRID_CELL).floor().clip(0, grid_ny - 1);
+    let iz0 = ((lz - e - grid_z0) / GRID_CELL).floor().clip(0, grid_nz - 1);
+    let ix1 = ((hx + e - grid_x0) / GRID_CELL).floor().clip(0, grid_nx - 1);
+    let iy1 = ((hy + e - grid_y0) / GRID_CELL).floor().clip(0, grid_ny - 1);
+    let iz1 = ((hz + e - grid_z0) / GRID_CELL).floor().clip(0, grid_nz - 1);
+
+    let var own = brushes.len;
+    if (f.brush != nil) own = f.brush.id;
+
+    grid_query = grid_query + 1;
+    let q = grid_query;
+    let var work = [v];
+    let var cut = false;
+
+    for (let var z = iz0; z <= iz1; ++z) {
+        for (let var y = iy0; y <= iy1; ++y) {
+            for (let var x = ix0; x <= ix1; ++x) {
+                let cell = grid_cells[(z * grid_ny + y) * grid_nx + x];
+                if (cell == nil) continue;
+                for (let var c = 0; c < cell.len; ++c) {
+                    let i = cell[c];
+                    if (grid_mark[i] == q) continue;
+                    grid_mark[i] = q;
+                    let b = brushes[i];
+                    if (b == f.brush || b.lit_through) continue;
+                    if (hx < b.x0 - e || lx > b.x1 + e) continue;
+                    if (hy < b.y0 - e || ly > b.y1 + e) continue;
+                    if (hz < b.z0 - e || lz > b.z1 + e) continue;
+
+                    let next = [];
+                    for (let var p = 0; p < work.len; ++p) {
+                        if (carve_poly(work[p], f.nx, f.ny, f.nz, b, own, next)) cut = true;
+                        else next.push(work[p]);
+                    }
+                    work = next;
+                    if (work.len == 0) return;
+                }
+            }
+        }
+    }
+
+    if (!cut) { out.push(f); return; }
+    for (let var p = 0; p < work.len; ++p) out.push(Face(work[p], f));
+}
+
+// --- T-junctions ---
+//
+// Where a corner of one piece lies part way along an edge of another on the
+// same plane, the light on that edge runs straight between its two ends on one
+// side and bends at the corner on the other, which shows as a seam.
+//
+// Where it bends a long way, the long side has missed something the short one
+// caught, such as light spilling through a doorway, and the long edge is cut
+// at the corner, square across, so that both sides sample it. Each cut lands
+// part way along an edge further on, so cutting at every T-junction would run
+// lines right across a plane. The smaller bends that are left are welded: the
+// corner takes the light the long edge has there, so both sides run straight.
+
+// How close a corner has to be to an edge to be on it, and how far from its
+// ends, in meters
+let TJ_ON = 0.001;
+let TJ_END = 0.005;
+
+// How far off the straight run a corner's light has to be for the long edge
+// to be cut there, on the 0..255 scale
+let TJ_TOL = 4.0;
+
+// The direction and distance along it of the first edge of `a` that a corner
+// of `b` lies part way along, as [ex, ey, ez, d], or nil
+fun t_cut(a, b) {
+    let av = a.v; let bv = b.v;
+    let na = av.len.idiv(3); let nb = bv.len.idiv(3);
+    for (let var i = 0; i < na; ++i) {
+        let var j = i + 1;
+        if (j == na) j = 0;
+        let px = av[i * 3]; let py = av[i * 3 + 1]; let pz = av[i * 3 + 2];
+        let var ex = av[j * 3] - px; let var ey = av[j * 3 + 1] - py; let var ez = av[j * 3 + 2] - pz;
+        let len = (ex * ex + ey * ey + ez * ez).sqrt();
+        if (len < 2.0 * TJ_END) continue;
+        ex = ex / len; ey = ey / len; ez = ez / len;
+
+        for (let var k = 0; k < nb; ++k) {
+            let mx = bv[k * 3] - px; let my = bv[k * 3 + 1] - py; let mz = bv[k * 3 + 2] - pz;
+            let t = mx * ex + my * ey + mz * ez;
+            if (t < TJ_END || t > len - TJ_END) continue;
+            let ox = mx - ex * t; let oy = my - ey * t; let oz = mz - ez * t;
+            if (ox * ox + oy * oy + oz * oz > TJ_ON * TJ_ON) continue;
+            if (!bends(a, i, j, t / len, b, k)) continue;
+            return [ex, ey, ez, ex * bv[k * 3] + ey * bv[k * 3 + 1] + ez * bv[k * 3 + 2]];
+        }
+    }
+    return nil;
+}
+
+
+// The light at every point sampled so far, by position and facing
+let var samples = {};
+
+// The light at a point of face f, as light_at gives it, sampled once. Pieces
+// meeting at a corner then read the same light there, whichever face they
+// were cut from.
+fun light_of(f, x, y, z) {
+    let key = sample_key(f, x, y, z);
+    if (samples.has(key)) {
+        let c = samples[key];
+        at_r = c[0]; at_g = c[1]; at_b = c[2];
+        return c[3];
+    }
+    if (f != lights_face) { face_lights = lights_for(f); lights_face = f; }
+    let level = light_at(x, y, z, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+    samples[key] = [at_r, at_g, at_b, level];
+    return level;
+}
+
+// The key light_of files a point of face f under
+fun sample_key(f, x, y, z) {
+    if (f.nkey == nil) f.nkey = key_part(f.nx) + "," + key_part(f.ny) + "," + key_part(f.nz);
+    return key_part(x) + "," + key_part(y) + "," + key_part(z) + "," + f.nkey;
+}
+
+// The edge each corner on a T-junction takes its light from, by sample key, as
+// [length, face, the ends' x, y, z, how far along it, the corner's x, y, z].
+// Where a corner is on more than one, the longest wins.
+let var welds = {};
+let var weld_keys = [];
+
+// How many passes the light at T-junctions gets to settle
+let WELD_PASSES = 64;
+
+// The corners, by sample key, that welding moved more than TJ_TOL from their
+// own light, and how many times welding is tried again after cutting at them
+let var must_cut = {};
+let WELD_ROUNDS = 4;
+
+// Note every corner of `b` lying part way along an edge of `a`
+fun find_welds(a, b) {
+    let av = a.v; let bv = b.v;
+    let na = av.len.idiv(3); let nb = bv.len.idiv(3);
+    for (let var i = 0; i < na; ++i) {
+        let var j = i + 1;
+        if (j == na) j = 0;
+        let px = av[i * 3]; let py = av[i * 3 + 1]; let pz = av[i * 3 + 2];
+        let var ex = av[j * 3] - px; let var ey = av[j * 3 + 1] - py; let var ez = av[j * 3 + 2] - pz;
+        let len = (ex * ex + ey * ey + ez * ez).sqrt();
+        if (len < 2.0 * TJ_END) continue;
+        ex = ex / len; ey = ey / len; ez = ez / len;
+
+        for (let var k = 0; k < nb; ++k) {
+            let mx = bv[k * 3]; let my = bv[k * 3 + 1]; let mz = bv[k * 3 + 2];
+            let dx = mx - px; let dy = my - py; let dz = mz - pz;
+            let t = dx * ex + dy * ey + dz * ez;
+            if (t < TJ_END || t > len - TJ_END) continue;
+            let ox = dx - ex * t; let oy = dy - ey * t; let oz = dz - ez * t;
+            if (ox * ox + oy * oy + oz * oz > TJ_ON * TJ_ON) continue;
+
+            let key = sample_key(b, mx, my, mz);
+            if (welds.has(key)) {
+                if (welds[key][0] >= len) continue;
+            } else {
+                weld_keys.push(key);
+            }
+            welds[key] = [len, a, px, py, pz, av[j * 3], av[j * 3 + 1], av[j * 3 + 2], t / len, mx, my, mz];
+        }
+    }
+}
+
+// The light at the corners of a piece, worked out once
+fun corner_light(f) {
+    if (f.vl != nil) return f.vl;
+    let n = f.v.len.idiv(3);
+    let vl = Array.with_size(n * 3, 0.0);
+    for (let var i = 0; i < n; ++i) {
+        light_of(f, f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2]);
+        vl[i * 3] = at_r; vl[i * 3 + 1] = at_g; vl[i * 3 + 2] = at_b;
+    }
+    f.vl = vl;
+    return vl;
+}
+
+// Is the light at corner k of piece b, a fraction t of the way along the edge
+// of piece a from its corner i to its corner j, further off the straight run
+// between them than TJ_TOL? A corner welding moved too far is always cut at.
+fun bends(a, i, j, t, b, k) {
+    if (must_cut.has(sample_key(b, b.v[k * 3], b.v[k * 3 + 1], b.v[k * 3 + 2]))) return true;
+    let al = corner_light(a);
+    let bl = corner_light(b);
+    let var off = 0.0;
+    for (let var c = 0; c < 3; ++c) {
+        let p = al[i * 3 + c];
+        off = off.max((bl[k * 3 + c] - p - (al[j * 3 + c] - p) * t).abs());
+    }
+    return off > TJ_TOL;
+}
+
+// The boxes around the edges of a piece that a plane, as [nx, ny, nz, d],
+// crosses
+fun crossed_edges(f, c) {
+    let v = f.v;
+    let n = v.len.idiv(3);
+    let out = [];
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+        let di = c[0] * v[i * 3] + c[1] * v[i * 3 + 1] + c[2] * v[i * 3 + 2] - c[3];
+        let dj = c[0] * v[j * 3] + c[1] * v[j * 3 + 1] + c[2] * v[j * 3 + 2] - c[3];
+        if ((di > 0.0) == (dj > 0.0)) continue;
+        out.push([v[i * 3].min(v[j * 3]), v[i * 3 + 1].min(v[j * 3 + 1]), v[i * 3 + 2].min(v[j * 3 + 2]),
+            v[i * 3].max(v[j * 3]), v[i * 3 + 1].max(v[j * 3 + 1]), v[i * 3 + 2].max(v[j * 3 + 2])]);
+    }
+    return out;
+}
+
+// The box around a piece, as [x0, y0, z0, x1, y1, z1]
+fun piece_box(f) {
+    let v = f.v;
+    let n = v.len.idiv(3);
+    let box = [v[0], v[1], v[2], v[0], v[1], v[2]];
+    for (let var k = 1; k < n; ++k) {
+        for (let var a = 0; a < 3; ++a) {
+            box[a] = box[a].min(v[k * 3 + a]);
+            box[a + 3] = box[a + 3].max(v[k * 3 + a]);
+        }
+    }
+    return box;
+}
+
+fun boxes_touch(a, b) {
+    let e = TJ_ON;
+    return a[0] <= b[3] + e && b[0] <= a[3] + e
+        && a[1] <= b[4] + e && b[1] <= a[4] + e
+        && a[2] <= b[5] + e && b[2] <= a[5] + e;
+}
+
+// Pieces of a plane are binned into cubes this size, so that each is only
+// checked against those near it. A big plane slanting across all three axes
+// takes bigger ones, to keep the grid to TJ_MAX_CELLS.
+let TJ_CELL = 2.0;
+let TJ_MAX_CELLS = 65536;
+
+// The pieces of one plane, binned into a grid over the box around them all.
+// Pieces cut from them later stay inside it.
+class PieceGrid {
+    init(self, group) {
+        let lo = piece_box(group[0]);
+        for (let var i = 1; i < group.len; ++i) {
+            let box = piece_box(group[i]);
+            for (let var a = 0; a < 3; ++a) {
+                lo[a] = lo[a].min(box[a]);
+                lo[a + 3] = lo[a + 3].max(box[a + 3]);
+            }
+        }
+        let var cs = TJ_CELL;
+        loop {
+            self.gx = ((lo[3] - lo[0]) / cs).floor() + 1;
+            self.gy = ((lo[4] - lo[1]) / cs).floor() + 1;
+            self.gz = ((lo[5] - lo[2]) / cs).floor() + 1;
+            if (self.gx * self.gy * self.gz <= TJ_MAX_CELLS) break;
+            cs = cs * 2.0;
+        }
+        self.lo = lo;
+        self.cs = cs;
+        self.cells = Array.with_size(self.gx * self.gy * self.gz, nil);
+        self.r = Array.with_size(6, 0);
+        self.pieces = [];
+        self.boxes = [];
+        self.seen = [];
+        self.stamp = 0;
+        for (let var i = 0; i < group.len; ++i) self.add(group[i]);
+    }
+
+    // The range of cells a box reaches, left in r
+    cell_range(self, box) {
+        let e = TJ_ON;
+        let lo = self.lo; let cs = self.cs; let r = self.r;
+        r[0] = ((box[0] - e - lo[0]) / cs).floor().clip(0, self.gx - 1);
+        r[1] = ((box[1] - e - lo[1]) / cs).floor().clip(0, self.gy - 1);
+        r[2] = ((box[2] - e - lo[2]) / cs).floor().clip(0, self.gz - 1);
+        r[3] = ((box[3] + e - lo[0]) / cs).floor().clip(0, self.gx - 1);
+        r[4] = ((box[4] + e - lo[1]) / cs).floor().clip(0, self.gy - 1);
+        r[5] = ((box[5] + e - lo[2]) / cs).floor().clip(0, self.gz - 1);
+    }
+
+    // Add a piece, returning its index
+    add(self, f) {
+        let i = self.pieces.len;
+        self.pieces.push(f);
+        let box = piece_box(f);
+        self.boxes.push(box);
+        self.seen.push(0 - 1);
+        self.cell_range(box);
+        let r = self.r; let cells = self.cells; let gx = self.gx; let gy = self.gy;
+        for (let var z = r[2]; z <= r[5]; ++z) {
+            for (let var y = r[1]; y <= r[4]; ++y) {
+                for (let var x = r[0]; x <= r[3]; ++x) {
+                    let c = (z * gy + y) * gx + x;
+                    if (cells[c] == nil) cells[c] = [];
+                    cells[c].push(i);
+                }
+            }
+        }
+        return i;
+    }
+
+    // Put a part of piece i in its place. It stays filed under the whole
+    // piece's cells, which still cover it.
+    replace(self, i, f) {
+        self.pieces[i] = f;
+        self.boxes[i] = piece_box(f);
+    }
+
+    // The pieces whose boxes touch piece i's, each once
+    near(self, i) {
+        self.stamp = self.stamp + 1;
+        let stamp = self.stamp;
+        let seen = self.seen; let boxes = self.boxes; let cells = self.cells;
+        let gx = self.gx; let gy = self.gy;
+        let out = [];
+        let bi = boxes[i];
+        self.cell_range(bi);
+        let r = self.r;
+        for (let var z = r[2]; z <= r[5]; ++z) {
+            for (let var y = r[1]; y <= r[4]; ++y) {
+                for (let var x = r[0]; x <= r[3]; ++x) {
+                    let list = cells[(z * gy + y) * gx + x];
+                    if (list == nil) continue;
+                    for (let var m = 0; m < list.len; ++m) {
+                        let j = list[m];
+                        if (j == i || seen[j] == stamp || !boxes_touch(bi, boxes[j])) continue;
+                        seen[j] = stamp;
+                        out.push(j);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    // The pieces touching piece i that were not cut from the same face as it.
+    // Those that were share their corners with it, since every cut ran right
+    // across the face. A piece a T-junction cut made has no `cuts`, so it is
+    // never skipped.
+    other_near(self, i) {
+        let list = self.near(i);
+        let cuts = self.pieces[i].cuts;
+        if (cuts == nil) return list;
+        let out = [];
+        for (let var m = 0; m < list.len; ++m) {
+            if (self.pieces[list[m]].cuts != cuts) out.push(list[m]);
+        }
+        return out;
+    }
+}
+
+// The pieces whose light is baked across them, gathered by the plane they lie
+// on, facing one way. A level fixed by the map, lava and see-through faces
+// show a seam against their neighbours anyway, so they go in `rest`.
+fun plane_groups(pieces, rest) {
+    let groups = {};
+    let keys = [];
+    for (let var i = 0; i < pieces.len; ++i) {
+        let f = pieces[i];
+        if (f.light >= 0 || f.flow || f.alpha < 1.0) { rest.push(f); continue; }
+        let key = sample_key(f, 0.0, 0.0, f.d);
+        if (!groups.has(key)) { groups[key] = []; keys.push(key); }
+        groups[key].push(f);
+    }
+    let out = [];
+    for (let var i = 0; i < keys.len; ++i) out.push(groups[keys[i]]);
+    return out;
+}
+
+// Cut the pieces of one plane where a corner's light bends a long way off an
+// edge, returning them. The work is a queue of pairs of pieces, the corners
+// of the second to be checked against the edges of the first. A cut puts new
+// corners on both parts, so it queues them against the pieces along the edges
+// it crosses, both ways round.
+fun cut_group(group) {
+    let grid = PieceGrid(group);
+    let pieces = grid.pieces;
+    let boxes = grid.boxes;
+    let qa = [];
+    let qb = [];
+    for (let var i = 0; i < pieces.len; ++i) {
+        let list = grid.other_near(i);
+        for (let var m = 0; m < list.len; ++m) { qa.push(i); qb.push(list[m]); }
+    }
+
+    let var head = 0;
+    while (head < qa.len) {
+        let i = qa[head];
+        let j = qb[head];
+        head = head + 1;
+        if (!boxes_touch(boxes[i], boxes[j])) continue;
+
+        let c = t_cut(pieces[i], pieces[j]);
+        if (c == nil) continue;
+        let parts = split_face(pieces[i], c[0], c[1], c[2], c[3]);
+        if (parts.len < 2) continue;
+
+        // This cut did not run right across the face, so the parts no longer
+        // share their corners with the rest of it
+        parts[0].cuts = nil;
+        parts[1].cuts = nil;
+
+        // The neighbours along the two edges the cut crosses, which are the
+        // only ones the new corners can matter to
+        let edges = crossed_edges(pieces[i], c);
+        let all = grid.near(i);
+        let list = [];
+        for (let var m = 0; m < all.len; ++m) {
+            let n = all[m];
+            for (let var e = 0; e < edges.len; ++e) {
+                if (boxes_touch(boxes[n], edges[e])) { list.push(n); break; }
+            }
+        }
+        grid.replace(i, parts[0]);
+        let k = grid.add(parts[1]);
+        qa.push(i); qb.push(k);
+        qa.push(k); qb.push(i);
+        for (let var m = 0; m < list.len; ++m) {
+            let n = list[m];
+            qa.push(i); qb.push(n);
+            qa.push(k); qb.push(n);
+            qa.push(n); qb.push(i);
+            qa.push(n); qb.push(k);
+        }
+    }
+    return pieces;
+}
+
+// Cut every piece where its light bends a long way off the edge of another
+// on its plane, returning the pieces
+fun cut_t_junctions(pieces) {
+    let out = [];
+    let groups = plane_groups(pieces, out);
+    for (let var i = 0; i < groups.len; ++i) {
+        let var group = groups[i];
+        if (group.len > 1) group = cut_group(group);
+        for (let var k = 0; k < group.len; ++k) out.push(group[k]);
+    }
+    return out;
+}
+
+// Give every corner on a T-junction the light of the edge it lies along.
+//
+// A corner whose own bend was small can still be pulled far off its light
+// when it is one of a chain of them, such as where two faces were cut for the
+// light a few centimeters apart, and the chain runs between dark ends. Such
+// corners are noted in `must_cut`, and unless this is the `last` try, every
+// sample is put back and false returned, for them to be cut at instead.
+fun weld_t_junctions(pieces, last) {
+    welds = {};
+    weld_keys = [];
+
+    let groups = plane_groups(pieces, []);
+    for (let var g = 0; g < groups.len; ++g) {
+        if (groups[g].len < 2) continue;
+        let grid = PieceGrid(groups[g]);
+        for (let var i = 0; i < grid.pieces.len; ++i) {
+            let list = grid.other_near(i);
+            for (let var m = 0; m < list.len; ++m) find_welds(grid.pieces[i], grid.pieces[list[m]]);
+        }
+    }
+
+    // The ends of an edge can be on T-junctions of their own, and around a
+    // brush the pieces can each have a corner on the next one's edge all the
+    // way round, so the light is settled by passes until it stops moving
+    let ends = [];
+    for (let var i = 0; i < weld_keys.len; ++i) {
+        let w = welds[weld_keys[i]];
+        let a = w[1];
+        light_of(a, w[9], w[10], w[11]);
+        light_of(a, w[2], w[3], w[4]);
+        let p = samples[sample_key(a, w[2], w[3], w[4])];
+        light_of(a, w[5], w[6], w[7]);
+        let q = samples[sample_key(a, w[5], w[6], w[7])];
+        let m = samples[weld_keys[i]];
+        ends.push([p, q, m, [m[0], m[1], m[2], m[3]]]);
+    }
+    for (let var pass = 0; pass < WELD_PASSES; ++pass) {
+        let var moved = 0.0;
+        for (let var i = 0; i < ends.len; ++i) {
+            let e = ends[i];
+            let t = welds[weld_keys[i]][8];
+            let p = e[0]; let q = e[1]; let m = e[2];
+            for (let var c = 0; c < 4; ++c) {
+                let x = p[c] + (q[c] - p[c]) * t;
+                moved = moved.max((x - m[c]).abs());
+                m[c] = x;
+            }
+        }
+        if (moved < 0.05) break;
+    }
+
+    let var settled = true;
+    for (let var i = 0; i < ends.len; ++i) {
+        let m = ends[i][2]; let o = ends[i][3];
+        for (let var c = 0; c < 3; ++c) {
+            if ((m[c] - o[c]).abs() > TJ_TOL) {
+                must_cut[weld_keys[i]] = true;
+                settled = false;
+                break;
+            }
+        }
+    }
+    if (settled || last) return true;
+
+    for (let var i = 0; i < ends.len; ++i) {
+        let m = ends[i][2]; let o = ends[i][3];
+        for (let var c = 0; c < 4; ++c) m[c] = o[c];
+    }
+    return false;
+}
+
+// --- Merging pieces back ---
+//
+// The light cuts run right across a face and the T-junction cuts right across
+// a piece, so plenty of pieces are split where one fit would serve both
+// sides. After baking, two pieces on a plane that share an edge are merged
+// when a fit across both still holds. The merged piece keeps every corner of
+// the two that is still on its outline, even those left part way along an
+// edge, so whatever meets it there still meets a corner.
+
+// The most corners a merged piece may have. The renderer draws up to 24, and
+// the BSP tree adds a corner wherever it cuts a piece.
+let MERGE_MAX_CORNERS = 16;
+
+// Do two pieces map their texture the same way?
+fun same_mapping(a, b) {
+    return a.tex == b.tex && a.ux == b.ux && a.uy == b.uy && a.uz == b.uz && a.ou == b.ou
+        && a.vx == b.vx && a.vy == b.vy && a.vz == b.vz && a.ov == b.ov;
+}
+
+// The pieces of one plane being merged, with their corners numbered so that
+// edges are matched by number
+class Merger {
+    init(self) {
+        self.pieces = [];
+        self.alive = [];
+        // Each piece's corner numbers, and its samples as `corner_samples` has them
+        self.vids = [];
+        self.samps = [];
+        // The edges leaving each corner, as the corner they go to and the
+        // piece, in turn
+        self.from = [];
+    }
+
+    // Add a piece, returning its index
+    add(self, f, vid, cs) {
+        let x = self.pieces.len;
+        self.pieces.push(f);
+        self.alive.push(true);
+        self.vids.push(vid);
+        self.samps.push(cs);
+        let n = vid.len;
+        for (let var i = 0; i < n; ++i) {
+            let var j = i + 1;
+            if (j == n) j = 0;
+            let list = self.from[vid[i]];
+            list.push(vid[j]);
+            list.push(x);
+        }
+        return x;
+    }
+
+    // The live piece other than x with an edge from corner a to corner b, or -1
+    owner(self, a, b, x) {
+        let list = self.from[a];
+        for (let var k = 0; k < list.len; k = k + 2) {
+            let y = list[k + 1];
+            if (list[k] == b && y != x && self.alive[y]) return y;
+        }
+        return 0 - 1;
+    }
+
+    // Merge piece x with the first neighbour a fit across both holds for,
+    // returning the merged piece's index, or -1
+    merge_one(self, x) {
+        let a = self.pieces[x];
+        let av = self.vids[x];
+        let n = av.len;
+        for (let var i = 0; i < n; ++i) {
+            let var j = i + 1;
+            if (j == n) j = 0;
+            let y = self.owner(av[j], av[i], x);
+            if (y < 0 || !same_mapping(a, self.pieces[y])) continue;
+
+            let u = self.union(x, i, y);
+            if (u == nil) continue;
+            let f = Face(u[0], a);
+            if (!fit_face_light(f, u[2])) continue;
+
+            self.alive[x] = false;
+            self.alive[y] = false;
+            return self.add(f, u[1], u[2]);
+        }
+        return 0 - 1;
+    }
+
+    // The outline of pieces x and y joined across x's edge from corner i, as
+    // [vertices, corner numbers, samples], or nil if it is not convex
+    union(self, x, i, y) {
+        let av = self.vids[x]; let bv = self.vids[y];
+        let na = av.len; let nb = bv.len;
+
+        // The edges they share run from a's corner s to e, and back along b
+        // from bs to be
+        let var s = i;
+        let var e = (i + 1) % na;
+        let var be = 0;
+        while (bv[be] != av[i]) be = be + 1;
+        let var bs = (be + nb - 1) % nb;
+        let var len = 1;
+        let most = na.min(nb) - 1;
+        while (len < most && av[(e + 1) % na] == bv[(bs + nb - 1) % nb]) {
+            e = (e + 1) % na; bs = (bs + nb - 1) % nb; len = len + 1;
+        }
+        while (len < most && av[(s + na - 1) % na] == bv[(be + 1) % nb]) {
+            s = (s + na - 1) % na; be = (be + 1) % nb; len = len + 1;
+        }
+
+        // Round a from e to s, then round b from after be to before bs
+        let ap = self.pieces[x].v; let bp = self.pieces[y].v;
+        let acs = self.samps[x]; let bcs = self.samps[y];
+        let verts = []; let vid = []; let cs = [];
+        let var c = e;
+        loop {
+            verts.push(ap[c * 3]); verts.push(ap[c * 3 + 1]); verts.push(ap[c * 3 + 2]);
+            vid.push(av[c]);
+            for (let var k = 0; k < 4; ++k) cs.push(acs[c * 4 + k]);
+            if (c == s) break;
+            c = (c + 1) % na;
+        }
+        c = (be + 1) % nb;
+        while (c != bs) {
+            verts.push(bp[c * 3]); verts.push(bp[c * 3 + 1]); verts.push(bp[c * 3 + 2]);
+            vid.push(bv[c]);
+            for (let var k = 0; k < 4; ++k) cs.push(bcs[c * 4 + k]);
+            c = (c + 1) % nb;
+        }
+
+        // A corner twice means they touch somewhere else as well
+        let n = vid.len;
+        if (n > MERGE_MAX_CORNERS) return nil;
+        for (let var p = 0; p < n; ++p) {
+            for (let var q = p + 1; q < n; ++q) if (vid[p] == vid[q]) return nil;
+        }
+
+        // Convex, allowing corners in a straight line but not turning back
+        // along it, which an L-shaped union does where its edges line up
+        let f = self.pieces[x];
+        for (let var k = 0; k < n; ++k) {
+            let p = (k + n - 1) % n; let q = (k + 1) % n;
+            let ax = verts[k * 3] - verts[p * 3]; let ay = verts[k * 3 + 1] - verts[p * 3 + 1]; let az = verts[k * 3 + 2] - verts[p * 3 + 2];
+            let bx = verts[q * 3] - verts[k * 3]; let by = verts[q * 3 + 1] - verts[k * 3 + 1]; let bz = verts[q * 3 + 2] - verts[k * 3 + 2];
+            let cx = ay * bz - az * by; let cy = az * bx - ax * bz; let cz = ax * by - ay * bx;
+            let la = (ax * ax + ay * ay + az * az).sqrt();
+            let lb = (bx * bx + by * by + bz * bz).sqrt();
+            let turn = cx * f.nx + cy * f.ny + cz * f.nz;
+            if (turn < 0.0 - 0.0001 * la * lb) return nil;
+            if (turn < 0.0001 * la * lb && ax * bx + ay * by + az * bz < 0.0) return nil;
+        }
+        return [verts, vid, cs];
+    }
+}
+
+// Merge what pieces of one plane it can, pushing what is left onto `out`
+fun merge_group(group, out) {
+    let m = Merger();
+    let ids = {};
+    for (let var g = 0; g < group.len; ++g) {
+        let f = group[g];
+        let n = f.v.len.idiv(3);
+        let vid = Array.with_size(n, 0);
+        for (let var i = 0; i < n; ++i) {
+            let key = key_part(f.v[i * 3]) + "," + key_part(f.v[i * 3 + 1]) + "," + key_part(f.v[i * 3 + 2]);
+            if (!ids.has(key)) { ids[key] = m.from.len; m.from.push([]); }
+            vid[i] = ids[key];
+        }
+        m.add(f, vid, corner_samples(f));
+    }
+
+    // A merged piece goes back on the list, to try its new neighbours
+    let work = [];
+    for (let var x = 0; x < m.pieces.len; ++x) work.push(x);
+    let var head = 0;
+    while (head < work.len) {
+        let x = work[head];
+        head = head + 1;
+        if (!m.alive[x]) continue;
+        let z = m.merge_one(x);
+        if (z >= 0) work.push(z);
+    }
+
+    for (let var x = 0; x < m.pieces.len; ++x) {
+        if (m.alive[x]) out.push(m.pieces[x]);
+    }
+}
+
+// Merge what pieces it can, returning the pieces left
+fun merge_pieces(pieces) {
+    let out = [];
+    let groups = plane_groups(pieces, out);
+    for (let var g = 0; g < groups.len; ++g) {
+        if (groups[g].len > 1) merge_group(groups[g], out);
+        else out.push(groups[g][0]);
+    }
+    return out;
+}
+
+// A plane, facing one way, rounded to a millimeter as a key to gather faces by
+fun key_part(x) {
+    return (x * 1000.0 + 0.5).floor().to_s();
 }
 
 // Put light summed per channel on the curve, returning the level and leaving
@@ -371,37 +1162,27 @@ fun shade(r, g, b) {
 }
 
 // The light level at one point on a surface facing a given way, with its
-// channels left in `at_r`, `at_g` and `at_b`. `tx, ty, tz` is the middle of
-// the whole face the point belongs to, not of the piece it is being baked
-// with, and says which way is inward along it. Answering the same for every
-// piece of a face is what keeps the reply the same at a point two of them
-// share.
+// channels left in `at_r`, `at_g` and `at_b`. `tx, ty, tz` is a point inside
+// the face the point belongs to, and says which way is inward along it.
 fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     // Lift the sample off the surface, so that a fixture sitting flush against
     // a wall still counts as being in front of it
-    let cx = px + nx * 0.0125;
-    let cy = py + ny * 0.0125;
-    let cz = pz + nz * 0.0125;
+    let lift_x = px + nx * 0.0125;
+    let lift_y = py + ny * 0.0125;
+    let lift_z = pz + nz * 0.0125;
+    let var cx = lift_x; let var cy = lift_y; let var cz = lift_z;
 
-    // Most of a face is usually walled in by the brushes around it: an arcade
-    // pocket is a gap left between two wall boxes, so the face that shows in
-    // the gap runs the whole height of the wall with all but a window of it
-    // buried. A sample down in that buried part sees no lamp at all, and since
-    // its neighbours see none either there is nothing for `light_curves` to cut
-    // on, so the window bakes as dark as the stone around it.
-    //
-    // A buried sample has no visibility worth reporting, so it reports none and
-    // takes the light it would have had before shadows. Faces out in the open
-    // are untouched, and one standing in a real shadow still goes dark.
-    //
-    // The test is done a little inside the face rather than at the sample: a
-    // corner of a face is a corner of its brush too, and sits on the bounding
-    // planes of whatever it abuts rather than within them.
-    let mx = tx - cx; let my = ty - cy; let mz = tz - cz;
+    // Where another brush leans in over the face, `uncovered` cut the face back
+    // to it, and a corner there lifts into it, where every lamp is hidden. Such
+    // a sample is moved in along the face, towards its middle, until it clears.
+    let mx = tx - px; let my = ty - py; let mz = tz - pz;
     let span = (mx * mx + my * my + mz * mz).sqrt();
-    let var probe = 0.5;
-    if (span > 0.05) probe = 0.025 / span;
-    let buried = in_solid(cx + mx * probe, cy + my * probe, cz + mz * probe);
+    let var step = 0.01;
+    while (step < span && in_solid(cx, cy, cz)) {
+        let s = step / span;
+        cx = lift_x + mx * s; cy = lift_y + my * s; cz = lift_z + mz * s;
+        step = step * 2.0;
+    }
 
     let var lr = AMBIENT;
     let var lg = AMBIENT;
@@ -428,7 +1209,7 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
         if (ndotl <= 0.0) continue;
 
         // Anything solid in the way takes the lamp out entirely
-        if (!buried && occluded(cx, cy, cz, L[0], L[1], L[2])) continue;
+        if (occluded(cx, cy, cz, L[0], L[1], L[2])) continue;
 
         let atten = 1.0 - dist / radius;
         let p = L[4] * atten * (0.35 + 0.65 * ndotl);
@@ -436,9 +1217,8 @@ fun light_at(px, py, pz, nx, ny, nz, tx, ty, tz) {
     }
 
     // The moon is far enough off to be a direction rather than a place, and
-    // does not fade with distance. A buried sample takes none of it: unlike a
-    // lamp it would otherwise reach every roofed-over face in the level.
-    if (moon_light > 0.0 && !buried) {
+    // does not fade with distance
+    if (moon_light > 0.0) {
         let ce = MOON_EL.cos();
         let dx = ce * MOON_AZ.sin();
         let dy = MOON_EL.sin();
@@ -557,8 +1337,8 @@ fun solve_system(a, n, out) {
 //
 // On an edge with u or v constant the cross term folds into the linear ones, so
 // the level runs straight between the two shared corner values and both sides
-// agree. Cuts and faces are axis aligned, which is every edge that matters
-// here; a slanted one keeps a little of the old disagreement.
+// agree. A piece with a slanted edge or more than four corners is checked, and
+// false is returned if its fit does not hold, for it to be split into triangles.
 fun bake_face_light(f) {
     let n = f.v.len.idiv(3);
     let top = SHADE_MAX;
@@ -571,7 +1351,7 @@ fun bake_face_light(f) {
     // and nothing standing over it makes it any dimmer
     if (f.flow) {
         f.l_k = top;
-        return;
+        return true;
     }
 
     if (f.light >= 0) {
@@ -579,9 +1359,27 @@ fun bake_face_light(f) {
         let t = f.light.to_f() / (NUM_LEVELS - 1).to_f();
         f.l_k = ((MIN_SHADE + (MAX_SHADE - MIN_SHADE) * t * t.sqrt()) * SHADE_MAX)
             .clip(0.0, top);
-        return;
+        return true;
     }
 
+    return fit_face_light(f, corner_samples(f));
+}
+
+// The light at the corners of a piece, as red, green, blue and level for each
+fun corner_samples(f) {
+    let n = f.v.len.idiv(3);
+    let cs = Array.with_size(n * 4, 0.0);
+    for (let var i = 0; i < n; ++i) {
+        cs[i * 4 + 3] = light_of(f, f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2]);
+        cs[i * 4] = at_r; cs[i * 4 + 1] = at_g; cs[i * 4 + 2] = at_b;
+    }
+    return cs;
+}
+
+// Fit the light across a piece to `cs`, the samples at its corners as
+// `corner_samples` gives them. False when the fit does not hold.
+fun fit_face_light(f, cs) {
+    let n = f.v.len.idiv(3);
     let inv_n = 1.0 / n.to_f();
     let uv = Array.with_size(n, 0.0);
     let vv = Array.with_size(n, 0.0);
@@ -596,9 +1394,9 @@ fun bake_face_light(f) {
         let x = f.v[i * 3]; let y = f.v[i * 3 + 1]; let z = f.v[i * 3 + 2];
         uv[i] = texel_u(f, x, y, z);
         vv[i] = texel_v(f, x, y, z);
-        lv[i] = light_at(x, y, z, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
-        rv[i] = at_r; gv[i] = at_g; bv[i] = at_b;
-        spread = spread.max(at_r.max(at_g).max(at_b) - at_r.min(at_g).min(at_b));
+        let r = cs[i * 4]; let g = cs[i * 4 + 1]; let b = cs[i * 4 + 2];
+        rv[i] = r; gv[i] = g; bv[i] = b; lv[i] = cs[i * 4 + 3];
+        spread = spread.max(r.max(g).max(b) - r.min(g).min(b));
         uc = uc + uv[i]; vc = vc + vv[i];
     }
     uc = uc * inv_n; vc = vc * inv_n;
@@ -622,16 +1420,106 @@ fun bake_face_light(f) {
         pv[i] = (vv[i] - vc) / hv;
     }
 
+    // A triangle's plane and a box's bilinear both pass through every corner
+    // and run straight along every edge, so only other shapes need checking
+    let var exact = n == 3;
+    if (n == 4) {
+        exact = true;
+        for (let var i = 0; i < 4; ++i) {
+            if (pu[i].abs() < 0.999 || pv[i].abs() < 0.999) exact = false;
+        }
+    }
+
     let coef = fit_bilinear(n, pu, pv, lv, hu, hv);
+    if (!exact && !fit_holds(n, pu, pv, lv, coef, hu, hv)) return false;
     f.lu0 = uc; f.lv0 = vc;
     f.l_k = coef[0]; f.l_u = coef[1]; f.l_v = coef[2]; f.l_uv = coef[3];
 
     // A piece whose channels all read the level is drawn with it alone
     f.lc = nil;
     if (spread > GREY_TOL) {
-        f.lc = fit_bilinear(n, pu, pv, rv, hu, hv);
-        f.lc.append(fit_bilinear(n, pu, pv, gv, hu, hv));
-        f.lc.append(fit_bilinear(n, pu, pv, bv, hu, hv));
+        let chans = [rv, gv, bv];
+        let lc = [];
+        for (let var c = 0; c < 3; ++c) {
+            let fit = fit_bilinear(n, pu, pv, chans[c], hu, hv);
+            if (!exact && !fit_holds(n, pu, pv, chans[c], fit, hu, hv)) return false;
+            lc.append(fit);
+        }
+        f.lc = lc;
+    }
+    return true;
+}
+
+// How far a fit may stray from its corner samples, from a straight run between
+// them along an edge, or past them inside the piece
+let FIT_TOL = 2.0;
+
+// Does the fit hold to the samples at the corners of a piece? On a slanted edge
+// a bilinear curves, so the piece on the other side disagrees with it, and a
+// piece with more corners than terms misses some of them. Either way it can
+// also swing far out between the corners, which draws as a bright or dark
+// wedge.
+fun fit_holds(n, pu, pv, vals, coef, hu, hv) {
+    let var lo = vals[0]; let var hi = vals[0];
+    for (let var i = 1; i < n; ++i) { lo = lo.min(vals[i]); hi = hi.max(vals[i]); }
+    lo = lo - FIT_TOL; hi = hi + FIT_TOL;
+
+    // Probe a grid over each triangle fanned out from the middle, which the
+    // corners are centred on. Its outer row is the edge.
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+        for (let var s = 0; s <= 4; ++s) {
+            for (let var t = 0; s + t <= 4; ++t) {
+                let u = (pu[i] * s.to_f() + pu[j] * t.to_f()) * 0.25 * hu;
+                let v = (pv[i] * s.to_f() + pv[j] * t.to_f()) * 0.25 * hv;
+                let l = coef[0] + coef[1] * u + coef[2] * v + coef[3] * u * v;
+                if (s + t == 4) {
+                    let line = (vals[i] * s.to_f() + vals[j] * t.to_f()) * 0.25;
+                    if ((l - line).abs() > FIT_TOL) return false;
+                } else if (l < lo || l > hi) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// Split a piece into triangles fanned out from its first corner, or from its
+// middle where that would leave a flat triangle at a corner lying on an edge
+fun fan_out(f, out) {
+    let n = f.v.len.idiv(3);
+    let v = f.v;
+    let min_area = poly_area(v) * 0.0001;
+    let var flat = false;
+    for (let var i = 1; i < n - 1; ++i) {
+        let t = [v[0], v[1], v[2], v[i * 3], v[i * 3 + 1], v[i * 3 + 2],
+            v[i * 3 + 3], v[i * 3 + 4], v[i * 3 + 5]];
+        if (poly_area(t) < min_area) flat = true;
+    }
+
+    if (!flat) {
+        for (let var i = 1; i < n - 1; ++i) {
+            out.push(Face([v[0], v[1], v[2], v[i * 3], v[i * 3 + 1], v[i * 3 + 2],
+                v[i * 3 + 3], v[i * 3 + 4], v[i * 3 + 5]], f));
+        }
+        return;
+    }
+
+    // Its own middle: `mid_x` is that of the face it was cut from
+    let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
+    for (let var i = 0; i < n; ++i) {
+        cx = cx + v[i * 3]; cy = cy + v[i * 3 + 1]; cz = cz + v[i * 3 + 2];
+    }
+    let inv_n = 1.0 / n.to_f();
+    cx = cx * inv_n; cy = cy * inv_n; cz = cz * inv_n;
+
+    for (let var i = 0; i < n; ++i) {
+        let var j = i + 1;
+        if (j == n) j = 0;
+        out.push(Face([cx, cy, cz, v[i * 3], v[i * 3 + 1], v[i * 3 + 2],
+            v[j * 3], v[j * 3 + 1], v[j * 3 + 2]], f));
     }
 }
 
@@ -691,15 +1579,14 @@ fun light_curves(f) {
     cx = cx * inv_n; cy = cy * inv_n; cz = cz * inv_n;
 
     for (let var i = 0; i < n; ++i) {
-        light_at(f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2],
-            f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+        light_of(f, f.v[i * 3], f.v[i * 3 + 1], f.v[i * 3 + 2]);
         vr[i] = at_r; vg[i] = at_g; vb[i] = at_b;
         mr = mr + at_r; mg = mg + at_g; mb = mb + at_b;
     }
     mr = mr * inv_n; mg = mg * inv_n; mb = mb * inv_n;
 
     // The middle, where a lamp pool that the corners all miss shows up
-    light_at(cx, cy, cz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+    light_of(f, cx, cy, cz);
     if (off_by(mr, mg, mb) > LIGHT_TOL) return true;
 
     // And the edge midpoints, where interpolation is the mean of two corners.
@@ -711,7 +1598,7 @@ fun light_curves(f) {
         let mx = (f.v[i * 3] + f.v[j * 3]) * 0.5;
         let my = (f.v[i * 3 + 1] + f.v[j * 3 + 1]) * 0.5;
         let mz = (f.v[i * 3 + 2] + f.v[j * 3 + 2]) * 0.5;
-        light_at(mx, my, mz, f.nx, f.ny, f.nz, f.mid_x, f.mid_y, f.mid_z);
+        light_of(f, mx, my, mz);
         if (off_by((vr[i] + vr[j]) * 0.5, (vg[i] + vg[j]) * 0.5, (vb[i] + vb[j]) * 0.5)
             > LIGHT_TOL) {
             return true;
@@ -840,8 +1727,9 @@ fun lights_for(f) {
     return out;
 }
 
-// Cut every face of the world for the light and bake it, returning the lit
-// pieces. This runs before the tree divides anything.
+// Cut every face of the world down to what no brush covers, cut that for the
+// light, weld its T-junctions and bake it, returning the lit pieces. This runs
+// before the tree divides anything.
 //
 // The tree cuts a face into fragments of its own, and lighting them afterwards
 // meant each fragment gathered its own cuts and fitted its own light. Two
@@ -856,15 +1744,15 @@ fun light_world(w) {
     moon_light = w.moon_light;
     moon_color = w.moon_color;
     build_grid(brushes);
+    samples = {};
+    lights_face = nil;
 
-    let faces = w.faces;
-    let lit_faces = [];
+    let faces = [];
+    for (let var i = 0; i < w.faces.len; ++i) uncovered(w.faces[i], faces);
 
+    let var pieces = [];
     for (let var i = 0; i < faces.len; ++i) {
         let f = faces[i];
-        let pieces = [];
-        face_lights = lights_for(f);
-
         if (f.flow) {
             // A moving surface is still cut on a fixed grid: it needs corners
             // close enough together for the wave to read as a curve
@@ -875,31 +1763,59 @@ fun light_world(w) {
             f.cuts = cuts;
             apply_cuts(f, pieces);
         }
+    }
+    must_cut = {};
+    pieces = cut_t_junctions(pieces);
+    for (let var round = 1; !weld_t_junctions(pieces, round == WELD_ROUNDS); ++round) {
+        pieces = cut_t_junctions(pieces);
+    }
 
-        for (let var k = 0; k < pieces.len; ++k) {
-            let g = pieces[k];
-            bake_face_light(g);
-
-            // Alpha rides into the level the face was baked at, rather than
-            // being a second number the span loop has to apply. The multiplier
-            // it interpolates then already carries it, so a blended pixel pays
-            // for the destination and nothing more. This is also what bounds
-            // that multiplier by alpha8, which is what keeps the two halves of
-            // the blend summing to 255.
-            //
-            // A see-through face keeps the single level: the blend has no room
-            // for a colour of its own.
-            if (g.alpha < 1.0) {
-                g.l_k = g.l_k * g.alpha;
-                g.l_u = g.l_u * g.alpha;
-                g.l_v = g.l_v * g.alpha;
-                g.l_uv = g.l_uv * g.alpha;
-                g.lc = nil;
+    // Slivers the cuts left behind cover no pixel worth drawing
+    let var lit_faces = [];
+    for (let var k = 0; k < pieces.len; ++k) {
+        let p = pieces[k];
+        if (poly_area(p.v) < MIN_PIECE_AREA) continue;
+        if (bake_face_light(p)) {
+            lit_faces.push(p);
+        } else {
+            let tris = [];
+            fan_out(p, tris);
+            for (let var t = 0; t < tris.len; ++t) {
+                if (poly_area(tris[t].v) < MIN_PIECE_AREA) continue;
+                bake_face_light(tris[t]);
+                lit_faces.push(tris[t]);
             }
-
-            lit_faces.push(g);
         }
     }
 
+    lit_faces = merge_pieces(lit_faces);
+
+    for (let var k = 0; k < lit_faces.len; ++k) {
+        let g = lit_faces[k];
+        g.vl = nil;
+        g.nkey = nil;
+
+        // Alpha rides into the level the face was baked at, rather than
+        // being a second number the span loop has to apply. The multiplier
+        // it interpolates then already carries it, so a blended pixel pays
+        // for the destination and nothing more. This is also what bounds
+        // that multiplier by alpha8, which is what keeps the two halves of
+        // the blend summing to 255.
+        //
+        // A see-through face keeps the single level: the blend has no room
+        // for a colour of its own.
+        if (g.alpha < 1.0) {
+            g.l_k = g.l_k * g.alpha;
+            g.l_u = g.l_u * g.alpha;
+            g.l_v = g.l_v * g.alpha;
+            g.l_uv = g.l_uv * g.alpha;
+            g.lc = nil;
+        }
+    }
+
+    samples = {};
+    welds = {};
+    weld_keys = [];
+    must_cut = {};
     return lit_faces;
 }

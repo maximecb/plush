@@ -102,6 +102,14 @@ class Brush {
         self.x0 = 0.0; self.y0 = 0.0; self.z0 = 0.0;
         self.x1 = 0.0; self.y1 = 0.0; self.z1 = 0.0;
         self.alpha = 1.0;
+
+        // Light passes through it: it is see-through, or it flows, like lava,
+        // whose surface rises and falls past the faces it would otherwise hide
+        self.lit_through = false;
+
+        // Its place in the world's list, which settles which of two faces
+        // lying on each other is kept
+        self.id = 0;
     }
 }
 
@@ -145,10 +153,9 @@ class Face {
         self.alpha8 = (alpha * 255.0).floor().clip(0, 255);
         self.inv_alpha8 = 255 - self.alpha8;
 
-        // A point inside the face, which `light_at` steps towards to ask
-        // whether a sample is walled in. Pieces cut off a face keep the whole
-        // face's point rather than taking their own, so that two of them
-        // meeting at a corner step the same way and find the same answer.
+        // A point inside the face, which `light_at` moves a sample towards
+        // when it lands in a brush. Pieces cut off a face keep the whole
+        // face's point rather than taking their own.
         let nv = verts.len.idiv(3);
         let var cx = 0.0; let var cy = 0.0; let var cz = 0.0;
         for (let var i = 0; i < nv; ++i) {
@@ -159,6 +166,16 @@ class Face {
 
         // The light cuts and the lava grid go by this
         self.taxis = dominant_axis(nx, ny, nz);
+
+        // The brush the face is on, which never hides it
+        self.brush = nil;
+
+        // Its facing as a key, which the light bake fills in
+        self.nkey = nil;
+
+        // The light at its corners as red, green and blue in turn, which the
+        // light bake fills in where it needs them
+        self.vl = nil;
 
         // Set when the face is lit
         self.pix = nil;
@@ -436,12 +453,19 @@ fun add_brush(w, planes) {
     // walk into: a window is still a wall to the player.
     for (let var i = 0; i < planes.len; ++i) {
         if (planes[i].alpha < b.alpha) b.alpha = planes[i].alpha;
+        if (planes[i].flow) b.lit_through = true;
     }
+    if (b.alpha < 1.0) b.lit_through = true;
+    b.id = w.brushes.len;
     w.brushes.push(b);
 
     // Each textured plane that is left with a polygon is a face
     for (let var i = 0; i < planes.len; ++i) {
-        if (planes[i].tex != nil && polys[i] != nil) w.faces.push(Face(polys[i], planes[i]));
+        if (planes[i].tex != nil && polys[i] != nil) {
+            let f = Face(polys[i], planes[i]);
+            f.brush = b;
+            w.faces.push(f);
+        }
     }
 }
 
@@ -889,7 +913,10 @@ let BSP_CANDIDATES = 24;
 let BSP_CUT_COST = 1.0;
 
 fun face_area(f) {
-    let v = f.v;
+    return poly_area(f.v);
+}
+
+fun poly_area(v) {
     let n = v.len.idiv(3);
     let var ax = 0.0; let var ay = 0.0; let var az = 0.0;
     for (let var i = 1; i + 1 < n; ++i) {
