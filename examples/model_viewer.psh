@@ -1381,6 +1381,14 @@ class Model
         // one again at the end, and how far along the time is between them
         let clip = self.clips[clip_idx];
         let num_frames = clip.num_frames;
+        let count = self.num_verts * POSE_FLOATS;
+
+        // A clip with no length is one pose
+        if (clip.duration <= 0.0) {
+            pose.memcpy(0, clip.frames, 0, count * 4);
+            return;
+        }
+
         let at = (time / clip.duration) * num_frames;
         let whole = at.floor();
         let frac = at - whole;
@@ -1388,7 +1396,6 @@ class Model
         let b = (a + 1) % num_frames;
 
         // pose = a + frac * (b - a), over every float of the pose at once
-        let count = self.num_verts * POSE_FLOATS;
         pose.memcpy(0, clip.frames, a * count * 4, count * 4);
         if (frac > 0.0 && a != b) {
             pose.axpy_f32(0, 1, clip.frames, b * count, 1, count, frac);
