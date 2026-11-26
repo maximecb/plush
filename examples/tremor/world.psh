@@ -227,6 +227,21 @@ class World {
         // The entities the map places, which entities.psh makes
         self.entity_specs = [];
         self.door_specs = [];
+        self.elevator_specs = [];
+    }
+}
+
+// An elevator of the map: the box its platform fills at the top, how far down
+// it goes and how fast, in meters and m/s, and the textures of its top and
+// sides. Like a door, it is not part of the level's solid geometry.
+class ElevatorSpec {
+    init(self, x0, y0, z0, x1, y1, z1, travel, speed, top_tex, side_tex) {
+        self.x0 = x0; self.y0 = y0; self.z0 = z0;
+        self.x1 = x1; self.y1 = y1; self.z1 = z1;
+        self.travel = travel;
+        self.speed = speed;
+        self.top_tex = top_tex;
+        self.side_tex = side_tex;
     }
 }
 
@@ -681,6 +696,30 @@ fun valve_entity(w, li, ent, brushes) {
             let tex = brush_tex_name(brushes[i]);
             if (tex == nil) valve_error(li, "door with no texture");
             w.door_specs.push(DoorSpec(b.x0, b.y0, b.z0, b.x1, b.y1, b.z1, lift, tex, from, key));
+        }
+        return;
+    }
+
+    // Each brush of an elevator is its platform, at the top of its travel
+    if (cls == "func_elevator") {
+        let travel = valve_num(ent, "travel", 0.0) * k;
+        let speed = valve_num(ent, "speed", 160.0) * k;
+        if (travel <= 0.0) valve_error(li, "elevator with no travel");
+        if (speed <= 0.0) valve_error(li, "elevator with no speed");
+        for (let var i = 0; i < brushes.len; ++i) {
+            let planes = brushes[i];
+            let b = Brush(planes);
+            set_brush_bounds(b, brush_polys(planes));
+            let var top_tex = nil;
+            let var side_tex = nil;
+            for (let var j = 0; j < planes.len; ++j) {
+                let p = planes[j];
+                if (p.tex == nil) continue;
+                if (p.ny > 0.9) top_tex = p.tex.name;
+                else if (p.ny.abs() < 0.1 && side_tex == nil) side_tex = p.tex.name;
+            }
+            if (top_tex == nil || side_tex == nil) valve_error(li, "elevator with no texture on its top or sides");
+            w.elevator_specs.push(ElevatorSpec(b.x0, b.y0, b.z0, b.x1, b.y1, b.z1, travel, speed, top_tex, side_tex));
         }
         return;
     }

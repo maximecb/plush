@@ -7,7 +7,7 @@
 // facing along its yaw, posed by the animation it is playing.
 
 from ./physics import move_body, brush_top, brush_hits, is_lava, ray_brushes, contains, GRAVITY, PUSH_RATE;
-from ./models import get_model, add_model, box_model, blob_model, models;
+from ./models import get_model, add_model, box_model, slab_model, blob_model, models;
 from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER, UNITS_PER_METER;
 from ./lighting import light_level_at, occluded, SHADE_MAX;
 
@@ -155,6 +155,9 @@ class Entity {
 
     // The bottom of its box, as far as what it is in or on goes
     base_y(self) { return self.y; }
+
+    // Move it up or down, as something it stands on does
+    shift_y(self, dy) { self.y = self.y + dy; }
 
     // Give the entity a model, by its name under examples/tremor/models/,
     // scaled so that it stands `height` meters tall
@@ -617,6 +620,7 @@ fun spawn_entities(w, player) {
     let out = [];
     spawn_placed(w, player, out);
     for (let var i = 0; i < w.door_specs.len; ++i) out.push(Door(w, w.door_specs[i], player));
+    for (let var i = 0; i < w.elevator_specs.len; ++i) out.push(Elevator(w, w.elevator_specs[i], player, out));
     build_hazards(w);
     return out;
 }
@@ -800,6 +804,201 @@ class Door extends Entity {
             set_box_brush_y(self.brush, self.y0 + self.pos, self.y1 + self.pos);
             self.y = self.y0 + self.pos;
         }
+    }
+}
+
+// --- Elevators ---
+
+// How long the player stands on an elevator before it sets off, and how close
+// they have to come to call it to their end of the shaft, in seconds and meters
+let ELEVATOR_DELAY = 1.0;
+let ELEVATOR_CALL = 3.0;
+
+// How long it takes to come up to speed, and to slow to a stop, in seconds
+let ELEVATOR_RAMP = 0.5;
+
+// Below this speed it doesn't slow any further, so that it arrives, in m/s
+let ELEVATOR_CRAWL = 0.3;
+
+// How close to its top the feet of what stands on it are, in meters
+let RIDE_GAP = 0.1;
+
+// How long it waits after something under it sent it back up, in seconds
+let ELEVATOR_REST = 2.0;
+
+let ELEVATOR_GAIN = 0.8;
+let ELEVATOR_STOP_GAIN = 1.0;
+
+// A platform that goes down a shaft and back up. It sets off a moment after
+// the player steps onto it, and comes to them when they are at the other end.
+// Whatever stands on it rides with it. Its position is the middle of its
+// bottom face, and it has a solid box in the world's brush list that moves
+// with it.
+class Elevator extends Entity {
+    init(self, w, spec, player, list) {
+        Entity.init(self, (spec.x0 + spec.x1) * 0.5, spec.y0, (spec.z0 + spec.z1) * 0.5, 0.0);
+        self.x0 = spec.x0; self.y0 = spec.y0; self.z0 = spec.z0;
+        self.x1 = spec.x1; self.y1 = spec.y1; self.z1 = spec.z1;
+        self.travel = spec.travel;
+        self.speed = spec.speed;
+        self.player = player;
+        self.list = list;
+
+        // How far down it is, which way it is going (1 down, -1 up), how
+        // fast, and how long the player has stood on it
+        self.pos = 0.0;
+        self.dir = 0;
+        self.vel = 0.0;
+        self.stood = 0.0;
+        self.rest = 0.0;
+
+        // Once it has taken the player somewhere, they step off before it
+        // takes them anywhere again
+        self.spent = false;
+
+        // Not something to touch
+        self.radius = 0.0;
+        self.height = 0.0;
+
+        let model = slab_model(spec.x1 - spec.x0, spec.y1 - spec.y0, spec.z1 - spec.z0,
+            load_texture(TEX_DIR + spec.top_tex + ".png"),
+            load_texture(TEX_DIR + spec.side_tex + ".png"), TEXELS_PER_METER);
+        self.model = add_model("elevator " + models.len.to_s(), model);
+
+        // Lit as what stands on it is, and taken again as it goes
+        self.fixed_light = true;
+        self.lit = true;
+        self.relight();
+
+        self.brush = box_brush(spec.x0, spec.y0, spec.z0, spec.x1, spec.y1, spec.z1);
+        w.brushes.push(self.brush);
+    }
+
+    top(self) {
+        return self.y1 - self.pos;
+    }
+
+    relight(self) {
+        self.light = light_level_at(self.x, self.top() + 1.0, self.z);
+        self.lit_y = self.y;
+    }
+
+    // Is this standing on it?
+    on_top(self, e) {
+        if (e.x < self.x0 || e.x > self.x1 || e.z < self.z0 || e.z > self.z1) return false;
+        return (e.base_y() - self.top()).abs() < RIDE_GAP;
+    }
+
+    // Is this body in the way of it going down by `step`?
+    in_way(self, e, step) {
+        let r = e.radius;
+        if (e.x + r <= self.x0 || e.x - r >= self.x1) return false;
+        if (e.z + r <= self.z0 || e.z - r >= self.z1) return false;
+        let bottom = self.y0 - self.pos;
+        return e.base_y() < bottom && e.base_y() + e.height > bottom - step;
+    }
+
+    // Is the player waiting for it at the other end of the shaft?
+    called(self) {
+        let p = self.player;
+        if (p.dead || !p.on_ground) return false;
+
+        // Not from under it, where it would only come down on them
+        if (p.x > self.x0 && p.x < self.x1 && p.z > self.z0 && p.z < self.z1) return false;
+        let var other = self.y1 - self.travel;
+        if (self.pos > 0.0) other = self.y1;
+        if ((p.y - other).abs() >= 1.0) return false;
+        let dx = (self.x0 - p.x).max(p.x - self.x1).max(0.0);
+        let dz = (self.z0 - p.z).max(p.z - self.z1).max(0.0);
+        return dx * dx + dz * dz < ELEVATOR_CALL * ELEVATOR_CALL;
+    }
+
+    // Back at the top, as at the start of the level
+    reset(self) {
+        self.pos = 0.0;
+        self.dir = 0;
+        self.vel = 0.0;
+        self.stood = 0.0;
+        self.rest = 0.0;
+        self.spent = false;
+        self.place();
+    }
+
+    place(self) {
+        set_box_brush_y(self.brush, self.y0 - self.pos, self.y1 - self.pos);
+        self.y = self.y0 - self.pos;
+        if ((self.y - self.lit_y).abs() > 0.25) self.relight();
+    }
+
+    // Set off down (1) or up (-1), with the sound of the whole run
+    start(self, dir) {
+        self.dir = dir;
+        self.vel = 0.0;
+        self.stood = 0.0;
+        let var dist = self.pos;
+        if (dir > 0) dist = self.travel - self.pos;
+        // Heard from the player's end of the shaft
+        let sy = self.player.y.clip(self.y1 - self.travel, self.y1);
+        emit_sound("elevator", self.x, sy, self.z, dist / self.speed + ELEVATOR_RAMP, ELEVATOR_GAIN);
+    }
+
+    update(self, w, dt) {
+        let p = self.player;
+        let riding = !p.dead && self.on_top(p);
+        if (!riding) self.spent = false;
+
+        if (self.dir == 0) {
+            if (riding && !self.spent) {
+                self.stood = self.stood + dt;
+                if (self.stood >= ELEVATOR_DELAY) self.start(self.pos == 0.0 ? 1 : 0 - 1);
+            } else {
+                self.stood = 0.0;
+                self.rest = self.rest - dt;
+                if (!riding && self.rest <= 0.0 && self.called()) self.start(self.pos == 0.0 ? 1 : 0 - 1);
+            }
+        }
+        if (self.dir == 0) return;
+
+        // Up to speed, and slowing so as to stop at the end
+        let var left = self.pos;
+        if (self.dir > 0) left = self.travel - self.pos;
+        let accel = self.speed / ELEVATOR_RAMP;
+        self.vel = (self.vel + accel * dt).min(self.speed).min((2.0 * accel * left).sqrt()).max(ELEVATOR_CRAWL);
+        let step = (self.vel * dt).min(left);
+
+        // Going down, it goes back up rather than crush what is under it
+        if (self.dir > 0) {
+            let var blocked = self.in_way(p, step);
+            for (let var i = 0; i < self.list.len && !blocked; ++i) {
+                let e = self.list[i];
+                if (e.radius > 0.0 && !self.on_top(e) && self.in_way(e, step)) blocked = true;
+            }
+            if (blocked) {
+                self.rest = ELEVATOR_REST;
+                self.start(0 - 1);
+                return;
+            }
+        }
+
+        // What stands on it goes with it
+        let dy = 0.0 - step * self.dir.to_f();
+        if (self.on_top(p)) p.shift_y(dy);
+        for (let var i = 0; i < self.list.len; ++i) {
+            let e = self.list[i];
+            if (e == self || e.radius == 0.0 || !self.on_top(e)) continue;
+            e.shift_y(dy);
+        }
+
+        self.pos = self.pos + step * self.dir.to_f();
+        if (step >= left) {
+            self.pos = 0.0;
+            if (self.dir > 0) self.pos = self.travel;
+            self.dir = 0;
+            self.vel = 0.0;
+            self.spent = true;
+            emit_sound("elevator_stop", self.x, self.y1 - self.pos, self.z, 0.0, ELEVATOR_STOP_GAIN);
+        }
+        self.place();
     }
 }
 
@@ -1002,6 +1201,11 @@ class Monster extends Entity {
     base_y(self) {
         if (self.state == "dead") return self.dead_y;
         return self.y;
+    }
+
+    shift_y(self, dy) {
+        self.y = self.y + dy;
+        self.dead_y = self.dead_y + dy;
     }
 
     // Its body's middle and the way up its body, which tips over with it
@@ -2928,12 +3132,13 @@ fun apply_hazards(player, list, dt) {
 // --- Starting over ---
 
 // Start the level over: the player back at the start with nothing, and every
-// entity as the map placed it. Doors are shut again rather than made anew,
-// since each has a model the render actors were started with.
+// entity as the map placed it. Doors are shut again and elevators sent back
+// up rather than made anew, since each has a model the render actors were
+// started with.
 fun restart_level(w, player, list) {
     let doors = [];
     for (let var i = 0; i < list.len; ++i) {
-        if (list[i] instanceof Door) {
+        if (list[i] instanceof Door || list[i] instanceof Elevator) {
             list[i].reset();
             doors.push(list[i]);
         }

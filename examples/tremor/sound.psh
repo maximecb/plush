@@ -687,12 +687,152 @@ class MuffledVoice extends Voice {
 
 // The voice for a sound, by name. `param` means what each sound says it does,
 // such as a door's duration.
+// The ring of struck iron: a few band passes that barely damp, so that a
+// short burst of noise through them rings on as a clank
+let CLANK_HZ = [190.0, 345.0, 590.0, 880.0];
+let CLANK_LEVELS = [1.0, 0.7, 0.45, 0.25];
+
+class Clank {
+    init(self, scale) {
+        self.f = [];
+        self.lo = [];
+        self.bp = [];
+        for (let var i = 0; i < CLANK_HZ.len; ++i) {
+            self.f.push(svf_coef(CLANK_HZ[i] * scale * rand_range(0.97, 1.03)));
+            self.lo.push(0.0);
+            self.bp.push(0.0);
+        }
+    }
+
+    // The next sample, struck by x
+    next(self, x) {
+        let var v = 0.0;
+        for (let var i = 0; i < CLANK_HZ.len; ++i) {
+            let f = self.f[i];
+            self.lo[i] = self.lo[i] + f * self.bp[i];
+            self.bp[i] = self.bp[i] + f * (x - self.lo[i] - 0.03 * self.bp[i]);
+            v = v + self.bp[i] * CLANK_LEVELS[i];
+        }
+        return v;
+    }
+}
+
+// An elevator on its way: the drone of the winch motor, two low saws a
+// little apart in pitch so that they beat, the whir of its gears an octave
+// and a half up, and a steady rumble of the platform under it all. The highs
+// are taken well off. It spins up and down with the platform, and starts
+// with the clank of the brake letting go.
+
+// How long it takes to come up to speed and to slow down, as in entities.psh
+let ELEVATOR_EASE = 0.5;
+
+// The motor's pitch at full speed, and how far below that it starts
+let MOTOR_HZ = 46.0;
+let MOTOR_SPIN = 0.55;
+
+class ElevatorVoice extends Voice {
+    init(self, gain, duration) {
+        Voice.init(self, gain);
+        self.duration = duration;
+
+        self.saw1 = 0.0; self.saw2 = 0.3; self.gear = 0.0;
+        self.motor_k = lp_coef(200.0);
+        self.mo1 = 0.0; self.mo2 = 0.0;
+        self.gear_k = lp_coef(260.0);
+        self.ge1 = 0.0; self.ge2 = 0.0;
+
+        self.rumble_k = lp_coef(70.0);
+        self.ru1 = 0.0; self.ru2 = 0.0; self.ru3 = 0.0;
+
+        self.strike = 1.0;
+        self.strike_keep = decay_rate(0.004);
+        self.clank = Clank(0.8);
+    }
+
+    render(self, mix, n) {
+        let d = self.duration;
+        for (let var i = 0; i < n; ++i) {
+            let white = noise();
+            self.t = self.t + DT;
+            let t = self.t;
+            let run = (t / ELEVATOR_EASE).min((d - t) / ELEVATOR_EASE).clip(0.0, 1.0);
+            let hz = MOTOR_HZ * (MOTOR_SPIN + (1.0 - MOTOR_SPIN) * run);
+
+            self.saw1 = self.saw1 + hz * DT;
+            if (self.saw1 >= 1.0) self.saw1 = self.saw1 - 1.0;
+            self.saw2 = self.saw2 + hz * 1.013 * DT;
+            if (self.saw2 >= 1.0) self.saw2 = self.saw2 - 1.0;
+            let motor = self.saw1 + self.saw2 - 1.0;
+            self.mo1 = self.mo1 + (motor - self.mo1) * self.motor_k;
+            self.mo2 = self.mo2 + (self.mo1 - self.mo2) * self.motor_k;
+
+            // A square wave turning with the motor, for the gears
+            self.gear = self.gear + hz * 3.0 * DT;
+            if (self.gear >= 1.0) self.gear = self.gear - 1.0;
+            let sq = self.gear < 0.5 ? 1.0 : 0.0 - 1.0;
+            self.ge1 = self.ge1 + (sq - self.ge1) * self.gear_k;
+            self.ge2 = self.ge2 + (self.ge1 - self.ge2) * self.gear_k;
+
+            self.ru1 = self.ru1 + (white - self.ru1) * self.rumble_k;
+            self.ru2 = self.ru2 + (self.ru1 - self.ru2) * self.rumble_k;
+            self.ru3 = self.ru3 + (self.ru2 - self.ru3) * self.rumble_k;
+
+            self.strike = self.strike * self.strike_keep;
+            let clank = self.clank.next(white * self.strike);
+
+            let drive = self.mo2 * 0.3 + self.ge2 * 0.06 + self.ru3 * 3.0;
+            let v = drive * run + clank * 0.08;
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+        }
+        return self.t < d + 0.6;
+    }
+}
+
+// An elevator coming to a stop: the thud of it settling and the clank of the
+// brake going on, which rings on for a while in the shaft
+class ElevatorStopVoice extends Voice {
+    init(self, gain) {
+        Voice.init(self, gain);
+        self.env = 1.0;
+        self.keep = decay_rate(0.12);
+        self.lp_k = lp_coef(80.0);
+        self.lp1 = 0.0; self.lp2 = 0.0;
+
+        self.strike = 1.0;
+        self.strike_keep = decay_rate(0.006);
+        self.clank = Clank(1.0);
+        self.ring = 1.0;
+        self.ring_keep = decay_rate(0.35);
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            let white = noise();
+            self.t = self.t + DT;
+
+            self.env = self.env * self.keep;
+            self.lp1 = self.lp1 + (white * self.env - self.lp1) * self.lp_k;
+            self.lp2 = self.lp2 + (self.lp1 - self.lp2) * self.lp_k;
+
+            self.strike = self.strike * self.strike_keep;
+            self.ring = self.ring * self.ring_keep;
+            let clank = self.clank.next(white * self.strike) * self.ring;
+
+            let v = soft_clip(self.lp2 * 30.0) * 0.9 + clank * 0.6;
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+        }
+        return self.t < 1.5;
+    }
+}
+
 fun make_voice(kind, gain, param) {
     if (kind == "shotgun") return ShotgunVoice(gain);
     if (kind == "step") return StepVoice(gain);
     if (kind == "land") return LandVoice(gain);
     if (kind == "pickup") return PickupVoice(gain);
     if (kind == "door") return DoorVoice(gain, param);
+    if (kind == "elevator") return ElevatorVoice(gain, param);
+    if (kind == "elevator_stop") return ElevatorStopVoice(gain);
     if (kind == "stomp") return StompVoice(gain);
     if (kind == "swipe") return SwipeVoice(gain, param);
     if (kind == "sword") return SwordVoice(gain, param);
