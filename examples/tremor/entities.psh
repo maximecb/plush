@@ -1632,11 +1632,30 @@ class Spider extends Monster {
     // to the renderer
     settle(self, dt) {
         let k = (SPIDER_SETTLE * dt).min(1.0);
-        let var ux = self.vx_n + (self.nx - self.vx_n) * k;
-        let var uy = self.vy_n + (self.ny - self.vy_n) * k;
-        let var uz = self.vz_n + (self.nz - self.vz_n) * k;
+
+        // Up turns towards the new up by a share of the angle between them.
+        // Blending the two instead never turns it when they are opposite, as
+        // from a ceiling to the floor: it rolls about its facing then. In the
+        // air it turns feet down, to land on them.
+        let var nx = self.nx; let var ny = self.ny; let var nz = self.nz;
+        if (self.flying) { nx = 0.0; ny = 1.0; nz = 0.0; }
+        let ox = self.vx_n; let oy = self.vy_n; let oz = self.vz_n;
+        let c = ox * nx + oy * ny + oz * nz;
+        let var px = nx - ox * c; let var py = ny - oy * c; let var pz = nz - oz * c;
+        let var plen = vlen(px, py, pz);
+        let a = angle_of(plen, c) * k;
+        if (plen < 0.001 && c < 0.0) {
+            px = oy * self.vz_f - oz * self.vy_f;
+            py = oz * self.vx_f - ox * self.vz_f;
+            pz = ox * self.vy_f - oy * self.vx_f;
+            plen = vlen(px, py, pz);
+        }
+        let var ux = nx; let var uy = ny; let var uz = nz;
+        if (plen >= 0.001) {
+            let ca = a.cos(); let sa = a.sin() / plen;
+            ux = ox * ca + px * sa; uy = oy * ca + py * sa; uz = oz * ca + pz * sa;
+        }
         let var len = vlen(ux, uy, uz);
-        if (len < 0.001) { ux = self.nx; uy = self.ny; uz = self.nz; len = 1.0; }
         ux = ux / len; uy = uy / len; uz = uz / len;
 
         let var fx = self.vx_f + (self.fx - self.vx_f) * k;
