@@ -2,7 +2,7 @@
 //
 //   from datetime import DateTime;
 //
-//   let now = DateTime.from_timestamp($time_current_ms(), -4);
+//   let now = DateTime.from_timestamp($time_epoch(), -4);
 //   $println(now.to_s());        // 2025-11-03T21:32:42-04:00
 //   $println(now.weekday_s());   // Monday
 //
@@ -98,12 +98,13 @@ class DateTime
         self.utc_offset_minutes = utc_offset_minutes;
     }
 
-    // Convert a timestamp in milliseconds since the UNIX epoch to a DateTime,
-    // expressed at an offset from UTC given in hours, which may be fractional
-    from_timestamp(timestamp_ms, utc_offset_hours)
+    // Convert a timestamp in seconds since the UNIX epoch to a DateTime,
+    // expressed at an offset from UTC given in hours, which may be fractional.
+    // Fractional seconds are rounded down.
+    from_timestamp(timestamp, utc_offset_hours)
     {
         let utc_offset_minutes = (utc_offset_hours * 60).to_f().floor();
-        let secs = floor_div(timestamp_ms, 1000) + utc_offset_minutes * 60;
+        let secs = timestamp.to_f().floor() + utc_offset_minutes * 60;
         let days = floor_div(secs, SECS_PER_DAY);
         let secs_today = secs - days * SECS_PER_DAY;
 
@@ -178,7 +179,7 @@ class DateTime
         return DateTime(year, month, day, clock[0], clock[1], clock[2], utc_offset_minutes);
     }
 
-    // Convert to a timestamp in milliseconds since the UNIX epoch
+    // Convert to a timestamp in seconds since the UNIX epoch
     to_timestamp(self)
     {
         // Civil date to days since 1970-01-01, from Howard Hinnant's
@@ -199,7 +200,7 @@ class DateTime
             self.utc_offset_minutes * 60
         );
 
-        return secs * 1000;
+        return secs;
     }
 
     // Format as ISO 8601, e.g. 2025-11-04T01:32:42+00:00

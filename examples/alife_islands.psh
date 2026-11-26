@@ -56,7 +56,13 @@ let MAX_TICKS = args.ticks;
 // A fresh world every run, since a fixed seed makes every run the same run:
 // the same founder wins and the population comes out the same colour. The
 // seed is printed so that a run worth keeping can be repeated with --seed
-let WORLD_SEED = args.seed == nil ? $time_current_ms() : args.seed;
+let WORLD_SEED = args.seed == nil ? ($time_epoch() * 1000).floor() : args.seed;
+
+// Milliseconds on the monotonic clock, as an integer
+fun now_ms()
+{
+    return ($time_monotonic() * 1000).floor();
+}
 
 // --- Islands ---
 //
@@ -2394,12 +2400,12 @@ fun island_actor() {
                 island.tick();
         }
         else {
-            let now = $time_current_ms();
+            let now = now_ms();
             if (now >= next_tick) {
                 island.tick();
                 next_tick = now + tick_ms;
             } else {
-                $actor_sleep(2);
+                $actor_sleep(0.002);
             }
         }
 
@@ -2449,7 +2455,7 @@ fun gather(ids, snaps) {
 fun run_headless(ids) {
     let limit = MAX_TICKS > 0 ? MAX_TICKS : 1000000;
     let snaps = Array.with_size(ids.len, nil);
-    let start = $time_current_ms();
+    let start = now_ms();
 
     $println(
         "Running headless to " + limit.comma_sep() + " ticks on " +
@@ -2462,7 +2468,7 @@ fun run_headless(ids) {
     let var last_total = 0;
 
     loop {
-        $actor_sleep(1000);
+        $actor_sleep(1);
         gather(ids, snaps);
 
         // Summed across the ring, except the tick count, which is per island
@@ -2490,7 +2496,7 @@ fun run_headless(ids) {
             crossed = crossed + s.arrived;
         }
 
-        let now = $time_current_ms();
+        let now = now_ms();
         let rate = ((total_ticks - last_total).to_f() * 1000.0 /
                     (now - last).max(1).to_f()).floor();
 
@@ -2533,7 +2539,7 @@ if (HEADLESS) {
 // picture down rather than the whole window
 let snaps = Array.with_size(NUM_ISLANDS, nil);
 let var snap_pending = false;
-let var last_snap = 0;
+let var last_snap = -SNAP_PERIOD_MS;
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Artificial Life Islands", 0);
@@ -2550,10 +2556,10 @@ let var dragging = false;
 let var drag_x = 0;
 let var drag_y = 0;
 
-let var last_draw = 0;
+let var last_draw = -DRAW_PERIOD_MS;
 let var sent_speed = -2;
-let start_ms = $time_current_ms();
-let var rate_time = $time_current_ms();
+let start_ms = now_ms();
+let var rate_time = now_ms();
 let var rate_tick = 0;
 let var ticks_per_sec = 0;
 
@@ -2663,7 +2669,7 @@ loop {
         sent_speed = want_speed;
     }
 
-    let now = $time_current_ms();
+    let now = now_ms();
 
     // Asking again only once the last round has landed, so a slow island
     // cannot pile up requests it will never catch up with
@@ -2696,5 +2702,5 @@ loop {
 
     // The islands are off on their own actors, so this one has nothing to do
     // between frames but wait for them
-    $actor_sleep(2);
+    $actor_sleep(0.002);
 }

@@ -1109,7 +1109,7 @@ fun augment_frames(frames) {
 }
 
 fun training_actor(detection_actor_id) {
-    rng.seed($time_current_ms());
+    rng.seed(($time_epoch() * 1000).floor());
     let mlp = ConvNet();
     $println("Network parameters: " + mlp.num_params().comma_sep() + " + " + (HIDDEN_SIZE + 1).to_s() + " per word");
 
@@ -1132,7 +1132,7 @@ fun training_actor(detection_actor_id) {
     // Training steps per second, counted over a window rather than timed one
     // step at a time, so the number holds still long enough to read
     let RATE_WINDOW_MS = 500;
-    let var rate_start_ms = $time_current_ms();
+    let var rate_start_ms = $time_monotonic() * 1000;
     let var rate_count = 0;
     let var itrs_per_sec = 0.0;
 
@@ -1212,10 +1212,10 @@ fun training_actor(detection_actor_id) {
             // Status is printed once per rate window, rather than on every
             // step, which scrolled thousands of lines a second
             rate_count = rate_count + 1;
-            let rate_elapsed = $time_current_ms() - rate_start_ms;
+            let rate_elapsed = $time_monotonic() * 1000 - rate_start_ms;
             if (rate_elapsed >= RATE_WINDOW_MS) {
-                itrs_per_sec = rate_count.to_f() * 1000.0 / rate_elapsed.to_f();
-                rate_start_ms = $time_current_ms();
+                itrs_per_sec = rate_count * 1000.0 / rate_elapsed;
+                rate_start_ms = $time_monotonic() * 1000;
                 rate_count = 0;
                 $println(
                     "Itr#" + training_itr.to_s() +
@@ -1243,7 +1243,7 @@ fun training_actor(detection_actor_id) {
         // has been recorded. Sleeping after every step instead would cap
         // training near 90 steps a second, where a step costs about 1ms.
         if (!can_train) {
-            $actor_sleep(10);
+            $actor_sleep(0.01);
         }
     }
 }
@@ -1271,7 +1271,7 @@ fun detection_actor(beep_actor_id) {
         // would re-run the network over frames that have not changed, which
         // burns a core for nothing and slows the actor that draws the window.
         if (msg == nil) {
-            $actor_sleep(2);
+            $actor_sleep(0.002);
             continue;
         }
 
@@ -1368,8 +1368,8 @@ fun beep_actor() {
     let audio_out_id = $audio_open_output(SAMPLE_RATE, NUM_CHANNELS);
 
     let var is_recording = false;
-    let var last_beep_time = 0;
     let cooldown_ms = 1200;
+    let var last_beep_time = -cooldown_ms;
 
     let beep_duration_ms = 80;
     let pause_duration_ms = 30;
@@ -1391,7 +1391,7 @@ fun beep_actor() {
 
         if (msg == true || msg == false) {
             is_recording = msg;
-            last_beep_time = $time_current_ms();
+            last_beep_time = $time_monotonic() * 1000;
             continue;
         }
 
@@ -1403,7 +1403,7 @@ fun beep_actor() {
         }
 
         if (msg == "detected" && !is_recording) {
-            let current_time = $time_current_ms();
+            let current_time = $time_monotonic() * 1000;
             if (current_time - last_beep_time > cooldown_ms) {
                 last_beep_time = current_time;
                 if (beep_state == 0) { // Start only if idle
@@ -1676,7 +1676,7 @@ fun main() {
     let var last_conf = 0.0;
     let var last_detect_ms = 0;
 
-    let var last_draw_ms = 0;
+    let var last_draw_ms = -DRAW_INTERVAL_MS;
 
     while (running) {
         $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
@@ -1696,7 +1696,7 @@ fun main() {
             recorded_spectra.push(spectrum);
         }
 
-        let now = $time_current_ms();
+        let now = $time_monotonic() * 1000;
 
         // --- Draw ---
         //

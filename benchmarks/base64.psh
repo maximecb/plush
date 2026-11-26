@@ -22,27 +22,27 @@ fun main()
     assert(decoded != nil);
     assert(decoded.to_hex() == data.to_hex());
 
-    let enc_start = $time_current_ms();
+    let enc_start = $time_monotonic();
     for (let var i = 0; i < NUM_ITERS; ++i) {
         let out = base64_encode(data);
         assert(out.len == text.len);
     }
-    let enc_ms = $time_current_ms() - enc_start;
+    let enc_ms = ($time_monotonic() - enc_start) * 1000;
 
-    let dec_start = $time_current_ms();
+    let dec_start = $time_monotonic();
     for (let var i = 0; i < NUM_ITERS; ++i) {
         let out = base64_decode(text);
         assert(out.len == NUM_BYTES);
     }
-    let dec_ms = $time_current_ms() - dec_start;
+    let dec_ms = ($time_monotonic() - dec_start) * 1000;
 
     let mb = (NUM_BYTES * NUM_ITERS).to_f() / 1000000.0;
-    let enc_rate = mb / (enc_ms.max(1).to_f() / 1000.0);
-    let dec_rate = mb / (dec_ms.max(1).to_f() / 1000.0);
+    let enc_rate = mb / (enc_ms.max(0.001) / 1000.0);
+    let dec_rate = mb / (dec_ms.max(0.001) / 1000.0);
 
     $println("data size: " + NUM_BYTES.comma_sep() + " bytes, " + NUM_ITERS.to_s() + " iterations");
-    $println("encode: " + enc_ms.to_s() + " ms, " + enc_rate.format_decimals(2) + " MB/s");
-    $println("decode: " + dec_ms.to_s() + " ms, " + dec_rate.format_decimals(2) + " MB/s");
+    $println("encode: " + enc_ms.format_decimals(1) + " ms, " + enc_rate.format_decimals(2) + " MB/s");
+    $println("decode: " + dec_ms.format_decimals(1) + " ms, " + dec_rate.format_decimals(2) + " MB/s");
 }
 
 main();

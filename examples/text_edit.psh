@@ -51,7 +51,7 @@ fun redraw()
 
     frame_buffer.clear(COLOR_C64_BLUE);
 
-    let start_time = $time_current_ms();
+    let start_time = $time_monotonic();
 
     // For each row to draw
     for (let var i = 0; i < NUM_ROWS; ++i)
@@ -84,9 +84,9 @@ fun redraw()
         );
     }
 
-    let end_time = $time_current_ms();
-    let redraw_time = end_time - start_time;
-    $println('Redraw time: ' + redraw_time.to_s() + 'ms');
+    let end_time = $time_monotonic();
+    let redraw_ms = (end_time - start_time) * 1000;
+    $println('Redraw time: ' + redraw_ms.format_decimals(1) + 'ms');
 
     $window_draw_frame(window, frame_buffer.bytes);
 }
@@ -96,7 +96,7 @@ fun blink_timer()
     let var cursor_state = false;
 
     loop {
-        $actor_sleep(400);
+        $actor_sleep(0.4);
         cursor_state = !cursor_state;
         $actor_send($actor_parent(), cursor_state? 'CURSOR_ON':'CURSOR_OFF');
     }

@@ -60,9 +60,9 @@ $println("loading map " + MAP_PATH);
 let world = load_map(MAP_PATH);
 
 $println("lighting the level");
-let light_start_ms = $time_current_ms();
+let light_start = $time_monotonic();
 let lit_faces = light_world(world);
-let light_ms = $time_current_ms() - light_start_ms;
+let light_ms = ($time_monotonic() - light_start) * 1000;
 
 $println("building the BSP tree");
 let bsp = build_bsp(lit_faces);
@@ -81,7 +81,7 @@ $println(world.textures.len.to_s() + " textures, " + world.brushes.len.to_s() + 
     + world.lights.len.to_s() + " lights");
 $println("bsp: " + bsp.nodes.to_s() + " nodes, " + bsp.splits.to_s() + " splits, "
     + (num_lit_faces + bsp.splits).to_s() + " pieces drawn from");
-$println("lighting: " + light_ms.to_s() + " ms to cut and bake");
+$println("lighting: " + light_ms.format_decimals(1) + " ms to cut and bake");
 $println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB, shaded per pixel");
 $println("main actor GC/message heaps: "
     + (main_mem_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB");
@@ -91,13 +91,13 @@ let player = Player(world.spawn_x, world.spawn_y - EYE_HEIGHT, world.spawn_z, wo
 // The entities load their models as they are made, which has to happen before
 // the render actors are spawned with their copy of every model
 $println("spawning entities");
-let models_start_ms = $time_current_ms();
+let models_start = $time_monotonic();
 let entities = spawn_entities(world, player);
 load_weapons();
 load_gibs();
 if (entities.len > 0) {
     $println("entities: " + entities.len.to_s() + ", with " + models.len.to_s() + " models loaded in "
-        + ($time_current_ms() - models_start_ms).to_s() + " ms");
+        + (($time_monotonic() - models_start) * 1000).format_decimals(1) + " ms");
 }
 
 // The light level on an entity, taken `up` above its base along its own way
@@ -248,10 +248,10 @@ fun save_screenshot(path) {
 }
 
 $println("starting render workers");
-let actor_start_ms = $time_current_ms();
+let actor_start = $time_monotonic();
 start_render_actors(NUM_RENDER_ACTORS);
 $println("render workers: " + NUM_RENDER_ACTORS.to_s() + " actors forked in "
-    + ($time_current_ms() - actor_start_ms).to_s() + " ms, dynamic "
+    + (($time_monotonic() - actor_start) * 1000).format_decimals(1) + " ms, dynamic "
     + BAND_HEIGHT.to_s() + "-row bands");
 
 if (BENCH) {
@@ -266,9 +266,9 @@ if (BENCH) {
         set_view(view[0], view[1], view[2], view[3], view[4], i.to_f() * 0.21);
         update_entities(1.0 / 60.0, view[0], view[1], view[2]);
 
-        let t0 = $time_current_ms();
+        let t0 = $time_monotonic();
         render_frame_parallel(i);
-        let ms = $time_current_ms() - t0;
+        let ms = ($time_monotonic() - t0) * 1000;
         total_ms = total_ms + ms;
         total_pixels = total_pixels + frame_stats.pixels_drawn;
         total_rect_skipped = total_rect_skipped + frame_stats.faces_skipped;
@@ -282,10 +282,10 @@ if (BENCH) {
         }
     }
 
-    let avg = total_ms.to_f() / BENCH_FRAMES.to_f();
+    let avg = total_ms / BENCH_FRAMES;
     let avg_px = total_pixels.to_f() / BENCH_FRAMES.to_f();
     $println(BENCH_FRAMES.to_s() + " frames: " + avg.format_decimals(2) + " ms/frame ("
-        + (1000.0 / avg.max(0.001)).format_decimals(1) + " fps), worst " + worst_ms.to_s() + " ms");
+        + (1000.0 / avg.max(0.001)).format_decimals(1) + " fps), worst " + worst_ms.format_decimals(2) + " ms");
     $println("pixels drawn per frame: " + avg_px.floor().to_s() + " of "
         + (FRAME_WIDTH * FRAME_HEIGHT).to_s() + ", overdraw "
         + (avg_px / (FRAME_WIDTH * FRAME_HEIGHT).to_f()).format_decimals(3) + "x");
@@ -359,24 +359,19 @@ fun set_key(key, down) {
 
 // --- Main loop ---
 
-let start_ms = $time_current_ms();
-let var last_ms = start_ms;
+let start_time = $time_monotonic();
+let var last_time = start_time;
 let var frame_count = 0;
 let var render_ms_total = 0;
-let var last_report_ms = start_ms;
+let var last_report_time = start_time;
 let var render_frame_id = 0;
 
 loop {
-    let now_ms = $time_current_ms();
-    let var dt = (now_ms - last_ms).to_f() * 0.001;
-    last_ms = now_ms;
-    if (dt > 0.1) dt = 0.1;
+    let now = $time_monotonic();
+    let dt = (now - last_time).min(0.1);
+    last_time = now;
 
-    // The clock is wall time, which can step backwards when it is corrected,
-    // and a negative step would run the world in reverse for a frame
-    if (dt < 0.0) dt = 0.0;
-
-    let time_s = (now_ms - start_ms).to_f() * 0.001;
+    let time_s = now - start_time;
 
     // Events first, so that turning responds in the frame the key arrives
     let var quit = false;
@@ -465,22 +460,22 @@ loop {
     set_view(player.x, player.eye_y(), player.z, player.yaw, player.pitch, time_s * 1.1);
     set_roll(player.view_roll());
 
-    let render_start = $time_current_ms();
+    let render_start = $time_monotonic();
     render_frame_parallel(render_frame_id);
     render_frame_id = render_frame_id + 1;
-    render_ms_total = render_ms_total + ($time_current_ms() - render_start);
+    render_ms_total = render_ms_total + ($time_monotonic() - render_start) * 1000;
 
     frame_count = frame_count + 1;
-    let report_ms = $time_current_ms();
-    if (report_ms - last_report_ms >= 1000) {
-        let render_ms = render_ms_total.to_f() / frame_count.to_f();
+    let report_time = $time_monotonic();
+    if (report_time - last_report_time >= 1.0) {
+        let render_ms = render_ms_total / frame_count;
         let fps = 1000.0 / render_ms.max(0.001);
         let fps_count = fps.format_decimals(1);
         fps_text = "FPS: " + fps_count.lpad(FPS_FIELD_WIDTH, " ");
         $println("render: " + render_ms.format_decimals(1) + "ms (" + fps_count + " fps)");
         frame_count = 0;
         render_ms_total = 0;
-        last_report_ms = report_ms;
+        last_report_time = report_time;
     }
 
     draw_hud(frame_image, player);

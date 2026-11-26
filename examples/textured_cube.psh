@@ -445,14 +445,14 @@ let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Rotating textured cube",
 
 // Rendering is timed on its own, without the wait for vsync that
 // $window_draw_frame ends a frame with, and averaged over each report
-let start_ms = $time_current_ms();
+let start_ms = $time_monotonic() * 1000;
 let var frame_count = 0;
 let var render_ms_total = 0;
 let var last_report_ms = start_ms;
 
 loop {
-    let now_ms = $time_current_ms();
-    let time_s = (now_ms - start_ms).to_f() * 0.001;
+    let now_ms = $time_monotonic() * 1000;
+    let time_s = (now_ms - start_ms) * 0.001;
 
     let yaw = time_s * 0.7;
     let pitch = time_s * 0.43;
@@ -486,7 +486,7 @@ loop {
         draw_face(face, frame_buffer, shade_table[shade]);
     }
 
-    render_ms_total = render_ms_total + ($time_current_ms() - now_ms);
+    render_ms_total = render_ms_total + ($time_monotonic() * 1000 - now_ms);
 
     $window_draw_frame(window, frame_buffer);
 

@@ -170,13 +170,13 @@ fun main() {
     while (running) {
         $audio_read_samples(audio_input_device_id, FFT_SIZE, real_parts, 0);
 
-        let start_time = $time_current_ms();
+        let start_time = $time_monotonic();
         imag_parts.zero_fill();
         hanning_window(real_parts);
         fft(real_parts, imag_parts, false);
         let magnitudes = mel_bins(real_parts, imag_parts, NUM_FREQUENCY_BANDS, MIN_FREQ, MAX_FREQ, FFT_SIZE, SAMPLE_RATE);
-        let end_time = $time_current_ms();
-        $println("Audio analysis time: " + (end_time - start_time).to_s() + "ms (/" + AUDIO_FRAME_TIME.format_decimals(1) + "ms)");
+        let end_time = $time_monotonic();
+        $println("Audio analysis time: " + ((end_time - start_time) * 1000).format_decimals(1) + "ms (/" + AUDIO_FRAME_TIME.format_decimals(1) + "ms)");
 
         frame_buffer.zero_fill();
         let bar_width_total = WINDOW_WIDTH.idiv(NUM_FREQUENCY_BANDS);
@@ -225,7 +225,7 @@ fun main() {
         }
     }
 
-    $actor_sleep(500);
+    $actor_sleep(0.5);
 }
 
 main();

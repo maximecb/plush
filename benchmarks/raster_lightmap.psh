@@ -465,7 +465,7 @@ for (let var r = 0; r < GRID_ROWS; ++r) {
 
 let frame_buffer = ByteArray.with_size(FRAME_WIDTH * FRAME_HEIGHT * 4);
 let num_tris = indices.len / 3;
-let start_ms = $time_current_ms();
+let start_ms = $time_monotonic();
 for (let var frame = 0; frame < num_frames; ++frame) {
     let var i = 0;
     for (let var t = 0; t < num_tris; ++t) {
@@ -477,7 +477,7 @@ for (let var frame = 0; frame < num_frames; ++frame) {
     }
 }
 
-let total_ms = $time_current_ms() - start_ms;
+let total_ms = ($time_monotonic() - start_ms) * 1000;
 let fps = (num_frames * 1000) / total_ms;
 let mpix = (num_frames * FRAME_WIDTH * FRAME_HEIGHT) / (total_ms * 1000);
 let var sum = 0;
@@ -491,7 +491,7 @@ for (let var p = 0; p < FRAME_WIDTH * FRAME_HEIGHT; ++p) {
 $println(num_frames.to_s() + " frames of " + num_tris.to_s() + " lightmapped textured triangles");
 $println("lightmap: " + LM_SIZE.to_s() + "x" + LM_SIZE.to_s() + " bytes, 1 sample per " + LM_STEP.to_s() + " texture texels");
 if (angled) $println("mapping: angled (both lightmap coordinates vary along spans)");
-$println("total time: " + total_ms.to_s() + "ms");
+$println("total time: " + total_ms.format_decimals(1) + "ms");
 $println("fps: " + fps.format_decimals(1));
 $println("Mpixels/s: " + mpix.format_decimals(1));
 $println("RGB checksum: " + sum.to_s() + ", unwritten pixels: " + unlit.to_s());

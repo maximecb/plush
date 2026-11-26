@@ -345,7 +345,7 @@ loop {
     // --- Drawing ---
     frame_buffer.bytes.zero_fill();
 
-    let start_time = $time_current_ms();
+    let start_time = $time_monotonic();
 
     font.draw_string(frame_buffer, (WIDTH-s_w)>>1, (HEIGHT>>2), s);
     let count_str = "(" + count.to_s() + ")";
@@ -356,14 +356,14 @@ loop {
         mono.draw_string(frame_buffer, 10, (HEIGHT>>1) + 60 + (40 * i), char_lines[i]);
     }
 
-    let end_time = $time_current_ms();
+    let end_time = $time_monotonic();
     $print('redraw time: ');
-    $print(end_time - start_time);
+    $print(((end_time - start_time) * 1000).format_decimals(1));
     $println('ms');
 
     $window_draw_frame(window, frame_buffer.bytes);
 
-    $actor_sleep(200); // Limit the frame rate
+    $actor_sleep(0.2); // Limit the frame rate
 
     // --- Event Handling ---
     let msg = $actor_poll();

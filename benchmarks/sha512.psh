@@ -22,14 +22,14 @@ fun main() {
         data[i] = i & 0xFF;
     }
 
-    let start_time = $time_current_ms();
+    let start_time = $time_monotonic();
     let d = sha512(data);
-    let end_time = $time_current_ms();
+    let end_time = $time_monotonic();
 
-    let time_ms = end_time - start_time;
-    let bytes_per_sec = (NUM_BYTES * 1000).idiv(time_ms.max(1));
+    let time_ms = (end_time - start_time) * 1000;
+    let bytes_per_sec = (NUM_BYTES * 1000 / time_ms.max(0.001)).floor();
 
-    $println("SHA-512 of " + NUM_BYTES.comma_sep() + " bytes took " + time_ms.to_s() + " ms");
+    $println("SHA-512 of " + NUM_BYTES.comma_sep() + " bytes took " + time_ms.format_decimals(1) + " ms");
     $println("throughput: " + bytes_per_sec.comma_sep() + " bytes/s");
     $println("digest: " + d.to_hex());
 }

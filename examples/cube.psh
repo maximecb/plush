@@ -416,38 +416,32 @@ fun render_cube(fTheta, img) {
 let window = $window_create(frame_width, frame_height, "3D Cube", 0);
 let image = Image(frame_width, frame_height);
 let var fTheta = 0.0;
-let var previous_time = $time_current_ms();
+let var previous_time = $time_monotonic();
 
-// Rendering can take under a millisecond, which is the resolution of the
-// clock, so the time is added up over a second of frames before reporting
+// Render time is added up over a second of frames before reporting
 let var stats_start = previous_time;
 let var stats_frames = 0;
 let var stats_render_ms = 0;
 
 loop {
-    let current_time = $time_current_ms();
-    let delta_time = (current_time - previous_time).to_f() * 0.001;
+    let current_time = $time_monotonic();
+    let delta_time = current_time - previous_time;
     fTheta = fTheta + delta_time * 0.85;
     previous_time = current_time;
 
     render_cube(fTheta, image);
-    stats_render_ms = stats_render_ms + ($time_current_ms() - current_time);
+    stats_render_ms = stats_render_ms + ($time_monotonic() - current_time) * 1000;
     ++stats_frames;
 
     $window_draw_frame(window, image.bytes);
 
-    // Frame rate from the render time alone, without drawing to the window.
-    // Under a millisecond per frame, the sum is too few clock ticks to tell.
-    if (current_time - stats_start >= 1000) {
-        if (stats_render_ms < stats_frames) {
-            $println("Render fps: >1000");
-        } else {
-            let render_ms = stats_render_ms.to_f() / stats_frames.to_f();
-            $println(
-                "Render fps: " + (1000.0 / render_ms).format_decimals(1) +
-                " (" + render_ms.format_decimals(2) + " ms per frame)"
-            );
-        }
+    // Frame rate from the render time alone, without drawing to the window
+    if (current_time - stats_start >= 1.0) {
+        let render_ms = stats_render_ms / stats_frames;
+        $println(
+            "Render fps: " + (1000.0 / render_ms.max(0.001)).format_decimals(1) +
+            " (" + render_ms.format_decimals(2) + " ms per frame)"
+        );
 
         stats_start = current_time;
         stats_frames = 0;
@@ -464,5 +458,5 @@ loop {
     }
     if (quit) break;
 
-    $actor_sleep(16);
+    $actor_sleep(0.016);
 }

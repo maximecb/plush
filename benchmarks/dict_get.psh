@@ -22,7 +22,7 @@ assert(d[keys[num_keys - 1]] == num_keys - 1);
 
 // The keys come out of the array rather than being built in the loop, so
 // what is measured is the lookup and not string formatting
-let start_time = $time_current_ms();
+let start_time = $time_monotonic();
 let var value = nil;
 
 for (let var p = 0; p < num_passes; ++p)
@@ -33,13 +33,13 @@ for (let var p = 0; p < num_passes; ++p)
     }
 }
 
-let time_ms = $time_current_ms() - start_time;
+let time_ms = ($time_monotonic() - start_time) * 1000;
 
 // The same loop without the lookup. Feeding the keys in costs an array
 // read and the loop itself costs a compare and an increment, which is a
 // large enough share of the total to be worth naming rather than
 // leaving folded into the headline number
-let base_start = $time_current_ms();
+let base_start = $time_monotonic();
 
 for (let var p = 0; p < num_passes; ++p)
 {
@@ -49,12 +49,12 @@ for (let var p = 0; p < num_passes; ++p)
     }
 }
 
-let base_ms = $time_current_ms() - base_start;
+let base_ms = ($time_monotonic() - base_start) * 1000;
 
 let mreads = num_reads.to_f() / (time_ms.to_f() * 1000.0);
 let net_mreads = num_reads.to_f() / ((time_ms - base_ms).to_f() * 1000.0);
 
 $println("reads: " + num_reads.comma_sep());
-$println("time: " + time_ms.to_s() + " ms (" + base_ms.to_s() + " ms of loop overhead)");
+$println("time: " + time_ms.format_decimals(1) + " ms (" + base_ms.format_decimals(1) + " ms of loop overhead)");
 $println("Mreads/s: " + mreads.format_decimals(1));
 $println("Mreads/s excluding overhead: " + net_mreads.format_decimals(1));

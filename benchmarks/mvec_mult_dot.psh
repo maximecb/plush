@@ -98,12 +98,12 @@ matrix.mul_vec(vector, result);
 let times = [];
 
 for (let var round = 0; round < NUM_ROUNDS; ++round) {
-    let start_time = $time_current_ms();
+    let start_time = $time_monotonic();
 
     for (let var iter = 0; iter < NUM_ITERS; ++iter)
         matrix.mul_vec(vector, result);
 
-    times.push($time_current_ms() - start_time);
+    times.push(($time_monotonic() - start_time) * 1000);
 }
 
 let elapsed_ms = median(times);
@@ -112,10 +112,10 @@ let per_iter = elapsed_ms.to_f() / NUM_ITERS.to_f();
 // Each step of the inner loop is a multiply and an add, which is how a
 // matrix-vector product is normally counted
 let flops = (2 * NUM_ITERS * num_outputs * num_inputs).to_f();
-let mflops = flops / (elapsed_ms.max(1).to_f() * 1000.0);
+let mflops = flops / (elapsed_ms.max(0.001) * 1000.0);
 
 $println(
-    "Matrix-vector multiplication took " + elapsed_ms.to_s() + " ms for " +
+    "Matrix-vector multiplication took " + elapsed_ms.format_decimals(1) + " ms for " +
     NUM_ITERS.to_s() + " iterations, " + per_iter.format_decimals(3) + " ms per iteration."
 );
 $println(mflops.format_decimals(1) + " MFLOPS");

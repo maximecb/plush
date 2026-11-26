@@ -55,6 +55,12 @@ let MIN_PASS_LEN = 4;
 let PAGE_SIZE = 32;
 let POLL_MS = 5000;
 
+// Milliseconds on the monotonic clock, as an integer
+fun now_ms()
+{
+    return ($time_monotonic() * 1000).floor();
+}
+
 // Most raw data accepted after a response, in bytes
 let MAX_BLOB = 16 << 20;
 
@@ -1001,7 +1007,7 @@ fun wrap(text, cols)
 // Describes how long ago a Unix timestamp was
 fun time_ago(time)
 {
-    let secs = $time_current_ms().idiv(1000) - time;
+    let secs = $time_epoch().floor() - time;
 
     if (secs < 60) return "just now";
 
@@ -1236,7 +1242,7 @@ fun net_actor(addr, gen)
     }
 
     // Wait for data as long as it takes, the server sends nothing when idle
-    $net_set_timeout(sock, 0);
+    $net_set_timeout(sock, nil);
     $actor_send(parent, {net: "connected", gen: gen, sock: sock});
 
     let buf = ByteArray.with_size(1 << 20);
@@ -1545,12 +1551,12 @@ class Grid
         self.epoch = nil;
         self.seq = nil;
         self.polling = false;
-        self.last_poll_ms = 0;
+        self.last_poll_ms = -CANVAS_POLL_MS;
         self.error = "";
 
         // Cells we changed that are waiting to be sent
         self.set_queue = [];
-        self.last_set_ms = 0;
+        self.last_set_ms = -SET_INTERVAL_MS;
 
         // Set when cells change, for the circuit to be worked out again
         self.changed = false;
@@ -1604,7 +1610,7 @@ class Grid
 
         if (app.send(req, self)) {
             self.polling = true;
-            self.last_poll_ms = $time_current_ms();
+            self.last_poll_ms = now_ms();
         }
     }
 
@@ -1787,7 +1793,7 @@ class App
         self.sprites = {};
 
         self.screen = "intro";
-        self.start_ms = $time_current_ms();
+        self.start_ms = now_ms();
         self.dirty = true;
         self.cursor_on = true;
 
@@ -2323,11 +2329,11 @@ class App
 
         let grid = self.grid();
         grid.error = "";
-        grid.last_poll_ms = 0;
+        grid.last_poll_ms = -CANVAS_POLL_MS;
         grid.view.dirty = true;
 
         // The circuit stood still while it wasn't shown
-        self.sim_ms = $time_current_ms().to_f();
+        self.sim_ms = now_ms().to_f();
     }
 
     // Returns from the canvas or the circuit to the guestbook
@@ -2873,7 +2879,7 @@ class App
     // blink, and fetching older messages near the bottom of the list
     update(self)
     {
-        let now = $time_current_ms();
+        let now = now_ms();
 
         if (self.screen == "intro" && now - self.start_ms >= INTRO_END_MS)
             self.enter_main();
@@ -2938,7 +2944,7 @@ class App
     // stripe, then the teddy bear, then its sunglasses drop into place
     render_intro(self)
     {
-        let t = $time_current_ms() - self.start_ms;
+        let t = now_ms() - self.start_ms;
         let stripes = [];
 
         for (let var i = 0; i < LOGO_LETTERS.len; ++i) {
@@ -3811,7 +3817,7 @@ fun main()
     // Wakes us up every few seconds to check for new messages
     $actor_spawn(|| {
         loop {
-            $actor_sleep(POLL_MS);
+            $actor_sleep(POLL_MS / 1000);
             $actor_send($actor_parent(), "tick");
         }
     });
@@ -3836,7 +3842,7 @@ fun main()
             $window_draw_frame(window, app.frame.bytes);
         }
 
-        $actor_sleep(16);
+        $actor_sleep(0.016);
     }
 }
 

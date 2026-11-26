@@ -2009,9 +2009,9 @@ fun render_shots(dir) {
         // Take the median of a few runs of each view
         let times = [];
         for (let var run = 0; run < NUM_RUNS; ++run) {
-            let start = $time_current_ms();
+            let start = $time_monotonic();
             render_frame();
-            let elapsed = $time_current_ms() - start;
+            let elapsed = ($time_monotonic() - start) * 1000;
 
             let var idx = 0;
             while (idx < times.len && times[idx] < elapsed) ++idx;
@@ -2132,16 +2132,15 @@ fun set_key(key, down) {
 
 // --- Main loop ---
 
-let var last_ms = $time_current_ms();
+let var last_time = $time_monotonic();
 let var frame_count = 0;
 let var render_ms_total = 0;
-let var last_report_ms = last_ms;
+let var last_report_time = last_time;
 
 loop {
-    let now_ms = $time_current_ms();
-    let var dt = (now_ms - last_ms).to_f() * 0.001;
-    last_ms = now_ms;
-    if (dt > 0.1) dt = 0.1;
+    let now = $time_monotonic();
+    let dt = (now - last_time).min(0.1);
+    last_time = now;
 
     let var quit = false;
     loop {
@@ -2208,19 +2207,19 @@ loop {
     if (key_further) cam_dist = cam_dist * (1.0 + ZOOM_SPEED * dt);
     cam_dist = cam_dist.clip(MIN_DIST, MAX_DIST);
 
-    let render_start = $time_current_ms();
+    let render_start = $time_monotonic();
     render_frame();
-    render_ms_total = render_ms_total + ($time_current_ms() - render_start);
+    render_ms_total = render_ms_total + ($time_monotonic() - render_start) * 1000;
 
     frame_count = frame_count + 1;
-    let report_ms = $time_current_ms();
-    if (report_ms - last_report_ms >= 1000) {
-        let render_ms = render_ms_total.to_f() / frame_count.to_f();
+    let report_time = $time_monotonic();
+    if (report_time - last_report_time >= 1.0) {
+        let render_ms = render_ms_total / frame_count;
         let fps = 1000.0 / render_ms.max(0.001);
         fps_text = "FPS: " + fps.format_decimals(1).lpad(FPS_FIELD_WIDTH, " ");
         frame_count = 0;
         render_ms_total = 0;
-        last_report_ms = report_ms;
+        last_report_time = report_time;
     }
 
     draw_text(model.tris_drawn.to_s() + " of " + model.num_tris.to_s() + " triangles", 8, 8);

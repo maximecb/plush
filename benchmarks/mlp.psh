@@ -184,8 +184,6 @@ fun main() {
     let LEARNING_RATE = 0.01;
     let NUM_ITERATIONS = 10_000;
 
-    rng.seed($time_current_ms());
-
     // --- Initialization ---
     $println("Initializing MLP and data...");
     let mlp = MLP(INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE);
@@ -201,31 +199,31 @@ fun main() {
 
     for (let var i = 0; i < NUM_ITERATIONS; ++i) {
         // --- Forward Pass ---
-        let start_forward = $time_current_ms();
+        let start_forward = $time_monotonic();
         let y_pred = mlp.forward(x);
-        let end_forward = $time_current_ms();
-        total_forward_time = total_forward_time + (end_forward - start_forward);
+        let end_forward = $time_monotonic();
+        total_forward_time = total_forward_time + (end_forward - start_forward) * 1000;
 
         // --- Backward Pass ---
-        let start_backward = $time_current_ms();
+        let start_backward = $time_monotonic();
         let grads = mlp.backward(x, y_true, y_pred);
-        let end_backward = $time_current_ms();
-        total_backward_time = total_backward_time + (end_backward - start_backward);
+        let end_backward = $time_monotonic();
+        total_backward_time = total_backward_time + (end_backward - start_backward) * 1000;
 
         // --- Weight Update ---
-        let start_update = $time_current_ms();
+        let start_update = $time_monotonic();
         update(mlp, grads, LEARNING_RATE);
-        let end_update = $time_current_ms();
-        total_update_time = total_update_time + (end_update - start_update);
+        let end_update = $time_monotonic();
+        total_update_time = total_update_time + (end_update - start_update) * 1000;
     }
 
     $println("\n--- Benchmark Results ---");
     $println("Total iterations: " + NUM_ITERATIONS.to_s());
-    $println("Average forward pass:  " + (total_forward_time / NUM_ITERATIONS).to_s() + " ms");
-    $println("Average backward pass: " + (total_backward_time / NUM_ITERATIONS).to_s() + " ms");
-    $println("Average weight update: " + (total_update_time / NUM_ITERATIONS).to_s() + " ms");
+    $println("Average forward pass:  " + (total_forward_time / NUM_ITERATIONS).format_decimals(3) + " ms");
+    $println("Average backward pass: " + (total_backward_time / NUM_ITERATIONS).format_decimals(3) + " ms");
+    $println("Average weight update: " + (total_update_time / NUM_ITERATIONS).format_decimals(3) + " ms");
     let total_avg = (total_forward_time + total_backward_time + total_update_time) / NUM_ITERATIONS;
-    $println("Average total per iteration: " + total_avg.to_s() + " ms");
+    $println("Average total per iteration: " + total_avg.format_decimals(3) + " ms");
 }
 
 main();

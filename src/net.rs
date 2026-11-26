@@ -604,23 +604,33 @@ pub fn net_close(_actor: &mut Actor, socket_id: Value) -> HostResult
 /// the READ_TIMEOUT default. A timeout of 0 clears it, making subsequent
 /// reads block indefinitely. The write timeout is not affected
 /// $net_set_timeout(socket_id, timeout_ms)
-pub fn net_set_timeout(_actor: &mut Actor, socket_id: Value, timeout_ms: Value) -> HostResult
+pub fn net_set_timeout(_actor: &mut Actor, socket_id: Value, secs: Value) -> HostResult
 {
     let socket_id = unwrap_u64!(socket_id);
-    let timeout_ms = unwrap_u64!(timeout_ms);
+
+    // Nil means no timeout. Zero is rejected rather than meaning the same,
+    // since a computed timeout that reaches 0 should not block forever.
+    let timeout = if secs.is_nil() {
+        None
+    } else {
+        if !secs.is_num() {
+            error!("net_set_timeout expects a number of seconds or nil");
+        }
+
+        let secs = secs.num_as_f64();
+        match Duration::try_from_secs_f64(secs) {
+            Ok(d) if !d.is_zero() => Some(d),
+            _ => error!("invalid timeout: {} seconds, must be positive", secs),
+        }
+    };
 
     let stream = match get_stream(socket_id) {
         Some(stream) => stream,
         None => return Value::NIL.into(),
     };
 
-    // A zero duration is rejected by the OS, so map 0 ms to "no timeout"
-    let timeout = if timeout_ms == 0 {
-        None
-    } else {
-        Some(Duration::from_millis(timeout_ms))
-    };
-
+    // This can fail on a connection the peer already reset, which the next
+    // read reports as nil, so the failure is not an error here
     let _ = stream.set_read_timeout(timeout);
 
     Value::NIL.into()

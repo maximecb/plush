@@ -1197,7 +1197,7 @@ let SCENES = [
 assert(SCENES.len == SECTIONS.len);
 
 $println("generating tables...");
-let gen_start = $time_current_ms();
+let gen_start = $time_monotonic();
 
 let stars = Stars();
 let logo = Logo("PLUSH");
@@ -1242,7 +1242,7 @@ let PLASMA_COLORS = gradient([
     [1.0, rgb(10, 0, 40)],
 ], 256);
 
-$println("tables generated in " + ($time_current_ms() - gen_start).to_s() + " ms");
+$println("tables generated in " + (($time_monotonic() - gen_start) * 1000).format_decimals(1) + " ms");
 
 let fb = Image(W, H);
 
@@ -1350,13 +1350,13 @@ if (args.bench) {
     let totals = Array.with_size(SCENE_NAMES.len, 0);
     let counts = Array.with_size(SCENE_NAMES.len, 0);
     for (let var t = 0.0; t < SONG_SEC; t = t + 0.25) {
-        let t0 = $time_current_ms();
+        let t0 = $time_monotonic();
         let scene = render_frame(t);
-        totals[scene] = totals[scene] + ($time_current_ms() - t0);
+        totals[scene] = totals[scene] + ($time_monotonic() - t0) * 1000;
         counts[scene] = counts[scene] + 1;
     }
     for (let var i = 0; i < SCENE_NAMES.len; ++i) {
-        let ms = totals[i].to_f() / counts[i];
+        let ms = totals[i] / counts[i];
         $println(SCENE_NAMES[i].rpad(10, " ") + ms.format_decimals(1) + " ms/frame");
     }
     $exit(0);
@@ -1369,10 +1369,10 @@ let AUDIO_LATENCY = 0.025;
 
 let window = $window_create(W, H, "Plush Intro", 0);
 
-let start_ms = $time_current_ms();
+let start_time = $time_monotonic();
 let var have_pos = false;
 let var pos_frames = 0;
-let var pos_ms = 0;
+let var pos_time = 0.0;
 
 if (!args.mute) $actor_spawn(audio_actor);
 
@@ -1380,20 +1380,20 @@ if (!args.mute) $actor_spawn(audio_actor);
 // there is one, interpolated with the clock between its reports
 fun song_time()
 {
-    let now = $time_current_ms();
+    let now = $time_monotonic();
     if (args.mute) {
-        let t = (now - start_ms) / 1000.0;
+        let t = now - start_time;
         return t - (t / SONG_SEC).floor() * SONG_SEC;
     }
     if (!have_pos) return 0.0;
 
     let frames = pos_frames % SONG_FRAMES;
-    let t = frames.to_f() / SAMPLE_RATE + (now - pos_ms) / 1000.0 - AUDIO_LATENCY;
+    let t = frames.to_f() / SAMPLE_RATE + (now - pos_time) - AUDIO_LATENCY;
     return t.clip(0.0, SONG_SEC - 0.001);
 }
 
 loop {
-    let frame_start = $time_current_ms();
+    let frame_start = $time_monotonic();
 
     loop {
         let msg = $actor_poll();
@@ -1402,7 +1402,7 @@ loop {
         if (msg instanceof Int64) {
             have_pos = true;
             pos_frames = msg;
-            pos_ms = $time_current_ms();
+            pos_time = $time_monotonic();
             continue;
         }
 
@@ -1415,6 +1415,6 @@ loop {
     render_frame(song_time());
     $window_draw_frame(window, fb.bytes);
 
-    let frame_ms = $time_current_ms() - frame_start;
-    if (frame_ms < 16) $actor_sleep(16 - frame_ms);
+    let frame_time = $time_monotonic() - frame_start;
+    if (frame_time < 0.016) $actor_sleep(0.016 - frame_time);
 }

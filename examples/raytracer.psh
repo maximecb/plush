@@ -304,7 +304,7 @@ fun render(num_actors, width, height)
     // Image to render into
     let image = Image(width, height);
 
-    let start_time = $time_current_ms();
+    let start_time = $time_monotonic();
 
     // Send one requests to each actor, round-robin
     for (let var i = 0; i < num_actors; ++i)
@@ -326,8 +326,8 @@ fun render(num_actors, width, height)
         image.blit(msg.tile_img, msg.x, msg.y);
     }
 
-    let render_time = $time_current_ms() - start_time;
-    $println("Parallel render time: " + render_time.to_s() + "ms");
+    let render_ms = ($time_monotonic() - start_time) * 1000;
+    $println("Parallel render time: " + render_ms.format_decimals(1) + "ms");
 
     // Tell actors to terminate
     for (let var i = 0; i < num_actors; ++i)
@@ -347,10 +347,10 @@ fun render_no_tile(width, height)
     // Scene setup
     let scene = Scene();
 
-    let start_time = $time_current_ms();
+    let start_time = $time_monotonic();
     let img = render_tile(scene, camera, 0, 0, width, height);
-    let render_time = $time_current_ms() - start_time;
-    $println("Single thread render time: " + render_time.to_s() + "ms");
+    let render_ms = ($time_monotonic() - start_time) * 1000;
+    $println("Single thread render time: " + render_ms.format_decimals(1) + "ms");
 
     return img;
 }

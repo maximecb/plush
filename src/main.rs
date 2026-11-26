@@ -306,6 +306,8 @@ fn parse_input(opts: &Options) -> Program
 
 fn main()
 {
+    host::init_monotonic();
+
     // With no command-line arguments, start the REPL
     if env::args().len() == 1 {
         repl::run();

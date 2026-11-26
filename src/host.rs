@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::thread;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::vm::{VM, Actor};
 use crate::value::*;
 use crate::ast::{Expr, Function, Program};
@@ -276,7 +277,8 @@ use crate::window::*;
 def_host_fns! {
     // Functions Plush code names directly
     globals {
-        time_current_ms(0),
+        time_epoch(0),
+        time_monotonic(0),
         cmd_num_args(0),
         cmd_get_arg(1),
         cmd_get_arg_or(2),
@@ -429,18 +431,32 @@ pub fn get_host_const(name: &str, fun: &Function, prog: &Program) -> Option<Expr
     HostFnId::from_name(name).map(Expr::HostFn)
 }
 
-/// Get the current time stamp in milliseconds
-pub fn get_time_ms() -> u64
+/// Reference point for the monotonic clock, shared by all actors
+static MONOTONIC_START: OnceLock<Instant> = OnceLock::new();
+
+/// Start the monotonic clock, so that it reads near zero at VM startup
+pub fn init_monotonic()
 {
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    MONOTONIC_START.get_or_init(Instant::now);
 }
 
-/// Get the current time stamp in milliseconds since the unix epoch
-pub fn time_current_ms(actor: &mut Actor) -> HostResult
+/// Get the wall-clock time in seconds since the Unix epoch
+pub fn time_epoch(actor: &mut Actor) -> HostResult
 {
-    actor.int64(get_time_ms() as i64).into()
+    // A clock set before 1970 yields a negative time rather than a panic
+    let secs = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs_f64(),
+        Err(e) => -e.duration().as_secs_f64(),
+    };
+
+    actor.float64(secs).into()
+}
+
+/// Get the time in seconds on a clock that never goes backward
+pub fn time_monotonic(actor: &mut Actor) -> HostResult
+{
+    let secs = MONOTONIC_START.get_or_init(Instant::now).elapsed().as_secs_f64();
+    actor.float64(secs).into()
 }
 
 /// Get the number of command-line arguments
@@ -917,11 +933,20 @@ fn actor_parent(actor: &mut Actor) -> HostResult
     parent.into()
 }
 
-/// Make the current actor sleep
-fn actor_sleep(_actor: &mut Actor, msecs: Value) -> HostResult
+/// Make the current actor sleep for a number of seconds
+fn actor_sleep(_actor: &mut Actor, secs: Value) -> HostResult
 {
-    let msecs = unwrap_u64!(msecs);
-    thread::sleep(Duration::from_millis(msecs));
+    if !secs.is_num() {
+        error!("actor_sleep expects a number of seconds");
+    }
+
+    let secs = secs.num_as_f64();
+    let duration = match Duration::try_from_secs_f64(secs) {
+        Ok(d) => d,
+        Err(_) => error!("invalid sleep duration: {} seconds", secs),
+    };
+
+    thread::sleep(duration);
     Value::NIL.into()
 }
 

@@ -51,7 +51,7 @@ fun hsv_to_rgb(h, s, v)
     return rgb32(vi, p, q);
 }
 
-let prog_start_time = $time_current_ms();
+let prog_start_time = $time_monotonic();
 
 // Generate the palette
 let palette = [];
@@ -93,9 +93,9 @@ let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Demoscene Plasma Effect"
 
 loop
 {
-    let frame_start_time = $time_current_ms();
-    let time_ms_i = frame_start_time - prog_start_time;
-    let palette_offs = (time_ms_i / 20).floor();
+    let frame_start_time = $time_monotonic();
+    let time_ms = (frame_start_time - prog_start_time) * 1000;
+    let palette_offs = (time_ms / 20).floor();
 
     // Create a shifted palette for this frame
     let shifted_palette = [];
@@ -120,8 +120,8 @@ loop
 
     $window_draw_frame(window, frame_buffer);
 
-    let frame_end_time = $time_current_ms();
-    $println(frame_end_time - frame_start_time);
+    let frame_end_time = $time_monotonic();
+    $println(((frame_end_time - frame_start_time) * 1000).format_decimals(1) + " ms");
 
     loop
     {

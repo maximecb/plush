@@ -1,6 +1,6 @@
 from random import Xoshiro128;
 
-let rng = Xoshiro128($time_current_ms());
+let rng = Xoshiro128(($time_epoch() * 1000).floor());
 
 let FRAME_WIDTH = 600;
 let FRAME_HEIGHT = 400;
@@ -473,7 +473,7 @@ fun audio_actor()
 
         // The audio driver needs more samples
         if (msg instanceof AudioNeeded) {
-            let t0 = $time_current_ms();
+            let t0 = $time_monotonic();
 
             let num_samples_to_gen = msg.num_samples;
             let var buffer_idx = 0;
@@ -519,10 +519,10 @@ fun audio_actor()
 
             $audio_write_samples(audio_dev, buffer);
 
-            let t1 = $time_current_ms();
-            let dt = t1 - t0;
+            let t1 = $time_monotonic();
+            let dt_ms = (t1 - t0) * 1000;
             let avail_ms = (1000 * msg.num_samples / SAMPLE_RATE).floor();
-            $println(dt.to_s() + 'ms (/' + avail_ms.to_s() + ')');
+            $println(dt_ms.format_decimals(1) + 'ms (/' + avail_ms.to_s() + ')');
 
             sample_idx = sample_idx + msg.num_samples;
         }

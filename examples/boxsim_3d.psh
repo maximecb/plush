@@ -562,7 +562,7 @@ class World {
     // Keep a random stream for boxes added during this run.
     init(self, count) {
         self.count = count;
-        self.rng = Xoshiro128($time_current_ms());
+        self.rng = Xoshiro128(1);
         self.reset();
     }
 
@@ -1523,7 +1523,7 @@ let var throw_down = false;
 let var push_down = false;
 let var mouse_x = 0;
 let var mouse_y = 0;
-let var last_ms = $time_current_ms();
+let var last_time = $time_monotonic();
 let var accumulator = 0.0;
 let var frame = 0;
 
@@ -1586,9 +1586,9 @@ loop {
     if (quit) break;
 
     // Accumulate real time into fixed physics steps.
-    let now = $time_current_ms();
-    let elapsed = ((now - last_ms).to_f() * 0.001).min(0.05);
-    last_ms = now;
+    let now = $time_monotonic();
+    let elapsed = (now - last_time).min(0.05);
+    last_time = now;
     if (!paused) accumulator = (accumulator + elapsed).min(0.05);
 
     let yaw = ((orbit_right ? 1.0 : 0.0) - (orbit_left ? 1.0 : 0.0)) * ORBIT_SPEED * elapsed;
@@ -1605,7 +1605,7 @@ loop {
         camera_changed = true;
     }
 
-    let physics_start = $time_current_ms();
+    let physics_start = $time_monotonic();
     let var steps = 0;
     let push_ray = renderer.ray_direction(mouse_x, mouse_y);
 
@@ -1621,20 +1621,20 @@ loop {
     }
 
     // Reuse the framebuffer when neither the scene nor the camera moved.
-    let render_start = $time_current_ms();
+    let render_start = $time_monotonic();
     if (camera_changed || world.render_dirty) {
         renderer.render(world);
         world.render_dirty = false;
     }
-    let render_end = $time_current_ms();
+    let render_end = $time_monotonic();
     $window_draw_frame(window, renderer.fb);
 
     $println("frame=" + frame.to_s() + " steps=" + steps.to_s()
              + " boxes=" + (world.boxes.len - 1).to_s()
              + " sleeping=" + world.sleeping_count().to_s()
-             + " physics=" + (render_start - physics_start).to_s() + " ms"
-             + " render=" + (render_end - render_start).to_s() + " ms");
+             + " physics=" + ((render_start - physics_start) * 1000).format_decimals(1) + " ms"
+             + " render=" + ((render_end - render_start) * 1000).format_decimals(1) + " ms");
     frame += 1;
 
-    $actor_sleep(5);
+    $actor_sleep(0.005);
 }

@@ -807,18 +807,17 @@ fun main()
         return;
     }
 
-    let t0 = $time_current_ms();
+    let t0 = $time_monotonic();
     let samples = render(segs);
-    let gen_ms = $time_current_ms() - t0;
+    let gen_ms = ($time_monotonic() - t0) * 1000;
 
     let num_samples = samples.len.idiv(4);
     let duration_ms = (num_samples * 1000).idiv(SAMPLE_RATE);
 
-    // Ratio kept in tenths so it can be printed without float formatting
-    let ratio = (duration_ms * 10).idiv(gen_ms.max(1));
+    let ratio = duration_ms / gen_ms.max(0.001);
     $println(
-        "Generated " + duration_ms.to_s() + "ms of audio in " + gen_ms.to_s() + "ms " +
-        "(" + (ratio.idiv(10)).to_s() + "." + (ratio % 10).to_s() + "x realtime)"
+        "Generated " + duration_ms.to_s() + "ms of audio in " + gen_ms.format_decimals(1) + "ms " +
+        "(" + ratio.format_decimals(1) + "x realtime)"
     );
 
     if (out_path != nil) {
@@ -836,7 +835,7 @@ fun main()
     }
 
     $audio_write_samples(dev, samples);
-    $actor_sleep(duration_ms + 200);
+    $actor_sleep(num_samples / SAMPLE_RATE + 0.2);
 }
 
 main();

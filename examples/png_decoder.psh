@@ -24,7 +24,7 @@ fun main() {
     let times = [];
     let var img = nil;
     for (let var i = 0; i < NUM_RUNS; ++i) {
-        let start = $time_current_ms();
+        let start = $time_monotonic();
         img = decode_png(data);
         if (img == nil) {
             $println("Could not decode PNG: " + path);
@@ -32,7 +32,7 @@ fun main() {
         }
 
         // Insert the time so that the array stays sorted
-        let elapsed = $time_current_ms() - start;
+        let elapsed = ($time_monotonic() - start) * 1000;
         let var idx = 0;
         while (idx < times.len && times[idx] < elapsed) {
             ++idx;
@@ -43,8 +43,8 @@ fun main() {
     let median = times[NUM_RUNS.idiv(2)];
     let megapixels = img.width * img.height / 1000000.0;
     $println("Decoded " + img.width.to_s() + " x " + img.height.to_s() +
-             " PNG in " + median.to_s() + " ms (" +
-             (megapixels * 1000 / median.max(1)).format_decimals(1) + " megapixels/s)");
+             " PNG in " + median.format_decimals(1) + " ms (" +
+             (megapixels * 1000 / median.max(0.001)).format_decimals(1) + " megapixels/s)");
 
     let window = $window_create(img.width, img.height, "PNG decoder: " + path, 0);
     $window_draw_frame(window, img.bytes);

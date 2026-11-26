@@ -1217,7 +1217,7 @@ impl Actor
         println!("Running GC cycle, {} bytes free", self.alloc.bytes_free());
 
         #[cfg(feature = "log_gc")]
-        let start_time = crate::host::get_time_ms();
+        let start_time = std::time::Instant::now();
 
         // How big to make the to-space. A block costs its header plus its
         // own rounded size and nothing else, and each one is copied at
@@ -1340,7 +1340,7 @@ impl Actor
         crate::gc::verify_heap(&self.alloc);
 
         #[cfg(feature = "log_gc")]
-        println!("GC time: {} ms", crate::host::get_time_ms() - start_time);
+        println!("GC time: {:.3} ms", start_time.elapsed().as_secs_f64() * 1000.0);
     }
 
     /// Ensure that at least bytes_needed of free space are available in the
@@ -3417,7 +3417,10 @@ mod tests
         eval_eq("return $actor_id();", Value::fixnum(0));
         eval_eq("return $actor_parent();", Value::NIL);
         eval("return $print('hi');");
-        eval("return $time_current_ms();");
+        eval("return $time_epoch();");
+        eval("return $time_monotonic();");
+        eval("return $actor_sleep(0.001);");
+        eval("return $actor_sleep(0);");
     }
 
     #[test]

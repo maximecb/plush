@@ -85,27 +85,27 @@ fun main()
 
     let var total_bytes = 0;
 
-    let parse_start = $time_current_ms();
+    let parse_start = $time_monotonic();
     for (let var i = 0; i < NUM_ITERS; ++i) {
         let val = parse_json(text);
         total_bytes = total_bytes + num_bytes;
     }
-    let parse_ms = $time_current_ms() - parse_start;
+    let parse_ms = ($time_monotonic() - parse_start) * 1000;
 
-    let fmt_start = $time_current_ms();
+    let fmt_start = $time_monotonic();
     for (let var i = 0; i < NUM_ITERS; ++i) {
         let out = format_json(tree);
         assert(out.len == num_bytes);
     }
-    let fmt_ms = $time_current_ms() - fmt_start;
+    let fmt_ms = ($time_monotonic() - fmt_start) * 1000;
 
     let mb = total_bytes.to_f() / 1000000.0;
-    let parse_rate = mb / (parse_ms.max(1).to_f() / 1000.0);
-    let fmt_rate = mb / (fmt_ms.max(1).to_f() / 1000.0);
+    let parse_rate = mb / (parse_ms.max(0.001) / 1000.0);
+    let fmt_rate = mb / (fmt_ms.max(0.001) / 1000.0);
 
     $println("document size: " + num_bytes.comma_sep() + " bytes, " + NUM_ITERS.to_s() + " iterations");
-    $println("parse:  " + parse_ms.to_s() + " ms, " + parse_rate.format_decimals(2) + " MB/s");
-    $println("format: " + fmt_ms.to_s() + " ms, " + fmt_rate.format_decimals(2) + " MB/s");
+    $println("parse:  " + parse_ms.format_decimals(1) + " ms, " + parse_rate.format_decimals(2) + " MB/s");
+    $println("format: " + fmt_ms.format_decimals(1) + " ms, " + fmt_rate.format_decimals(2) + " MB/s");
 }
 
 main();

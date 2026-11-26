@@ -817,19 +817,19 @@ loop {
     }
 
     // --- Render City ---
-    let transform_start = $time_current_ms();
+    let transform_start = $time_monotonic();
     city_data.vertices = [];
     for (let var i = 0; i < orig_city_vertices.len; ++i) {
         city_data.vertices.push(orig_city_vertices[i].clone());
     }
     city_data.transform(mat_vp);
-    let transform_time = $time_current_ms() - transform_start;
+    let transform_time = ($time_monotonic() - transform_start) * 1000;
 
-    let sort_start = $time_current_ms();
+    let sort_start = $time_monotonic();
     city_data.sort_triangles_bucket(4096);
-    let sort_time = $time_current_ms() - sort_start;
+    let sort_time = ($time_monotonic() - sort_start) * 1000;
 
-    let raster_start = $time_current_ms();
+    let raster_start = $time_monotonic();
     for (let var i = 0; i < city_data.indices.len; i = i + 3) {
         let v0 = city_data.vertices[city_data.indices[i]];
         let v1 = city_data.vertices[city_data.indices[i+1]];
@@ -860,17 +860,17 @@ loop {
             rasterize_triangle(v0, v1, v2, shaded_color, image);
         }
     }
-    let raster_time = $time_current_ms() - raster_start;
+    let raster_time = ($time_monotonic() - raster_start) * 1000;
 
     $println(
         "triangles: " + city_data.colors.len.to_s() +
-        ", transform: " + transform_time.to_s() +
-        "ms, sort: " + sort_time.to_s() +
-        "ms, rasterize: " + raster_time.to_s() + "ms"
+        ", transform: " + transform_time.format_decimals(1) +
+        "ms, sort: " + sort_time.format_decimals(1) +
+        "ms, rasterize: " + raster_time.format_decimals(1) + "ms"
     );
 
     $window_draw_frame(window, image.bytes);
 
     // --- Frame Limiting ---
-    $actor_sleep(20);
+    $actor_sleep(0.02);
 }

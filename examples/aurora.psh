@@ -66,7 +66,7 @@ fun rand_star(color) {
 
 // Colorize buffer points from..to
 fun colorizer(from, to) {
-    rng.seed($actor_id() + $time_current_ms());
+    rng.seed($actor_id() + ($time_epoch() * 1000).floor());
     let color_array = ByteArray.with_size(WIDTH*4*(to-from));
     let var idx = 0;
     for (let var y = from; y < to; ++y) {
@@ -86,7 +86,7 @@ fun colorizer(from, to) {
 }
 
 // Color pixels in parallel
-let start_time = $time_current_ms();
+let start_time = $time_monotonic();
 
 // Distribute rows and hand them to actors
 let var to = 0;
@@ -118,8 +118,8 @@ loop {
 }
 
 // Print render time
-let render_time = $time_current_ms() - start_time;
-$println("Mandelbrot render time: " + render_time.to_s() + "ms");
+let render_ms = ($time_monotonic() - start_time) * 1000;
+$println("Mandelbrot render time: " + render_ms.format_decimals(1) + "ms");
 
 // --- Window and Event Loop ---
 let window = $window_create(WIDTH, HEIGHT, "Mandelbrot Set", 0);

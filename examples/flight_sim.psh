@@ -805,14 +805,14 @@ fun generate_colors(elev_map, rough_map) {
 
 // Generate the world
 fun generate_terrain() {
-    let start_ms = $time_current_ms();
+    let start_time = $time_monotonic();
     let elev_map = ByteArray.with_size(MAP_SIZE * MAP_SIZE * 4);
     let rough_map = ByteArray.with_size(MAP_SIZE * MAP_SIZE * 4);
 
     generate_heights(elev_map, rough_map);
     generate_colors(elev_map, rough_map);
 
-    $println("Generated terrain in " + ($time_current_ms() - start_ms).to_s() + " ms");
+    $println("Generated terrain in " + (($time_monotonic() - start_time) * 1000).format_decimals(1) + " ms");
 }
 
 // Ground height at a world position. This follows the two triangles a cell
@@ -3427,9 +3427,9 @@ fun run_bench(num_frames, shot_dir) {
         in_fire = frame % 60 >= 20 && frame % 60 < 50;
         update_sim(dt);
 
-        let start_ms = $time_current_ms();
+        let start_time = $time_monotonic();
         render_frame();
-        render_ms = render_ms + ($time_current_ms() - start_ms);
+        render_ms = render_ms + ($time_monotonic() - start_time) * 1000;
         tri_total = tri_total + tris_drawn;
 
         if (shot_dir != nil && frame % 30 == 29) {
@@ -3497,16 +3497,16 @@ fun set_key(key, down) {
     else if (key == 'SPACE') in_fire = down;
 }
 
-let start_ms = $time_current_ms();
-let var last_ms = start_ms;
-let var last_report_ms = last_ms;
+let start_time = $time_monotonic();
+let var last_time = start_time;
+let var last_report_time = last_time;
 let var frame_count = 0;
 let var render_ms_total = 0;
 
 loop {
-    let now_ms = $time_current_ms();
-    let dt = ((now_ms - last_ms).to_f() * 0.001).min(0.1);
-    last_ms = now_ms;
+    let now = $time_monotonic();
+    let dt = (now - last_time).min(0.1);
+    last_time = now;
 
     // Handle pending events
     let var quit = false;
@@ -3533,25 +3533,25 @@ loop {
     in_roll = key_axis(key_roll_left, key_roll_right);
     in_yaw = key_axis(key_yaw_left, key_yaw_right);
     in_throttle = key_axis(key_slower, key_faster);
-    hud_time = (now_ms - start_ms).to_f() * 0.001;
+    hud_time = now - start_time;
     update_sim(dt);
     send_audio();
 
-    let render_start = $time_current_ms();
+    let render_start = $time_monotonic();
     render_frame();
-    render_ms_total = render_ms_total + ($time_current_ms() - render_start);
+    render_ms_total = render_ms_total + ($time_monotonic() - render_start) * 1000;
     frame_count = frame_count + 1;
 
     // Report the frame time once a second
-    if (now_ms - last_report_ms >= 1000) {
-        let ms = render_ms_total.to_f() / frame_count;
+    if (now - last_report_time >= 1.0) {
+        let ms = render_ms_total / frame_count;
         $println("render: " + ms.format_decimals(1) + " ms, "
             + (1000.0 / ms.max(0.001)).format_decimals(1) + " fps, "
             + tris_drawn.to_s() + " triangles, speed " + (speed * 3.6).floor().to_s() + " km/h, altitude "
             + cam_y.floor().to_s() + " m");
         frame_count = 0;
         render_ms_total = 0;
-        last_report_ms = now_ms;
+        last_report_time = now;
     }
 
     $window_draw_frame(window, frame_buffer);

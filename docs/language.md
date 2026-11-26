@@ -480,7 +480,8 @@ communicate with them.
 
 These host functions are defined in [`src/host.rs`](/src/host.rs):
 
--   `$time_current_ms()`: Returns the current time in milliseconds since the Unix epoch.
+-   `$time_epoch()`: Returns the wall-clock time as a float number of seconds since the Unix epoch. This can jump forward or backward if the system clock is adjusted, so it should not be used to measure elapsed time.
+-   `$time_monotonic()`: Returns a float number of seconds on a clock that never goes backward, counting from around the time the VM started. Use this to measure elapsed time. Its resolution depends on the platform, and it may not advance while the machine is asleep.
 -   `$cmd_num_args()`: Get the number of command-line arguments available to the program.
 -   `$cmd_get_arg(idx)`: Get the command-line argument at the given index. Returns `nil` if absent.
 -   `$cmd_get_arg_or(idx, default)`: Get the command-line argument at the given index. Returns `default` if absent.
@@ -496,7 +497,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$gc_mem_size()`: Returns the total committed capacity, in bytes, of the current actor's GC and incoming-message heaps.
 -   `$actor_id()`: Returns the ID of the current actor.
 -   `$actor_parent()`: Returns the ID of the parent actor.
--   `$actor_sleep(msecs)`: Pauses the current actor for the specified number of milliseconds.
+-   `$actor_sleep(secs)`: Pauses the current actor for at least the given number of seconds, which may be fractional, e.g. `0.016`. The actual wake-up time depends on the OS scheduler.
 -   `$actor_spawn(function)`: Spawns a new actor that executes the given function.
 -   `$actor_join(actor_id)`: Waits for an actor to finish and returns its result.
 -   `$actor_send(actor_id, message)`: Sends a message to the specified actor.
@@ -518,7 +519,7 @@ These host functions are defined in [`src/host.rs`](/src/host.rs):
 -   `$net_write(socket_id, byte_array, start, len)`: Writes `len` bytes of a `ByteArray`, starting at index `start`, blocking until all of it has been written. Returns `len`, or `nil` if the connection is over. There are no partial writes. A write that makes no progress for 30 seconds fails and shuts the connection down.
 -   `$net_shutdown_write(socket_id)`: Shuts down the writing half of a connection, giving the peer an EOF while this end can still read. Use it to end a request that the peer reads to EOF, then keep reading for the response. Writing afterwards returns `nil`.
 -   `$net_close(socket_id)`: Closes a socket. Closing a listening socket cancels an actor blocked in `$net_accept()`, and closing a connection wakes one blocked in `$net_read()`. Closing an unknown or already closed socket does nothing.
--   `$net_set_timeout(socket_id, timeout_ms)`: Sets the read timeout on a connected socket, in milliseconds, replacing the 10 second default. A timeout of `0` makes reads block indefinitely.
+-   `$net_set_timeout(socket_id, secs)`: Sets the read timeout on a connected socket, in seconds, which may be fractional, replacing the 10 second default. A timeout of `nil` makes reads block indefinitely. Zero or negative timeouts are an error.
 -   `$exit(code)`: End program execution and produce the given exit code.
 
 ## Concurrency with Actors

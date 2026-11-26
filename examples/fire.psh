@@ -5,13 +5,13 @@
 from random import Xoshiro128;
 
 // Seeded from the clock so that the flame differs from one run to the next
-let rng = Xoshiro128($time_current_ms());
+let rng = Xoshiro128(($time_epoch() * 1000).floor());
 
 let FRAME_WIDTH = 512;
 let FRAME_HEIGHT = 512;
 
 // Time budget per frame, as in the original's animation loop
-let FRAME_TIME_MS = 40;
+let FRAME_TIME = 0.04;
 
 // Heat kept from one row to the next, in 4096ths. The update rule sums
 // four samples, so 1024 conserves heat exactly and the flame would never
@@ -101,7 +101,7 @@ let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Demoscene Fire Effect", 
 
 loop
 {
-    let frame_start_time = $time_current_ms();
+    let frame_start_time = $time_monotonic();
 
     // Randomize the bottom row, which is what feeds the flame
     let bottom_row = fire[FRAME_HEIGHT - 1];
@@ -159,7 +159,7 @@ loop
     }
 
     // Hold the frame rate to the time budget
-    let frame_ms = $time_current_ms() - frame_start_time;
-    if (frame_ms < FRAME_TIME_MS)
-        $actor_sleep(FRAME_TIME_MS - frame_ms);
+    let frame_time = $time_monotonic() - frame_start_time;
+    if (frame_time < FRAME_TIME)
+        $actor_sleep(FRAME_TIME - frame_time);
 }

@@ -3256,17 +3256,17 @@ let OFFLINE_DT = 1.0 / 60.0;
 
 if (args.bench) {
     let n = args.frames == nil ? 120 : args.frames;
-    let t0 = $time_current_ms();
+    let t0 = $time_monotonic();
     for (let var i = 0; i < n; ++i) {
         cam_z = i.to_f() * 1.6;
         frame_dt = OFFLINE_DT;
         update_ride(OFFLINE_DT, 1.0);
         render_frame(frame_buffer);
     }
-    let ms = $time_current_ms() - t0;
-    $println(n.to_s() + " frames in " + ms.to_s() + "ms  ("
-             + (ms.to_f() / n.to_f()).format_decimals(2) + " ms/frame, "
-             + ((n * 1000).to_f() / ms.to_f()).format_decimals(1) + " fps)");
+    let ms = ($time_monotonic() - t0) * 1000;
+    $println(n.to_s() + " frames in " + ms.format_decimals(1) + "ms  ("
+             + (ms / n).format_decimals(2) + " ms/frame, "
+             + (n * 1000 / ms.max(0.001)).format_decimals(1) + " fps)");
     return;
 }
 
@@ -3291,13 +3291,11 @@ let window = $window_create(FRAME_WIDTH, FRAME_HEIGHT, "Night Ride", 0);
 
 let var paused = false;
 let var frame_no = 0;
-let var last_ms = $time_current_ms();
+let var last_time = $time_monotonic();
 
-// Render time is accumulated over the reporting interval rather than sampled
-// once: a single frame only resolves to whole milliseconds, which is too
-// coarse to tell 12ms from 13ms
+// Render time in ms, accumulated over the reporting interval
 let var render_accum = 0;
-let var report_start = last_ms;
+let var report_start = last_time;
 
 let var quit = false;
 
@@ -3327,9 +3325,9 @@ loop {
         break;
     }
 
-    let now = $time_current_ms();
-    let dt = (now - last_ms).to_f() / 1000.0;
-    last_ms = now;
+    let now = $time_monotonic();
+    let dt = now - last_time;
+    last_time = now;
 
     let step = dt.min(0.1);
     if (!paused) {
@@ -3351,20 +3349,20 @@ loop {
         update_scene(step);
     }
 
-    let t0 = $time_current_ms();
+    let t0 = $time_monotonic();
     render_frame(frame_buffer);
-    render_accum = render_accum + ($time_current_ms() - t0);
+    render_accum = render_accum + ($time_monotonic() - t0) * 1000;
 
     $window_draw_frame(window, frame_buffer);
 
     frame_no = frame_no + 1;
     if (frame_no >= 30) {
-        let elapsed = ($time_current_ms() - report_start).max(1);
-        let avg_render = render_accum.to_f() / frame_no.to_f();
+        let elapsed = ($time_monotonic() - report_start).max(0.001);
+        let avg_render = render_accum / frame_no;
         // Two rates: what the renderer alone could sustain, and what the loop
         // actually achieves once the window blit and event handling are in
         let render_fps = 1000.0 / avg_render.max(0.001);
-        let real_fps = (frame_no * 1000).to_f() / elapsed.to_f();
+        let real_fps = frame_no / elapsed;
 
         $println(
             "render: " + avg_render.format_decimals(2) + "ms (" +
@@ -3375,6 +3373,6 @@ loop {
 
         frame_no = 0;
         render_accum = 0;
-        report_start = $time_current_ms();
+        report_start = $time_monotonic();
     }
 }

@@ -781,16 +781,16 @@ loop {
     let mat_mvp_grid = mat4_mul(mat_proj, mat_view);
 
     // Render scene
-    let transform_start = $time_current_ms();
+    let transform_start = $time_monotonic();
     let transformed_ball_data = ball_data.transform(mat_mvp_ball).to_screen();
     let transformed_grid_data = grid_data.transform(mat_mvp_grid).to_screen();
-    let transform_time = $time_current_ms() - transform_start;
+    let transform_time = ($time_monotonic() - transform_start) * 1000;
 
-    let sort_start = $time_current_ms();
+    let sort_start = $time_monotonic();
     transformed_ball_data.sort_triangles_bucket(4096);
-    let sort_time = $time_current_ms() - sort_start;
+    let sort_time = ($time_monotonic() - sort_start) * 1000;
 
-    let raster_start = $time_current_ms();
+    let raster_start = $time_monotonic();
 
     // Draw the grid
     let grid_color = 0xFF_F0_00_F0; // Purple color for the grid
@@ -813,17 +813,17 @@ loop {
         }
     }
 
-    let raster_time = $time_current_ms() - raster_start;
+    let raster_time = ($time_monotonic() - raster_start) * 1000;
 
     $println(
         "triangles: " + transformed_ball_data.colors.len.to_s() +
-        ", transform: " + transform_time.to_s() +
-        "ms, sort: " + sort_time.to_s() +
-        "ms, rasterize: " + raster_time.to_s() + "ms"
+        ", transform: " + transform_time.format_decimals(1) +
+        "ms, sort: " + sort_time.format_decimals(1) +
+        "ms, rasterize: " + raster_time.format_decimals(1) + "ms"
     );
 
     $window_draw_frame(window, image.bytes);
 
     // --- Frame rate limiting ---
-    $actor_sleep(20);
+    $actor_sleep(0.02);
 }
