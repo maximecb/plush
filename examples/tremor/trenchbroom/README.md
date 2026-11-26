@@ -30,3 +30,6 @@ Tremor maps are in the Valve 220 format that TrenchBroom writes.
   shut and rising by `lift` units to open.
 - `info_player_start` stands the player at its origin. Entities stand with
   their base at their origin, and `angle` gives their facing in degrees.
+  The `sword` stands point down with its tip at its origin instead, and
+  takes `angles`, pitch, yaw and roll, so that it can be driven into rock at
+  a slant.

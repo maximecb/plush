@@ -385,6 +385,57 @@ class SwipeVoice extends Voice {
     }
 }
 
+// A blade cutting the air: a deep rush of noise through a wide band whose
+// pitch rises as the blade comes on and drops once it has passed, as it would
+// going by the ear, with a soft hiss off the edge on top, tight around the
+// moment of the cut. The band is kept wide, since a narrow one sweeping
+// sounds like a vowel. It builds faster than the swipe does, as the blade
+// picks up speed, and is gone quickly after. The loudest moment is `peak`
+// seconds in.
+class SwordVoice extends Voice {
+    init(self, gain, peak) {
+        Voice.init(self, gain);
+        self.peak = peak.max(0.05);
+        self.len = self.peak + 0.22;
+        self.lo = 0.0; self.bp = 0.0;
+        self.hlo = 0.0; self.hbp = 0.0;
+        self.pitch = rand_range(0.9, 1.1);
+        self.hf = svf_coef(rand_range(1800.0, 2200.0));
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            self.t = self.t + DT;
+
+            // Rising as the cube of the way to the peak, falling as a square
+            let var env = 0.0;
+            let var hz = 0.0;
+            if (self.t < self.peak) {
+                let s = self.t / self.peak;
+                env = s * s * s;
+                hz = 160.0 + 520.0 * s * s;
+            } else {
+                let u = ((self.t - self.peak) / (self.len - self.peak)).min(1.0);
+                env = (1.0 - u) * (1.0 - u);
+                hz = 680.0 - 480.0 * u;
+            }
+
+            let white = noise();
+            let f = svf_coef(hz * self.pitch);
+            self.lo = self.lo + f * self.bp;
+            self.bp = self.bp + f * (white - self.lo - 1.1 * self.bp);
+
+            self.hlo = self.hlo + self.hf * self.hbp;
+            self.hbp = self.hbp + self.hf * (white - self.hlo - 1.4 * self.hbp);
+            let edge = env * env * env;
+
+            let v = self.bp * env * 0.95 + self.hbp * edge * 0.05;
+            mix.set_f32(i, mix.get_f32(i) + v * self.gain);
+        }
+        return self.t < self.len;
+    }
+}
+
 // A spider's hiss: high, breathy noise that rises fast and tails off, longer
 // as it dies
 class HissVoice extends Voice {
@@ -644,6 +695,7 @@ fun make_voice(kind, gain, param) {
     if (kind == "door") return DoorVoice(gain, param);
     if (kind == "stomp") return StompVoice(gain);
     if (kind == "swipe") return SwipeVoice(gain, param);
+    if (kind == "sword") return SwordVoice(gain, param);
     if (kind == "claw_hit") return ClawHitVoice(gain);
     if (kind == "hiss") return HissVoice(gain, param > 0.0);
     if (kind == "gib") return GibVoice(gain);

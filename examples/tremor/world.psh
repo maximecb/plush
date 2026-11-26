@@ -267,7 +267,8 @@ fun set_box_brush_y(b, y0, y1) {
 }
 
 // A point entity of the map: what kind of entity, and where it stands, facing
-// along yaw in radians, with the rest of its keys
+// along yaw in radians, with the rest of its keys. Pitch and roll, also in
+// radians, come from `angles` and are 0 without it.
 class EntitySpec {
     init(self, kind, x, y, z, yaw, keys) {
         self.kind = kind;
@@ -275,6 +276,13 @@ class EntitySpec {
         self.y = y;
         self.z = z;
         self.yaw = yaw;
+        self.pitch = 0.0;
+        self.roll = 0.0;
+        if (keys.has("angles")) {
+            let a = valve_words(keys["angles"]);
+            self.pitch = parse_num(a[0]) * PI / 180.0;
+            self.roll = parse_num(a[2]) * PI / 180.0;
+        }
         self.keys = keys;
     }
 

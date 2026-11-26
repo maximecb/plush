@@ -6,7 +6,7 @@
 // An entity may have a 3D model, which is drawn standing at its position and
 // facing along its yaw, posed by the animation it is playing.
 
-from ./physics import move_body, brush_top, brush_hits, is_lava, ray_brushes, GRAVITY, PUSH_RATE;
+from ./physics import move_body, brush_top, brush_hits, is_lava, ray_brushes, contains, GRAVITY, PUSH_RATE;
 from ./models import get_model, add_model, box_model, blob_model, models;
 from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER, UNITS_PER_METER;
 from ./lighting import light_level_at, occluded, SHADE_MAX;
@@ -226,6 +226,33 @@ fun pickup_prop(x, y, z, yaw, model, height, spin, item, amount) {
     p.pickup = item;
     p.amount = amount;
     p.radius = p.radius.max(PICKUP_RADIUS);
+    return p;
+}
+
+// How long the sword is, from the tip of its blade to the end of its hilt
+let SWORD_LENGTH = 1.1;
+
+// The sword as the map places it, point down with its tip at the origin, as
+// though driven into whatever is there. Pitch tips its hilt towards the way
+// it faces, and roll tips it to the right. The flat of the blade faces along
+// its yaw.
+fun planted_sword(spec) {
+    let sy = spec.yaw.sin(); let cy = spec.yaw.cos();
+    let sp = spec.pitch.sin(); let cp = spec.pitch.cos();
+    let sr = spec.roll.sin(); let cr = spec.roll.cos();
+
+    // Forward, right and up, pitched and then rolled
+    let fx = sy; let fz = cy;
+    let rx = cy; let rz = 0.0 - sy;
+    let px = sy * cp; let py = 0.0 - sp; let pz = cy * cp;
+    let ux = sy * sp; let uy = cp; let uz = cy * sp;
+    let hx = ux * cr + rx * sr; let hy = uy * cr; let hz = uz * cr + rz * sr;
+
+    // The model runs from the end of the hilt up to the tip, so it is drawn
+    // from the hilt, along the blade towards the tip
+    let p = pickup_prop(spec.x + hx * SWORD_LENGTH, spec.y + hy * SWORD_LENGTH, spec.z + hz * SWORD_LENGTH,
+        spec.yaw, "long_sword", SWORD_LENGTH, 0.0, "sword", 0);
+    p.basis = [px, py, pz, 0.0 - hx, 0.0 - hy, 0.0 - hz];
     return p;
 }
 
@@ -573,6 +600,7 @@ fun spawn_entity(spec) {
     if (k == "armor_shard") return pickup_prop(x, y, z, yaw, "armor_shard", 0.675, 1.2, "armor", 2);
     if (k == "shotgun") return pickup_prop(x, y, z, yaw, "shotgun", 0.6, 1.2, "shotgun", 8);
     if (k == "shotgun_ammo") return pickup_prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0.0, "shells", 10);
+    if (k == "sword") return planted_sword(spec);
     if (k == "relic") return Relic(x, y, z, yaw);
     if (k == "keycard") return pickup_prop(x, y, z, yaw, "keycard", 0.375, 1.5, "keycard", 1);
 
@@ -612,7 +640,8 @@ fun spawn_placed(w, player, out) {
         }
         else {
             let e = spawn_entity(spec);
-            if (e instanceof Prop && e.pickup != nil) land_pickup(w, e);
+            // One placed at an angle stays just where the map puts it
+            if (e instanceof Prop && e.pickup != nil && e.basis == nil) land_pickup(w, e);
             out.push(e);
         }
     }
@@ -1731,7 +1760,7 @@ fun shoot(player, list) {
         let len = (dx * dx + dy * dy + dz * dz).sqrt();
         dx = dx / len; dy = dy / len; dz = dz / len;
 
-        let res = trace_monsters(list, ox, oy, oz, dx, dy, dz);
+        let res = trace_monsters(list, ox, oy, oz, dx, dy, dz, SHOT_RANGE);
         if (res == nil) continue;
         let e = res[0];
         let t = res[1];
@@ -1752,10 +1781,10 @@ fun shoot(player, list) {
 }
 
 // The first monster along a ray from (ox, oy, oz) in the unit direction
-// (dx, dy, dz) within the shot's range, as [monster, distance], or nil
-fun trace_monsters(list, ox, oy, oz, dx, dy, dz) {
+// (dx, dy, dz) within a range, as [monster, distance], or nil
+fun trace_monsters(list, ox, oy, oz, dx, dy, dz, range) {
     let var best = nil;
-    let var best_t = SHOT_RANGE;
+    let var best_t = range;
     for (let var i = 0; i < list.len; ++i) {
         let e = list[i];
         if (!(e instanceof Monster) || e.gone) continue;
@@ -2218,10 +2247,45 @@ class HeldPose {
         // How long a shot takes, recoil and reloading included, before the
         // next one can be fired, in seconds
         self.cycle = 1.0;
+
+        // How far it tips its front up and turns its top to the left at
+        // rest, and where along the model's y the hand holds it, in the
+        // model's units from its middle. The hand is what x, y, z place, and
+        // what it turns about.
+        self.pitch = 0.0;
+        self.roll = 0.0;
+        self.grip = 0.0;
+
+        // Whether firing it takes a shell and makes a flash, and the sound it
+        // makes, with the parameter that sound takes
+        self.shells = true;
+        self.muzzle = true;
+        self.sound = model;
+        self.sound_param = 0.0;
     }
 }
 
-let WEAPONS = ["shotgun"];
+// The weapons, in the order of the number keys that pick them
+let WEAPONS = ["sword", "shotgun"];
+
+// The sword's reach from the eye, and how much a blow takes off
+let SWORD_REACH = 2.2;
+let SWORD_DAMAGE = 40.0;
+
+// The sword's swing, in seconds: drawn back, the cut across the view, and the
+// return to rest, with the blow landing partway through the cut. The poses
+// it passes through are offsets from where it is held at rest, as [x, y, z,
+// pitch, yaw, roll]: pushed out away from the eye and drawn back over the
+// shoulder, then cut down across the view to the lower left.
+let SWING_BACK = 0.17;
+let SWING_CUT = 0.11;
+let SWING_HIT = SWING_BACK + SWING_CUT * 0.6;
+let SWING_TIME = 0.65;
+let SWING_DRAWN = [0.12, 0.2, 0.24, 0.1, 0 - 0.6, 0 - 0.6];
+let SWING_DONE = [0 - 0.6, 0 - 0.15, 0.1, 0 - 0.6, 0 - 0.9, 2.3];
+
+// The pose of the swing this frame, reused from one frame to the next
+let swing_offset = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
 fun held_pose(weapon) {
     if (weapon == "shotgun") {
@@ -2232,8 +2296,92 @@ fun held_pose(weapon) {
         p.cycle = 0.85;
         return p;
     }
+    if (weapon == "sword") {
+        let p = HeldPose("long_sword", 0.045, 0.42, 0 - 0.62, 0.9, 1.25);
+        p.pitch = 0 - 0.4;
+        p.roll = 0 - 0.3;
+        p.grip = 0 - 11.5;
+        p.cycle = SWING_TIME;
+        p.shells = false;
+        p.muzzle = false;
+        p.sound = "sword";
+        p.sound_param = SWING_HIT;
+        return p;
+    }
     return nil;
 }
+
+// The sword's pose `t` seconds into a swing, as an offset like those above,
+// into out
+fun swing_pose(t, out) {
+    let var a = nil;
+    let var b = nil;
+    let var u = 0.0;
+    if (t < SWING_BACK) {
+        u = smooth(t / SWING_BACK); b = SWING_DRAWN;
+    } else if (t < SWING_BACK + SWING_CUT) {
+        // The cut picks up speed as it goes
+        let c = (t - SWING_BACK) / SWING_CUT;
+        u = c * c; a = SWING_DRAWN; b = SWING_DONE;
+    } else {
+        u = 1.0 - smooth((t - SWING_BACK - SWING_CUT) / (SWING_TIME - SWING_BACK - SWING_CUT));
+        b = SWING_DONE;
+    }
+    for (let var i = 0; i < 6; ++i) {
+        let from = a == nil ? 0.0 : a[i];
+        out[i] = from + (b[i] - from) * u;
+    }
+}
+
+// Each blow of the sword is traced along a fan of rays through the cut, this
+// far apart up and down and to each side, in radians
+let SWING_FAN = 0.22;
+
+// Bring the sword down on whatever monsters are in front of the player and
+// within its reach. Each one it finds is struck once.
+fun sword_blow(player, list) {
+    let ox = player.x; let oy = player.eye_y(); let oz = player.z;
+    let hit = [];
+    for (let var i = 0 - 1; i <= 1; ++i) {
+        for (let var j = 0 - 1; j <= 1; ++j) {
+            let yaw = player.yaw + i.to_f() * SWING_FAN;
+            let pitch = player.pitch + j.to_f() * SWING_FAN;
+            let dx = yaw.sin() * pitch.cos(); let dy = pitch.sin(); let dz = yaw.cos() * pitch.cos();
+            let res = trace_monsters(list, ox, oy, oz, dx, dy, dz, SWORD_REACH);
+            if (res == nil) continue;
+            let e = res[0];
+            let var seen = false;
+            for (let var k = 0; k < hit.len; ++k) { if (hit[k] == e) seen = true; }
+            if (seen) continue;
+            let t = res[1];
+            let hx = ox + dx * t; let hy = oy + dy * t; let hz = oz + dz * t;
+            if (occluded(ox, oy, oz, hx, hy, hz)) continue;
+            hit.push(e);
+            spawn_blood(hx - dx * 0.2, hy, hz - dz * 0.2, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS * 3, e.blood_floor());
+            emit_sound("claw_hit", hx, hy, hz, 0.0, HIT_GAIN);
+        }
+    }
+    for (let var i = 0; i < hit.len; ++i) hit[i].hurt(SWORD_DAMAGE);
+}
+
+// Use the weapon the player just fired: the shotgun's pellets fly at once,
+// while the sword's blow lands later in its swing, which strike() sees to
+fun attack(player, list) {
+    if (player.weapon == "shotgun") shoot(player, list);
+    else if (player.weapon == "sword") player.blow_due = true;
+}
+
+// Land the blow of a swing once it reaches that point
+fun strike(player, list) {
+    if (!player.blow_due || player.shot_time < SWING_HIT) return;
+    player.blow_due = false;
+    if (player.weapon == "sword" && !player.dead) sword_blow(player, list);
+}
+
+// How long a weapon takes to come up once picked, and how far below where it
+// is held it starts
+let RAISE_TIME = 0.3;
+let RAISE_DROP = 0.5;
 
 // --- Firing ---
 //
@@ -2318,9 +2466,15 @@ class Player extends Entity {
         self.jolt_yaw = 0.0;
         self.jolt_pitch = 0.0;
 
-        // The weapon in hand, nil for none, and how it is held
+        // The weapons they have, the one in hand, nil for none, how it is
+        // held, and how long since it was picked
+        self.weapons = [];
         self.weapon = nil;
         self.held = nil;
+        self.raise_time = RAISE_TIME;
+
+        // Set when a swing of the sword has yet to land its blow
+        self.blow_due = false;
 
         // How far through a stride the weapon bob is, in radians, and how
         // much of it shows, from 0 standing still to 1 walking
@@ -2467,15 +2621,34 @@ class Player extends Entity {
             if (self.keycard) return false;
             self.keycard = true;
         } else {
-            // A weapon, which comes loaded
-            let pose = held_pose(item);
-            if (pose == nil) return false;
-            self.weapon = item;
-            self.held = pose;
+            // A weapon, which comes loaded. A new one is taken in hand; one
+            // they already have is only worth its shells.
+            if (held_pose(item) == nil) return false;
+            if (contains(self.weapons, item)) {
+                if (amount == 0 || self.shells >= MAX_SHELLS) return false;
+            } else {
+                self.weapons.push(item);
+                self.pick_weapon(item);
+            }
             self.shells = (self.shells + amount).min(MAX_SHELLS);
         }
         self.events.push("pickup");
         return true;
+    }
+
+    // Take a weapon they have in hand, by its name
+    pick_weapon(self, item) {
+        if (item == self.weapon || !contains(self.weapons, item)) return;
+        self.weapon = item;
+        self.held = held_pose(item);
+        self.raise_time = 0.0;
+        self.shot_time = 100.0;
+        self.blow_due = false;
+    }
+
+    // Take the weapon of a number key in hand, if they have it
+    pick_slot(self, n) {
+        if (n >= 1 && n <= WEAPONS.len) self.pick_weapon(WEAPONS[n - 1]);
     }
 
     // Advance the player by one frame. `mf` and `ms` are how hard they are
@@ -2582,14 +2755,19 @@ class Player extends Entity {
     // Fire the weapon in hand, if there is one, it is loaded and the last
     // shot is over. Returns whether it went off.
     fire(self) {
-        if (self.dead || self.finished || self.held == nil || self.shells <= 0 || self.shot_time < self.held.cycle) return false;
+        let h = self.held;
+        if (self.dead || self.finished || h == nil || self.shot_time < h.cycle || self.raise_time < RAISE_TIME) return false;
+        if (h.shells) {
+            if (self.shells <= 0) return false;
+            self.shells = self.shells - 1;
+        }
         self.shot_time = 0.0;
-        self.shells = self.shells - 1;
         return true;
     }
 
     update_weapon(self, dt) {
         self.shot_time = self.shot_time + dt;
+        self.raise_time = self.raise_time + dt;
     }
 
     // How far into the kick of the last shot the weapon is, from 0 at rest to
@@ -2611,7 +2789,7 @@ class Player extends Entity {
 
     // How bright the muzzle flash is, from 1 as the shot goes off to 0
     flash(self) {
-        if (self.shot_time >= FLASH_TIME) return 0.0;
+        if (self.held == nil || !self.held.muzzle || self.shot_time >= FLASH_TIME) return 0.0;
         return 1.0 - self.shot_time / FLASH_TIME;
     }
 
@@ -2621,19 +2799,39 @@ class Player extends Entity {
         let h = self.held;
         if (h == nil) return nil;
 
-        let k = self.kick();
-        let p = self.pump();
-        let x = h.x + self.bob_x();
-        let y = h.y + self.bob_y() + KICK_UP * k - PUMP_DROP * p;
-        let z = h.z - KICK_BACK * k;
-        let yaw = h.yaw + self.bob_yaw() + PUMP_YAW * p;
-        let pitch = KICK_PITCH * k - PUMP_PITCH * p;
+        // Where the hand is, and how the weapon is turned in it
+        let var x = h.x + self.bob_x();
+        let var y = h.y + self.bob_y() - RAISE_DROP * (1.0 - smooth(self.raise_time / RAISE_TIME));
+        let var z = h.z;
+        let var yaw = h.yaw + self.bob_yaw();
+        let var pitch = h.pitch;
+        let var roll = h.roll;
+        if (self.weapon == "sword") {
+            let s = swing_offset;
+            swing_pose(self.shot_time, s);
+            x = x + s[0]; y = y + s[1]; z = z + s[2];
+            pitch = pitch + s[3]; yaw = yaw + s[4]; roll = roll + s[5];
+        } else {
+            let k = self.kick();
+            let p = self.pump();
+            y = y + KICK_UP * k - PUMP_DROP * p;
+            z = z - KICK_BACK * k;
+            yaw = yaw + PUMP_YAW * p;
+            pitch = pitch + KICK_PITCH * k - PUMP_PITCH * p;
+        }
+
+        // The model's middle, from the hand, along its length as turned
+        let g = h.grip * h.scale;
+        let cp = pitch.cos();
+        x = x + g * roll.sin() * cp;
+        y = y - g * roll.cos() * cp;
+        z = z + g * pitch.sin();
 
         // The flash lights up the weapon it comes out of, part of the way to
         // full brightness
         let lit = level + (255.0 - level) * FLASH_LIGHT * self.flash();
 
-        return [h.model.id, 0 - 1, 0.0, x, y, z, yaw, h.scale, lit, true, pitch];
+        return [h.model.id, 0 - 1, 0.0, x, y, z, yaw, h.scale, lit, true, pitch, nil, nil, roll];
     }
 }
 

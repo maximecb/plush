@@ -2522,15 +2522,21 @@ fun view_dir_z(x, y, z) { return (x * sin_yaw + z * cos_yaw) * cos_pitch + y * s
 
 // The transform of a model held in front of the eye, into m: x, y, z are
 // where the middle of the model goes in view space, yaw turns it about the
-// view's up axis and then pitch about its right axis, tipping its front up.
-// The axes are those of a model standing in the world, without the camera.
-fun held_matrix(m, model, x, y, z, yaw, pitch, s) {
+// view's up axis, then pitch about its right axis, tipping its front up, and
+// then roll about the line of sight, turning its top to the left. The axes
+// are those of a model standing in the world, without the camera.
+fun held_matrix(m, model, x, y, z, yaw, pitch, roll, s) {
     let ce = yaw.cos(); let se = yaw.sin();
     let cp = pitch.cos(); let sp = pitch.sin();
+    let cr = roll.cos(); let sr = roll.sin();
 
-    m[0] = (0.0 - ce) * s; m[4] = se * sp * s; m[8] = se * cp * s;
-    m[1] = 0.0;            m[5] = cp * s;      m[9] = (0.0 - sp) * s;
-    m[2] = se * s;         m[6] = ce * sp * s; m[10] = ce * cp * s;
+    // Each model axis across and up the view before the roll, then rolled
+    let xx = (0.0 - ce) * s; let xy = se * sp * s;
+    let yy = cp * s;
+    let zx = se * s;         let zy = ce * sp * s;
+    m[0] = xx * cr - xy * sr; m[4] = xx * sr + xy * cr; m[8] = se * cp * s;
+    m[1] = 0.0 - yy * sr;     m[5] = yy * cr;           m[9] = (0.0 - sp) * s;
+    m[2] = zx * cr - zy * sr; m[6] = zx * sr + zy * cr; m[10] = ce * cp * s;
 
     let bx = model.mid_x; let by = model.mid_y; let bz = model.mid_z;
     m[3] = x - (m[0] * bx + m[1] * by + m[2] * bz);
@@ -2576,6 +2582,12 @@ fun inst_basis(inst) {
     return nil;
 }
 
+// The roll of an entry held in view, which it may have after its basis
+fun inst_roll(inst) {
+    if (inst.len > 13) return inst[13];
+    return 0.0;
+}
+
 // Draw one entry of the draw list into the model s-buffer. One standing in
 // the world has been through `instance_in_band` already.
 fun draw_instance(inst) {
@@ -2591,7 +2603,7 @@ fun draw_instance(inst) {
     let m = model_mat;
 
     if (in_view) {
-        held_matrix(m, model, ex, ey, ez, yaw, inst[10], s);
+        held_matrix(m, model, ex, ey, ez, yaw, inst[10], inst_roll(inst), s);
 
         // Its 1/z is stored scaled up by this much, so that it wins against
         // any wall the eye is standing close enough to for it to reach into.
@@ -2959,7 +2971,7 @@ fun set_muzzle_flash(inst, px, py, pz, strength) {
     let model = models[inst[0]];
     let s = inst[7];
     let m = Array.with_size(12, 0.0);
-    held_matrix(m, model, inst[3], inst[4], inst[5], inst[6], inst[10], s);
+    held_matrix(m, model, inst[3], inst[4], inst[5], inst[6], inst[10], inst_roll(inst), s);
 
     let vx = m[0] * px + m[1] * py + m[2] * pz + m[3];
     let vy = m[4] * px + m[5] * py + m[6] * pz + m[7];
