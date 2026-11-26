@@ -6,7 +6,7 @@
 // An entity may have a 3D model, which is drawn standing at its position and
 // facing along its yaw, posed by the animation it is playing.
 
-from ./physics import move_body, brush_top, is_lava, ray_brushes, GRAVITY;
+from ./physics import move_body, brush_top, brush_hits, is_lava, ray_brushes, GRAVITY, PUSH_RATE;
 from ./models import get_model, add_model, box_model, blob_model, models;
 from ./world import load_texture, box_brush, set_box_brush_y, TEX_DIR, TEXELS_PER_METER, UNITS_PER_METER;
 from ./lighting import light_level_at, occluded, SHADE_MAX;
@@ -111,6 +111,7 @@ class Entity {
         // far it overlaps them this frame, which move_body() pushes it out of
         self.solid = false;
         self.push_x = 0.0;
+        self.push_y = 0.0;
         self.push_z = 0.0;
 
         // The Model it is drawn with, or nil for none, how much it is scaled,
@@ -142,7 +143,18 @@ class Entity {
         // upright, such as something walking up a wall. nil goes by yaw and
         // pitch instead.
         self.basis = nil;
+
+        // Where it was when last tested against the hazards, and what the
+        // worst of those it was in does each tick. Far off to start with, so
+        // the first tick tests it.
+        self.hazard_x = 1000000.0;
+        self.hazard_y = 1000000.0;
+        self.hazard_z = 1000000.0;
+        self.hazard_damage = 0;
     }
+
+    // The bottom of its box, as far as what it is in or on goes
+    base_y(self) { return self.y; }
 
     // Give the entity a model, by its name under examples/tremor/models/,
     // scaled so that it stands `height` meters tall
@@ -577,6 +589,7 @@ fun spawn_entities(w, player) {
     let out = [];
     spawn_placed(w, player, out);
     for (let var i = 0; i < w.door_specs.len; ++i) out.push(Door(w, w.door_specs[i], player));
+    build_hazards(w);
     return out;
 }
 
@@ -956,6 +969,12 @@ class Monster extends Entity {
         return self.y;
     }
 
+    // Falling over lifts its y, but its body stays where it fell
+    base_y(self) {
+        if (self.state == "dead") return self.dead_y;
+        return self.y;
+    }
+
     // Its body's middle and the way up its body, which tips over with it
     up_x(self) { return 0.0 - self.pitch.sin() * self.yaw.sin(); }
     up_y(self) { return self.pitch.cos(); }
@@ -1047,6 +1066,10 @@ class Monster extends Entity {
             }
             if (self.anim_time >= dur) self.set_state("chase");
         }
+
+        // Standing still on the ground with nothing pushing it, it stays put
+        // without move_body() going over every brush to find that out
+        if (self.state == "idle" && self.on_ground && self.push_x == 0.0 && self.push_z == 0.0) return;
 
         let start_x = self.x;
         let start_z = self.z;
@@ -1157,7 +1180,6 @@ class Spider extends Monster {
     init(self, x, y, z, yaw, player) {
         Monster.init(self, x, y, z, yaw, "spider", SPIDER_HEIGHT, player);
         self.radius = 0.45;
-        self.solid = false;
 
         // Any pellet of a shot that finds it is enough: a blast kills it
         // however few of them do
@@ -1361,6 +1383,30 @@ class Spider extends Monster {
         self.vel_x = fx * self.speed; self.vel_y = fy * self.speed; self.vel_z = fz * self.speed;
     }
 
+    // Pushed by the bodies it overlaps, it slides along the surface it is on,
+    // as long as the way is clear and there is surface to slide onto
+    shove(self, w, dt) {
+        let nx = self.nx; let ny = self.ny; let nz = self.nz;
+        let into = self.push_x * nx + self.push_y * ny + self.push_z * nz;
+        let k = PUSH_RATE * dt;
+        let sx = (self.push_x - nx * into) * k;
+        let sy = (self.push_y - ny * into) * k;
+        let sz = (self.push_z - nz * into) * k;
+        if (vlen(sx, sy, sz) < 0.0001) return;
+
+        let ax = self.x + nx * SPIDER_PROBE; let ay = self.y + ny * SPIDER_PROBE; let az = self.z + nz * SPIDER_PROBE;
+        if (ray_brushes(w, ax, ay, az, ax + sx, ay + sy, az + sz) != nil) return;
+
+        let tx = self.x + sx; let ty = self.y + sy; let tz = self.z + sz;
+        let down = ray_brushes(w, tx + nx * SPIDER_PROBE, ty + ny * SPIDER_PROBE, tz + nz * SPIDER_PROBE,
+            tx - nx * SPIDER_REACH, ty - ny * SPIDER_REACH, tz - nz * SPIDER_REACH);
+        if (down == nil || is_lava(down[4])) return;
+        if (down[1] * nx + down[2] * ny + down[3] * nz < 0.85) return;
+        let t = down[0] * (SPIDER_PROBE + SPIDER_REACH);
+        self.attach(tx + nx * (SPIDER_PROBE - t), ty + ny * (SPIDER_PROBE - t), tz + nz * (SPIDER_PROBE - t),
+            down[1], down[2], down[3], self.fx, self.fy, self.fz);
+    }
+
     // Lava ahead: turn aside rather than walk into it
     turn_away(self) {
         let rx = self.ny * self.fz - self.nz * self.fy;
@@ -1388,12 +1434,6 @@ class Spider extends Monster {
 
         let t = (hit[0] * k).min(1.0);
         let hx = self.x + sx * t; let hy = self.y + sy * t; let hz = self.z + sz * t;
-        if (is_lava(hit[4])) {
-            self.x = hx; self.y = hy; self.z = hz;
-            emit_sound("hiss", hx, hy, hz, 1.0, PAIN_GAIN);
-            self.gone = true;
-            return true;
-        }
         self.attach(hx, hy, hz, hit[1], hit[2], hit[3], self.vel_x, self.vel_y, self.vel_z);
         self.vel_x = 0.0; self.vel_y = 0.0; self.vel_z = 0.0;
         return true;
@@ -1452,13 +1492,14 @@ class Spider extends Monster {
             return;
         }
 
-        // The floor its blood falls to
-        self.floor_wait = self.floor_wait - dt;
+        // The floor its blood falls to, which only changes once it moves
+        if (self.state != "idle") self.floor_wait = self.floor_wait - dt;
         if (self.floor_wait <= 0.0) {
             self.floor_wait = 0.3;
             let g = ground_below(w, self.x, self.y - 0.05, self.z);
             self.floor_y = g == nil ? self.y : g[0];
         }
+        if (!self.flying) self.shove(w, dt);
 
         // How far the middle of the player's body is from its own
         let cx = self.x + self.nx * 0.2; let cy = self.y + self.ny * 0.2; let cz = self.z + self.nz * 0.2;
@@ -2004,39 +2045,114 @@ fun update_blood(dt, ex, ey, ez) {
 // The solid bodies this frame, reused from one frame to the next
 let solids = [];
 
-// Find which solid bodies overlap and by how much, for move_body() to push
-// them apart. The player is one of them, though not in the list. Every pair is
-// tried, which is cheap for the few dozen monsters a level has; a grid would
-// be the next step for hundreds.
+// Each solid body's capsule this frame, CAP_SIZE numbers apiece: the two ends
+// of its axis, its radius, and the middle and radius of a sphere round it all
+let caps = [];
+let CAP_SIZE = 11;
+
+// Add a body's capsule to caps. It runs up from its feet along the way up it
+// has, upright for most bodies and off the surface for a spider, and is as
+// wide as the body. One shorter than it is wide is a sphere at its middle.
+fun add_capsule(e) {
+    let var ux = 0.0; let var uy = 1.0; let var uz = 0.0;
+    if (e.basis != nil) { ux = e.basis[3]; uy = e.basis[4]; uz = e.basis[5]; }
+    let r = e.radius;
+    let half = e.height * 0.5;
+    let lo = r.min(half);
+    let hi = (e.height - r).max(half);
+    let ax = e.x + ux * lo; let ay = e.y + uy * lo; let az = e.z + uz * lo;
+    let bx = e.x + ux * hi; let by = e.y + uy * hi; let bz = e.z + uz * hi;
+    caps.push(ax); caps.push(ay); caps.push(az);
+    caps.push(bx); caps.push(by); caps.push(bz);
+    caps.push(r);
+    caps.push((ax + bx) * 0.5); caps.push((ay + by) * 0.5); caps.push((az + bz) * 0.5);
+    caps.push((hi - lo) * 0.5 + r);
+}
+
+// How far along each of two segments, a0 to a1 and b0 to b1, their closest
+// points are, from 0 to 1, left in seg_s and seg_t
+let var seg_s = 0.0;
+let var seg_t = 0.0;
+
+fun closest_on_segments(a0x, a0y, a0z, a1x, a1y, a1z, b0x, b0y, b0z, b1x, b1y, b1z) {
+    let d1x = a1x - a0x; let d1y = a1y - a0y; let d1z = a1z - a0z;
+    let d2x = b1x - b0x; let d2y = b1y - b0y; let d2z = b1z - b0z;
+    let rx = a0x - b0x; let ry = a0y - b0y; let rz = a0z - b0z;
+    let aa = d1x * d1x + d1y * d1y + d1z * d1z;
+    let ee = d2x * d2x + d2y * d2y + d2z * d2z;
+    let f = d2x * rx + d2y * ry + d2z * rz;
+    let eps = 0.000001;
+
+    // Either one may be a point
+    if (aa <= eps && ee <= eps) { seg_s = 0.0; seg_t = 0.0; return; }
+    if (aa <= eps) { seg_s = 0.0; seg_t = (f / ee).clip(0.0, 1.0); return; }
+    let c = d1x * rx + d1y * ry + d1z * rz;
+    if (ee <= eps) { seg_t = 0.0; seg_s = ((0.0 - c) / aa).clip(0.0, 1.0); return; }
+
+    // The closest points of the two lines, then clamped onto the segments.
+    // Parallel ones are taken from the start of the first.
+    let b = d1x * d2x + d1y * d2y + d1z * d2z;
+    let denom = aa * ee - b * b;
+    seg_s = 0.0;
+    if (denom > eps) seg_s = ((b * f - c * ee) / denom).clip(0.0, 1.0);
+    seg_t = (b * seg_s + f) / ee;
+    if (seg_t < 0.0) {
+        seg_t = 0.0;
+        seg_s = ((0.0 - c) / aa).clip(0.0, 1.0);
+    } else if (seg_t > 1.0) {
+        seg_t = 1.0;
+        seg_s = ((b - c) / aa).clip(0.0, 1.0);
+    }
+}
+
+// Find which solid bodies overlap and by how much, for each to be pushed
+// apart as it moves: move_body() takes the push along the ground, and a
+// spider along the surface it is on. The player is one of them, though not in
+// the list. Every pair is tried, which is cheap for the few dozen monsters a
+// level has, and the spheres round them rule most pairs out at once.
 fun separate_bodies(player, list) {
     solids.resize(0, nil);
-    player.push_x = 0.0;
-    player.push_z = 0.0;
+    caps.resize(0, nil);
+    player.push_x = 0.0; player.push_y = 0.0; player.push_z = 0.0;
     if (player.solid) solids.push(player);
     for (let var i = 0; i < list.len; ++i) {
         let e = list[i];
-        e.push_x = 0.0;
-        e.push_z = 0.0;
+        e.push_x = 0.0; e.push_y = 0.0; e.push_z = 0.0;
         if (e.solid) solids.push(e);
     }
+    for (let var i = 0; i < solids.len; ++i) add_capsule(solids[i]);
 
     for (let var i = 0; i < solids.len; ++i) {
-        let a = solids[i];
+        let ca = i * CAP_SIZE;
         for (let var j = i + 1; j < solids.len; ++j) {
-            let b = solids[j];
-            let var dx = a.x - b.x;
-            let var dz = a.z - b.z;
-            let r = a.radius + b.radius;
-            let d2 = dx * dx + dz * dz;
+            let cb = j * CAP_SIZE;
+            let mx = caps[ca + 7] - caps[cb + 7];
+            let my = caps[ca + 8] - caps[cb + 8];
+            let mz = caps[ca + 9] - caps[cb + 9];
+            let reach = caps[ca + 10] + caps[cb + 10];
+            if (mx * mx + my * my + mz * mz >= reach * reach) continue;
+
+            closest_on_segments(
+                caps[ca], caps[ca + 1], caps[ca + 2], caps[ca + 3], caps[ca + 4], caps[ca + 5],
+                caps[cb], caps[cb + 1], caps[cb + 2], caps[cb + 3], caps[cb + 4], caps[cb + 5]);
+            let px = caps[ca] + (caps[ca + 3] - caps[ca]) * seg_s;
+            let py = caps[ca + 1] + (caps[ca + 4] - caps[ca + 1]) * seg_s;
+            let pz = caps[ca + 2] + (caps[ca + 5] - caps[ca + 2]) * seg_s;
+            let qx = caps[cb] + (caps[cb + 3] - caps[cb]) * seg_t;
+            let qy = caps[cb + 1] + (caps[cb + 4] - caps[cb + 1]) * seg_t;
+            let qz = caps[cb + 2] + (caps[cb + 5] - caps[cb + 2]) * seg_t;
+            let var dx = px - qx; let var dy = py - qy; let var dz = pz - qz;
+            let r = caps[ca + 6] + caps[cb + 6];
+            let d2 = dx * dx + dy * dy + dz * dz;
             if (d2 >= r * r) continue;
-            if (a.y >= b.y + b.height || b.y >= a.y + a.height) continue;
 
             // Right on top of each other, they part along an arbitrary line
             let var d = d2.sqrt();
-            if (d < 0.001) { dx = 1.0; dz = 0.0; d = 1.0; }
+            if (d < 0.001) { dx = 1.0; dy = 0.0; dz = 0.0; d = 1.0; }
             let s = (r - d) * 0.5 / d;
-            a.push_x = a.push_x + dx * s; a.push_z = a.push_z + dz * s;
-            b.push_x = b.push_x - dx * s; b.push_z = b.push_z - dz * s;
+            let a = solids[i]; let b = solids[j];
+            a.push_x = a.push_x + dx * s; a.push_y = a.push_y + dy * s; a.push_z = a.push_z + dz * s;
+            b.push_x = b.push_x - dx * s; b.push_y = b.push_y - dy * s; b.push_z = b.push_z - dz * s;
         }
     }
 }
@@ -2213,10 +2329,12 @@ class Player extends Entity {
         return DEAD_ROLL * f * f;
     }
 
-    // Lose health, and die with none left
+    // Lose health, less what armor takes, and die with none left
     hurt(self, amount) {
         if (self.dead || self.finished) return;
-        self.health = (self.health - amount).max(0);
+        let saved = (amount * ARMOR_ABSORB).ceil().min(self.armor);
+        self.armor = self.armor - saved;
+        self.health = (self.health - (amount - saved)).max(0);
         self.hurt_time = 0.0;
         if (self.health <= 0) self.die();
     }
@@ -2249,13 +2367,10 @@ class Player extends Entity {
         self.hurt_time = 100.0;
     }
 
-    // Take a blow from something at (from_x, from_z): the damage, less what
-    // armor takes, a shove away from it, and a jolt to the aim in a random
-    // direction
+    // Take a blow from something at (from_x, from_z): the damage, a shove
+    // away from it, and a jolt to the aim in a random direction
     struck(self, amount, from_x, from_z) {
-        let saved = (amount * ARMOR_ABSORB).ceil().min(self.armor);
-        self.armor = self.armor - saved;
-        self.hurt(amount - saved);
+        self.hurt(amount);
 
         let dx = self.x - from_x;
         let dz = self.z - from_z;
@@ -2405,12 +2520,6 @@ class Player extends Entity {
         self.knock_z = self.knock_z * keep;
         move_body(w, self, dt, vx, vz, want_up);
 
-        // Lava is the end of them
-        if (is_lava(self.ground_plane)) {
-            self.hurt(self.health);
-            return;
-        }
-
         // Coming down hard enough to hear, which a step down a stair is not
         if (!was_on_ground && self.on_ground && fall_speed > LAND_SPEED) self.events.push("land");
 
@@ -2509,6 +2618,96 @@ class Player extends Entity {
     }
 }
 
+// --- Hazards ---
+//
+// Lava brushes and flames hurt the player and monsters in or on them, every
+// tick. Hazards never move, so a body is only tested again once it has moved.
+
+// Damage per second of lava and of a flame
+let LAVA_DPS = 40.0;
+let FIRE_DPS = 20.0;
+
+// How often hazards do their damage, in seconds
+let HAZARD_TICK = 0.2;
+
+// How far past a body's box a hazard still reaches it, so that standing on
+// lava counts
+let HAZARD_REACH = 0.05;
+
+// How far a body has to move to be tested again
+let HAZARD_MOVE = 0.01;
+
+// A brush, and the damage it does each tick
+class Hazard {
+    init(self, brush, dps) {
+        self.brush = brush;
+        self.damage = (dps * HAZARD_TICK + 0.5).floor();
+    }
+}
+
+let hazards = [];
+let var hazard_wait = 0.0;
+
+// Gather the hazards of the world's brushes and of the flames spawned
+fun build_hazards(w) {
+    hazards.resize(0, nil);
+    let brushes = w.brushes;
+    for (let var i = 0; i < brushes.len; ++i) {
+        let planes = brushes[i].planes;
+        for (let var j = 0; j < planes.len; ++j) {
+            if (is_lava(planes[j])) {
+                hazards.push(Hazard(brushes[i], LAVA_DPS));
+                break;
+            }
+        }
+    }
+    for (let var i = 0; i < flames.len; ++i) {
+        let f = flames[i];
+        let r = f.width * 0.5;
+        let b = box_brush(f.x - r, f.y, f.z - r, f.x + r, f.y + f.size, f.z + r);
+        hazards.push(Hazard(b, FIRE_DPS));
+    }
+}
+
+// The damage of the worst hazard a body is in, so that standing where two
+// lava brushes meet does not hurt twice as much
+fun hazard_damage_at(e, y) {
+    let hx = e.radius + HAZARD_REACH;
+    let hy = e.height * 0.5 + HAZARD_REACH;
+    let cy = y + e.height * 0.5;
+    let var worst = 0;
+    for (let var i = 0; i < hazards.len; ++i) {
+        let h = hazards[i];
+        if (h.damage > worst && brush_hits(h.brush, e.x, cy, e.z, hx, hy, hx)) worst = h.damage;
+    }
+    return worst;
+}
+
+fun burn(e) {
+    let y = e.base_y();
+    let moved = (e.x - e.hazard_x).abs() > HAZARD_MOVE || (y - e.hazard_y).abs() > HAZARD_MOVE ||
+        (e.z - e.hazard_z).abs() > HAZARD_MOVE;
+    if (moved) {
+        e.hazard_x = e.x; e.hazard_y = y; e.hazard_z = e.z;
+        e.hazard_damage = hazard_damage_at(e, y);
+    }
+    if (e.hazard_damage > 0) e.hurt(e.hazard_damage);
+}
+
+// Each tick, hurt the player and every monster by what they are in
+fun apply_hazards(player, list, dt) {
+    hazard_wait = hazard_wait - dt;
+    if (hazard_wait > 0.0) return;
+    hazard_wait = hazard_wait + HAZARD_TICK;
+    if (hazard_wait <= 0.0) hazard_wait = HAZARD_TICK;
+
+    burn(player);
+    for (let var i = 0; i < list.len; ++i) {
+        let e = list[i];
+        if (e instanceof Monster && !e.gone) burn(e);
+    }
+}
+
 // --- Starting over ---
 
 // Start the level over: the player back at the start with nothing, and every
@@ -2532,4 +2731,5 @@ fun restart_level(w, player, list) {
     player.restart();
     spawn_placed(w, player, list);
     for (let var i = 0; i < doors.len; ++i) list.push(doors[i]);
+    build_hazards(w);
 }
