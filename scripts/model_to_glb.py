@@ -28,6 +28,10 @@
 # shading that carry across, are merged and cut up again from their outline,
 # which changes nothing that can be seen.
 #
+# With --cap, flat holes such as an open bottom are closed, before any
+# simplifying. With --target-tris, --min-detail lets fine details, such as
+# small ribs, go before broad curves.
+#
 # The model can be turned so that given axes of the source become up (+Y) and
 # front (+Z), then rotated further, scaled and centred. Axes are named in
 # glTF's frame, Y up, which a .blend is converted to first.
@@ -1330,15 +1334,16 @@ def min_angle(pts):
         out = min(out, math.acos(max(-1.0, min(1.0, dot(u, v) / (lu * lv)))))
     return out
 
-def decimate(polys, target, ignore_normals=False, texels=256, seam_texels=1.0, keep=None):
+def decimate(polys, target, ignore_normals=False, texels=256, seam_texels=1.0, keep=None, min_detail=0.0):
     """Collapse edges, cheapest first by quadric error, until at most target
     triangles remain. A corner's uv and normal together are its wedge, or its
     uv alone with ignore_normals; edges where wedges change, and open edges,
     are seams, which a vertex only slides along, where they are straight on a
     texture of this many texels to within seam_texels, and where seams meet
     it stays. Vertices for which keep(pos) is true stay as they are, and so
-    do the faces between them. Returns triangles as polygons of corners (pos,
-    normal, uv, vertex id)."""
+    do the faces between them. Edges shorter than min_detail times the
+    model's diagonal are costed by absolute error. Returns triangles as
+    polygons of corners (pos, normal, uv, vertex id)."""
     import heapq
     tris = []
     pos = {}
@@ -1415,6 +1420,18 @@ def decimate(polys, target, ignore_normals=False, texels=256, seam_texels=1.0, k
             for v in (a[3], b[3]):
                 Q[v] = [x + y for x, y in zip(Q[v], q)]
 
+    # The points of the seams as they were, along each seam edge that has
+    # straightened them, so that its cost is how far it strays from them
+    seam_pts = {}
+    seam_bend_weight = 30.0
+
+    def seg_dist(p, a, b):
+        ab = sub(b, a)
+        l = dot(ab, ab)
+        t = max(0.0, min(1.0, dot(sub(p, a), ab) / l)) if l > 0 else 0.0
+        d = sub(p, [a[i] + ab[i] * t for i in range(3)])
+        return math.sqrt(dot(d, d))
+
     def plan(u, v):
         """The cost of moving u onto v, and the wedge each of u's wedges
         becomes, or None if that collapse isn't allowed"""
@@ -1458,6 +1475,15 @@ def decimate(polys, target, ignore_normals=False, texels=256, seam_texels=1.0, k
                 off = abs((p[0] - a[0]) * d[1] - (p[1] - a[1]) * d[0]) / ld if ld > 0 else math.hypot(p[0] - a[0], p[1] - a[1])
                 if off * texels > seam_texels:
                     return None
+        # Straightening a seam in space, such as a curved rim, costs how far
+        # the new edge passes from the points it replaces
+        seam_cost = 0.0
+        seam_edge = None
+        if seams_u:
+            w = seams_u[0] if seams_u[1] == v else seams_u[1]
+            pts = seam_pts.get(frozenset((w, u)), []) + seam_pts.get(frozenset((u, v)), []) + [pos[u]]
+            seam_edge = (frozenset((w, v)), pts)
+            seam_cost = seam_bend_weight * max(seg_dist(p, pos[w], pos[v]) for p in pts) ** 2
         # Away from seams, the merged vertex can go where the quadrics say
         # is best rather than onto v, which keeps rounded parts from caving
         # in; its uv and normal are taken along the edge
@@ -1523,7 +1549,9 @@ def decimate(polys, target, ignore_normals=False, texels=256, seam_texels=1.0, k
             q1 = min_angle(new)
             if q1 < 0.05 and q1 < min_angle(old):
                 return None
-        return max(0.0, quadric_error(q, place)) / max(dot(e, e), 1e-12 * diag * diag), mapping, attrs
+        scale = max(dot(e, e), (min_detail * diag) ** 2, 1e-12 * diag * diag)
+        cost = (max(0.0, quadric_error(q, place)) + seam_cost) / scale
+        return cost, mapping, attrs, seam_edge
 
     stamp = {v: 0 for v in pos}
     heap = []
@@ -1544,7 +1572,7 @@ def decimate(polys, target, ignore_normals=False, texels=256, seam_texels=1.0, k
         r = plan(u, v)
         if r is None:
             continue
-        _, mapping, attrs = r
+        _, mapping, attrs, seam_edge = r
 
         # The faces it leaves may not pass through any others, as the two
         # sides of a thin part would when pushed together
@@ -1579,6 +1607,8 @@ def decimate(polys, target, ignore_normals=False, texels=256, seam_texels=1.0, k
                 tris[t] = [mapping[wedge(c)] if c[3] == u else c for c in tris[t]]
                 vtris[v].add(t)
         del vtris[u]
+        if seam_edge is not None:
+            seam_pts[seam_edge[0]] = seam_edge[1]
         if attrs is not None:
             # The one wedge of v, moved
             pos[v] = attrs[0]
@@ -1593,6 +1623,67 @@ def decimate(polys, target, ignore_normals=False, texels=256, seam_texels=1.0, k
                 push(w, x)
                 push(x, w)
     return [tri for t, tri in enumerate(tris) if alive[t]]
+
+def on_triangle(p, tri, tol):
+    """Whether p is within tol of the plane of tri, and inside it"""
+    n = cross(sub(tri[1], tri[0]), sub(tri[2], tri[0]))
+    ln = math.sqrt(dot(n, n))
+    if ln == 0 or abs(dot(sub(p, tri[0]), n)) / ln > tol:
+        return False
+    for k in range(3):
+        a, b = tri[k], tri[(k + 1) % 3]
+        if dot(cross(sub(b, a), sub(p, a)), n) < 0:
+            return False
+    return True
+
+def cap_holes(polys, uc, vc, radius):
+    """Close each flat loop of open edges with a fan of triangles around its
+    centre, textured with the disc of this radius around (uc, vc)"""
+    pos = {}
+    half = {}
+    for corners in polys:
+        for k, c in enumerate(corners):
+            pos[c[3]] = c[0]
+            e = (c[3], corners[(k + 1) % len(corners)][3])
+            half[e] = half.get(e, 0) + 1
+    # The cap runs against the faces beside it
+    nxt = {}
+    for (a, b), n in half.items():
+        if n == 1 and (b, a) not in half:
+            nxt[b] = a
+    next_id = max(pos) + 1
+    caps = []
+    skipped = 0
+    while nxt:
+        start = next(iter(nxt))
+        loop = [start]
+        while nxt.get(loop[-1]) is not None and nxt[loop[-1]] != start and len(loop) <= len(pos):
+            loop.append(nxt.pop(loop[-1]))
+        if nxt.pop(loop[-1], None) != start or len(loop) < 3:
+            skipped += 1
+            continue
+        pts = [pos[v] for v in loop]
+        mid = [sum(p[i] for p in pts) / len(pts) for i in range(3)]
+        n = poly_normal(pts)[0]
+        size = max(math.sqrt(dot(sub(p, mid), sub(p, mid))) for p in pts)
+        if size == 0 or max(abs(dot(sub(p, mid), n)) for p in pts) > 0.01 * size:
+            skipped += 1
+            continue
+        # A loop that sits on another face, as a part set on a surface does,
+        # is covered already
+        if any(on_triangle(mid, [c[0] for c in tri], 0.01 * size) for tri in fan(polys)):
+            skipped += 1
+            continue
+        # Texture axes in the cap's plane
+        ax = normalize(sub(pts[0], mid))
+        ay = cross(n, ax)
+        uv = lambda p: (uc + radius * dot(sub(p, mid), ax) / size, vc + radius * dot(sub(p, mid), ay) / size)
+        corner = lambda v: (pos[v], n, uv(pos[v]), v)
+        centre = (mid, n, (uc, vc), next_id)
+        next_id += 1
+        for k in range(len(loop)):
+            caps.append([centre, corner(loop[k]), corner(loop[(k + 1) % len(loop)])])
+    return caps, skipped
 
 # --- Merging coplanar faces ---
 
@@ -2534,6 +2625,13 @@ def main():
     parser.add_argument("--seam-texels", type=float, default=1.0, metavar="N",
                         help="with --target-tris, how far, in texels, a uv seam may be straightened (default 1); "
                              "more lets it go further, at the risk of faces showing the texture around their island")
+    parser.add_argument("--min-detail", type=float, default=0.0, metavar="FRACTION",
+                        help="with --target-tris, judge details smaller than this fraction of the model's "
+                             "diagonal by how far they move rather than relative to their size, so that "
+                             "fine detail is simplified before broad shapes, e.g. 0.06 (default 0)")
+    parser.add_argument("--cap", metavar="U,V,RADIUS",
+                        help="close each flat loop of open edges, such as an open bottom, with a face "
+                             "textured with the disc of this radius around U,V")
     parser.add_argument("--hard-angle", type=float, metavar="DEGREES",
                         help="work out normals again, with hard edges where faces meet at more than this "
                              "angle; with --target-tris, the model's own hard edges no longer hold vertices")
@@ -2550,6 +2648,16 @@ def main():
         sys.exit('unsupported input format: ' + ext)
     if not polys:
         sys.exit(args.input + ': no faces')
+
+    if args.cap:
+        try:
+            uc, vc, radius = (float(x) for x in args.cap.split(','))
+        except ValueError:
+            sys.exit('bad --cap %r, expected U,V,RADIUS, e.g. 0.25,0.3,0.2' % args.cap)
+        caps, skipped = cap_holes(polys, uc, vc, radius)
+        polys = polys + caps
+        print('capped open edges with %d triangles%s'
+              % (len(caps), ', skipped %d loops that are not flat or are covered' % skipped if skipped else ''))
 
     if args.target_tris is not None:
         before = sum(len(p) - 2 for p in polys)
@@ -2570,7 +2678,8 @@ def main():
                     sys.exit('bad --keep %r, expected e.g. "y<2.8", "y>1" or "-3.4<y<2.8"' % spec)
                 tests.append(('xyz'.index(axis), lo, hi))
             keep = lambda p: any(lo < p[i] < hi for i, lo, hi in tests)
-        polys = decimate(polys, args.target_tris, args.hard_angle is not None, args.max_tex_size, args.seam_texels, keep)
+        polys = decimate(polys, args.target_tris, args.hard_angle is not None, args.max_tex_size, args.seam_texels, keep,
+                          args.min_detail)
         print('decimated %d triangles to %d' % (before, len(polys)))
         if len(polys) > args.target_tris:
             print('warning: stopped above the target, where seams and folds allow no more')
