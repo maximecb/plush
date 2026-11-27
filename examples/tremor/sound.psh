@@ -720,8 +720,7 @@ class Clank {
 // An elevator on its way: the drone of the winch motor, two low saws a
 // little apart in pitch so that they beat, the whir of its gears an octave
 // and a half up, and a steady rumble of the platform under it all. The highs
-// are taken well off. It spins up and down with the platform, and starts
-// with the clank of the brake letting go.
+// are taken well off. It spins up and down with the platform.
 
 // How long it takes to come up to speed and to slow down, as in entities.psh
 let ELEVATOR_EASE = 0.5;
@@ -743,10 +742,6 @@ class ElevatorVoice extends Voice {
 
         self.rumble_k = lp_coef(70.0);
         self.ru1 = 0.0; self.ru2 = 0.0; self.ru3 = 0.0;
-
-        self.strike = 1.0;
-        self.strike_keep = decay_rate(0.004);
-        self.clank = Clank(0.8);
     }
 
     render(self, mix, n) {
@@ -777,11 +772,7 @@ class ElevatorVoice extends Voice {
             self.ru2 = self.ru2 + (self.ru1 - self.ru2) * self.rumble_k;
             self.ru3 = self.ru3 + (self.ru2 - self.ru3) * self.rumble_k;
 
-            self.strike = self.strike * self.strike_keep;
-            let clank = self.clank.next(white * self.strike);
-
-            let drive = self.mo2 * 0.3 + self.ge2 * 0.06 + self.ru3 * 3.0;
-            let v = drive * run + clank * 0.08;
+            let v = (self.mo2 * 0.3 + self.ge2 * 0.06 + self.ru3 * 3.0) * run;
             mix.set_f32(i, mix.get_f32(i) + v * self.gain);
         }
         return self.t < d + 0.6;

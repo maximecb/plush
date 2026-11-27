@@ -2479,14 +2479,15 @@ let SWORD_DAMAGE = 40.0;
 // The sword's swing, in seconds: drawn back, the cut across the view, and the
 // return to rest, with the blow landing partway through the cut. The poses
 // it passes through are offsets from where it is held at rest, as [x, y, z,
-// pitch, yaw, roll]: pushed out away from the eye and drawn back over the
-// shoulder, then cut down across the view to the lower left.
+// pitch, yaw, roll]: drawn back over the shoulder, then cut down across the
+// view to the lower left. The hand stays below the bottom of the view, as
+// there is none drawn holding it.
 let SWING_BACK = 0.17;
 let SWING_CUT = 0.11;
 let SWING_HIT = SWING_BACK + SWING_CUT * 0.6;
 let SWING_TIME = 0.65;
-let SWING_DRAWN = [0.12, 0.2, 0.24, 0.1, 0 - 0.6, 0 - 0.6];
-let SWING_DONE = [0 - 0.6, 0 - 0.15, 0.1, 0 - 0.6, 0 - 0.9, 2.3];
+let SWING_DRAWN = [0.1, 0 - 0.06, 0.0, 0.1, 0 - 0.6, 0 - 0.6];
+let SWING_DONE = [0 - 0.45, 0 - 0.2, 0.0, 0 - 0.6, 0 - 0.9, 2.3];
 
 // The pose of the swing this frame, reused from one frame to the next
 let swing_offset = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
@@ -2537,49 +2538,69 @@ fun swing_pose(t, out) {
     }
 }
 
-// Each blow of the sword is traced along a fan of rays through the cut, this
-// far apart up and down and to each side, in radians
-let SWING_FAN = 0.22;
+// The cut sweeps a cone about the view this wide each way, in radians, out
+// to the sword's reach
+let SWING_CONE = 0.35;
 
-// Bring the sword down on whatever monsters are in front of the player and
-// within its reach. Each one it finds is struck once.
+// Bring the sword down on the monsters in front of the player and within its
+// reach that it has not struck yet in this swing
 fun sword_blow(player, list) {
     let ox = player.x; let oy = player.eye_y(); let oz = player.z;
-    let hit = [];
-    for (let var i = 0 - 1; i <= 1; ++i) {
-        for (let var j = 0 - 1; j <= 1; ++j) {
-            let yaw = player.yaw + i.to_f() * SWING_FAN;
-            let pitch = player.pitch + j.to_f() * SWING_FAN;
-            let dx = yaw.sin() * pitch.cos(); let dy = pitch.sin(); let dz = yaw.cos() * pitch.cos();
-            let res = trace_monsters(list, ox, oy, oz, dx, dy, dz, SWORD_REACH);
-            if (res == nil) continue;
-            let e = res[0];
-            let var seen = false;
-            for (let var k = 0; k < hit.len; ++k) { if (hit[k] == e) seen = true; }
-            if (seen) continue;
-            let t = res[1];
-            let hx = ox + dx * t; let hy = oy + dy * t; let hz = oz + dz * t;
-            if (occluded(ox, oy, oz, hx, hy, hz)) continue;
-            hit.push(e);
-            spawn_blood(hx - dx * 0.2, hy, hz - dz * 0.2, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS * 3, e.blood_floor());
-            emit_sound("claw_hit", hx, hy, hz, 0.0, HIT_GAIN);
+    let cp = player.pitch.cos();
+    let fx = player.yaw.sin() * cp; let fy = player.pitch.sin(); let fz = player.yaw.cos() * cp;
+    for (let var i = 0; i < list.len; ++i) {
+        let e = list[i];
+        if (!(e instanceof Monster) || e.gone || contains(player.cut, e)) continue;
+
+        // The point of its body nearest the eye, on the capsule up its
+        // middle that trace_monsters() uses
+        let ux = e.up_x(); let uy = e.up_y(); let uz = e.up_z();
+        let lo = e.radius * 0.5;
+        let len = e.height - e.radius;
+        let ax = e.x + ux * lo; let ay = e.y + uy * lo; let az = e.z + uz * lo;
+        let s = (((ox - ax) * ux + (oy - ay) * uy + (oz - az) * uz) / len.max(0.000001)).clip(0.0, 1.0);
+        let px = ax + ux * len * s - ox; let py = ay + uy * len * s - oy; let pz = az + uz * len * s - oz;
+        let d = vlen(px, py, pz);
+        if (d - e.radius > SWORD_REACH) continue;
+
+        // In the cone, widened by how large it looks from the eye, unless it
+        // is right on the player
+        let var k = 0.0;
+        if (d > e.radius) {
+            let size = (e.radius / (d * d - e.radius * e.radius).sqrt()).atan();
+            if (px * fx + py * fy + pz * fz < d * (SWING_CONE + size).min(PI * 0.5).cos()) continue;
+            k = (d - e.radius) / d;
         }
+        let hx = ox + px * k; let hy = oy + py * k; let hz = oz + pz * k;
+        if (occluded(ox, oy, oz, hx, hy, hz)) continue;
+
+        player.cut.push(e);
+        let dx = px / d.max(0.000001); let dy = py / d.max(0.000001); let dz = pz / d.max(0.000001);
+        spawn_blood(hx - dx * 0.2, hy, hz - dz * 0.2, 0.0 - dx, 0.0 - dy, 0.0 - dz, BLOOD_DROPS * 3, e.blood_floor());
+        emit_sound("claw_hit", hx, hy, hz, 0.0, HIT_GAIN);
+        e.hurt(SWORD_DAMAGE);
     }
-    for (let var i = 0; i < hit.len; ++i) hit[i].hurt(SWORD_DAMAGE);
 }
 
 // Use the weapon the player just fired: the shotgun's pellets fly at once,
-// while the sword's blow lands later in its swing, which strike() sees to
+// while the sword strikes through the cut of its swing, which strike() sees
+// to
 fun attack(player, list) {
     if (player.weapon == "shotgun") shoot(player, list);
-    else if (player.weapon == "sword") player.blow_due = true;
+    else if (player.weapon == "sword") {
+        player.blow_due = true;
+        player.cut = [];
+    }
 }
 
-// Land the blow of a swing once it reaches that point
+// Through the cut of a swing, strike whatever comes within the sword's reach
 fun strike(player, list) {
-    if (!player.blow_due || player.shot_time < SWING_HIT) return;
-    player.blow_due = false;
-    if (player.weapon == "sword" && !player.dead) sword_blow(player, list);
+    if (!player.blow_due || player.shot_time < SWING_BACK) return;
+    if (player.weapon != "sword" || player.dead || player.shot_time > SWING_BACK + SWING_CUT) {
+        player.blow_due = false;
+        return;
+    }
+    sword_blow(player, list);
 }
 
 // How long a weapon takes to come up once picked, and how far below where it
@@ -2677,8 +2698,10 @@ class Player extends Entity {
         self.held = nil;
         self.raise_time = RAISE_TIME;
 
-        // Set when a swing of the sword has yet to land its blow
+        // Set while a swing of the sword has yet to finish its cut, and the
+        // monsters it has struck so far
         self.blow_due = false;
+        self.cut = [];
 
         // How far through a stride the weapon bob is, in radians, and how
         // much of it shows, from 0 standing still to 1 walking

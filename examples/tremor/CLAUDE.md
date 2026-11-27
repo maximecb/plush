@@ -40,6 +40,10 @@ entities and texture conventions are described in `trenchbroom/README.md` and
 - Faces textured `skip` are not drawn. Use it for faces that are always
   hidden.
 - Seal every room with solid walls, floors and ceilings 64 units thick.
+- Build rough rock, like the walls and roof of a cave, as a skin of facets
+  over a plain shell that seals the space: each facet is the hull of four
+  jittered corners on the rock face and the four behind them on the shell.
+  Faces buried in other brushes are cut away, so the overlap costs nothing.
 - Build curved shapes, like vaults and arches, from facets. Set the texture
   offsets so the pattern runs on from one facet to the next without a jump.
 
@@ -57,7 +61,8 @@ entities and texture conventions are described in `trenchbroom/README.md` and
 - Flames burn at 20/s and lava at 40/s, so keep wall torches out of the
   player's reach, 3.5 m up.
 - A door is not in the light bake. Make the space it rises into solid, and
-  set the door a little inside its doorway's walls.
+  sink its sides a little into its doorway's walls, so that no gap shows.
+  Doors that slide up use `iron_brick`.
 
 ## Map file organization
 
