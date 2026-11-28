@@ -1,4 +1,4 @@
-from wav import AudioData, decode_wav, encode_wav, WAV_U8, WAV_I16, WAV_I24, WAV_I32, WAV_F32;
+from wav import AudioData, decode_wav, encode_wav, WAV_U8, WAV_I16, WAV_I24, WAV_I32, WAV_F32, WAV_ADPCM;
 
 // Stereo, 3 frames of 16-bit PCM, with a LIST chunk of odd size before
 // fmt and its pad byte, so chunks have to be walked rather than assumed
@@ -139,3 +139,62 @@ let odd = encode_wav(AudioData(1, 8000, 3), WAV_U8);
 assert(odd.len == 48);
 assert(odd.load_u32(4) == 40);
 assert(odd.load_u32(40) == 3);
+
+// Mono IMA ADPCM, one block of 8 bytes: a header starting at 0 with the
+// smallest step, then the codes 7, 7, 8, 0, 0, 0, 0, 0, worked out by hand
+let WAV_ADPCM_DATA = #[\x
+    52 49 46 46 3C 00 00 00 57 41 56 45
+    66 6D 74 20 14 00 00 00 11 00 01 00 40 1F 00 00 00 10 00 00 08 00 04 00 02 00 09 00
+    66 61 63 74 04 00 00 00 09 00 00 00
+    64 61 74 61 08 00 00 00 00 00 00 00 77 08 00 00
+];
+
+let ima = decode_wav(WAV_ADPCM_DATA);
+assert(ima != nil);
+assert(ima.num_channels == 1);
+assert(ima.sample_rate == 8000);
+assert(ima.num_frames() == 9);
+let ima_want = [0, 11, 41, 37, 40, 43, 46, 48, 50];
+for (let var i = 0; i < 9; ++i)
+    assert(ima.get(i, 0) == ima_want[i].to_f() / 32768.0);
+
+// The fact chunk leaves out the padding at the end of the last block
+let ima_short = ByteArray.with_size(WAV_ADPCM_DATA.len);
+ima_short.memcpy(0, WAV_ADPCM_DATA, 0, ima_short.len);
+ima_short.store_u32(48, 5);
+assert(decode_wav(ima_short).num_frames() == 5);
+
+// ADPCM needs 4 bits, and blocks of whole runs
+let ima_bad = ByteArray.with_size(WAV_ADPCM_DATA.len);
+ima_bad.memcpy(0, WAV_ADPCM_DATA, 0, ima_bad.len);
+ima_bad.store_u16(34, 3);
+assert(decode_wav(ima_bad) == nil);
+ima_bad.store_u16(34, 4);
+ima_bad.store_u16(32, 6);
+assert(decode_wav(ima_bad) == nil);
+
+// Round trips through ADPCM keep the length, and come close once the step
+// size has grown to fit, a few samples in
+for (let var nc = 1; nc <= 2; ++nc) {
+    let tone = AudioData(nc, 22050, 3000);
+    for (let var f = 0; f < 3000; ++f) {
+        for (let var c = 0; c < nc; ++c) {
+            tone.set(f, c, (f.to_f() * (0.06 + 0.03 * c.to_f())).sin() * 0.5);
+        }
+    }
+
+    let bytes = encode_wav(tone, WAV_ADPCM);
+    assert(bytes.len % 2 == 0);
+    let back = decode_wav(bytes);
+    assert(back != nil);
+    assert(back.num_channels == nc);
+    assert(back.sample_rate == 22050);
+    assert(back.num_frames() == 3000);
+
+    for (let var f = 0; f < 3000; ++f) {
+        for (let var c = 0; c < nc; ++c) {
+            let err = (back.get(f, c) - tone.get(f, c)).abs();
+            assert(f < 40 || err < 0.01);
+        }
+    }
+}

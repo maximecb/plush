@@ -11,9 +11,9 @@
 // sample for each channel, at one point in time.
 //
 // Decoding handles PCM with 8, 16, 24 or 32 bits per sample, 32-bit IEEE
-// float, and the extensible format when it holds either of these. Other
-// chunks, such as metadata, are skipped. Compressed formats, big-endian
-// RIFX and RF64 files are not supported.
+// float, 4-bit IMA ADPCM, and the extensible format when it holds PCM or
+// float. Other chunks, such as metadata, are skipped. Other compressed
+// formats, big-endian RIFX and RF64 files are not supported.
 
 // Sample formats for encoding
 let WAV_U8  = 0;
@@ -21,16 +21,19 @@ let WAV_I16 = 1;
 let WAV_I24 = 2;
 let WAV_I32 = 3;
 let WAV_F32 = 4;
+let WAV_ADPCM = 5;
 
 // Chunk ids, as load_u32() reads their four characters
 let CHUNK_RIFF = 0x46464952;
 let CHUNK_WAVE = 0x45564157;
 let CHUNK_FMT  = 0x20746D66;
 let CHUNK_DATA = 0x61746164;
+let CHUNK_FACT = 0x74636166;
 
 // Format tags
 let TAG_PCM = 1;
 let TAG_FLOAT = 3;
+let TAG_IMA_ADPCM = 0x11;
 let TAG_EXTENSIBLE = 0xFFFE;
 
 // Audio held as interleaved f32 samples in [-1, 1]
@@ -104,6 +107,227 @@ fun decode_pcm(data, pos, count, bytes_per, out)
     }
 }
 
+// A sample in [-1, 1] as a 16-bit integer, clipped and rounded
+fun to_i16(x)
+{
+    return (x.clip(-1.0, 1.0) * 32768.0 + 0.5).floor().min(32767);
+}
+
+// --- IMA ADPCM ---
+//
+// Each sample is a 4-bit code for a step up or down from the one before it,
+// counted in a step size that grows after big steps and shrinks after small
+// ones. Samples come in blocks, and each block starts with a header per
+// channel holding its first sample and step size, so that blocks decode on
+// their own. After the headers, channels take turns with 4 bytes, 8 samples,
+// at a time, the low nibble of each byte first.
+
+let ADPCM_STEPS = [
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+    50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+    253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+    1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+    3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442,
+    11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794,
+    32767
+];
+
+// How far each code moves along ADPCM_STEPS, by its size without the sign
+let ADPCM_INDEX_SHIFT = [-1, -1, -1, -1, 2, 4, 6, 8];
+
+// The state of one channel: its last sample, as a 16-bit integer, and the
+// index of its step size in ADPCM_STEPS
+class AdpcmChannel
+{
+    init(self)
+    {
+        self.sample = 0;
+        self.index = 0;
+    }
+
+    // Steps by a code and returns the new sample
+    decode(self, code)
+    {
+        let step = ADPCM_STEPS[self.index];
+        let var diff = step >> 3;
+        if ((code & 1) != 0) diff = diff + (step >> 2);
+        if ((code & 2) != 0) diff = diff + (step >> 1);
+        if ((code & 4) != 0) diff = diff + step;
+        if ((code & 8) != 0) diff = 0 - diff;
+
+        self.sample = (self.sample + diff).clip(-32768, 32767);
+        self.index = (self.index + ADPCM_INDEX_SHIFT[code & 7]).clip(0, 88);
+        return self.sample;
+    }
+
+    // Finds the code that steps closest to a 16-bit sample, steps by it and
+    // returns it
+    encode(self, target)
+    {
+        let var step = ADPCM_STEPS[self.index];
+        let var diff = target - self.sample;
+        let var code = 0;
+        if (diff < 0) {
+            code = 8;
+            diff = 0 - diff;
+        }
+        for (let var bit = 4; bit > 0; bit = bit >> 1) {
+            if (diff >= step) {
+                code = code | bit;
+                diff = diff - step;
+            }
+            step = step >> 1;
+        }
+
+        self.decode(code);
+        return code;
+    }
+}
+
+// Samples in a block with this many bytes per channel
+fun adpcm_block_frames(bytes_per_channel)
+{
+    return (bytes_per_channel - 4) * 2 + 1;
+}
+
+// Decodes num_frames frames of IMA ADPCM, in blocks of block_align bytes,
+// from the data starting at byte pos, into out as floats
+fun decode_adpcm(data, pos, num_channels, block_align, num_frames, out)
+{
+    let block_frames = adpcm_block_frames(block_align.idiv(num_channels));
+    let channels = [];
+    for (let var c = 0; c < num_channels; ++c) channels.push(AdpcmChannel());
+
+    for (let var first = 0; first < num_frames; first += block_frames) {
+        let block = pos + (first.idiv(block_frames)) * block_align;
+        let count = (num_frames - first).min(block_frames);
+
+        for (let var c = 0; c < num_channels; ++c) {
+            let ch = channels[c];
+            let head = block + 4 * c;
+            ch.sample = (data.load_u16(head) ^ 0x8000) - 0x8000;
+            ch.index = data[head + 2].min(88);
+            out.set_f32(first * num_channels + c, ch.sample.to_f() / 32768.0);
+
+            // The rest of the channel's samples, from its runs of 8
+            let runs = block + 4 * num_channels + 4 * c;
+            for (let var i = 1; i < count; ++i) {
+                let k = i - 1;
+                let byte = data[runs + (k >> 3) * 4 * num_channels + ((k & 7) >> 1)];
+                let code = (k & 1) == 0 ? byte & 0xF : byte >> 4;
+                out.set_f32((first + i) * num_channels + c, ch.decode(code).to_f() / 32768.0);
+            }
+        }
+    }
+}
+
+// The bytes per channel of an encoded block: 256 at 11025 Hz, and in
+// proportion at higher rates, as other encoders do
+fun adpcm_block_bytes(sample_rate)
+{
+    return 256 * (sample_rate.idiv(11025)).max(1);
+}
+
+// A sample as a 16-bit integer, or silence past the end
+fun adpcm_target(snd, frame, channel)
+{
+    if (frame >= snd.num_frames()) return 0;
+    return to_i16(snd.get(frame, channel));
+}
+
+// Encodes an AudioData as the bytes of an IMA ADPCM WAV file. Its last block
+// is padded with silence, and a fact chunk gives the true length.
+fun encode_adpcm(snd)
+{
+    let num_channels = snd.num_channels;
+    let num_frames = snd.num_frames();
+    let block_align = adpcm_block_bytes(snd.sample_rate) * num_channels;
+    let block_frames = adpcm_block_frames(block_align.idiv(num_channels));
+    let num_blocks = (num_frames + block_frames - 1).idiv(block_frames);
+    let data_size = num_blocks * block_align;
+    let out = ByteArray.with_size(60 + data_size);
+
+    out.store_u32(0, CHUNK_RIFF);
+    out.store_u32(4, 52 + data_size);
+    out.store_u32(8, CHUNK_WAVE);
+    out.store_u32(12, CHUNK_FMT);
+    out.store_u32(16, 20);
+    out.store_u16(20, TAG_IMA_ADPCM);
+    out.store_u16(22, num_channels);
+    out.store_u32(24, snd.sample_rate);
+    out.store_u32(28, (snd.sample_rate * block_align).idiv(block_frames));
+    out.store_u16(32, block_align);
+    out.store_u16(34, 4);
+    out.store_u16(36, 2);
+    out.store_u16(38, block_frames);
+    out.store_u32(40, CHUNK_FACT);
+    out.store_u32(44, 4);
+    out.store_u32(48, num_frames);
+    out.store_u32(52, CHUNK_DATA);
+    out.store_u32(56, data_size);
+
+    let channels = [];
+    for (let var c = 0; c < num_channels; ++c) channels.push(AdpcmChannel());
+
+    for (let var b = 0; b < num_blocks; ++b) {
+        let block = 60 + b * block_align;
+        let first = b * block_frames;
+
+        for (let var c = 0; c < num_channels; ++c) {
+            // The header starts the block from the true sample, keeping the
+            // step size the last block ended with
+            let ch = channels[c];
+            let head = block + 4 * c;
+            ch.sample = adpcm_target(snd, first, c);
+            out.store_u16(head, ch.sample & 0xFFFF);
+            out[head + 2] = ch.index;
+
+            let runs = block + 4 * num_channels + 4 * c;
+            for (let var i = 1; i < block_frames; ++i) {
+                let code = ch.encode(adpcm_target(snd, first + i, c));
+                let k = i - 1;
+                let at = runs + (k >> 3) * 4 * num_channels + ((k & 7) >> 1);
+                if ((k & 1) == 0) out[at] = code;
+                else out[at] = out[at] | (code << 4);
+            }
+        }
+    }
+
+    return out;
+}
+
+// Decodes the IMA ADPCM data of a WAV file whose chunks decode_wav() found
+fun decode_adpcm_wav(data, fmt_pos, data_pos, data_size, fact_frames)
+{
+    let num_channels = data.load_u16(fmt_pos + 2);
+    let sample_rate = data.load_u32(fmt_pos + 4);
+    let block_align = data.load_u16(fmt_pos + 12);
+    let bits = data.load_u16(fmt_pos + 14);
+
+    // Each channel's share of a block is a header and whole runs of 8
+    if (bits != 4 || block_align == 0 || block_align % (4 * num_channels) != 0) {
+        return nil;
+    }
+    let block_frames = adpcm_block_frames(block_align.idiv(num_channels));
+
+    // A block cut short holds the runs it has whole
+    let full = data_size.idiv(block_align);
+    let rest = data_size - full * block_align;
+    let var num_frames = full * block_frames;
+    if (rest >= 4 * num_channels) {
+        num_frames = num_frames + 1 + (rest.idiv(4 * num_channels) - 1) * 8;
+    }
+
+    // The fact chunk says how many of those are real, not padding
+    if (fact_frames != nil) {
+        num_frames = num_frames.min(fact_frames);
+    }
+
+    let snd = AudioData(num_channels, sample_rate, num_frames);
+    decode_adpcm(data, data_pos, num_channels, block_align, num_frames, snd.samples);
+    return snd;
+}
+
 // Decodes the bytes of a WAV file into an AudioData. Returns nil if the data is
 // not a WAV file, is in a format that is not supported, or is cut short.
 fun decode_wav(data)
@@ -119,6 +343,7 @@ fun decode_wav(data)
     let var fmt_pos = nil;
     let var data_pos = nil;
     let var data_size = 0;
+    let var fact_frames = nil;
     let var pos = 12;
 
     // Chunks can come in any order, and odd sizes are followed by a pad byte
@@ -132,6 +357,8 @@ fun decode_wav(data)
                 return nil;
             }
             fmt_pos = body;
+        } else if (id == CHUNK_FACT && size >= 4 && body + 4 <= data.len) {
+            fact_frames = data.load_u32(body);
         } else if (id == CHUNK_DATA) {
             // Writers that were cut off or that stream can leave a wrong size
             data_pos = body;
@@ -165,6 +392,10 @@ fun decode_wav(data)
         return nil;
     }
 
+    if (tag == TAG_IMA_ADPCM) {
+        return decode_adpcm_wav(data, fmt_pos, data_pos, data_size, fact_frames);
+    }
+
     let is_float = tag == TAG_FLOAT && bits == 32;
     let is_pcm = tag == TAG_PCM && (bits == 8 || bits == 16 || bits == 24 || bits == 32);
     if (!is_float && !is_pcm) {
@@ -189,9 +420,14 @@ fun decode_wav(data)
 // Encodes an AudioData as the bytes of a WAV file, with samples in one of the
 // WAV_* formats. Samples are clipped to [-1, 1] and rounded, with no dither.
 // Integer samples are scaled by the same factor as in decoding, so that
-// decoding and encoding again gives back the same bytes.
+// decoding and encoding again gives back the same bytes. WAV_ADPCM is lossy,
+// see encode_adpcm().
 fun encode_wav(snd, format)
 {
+    if (format == WAV_ADPCM) {
+        return encode_adpcm(snd);
+    }
+
     let bytes_per = [1, 2, 3, 4, 4][format];
     let count = snd.num_samples();
     let data_size = count * bytes_per;
@@ -225,8 +461,7 @@ fun encode_wav(snd, format)
         }
     } else if (format == WAV_I16) {
         for (let var i = 0; i < count; ++i) {
-            let v = (src.get_f32(i).clip(-1.0, 1.0) * 32768.0 + 0.5).floor().min(32767);
-            out.store_u16(44 + 2 * i, v & 0xFFFF);
+            out.store_u16(44 + 2 * i, to_i16(src.get_f32(i)) & 0xFFFF);
         }
     } else if (format == WAV_I24) {
         for (let var i = 0; i < count; ++i) {
