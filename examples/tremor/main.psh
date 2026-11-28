@@ -177,7 +177,8 @@ let FINISH_FADE = 1.5;
 
 // Move every entity on by dt, let the player pick up what they walk into, and
 // hand the renderer what it has to draw, as seen from the eye at (ex, ey, ez)
-fun update_entities(dt, ex, ey, ez) {
+// turned by yaw and pitch
+fun update_entities(dt, ex, ey, ez, yaw, pitch) {
     touch_entities(world, player, entities);
     separate_bodies(player, entities);
 
@@ -197,7 +198,8 @@ fun update_entities(dt, ex, ey, ez) {
 
     update_gibs(dt, list);
     let parts = update_blood(dt, ex, ey, ez);
-    update_auras(ex, ey, ez, parts);
+    let fwd = pitch.cos();
+    update_auras(ex, ey, ez, yaw.sin() * fwd, pitch.sin(), yaw.cos() * fwd, parts);
     update_portals(ex, ey, ez, parts);
     let glows = [];
     update_flames(ex, ey, ez, glows);
@@ -282,7 +284,7 @@ if (BENCH) {
     for (let var i = 0; i < BENCH_FRAMES; ++i) {
         let view = TOUR[i % TOUR.len];
         set_view(view[0], view[1], view[2], view[3], view[4], i.to_f() * 0.21);
-        update_entities(1.0 / 60.0, view[0], view[1], view[2]);
+        update_entities(1.0 / 60.0, view[0], view[1], view[2], view[3], view[4]);
 
         let t0 = $time_monotonic();
         render_frame_parallel(i);
@@ -519,7 +521,7 @@ loop {
         attack(player, entities);
     }
     strike(player, entities);
-    update_entities(dt, player.x, player.eye_y(), player.z);
+    update_entities(dt, player.x, player.eye_y(), player.z, player.yaw, player.pitch);
     play_sounds();
 
     set_view(player.x, player.eye_y(), player.z, player.yaw, player.pitch, time_s * 1.1);

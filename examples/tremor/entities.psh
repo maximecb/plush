@@ -297,7 +297,13 @@ let AURA_SPAN = RELIC_HEIGHT * 1.5;
 // hides those behind it
 let AURA_R0 = RELIC_HEIGHT * 0.7;
 let AURA_R1 = RELIC_HEIGHT * 0.95;
-let RELIC_HIDE = RELIC_HEIGHT * 0.55;
+
+// The middle of the column the motes rise through, above the skull's base,
+// and the radius of a sphere round it that holds them all. Past AURA_FAR they
+// are smaller than a pixel, and not drawn.
+let AURA_MID = AURA_SPAN * 0.35;
+let AURA_RADIUS = (AURA_R1 * AURA_R1 + AURA_SPAN * AURA_SPAN * 0.25).sqrt() + 0.05;
+let AURA_FAR = 40.0;
 
 // Every relic, for update_auras() to draw the motes of
 let relics = [];
@@ -390,18 +396,17 @@ fun segment_hits_box(ax, ay, az, bx, by, bz, b) {
     return true;
 }
 
-// Add the motes round each relic that the eye at (ex, ey, ez) can see to a
-// particle list. Particles are drawn over everything, so motes walls hide,
-// or the skull itself, are left out. Each mote is traced on its own, so
-// that bars hide the share of them they cover, wherever the eye is.
-fun update_auras(ex, ey, ez, out) {
+// Add the motes round each relic that the eye at (ex, ey, ez), looking along
+// (fx, fy, fz), can see to a particle list. The renderer hides them behind
+// models, but not walls, so motes walls hide are left out. Each mote is
+// traced on its own, so that bars hide the share of them they cover,
+// wherever the eye is. None are traced for a relic behind the eye or far off.
+fun update_auras(ex, ey, ez, fx, fy, fz, out) {
     for (let var k = 0; k < relics.len; ++k) {
         let r = relics[k];
-        let cy = r.y + RELIC_HEIGHT * 0.5;
-
-        // The skull's distance from the eye, and the direction to it
-        let sx = r.x - ex; let sy = cy - ey; let sz = r.z - ez;
-        let sd = (sx * sx + sy * sy + sz * sz).sqrt();
+        let cx = r.x - ex; let cy = r.y + AURA_MID - ey; let cz = r.z - ez;
+        if (cx * fx + cy * fy + cz * fz < 0.0 - AURA_RADIUS) continue;
+        if (cx * cx + cy * cy + cz * cz > AURA_FAR * AURA_FAR) continue;
 
         for (let var i = 0; i < r.motes.len; ++i) {
             let m = r.motes[i];
@@ -409,15 +414,7 @@ fun update_auras(ex, ey, ez, out) {
             let py = r.y + (m[3] - 0.15) * AURA_SPAN;
             let pz = r.z + m[0].sin() * m[2];
 
-            // Behind the skull and within its outline, it would show through
-            let dx = px - ex; let dy = py - ey; let dz = pz - ez;
-            let along = (dx * sx + dy * sy + dz * sz) / sd;
-            if (along > sd) {
-                let ox = dx - sx * along / sd; let oy = dy - sy * along / sd; let oz = dz - sz * along / sd;
-                if (ox * ox + oy * oy + oz * oz < RELIC_HIDE * RELIC_HIDE) continue;
-            }
-
-            // Or behind the stand
+            // Behind the stand, or a wall
             if (r.stand != nil && segment_hits_box(ex, ey, ez, px, py, pz, r.stand)) continue;
             if (occluded(ex, ey, ez, px, py, pz)) continue;
 

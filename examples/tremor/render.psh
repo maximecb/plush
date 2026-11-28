@@ -3064,28 +3064,43 @@ fun set_particles(list) {
     particles = list;
 }
 
-// Fill [x0, x1) x [y0, y1) of this band with a color, except where a model
-// held in view covers it, since particles are out in the world beyond it
-fun fill_unheld(x0, y0, x1, y1, color) {
+// Fill [x0, x1) x [y0, y1) of this band with a color, as a particle at 1/z
+// of w, except where a model in front of it covers it. Models' spans are in
+// the model s-buffer, in order along each row, with their 1/z, so a
+// pixel only has to be tested where the particle overlaps one. A model held
+// in view is always in front, so its spans are skipped whole.
+fun fill_unhidden(x0, y0, x1, y1, color, w) {
     let fb = frame_buffer;
     for (let var y = y0.max(render_y0); y < y1.min(render_y1); ++y) {
         let row = y * FRAME_WIDTH;
         let var x = x0;
         let var cur = mb_head[y];
         while (x < x1) {
-            while (cur != NO_SPAN && (msp_x1[cur] <= x || !held_span(cur))) cur = msp_next[cur];
+            while (cur != NO_SPAN && msp_x1[cur] <= x) cur = msp_next[cur];
+
+            // Up to the next span, nothing is in front
             let var end = x1;
-            if (cur != NO_SPAN && msp_x0[cur] < end) end = msp_x0[cur];
+            if (cur != NO_SPAN && msp_x0[cur] < end) end = msp_x0[cur].max(x);
             for (let var i = row + x; i < row + end; ++i) fb.set_u32(i, color);
-            if (cur == NO_SPAN) break;
-            x = msp_x1[cur].max(x);
+            if (end >= x1) break;
+
+            // Over the span, where it is behind
+            let sx1 = msp_x1[cur].min(x1);
+            if (!held_span(cur)) {
+                let sw = msp_w[cur];
+                let sdw = msp_dw[cur];
+                for (let var px = end; px < sx1; ++px) {
+                    if (sw + px.to_f() * sdw < w) fb.set_u32(row + px, color);
+                }
+            }
+            x = sx1;
             cur = msp_next[cur];
         }
     }
 }
 
-// Draw each particle as a square facing the eye. They are not tested against
-// what stands in front of them: they only ever start where a shot could see.
+// Draw each particle as a square facing the eye, behind any model in front of
+// it. Walls are not tested: particles only ever start where they can be seen.
 fun draw_particles() {
     let p = particles;
     for (let var i = 0; i + 4 < p.len; i += 5) {
@@ -3100,7 +3115,7 @@ fun draw_particles() {
         let y0 = (sy - half).floor();
         let y1 = (sy + half).ceil();
         if (x0 >= x1 || y1 <= render_y0 || y0 >= render_y1) continue;
-        fill_unheld(x0, y0, x1, y1, p[i + 4]);
+        fill_unhidden(x0, y0, x1, y1, p[i + 4], 1.0 / vz);
     }
 }
 
