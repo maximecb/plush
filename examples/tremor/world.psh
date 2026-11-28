@@ -235,11 +235,13 @@ class World {
 // it goes and how fast, in meters and m/s, and the textures of its top and
 // sides. Like a door, it is not part of the level's solid geometry.
 class ElevatorSpec {
-    init(self, x0, y0, z0, x1, y1, z1, travel, speed, top_tex, side_tex) {
+    init(self, x0, y0, z0, x1, y1, z1, travel, speed, down, top_tex, side_tex) {
         self.x0 = x0; self.y0 = y0; self.z0 = z0;
         self.x1 = x1; self.y1 = y1; self.z1 = z1;
         self.travel = travel;
         self.speed = speed;
+        // Whether it waits at the bottom of its travel at the start
+        self.down = down;
         self.top_tex = top_tex;
         self.side_tex = side_tex;
     }
@@ -706,6 +708,12 @@ fun valve_entity(w, li, ent, brushes) {
         let speed = valve_num(ent, "speed", 160.0) * k;
         if (travel <= 0.0) valve_error(li, "elevator with no travel");
         if (speed <= 0.0) valve_error(li, "elevator with no speed");
+        let var down = false;
+        if (ent.has("start")) {
+            let st = ent["start"];
+            if (st == "bottom") down = true;
+            else if (st != "top") valve_error(li, "bad elevator start: " + st);
+        }
         for (let var i = 0; i < brushes.len; ++i) {
             let planes = brushes[i];
             let b = Brush(planes);
@@ -719,7 +727,7 @@ fun valve_entity(w, li, ent, brushes) {
                 else if (p.ny.abs() < 0.1 && side_tex == nil) side_tex = p.tex.name;
             }
             if (top_tex == nil || side_tex == nil) valve_error(li, "elevator with no texture on its top or sides");
-            w.elevator_specs.push(ElevatorSpec(b.x0, b.y0, b.z0, b.x1, b.y1, b.z1, travel, speed, top_tex, side_tex));
+            w.elevator_specs.push(ElevatorSpec(b.x0, b.y0, b.z0, b.x1, b.y1, b.z1, travel, speed, down, top_tex, side_tex));
         }
         return;
     }

@@ -62,7 +62,9 @@ entities and texture conventions are described in `trenchbroom/README.md` and
   player's reach, 3.5 m up.
 - A door is not in the light bake. Make the space it rises into solid, and
   sink its sides a little into its doorway's walls, so that no gap shows.
-  Doors that slide up use `iron_brick`.
+  Doors that slide up use `door_iron`.
+- Give bridges over a drop a parapet 0.8 m high, above the 0.7 m a monster can
+  step up, so that monsters chasing the player don't walk off.
 
 ## Map file organization
 

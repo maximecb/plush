@@ -1085,6 +1085,11 @@ class Merger {
             if (turn < 0.0 - 0.0001 * la * lb) return nil;
             if (turn < 0.0001 * la * lb && ax * bx + ay * by + az * bz < 0.0) return nil;
         }
+
+        // It has to cover the two pieces and no more. A piece with a corner
+        // repeated can send the walk round the wrong way, leaving a sliver.
+        let a0 = poly_area(ap); let a1 = poly_area(bp);
+        if ((poly_area(verts) - a0 - a1).abs() > 0.001 * (a0 + a1) + MIN_PIECE_AREA) return nil;
         return [verts, vid, cs];
     }
 }

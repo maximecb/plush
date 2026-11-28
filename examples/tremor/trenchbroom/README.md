@@ -28,8 +28,9 @@ Tremor maps are in the Valve 220 format that TrenchBroom writes.
   see-through, or a `flow` of 0 or 1 that overrides the texture name.
 - `func_door` makes each of its brushes a door, filling the brush's box when
   shut and rising by `lift` units to open.
-- `func_elevator` makes each of its brushes a platform that starts at the
-  top, goes down by `travel` units at `speed` units per second, and back up.
+- `func_elevator` makes each of its brushes a platform at the top of its
+  travel, which goes down by `travel` units at `speed` units per second, and
+  back up. With `start` set to `bottom`, it waits at the bottom at first.
   It sets off a second after the player steps on, and comes to them when they
   wait at the other end. Whatever stands on it rides with it.
 - `info_player_start` stands the player at its origin. Entities stand with

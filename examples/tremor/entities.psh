@@ -388,12 +388,12 @@ fun segment_hits_box(ax, ay, az, bx, by, bz, b) {
 
 // Add the motes round each relic that the eye at (ex, ey, ez) can see to a
 // particle list. Particles are drawn over everything, so motes walls hide,
-// or the skull itself, are left out.
+// or the skull itself, are left out. Each mote is traced on its own, so
+// that bars hide the share of them they cover, wherever the eye is.
 fun update_auras(ex, ey, ez, out) {
     for (let var k = 0; k < relics.len; ++k) {
         let r = relics[k];
         let cy = r.y + RELIC_HEIGHT * 0.5;
-        if (occluded(ex, ey, ez, r.x, cy, r.z)) continue;
 
         // The skull's distance from the eye, and the direction to it
         let sx = r.x - ex; let sy = cy - ey; let sz = r.z - ez;
@@ -415,6 +415,7 @@ fun update_auras(ex, ey, ez, out) {
 
             // Or behind the stand
             if (r.stand != nil && segment_hits_box(ex, ey, ez, px, py, pz, r.stand)) continue;
+            if (occluded(ex, ey, ez, px, py, pz)) continue;
 
             // Brightest halfway up, dimming towards either end
             let fade = 1.0 - (m[3] * 2.0 - 1.0).abs();
@@ -844,6 +845,9 @@ class Elevator extends Entity {
         self.player = player;
         self.list = list;
 
+        // Where it waits at the start of the level, as how far down
+        self.start_pos = spec.down ? spec.travel : 0.0;
+
         // How far down it is, which way it is going (1 down, -1 up), how
         // fast, and how long the player has stood on it
         self.pos = 0.0;
@@ -872,6 +876,7 @@ class Elevator extends Entity {
 
         self.brush = box_brush(spec.x0, spec.y0, spec.z0, spec.x1, spec.y1, spec.z1);
         w.brushes.push(self.brush);
+        self.reset();
     }
 
     top(self) {
@@ -913,9 +918,9 @@ class Elevator extends Entity {
         return dx * dx + dz * dz < ELEVATOR_CALL * ELEVATOR_CALL;
     }
 
-    // Back at the top, as at the start of the level
+    // Back where it was at the start of the level
     reset(self) {
-        self.pos = 0.0;
+        self.pos = self.start_pos;
         self.dir = 0;
         self.vel = 0.0;
         self.stood = 0.0;
