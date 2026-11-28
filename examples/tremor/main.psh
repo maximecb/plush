@@ -36,16 +36,16 @@
 from png import save_png;
 from pixelfont import PixelFont;
 from ./config import FRAME_WIDTH, FRAME_HEIGHT, MAP_PATH, NUM_RENDER_ACTORS, BENCH, BENCH_FRAMES, SHOT_DIR;
-from ./world import load_map, build_bsp;
+from ./world import load_map, build_bsp, forget_textures;
 from ./lighting import light_world, light_level_at, brushes_crossed;
 from ./render import frame_image, frame_buffer, frame_stats, pending_ui_events, BAND_HEIGHT,
     set_scene, set_view, set_roll, set_draw_list, set_muzzle_flash, set_particles, set_glows, set_screen_tint,
     render_frame_parallel, start_render_actors, stop_render_actors;
-from ./entities import Player, spawn_entities, restart_level, touch_entities, separate_bodies, apply_hazards, load_weapons, load_gibs, attack, strike, update_blood, update_auras, update_flames, update_gibs, sound_events,
+from ./entities import Player, spawn_entities, restart_level, clear_level, update_portals, touch_entities, separate_bodies, apply_hazards, load_weapons, load_gibs, attack, strike, update_blood, update_auras, update_flames, update_gibs, sound_events,
     EYE_HEIGHT, TURN_SPEED, MOUSE_SENS, PITCH_LIMIT;
 from ./models import models;
 from ./sound import start_sound, stop_sound, play_sound, play_sound_at;
-from ./hud import draw_hud;
+from ./hud import draw_hud, draw_loading;
 
 // The audio actor starts with a copy of this actor's heap, so it is spawned
 // before the world is loaded into it. The benchmark runs silent.
@@ -56,49 +56,65 @@ if (!BENCH) {
 
 // --- Setup ---
 
-$println("loading map " + MAP_PATH);
-let world = load_map(MAP_PATH);
+// The level being played, and the map it came from
+let var map_path = MAP_PATH;
+let var world = nil;
+let var player = nil;
+let var entities = [];
 
-$println("lighting the level");
-let light_start = $time_monotonic();
-let lit_faces = light_world(world);
-let light_ms = ($time_monotonic() - light_start) * 1000;
+// Load a level, light it and hand its tree to the renderer. This has to
+// happen while the render actors are stopped, since each gets its own copy
+// of the tree when it is spawned.
+fun load_level(path) {
+    $println("loading map " + path);
+    world = load_map(path);
 
-$println("building the BSP tree");
-let bsp = build_bsp(lit_faces);
-set_scene(bsp.root);
-let main_mem_bytes = $gc_mem_size();
+    $println("lighting the level");
+    let light_start = $time_monotonic();
+    let lit_faces = light_world(world);
+    let light_ms = ($time_monotonic() - light_start) * 1000;
 
-let var tex_bytes = 0;
-for (let var i = 0; i < world.textures.len; ++i) {
-    let t = world.textures[i];
-    tex_bytes = tex_bytes + t.width * t.height * 4;
+    $println("building the BSP tree");
+    let bsp = build_bsp(lit_faces);
+    set_scene(bsp.root);
+    let main_mem_bytes = $gc_mem_size();
+
+    let var tex_bytes = 0;
+    for (let var i = 0; i < world.textures.len; ++i) {
+        let t = world.textures[i];
+        tex_bytes = tex_bytes + t.width * t.height * 4;
+    }
+
+    let num_lit_faces = lit_faces.len;
+    $println(world.textures.len.to_s() + " textures, " + world.brushes.len.to_s() + " brushes, "
+        + world.faces.len.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
+        + world.lights.len.to_s() + " lights");
+    $println("bsp: " + bsp.nodes.to_s() + " nodes, " + bsp.splits.to_s() + " splits, "
+        + (num_lit_faces + bsp.splits).to_s() + " pieces drawn from");
+    $println("lighting: " + light_ms.format_decimals(1) + " ms to cut and bake");
+    $println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB, shaded per pixel");
+    $println("main actor GC/message heaps: "
+        + (main_mem_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB");
 }
 
-let num_lit_faces = lit_faces.len;
-$println(world.textures.len.to_s() + " textures, " + world.brushes.len.to_s() + " brushes, "
-    + world.faces.len.to_s() + " faces, " + num_lit_faces.to_s() + " lit pieces, "
-    + world.lights.len.to_s() + " lights");
-$println("bsp: " + bsp.nodes.to_s() + " nodes, " + bsp.splits.to_s() + " splits, "
-    + (num_lit_faces + bsp.splits).to_s() + " pieces drawn from");
-$println("lighting: " + light_ms.format_decimals(1) + " ms to cut and bake");
-$println("texture memory: " + (tex_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB, shaded per pixel");
-$println("main actor GC/message heaps: "
-    + (main_mem_bytes.to_f() / 1048576.0).format_decimals(1) + " MiB");
+// The player at the level's start, and every entity the map places. The
+// entities load their models as they are made, which has to happen before the
+// render actors are spawned with their copy of every model.
+fun spawn_level() {
+    $println("spawning entities");
+    let models_start = $time_monotonic();
+    player = Player(world.spawn_x, world.spawn_y - EYE_HEIGHT, world.spawn_z, world.spawn_yaw);
+    entities = spawn_entities(world, player);
+    if (entities.len > 0) {
+        $println("entities: " + entities.len.to_s() + ", with " + models.len.to_s() + " models loaded in "
+            + (($time_monotonic() - models_start) * 1000).format_decimals(1) + " ms");
+    }
+}
 
-let player = Player(world.spawn_x, world.spawn_y - EYE_HEIGHT, world.spawn_z, world.spawn_yaw);
-
-// The entities load their models as they are made, which has to happen before
-// the render actors are spawned with their copy of every model
-$println("spawning entities");
-let models_start = $time_monotonic();
-let entities = spawn_entities(world, player);
+load_level(MAP_PATH);
+spawn_level();
 load_weapons();
 load_gibs();
-if (entities.len > 0) {
-    $println("entities: " + entities.len.to_s() + ", with " + models.len.to_s() + " models loaded in "
-        + (($time_monotonic() - models_start) * 1000).format_decimals(1) + " ms");
-}
 
 // The light level on an entity, taken `up` above its base along its own way
 // up, and taken again only once the entity has moved a little
@@ -182,6 +198,7 @@ fun update_entities(dt, ex, ey, ez) {
     update_gibs(dt, list);
     let parts = update_blood(dt, ex, ey, ez);
     update_auras(ex, ey, ez, parts);
+    update_portals(ex, ey, ez, parts);
     let glows = [];
     update_flames(ex, ey, ez, glows);
     set_particles(parts);
@@ -358,6 +375,46 @@ fun set_key(key, down) {
     else if (key == 'ALT') key_fire = down;
 }
 
+// --- Going on to the next level ---
+
+// The directory a path is in, with its slash
+fun dir_of(path) {
+    let var cut = 0;
+    for (let var i = 0; i < path.len; ++i) if (path.char_at(i) == "/") cut = i + 1;
+    return path.slice(0, cut);
+}
+
+// Load the level the player finished this one to go on to, next to it in the
+// same directory, and start them there with what they carry
+fun go_on() {
+    let kit = player.kit();
+    map_path = dir_of(map_path) + player.next_map;
+    play_sound("hush", 0.0, 0.0);
+
+    draw_loading(frame_image);
+    $window_draw_frame(window, frame_buffer);
+
+    // The render actors hold their own copies of the old level, so they are
+    // stopped while the new one loads, and spawned again with it. What is
+    // left of the old one is collected first, since their heaps are sized
+    // from this one's.
+    stop_render_actors();
+    clear_level();
+    entities = [];
+    world = nil;
+    forget_textures();
+    load_level(map_path);
+    spawn_level();
+    player.take_kit(kit);
+    $gc_collect();
+    start_render_actors(NUM_RENDER_ACTORS);
+
+    key_fwd = false; key_back = false; key_left = false; key_right = false;
+    key_turn_l = false; key_turn_r = false; key_look_u = false; key_look_d = false;
+    key_up = false; key_down = false; mouse_up = false;
+    key_fire = false; mouse_fire = false;
+}
+
 // --- Main loop ---
 
 let start_time = $time_monotonic();
@@ -396,7 +453,8 @@ loop {
                 break;
             }
             if (msg.key == 'RETURN' && player.finished) {
-                restart_level(world, player, entities);
+                if (player.next_map != nil) go_on();
+                else restart_level(world, player, entities);
             }
             if (msg.key == 'F9') {
                 player.noclip = !player.noclip;

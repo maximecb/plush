@@ -310,7 +310,11 @@ class Relic extends Entity {
         self.light = SHADE_MAX * RELIC_SHADE;
         self.fixed_light = true;
         self.lit = true;
-        self.model_light = RELIC_LIGHT;
+
+        // Its light is given for one facing +z, and turns with it
+        let L = RELIC_LIGHT;
+        let c = yaw.cos(); let s = yaw.sin();
+        self.model_light = [L[0], L[1], L[2] * c + L[4] * s, L[3], L[4] * c - L[2] * s];
 
         // The brush it hangs over, found on the first update, which the
         // motes behind it are hidden by
@@ -354,7 +358,7 @@ class Relic extends Entity {
     // Taking it ends the level
     touch(self, w, player) {
         if (player.dead || player.finished) return false;
-        player.finish();
+        player.finish(nil);
         for (let var i = relics.len - 1; i >= 0; --i) {
             if (relics[i] == self) relics.remove(i);
         }
@@ -424,6 +428,176 @@ fun update_auras(ex, ey, ez, out) {
             out.push(0xFF_00_00_00 | (c << 16) | (c << 8) | c);
         }
     }
+}
+
+// --- Portals ---
+//
+// A way on to the next level: an opening onto the dark, with stars drifting
+// out of the depths behind it. Its position is the middle of the bottom edge
+// of the opening, on the dark surface filling it, and it faces out along its
+// yaw. Stepping up to the surface finishes the level.
+//
+// The stars are particles out in a tunnel behind the surface, rushing out
+// along it at the player, each drawn only where the line from the eye to it
+// passes through the opening, so they keep their depth as the player moves.
+
+// The opening's size by default, in meters, and how deep the space behind it is
+let PORTAL_WIDTH = 4.4;
+let PORTAL_HEIGHT = 5.8;
+let PORTAL_DEPTH = 40.0;
+
+// How many stars, how fast they come, and the tunnel's inner and outer radius
+let PORTAL_STARS = 240;
+let STAR_SPEED = 10.0;
+let TUNNEL_R0 = 1.0;
+let TUNNEL_R1 = 4.0;
+
+// The dots trailing each star, and how far apart they are
+let STAR_TRAIL = 3;
+let STAR_TRAIL_GAP = 0.35;
+
+// How big a star looks, in pixels at 1280 across, far back and close up
+let STAR_PX_FAR = 1.0;
+let STAR_PX_NEAR = 3.0;
+
+// How close to the surface the player has to come to step through, past
+// their radius, and how far off the stars are not drawn at all
+let PORTAL_REACH = 0.1;
+let PORTAL_VIEW = 60.0;
+
+// Every portal, for update_portals() to draw the stars of
+let portals = [];
+
+class Portal extends Entity {
+    init(self, spec) {
+        Entity.init(self, spec.x, spec.y, spec.z, spec.yaw);
+        self.width = spec.num("width", PORTAL_WIDTH * UNITS_PER_METER) / UNITS_PER_METER;
+        self.height = spec.num("height", PORTAL_HEIGHT * UNITS_PER_METER) / UNITS_PER_METER;
+        self.next = nil;
+        if (spec.keys.has("map")) self.next = spec.keys["map"];
+
+        // Out of the opening, and along it to the right
+        self.fx = spec.yaw.sin(); self.fz = spec.yaw.cos();
+        self.rx = self.fz; self.rz = 0.0 - self.fx;
+
+        // Touched in its own way, by overlaps()
+        self.radius = 0.0;
+
+        // Each star as how far across and up it is from the tunnel's axis,
+        // in meters, and how deep it is
+        self.stars = [];
+        for (let var i = 0; i < PORTAL_STARS; ++i) {
+            let s = [0.0, 0.0, blood_rand(0.0, PORTAL_DEPTH)];
+            self.place_star(s);
+            self.stars.push(s);
+        }
+        portals.push(self);
+    }
+
+    // Put a star somewhere new around the tunnel, more of them out at its wall
+    place_star(self, s) {
+        let a = blood_rand(0.0, 2.0 * PI);
+        let r = TUNNEL_R0 + (TUNNEL_R1 - TUNNEL_R0) * blood_rand(0.0, 1.0).sqrt();
+        s[0] = r * a.cos();
+        s[1] = r * a.sin();
+    }
+
+    update(self, w, dt) {
+        for (let var i = 0; i < self.stars.len; ++i) {
+            let s = self.stars[i];
+            s[2] = s[2] - STAR_SPEED * dt;
+            if (s[2] <= 0.0) {
+                self.place_star(s);
+                s[2] = s[2] + PORTAL_DEPTH;
+            }
+        }
+    }
+
+    // Has the player come up to the surface, within the opening?
+    overlaps(self, p) {
+        let dx = p.x - self.x; let dz = p.z - self.z;
+        let out = dx * self.fx + dz * self.fz;
+        let across = dx * self.rx + dz * self.rz;
+        if (out > p.radius + PORTAL_REACH || out < 0.0 - p.radius) return false;
+        if (across.abs() > self.width * 0.5) return false;
+        return p.y < self.y + self.height && self.y < p.y + p.height;
+    }
+
+    // Stepping through finishes the level, with the next one to go on to.
+    // It stays, since its stars are still seen as the view fades.
+    touch(self, w, player) {
+        if (player.dead || player.finished) return false;
+        player.finish(self.next);
+        return false;
+    }
+
+    // A point on the surface, at `across` from the middle and `up` from the
+    // bottom, brought out a little so that the surface does not hide it
+    face_point(self, across, up) {
+        return [self.x + self.rx * across + self.fx * 0.05, self.y + up, self.z + self.rz * across + self.fz * 0.05];
+    }
+
+    // Add the stars the eye at (ex, ey, ez) sees through the opening
+    draw(self, ex, ey, ez, out) {
+        let dx = ex - self.x; let dz = ez - self.z;
+        let eye_out = dx * self.fx + dz * self.fz;
+        if (eye_out <= 0.05 || eye_out > PORTAL_VIEW) return;
+
+        // Whether the corners and the middle of the opening can be seen
+        // decides whether each star has to be traced on its own
+        let hw = self.width * 0.5 - 0.05; let h = self.height - 0.05;
+        let probes = [[0.0, self.height * 0.5], [0.0 - hw, 0.05], [hw, 0.05], [0.0 - hw, h], [hw, h]];
+        let var seen = 0;
+        for (let var i = 0; i < probes.len; ++i) {
+            let q = self.face_point(probes[i][0], probes[i][1]);
+            if (!occluded(ex, ey, ez, q[0], q[1], q[2])) seen = seen + 1;
+        }
+        if (seen == 0) return;
+        let trace = seen < probes.len;
+
+        let eye_across = dx * self.rx + dz * self.rz;
+        let eye_up = ey - self.y;
+        let mid = self.height * 0.5;
+        for (let var i = 0; i < self.stars.len; ++i) {
+            let s = self.stars[i];
+            let across = s[0];
+            let up = mid + s[1];
+            for (let var k = 0; k <= STAR_TRAIL; ++k) {
+                let depth = s[2] + k.to_f() * STAR_TRAIL_GAP;
+                if (depth >= PORTAL_DEPTH) break;
+
+                // Where the line to it crosses the surface
+                let t = eye_out / (eye_out + depth);
+                let ca = eye_across + (across - eye_across) * t;
+                let cu = eye_up + (up - eye_up) * t;
+                if (ca.abs() > self.width * 0.5 || cu < 0.0 || cu > self.height) continue;
+                if (trace) {
+                    let q = self.face_point(ca, cu);
+                    if (occluded(ex, ey, ez, q[0], q[1], q[2])) continue;
+                }
+
+                let px = self.x + self.rx * across - self.fx * depth;
+                let py = self.y + up;
+                let pz = self.z + self.rz * across - self.fz * depth;
+                let vx = px - ex; let vy = py - ey; let vz = pz - ez;
+                let dist = (vx * vx + vy * vy + vz * vz).sqrt();
+
+                // Faint far back, brightening and growing as it comes, and
+                // fading along its trail
+                let near = 1.0 - depth / PORTAL_DEPTH;
+                let fade = 1.0 - k.to_f() / (STAR_TRAIL + 1).to_f();
+                let size = (STAR_PX_FAR + (STAR_PX_NEAR - STAR_PX_FAR) * near * near * fade) * dist * 2.0 / 1280.0;
+                let c = (30.0 + 225.0 * near * near.sqrt()) * fade;
+                let r = (c * 0.8).floor(); let g = (c * 0.88).floor(); let b = c.floor();
+                out.push(px); out.push(py); out.push(pz); out.push(size);
+                out.push(0xFF_00_00_00 | (r << 16) | (g << 8) | b);
+            }
+        }
+    }
+}
+
+fun update_portals(ex, ey, ez, out) {
+    for (let var i = 0; i < portals.len; ++i) portals[i].draw(ex, ey, ez, out);
 }
 
 // --- Flames ---
@@ -606,6 +780,7 @@ fun spawn_entity(spec) {
     if (k == "shotgun_ammo") return pickup_prop(x, y, z, yaw, "shotgun_ammo", 0.35, 0.0, "shells", 10);
     if (k == "sword") return planted_sword(spec);
     if (k == "relic") return Relic(x, y, z, yaw);
+    if (k == "portal") return Portal(spec);
     if (k == "keycard") return pickup_prop(x, y, z, yaw, "keycard", 0.375, 1.5, "keycard", 1);
 
     // Figures, playing their idle animation
@@ -2680,6 +2855,13 @@ class Player extends Entity {
         self.finished = false;
         self.finish_time = 0.0;
 
+        // The level to go on to once this one is finished, nil for none
+        self.next_map = nil;
+
+        // What they carried at the start of the level, which they have again
+        // when it starts over
+        self.start_kit = nil;
+
         // Where they come back to after dying, and whether they are dead and
         // for how long
         self.spawn = [x, y, z, yaw];
@@ -2809,20 +2991,43 @@ class Player extends Entity {
         return 1.0 - self.hurt_time / HURT_FLASH_TIME;
     }
 
-    // Back at the start as at the beginning of the level, with nothing
+    // Back at the start as at the beginning of the level, with what they
+    // carried then
     restart(self) {
         let s = self.spawn;
         let noclip = self.noclip;
+        let kit = self.start_kit;
         Player.init(self, s[0], s[1], s[2], s[3]);
         self.noclip = noclip;
+        if (kit != nil) self.take_kit(kit);
     }
 
-    // Finish the level
-    finish(self) {
+    // What they carry from one level to the next: their health, armor and
+    // shells, their weapons and the one in hand
+    kit(self) {
+        let weapons = [];
+        for (let var i = 0; i < self.weapons.len; ++i) weapons.push(self.weapons[i]);
+        return [self.health.max(1), self.armor, self.shells, weapons, self.weapon];
+    }
+
+    // Start the level with a kit, which they get back if it starts over
+    take_kit(self, kit) {
+        self.start_kit = kit;
+        self.health = kit[0];
+        self.armor = kit[1];
+        self.shells = kit[2];
+        self.weapons = [];
+        for (let var i = 0; i < kit[3].len; ++i) self.weapons.push(kit[3][i]);
+        if (kit[4] != nil) self.pick_weapon(kit[4]);
+    }
+
+    // Finish the level, by a portal to `next`, or for good if that is nil
+    finish(self, next) {
         self.finished = true;
         self.finish_time = 0.0;
         self.message = nil;
-        self.events.push("pickup");
+        self.next_map = next;
+        self.events.push(next != nil ? "portal" : "pickup");
     }
 
     // Show the player a line of text, which then fades out
@@ -3159,6 +3364,16 @@ fun apply_hazards(player, list, dt) {
 
 // --- Starting over ---
 
+// Forget what the entities of a level left behind them
+fun clear_level() {
+    relics.resize(0, nil);
+    portals.resize(0, nil);
+    flames.resize(0, nil);
+    drops.resize(0, nil);
+    gibs.resize(0, nil);
+    sound_events.resize(0, nil);
+}
+
 // Start the level over: the player back at the start with nothing, and every
 // entity as the map placed it. Doors are shut again and elevators sent back
 // up rather than made anew, since each has a model the render actors were
@@ -3172,11 +3387,7 @@ fun restart_level(w, player, list) {
         }
     }
     list.resize(0, nil);
-    relics.resize(0, nil);
-    flames.resize(0, nil);
-    drops.resize(0, nil);
-    gibs.resize(0, nil);
-    sound_events.resize(0, nil);
+    clear_level();
 
     player.restart();
     spawn_placed(w, player, list);

@@ -1,5 +1,5 @@
-// Sound effects, synthesized as they play, but for a few recorded splats that
-// are loaded from examples/tremor/sounds/ when this is imported.
+// Sound effects, synthesized as they play, but for a few recorded splats and
+// whispers that are loaded from examples/tremor/sounds/ when this is imported.
 //
 // An actor of its own owns the audio device and fills a buffer whenever the
 // device asks for one. The game sends it a message for each sound to start.
@@ -816,6 +816,124 @@ class ElevatorStopVoice extends Voice {
     }
 }
 
+// Whispers from beyond a portal: a recording of four voices whispering,
+// looped, in a big echoing space. They come in slowly over a long while, out
+// of nothing, and go on until hushed. The recording is only loaded by the
+// audio actor, so that the other actors don't each get a copy of it.
+let var whisper_clip = nil;
+let WHISPER_RISE = 9.0;
+let WHISPER_FADE = 1.5;
+let WHISPER_GAIN = 0.9;
+
+// How long the end of the loop fades into its start, in seconds
+let WHISPER_SEAM = 0.5;
+
+// Delays of the echo's combs, in samples, how much each feeds back, how much
+// of the highs each time round takes away, and how much of it is heard. The
+// echoes are smeared by all passes, so that they don't ring like a pipe, and
+// darkened, as in a big stone hall.
+let WHISPER_ECHO_DELAYS = [6619, 9277, 11903, 14411];
+let WHISPER_ECHO_FEEDBACK = 0.6;
+let WHISPER_ECHO_DAMP = 0.3;
+let WHISPER_ECHO_MIX = 0.8;
+let WHISPER_DIFFUSE = [556, 441, 341];
+let WHISPER_ECHO_HZ = 4000.0;
+
+// Delay lines of these lengths, silent
+fun delay_lines(lens) {
+    let lines = [];
+    for (let var k = 0; k < lens.len; ++k) {
+        let buf = [];
+        for (let var i = 0; i < lens[k]; ++i) buf.push(0.0);
+        lines.push(buf);
+    }
+    return lines;
+}
+
+class WhisperVoice extends Voice {
+    init(self, gain, clip) {
+        Voice.init(self, gain * WHISPER_GAIN);
+        self.data = clip.samples;
+        self.step = clip.sample_rate.to_f() / SAMPLE_RATE.to_f();
+        self.seam = WHISPER_SEAM * clip.sample_rate.to_f();
+        self.loop = clip.num_frames().to_f() - 1.0 - self.seam;
+        self.pos = 0.0;
+
+        self.combs = delay_lines(WHISPER_ECHO_DELAYS);
+        self.pos_c = [0, 0, 0, 0];
+        self.damp = [0.0, 0.0, 0.0, 0.0];
+        self.diffuse = delay_lines(WHISPER_DIFFUSE);
+        self.pos_d = [0, 0, 0];
+        self.wet_k = lp_coef(WHISPER_ECHO_HZ);
+        self.wet = 0.0;
+
+        // Set by a hush, and how far into fading out
+        self.ending = false;
+        self.end_t = 0.0;
+    }
+
+    // The clip at a position in samples, between two of them
+    at(self, p) {
+        let k = p.floor();
+        let a = self.data.get_f32(k);
+        return a + (self.data.get_f32(k + 1) - a) * (p - k.to_f());
+    }
+
+    // The loop at its position: its start is faded in over the clip's end,
+    // which carries on past the loop, so that no seam is heard
+    next_sample(self) {
+        let p = self.pos;
+        self.pos = self.pos + self.step;
+        if (self.pos >= self.loop) self.pos = self.pos - self.loop;
+        if (p >= self.seam) return self.at(p);
+        let w = p / self.seam;
+        return self.at(p) * w.sqrt() + self.at(p + self.loop) * (1.0 - w).sqrt();
+    }
+
+    // The whispers through the combs, each damped in its loop, then through
+    // the all passes and a low pass
+    echo(self, x) {
+        let var out = 0.0;
+        for (let var k = 0; k < self.combs.len; ++k) {
+            let buf = self.combs[k];
+            let p = self.pos_c[k];
+            let y = buf[p];
+            self.damp[k] = self.damp[k] + (y - self.damp[k]) * WHISPER_ECHO_DAMP;
+            buf[p] = x + self.damp[k] * WHISPER_ECHO_FEEDBACK;
+            self.pos_c[k] = (p + 1) % buf.len;
+            out = out + y;
+        }
+        out = out / self.combs.len.to_f();
+        for (let var k = 0; k < self.diffuse.len; ++k) {
+            let buf = self.diffuse[k];
+            let p = self.pos_d[k];
+            let d = buf[p];
+            buf[p] = out + d * 0.5;
+            out = d - out * 0.5;
+            self.pos_d[k] = (p + 1) % buf.len;
+        }
+        self.wet = self.wet + (out - self.wet) * self.wet_k;
+        return self.wet;
+    }
+
+    render(self, mix, n) {
+        for (let var i = 0; i < n; ++i) {
+            self.t = self.t + DT;
+            let rise = (self.t / WHISPER_RISE).min(1.0);
+            let var level = rise * rise;
+            if (self.ending) {
+                self.end_t = self.end_t + DT;
+                level = level * (1.0 - self.end_t / WHISPER_FADE).max(0.0);
+            }
+
+            let dry = self.next_sample();
+            let v = dry + self.echo(dry) * WHISPER_ECHO_MIX;
+            mix.set_f32(i, mix.get_f32(i) + v * level * self.gain);
+        }
+        return !self.ending || self.end_t < WHISPER_FADE;
+    }
+}
+
 fun make_voice(kind, gain, param) {
     if (kind == "shotgun") return ShotgunVoice(gain);
     if (kind == "step") return StepVoice(gain);
@@ -831,6 +949,10 @@ fun make_voice(kind, gain, param) {
     if (kind == "hiss") return HissVoice(gain, param > 0.0);
     if (kind == "gib") return GibVoice(gain);
     if (kind == "groan") return GroanVoice(gain, param > 0.0);
+    if (kind == "portal") {
+        if (whisper_clip == nil) return nil;
+        return WhisperVoice(gain, whisper_clip);
+    }
     if (kind == "squish") {
         if (splat_clips.len == 0) return nil;
         let k = rand_range(0.0, splat_clips.len.to_f()).floor().min(splat_clips.len - 1);
@@ -857,8 +979,15 @@ let echo_pos = [0, 0, 0, 0];
 let echo_lp = [0.0, 0.0, 0.0, 0.0];
 for (let var k = 0; k < ECHO_LENS.len; ++k) echo_bufs.push(ByteArray.with_size(ECHO_LENS[k] * 4));
 
-// Start a sound, through a low pass at `hz`, or none if 0
+// Start a sound, through a low pass at `hz`, or none if 0. A "hush" is not a
+// sound: it fades out the whispers of a portal.
 fun start_voice(kind, gain, param, hz) {
+    if (kind == "hush") {
+        for (let var k = 0; k < voices.len; ++k) {
+            if (voices[k] instanceof WhisperVoice) voices[k].ending = true;
+        }
+        return;
+    }
     if (voices.len >= MAX_VOICES) return;
     let var v = make_voice(kind, gain, param);
     if (v == nil) return;
@@ -926,6 +1055,7 @@ class SoundStop {
 fun audio_actor() {
     let dev = $audio_open_output(SAMPLE_RATE, 1);
     if (dev == nil) $println("no audio device, running silent");
+    whisper_clip = load_wav(SOUND_DIR + "whispers.wav");
 
     // Reused, to give the collector nothing to do
     let var buf = ByteArray.with_size(0);

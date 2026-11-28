@@ -23,8 +23,8 @@ entities and texture conventions are described in `trenchbroom/README.md` and
   close.
 - Pay attention to texture alignment. Some textures should line up with
   the edges of brushes.
-  - Panel textures such as `floor_plate` should have their seams on the
-    brush's edges.
+  - Panel textures such as `floor_plate`, metal plates or tiles should have
+    their seams on the brush's edges, as much as reasonably possible.
   - Fixture textures such as `light_*` should show whole on their face. That
     can mean sizing the brush to the tile, or scaling the texture to fit:
     `light_square` is 128x128, so it fits a 64-unit face at scale 0.5.
