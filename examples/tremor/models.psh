@@ -116,6 +116,9 @@ class MeshData
         // For each triangle, the index of its texture
         self.tri_textures = [];
 
+        // How metallic it is, from 0 to 1: the most any of its materials is
+        self.metal = 0.0;
+
         // Images, of any size
         self.textures = [];
     }
@@ -381,6 +384,12 @@ class GlbFile
         // Vertex numbers are relative to the start of the primitive
         let base = mesh.num_verts();
         let slot = self.texture_slot(mesh, path, prim);
+
+        // As glTF has it, a material is fully metallic unless it says not
+        if (prim.has("material")) {
+            let pbr = self.json.materials[prim.material].get_or("pbrMetallicRoughness", {});
+            mesh.metal = mesh.metal.max(pbr.get_or("metallicFactor", 1.0).to_f());
+        }
 
         for (let var i = 0; i < positions.len; ++i) {
             mesh.positions.push(positions[i].to_f());
@@ -793,7 +802,51 @@ class Light
         self.z = z;
         self.ambient = ambient;
         self.diffuse = diffuse;
+
+        // For metal: which way is up, and the level of the light where the
+        // model is, from 0 to 1
+        self.up_x = 0.0; self.up_y = 1.0; self.up_z = 0.0;
+        self.level = 1.0;
     }
+}
+
+// Metal shows what is around it more than its own shade: a dim sky above, a
+// bright band at the horizon and dark ground below, so that its facets
+// stand out from each other, and a glint where it mirrors the light. These
+// are levels of the sky's top, the horizon and the ground, how far either
+// side of the horizon its band reaches, and how bright and how tight the
+// glint is, as a power of 2. Past 1, metal goes towards white.
+let METAL_SKY = 0.55;
+let METAL_HORIZON = 1.25;
+let METAL_GROUND = 0.3;
+let METAL_BAND = 0.12;
+let METAL_GLINT = 1.2;
+let METAL_GLINT_SQUARINGS = 3;
+
+// A second light for glints, fixed to the eye, from above it to the left,
+// so that metal shows them however it is turned to the world's light
+let METAL_EYE_X = -0.45;
+let METAL_EYE_Y = 0.55;
+let METAL_EYE_Z = -0.7;
+let METAL_EYE_LEN = (METAL_EYE_X * METAL_EYE_X + METAL_EYE_Y * METAL_EYE_Y + METAL_EYE_Z * METAL_EYE_Z).sqrt();
+
+// The level of metal whose normal is n and that is seen along the unit
+// vector (vx, vy, vz) from the eye, both in view space
+fun metal_level(light, nx, ny, nz, vx, vy, vz) {
+    // The direction it mirrors, towards what it shows
+    let d = 2.0 * (nx * vx + ny * vy + nz * vz);
+    let rx = vx - d * nx; let ry = vy - d * ny; let rz = vz - d * nz;
+
+    let up = rx * light.up_x + ry * light.up_y + rz * light.up_z;
+    let band = (up.abs() / METAL_BAND).min(1.0);
+    let var env = METAL_HORIZON + (METAL_SKY - METAL_HORIZON) * band;
+    if (up < 0.0) env = METAL_HORIZON + (METAL_GROUND - METAL_HORIZON) * band;
+
+    let eye = (rx * METAL_EYE_X + ry * METAL_EYE_Y + rz * METAL_EYE_Z) / METAL_EYE_LEN;
+    let var glint = (rx * light.x + ry * light.y + rz * light.z).max(eye).max(0.0);
+    for (let var i = 0; i < METAL_GLINT_SQUARINGS; ++i) glint = glint * glint;
+
+    return (env + METAL_GLINT * glint).min(2.0);
 }
 
 // A model that can be posed and drawn. Everything about one kind of model
@@ -848,6 +901,9 @@ class Model
             self.vert_u[v] = mesh.uvs[v * 2] * tex.width;
             self.vert_v[v] = mesh.uvs[v * 2 + 1] * tex.height;
         }
+
+        // How metallic it is, from 0 to 1
+        self.metal = mesh.metal;
 
         // The pose the model was made in, which is the one it has when
         // no animation is playing
@@ -1130,6 +1186,7 @@ class Model
         let light_z = light.z * inv_scale;
         let ambient = light.ambient;
         let diffuse = light.diffuse;
+        let metal = self.metal;
 
         let pose = self.pose;
         let vX = self.vX; let vY = self.vY; let vD = self.vD; let vW = self.vW;
@@ -1165,11 +1222,22 @@ class Model
             let nx = pose.get_f32(p + 3);
             let ny = pose.get_f32(p + 4);
             let nz = pose.get_f32(p + 5);
-            let var facing = (m0 * nx + m1 * ny + m2 * nz) * light_x
-                           + (m4 * nx + m5 * ny + m6 * nz) * light_y
-                           + (m8 * nx + m9 * ny + m10 * nz) * light_z;
+            let vnx = m0 * nx + m1 * ny + m2 * nz;
+            let vny = m4 * nx + m5 * ny + m6 * nz;
+            let vnz = m8 * nx + m9 * ny + m10 * nz;
+            let var facing = vnx * light_x + vny * light_y + vnz * light_z;
             if (facing < 0.0) facing = 0.0;
-            let level = (ambient + diffuse * facing) * 255.0;
+            let var level = (ambient + diffuse * facing) * 255.0;
+
+            // Metal blends towards what it mirrors. It is drawn shiny, where
+            // light can go past full, so its own shade is held to full.
+            if (metal > 0.0) {
+                level = level.min(255.0);
+                let inv_len = 1.0 / (view_x * view_x + view_y * view_y + depth * depth).sqrt();
+                let shine = metal_level(light, vnx * inv_scale, vny * inv_scale, vnz * inv_scale,
+                    view_x * inv_len, view_y * inv_len, depth * inv_len) * light.level * 255.0;
+                level = level + (shine - level) * metal;
+            }
 
             vUZ[i] = vert_u[i] * w;
             vVZ[i] = vert_v[i] * w;

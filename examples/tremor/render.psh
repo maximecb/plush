@@ -2167,6 +2167,11 @@ let var g_dlzdx = 0.0; let var g_dlzdy = 0.0; let var g_lz0 = 0.0;
 let var g_wk = 1.0;
 let HELD_DEPTH_SCALE = 1000.0;
 
+// Whether the model being drawn is shiny, as metal is. Its light can then go
+// up to twice full, and past full it blends the texture towards white.
+let var g_shiny = false;
+let L_SHINY_MAX_FX = 511 << L_SHIFT;
+
 // The corners of the triangle being drawn are pX/pY[0..3]
 
 // Walk the triangle in pX/pY scanline by scanline, hand each span to the model
@@ -2206,6 +2211,8 @@ fun raster_triangle() {
     let vwrap = g_vwrap;
     let mask_rb = MASK_RB;
     let fb = frame_buffer;
+    let shiny = g_shiny;
+    let l_max = shiny ? L_SHINY_MAX_FX : L_MAX_FX;
 
     // Every triangle drawn faces the eye, so the corners after the top one run
     // down its left side, and those before it down its right side
@@ -2292,7 +2299,7 @@ fun raster_triangle() {
 
                     let var lfx = (lz * z * L_ONE).floor();
                     if (lfx < L_MIN_FX) lfx = L_MIN_FX;
-                    else if (lfx > L_MAX_FX) lfx = L_MAX_FX;
+                    else if (lfx > l_max) lfx = l_max;
 
                     while (x < piece_end) {
                         let var run = SUB_MAX;
@@ -2331,7 +2338,7 @@ fun raster_triangle() {
 
                         let var lfx_e = (lz_e * z_e * L_ONE).floor();
                         if (lfx_e < L_MIN_FX) lfx_e = L_MIN_FX;
-                        else if (lfx_e > L_MAX_FX) lfx_e = L_MAX_FX;
+                        else if (lfx_e > l_max) lfx_e = l_max;
 
                         let dl = ((lfx_e - lfx) * (65536).idiv(len)) >> 16;
 
@@ -2339,16 +2346,37 @@ fun raster_triangle() {
                         let var i = row + x;
                         let end_i = row + xe;
                         span_px = span_px + len;
-                        while (i < end_i) {
-                            let c = pix.get_u32(((t >> vshift) & vmask)
-                                              | ((t >> U_SHIFT) & umask));
-                            let x = ((c & mask_rb) | ((c & MASK_G) << 24))
-                                  * (lp >> L_SHIFT);
-                            fb.set_u32(i, ((x >> 8) & mask_rb)
-                                        | ((x >> 32) & 0xFF00));
-                            t = t + dt;
-                            lp = lp + dl;
-                            i = i + 1;
+                        if (shiny) {
+                            // Up to full, as below. Past it, each channel goes
+                            // that much of the rest of the way to 255.
+                            while (i < end_i) {
+                                let c = pix.get_u32(((t >> vshift) & vmask)
+                                                  | ((t >> U_SHIFT) & umask));
+                                let l = lp >> L_SHIFT;
+                                if (l < 256) {
+                                    let x = ((c & mask_rb) | ((c & MASK_G) << 24)) * l;
+                                    fb.set_u32(i, ((x >> 8) & mask_rb) | ((x >> 32) & 0xFF00));
+                                } else {
+                                    let rest = c ^ 0xFFFFFF;
+                                    let x = ((rest & mask_rb) | ((rest & MASK_G) << 24)) * (l - 256);
+                                    fb.set_u32(i, (c + (((x >> 8) & mask_rb) | ((x >> 32) & 0xFF00))) & 0xFFFFFF);
+                                }
+                                t = t + dt;
+                                lp = lp + dl;
+                                i = i + 1;
+                            }
+                        } else {
+                            while (i < end_i) {
+                                let c = pix.get_u32(((t >> vshift) & vmask)
+                                                  | ((t >> U_SHIFT) & umask));
+                                let x = ((c & mask_rb) | ((c & MASK_G) << 24))
+                                      * (lp >> L_SHIFT);
+                                fb.set_u32(i, ((x >> 8) & mask_rb)
+                                            | ((x >> 32) & 0xFF00));
+                                t = t + dt;
+                                lp = lp + dl;
+                                i = i + 1;
+                            }
                         }
 
                         lfx = lfx_e;
@@ -2683,7 +2711,12 @@ fun draw_instance(inst) {
     }
     let light = Light(view_dir_x(lx, ly, lz), view_dir_y(lx, ly, lz), view_dir_z(lx, ly, lz),
         ambient * k, diffuse * k);
+    light.up_x = view_dir_x(0.0, 1.0, 0.0);
+    light.up_y = view_dir_y(0.0, 1.0, 0.0);
+    light.up_z = view_dir_z(0.0, 1.0, 0.0);
+    light.level = k;
 
+    g_shiny = model.metal > 0.0;
     model.set_pose(inst[1], inst[2]);
     model.transform(m, s, model_proj, light);
     model.sort();
